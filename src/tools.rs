@@ -203,9 +203,9 @@ mod tests {
     /// everywhere now, and the topology is enforced by its addressing rules
     /// instead (see the tool's own tests).
     #[tokio::test]
-    async fn hub_agent_tools_only_at_depth_zero() {
+    async fn main_agent_tools_only_at_depth_zero() {
         let mut warn = |_: String| {};
-        let hub: Vec<String> = assemble_tools(&session_at_depth(0), &mut warn)
+        let main_tools: Vec<String> = assemble_tools(&session_at_depth(0), &mut warn)
             .await
             .iter()
             .map(|t| t.name())
@@ -218,8 +218,8 @@ mod tests {
             "Team",
         ] {
             assert!(
-                hub.iter().any(|n| n == expected),
-                "missing {expected}: {hub:?}"
+                main_tools.iter().any(|n| n == expected),
+                "missing {expected}: {main_tools:?}"
             );
         }
         let sub: Vec<String> = assemble_tools(&session_at_depth(1), &mut warn)
@@ -264,15 +264,15 @@ mod tests {
                 );
             }
         }
-        let hub: Vec<String> = assemble_tools(&session_with(0, true), &mut warn)
+        let main_tools: Vec<String> = assemble_tools(&session_with(0, true), &mut warn)
             .await
             .iter()
             .map(|t| t.name())
             .collect();
         for retired in ["notify_user", "Post"] {
             assert!(
-                !hub.iter().any(|n| n == retired),
-                "{retired} is gone from every assembly: {hub:?}"
+                !main_tools.iter().any(|n| n == retired),
+                "{retired} is gone from every assembly: {main_tools:?}"
             );
         }
     }
@@ -288,10 +288,10 @@ mod tests {
         let off = names(assemble_tools(&session_at_depth(0), &mut warn).await);
         assert!(!off.iter().any(|n| n == "Channel"), "{off:?}");
 
-        let hub = names(assemble_tools(&session_with(0, true), &mut warn).await);
+        let main_tools = names(assemble_tools(&session_with(0, true), &mut warn).await);
         assert!(
-            hub.iter().any(|n| n == "Channel"),
-            "missing Channel: {hub:?}"
+            main_tools.iter().any(|n| n == "Channel"),
+            "missing Channel: {main_tools:?}"
         );
         let sub_session = std::sync::Arc::new(Session {
             instance: Some("a".into()),

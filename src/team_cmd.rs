@@ -302,7 +302,7 @@ fn assign(session: &Arc<Session>, cwd: &Path, rest: String) -> Vec<String> {
         )];
     };
     let (team, dir) = (node.def.name.clone(), node.dir.clone());
-    // The human typed the assignment, so it arrives under their name, not the hub's.
+    // The human typed the assignment, so it arrives under their name, not main's.
     match session.agents.deliver(
         member,
         crate::channels::USER_NAME,
@@ -384,7 +384,7 @@ fn validate(session: &Arc<Session>, cwd: &Path) -> Vec<String> {
 /// portrait 0 and the two numbers are not the same.
 fn crew_portraits() -> Vec<&'static str> {
     let taken = [
-        crate::tui::avatar::index_of(crate::channels::HUB_NAME),
+        crate::tui::avatar::index_of(crate::channels::MAIN_NAME),
         crate::tui::avatar::index_of(crate::channels::USER_NAME),
     ];
     crate::tui::avatar::ids()
@@ -432,7 +432,7 @@ fn new_team(session: &Arc<Session>, cwd: &Path, name: &str) -> Vec<String> {
         teams: Vec::new(),
         // Portraits handed out in roster order rather than by hashing the name:
         // a scaffolded crew should come out with distinct faces, and a hash of
-        // four role names collides more often than not. The two the hub and the
+        // four role names collides more often than not. The two main and the
         // human wear are dealt out of the deck (D50) — they are in every room the
         // crew appears in, so a member sharing one collides on sight. Derived
         // from the same hash they use rather than named here, so the reservation
@@ -692,11 +692,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(project.parent().unwrap());
     }
 
-    /// A scaffolded crew never wears the hub's or the human's face: those two are
+    /// A scaffolded crew never wears main's or the human's face: those two are
     /// in every room the crew shows up in, so a member sharing one collides on
     /// sight — the very confusion pinning a portrait exists to prevent.
     #[test]
-    fn scaffolded_crew_avoids_the_hub_and_human_faces() {
+    fn scaffolded_crew_avoids_main_and_human_faces() {
         let (s, project) = session("faces");
         // More members than there are free portraits, so the deal wraps and any
         // reserved face would certainly surface.
@@ -710,7 +710,7 @@ mod tests {
         let _ = new_team(&s, &project, "wide");
         let def = crate::team::load_team_file(&project).unwrap().unwrap();
         let taken = [
-            crate::tui::avatar::index_of(crate::channels::HUB_NAME),
+            crate::tui::avatar::index_of(crate::channels::MAIN_NAME),
             crate::tui::avatar::index_of(crate::channels::USER_NAME),
         ];
         for m in &def.members {

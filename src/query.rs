@@ -965,7 +965,7 @@ async fn query_loop(
         // follow-up sent in the previous round has already refilled the inbox and renewed the
         // lease. Only fires in a project whose crew is up; elsewhere the sweep is a no-op.
         //
-        // The hub sweeps, and only the hub: every instance shares this registry, so letting a
+        // Main sweeps, and only main: every instance shares this registry, so letting a
         // subagent's own loop run it would have hires releasing each other — and themselves.
         let released = if session.instance.is_none() {
             session.agents.release_hires()
@@ -979,7 +979,7 @@ async fn query_loop(
         let mut notes = session
             .watch
             .consume_notifications(session.instance.as_deref());
-        // Named rather than swept silently: without this the hub's next SendMessage to a
+        // Named rather than swept silently: without this main's next SendMessage to a
         // released hire fails with "no subagent named …", which reads as a bug rather than
         // as the lifetime it agreed to.
         if !released.is_empty() {
@@ -1012,7 +1012,7 @@ async fn query_loop(
         // subagent, so an unguarded drain let a subagent's own turn boundary eat
         // mail addressed to main.
         let mail = if session.instance.is_none() {
-            session.channels.drain_hub_mail()
+            session.channels.drain_main_mail()
         } else {
             Vec::new()
         };
@@ -3042,7 +3042,7 @@ mod tests {
             .agents
             .deliver(
                 "worker",
-                crate::channels::HUB_NAME,
+                crate::channels::MAIN_NAME,
                 "first",
                 Vec::new(),
                 None,
@@ -3052,7 +3052,7 @@ mod tests {
             .agents
             .deliver(
                 "worker",
-                crate::channels::HUB_NAME,
+                crate::channels::MAIN_NAME,
                 "second",
                 Vec::new(),
                 None,

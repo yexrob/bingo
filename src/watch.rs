@@ -272,8 +272,8 @@ struct Entry {
     /// Cumulative fed line count (for the LinesOver condition).
     total_lines: usize,
     /// Instance name of the session that registered this watch (None = the main session).
-    /// The registry is shared by the hub and every subagent, so notifications are addressed:
-    /// a running subagent must not consume a completion meant for the hub.
+    /// The registry is shared by main and every subagent, so notifications are addressed:
+    /// a running subagent must not consume a completion meant for main.
     owner: Option<String>,
     /// Whether this watch's terminal states are the owner's business (D98).
     ///
@@ -950,39 +950,39 @@ mod tests {
         assert!(reg.has_wake_notifications(None));
     }
 
-    /// The registry is shared by the hub and every subagent, so notifications are addressed:
+    /// The registry is shared by main and every subagent, so notifications are addressed:
     /// each session consumes only its own, and everyone else's keep their place in the queue.
     #[test]
     fn notifications_are_consumed_by_their_owner_only() {
         let reg = watch();
-        let hub = reg.register_with_conditions(running_watch("hub task"), Vec::new(), None);
+        let main_watch = reg.register_with_conditions(running_watch("main task"), Vec::new(), None);
         let sub = reg.register_with_conditions(
             running_watch("sub task"),
             Vec::new(),
             Some("worker".to_string()),
         );
-        reg.set_state(hub, WatchState::Done, Some("done".into()), None);
+        reg.set_state(main_watch, WatchState::Done, Some("done".into()), None);
         reg.set_state(sub, WatchState::Done, Some("done".into()), None);
 
         assert!(
             reg.has_wake_notifications(None),
-            "hub has wake notifications"
+            "main has wake notifications"
         );
         assert!(reg.has_wake_notifications(Some("worker")));
 
-        // The subagent's turn boundary takes only its own; the hub's stays queued.
+        // The subagent's turn boundary takes only its own; main's stays queued.
         let mine = reg.consume_notifications(Some("worker"));
         assert_eq!(mine.len(), 1, "{mine:?}");
         assert!(mine[0].contains("sub task"), "{mine:?}");
         assert!(!reg.has_wake_notifications(Some("worker")), "consumed");
         assert!(
             reg.has_wake_notifications(None),
-            "hub's notification was not taken"
+            "main's notification was not taken"
         );
 
-        let hub_notes = reg.consume_notifications(None);
-        assert_eq!(hub_notes.len(), 1, "{hub_notes:?}");
-        assert!(hub_notes[0].contains("hub task"), "{hub_notes:?}");
+        let main_notes = reg.consume_notifications(None);
+        assert_eq!(main_notes.len(), 1, "{main_notes:?}");
+        assert!(main_notes[0].contains("main task"), "{main_notes:?}");
     }
 
     fn running_watch(label: &'static str) -> Box<FakeWatch> {

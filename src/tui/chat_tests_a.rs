@@ -489,7 +489,7 @@ fn agent_watch_rows_wear_the_instance_face_only_where_images_place() {
     let watch = |chat: &mut Chat| {
         chat.messages.push(msg(Role::Assistant, ""));
         // The row belongs to the turn that spawned the agent (D94): outside a
-        // running turn an agent's lifecycle no longer writes into the hub at all,
+        // running turn an agent's lifecycle no longer writes into main at all,
         // and what this test is about is how the row looks, not whether it exists.
         chat.stream_msg = Some(chat.messages.len() - 1);
         chat.apply_event(UiEvent::WatchEvent {
@@ -564,7 +564,7 @@ fn the_console_names_its_speakers_in_the_gutter_and_not_above_them() {
     assert!(
         !rows
             .iter()
-            .any(|r| r.ends_with("You") || r.ends_with(crate::channels::HUB_NAME)),
+            .any(|r| r.ends_with("You") || r.ends_with(crate::channels::MAIN_NAME)),
         "no name row above a message, switch or no switch: {rows:?}"
     );
     assert!(rows.iter().any(|r| r.starts_with("U  ❯ hi")), "{rows:?}");
@@ -590,7 +590,7 @@ fn without_the_switch_the_transcript_wears_no_band() {
     chat.image_cap = Some(ImageCap::default_cells());
     chat.messages.push(msg(Role::User, "hi"));
     chat.messages.push(msg(Role::Assistant, ""));
-    // Same as above: a watch row exists in the hub only as the running turn's own
+    // Same as above: a watch row exists in main only as the running turn's own
     // tool row (D94).
     chat.stream_msg = Some(chat.messages.len() - 1);
     chat.apply_event(UiEvent::WatchEvent {
@@ -612,7 +612,7 @@ fn without_the_switch_the_transcript_wears_no_band() {
     assert!(
         !rows
             .iter()
-            .any(|r| r.ends_with("You") || r.ends_with(crate::channels::HUB_NAME)),
+            .any(|r| r.ends_with("You") || r.ends_with(crate::channels::MAIN_NAME)),
         "no band names a speaker over a message: {rows:?}"
     );
     assert!(

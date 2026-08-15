@@ -11,7 +11,7 @@
 //!   (`ctrl+o`), the compensation for write-once scrollback.
 //! - [`composer`] owns the prompt's readline state (kill ring, the
 //!   `ctrl+x ctrl+e` chord) and the `$EDITOR` round trip.
-//! - [`buffer`] is the conversation engine (D88): every conversation — hub, DM,
+//! - [`buffer`] is the conversation engine (D88): every conversation — @main, DM,
 //!   channel, team board — as one shape, holding read cursors and drafts while
 //!   the transcripts stay in the domain stores they already live in.
 //! - [`bufferview`] is its host side (D89): one terminal, one flow, one active

@@ -1,6 +1,6 @@
 //! The conversation engine (D88): every conversation has the same shape.
 //!
-//! A buffer is one conversation — the hub, a DM with a subagent, or a room the
+//! A buffer is one conversation — `@main`, a DM with a subagent, or a room the
 //! user is in. The engine holds what is *about* a conversation
 //! (how far you have read, whether it wants you, the draft you left in it) and
 //! nothing of what is *in* one: a buffer's transcript stays where the domain
@@ -17,7 +17,7 @@
 //!   re-reads the sequence numbers and the badge falls out of the subtraction.
 //!   A counter fed by events can drift from the thing it counts; a cursor cannot.
 //! - **Nothing replays a stored conversation into rows yet.** `/resume` clears
-//!   the transcript and prints a line; the hub's row builder (`build_rows`)
+//!   the transcript and prints a line; `@main`'s row builder (`build_rows`)
 //!   reads `Vec<UiMessage>` and only the live flow ever fills it. So
 //!   [`Buffers::rehydrate`] produces `UiMessage` — the unit that builder already
 //!   consumes — and extracts it with the functions the workspace extracted posts
@@ -46,9 +46,9 @@ const TEAM_LOG_MAX: usize = 200;
 
 /// Which conversation a buffer is.
 ///
-/// The derived ordering *is* the registry's ordering: hub, rooms by name, then
-/// DMs by name. Declaration order carries it, so there is no second sort key to
-/// keep in step with this enum.
+/// The derived ordering *is* the registry's ordering: `@main`, rooms by name,
+/// then DMs by name. Declaration order carries it, so there is no second sort
+/// key to keep in step with this enum.
 ///
 /// **There is no `Team` variant, and that is the D95 ruling.** The team is the
 /// organization, not a conversation: you cannot speak to it, and everything it
@@ -58,7 +58,15 @@ const TEAM_LOG_MAX: usize = 200;
 /// conversation-shaped hole where a roster belonged.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum BufferId {
-    /// The main conversation with the model — the transcript already on screen.
+    /// The **home conversation**: the user↔main dialogue plus the host's own
+    /// furniture — the transcript already on screen.
+    ///
+    /// D101 retired the word "hub" everywhere else, but kept this variant's
+    /// spelling on the design doc's explicit ruling: home is the one buffer
+    /// whose mechanics are genuinely different (it owns the turn loop, it has
+    /// no sequence to read to, it replays nothing, it is never closable), and
+    /// a name that says so is worth more than a name that matches its label.
+    /// Everything a user or a model reads calls it `@main`.
     Hub,
     /// A room the user is a member of (D29's channel, D95's vocabulary).
     Channel(String),
@@ -70,14 +78,14 @@ impl BufferId {
     /// The name this conversation goes by on screen.
     pub fn label(&self) -> String {
         match self {
-            Self::Hub => "hub".to_string(),
+            Self::Hub => format!("@{}", crate::channels::MAIN_NAME),
             Self::Channel(name) => format!("#{name}"),
             Self::Dm(name) => format!("@{name}"),
         }
     }
 
     /// The rule that opens this conversation in the flow, and the one that
-    /// closes it. One formatter, so a replay and the hand-back to the hub can
+    /// closes it. One formatter, so a replay and the hand-back home can
     /// never drift into two shapes.
     pub fn rule(&self) -> String {
         format!("── {} ──", self.label())
@@ -95,7 +103,7 @@ impl std::fmt::Display for BufferId {
 pub struct Buffer {
     pub id: BufferId,
     /// How far the source has got, in its own unit: channel `seq`, DM history
-    /// length, team-log length. The hub has no sequence and stays at 0.
+    /// length, team-log length. Main has no sequence and stays at 0.
     seq: u64,
     /// How far the user has read, in the same unit.
     read: u64,
@@ -134,9 +142,9 @@ impl Buffer {
 pub enum Replay {
     /// The rule that opens the conversation on switch.
     Divider(String),
-    /// A message from the source. `message` is the hub transcript's own unit, so
+    /// A message from the source. `message` is the main transcript's own unit, so
     /// the existing row builder renders it with the code the live flow uses;
-    /// `who` carries the sender the hub's two roles cannot express, for the
+    /// `who` carries the sender main's two roles cannot express, for the
     /// decorations D89 hangs on it.
     Message { who: String, message: UiMessage },
     /// Something that happened in the conversation that nobody said: a room's
@@ -151,7 +159,7 @@ pub enum Replay {
 /// Where a composer submit belongs. Data only — [`deliver`] performs it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SubmitTarget {
-    /// The hub's normal turn path.
+    /// Main's normal turn path.
     Turn(String),
     /// `AgentRegistry::deliver` under the user's name. The `[DM from user]`
     /// marker is *not* applied here and must not be: it is added downstream in
@@ -269,10 +277,10 @@ fn names(text: &str, name: &str) -> bool {
     false
 }
 
-/// The registry: the hub plus whatever the domain currently has.
+/// The registry: main plus whatever the domain currently has.
 #[derive(Debug, Clone)]
 pub struct Buffers {
-    /// Hub first, always; the rest in [`BufferId`] order.
+    /// Home first, always; the rest in [`BufferId`] order.
     list: Vec<Buffer>,
     active: BufferId,
     team: Vec<TeamEvent>,
@@ -330,7 +338,7 @@ impl Buffers {
     fn entry(&mut self, id: BufferId, seq: u64, tick: u64) -> &mut Buffer {
         if self.list.iter().all(|b| b.id != id) {
             // Insert in order rather than push-then-sort: the list is kept
-            // sorted, so the position is a search, and the hub stays at 0
+            // sorted, so the position is a search, and main stays at 0
             // because `BufferId::Hub` sorts first.
             let at = self
                 .list
@@ -396,7 +404,7 @@ impl Buffers {
             let id = BufferId::Channel(status.name.clone());
             let read = self.get(&id).map(|b| b.read).unwrap_or(status.seq);
             // Only worth reading the log when something in it is unread — this
-            // runs on the hub's poll, not inside a modal that was already
+            // runs on main's poll, not inside a modal that was already
             // cloning logs per frame.
             let mention = status.seq > read
                 && session
@@ -472,7 +480,7 @@ impl Buffers {
     /// Tee of the lifecycle stream (`UiEvent::WatchEvent`).
     ///
     /// Only agent events reach the feed. Room events belong to their own
-    /// conversation and command events are the hub's own tools, so neither is
+    /// conversation and command events are main's own tools, so neither is
     /// team news. Nothing here is gated any more: the feed is a column in a
     /// directory the user opens, not a buffer that asks to be read, so there is
     /// no badge to withhold and no reason to decide whether a formation counts
@@ -497,7 +505,7 @@ impl Buffers {
     }
 
     /// The bounded lifecycle log, oldest first — the team directory's feed, and
-    /// since D94 the only place a hub-idle spawn or completion is written down
+    /// since D94 the only place a main-idle spawn or completion is written down
     /// on the display side.
     pub fn team_log(&self) -> &[TeamEvent] {
         &self.team
@@ -506,9 +514,9 @@ impl Buffers {
     /// Post the host's own output to the feed (D90).
     ///
     /// `/team` reports what the formation is, and that is team news rather than
-    /// hub news: without this the answer landed in the hub's info tier and
+    /// main news: without this the answer landed in main's info tier and
     /// scrolled away. It goes where the rest of the formation's history goes,
-    /// and the hub keeps one line pointing at it.
+    /// and main keeps one line pointing at it.
     pub fn note_team_output(&mut self, label: &str, text: &str) {
         if text.trim().is_empty() {
             return;
@@ -563,7 +571,7 @@ impl Buffers {
     /// host's business and D89's — and a number that silently meant something
     /// else would be worse than a number that says what it is.
     ///
-    /// The hub yields nothing: it is already on screen, and replaying it would
+    /// Main yields nothing: it is already on screen, and replaying it would
     /// print the transcript a second time under a rule.
     pub fn rehydrate(&self, session: &Arc<Session>, id: &BufferId, budget: usize) -> Vec<Replay> {
         if *id == BufferId::Hub {
@@ -639,7 +647,7 @@ impl Buffers {
     ///
     /// The session is here for one question — am I in this room — and it is
     /// asked at the router rather than at the caller so that every way of
-    /// submitting (the composer, `#room …` from the hub) gets the same answer.
+    /// submitting (the composer, `#room …` from main) gets the same answer.
     pub fn route_submit(&self, session: &Arc<Session>, id: &BufferId, text: &str) -> SubmitTarget {
         let text = text.to_string();
         match id {
@@ -782,7 +790,7 @@ pub fn channel_posts(log: &[ChannelMessage], me: &str) -> Vec<Post> {
 /// DM as a dim note (D99) — it is not the user's conversation to read there.
 ///
 /// Anything the runtime wraps in its own brackets is not a message somebody
-/// typed; `None` is prose, which is the hub's default voice (the hub is the one
+/// typed; `None` is prose, which is main's default voice (main is the one
 /// sender `direct_text` leaves unmarked).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LineSource {
@@ -791,14 +799,14 @@ pub enum LineSource {
     /// A room message relayed into the agent's context. `body` is the relay's
     /// own `from: text`, the one scaffolding shape that kept a sender's name.
     Room { channel: String, body: String },
-    /// The hub, labelled because a batch made the boundaries ambiguous. Unlike
+    /// Main, labelled because a batch made the boundaries ambiguous. Unlike
     /// every other bracketed shape this one carries a real instruction.
-    HubBatched { text: String },
+    MainBatched { text: String },
     /// An agent speaking directly to the main agent (D98's `SendMessage`).
     /// Like [`LineSource::User`] it is a header line and the message is what
     /// follows it — the sender is named because `main` hears from many.
     Agent { name: String },
-    /// An automatic chase for a hub message nobody answered. Carries no
+    /// An automatic chase for a main message nobody answered. Carries no
     /// instruction — only the fact that somebody is still waiting.
     Chase,
     /// The task reminder. A *block*, not a line: everything after it in the
@@ -834,10 +842,10 @@ pub fn line_source(line: &str) -> Option<LineSource> {
     }
     if let Some(rest) = line.strip_prefix("[follow-up ") {
         // `[follow-up instruction] …` and `[follow-up 2/3] …` share a prefix and
-        // mean opposite things: the first is the hub talking, the second is the
+        // mean opposite things: the first is main talking, the second is the
         // runtime reporting silence.
         return Some(match rest.strip_prefix("instruction]") {
-            Some(text) => LineSource::HubBatched {
+            Some(text) => LineSource::MainBatched {
                 text: text.trim_start().to_string(),
             },
             None => LineSource::Chase,
@@ -1253,9 +1261,9 @@ mod tests {
     // ---- registry -------------------------------------------------------
 
     #[test]
-    fn the_hub_is_there_before_anything_else_is() {
+    fn main_is_there_before_anything_else_is() {
         let buffers = Buffers::new();
-        assert_eq!(ids(&buffers), vec!["hub"]);
+        assert_eq!(ids(&buffers), vec!["@main"]);
         assert_eq!(*buffers.active(), BufferId::Hub);
         assert_eq!(buffers.get(&BufferId::Hub).map(Buffer::unread), Some(0));
     }
@@ -1263,14 +1271,20 @@ mod tests {
     /// One vocabulary for naming a conversation: the label the id goes by, the
     /// rule the flow opens it with, and `Display`. D88 stated this as a `Source`
     /// enum nothing consulted; D89 made [`BufferId::rule`] load-bearing (the
-    /// replay and the hand-back to the hub both read it), so the property is
+    /// replay and the hand-back to main both read it), so the property is
     /// checked where it is now used.
     #[test]
     fn an_id_names_its_conversation_in_one_vocabulary() {
-        assert_eq!(BufferId::Hub.label(), "hub");
+        assert_eq!(BufferId::Hub.label(), "@main");
         assert_eq!(BufferId::Channel("build".to_string()).label(), "#build");
         assert_eq!(BufferId::Dm("scout".to_string()).label(), "@scout");
         assert_eq!(BufferId::Dm("scout".to_string()).to_string(), "@scout");
+        assert_eq!(BufferId::Hub.to_string(), "@main");
+        // D101: the home conversation is spelled the way every participant is,
+        // and the rule the flow hands back with says so literally. Written out
+        // rather than derived, because the whole point of the rename is the
+        // exact glyphs a reader sees.
+        assert_eq!(BufferId::Hub.rule(), "── @main ──");
         // The rule is the label and nothing else, so a divider can never name a
         // conversation differently from the way it is addressed.
         for id in [
@@ -1279,8 +1293,9 @@ mod tests {
             BufferId::Dm("scout".to_string()),
         ] {
             assert_eq!(id.rule(), format!("── {} ──", id.label()));
+            assert!(!id.label().contains("hub"), "{id:?} still says hub");
         }
-        assert_eq!(Buffers::new().iter().count(), 1, "the hub is always there");
+        assert_eq!(Buffers::new().iter().count(), 1, "main is always there");
     }
 
     #[test]
@@ -1301,12 +1316,12 @@ mod tests {
             1,
         );
 
-        // Hub, rooms by name, DMs by name — and the hub stays at 0 however many
+        // Home, rooms by name, DMs by name — and main stays at 0 however many
         // conversations arrive after it. The team is not among them: it is a
         // directory, not a conversation (D95).
         assert_eq!(
             ids(&buffers),
-            vec!["hub", "#alpha", "#build", "@scout", "@zoe"]
+            vec!["@main", "#alpha", "#build", "@scout", "@zoe"]
         );
     }
 
@@ -1326,20 +1341,24 @@ mod tests {
             .expect("room created");
         let mut buffers = Buffers::new();
         buffers.refresh(&session, 1);
-        assert_eq!(ids(&buffers), vec!["hub"], "somebody else's room is theirs");
+        assert_eq!(
+            ids(&buffers),
+            vec!["@main"],
+            "somebody else's room is theirs"
+        );
 
         session
             .channels
             .invite("parser", USER_NAME)
             .expect("joined");
         buffers.refresh(&session, 2);
-        assert_eq!(ids(&buffers), vec!["hub", "#parser"], "joining lists it");
+        assert_eq!(ids(&buffers), vec!["@main", "#parser"], "joining lists it");
 
         session.channels.kick("parser", USER_NAME).expect("left");
         buffers.refresh(&session, 3);
         assert_eq!(
             ids(&buffers),
-            vec!["hub"],
+            vec!["@main"],
             "and leaving takes it off again — unlike a DM, a room you are not \
              in was never your conversation"
         );
@@ -1552,7 +1571,7 @@ mod tests {
     }
 
     #[test]
-    fn the_hub_never_counts_its_own_flow() {
+    fn main_never_counts_its_own_flow() {
         let session = test_session();
         seed_agent(&session, "scout", Vec::new());
         let mut buffers = Buffers::new();
@@ -1611,7 +1630,7 @@ mod tests {
         assert_eq!(buffers.team_log().len(), 1);
         assert_eq!(
             ids(&buffers),
-            vec!["hub", "@scout"],
+            vec!["@main", "@scout"],
             "a lifecycle event opens no conversation and asks for nothing"
         );
     }
@@ -1649,12 +1668,12 @@ mod tests {
     }
 
     #[test]
-    fn the_hub_replays_nothing_because_it_is_already_on_screen() {
+    fn main_replays_nothing_because_it_is_already_on_screen() {
         let session = test_session();
         let buffers = Buffers::new();
         assert!(
             buffers.rehydrate(&session, &BufferId::Hub, 50).is_empty(),
-            "replaying the hub would print the transcript twice"
+            "replaying main would print the transcript twice"
         );
     }
 

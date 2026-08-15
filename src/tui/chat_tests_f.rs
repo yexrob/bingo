@@ -1,7 +1,7 @@
 //! Chat state-machine tests, part six: what the console does and does not print
 //! (D94's delivery rerouting, D98's quiet console).
 //!
-//! Three parts. The first pins what the hub *stopped* printing: an agent's spawn
+//! Three parts. The first pins what main *stopped* printing: an agent's spawn
 //! and completion used to hang a `◉ name · task` row off whatever assistant
 //! message happened to be last, and now they do not — while the signal they
 //! carried still lands in the lifecycle log, on the bar, and in the agent's own
@@ -55,8 +55,8 @@ fn lifecycle(label: &str, status: WatchState, detail: Option<&str>) -> UiEvent {
     }
 }
 
-/// The hub as the user sees it: every rendered row, flattened.
-fn hub_rows(chat: &mut Chat) -> Vec<String> {
+/// Main as the user sees it: every rendered row, flattened.
+fn main_rows(chat: &mut Chat) -> Vec<String> {
     chat.build_rows(80);
     chat.doc
         .rows
@@ -78,15 +78,15 @@ fn emitted(chat: &mut Chat) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// A. the hub stops being the bus
+// A. main stops being the bus
 // ---------------------------------------------------------------------------
 
 /// The inventory this batch was written against: a spawn and a completion
-/// arriving while the hub is idle used to add a `◉ scout · fix the parser` row
+/// arriving while main is idle used to add a `◉ scout · fix the parser` row
 /// with a `⎿ done` under it, stapled to the last assistant message — a reply
 /// that had nothing to do with either event.
 #[test]
-fn a_spawn_and_a_completion_add_no_rows_to_an_idle_hub() {
+fn a_spawn_and_a_completion_add_no_rows_to_an_idle_console() {
     let mut chat = test_chat();
     chat.messages.push(msg(Role::User, "have someone look"));
     chat.messages
@@ -95,7 +95,7 @@ fn a_spawn_and_a_completion_add_no_rows_to_an_idle_hub() {
         chat.stream_msg.is_none(),
         "the turn is over: what arrives now is the bus, not the conversation"
     );
-    let before = hub_rows(&mut chat);
+    let before = main_rows(&mut chat);
 
     chat.apply_event(lifecycle(
         "scout · fix the parser",
@@ -109,9 +109,9 @@ fn a_spawn_and_a_completion_add_no_rows_to_an_idle_hub() {
     ));
 
     assert_eq!(
-        hub_rows(&mut chat),
+        main_rows(&mut chat),
         before,
-        "the hub flow is byte-identical: no spawn row, no completion row"
+        "main flow is byte-identical: no spawn row, no completion row"
     );
     assert!(
         chat.messages.iter().all(|m| m.activities.is_empty()),
@@ -120,9 +120,9 @@ fn a_spawn_and_a_completion_add_no_rows_to_an_idle_hub() {
 }
 
 /// The signal is rerouted, not dropped. D95 renders this log as the team
-/// directory; until then it is where a hub-idle lifecycle event is written down.
+/// directory; until then it is where a main-idle lifecycle event is written down.
 #[test]
-fn the_lifecycle_log_keeps_what_the_hub_no_longer_prints() {
+fn the_lifecycle_log_keeps_what_the_console_no_longer_prints() {
     let mut chat = test_chat();
     chat.messages.push(msg(Role::Assistant, ""));
 
@@ -148,9 +148,9 @@ fn the_lifecycle_log_keeps_what_the_hub_no_longer_prints() {
 /// the DM says so with an unread badge. Nothing new was built for this — the
 /// badge follows the instance's history, and the lifecycle event's own registry
 /// sweep is what re-reads it — so the test exists to pin that the chain holds
-/// end to end now that the hub prints nothing.
+/// end to end now that main prints nothing.
 #[test]
-fn a_completion_bumps_the_dm_instead_of_the_hub() {
+fn a_completion_bumps_the_dm_instead_of_main() {
     let mut chat = test_chat();
     chat.messages.push(msg(Role::Assistant, ""));
     seed_agent(&chat, "scout");
@@ -164,7 +164,7 @@ fn a_completion_bumps_the_dm_instead_of_the_hub() {
         Some(0),
         "a conversation seen for the first time starts read"
     );
-    let before = hub_rows(&mut chat);
+    let before = main_rows(&mut chat);
 
     // The agent finishes: its reply lands in its history, then the lifecycle
     // event arrives — the order the domain actually produces.
@@ -189,9 +189,9 @@ fn a_completion_bumps_the_dm_instead_of_the_hub() {
     ));
 
     assert_eq!(
-        hub_rows(&mut chat),
+        main_rows(&mut chat),
         before,
-        "the hub is untouched by someone else's completion"
+        "main is untouched by someone else's completion"
     );
     assert_eq!(
         chat.buffers
@@ -211,7 +211,7 @@ fn a_completion_bumps_the_dm_instead_of_the_hub() {
 
 /// The exception, and the reason the rule is about *when* rather than *what*:
 /// `Agent` is a hidden tool, so this watch row is the only row the Task call the
-/// user just watched the model make will ever have. Inside the turn it is hub
+/// user just watched the model make will ever have. Inside the turn it is main
 /// content and it stays.
 #[test]
 fn the_running_turn_keeps_the_row_for_its_own_task_call() {
@@ -225,14 +225,14 @@ fn the_running_turn_keeps_the_row_for_its_own_task_call() {
         None,
     ));
 
-    let rows = hub_rows(&mut chat);
+    let rows = main_rows(&mut chat);
     assert!(
         rows.iter().any(|r| r.contains("◉ scout · fix the parser")),
         "the turn's own tool row is not bus noise: {rows:?}"
     );
 }
 
-/// A background command is the hub's own tool and keeps the walk-back it always
+/// A background command is main's own tool and keeps the walk-back it always
 /// had: D94 reroutes agents, and only agents.
 #[test]
 fn a_command_watch_still_reaches_the_last_reply() {
@@ -251,10 +251,10 @@ fn a_command_watch_still_reaches_the_last_reply() {
         signal: None,
     });
 
-    let rows = hub_rows(&mut chat);
+    let rows = main_rows(&mut chat);
     assert!(
         rows.iter().any(|r| r.contains("⏺ cargo watch")),
-        "a command watch is the hub's own tool: {rows:?}"
+        "a command watch is main's own tool: {rows:?}"
     );
 }
 
@@ -273,7 +273,7 @@ fn a_failed_run_writes_one_alert_line_and_rings() {
         Some("subagent failed: connection reset"),
     ));
 
-    let rows = hub_rows(&mut chat);
+    let rows = main_rows(&mut chat);
     let alert: Vec<&String> = rows.iter().filter(|r| r.contains("⚠ @scout")).collect();
     assert_eq!(
         alert.len(),
@@ -305,7 +305,7 @@ fn a_finished_or_cancelled_run_writes_nothing() {
     let mut chat = chat_with_bell();
     chat.messages
         .push(msg(Role::Assistant, "I have asked scout"));
-    let before = hub_rows(&mut chat);
+    let before = main_rows(&mut chat);
 
     chat.apply_event(lifecycle(
         "scout #3 · fix the parser",
@@ -318,7 +318,7 @@ fn a_finished_or_cancelled_run_writes_nothing() {
         Some("stopped"),
     ));
 
-    assert_eq!(hub_rows(&mut chat), before, "the flow is byte-identical");
+    assert_eq!(main_rows(&mut chat), before, "the flow is byte-identical");
     assert_eq!(
         emitted(&mut chat),
         "",
@@ -338,7 +338,7 @@ fn the_alert_line_keeps_its_stamp() {
         None,
     ));
     let stamp = crate::tui::buffer::stamp(chat.messages[0].at);
-    let rows = hub_rows(&mut chat);
+    let rows = main_rows(&mut chat);
     assert!(
         rows.iter()
             .any(|r| r.contains("⚠ @scout") && r.trim_end().ends_with(&stamp)),
@@ -437,7 +437,7 @@ fn the_ring_survives_a_turn_that_drained_the_mail_first() {
     chat.session
         .channels
         .deliver_to_main("scout", "blocked", true);
-    let drained = chat.session.channels.drain_hub_mail();
+    let drained = chat.session.channels.drain_main_mail();
     assert_eq!(
         drained.len(),
         1,
@@ -459,7 +459,7 @@ fn a_direct_message_to_main_carries_the_sender_into_the_inbox() {
     chat.session
         .channels
         .deliver_to_main("scout", "the migration is done", false);
-    let mail = chat.session.channels.drain_hub_mail();
+    let mail = chat.session.channels.drain_main_mail();
     assert_eq!(mail.len(), 1);
     let mut lines = mail[0].lines();
     assert_eq!(

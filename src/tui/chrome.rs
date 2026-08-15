@@ -519,7 +519,7 @@ pub(crate) fn prompt(chat: &Chat, width: usize) -> El {
     } else {
         tint.unwrap_or(theme.prompt_border)
     };
-    // A hub turn dims the hub's own prompt. It does not dim a DM's: a message
+    // A main turn dims main's own prompt. It does not dim a DM's: a message
     // to a subagent is a delivery, never a turn (D89), so the composer is live
     // there whatever the model is doing, and dimming it would promise a wait
     // that is not happening.
@@ -1453,7 +1453,7 @@ mod tests {
     }
 
     /// D90: while a DM is the conversation, the composer wears that teammate's
-    /// colour — the border and the `❯` alike — and the hub restores the
+    /// colour — the border and the `❯` alike — and main restores the
     /// default. Checked in both themes, because a tint verified in only one is
     /// a tint that works in only one.
     #[test]
@@ -1473,9 +1473,9 @@ mod tests {
             );
             chat.refresh_conversations();
 
-            let hub = rows_of(prompt(&chat, 40));
+            let main_prompt = rows_of(prompt(&chat, 40));
             let default = Some(chat.theme.prompt_border);
-            assert_eq!(hub[0].line.segs[0].style.fg, default, "{setting:?}");
+            assert_eq!(main_prompt[0].line.segs[0].style.fg, default, "{setting:?}");
 
             chat.switch_to(BufferId::Dm("scout".into()));
             let tint = chat.teammate_tint().expect("a DM has a teammate");
@@ -1502,7 +1502,7 @@ mod tests {
             let back = rows_of(prompt(&chat, 40));
             assert_eq!(
                 back[0].line.segs[0].style.fg, default,
-                "the hub restores the default accent in {setting:?}"
+                "main restores the default accent in {setting:?}"
             );
         }
     }
@@ -1516,8 +1516,8 @@ mod tests {
         assert!(
             !rows_of(chrome(&chat, 100, false))
                 .iter()
-                .any(|row| row_text(row).contains("hub")),
-            "a lone hub spends no row on a bar"
+                .any(|row| row_text(row).contains("@main")),
+            "a lone console spends no row on a bar"
         );
 
         chat.session.agents.insert(
@@ -1552,7 +1552,7 @@ mod tests {
             find_bar(true),
             "both hosts render the same bar"
         );
-        assert!(find_bar(false).contains("hub"), "and it names the hub too");
+        assert!(find_bar(false).contains("@main"), "and it names main too");
     }
 
     /// Every state that writes near the bottom composes around the bar without

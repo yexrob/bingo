@@ -75,7 +75,7 @@ pub struct Session {
     pub system: Vec<SystemBlock>,
     /// Sub-agent nesting depth (Agent tool recursion).
     pub depth: usize,
-    /// Session working directory, shared by the hub and all derived sub-sessions.
+    /// Session working directory, shared by main and all derived sub-sessions.
     pub cwd: Arc<std::sync::Mutex<PathBuf>>,
     /// User home (memdir memory location).
     pub home: PathBuf,
@@ -101,7 +101,7 @@ pub struct Session {
     /// channel member name main).
     pub instance: Option<String>,
     /// Images the user mounted on the input box, addressed by the `#[image N]` markers left in
-    /// the message text. Sub-sessions share the table, so the hub forwards an image to a
+    /// the message text. Sub-sessions share the table, so main forwards an image to a
     /// subagent by repeating its marker.
     pub attachments: Arc<crate::api::image::Attachments>,
 }

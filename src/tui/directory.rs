@@ -31,7 +31,7 @@
 
 use crossterm::event::{KeyCode, KeyModifiers};
 
-use crate::channels::{HUB_NAME, USER_NAME};
+use crate::channels::{MAIN_NAME, USER_NAME};
 use crate::tui::buffer::{BufferId, team_line};
 use crate::tui::chat::{Chat, Row, one_line};
 use crate::tui::line::{Line, SegStyle};
@@ -140,15 +140,15 @@ impl Chat {
         // manageable, and the directory has no verb that could try.
         let presence = if self.busy { "●" } else { "○" };
         let state = if self.busy { "running" } else { "idle" };
-        let rooms = rooms_label(&self.session.channels.rooms_of(HUB_NAME));
+        let rooms = rooms_label(&self.session.channels.rooms_of(MAIN_NAME));
         let tail = if rooms.is_empty() {
             String::new()
         } else {
             format!(" · {rooms}")
         };
         rows.push(DirRow::at(
-            format!("{presence} {HUB_NAME} · console · {state}{tail}"),
-            DirTarget::Member(HUB_NAME.to_string()),
+            format!("{presence} {MAIN_NAME} · console · {state}{tail}"),
+            DirTarget::Member(MAIN_NAME.to_string()),
         ));
         let agents = self.session.agents.list();
         if agents.is_empty() {
@@ -262,7 +262,7 @@ impl Chat {
                     // Main's conversation is the console, not a DM with an
                     // instance: `BufferId::Hub` *is* the pair view of the user
                     // and main, so Enter on its row goes home.
-                    Some(DirTarget::Member(name)) if name == HUB_NAME => {
+                    Some(DirTarget::Member(name)) if name == MAIN_NAME => {
                         self.switch_to(BufferId::Hub)
                     }
                     Some(DirTarget::Member(name)) => self.switch_to(BufferId::Dm(name.clone())),
@@ -485,7 +485,7 @@ mod tests {
         assert_eq!(
             chat.directory_targets(),
             vec![
-                DirTarget::Member(HUB_NAME.to_string()),
+                DirTarget::Member(MAIN_NAME.to_string()),
                 DirTarget::Member("scout".to_string()),
                 DirTarget::Room("parser".to_string())
             ],
@@ -518,7 +518,7 @@ mod tests {
             .channels
             .create(
                 "build",
-                vec![HUB_NAME.to_string(), "scout".to_string()],
+                vec![MAIN_NAME.to_string(), "scout".to_string()],
                 ChannelMode::Free,
             )
             .expect("room created");
@@ -565,7 +565,7 @@ mod tests {
 
         chat.open_directory();
         assert!(chat.directory_key(KeyCode::Char('o'), KeyModifiers::NONE));
-        assert_eq!(chat.open_perspective.as_deref(), Some(HUB_NAME));
+        assert_eq!(chat.open_perspective.as_deref(), Some(MAIN_NAME));
         assert!(chat.directory.is_none(), "the page takes the screen");
 
         chat.open_perspective = None;

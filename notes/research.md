@@ -3342,3 +3342,114 @@ note is still the last thing that conversation said — is the question being as
 4. *`o` is a directory key, not a global one.* There is no door to a *non-member's* record, because
    there is no surface that lists one: an agent whose instance is gone has no history to show, which is
    D96's limit, unchanged.
+
+### D101. The rename: hub retires, @main is the floor
+
+**Problem.** The floor of the terminal was labelled `hub`, and by D100 the word named nothing. Its
+three historical meanings had already resolved separately: the bus died in D94 and D98 (no agent
+lifecycle line writes into the console at all), the pair view became one view type among many in
+D99, and D100 gave main a directory row, an observation page and a `console` label to go with them.
+What was left was a word the user read in the bar, in every rule the flow prints, in `/open`'s
+grammar and in the `?` panel — one participant addressed by a name the address grammar does not use,
+in a session where every other conversation is `@name` or `#name`. `HUB_NAME`'s value had been
+`"main"` since channels.rs was written (channels.rs:37), so the constant had been lying about
+itself for the whole program.
+
+**Decision.**
+
+*One rule, applied everywhere: where a name says "hub" and the thing it names is main-the-participant
+or the home conversation, it says main.* `BufferId::label()` returns `format!("@{MAIN_NAME}")` rather
+than a literal, so the label, `Display`, `rule()` (`── @main ──`), the bar, `ctrl+k`, `/open`'s
+completion and the conversation-bar entry all flip from one line — D88's "one vocabulary" property
+paying for itself. The constant is `channels::MAIN_NAME`, value unchanged. The mail path main drains
+is `main_mail` / `drain_main_mail` / `has_main_mail` / `take_main_mail_urgent` / `main_mail_len`, and
+the room relay it formats is `format_main_line`. `EscLayer::BackToHub` → `BackToMain`,
+`LineSource::HubBatched` → `MainBatched`, `Chat::route_from_hub` → `route_from_main`,
+`switcher::pin_hub` → `pin_main`, `flow_order`'s `push_hub_upto` → `push_main_upto`.
+
+*`BufferId::Hub` stays, and its doc comment now says why.* The design doc's explicit ruling, and it
+holds up under reading: home is the one buffer whose mechanics are genuinely different — it owns the
+turn loop, it has no sequence to read to, `rehydrate` returns nothing for it, it is never closable,
+and it sorts first by declaration order. A variant named for that is worth more than a variant named
+to match its label, and the label is one `format!` away. `Decor::Hub` did **not** earn the same
+exemption and became `Decor::Home` (with `FlowItem::hub` → `FlowItem::home`): it names a *rendering
+property* — "this position is the home conversation's own two-speaker message" — and "home" is
+precisely the property the design doc says survives the retirement. So "hub" appears in exactly one
+identifier in the tree, at the one place that carries the paragraph explaining it.
+
+*`hub-and-spoke` is kept, everywhere, unrephrased.* It names a **topology**, not a participant: main
+may address any instance and any room it is in, a subagent only main and its own rooms, and that
+shape is what the phrase means in every architecture text that has one. The v3 design doc itself
+still uses it after declaring hub retired (conversation-model-v3.md:138), which settles it. Kept
+verbatim in tools.rs, agents.rs, tool/agent.rs, guide.md and both READMEs rather than kept in some
+places and rephrased in others.
+
+*`/open` gains `main` and loses `hub`.* `resolve_target` had a hardcoded `eq_ignore_ascii_case("hub")`
+branch; it now resolves `@main` and a bare `main` through the same sigil grammar every other target
+uses — accepted, not required — while `#main` still reads as a room, so a room may carry that name
+without shadowing the floor. `hub` is refused outright rather than kept as an alias: the completion
+dropdown reads the registry (so it stopped offering the word the moment `label()` changed), and a
+spelling that survives only in the parser is exactly the second name this batch existed to remove.
+`/open hub` answers `no conversation called hub · /open lists what is open`, which is the same
+refusal every unknown target gets and says the word is gone rather than merely unlisted.
+
+*The word leaves what the model reads, too.* SUBAGENT_NOTE, CHANNEL_NOTE, `crew_note`, `hire_note`,
+the ack-chase follow-up line (`[follow-up n/3] Main sent you message …`) and the `Agent` /
+`SendMessage` / `AgentControl` descriptions all say main, so the address language in the prompt is
+the address language in the bar — the same argument D98 made when it merged the speech tools. The
+SUBAGENT_NOTE's opening gloss ("The main agent (the hub) spawned you") lost its parenthetical
+outright: it existed to introduce the name the rest of the note used, and the rest of the note now
+uses the name in the sentence.
+
+**The wire was investigated and says nothing.** `src/json_events.rs`, `src/share.rs`,
+`src/share_html.rs`, `tests/cli_black_box.rs` and `notes/gui-json-events-legacy-check.md` contain
+zero occurrences of "hub", case-insensitive. The share document's channel rosters and message
+senders are literal participant names — `share.rs:450`, `share.rs:484`, `share.rs:807` all read
+`"main"` — because `HUB_NAME` has always been `"main"` and the projection has always written the
+value, never the constant's spelling. `BufferId::label()` is a TUI function with no serializer on it.
+So there is no compatibility divergence to document and none was introduced: an external consumer
+sees byte-identical output before and after this batch.
+
+**Consequences.**
+
+- **Assertions rewritten to the new contract, never relaxed.** Every literal that named the bar's
+  first entry, a rule, a completion candidate or a switcher label moved from `"hub"` to `"@main"` and
+  still asserts equality. Seventeen test names renamed with their subject
+  (`a_lone_hub_shows_no_bar` → `a_lone_console_shows_no_bar`,
+  `the_hub_is_there_before_anything_else_is` → `main_is_there_before_anything_else_is`, and so on).
+  Two assertions that the mechanical pass would have turned tautological were rewritten by hand
+  instead: `"main is reserved for main"` became a sentence about what `claim_name` does, and
+  `"the main is listed"` became `"@main is listed"`.
+- **Three new assertions and one new test.** `an_id_names_its_conversation_in_one_vocabulary` now
+  states `BufferId::Hub.rule() == "── @main ──"` literally rather than deriving it from `label()` —
+  the point of a rename is the exact glyphs — and asserts no label contains "hub".
+  `open_completes_from_the_registry` asserts the retired word is absent from the dropdown.
+  `open_reaches_every_conversation_and_reports_the_ones_it_cannot` covers bare `main` resolving and `hub` being refused by
+  name. `the_bar_opens_with_main_and_keeps_it_first` (new) checks the first bar entry reads `@main`
+  and stays first after activity elsewhere and a switch away, and that the row contains no "hub".
+- `/open`'s description for the home candidate reads **`the console`** rather than "the conversation
+  with the model", so the completion dropdown, D100's directory row (`main · console · idle`) and the
+  observation page's title use one word for the surface. It is the only candidate described by what it
+  *is* rather than by what is waiting in it, and that was already true before the rename.
+- 1471 + 13 tests before, 1472 + 13 after.
+- `feedback-states.md` gains v1.69 and its stale header stamp (v1.65, three entries behind since
+  D98) is corrected to match. The guide's two duplicated capability blocks, `README.md` and
+  `README.zh-CN.md` flip the vocabulary wherever they describe the current UI; changelog and
+  historical entries stay as written, including the ones that say "hub" about what used to be true.
+
+**Named limits.**
+
+1. *Two spellings survive in the tree, both deliberately.* `BufferId::Hub` (doc-pinned, with the
+   reasoning in its doc comment) and `hub-and-spoke` (topology). A reader who greps for "hub" finds
+   them and finds the paragraph that says why; a reader who greps expecting zero hits will be
+   surprised, which is the cost of the design doc's ruling and not a defect of it.
+2. *`hub` is unreachable, including from muscle memory.* Anyone who typed `/open hub` gets a refusal
+   rather than a redirect. Judged correct — a retired word kept in the grammar is a second name — but
+   it is a real, if small, one-time cost paid by existing users, and no deprecation path exists.
+3. *Bare `main` now beats a room called `main`.* Under the old grammar a bare word preferred a channel
+   when one existed by that name; the home conversation now takes a bare `main` first. `#main` still
+   reaches the room, so the room is not unreachable, only un-defaulted.
+4. *`README.zh-CN.md` is behind D98, and this batch did not fix it.* It still documents `notify_user`
+   as a tool and `Channel` / `Post` as the room pair — both retired in D98, both already corrected in
+   the English README. The vocabulary flip was applied to those lines because the rule applies to
+   them; their *content* is a D98 sync debt and correcting it is that batch's call, not a rename's.

@@ -10,12 +10,12 @@
 //! count. Nothing buffers *rows* for a conversation you are not in.
 //!
 //! **The flow is a projection, not the message list.** `Chat::messages` is one
-//! append-only store holding both the hub's transcript and the rows every
+//! append-only store holding both main's transcript and the rows every
 //! excursion has printed. [`Chat::flow_order`] decides what that store looks
-//! like on screen: hub messages up to the point where you left, then the
+//! like on screen: home messages up to the point where you left, then the
 //! excursion's rows, and — while the excursion is still open — nothing else, so
-//! a hub turn that lands while you are reading a DM does not print into the DM.
-//! Coming back closes the excursion with a `── hub ──` rule, and the hub's
+//! a main turn that lands while you are reading a DM does not print into the DM.
+//! Coming back closes the excursion with a `── @main ──` rule, and main's
 //! unprinted tail follows it.
 //!
 //! Two properties fall out of that shape, and both are why it has this shape:
@@ -24,8 +24,8 @@
 //!   never moves, so the write-once flush cursor
 //!   (`Chat::flushed_segments`) stays valid and scrollback is never rewritten.
 //! - **There is no second renderer.** An excursion's rows are `UiMessage`s in
-//!   the same list the hub's are, so `build_rows`/`assistant_el` render a
-//!   replayed DM message with the code that renders a live hub reply — the
+//!   the same list main's are, so `build_rows`/`assistant_el` render a
+//!   replayed DM message with the code that renders a live reply from main — the
 //!   markdown, the bubbles, the stamps and the CJK wrapping are the same by
 //!   construction rather than by imitation.
 //!
@@ -43,11 +43,11 @@ use crate::tui::el::El;
 use crate::tui::line::{Line, SegStyle, wrap_words};
 use crate::tui::markdown::MarkdownRenderer;
 
-/// The receipt a routed submit leaves in the hub flow: `→ @scout: look at…`.
+/// The receipt a routed submit leaves in the @main flow: `→ @scout: look at…`.
 ///
 /// Display-only, like the dialog receipts (D80/D81): the model's history never
 /// carries it, because nothing was said to the model. It exists so a line that
-/// left the hub is not simply gone — without it the composer would clear and
+/// left @main is not simply gone — without it the composer would clear and
 /// the flow would show nothing at all, which is indistinguishable from a
 /// message that was dropped.
 pub const ROUTE_RECEIPT_PREFIX: &str = "→ ";
@@ -65,7 +65,7 @@ pub(crate) fn is_route_receipt(text: &str) -> bool {
         .is_some_and(|rest| rest.starts_with('@') || rest.starts_with('#'))
 }
 
-/// The one line an agent's life still writes into the hub flow (D98):
+/// The one line an agent's life still writes into the @main flow (D98):
 /// `⚠ @scout · subagent failed: connection reset`.
 ///
 /// Everything else about a run — spawn, progress, completion, cancellation —
@@ -122,18 +122,19 @@ fn replay_items(all: &[Replay]) -> Vec<Replay> {
         .collect()
 }
 
-/// What a flow position is, beyond the hub's two roles.
+/// What a flow position is, beyond the home conversation's two roles.
 ///
-/// The hub's transcript has exactly two speakers and needs no decoration. A DM
+/// `@main`'s transcript has exactly two speakers and needs no decoration. A DM
 /// or a channel has a name over each message and a rule where it begins, and
 /// those are decorations of a *position in the flow* rather than facts about
-/// the message — the same `UiMessage` renders undecorated in the hub.
+/// the message — the same `UiMessage` renders undecorated in `@main`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Decor {
-    /// The hub's own message: the user and the model, rendered as always.
-    Hub,
+    /// The home conversation's own message: the user and main, rendered as
+    /// always.
+    Home,
     /// A rule: the one that opens a conversation, or the one that hands the
-    /// flow back to the hub. The message text is the rule.
+    /// flow back home. The message text is the rule.
     Divider,
     /// Spoken by this name, in a DM or a channel.
     Said(String),
@@ -148,35 +149,35 @@ pub struct FlowItem {
 }
 
 impl FlowItem {
-    fn hub(index: usize) -> Self {
+    fn home(index: usize) -> Self {
         Self {
             index,
-            decor: Decor::Hub,
+            decor: Decor::Home,
         }
     }
 }
 
-/// One visit to a conversation other than the hub.
+/// One visit to a conversation other than `@main`.
 ///
 /// An excursion is a *segment* of the flow: the rows this conversation printed,
-/// spliced in at the hub-message index the switch happened at. It is not a copy
-/// of the conversation — the rows are indices into the one message store, and
-/// the conversation itself stays in its domain store the whole time.
+/// spliced in at the home-message index the switch happened at. It is not a
+/// copy of the conversation — the rows are indices into the one message store,
+/// and the conversation itself stays in its domain store the whole time.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Excursion {
     pub id: BufferId,
-    /// How much of the hub had been printed when this excursion opened. Hub
+    /// How much of `@main` had been printed when this excursion opened. Home
     /// messages past it wait here until the excursion closes.
     pub at: usize,
     /// The rows this conversation has put on screen, in print order: the
     /// opening rule, the replay, whatever arrived while it was active, and —
-    /// once it closes — the `── hub ──` rule that ends it.
+    /// once it closes — the `── @main ──` rule that ends it.
     pub rows: Vec<FlowItem>,
     /// Messages the source had already produced when it was last printed, so
     /// the poll appends only what is new. Counted in posts, which is the unit
     /// the replay is built in.
     pub seen: usize,
-    /// The flow has been handed back to the hub.
+    /// The flow has been handed back to `@main`.
     pub closed: bool,
 }
 
@@ -185,16 +186,16 @@ impl Chat {
 
     /// The print order of [`Chat::messages`].
     ///
-    /// Hub messages and excursion rows share one store, and this is the single
+    /// Home messages and excursion rows share one store, and this is the single
     /// answer to what that store looks like on screen. Walking it is linear in
     /// the store, runs once per build, and is append-only across builds: an
     /// item that has been emitted keeps its position for the rest of the
     /// session, which is what the write-once flush cursor rests on.
     pub(crate) fn flow_order(&self) -> Vec<FlowItem> {
         if self.excursions.is_empty() {
-            return (0..self.messages.len()).map(FlowItem::hub).collect();
+            return (0..self.messages.len()).map(FlowItem::home).collect();
         }
-        // Which indices belong to an excursion rather than to the hub. The hub
+        // Which indices belong to an excursion rather than to main. Main
         // is "everything nobody claimed", so no message needs to carry a flag
         // saying which conversation printed it.
         let mut claimed = vec![false; self.messages.len()];
@@ -207,25 +208,25 @@ impl Chat {
         }
         let mut out: Vec<FlowItem> = Vec::with_capacity(self.messages.len());
         let mut cursor = 0usize;
-        let push_hub_upto = |upto: usize, cursor: &mut usize, out: &mut Vec<FlowItem>| {
+        let push_main_upto = |upto: usize, cursor: &mut usize, out: &mut Vec<FlowItem>| {
             while *cursor < upto {
                 if !claimed[*cursor] {
-                    out.push(FlowItem::hub(*cursor));
+                    out.push(FlowItem::home(*cursor));
                 }
                 *cursor += 1;
             }
         };
         for exc in &self.excursions {
-            push_hub_upto(exc.at.min(self.messages.len()), &mut cursor, &mut out);
+            push_main_upto(exc.at.min(self.messages.len()), &mut cursor, &mut out);
             out.extend(exc.rows.iter().cloned());
-            // An open excursion holds the hub's tail: the messages a running
-            // turn lands while you are away are the hub's news, and printing
+            // An open excursion holds main's tail: the messages a running
+            // turn lands while you are away are main's news, and printing
             // them here would interleave two conversations in one flow.
             if !exc.closed {
                 return out;
             }
         }
-        push_hub_upto(self.messages.len(), &mut cursor, &mut out);
+        push_main_upto(self.messages.len(), &mut cursor, &mut out);
         out
     }
 
@@ -234,7 +235,7 @@ impl Chat {
         self.buffers.active().clone()
     }
 
-    /// The excursion currently open, if the active conversation is not the hub.
+    /// The excursion currently open, if the active conversation is not main.
     fn open_excursion(&mut self) -> Option<&mut Excursion> {
         self.excursions.last_mut().filter(|exc| !exc.closed)
     }
@@ -261,7 +262,7 @@ impl Chat {
         let draft = self.buffers.take_draft(&id);
         self.set_input(draft);
         self.cursor = self.input.len();
-        // Composer modes that mean something to the hub and nothing to a
+        // Composer modes that mean something to main and nothing to a
         // conversation: `!` runs a command, and the completion surfaces are
         // about the line that was just abandoned.
         self.bash_mode = false;
@@ -270,7 +271,7 @@ impl Chat {
         self.mention_dismissed = false;
 
         // Leaving a conversation closes its segment with the rule that hands
-        // the flow back; the hub's own tail follows it, unprinted until now.
+        // the flow back; main's own tail follows it, unprinted until now.
         if from != BufferId::Hub {
             let divider = self.push_flow_divider(BufferId::Hub.rule());
             if let Some(exc) = self.open_excursion() {
@@ -310,7 +311,7 @@ impl Chat {
             return false;
         }
         let who = match self.active_buffer() {
-            BufferId::Hub => crate::channels::HUB_NAME.to_string(),
+            BufferId::Hub => crate::channels::MAIN_NAME.to_string(),
             BufferId::Dm(name) => name,
             BufferId::Channel(_) => return false,
         };
@@ -331,7 +332,7 @@ impl Chat {
         let start = seen.saturating_sub(REPLAY_BUDGET);
         let shown = items[start..].to_vec();
 
-        // Where the hub had got to before any of this was appended: the point
+        // Where main had got to before any of this was appended: the point
         // its unprinted tail resumes from when the excursion closes.
         let at = self.messages.len();
         // The rule comes from the replay rather than being formatted again
@@ -472,7 +473,7 @@ impl Chat {
 
     /// Send the composer's text to the active conversation.
     ///
-    /// Never starts a hub turn: `busy` belongs to the model conversation, and a
+    /// Never starts a main turn: `busy` belongs to the model conversation, and a
     /// message to a subagent is a delivery, not a turn. The echo is immediate
     /// in both directions — a channel post lands in the log and the poll picks
     /// it up, a DM lands in the instance's inbox and the live tail shows it
@@ -488,7 +489,7 @@ impl Chat {
             // An observed room's refusal and a delivery failure read the same
             // way: information about what did not happen, above the composer.
             Delivery::Rejected(why) => self.push_slash_info(why),
-            // Unreachable — only the hub routes to a turn, and the hub does not
+            // Unreachable — only main routes to a turn, and main does not
             // come through here — but a silent drop would be the worse answer.
             Delivery::Turn(text) => self.start_turn(text, true),
         }
@@ -597,7 +598,7 @@ impl Chat {
     /// One live post as rows. The vocabulary is the transcript's own: a message
     /// you sent is your bubble, a step of the agent's work is one dim line, and
     /// the wait is the same spinner the rest of the app waits with (D87
-    /// `pulse`), so a DM in flight and a hub turn in flight read alike.
+    /// `pulse`), so a DM in flight and a main turn in flight read alike.
     fn tail_post_rows(
         &self,
         post: &Post,
@@ -669,14 +670,14 @@ impl Chat {
 
     // -- line-leading routing ---------------------------------------------
 
-    /// A hub submit that opens with another conversation's name.
+    /// A main submit that opens with another conversation's name.
     ///
     /// `@scout look at the parser` delivers `look at the parser` to scout and
     /// leaves the flow where it is: the point is to say one thing to a teammate
     /// *without* the cost of going there and coming back, which is the whole
     /// difference between this and `ctrl+k`.
     ///
-    /// **Only from the hub.** In a DM or a channel the buffer already *is* the
+    /// **Only from main.** In a DM or a channel the buffer already *is* the
     /// target, so a leading `@name` there is what it looks like — a person
     /// being addressed inside a message — and treating it as an envelope would
     /// silently redirect a sentence the user meant to send where they were.
@@ -685,7 +686,7 @@ impl Chat {
     ///
     /// **Names resolve exactly.** The sigil is required and the name is matched
     /// case-sensitively against the registry, so `@unknown hi` is not an error
-    /// and not magic — it is prose, and it submits to the hub verbatim. D85's
+    /// and not magic — it is prose, and it submits to main verbatim. D85's
     /// completion offers the names that do resolve, which is where discovery
     /// belongs.
     pub(crate) fn leading_route(&self, text: &str) -> Option<(BufferId, String)> {
@@ -715,9 +716,9 @@ impl Chat {
     ///
     /// The delivery is [`crate::tui::buffer::deliver`], the same call a submit
     /// made from inside that conversation performs — one path, so a message
-    /// routed from the hub is indistinguishable at the domain from one typed
+    /// routed from main is indistinguishable at the domain from one typed
     /// in the DM itself.
-    pub(crate) fn route_from_hub(&mut self, id: BufferId, text: String) {
+    pub(crate) fn route_from_main(&mut self, id: BufferId, text: String) {
         let target = self.buffers.route_submit(&self.session, &id, &text);
         match crate::tui::buffer::deliver(&self.session, target) {
             Delivery::Sent => {
@@ -737,7 +738,7 @@ impl Chat {
             // happen, above the composer — never as a receipt, which would
             // claim something was delivered.
             Delivery::Rejected(why) => self.push_slash_info(why),
-            // Unreachable: a leading name always carries a sigil, and the hub
+            // Unreachable: a leading name always carries a sigil, and main
             // has none — but a silent drop would be the worse answer.
             Delivery::Turn(text) => self.start_turn(text, true),
         }
@@ -752,7 +753,7 @@ impl Chat {
         let arg = arg.trim();
         if arg.is_empty() {
             self.push_slash_info(
-                "usage: /open @agent · /open #room · /open hub · ctrl+t for the team directory"
+                "usage: /open @agent · /open #room · /open @main · ctrl+t for the team directory"
                     .to_string(),
             );
             return;
@@ -842,12 +843,19 @@ impl Chat {
     /// `scout` and `#build` all name what the user obviously means, and a name
     /// that is both a channel and an instance resolves to the channel, which is
     /// what the `#` reading of a bare word would have given.
+    ///
+    /// The home conversation answers to the same grammar as any participant —
+    /// `@main` and a bare `main` — because it *is* a participant's pair view
+    /// (D101). `hub` is not accepted: the word retired with the concept, and a
+    /// retired spelling kept alive in the grammar is a second name for the one
+    /// thing this batch existed to give a single name. `#main` still reads as a
+    /// room, so a room may keep that name without shadowing the floor.
     pub(crate) fn resolve_target(&self, arg: &str) -> Option<BufferId> {
         let arg = arg.trim();
-        if arg.eq_ignore_ascii_case("hub") {
+        let bare = arg.trim_start_matches(['@', '#']);
+        if !arg.starts_with('#') && bare.eq_ignore_ascii_case(crate::channels::MAIN_NAME) {
             return Some(BufferId::Hub);
         }
-        let bare = arg.trim_start_matches(['@', '#']);
         if bare.is_empty() {
             return None;
         }
@@ -872,7 +880,10 @@ impl Chat {
             .map(|buffer| {
                 let unread = buffer.unread();
                 let description = match (buffer.id(), unread) {
-                    (BufferId::Hub, _) => "the conversation with the model".to_string(),
+                    // The one candidate described by what it *is* rather than by
+                    // what is waiting in it, and named the way D100's directory
+                    // row names it, so the two doors into home agree.
+                    (BufferId::Hub, _) => "the console".to_string(),
                     (_, 0) => String::new(),
                     // A conversation that named you is worth saying out loud,
                     // because it is the one you were going to open anyway.
@@ -964,7 +975,7 @@ pub(crate) fn sender_runs(posts: &[Post]) -> Vec<bool> {
     out
 }
 
-/// An agent's prose, rendered the way the hub renders the model's.
+/// An agent's prose, rendered the way main renders the model's.
 fn agent_text_rows(theme: &crate::tui::theme::Theme, text: &str, width: usize) -> Vec<Row> {
     let mut processor = MarkdownProcessor::default();
     let mut renderer = MarkdownRenderer::with_theme(width.saturating_sub(2), theme.clone());
@@ -1054,7 +1065,7 @@ mod tests {
         );
     }
 
-    fn hub_message(chat: &mut Chat, role: Role, text: &str) {
+    fn main_message(chat: &mut Chat, role: Role, text: &str) {
         chat.messages.push(UiMessage {
             role,
             text: text.to_string(),
@@ -1146,13 +1157,13 @@ mod tests {
         seed_agent(&chat, "scout", Vec::new());
         chat.refresh_conversations();
 
-        chat.set_input("half a hub thought");
+        chat.set_input("half a main thought");
         chat.switch_to(BufferId::Dm("scout".to_string()));
         assert_eq!(chat.input, "", "the DM starts empty");
 
         chat.set_input("half a scout thought");
         chat.switch_to(BufferId::Hub);
-        assert_eq!(chat.input, "half a hub thought", "the hub's draft is back");
+        assert_eq!(chat.input, "half a main thought", "main's draft is back");
 
         chat.switch_to(BufferId::Dm("scout".to_string()));
         assert_eq!(chat.input, "half a scout thought", "and so is the DM's");
@@ -1174,7 +1185,7 @@ mod tests {
         assert_eq!(chat.messages.len(), rows, "nothing was appended");
         assert_eq!(flow(&mut chat), once, "and nothing was reprinted");
 
-        // The hub is not special: re-entering it from the hub is the same no-op.
+        // Main is not special: re-entering it from main is the same no-op.
         chat.switch_to(BufferId::Hub);
         let back = chat.messages.len();
         chat.switch_to(BufferId::Hub);
@@ -1338,10 +1349,10 @@ mod tests {
     // -- the excursion -----------------------------------------------------
 
     /// The ruling's central promise: while you are in a conversation, nothing
-    /// else prints into it. A hub turn that lands while you are away is the
-    /// hub's news, and it waits at the hub for you.
+    /// else prints into it. A main turn that lands while you are away is
+    /// main's news, and it waits at @main for you.
     #[test]
-    fn an_excursion_holds_the_hubs_tail_until_you_come_back() {
+    fn an_excursion_holds_mains_tail_until_you_come_back() {
         let mut chat = test_chat();
         seed_agent(
             &chat,
@@ -1349,11 +1360,11 @@ mod tests {
             vec![from_user("have a look"), assistant("on it")],
         );
         chat.refresh_conversations();
-        hub_message(&mut chat, Role::Assistant, "before you left");
+        main_message(&mut chat, Role::Assistant, "before you left");
 
         chat.switch_to(BufferId::Dm("scout".to_string()));
-        // A hub turn completes while the DM is on screen.
-        hub_message(&mut chat, Role::Assistant, "landed while you were away");
+        // A main turn completes while the DM is on screen.
+        main_message(&mut chat, Role::Assistant, "landed while you were away");
 
         let away = flow(&mut chat);
         assert!(away.contains("before you left"), "{away}");
@@ -1361,21 +1372,21 @@ mod tests {
         assert!(away.contains("on it"), "{away}");
         assert!(
             !away.contains("landed while you were away"),
-            "the hub printed into the DM: {away}"
+            "main printed into the DM: {away}"
         );
 
         chat.switch_to(BufferId::Hub);
         let home = flow(&mut chat);
         assert!(
-            home.contains("── hub ──"),
+            home.contains("── @main ──"),
             "the rule hands the flow back: {home}"
         );
         assert!(
             home.contains("landed while you were away"),
-            "the hub's tail follows it: {home}"
+            "main's tail follows it: {home}"
         );
-        // Order: the DM segment closes before the hub's tail resumes.
-        let rule = home.find("── hub ──").expect("the closing rule");
+        // Order: the DM segment closes before main's tail resumes.
+        let rule = home.find("── @main ──").expect("the closing rule");
         let tail = home.find("landed while you were away").expect("the tail");
         assert!(rule < tail, "the tail follows the rule: {home}");
         assert!(
@@ -1392,7 +1403,7 @@ mod tests {
         let mut chat = test_chat();
         seed_agent(&chat, "scout", vec![assistant("first")]);
         chat.refresh_conversations();
-        hub_message(&mut chat, Role::Assistant, "hub one");
+        main_message(&mut chat, Role::Assistant, "main one");
 
         let mut seen = chat.flow_order();
         let step = |chat: &Chat, seen: &mut Vec<FlowItem>| {
@@ -1405,11 +1416,11 @@ mod tests {
         };
         chat.switch_to(BufferId::Dm("scout".to_string()));
         step(&chat, &mut seen);
-        hub_message(&mut chat, Role::Assistant, "hub two");
+        main_message(&mut chat, Role::Assistant, "main two");
         step(&chat, &mut seen);
         chat.switch_to(BufferId::Hub);
         step(&chat, &mut seen);
-        hub_message(&mut chat, Role::Assistant, "hub three");
+        main_message(&mut chat, Role::Assistant, "main three");
         step(&chat, &mut seen);
         chat.switch_to(BufferId::Dm("scout".to_string()));
         step(&chat, &mut seen);
@@ -1431,12 +1442,9 @@ mod tests {
 
         chat.set_input("have a look at the parser");
         chat.submit();
-        assert!(!chat.busy, "no hub turn was started");
+        assert!(!chat.busy, "no main turn was started");
         assert!(chat.input.is_empty(), "the composer cleared");
-        assert!(
-            chat.queued.is_empty(),
-            "and it did not queue behind the hub"
-        );
+        assert!(chat.queued.is_empty(), "and it did not queue behind main");
 
         // The shape the workspace composer produced: an inbox item from
         // `user`, which is what earns the D64 marker when the instance picks it
@@ -1470,7 +1478,7 @@ mod tests {
 
         chat.set_input("ship it");
         chat.submit();
-        assert!(!chat.busy, "no hub turn was started");
+        assert!(!chat.busy, "no main turn was started");
 
         let log = chat.session.channels.log_of("build");
         assert_eq!(log.len(), 1, "one post: {log:?}");
@@ -1542,7 +1550,7 @@ mod tests {
         );
 
         // Esc goes home, exactly as it does from every other conversation: the
-        // destination must not depend on how you arrived (D89's BackToHub). The
+        // destination must not depend on how you arrived (D89's BackToMain). The
         // info line is peeled first, as it is anywhere else.
         chat.slash_info_lines.clear();
         assert!(chat.on_key(
@@ -1716,7 +1724,7 @@ mod tests {
             .agents
             .deliver(
                 "scout",
-                crate::channels::HUB_NAME,
+                crate::channels::MAIN_NAME,
                 "look at the parser",
                 Vec::new(),
                 None,
@@ -1787,7 +1795,7 @@ mod tests {
 
     // -- the team feed -----------------------------------------------------
 
-    /// `/team` answers into the team's feed, and the hub keeps one line saying
+    /// `/team` answers into the team's feed, and main keeps one line saying
     /// where the answer went. The feed is a column of the directory now, so the
     /// pointer names the key that opens it rather than a buffer to switch to
     /// (`the_board_renders_its_lifecycle_log` moved to `tui::directory`, which
@@ -1811,7 +1819,7 @@ mod tests {
             chat.slash_info_lines
                 .iter()
                 .any(|line| line == "→ team (ctrl+t)"),
-            "and the hub points at the key that opens it: {:?}",
+            "and main points at the key that opens it: {:?}",
             chat.slash_info_lines
         );
         assert!(
@@ -1851,7 +1859,7 @@ mod tests {
     /// move, and no turn starts. The domain assertion is the one the DM-buffer
     /// submit makes, because it has to be the same delivery.
     #[tokio::test]
-    async fn a_leading_name_delivers_from_the_hub_without_moving() {
+    async fn a_leading_name_delivers_from_main_without_moving() {
         let mut chat = test_chat();
         seed_agent(&chat, "scout", Vec::new());
         chat.refresh_conversations();
@@ -1861,10 +1869,7 @@ mod tests {
 
         assert!(!chat.busy, "a delivery is not a turn");
         assert_eq!(*chat.buffers.active(), BufferId::Hub, "the flow stayed put");
-        assert!(
-            chat.queued.is_empty(),
-            "and it did not queue behind the hub"
-        );
+        assert!(chat.queued.is_empty(), "and it did not queue behind main");
 
         // Byte-identical to what a submit inside the DM produces (D88/D89).
         let items = chat.session.agents.take_running("scout", 0);
@@ -1915,7 +1920,7 @@ mod tests {
     }
 
     /// No magic and no error: a name that resolves to nothing is prose, and
-    /// prose submits to the hub exactly as typed.
+    /// prose submits to main exactly as typed.
     #[tokio::test]
     async fn an_unknown_name_is_just_prose() {
         let mut chat = test_chat();
@@ -1924,7 +1929,7 @@ mod tests {
         chat.set_input("@nobody are you there");
         chat.submit();
 
-        assert!(chat.busy, "it opened an ordinary hub turn");
+        assert!(chat.busy, "it opened an ordinary main turn");
         assert_eq!(
             chat.last_prompt, "@nobody are you there",
             "verbatim, envelope and all"
@@ -1967,7 +1972,7 @@ mod tests {
     }
 
     /// A name with nothing after it is not an envelope — it is someone being
-    /// mentioned, and it belongs to the hub like any other sentence.
+    /// mentioned, and it belongs to main like any other sentence.
     #[test]
     fn a_bare_name_is_not_a_route() {
         let mut chat = test_chat();
@@ -2047,11 +2052,31 @@ mod tests {
             *chat.buffers.active(),
             BufferId::Channel("build".to_string())
         );
-        chat.run_slash("open hub");
+        chat.run_slash("open @main");
         assert_eq!(*chat.buffers.active(), BufferId::Hub);
         // The sigil is an accepted spelling, not a requirement.
         chat.run_slash("open scout");
         assert_eq!(*chat.buffers.active(), BufferId::Dm("scout".to_string()));
+        // …and home follows the same grammar as any participant (D101).
+        chat.run_slash("open main");
+        assert_eq!(*chat.buffers.active(), BufferId::Hub);
+
+        // The retired word is not a second spelling of it: `hub` names nothing.
+        chat.run_slash("open @scout");
+        chat.slash_info_lines.clear();
+        chat.run_slash("open hub");
+        assert_eq!(
+            *chat.buffers.active(),
+            BufferId::Dm("scout".to_string()),
+            "the retired word moves nothing"
+        );
+        assert!(
+            chat.slash_info_lines
+                .iter()
+                .any(|line| line.contains("hub")),
+            "and it is refused by name: {:?}",
+            chat.slash_info_lines
+        );
 
         chat.slash_info_lines.clear();
         chat.run_slash("open @nobody");
@@ -2091,9 +2116,13 @@ mod tests {
             .iter()
             .map(|item| item.name.clone())
             .collect();
-        assert!(offered.contains(&"hub".to_string()), "{offered:?}");
+        assert!(offered.contains(&"@main".to_string()), "{offered:?}");
         assert!(offered.contains(&"@scout".to_string()), "{offered:?}");
         assert!(offered.contains(&"#build".to_string()), "{offered:?}");
+        assert!(
+            !offered.iter().any(|name| name.contains("hub")),
+            "the retired word left the grammar with the concept: {offered:?}"
+        );
 
         // And every one of them resolves — the offer is the registry, so it
         // cannot name something `/open` would then refuse.
@@ -2181,8 +2210,8 @@ mod tests {
     #[test]
     fn the_console_wears_the_same_gutter_every_conversation_does() {
         let mut chat = test_chat();
-        hub_message(&mut chat, Role::User, "a question");
-        hub_message(&mut chat, Role::Assistant, "hub prose");
+        main_message(&mut chat, Role::User, "a question");
+        main_message(&mut chat, Role::Assistant, "main prose");
         let rows = raw_rows(&mut chat);
         let gutter = crate::tui::avatar::gutter_width(false);
 
@@ -2191,7 +2220,7 @@ mod tests {
             mine.starts_with(" U "),
             "the user's chip is the same one a DM draws: {mine:?}"
         );
-        let main = row_with(&rows, "hub prose");
+        let main = row_with(&rows, "main prose");
         assert!(
             main.starts_with(" M "),
             "and main wears its own reserved face: {main:?}"
@@ -2202,12 +2231,12 @@ mod tests {
                 &crate::tui::avatar::Palette::new(&chat.theme),
                 &chat.faces_pinned
             )
-            .index_for(crate::channels::HUB_NAME),
+            .index_for(crate::channels::MAIN_NAME),
             crate::tui::avatar::MAIN_INDEX
         );
         // Everything below the opening row of a run takes the indentation and
         // no face, exactly as in a DM.
-        hub_message(&mut chat, Role::Assistant, "a second paragraph");
+        main_message(&mut chat, Role::Assistant, "a second paragraph");
         let rows = raw_rows(&mut chat);
         let body = row_with(&rows, "a second paragraph");
         assert_eq!(
@@ -2226,8 +2255,8 @@ mod tests {
         let mut placed = test_chat();
         placed.image_cap = Some(crate::tui::gfx::ImageCap::default_cells());
         for chat in [&mut chip, &mut placed] {
-            hub_message(chat, Role::User, "a question");
-            hub_message(chat, Role::Assistant, "hub prose that runs on a while");
+            main_message(chat, Role::User, "a question");
+            main_message(chat, Role::Assistant, "main prose that runs on a while");
         }
         let chip_rows = raw_rows(&mut chip);
         let placed_rows = raw_rows(&mut placed);
@@ -2250,7 +2279,7 @@ mod tests {
             );
             row[cut..].to_string()
         };
-        for needle in ["❯ a question", "⏺ hub prose"] {
+        for needle in ["❯ a question", "⏺ main prose"] {
             assert_eq!(
                 column(&chip_rows, needle, false),
                 column(&placed_rows, needle, true),

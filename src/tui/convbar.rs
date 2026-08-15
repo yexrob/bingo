@@ -10,7 +10,7 @@
 //! row by answering the question the unified conversation model created: once
 //! every conversation shares one terminal, "what else is going on" has no
 //! surface at all. `/open` (D89) could reach a conversation but never named
-//! one, so a DM that filled up while you were in the hub was invisible until
+//! one, so a DM that filled up while you were in `@main` was invisible until
 //! you thought to ask.
 //!
 //! Three rules keep it from becoming noise:
@@ -47,7 +47,7 @@ const ELLIPSIS: &str = "…";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BarEntry {
     pub id: BufferId,
-    /// `hub` / `#build` / `@scout` — the label already carries its
+    /// `@main` / `#build` / `@scout` — the label already carries its
     /// sigil, so the bar never re-derives one and can never print a name the
     /// `/open` completion would not accept.
     pub label: String,
@@ -224,7 +224,7 @@ impl Chat {
     /// The bar, or no rows at all.
     ///
     /// A session with one conversation has nothing to switch between, and a
-    /// bar reading `hub` on its own would be a row spent saying that the only
+    /// bar reading `@main` on its own would be a row spent saying that the only
     /// thing on screen is the thing on screen.
     pub(crate) fn conversation_bar_rows(&self, width: usize) -> Vec<Row> {
         let entries = self.bar_entries();
@@ -314,12 +314,56 @@ mod tests {
     /// The bar is not a decoration that is always there: with one conversation
     /// there is nothing to switch between, and the row is not spent.
     #[test]
-    fn a_lone_hub_shows_no_bar() {
+    fn a_lone_console_shows_no_bar() {
         let chat = test_chat();
         assert!(
             chat.conversation_bar_rows(100).is_empty(),
-            "a bare hub session pays nothing for the bar"
+            "a bare console session pays nothing for the bar"
         );
+    }
+
+    /// D101: the floor is named `@main` and it is the first thing the bar says,
+    /// however much has happened since. Home is a property, not a word of its
+    /// own — the bar spells it the way every other participant is spelled, and
+    /// the retired `hub` appears nowhere in the row.
+    #[test]
+    fn the_bar_opens_with_main_and_keeps_it_first() {
+        let mut chat = test_chat();
+        seed_agent(&chat, "zoe");
+        seed_crew(&chat, "scout");
+        chat.session
+            .channels
+            .create(
+                "build",
+                vec![USER_NAME.to_string(), "scout".to_string()],
+                ChannelMode::Free,
+            )
+            .expect("channel created");
+        chat.refresh_conversations();
+
+        let first = |chat: &Chat| chat.bar_entries().first().expect("a bar entry").clone();
+        assert_eq!(first(&chat).label, "@main");
+
+        // Everything else moves under it — activity elsewhere, and a switch
+        // away — and it is still the entry the eye lands on first.
+        chat.switch_to(BufferId::Dm("zoe".to_string()));
+        chat.buffers.note_watch_event(
+            "scout #1 · go",
+            crate::watch::WatchKind::Agent,
+            crate::watch::WatchState::Running,
+            None,
+            9,
+        );
+        chat.refresh_conversations();
+        assert_eq!(
+            first(&chat).label,
+            "@main",
+            "home is where the bar starts, not where recency puts it"
+        );
+
+        let text = bar_text(&chat, 100);
+        assert!(text.contains("@main"), "{text:?}");
+        assert!(!text.contains("hub"), "the retired word is gone: {text:?}");
     }
 
     /// Entries, their order, their sigils and their badges — the registry's
@@ -347,7 +391,7 @@ mod tests {
         chat.refresh_conversations();
 
         let text = bar_text(&chat, 100);
-        let order: Vec<&str> = ["hub", "#build", "@scout", "@zoe"].to_vec();
+        let order: Vec<&str> = ["@main", "#build", "@scout", "@zoe"].to_vec();
         let mut at = 0usize;
         for name in order {
             let found = text[at..]
@@ -387,7 +431,7 @@ mod tests {
         assert_eq!(
             entries
                 .iter()
-                .find(|entry| entry.label == "hub")
+                .find(|entry| entry.label == "@main")
                 .map(|entry| entry.presence),
             Some(None)
         );
@@ -444,14 +488,17 @@ mod tests {
         };
         assert_eq!(badge_style(&quiet, &theme, &pal).fg, Some(pal.unread));
 
-        let hub = entries
+        let main = entries
             .iter()
-            .find(|entry| entry.label == "hub")
-            .expect("the hub is listed");
-        assert!(hub.active, "the hub is where the session starts");
-        assert_eq!(hub.unread, 0, "the conversation you are in is never unread");
-        assert_eq!(label_style(hub, &theme).fg, Some(theme.claude));
-        assert!(label_style(hub, &theme).bold);
+            .find(|entry| entry.label == "@main")
+            .expect("@main is listed");
+        assert!(main.active, "@main is where the session starts");
+        assert_eq!(
+            main.unread, 0,
+            "the conversation you are in is never unread"
+        );
+        assert_eq!(label_style(main, &theme).fg, Some(theme.claude));
+        assert!(label_style(main, &theme).bold);
         assert_eq!(
             label_style(channel, &theme).fg,
             Some(theme.text),

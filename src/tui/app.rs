@@ -877,7 +877,7 @@ mod tests {
         for i in 0..80 {
             chat.messages.push(crate::tui::chat::UiMessage {
                 role: crate::tui::chat::Role::User,
-                text: format!("hub line {i}"),
+                text: format!("main line {i}"),
                 at: 0,
                 activities: Vec::new(),
                 insert_points: Vec::new(),
@@ -930,7 +930,7 @@ mod tests {
         for i in 0..80 {
             chat.messages.push(crate::tui::chat::UiMessage {
                 role: crate::tui::chat::Role::User,
-                text: format!("hub line {i}"),
+                text: format!("main line {i}"),
                 at: 0,
                 activities: Vec::new(),
                 insert_points: Vec::new(),

@@ -21,30 +21,30 @@ const MAX_AGENT_DEPTH: usize = 3;
 /// against a surface it does not have.
 ///
 /// The DM bullet exists because the user has a real private line to every instance (D57's
-/// workspace and the main-chat selector), and its messages arrive indistinguishable from the
-/// hub's. A note that claims the user never sees the turn text leaves exactly one imaginable
+/// workspace and the main-chat selector), and its messages arrive indistinguishable from
+/// main's. A note that claims the user never sees the turn text leaves exactly one imaginable
 /// way to reach them — a channel Post — which is how a private question ends up answered in
 /// front of the whole room (D63).
 const SUBAGENT_NOTE: &str = "\
 # You are a subagent
 
-- The main agent (the hub) spawned you for one task. Your final text is returned to the hub
+- The main agent spawned you for one task. Your final text is returned to main
   as its tool result; it does not appear in the user's main transcript, and markdown image
   blocks are not rendered for anyone. Put conclusions in the text itself.
 - The user has a private direct-message window with you. A message they send there arrives
-  under a `[DM from user]` line; a direct instruction without that line is from the hub.
+  under a `[DM from user]` line; a direct instruction without that line is from main.
   Either way the prose of your turns is exactly what the sender reads back — a direct
   message is answered where it arrived, in your turn text.
 - You cannot question the user: AskUserQuestion is not available here. Permission prompts do
-  reach the user, but anything else you need must be reported back to the hub.
-- `SendMessage(to: \"main\")` is your one deliberate way to reach the hub *between* turns —
+  reach the user, but anything else you need must be reported back to main.
+- `SendMessage(to: \"main\")` is your one deliberate way to reach main *between* turns —
   for the overall task being finished, for being blocked on a decision, for a finding that
   changes what is being coordinated. It is not for progress, acknowledgements, or anything
   already in your reply: your work is visible in your DM and your final text is returned to
   whoever started you. `urgent: true` interrupts the user wherever they are; reserve it.
 - Your turn ends when you stop calling tools, and background tasks you started will NOT wake
   you afterwards. Finish what needs finishing within this turn, or state what is still
-  pending — the hub can resume you with a follow-up message.";
+  pending — main can resume you with a follow-up message.";
 
 /// Appended when agent channels are on. Three failure modes pull against each other and the
 /// note has to hold all of them: a room of polite agents acknowledging each other's
@@ -54,7 +54,7 @@ const SUBAGENT_NOTE: &str = "\
 ///
 /// The rule that separates the first two is *who spoke*, not how the message reads — a person
 /// answers their manager and ignores their colleagues' hellos — plus the mechanical fact the
-/// model cannot infer: a turn woken by a channel message reports back to the hub, so a reply
+/// model cannot infer: a turn woken by a channel message reports back to main, so a reply
 /// written as turn text never reaches the room. Without that sentence the model believes it has
 /// already answered and stays silent on purpose. The third failure mode needs the opposite
 /// mechanical fact: *where* a message arrived decides where the answer goes, and the only
@@ -62,7 +62,7 @@ const SUBAGENT_NOTE: &str = "\
 ///
 /// The first three rules all govern replies, which left initiated messages lawless (D67): a
 /// member that *discovered* something team-wide had no rule sending it to the room — it went to
-/// the hub as turn text and the team worked on stale ground — while the symmetric mistake,
+/// main as turn text and the team worked on stale ground — while the symmetric mistake,
 /// narrating personal progress into the room, is D45's flood through a new door. The venue rule
 /// closes both at once, so its two halves must stay together.
 ///
@@ -73,7 +73,7 @@ const CHANNEL_NOTE: &str = "\
 # Speaking in a channel
 
 **Only `SendMessage(to: \"#channel\")` puts words in the room.** The text you write in a turn woken
-by a channel message goes back to the hub as your result — nobody in the channel sees it. Writing
+by a channel message goes back to main as your result — nobody in the channel sees it. Writing
 \"standing by, no channel reply needed\" as your turn text is not an answer to the room; it is a
 private note to your manager, and from the room it is indistinguishable from ignoring the message.
 If you decide to answer, send it to the room.
@@ -98,18 +98,18 @@ nobody.
 **The audience decides the lane — for what you initiate, not only for replies.** When your work
 surfaces something that changes what other members will do — a contract or interface change, a
 shared blocker, a hazard someone is about to walk into — take it to the room
-without waiting to be asked: reporting it only to the hub in your turn text leaves the team
+without waiting to be asked: reporting it only to main in your turn text leaves the team
 working on stale ground. What
-concerns nobody but you and the hub — your progress, partial results, questions only the hub can
+concerns nobody but you and main — your progress, partial results, questions only main can
 answer — stays in your turn text: the room's attention is the scarcest thing in it.
 
 **A direct message is a different lane, and a private one.** Channel traffic arrives tagged
 `[#channel msg #N]`; text without that tag was sent to you alone — under a `[DM from user]`
-line when the user wrote it in your direct-message window, unmarked when it is the hub. Your
+line when the user wrote it in your direct-message window, unmarked when it is main. Your
 turn text is exactly what the sender reads. Answer a direct message in your turn text —
 never in a room: the answer belongs to the person who asked, not to the room. What reaches
 you privately stays private — do not repeat or summarize it into a channel unless the
-message itself tells you to take it there. When something private has to reach the hub between
+message itself tells you to take it there. When something private has to reach main between
 turns rather than at the end of one, that is `SendMessage(to: \"main\")`, never a room.";
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -482,7 +482,7 @@ pub(crate) fn flush_agent_inbox(session: &Arc<Session>, watch: &Arc<WatchRegistr
 /// Acknowledgement watchdog for one message: the sender named a wait, so when that wait elapses
 /// this re-reads the very record `AgentControl(action=messages)` reports and, while the message
 /// still has not entered the receiver's context, nudges the receiver and retries the boundary
-/// flush — the automatic form of the poll the hub would otherwise have to run by hand.
+/// flush — the automatic form of the poll main would otherwise have to run by hand.
 ///
 /// What it waits for is an *answer*, not a delivery. Reading a message into a prompt proves
 /// nothing about the receiver: an instance can take the message, run a turn and end it without a
@@ -491,7 +491,7 @@ pub(crate) fn flush_agent_inbox(session: &Arc<Session>, watch: &Arc<WatchRegistr
 ///
 /// Two bounds keep it a mechanism rather than a loop: at most `MAX_FOLLOW_UPS` rounds, and every
 /// outcome except an answer inside the wait is reported back to the sender as a watch line, whose
-/// terminal state reaches the hub's next turn. A chase that never gives up and never speaks would
+/// terminal state reaches main's next turn. A chase that never gives up and never speaks would
 /// be worse than no chase at all.
 pub(crate) fn spawn_ack_watchdog(
     session: Arc<Session>,
@@ -614,12 +614,12 @@ pub(crate) fn excerpt(text: &str) -> String {
 }
 
 /// Line the user's direct messages arrive under, on its own line above the text (D64). The
-/// hub stays untagged — it is the default voice of direct instructions — so the marker is
+/// main stays untagged — it is the default voice of direct instructions — so the marker is
 /// the one observable difference between "your manager" and "the human", and the DM view
 /// drops the line rather than rendering scaffolding as prose.
 pub(crate) const DM_FROM_USER_MARKER: &str = "[DM from user]";
 
-/// The user's messages carry the marker in every shape of batch; the hub's only gain their
+/// The user's messages carry the marker in every shape of batch; main's only gain their
 /// `[follow-up instruction]` label when a batch makes the boundaries ambiguous.
 fn direct_text(from: &str, text: &str, batched: bool) -> String {
     if from == crate::channels::USER_NAME {
@@ -631,7 +631,7 @@ fn direct_text(from: &str, text: &str, batched: bool) -> String {
     }
 }
 
-/// Inbox → turn prompt plus the images those instructions carried: a single hub instruction is
+/// Inbox → turn prompt plus the images those instructions carried: a single main instruction is
 /// kept verbatim; user messages arrive under [`DM_FROM_USER_MARKER`]; mixed or multiple entries
 /// are annotated with their sources in order. Channel entries also advance the member's read
 /// cursor (messages enter its context with this turn).
@@ -685,7 +685,7 @@ pub(crate) fn absorb_inbox(
                         "it sat in your inbox without being picked up"
                     };
                     format!(
-                        "[follow-up {round}/{MAX_FOLLOW_UPS}] The hub sent you message \
+                        "[follow-up {round}/{MAX_FOLLOW_UPS}] Main sent you message \
                          #{original} (\"{excerpt}\") {}s ago and has had no reply: {silence}. \
                          Answer it now — if you are still working, say what you are doing and \
                          what you have so far; if you have nothing to add, say that. Ending a \
@@ -1542,7 +1542,7 @@ impl SendMessageTool {
         self.session
             .instance
             .clone()
-            .unwrap_or_else(|| crate::channels::HUB_NAME.to_string())
+            .unwrap_or_else(|| crate::channels::MAIN_NAME.to_string())
     }
 
     /// Whether this caller may address rooms at all. Rooms are still behind the
@@ -1564,7 +1564,7 @@ impl SendMessageTool {
                 "{name} is you — a message to yourself is a note, not a message"
             ))),
             Address::Agent(name) => {
-                if self.session.depth == 0 || name == crate::channels::HUB_NAME {
+                if self.session.depth == 0 || name == crate::channels::MAIN_NAME {
                     Ok(())
                 } else {
                     Err(ToolError::failed(format!(
@@ -1632,7 +1632,7 @@ Decide again from the latest content: resend as-is (call again unchanged), edit 
         ToolResult {
             content: serde_json::json!({
                 "status": "queued",
-                "to": crate::channels::HUB_NAME,
+                "to": crate::channels::MAIN_NAME,
                 "from": from,
                 "urgent": urgent,
                 "note": "in main's inbox, read at its next turn boundary; it starts one now if it is idle. \
@@ -1699,7 +1699,7 @@ Set urgent only for something blocking that cannot wait for the user to look: it
         // room, has no user on the other end to interrupt — refused rather than
         // ignored, so a model that reaches for it learns the shape of the tool.
         let sub_to_main =
-            self.session.depth > 0 && address == Address::Agent(crate::channels::HUB_NAME.into());
+            self.session.depth > 0 && address == Address::Agent(crate::channels::MAIN_NAME.into());
         if params.urgent && !sub_to_main {
             return Err(ToolError::failed(
                 "urgent only applies when a subagent writes to main — it rings the user's attention channel, and nobody else is on the other end of this message",
@@ -2215,7 +2215,7 @@ mod tests {
         let tool = AgentTool::new(session.clone(), Vec::new());
         let ctx = ToolContext {
             cwd: project.clone(),
-            ..hub_ctx(&session)
+            ..main_ctx(&session)
         };
         let out = tool
             .call(
@@ -2640,7 +2640,7 @@ mod tests {
         let out = SendMessageTool::new(session.clone())
             .call(
                 serde_json::json!({"to": "worker", "message": "start now", "ack_timeout": 0}),
-                &hub_ctx(&session),
+                &main_ctx(&session),
             )
             .await
             .unwrap_or_else(|e| panic!("{e}"));
@@ -2673,7 +2673,7 @@ mod tests {
             session.clone(),
         );
         let send = SendMessageTool::new(session.clone());
-        let ctx = hub_ctx(&session);
+        let ctx = main_ctx(&session);
         // The acknowledgement wait is opt-in: omitting it keeps the plain fire-and-forget path.
         let schema = send.input_schema();
         assert!(schema["properties"]["ack_timeout"].is_object());
@@ -2715,7 +2715,7 @@ mod tests {
             session.clone(),
         );
         let send = SendMessageTool::new(session.clone());
-        let ctx = hub_ctx(&session);
+        let ctx = main_ctx(&session);
         let receipt = |out: ToolResult| -> serde_json::Value {
             serde_json::from_str(out.content.as_str().unwrap_or_default())
                 .unwrap_or_else(|e| panic!("{e}"))
@@ -2757,7 +2757,7 @@ mod tests {
         assert_eq!(acks[1].timeout, None);
     }
 
-    fn hub_ctx(session: &Arc<Session>) -> crate::tool::ToolContext {
+    fn main_ctx(session: &Arc<Session>) -> crate::tool::ToolContext {
         crate::tool::ToolContext {
             home: std::env::temp_dir(),
             cwd: std::path::PathBuf::from("/tmp"),
@@ -2823,7 +2823,7 @@ mod tests {
             "work".into(),
             session.clone(),
         );
-        let ctx = hub_ctx(&session);
+        let ctx = main_ctx(&session);
         let send = SendMessageTool::new(sub_of(&session, "scout", false));
 
         let err = send
@@ -2858,12 +2858,12 @@ mod tests {
     }
 
     /// The message lands in the store the query layer drains into main's next
-    /// turn, under the calling instance's real name — not the hub's, which is
+    /// turn, under the calling instance's real name — not main's, which is
     /// what the old sender field hardcoded.
     #[tokio::test]
     async fn a_message_to_main_lands_in_the_inbox_under_the_sender_s_own_name() {
         let (session, _client) = parent_session();
-        let ctx = hub_ctx(&session);
+        let ctx = main_ctx(&session);
         SendMessageTool::new(sub_of(&session, "scout", false))
             .call(
                 serde_json::json!({"to": "@main", "message": "the migration is done"}),
@@ -2872,12 +2872,12 @@ mod tests {
             .await
             .unwrap_or_else(|e| panic!("{e}"));
 
-        assert!(session.channels.has_hub_mail());
+        assert!(session.channels.has_main_mail());
         assert!(
-            !session.channels.take_hub_mail_urgent(),
+            !session.channels.take_main_mail_urgent(),
             "an ordinary message does not ring"
         );
-        let mail = session.channels.drain_hub_mail();
+        let mail = session.channels.drain_main_mail();
         assert_eq!(
             mail,
             vec!["[message from @scout]\nthe migration is done".to_string()],
@@ -2898,7 +2898,7 @@ mod tests {
             "work".into(),
             session.clone(),
         );
-        let ctx = hub_ctx(&session);
+        let ctx = main_ctx(&session);
 
         SendMessageTool::new(sub_of(&session, "scout", false))
             .call(
@@ -2908,7 +2908,7 @@ mod tests {
             .await
             .unwrap_or_else(|e| panic!("{e}"));
         assert!(
-            session.channels.take_hub_mail_urgent(),
+            session.channels.take_main_mail_urgent(),
             "the bell is owed on arrival"
         );
 
@@ -2927,7 +2927,7 @@ mod tests {
     #[tokio::test]
     async fn room_addressing_is_gated_and_checked() {
         let (session, _client) = parent_session();
-        let ctx = hub_ctx(&session);
+        let ctx = main_ctx(&session);
 
         let err = SendMessageTool::new(sub_of(&session, "scout", false))
             .call(serde_json::json!({"to": "#build", "message": "hi"}), &ctx)
@@ -2976,9 +2976,9 @@ mod tests {
             text: text.to_string(),
             images: Vec::new(),
         };
-        let hub_item = InboxItem::Direct {
+        let main_item = InboxItem::Direct {
             id: MsgId(2),
-            from: crate::channels::HUB_NAME.to_string(),
+            from: crate::channels::MAIN_NAME.to_string(),
             text: "carry on".to_string(),
             images: Vec::new(),
         };
@@ -2989,7 +2989,7 @@ mod tests {
         assert!(!wakes_owner(&[user_item("are you there?")]));
         assert!(!wakes_owner(&[user_item("one"), user_item("two")]));
         assert!(
-            wakes_owner(&[user_item("one"), hub_item]),
+            wakes_owner(&[user_item("one"), main_item]),
             "one main-origin item in the batch and the reply answers it"
         );
         assert!(wakes_owner(&[InboxItem::Channel {
@@ -3001,7 +3001,7 @@ mod tests {
     }
 
     /// A message that is never picked up is chased on the sender's own clock and then reported:
-    /// three follow-ups ride along with it, and the give-up lands in the hub's notification queue
+    /// three follow-ups ride along with it, and the give-up lands in main's notification queue
     /// rather than staying an unanswered "queued" nobody looks at again.
     #[tokio::test(start_paused = true)]
     async fn unacknowledged_message_is_chased_three_times_then_reported() {
@@ -3014,7 +3014,7 @@ mod tests {
             "do work".into(),
             session.clone(),
         );
-        let ctx = hub_ctx(&session);
+        let ctx = main_ctx(&session);
         let out = SendMessageTool::new(session.clone())
             .call(
                 serde_json::json!({"to": "worker", "message": "check the logs", "ack_timeout": 1}),
@@ -3051,7 +3051,7 @@ mod tests {
             notes
                 .iter()
                 .any(|n| n.contains("follow-ups") && n.contains("worker")),
-            "the hub is told after giving up: {notes:?}"
+            "main is told after giving up: {notes:?}"
         );
     }
 
@@ -3067,7 +3067,7 @@ mod tests {
             "silent".into(),
             session.clone(),
         );
-        let ctx = hub_ctx(&session);
+        let ctx = main_ctx(&session);
         SendMessageTool::new(session.clone())
             .call(
                 serde_json::json!({"to": "mute", "message": "report progress", "ack_timeout": 5}),
@@ -3101,7 +3101,7 @@ mod tests {
         let notes = session.watch.consume_notifications(None);
         assert!(
             notes.iter().any(|n| n.contains("still has not replied")),
-            "silence is eventually reported to the hub: {notes:?}"
+            "silence is eventually reported to main: {notes:?}"
         );
     }
 
@@ -3117,7 +3117,7 @@ mod tests {
             "do work".into(),
             session.clone(),
         );
-        let ctx = hub_ctx(&session);
+        let ctx = main_ctx(&session);
         SendMessageTool::new(session.clone())
             .call(
                 serde_json::json!({"to": "worker", "message": "check the logs", "ack_timeout": 60}),
@@ -3143,7 +3143,7 @@ mod tests {
         );
         assert!(
             session.watch.consume_notifications(None).is_empty(),
-            "no news, no nagging the hub"
+            "no news, no nagging main"
         );
         assert!(
             session.watch.snapshot().is_empty(),
@@ -3151,7 +3151,7 @@ mod tests {
         );
     }
 
-    /// The hub forwards an image to a subagent by repeating its `#[image N]` marker: the
+    /// Main forwards an image to a subagent by repeating its `#[image N]` marker: the
     /// attachment table is shared with the sub-session, and the resolved images ride along with
     /// the queued instruction so a busy instance still receives them.
     #[test]
@@ -3194,7 +3194,7 @@ mod tests {
             .agents
             .deliver(
                 "worker",
-                crate::channels::HUB_NAME,
+                crate::channels::MAIN_NAME,
                 "compare #[image 1]",
                 images.clone(),
                 None,
@@ -3219,10 +3219,10 @@ mod tests {
     }
 
     /// D64: who wrote a direct message is part of the message. The user's DMs arrive under
-    /// the `[DM from user]` line — alone or batched with hub traffic — while a single hub
+    /// the `[DM from user]` line — alone or batched with main traffic — while a single main
     /// instruction stays byte-identical, so the common SendMessage path is unchanged.
     #[test]
-    fn absorb_inbox_names_the_user_and_keeps_the_hub_verbatim() {
+    fn absorb_inbox_names_the_user_and_keeps_main_verbatim() {
         let (session, _client) = parent_session();
         let sub = build_sub_session(
             &session,
@@ -3252,15 +3252,15 @@ mod tests {
         deliver(crate::channels::USER_NAME, "are you there?");
         assert_eq!(absorb(), format!("{DM_FROM_USER_MARKER}\nare you there?"));
 
-        deliver(crate::channels::HUB_NAME, "map the module");
-        assert_eq!(absorb(), "map the module", "hub singles stay verbatim");
+        deliver(crate::channels::MAIN_NAME, "map the module");
+        assert_eq!(absorb(), "map the module", "main singles stay verbatim");
 
-        deliver(crate::channels::HUB_NAME, "first");
+        deliver(crate::channels::MAIN_NAME, "first");
         deliver(crate::channels::USER_NAME, "second");
         assert_eq!(
             absorb(),
             format!("[follow-up instruction] first\n{DM_FROM_USER_MARKER}\nsecond"),
-            "a batch labels the hub's line and marks the user's"
+            "a batch labels main's line and marks the user's"
         );
     }
 
@@ -3411,7 +3411,7 @@ mod tests {
         assert!(
             CHANNEL_NOTE.contains("without waiting to be asked"),
             "must impose the proactive duty to speak in the room — otherwise a team-wide finding \
-             reaches only the hub as turn text and the room works on stale ground (D67)"
+             reaches only main as turn text and the room works on stale ground (D67)"
         );
         assert!(
             CHANNEL_NOTE.contains("stays in your turn text"),

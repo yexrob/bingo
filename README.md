@@ -205,7 +205,7 @@ the system viewer),
 `/permissions [allow|deny|ask] [rule]`,
 `/mcp` (status) · `/mcp enable|disable [name|all]` · `/mcp reconnect <name>`,
 `/skills` (listing; `/skill-name` executes directly),
-`/open <@agent|#room|hub>` (enter a conversation; Tab completes from
+`/open <@agent|#room|@main>` (enter a conversation; Tab completes from
 the ones that exist — `Ctrl+K` is the same door without typing a name),
 `/context` (usage),
 `/status`, `/config` (effective config with per-key source layer/env, current
@@ -364,7 +364,7 @@ schema from a single source of truth):
 - Instances have names (`name` parameter, defaults to the definition name/
   `agent`, auto `-2`/`-3` on collisions); the turn that spawns one shows
   `◉ name · task`, while a lifecycle event arriving when no turn is running no
-  longer writes into the hub at all — the conversation bar, the team lifecycle
+  longer writes into `@main` at all — the conversation bar, the team lifecycle
   log and the instance's own DM carry it instead; history is kept after
   completion.
 - `SendMessage` sends follow-up instructions to an instance (context
@@ -373,7 +373,7 @@ schema from a single source of truth):
   agent's inbox and wakes it when idle; nothing of the arrival is drawn —
   what the user sees is only what the main agent then says. `urgent: true`
   (sub-agent→main only) rings the terminal attention channel on arrival.
-- A run that **fails** draws one `⚠ @name · reason` line in the hub and rings
+- A run that **fails** draws one `⚠ @name · reason` line in `@main` and rings
   the attention channel; done and cancelled draw nothing. A run whose trigger
   was entirely the user's own DM messages produces no notification and no woken
   turn for the main agent at all.
@@ -414,7 +414,7 @@ surface.
   succeeds), `new` (interactive scaffold that always produces a valid file,
   plus a starter working agreement), `norms` (read the agreement),
   `memory list|gc`.
-- **The crew is the default workforce**: where a team is pinned, the hub sees
+- **The crew is the default workforce**: where a team is pinned, main sees
   the roster in its system prompt along with the rule that goes with it — give
   the work to a member with `SendMessage`, and spawn a subagent only for what
   no member covers. Spawning a stand-in for a member that is already idle
@@ -423,7 +423,7 @@ surface.
   not a member. It never enters `.bingo/team.json`; it is listed apart from the
   crew in `/team list` and `AgentControl list` (`crew` / `hire`); it is recorded
   in the crew's `decisions.md` under `type: hire`; and it is released once its
-  task is done — idle, inbox empty, nothing still owed an answer, with one hub
+  task is done — idle, inbox empty, nothing still owed an answer, with one main
   round left to send a follow-up in. The sweep runs only while a crew is
   actually up: in a project with no team, ad-hoc subagents live as long as they
   always did.
@@ -444,7 +444,7 @@ surface.
   before when the task depends on it. Loading the history instead charged a
   growing, invisible toll on the member's first turn — the file is unbounded
   and monotonic, every session appends and nothing prunes — for relevance that
-  decays fast. The hub starts each session clean too; a crew member should not
+  decays fast. Main starts each session clean too; a crew member should not
   be the exception. `/team memory list` shows what is on disk; open a `.md` to
   read it yourself.
 - **The `Team` tool** (main session only) gives the model the same surface:
@@ -477,30 +477,30 @@ With `settings.experimental.agentChannels: true`:
 
 ## Conversations
 
-One terminal, one flow, one conversation at a time. The hub — your conversation
+One terminal, one flow, one conversation at a time. `@main` — your conversation
 with the model — is one of them; a DM with a running subagent and a room are
 the others, and they all wear the same composer, the
 same keys, the same approval dialogs and the same transcript rendering. There is
 no separate screen to enter and no second set of controls to learn.
 
 **Entering one** is `Ctrl+K` — every conversation in one list, most recently
-active first with the hub pinned on top, filtered as you type, opened with
-Enter — or `/open @agent`, `/open #room`, `/open hub` (Tab completes from the
+active first with `@main` pinned on top, filtered as you type, opened with
+Enter — or `/open @agent`, `/open #room`, `/open @main` (Tab completes from the
 conversations that exist); a running agent's DM also opens from the Ctrl+B
 manager with Enter, and a member or a room from the team directory. On the
 window's last row, a **conversation bar** lists the conversations you are *in* — presence
 for DMs (`●` running, `○` idle), an unread count, and the one you are in
 accented — and it appears only once there is more than one to switch between.
 
-**Saying one thing without going there**: from the hub, a message that opens
+**Saying one thing without going there**: from `@main`, a message that opens
 with a conversation's name delivers the rest to it and leaves you where you
 are — `@scout have a look at the parser` reaches scout, and the flow keeps a
 dim `→ @scout: have a look at the parser` receipt. A name that matches nothing
 is not an error and not magic: it is prose, and it goes to the model as typed.
 Inside a conversation there is no such rule, because the conversation you are
-in already *is* the destination. **Esc goes back to the hub** —
+in already *is* the destination. **Esc goes back to `@main`** —
 navigation before interruption, so a turn running behind you keeps running and
-its Esc-to-interrupt waits for you at the hub. Ctrl+C is unchanged and stops the
+its Esc-to-interrupt waits for you in `@main`. Ctrl+C is unchanged and stops the
 turn from anywhere.
 
 ### Rewind
@@ -535,12 +535,12 @@ rule goes into the flow, followed by that conversation's last eight messages. Fr
 then on only that conversation prints. Everything else keeps accumulating where
 it already lives and counts up an unread badge — nothing is buffered on your
 behalf, so nothing can be lost by not looking at it. Coming back prints a
-`── hub ──` rule and whatever the hub finished while you were away.
+`── @main ──` rule and whatever `@main` finished while you were away.
 
 Because scrollback is written once and never rewritten, a couple of excursions
 leave the same conversation on screen more than once. That is deliberate and the
 rules mark it; `Ctrl+O` (the transcript view) remains the complete record of the
-hub session.
+`@main` session.
 
 **Sending**: what you type goes to the conversation you are in — a DM delivers
 to that instance under your name, and a room posts to its log if you are a

@@ -22,7 +22,7 @@
 //! **The pager is [`TranscriptState`]**, unchanged: scrolling, paging, `g`/`G`
 //! and `/` search with `n`/`N` are the transcript's, so a reader who has used
 //! `ctrl+o` already knows this view. `ctrl+e` is deliberately **not** bound —
-//! there it toggles fold state that lives on the hub's messages, and a thread's
+//! there it toggles fold state that lives on main's messages, and a thread's
 //! rows are [`crate::tui::buffer::Post`]s, which carry a tool call as one
 //! collapsed line and no output at all. There is no second state to show.
 
@@ -417,7 +417,7 @@ fn main_record(chat: &Chat) -> (Vec<crate::api::types::Message>, Vec<u64>) {
 ///
 /// A snapshot: taken once, when the page opens. Nothing here ticks.
 pub fn snapshot(chat: &Chat, agent: &str) -> Dossier {
-    let (history, stamps) = if agent == crate::channels::HUB_NAME {
+    let (history, stamps) = if agent == crate::channels::MAIN_NAME {
         main_record(chat)
     } else {
         match chat.session.agents.view_of(agent) {
@@ -871,8 +871,8 @@ mod tests {
             crate::query::MAIL_BLOCK_CLOSE
         ))));
 
-        let page = snapshot(&chat, crate::channels::HUB_NAME);
-        assert_eq!(page.agent, crate::channels::HUB_NAME);
+        let page = snapshot(&chat, crate::channels::MAIN_NAME);
+        assert_eq!(page.agent, crate::channels::MAIN_NAME);
         let labels: Vec<String> = page.lanes.iter().map(|lane| lane.id.label()).collect();
         assert!(
             labels.contains(&"@user".to_string()) && labels.contains(&"@scout".to_string()),
@@ -904,7 +904,7 @@ mod tests {
     #[test]
     fn mains_page_without_a_transcript_is_empty() {
         let chat = crate::tui::test_util::chat_at(80, 24);
-        assert!(snapshot(&chat, crate::channels::HUB_NAME).is_empty());
+        assert!(snapshot(&chat, crate::channels::MAIN_NAME).is_empty());
     }
 
     /// The footer tells the reader which keys exist at the depth they are at.

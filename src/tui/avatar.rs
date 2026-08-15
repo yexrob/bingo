@@ -85,7 +85,7 @@ pub fn index_of_id(id: &str) -> Option<usize> {
 /// The main agent is answered before the hash and everybody else is hashed over
 /// what is left, so no teammate can land on main's face.
 pub fn index_of(name: &str) -> usize {
-    if name == crate::channels::HUB_NAME {
+    if name == crate::channels::MAIN_NAME {
         return MAIN_INDEX;
     }
     let hash = name
@@ -268,7 +268,7 @@ fn chip(name: &str, index: usize, pal: &Palette) -> Line {
 /// layout was not already spending.
 ///
 /// The portrait index is resolved by the caller: the transcript knows it before
-/// it knows the name (neither the hub nor the human is a blueprint member), and
+/// it knows the name (neither main nor the human is a blueprint member), and
 /// a table to look it up in would have been cloned every frame.
 pub fn gutter_cell(index: usize, name: &str, row: usize, images: bool, pal: &Palette) -> Line {
     if images {
@@ -333,7 +333,7 @@ impl<'a> Gutter<'a> {
     /// except main's, which is answered before either (D99): its face is
     /// reserved, and a reservation a pin could override would not be one.
     pub fn index_for(&self, name: &str) -> usize {
-        if name == crate::channels::HUB_NAME {
+        if name == crate::channels::MAIN_NAME {
             return MAIN_INDEX;
         }
         self.pinned
@@ -425,10 +425,10 @@ mod tests {
         // Even a blueprint that tries to hand main's portrait to somebody, and
         // even one that tries to repin main itself, does not move it.
         pinned.insert("scout".to_string(), MAIN_INDEX);
-        pinned.insert(crate::channels::HUB_NAME.to_string(), 5);
+        pinned.insert(crate::channels::MAIN_NAME.to_string(), 5);
         let gutter = Gutter::new(false, &pal, &pinned);
-        assert_eq!(gutter.index_for(crate::channels::HUB_NAME), MAIN_INDEX);
-        assert_eq!(index_of(crate::channels::HUB_NAME), MAIN_INDEX);
+        assert_eq!(gutter.index_for(crate::channels::MAIN_NAME), MAIN_INDEX);
+        assert_eq!(index_of(crate::channels::MAIN_NAME), MAIN_INDEX);
 
         // The id of main's portrait is not in the pinnable vocabulary at all, so
         // no team.json can reach it by name.

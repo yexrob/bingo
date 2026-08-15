@@ -1081,7 +1081,7 @@ pub struct Chat {
     /// title bytes the host collects after each frame. Silent by default —
     /// only [`Chat::set_notifier`] gives it a channel.
     pub notify: Notifier,
-    /// The conversation engine (D88): every conversation as one shape. The hub
+    /// The conversation engine (D88): every conversation as one shape. Main
     /// is buffer 0 and the active one; DM / channel / team accounting shadows
     /// the domain here so D89 can switch onto it. Nothing renders from it yet.
     pub(crate) buffers: crate::tui::buffer::Buffers,
@@ -1164,11 +1164,11 @@ pub struct Chat {
     pub(crate) directory: Option<crate::tui::directory::Directory>,
     /// The esc-esc rewind selector (D91); `None` means it is closed.
     pub(crate) rewind: Option<rewind_ui::Rewind>,
-    /// Visits to conversations other than the hub (D89), oldest first. Each one
-    /// is a segment of the flow: which rows it printed, and where in the hub's
+    /// Visits to conversations other than main (D89), oldest first. Each one
+    /// is a segment of the flow: which rows it printed, and where in main's
     /// transcript it sits. `Chat::flow_order` reads them to decide what the one
     /// message store looks like on screen; the last one is open while a
-    /// conversation other than the hub is active.
+    /// conversation other than main is active.
     pub(crate) excursions: Vec<crate::tui::bufferview::Excursion>,
     /// Interrupt signal: Ctrl+C / Esc while busy → send(true), aborting stream reads in the turn immediately.
     pub(crate) cancel_tx: tokio::sync::watch::Sender<bool>,
@@ -1877,7 +1877,7 @@ impl Chat {
                     // A running turn owns its own tools. `Agent` renders no tool
                     // row of its own (`is_hidden_tool`), so this watch row *is*
                     // the row for the Task call the user just watched the model
-                    // make — hub content, and it stays.
+                    // make — main content, and it stays.
                     //
                     // With no turn running, the old code walked back to the last
                     // assistant message and stapled the row there. That is the
@@ -1891,7 +1891,7 @@ impl Chat {
                     // the agent's own DM, whose unread follows its history.
                     //
                     // Command and channel watches keep the old walk-back: a
-                    // background shell command is the hub's own tool, and a
+                    // background shell command is main's own tool, and a
                     // channel row belongs to the conversation it names.
                     let target = match self.stream_msg {
                         Some(i) => Some(i),
@@ -2420,14 +2420,14 @@ impl Chat {
             self.set_input(text);
             return;
         }
-        // A conversation other than the hub owns the composer (D89): the text
+        // A conversation other than main owns the composer (D89): the text
         // goes to it, not to the model. Slash commands are the exception and
         // deliberately so — they act on the application, and `/model` in a DM
         // is still `/model` — so they fall through to the path below unchanged.
         //
-        // This sits above the busy branch because `busy` is the *hub's* state:
+        // This sits above the busy branch because `busy` is *main's* state:
         // a message to a subagent neither queues behind a running turn nor
-        // steers it (D83 offers only hub submissions), and the send must not
+        // steers it (D83 offers only main submissions), and the send must not
         // start a turn of its own.
         if self.buffers.active() != &crate::tui::buffer::BufferId::Hub && !text.starts_with('/') {
             let text = self.expand_pastes(&text);
@@ -2437,7 +2437,7 @@ impl Chat {
             self.update_slash_suggestions();
             return;
         }
-        // A hub submit that opens with another conversation's name delivers the
+        // A main submit that opens with another conversation's name delivers the
         // rest there and stays put (D90). Same placement and the same reason as
         // the branch above: it is a delivery, not a turn, so it must neither
         // queue behind a running one nor start one. Slash commands and bash
@@ -2452,7 +2452,7 @@ impl Chat {
             // The whole line goes into history, envelope included: ↑ brings
             // back what was typed, not what was delivered.
             self.record_history(&text);
-            self.route_from_hub(id, body);
+            self.route_from_main(id, body);
             self.update_slash_suggestions();
             return;
         }
@@ -3817,7 +3817,7 @@ pub(crate) fn user_message_rows(text: &str, width: usize, theme: &Theme) -> Vec<
         ))];
     }
     // A dialog the turn outlived, the receipt of one the user answered, or the
-    // receipt of a line routed out of the hub (D90): nothing failed, so they
+    // receipt of a line routed out of main (D90): nothing failed, so they
     // settle dim rather than in the error colour, and none of them wears the
     // `❯` bubble — the user typed the envelope, not this line.
     if text == ASK_CANCELLED_TEXT

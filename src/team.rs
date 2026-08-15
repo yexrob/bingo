@@ -867,16 +867,16 @@ pub fn norms_block(team: &str, norms: &str) -> String {
     )
 }
 
-/// What the hub is told about the crew standing behind it: who is on it, which rooms
+/// What main is told about the crew standing behind it: who is on it, which rooms
 /// reach whom, and the rule that decides between giving a member work and hiring
 /// someone new.
 ///
-/// Without this the crew is invisible at the moment it matters. The hub sees a list of
+/// Without this the crew is invisible at the moment it matters. Main sees a list of
 /// *agent definitions* in the Agent tool's description and spawns from it, so a pinned
 /// crew — already spawned, already carrying this branch's memory, already paid for —
 /// sits idle while a fresh subagent redoes what a member knows.
 ///
-/// The whole tree is named, not just the root: a department the hub cannot see is a
+/// The whole tree is named, not just the root: a department main cannot see is a
 /// department it will re-hire from scratch. Each team is listed under its own directory,
 /// because that is where its work is and a member of it is not sitting in the session's
 /// cwd.
@@ -956,7 +956,7 @@ pub fn team_root_note(team: &str, dir: &Path) -> String {
     )
 }
 
-/// What a temporary hire is told about its own standing. The crew note tells the hub how
+/// What a temporary hire is told about its own standing. The crew note tells main how
 /// to treat a hire; this tells the hire, so "temporary" is a fact it can plan against
 /// rather than a bookkeeping detail it never learns.
 pub fn hire_note(team: &str) -> String {
@@ -964,7 +964,7 @@ pub fn hire_note(team: &str) -> String {
         "# You are a temporary hire\n\n\
          This project has a standing crew ({team}) and you are not on it. You were brought in \
          for one task because no member covered it: you are not written into {TEAM_FILE}, you \
-         are not in the crew's channel, and you are released once your result is in and the hub \
+         are not in the crew's channel, and you are released once your result is in and main \
          has had its chance to follow up. Put everything worth keeping in your final text — \
          there is no next session in which you are asked again."
     )
@@ -1297,7 +1297,7 @@ fn open_rooms(
             // implicit is written here — the one place that knows these rooms
             // are the user's rather than an agent's private working group.
             let mut roster = vec![
-                crate::channels::HUB_NAME.to_string(),
+                crate::channels::MAIN_NAME.to_string(),
                 crate::channels::USER_NAME.to_string(),
             ];
             roster.extend(live);
@@ -1865,7 +1865,7 @@ mod tests {
         assert_eq!(first.spawned.len(), 3, "{first:?}");
         assert!(first.reused.is_empty());
         assert!(first.failed.is_empty());
-        // Members in Idle standby (zero tokens, no turn started); channel built with hub/user + three members.
+        // Members in Idle standby (zero tokens, no turn started); channel built with main/user + three members.
         let states = s.agents.list();
         assert_eq!(states.len(), 3);
         assert!(
@@ -2015,7 +2015,7 @@ mod tests {
         s.agents
             .deliver(
                 "qa",
-                crate::channels::HUB_NAME,
+                crate::channels::MAIN_NAME,
                 "look at #41",
                 Vec::new(),
                 None,
@@ -2087,7 +2087,7 @@ mod tests {
             s.agents
                 .deliver(
                     "qa",
-                    crate::channels::HUB_NAME,
+                    crate::channels::MAIN_NAME,
                     "carry on",
                     Vec::new(),
                     None
@@ -2432,7 +2432,7 @@ mod tests {
         std::fs::remove_dir_all(&project).unwrap_or_else(|e| panic!("{e}"));
     }
 
-    /// What the hub is told: who is on the crew, which rooms reach whom, and the rule
+    /// What main is told: who is on the crew, which rooms reach whom, and the rule
     /// that sends work to a member before it spawns a stand-in for one.
     #[test]
     fn the_crew_note_names_the_roster_and_the_routing_rule() {
@@ -2987,7 +2987,7 @@ mod tests {
     }
 
     /// A blueprint may ask for a name the registry cannot give — `main` and `user` are
-    /// reserved for the hub and the human — so the member runs under a claimed one.
+    /// reserved for main and the human — so the member runs under a claimed one.
     /// Rooms are declared in blueprint names and have to follow that rename: otherwise
     /// the member comes up running but outside every room that asked for it, which
     /// reads as a member that never started.
@@ -3020,7 +3020,7 @@ mod tests {
         std::fs::remove_dir_all(&home).unwrap_or_else(|e| panic!("{e}"));
     }
 
-    /// What the hub is told about a chart: every department under its own directory,
+    /// What main is told about a chart: every department under its own directory,
     /// and the fact that a bare name reaches anyone in it.
     #[test]
     fn the_crew_note_names_the_whole_chart() {

@@ -9,7 +9,7 @@
 //! Two orderings, and the difference matters. The bar is ordered by the
 //! registry, because a bar you read at a glance must not move under you. The
 //! switcher is ordered by **recency**, because a reader who reached for ctrl+k
-//! is asking "what just happened" rather than "what exists" — with the hub
+//! is asking "what just happened" rather than "what exists" — with main
 //! pinned on top, since it is where turns run and where Esc goes.
 //!
 //! The switcher does not absorb the ctrl+b manager, though the blueprint
@@ -55,7 +55,7 @@ pub struct SwitcherItem {
 }
 
 /// How long ago, in the shortest form that is still true. Empty when the
-/// conversation has no clock — the hub never observes itself, and printing an
+/// conversation has no clock — main never observes itself, and printing an
 /// age derived from tick zero would be a number that means nothing.
 fn age_label(now: u64, last_activity: u64) -> String {
     if last_activity == 0 {
@@ -70,7 +70,7 @@ fn age_label(now: u64, last_activity: u64) -> String {
 }
 
 impl Chat {
-    /// Every conversation, most recently active first, hub pinned on top.
+    /// Every conversation, most recently active first, @main pinned on top.
     pub(crate) fn switcher_items(&self) -> Vec<SwitcherItem> {
         let statuses = self.session.agents.list();
         let mut items: Vec<SwitcherItem> = self
@@ -102,7 +102,7 @@ impl Chat {
                 .cmp(&left.last_activity)
                 .then_with(|| left.label.cmp(&right.label))
         });
-        pin_hub(&mut items);
+        pin_main(&mut items);
         items
     }
 
@@ -111,7 +111,7 @@ impl Chat {
     /// argument completion do.
     pub(crate) fn switcher_matches(&self, query: &str) -> Vec<SwitcherItem> {
         let mut items = fuzzy_rank(query, self.switcher_items(), |item| item.label.as_str());
-        pin_hub(&mut items);
+        pin_main(&mut items);
         items
     }
 
@@ -255,14 +255,14 @@ impl Chat {
     }
 }
 
-/// The hub goes first however the rest is ordered: it is where turns run and
+/// Main goes first however the rest is ordered: it is where turns run and
 /// where Esc goes, so it is the one destination that must never be hunted for.
-fn pin_hub(items: &mut Vec<SwitcherItem>) {
+fn pin_main(items: &mut Vec<SwitcherItem>) {
     if let Some(at) = items.iter().position(|item| item.id == BufferId::Hub)
         && at > 0
     {
-        let hub = items.remove(at);
-        items.insert(0, hub);
+        let main = items.remove(at);
+        items.insert(0, main);
     }
 }
 
@@ -302,10 +302,10 @@ mod tests {
             .collect()
     }
 
-    /// Recency order with the hub pinned: the question a roster answers is
+    /// Recency order with main pinned: the question a roster answers is
     /// "what just happened", not "what exists".
     #[test]
-    fn the_list_is_recent_first_with_the_hub_on_top() {
+    fn the_list_is_recent_first_with_main_on_top() {
         let mut chat = test_chat();
         for name in ["alpha", "bravo", "charlie"] {
             seed_agent(&chat, name);
@@ -321,8 +321,8 @@ mod tests {
 
         assert_eq!(
             labels(&chat),
-            vec!["hub", "@bravo", "@charlie", "@alpha"],
-            "most recently active first, hub pinned"
+            vec!["@main", "@bravo", "@charlie", "@alpha"],
+            "most recently active first, @main pinned"
         );
     }
 
@@ -341,7 +341,11 @@ mod tests {
             )
             .expect("room created");
         chat.refresh_conversations();
-        assert_eq!(labels(&chat), vec!["hub"], "somebody else's room is theirs");
+        assert_eq!(
+            labels(&chat),
+            vec!["@main"],
+            "somebody else's room is theirs"
+        );
 
         chat.session
             .channels
@@ -350,12 +354,12 @@ mod tests {
         chat.refresh_conversations();
         assert_eq!(
             labels(&chat),
-            vec!["hub", "#parser"],
+            vec!["@main", "#parser"],
             "joining it makes it one of yours"
         );
     }
 
-    /// Typing filters through the app's one scorer, and the hub stays reachable
+    /// Typing filters through the app's one scorer, and main stays reachable
     /// at the top of whatever survives.
     #[test]
     fn typing_filters_the_list() {
@@ -366,7 +370,7 @@ mod tests {
         chat.refresh_conversations();
         chat.open_switcher();
 
-        assert_eq!(labels(&chat).len(), 3, "hub + two DMs");
+        assert_eq!(labels(&chat).len(), 3, "@main + two DMs");
         for c in "sct".chars() {
             assert!(key(&mut chat, KeyCode::Char(c)));
         }
@@ -534,7 +538,7 @@ mod tests {
     /// gets no age rather than one measured from tick zero.
     #[test]
     fn ages_are_short_and_never_invented() {
-        assert_eq!(age_label(100, 0), "", "the hub never observes itself");
+        assert_eq!(age_label(100, 0), "", "main never observes itself");
         assert_eq!(age_label(40, 10), "0s");
         assert_eq!(age_label(1000, 10), "32s");
         assert_eq!(age_label(10_000, 10), "5m");

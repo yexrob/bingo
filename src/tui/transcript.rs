@@ -1103,7 +1103,7 @@ mod tests {
     /// D89: the pager reads the flow, so an excursion into a conversation is in
     /// it, under the same rules that mark it on screen.
     ///
-    /// D89's brief said to leave the pager showing the hub session alone. It
+    /// D89's brief said to leave the pager showing main session alone. It
     /// does not, and the reason is the pager's own design: D82 built it on
     /// `build_rows` precisely so that it could never disagree with the screen,
     /// and `build_rows` now prints the flow. Filtering the conversations back
@@ -1150,7 +1150,7 @@ mod tests {
         chat.messages.push(message(Role::Assistant, "an answer"));
 
         let all = texts(&transcript_rows(&mut chat, 80, true)).join("\n");
-        assert!(all.contains("first question"), "the hub is there: {all}");
+        assert!(all.contains("first question"), "main is there: {all}");
         assert!(
             all.contains("an answer"),
             "including after the return: {all}"

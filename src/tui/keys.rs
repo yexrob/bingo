@@ -25,7 +25,7 @@ pub const BINDINGS: &[Binding] = &[
     },
     Binding {
         keys: "esc",
-        description: "close dialog/menu/panel · back to hub · interrupt · esc esc clears or rewinds",
+        description: "close dialog/menu/panel · back to @main · interrupt · esc esc clears or rewinds",
     },
     Binding {
         keys: "ctrl+c",
@@ -117,7 +117,7 @@ pub const BINDINGS: &[Binding] = &[
     },
     Binding {
         keys: "/open",
-        description: "open a conversation: @agent · #room · hub",
+        description: "open a conversation: @agent · #room · @main",
     },
     Binding {
         keys: "ctrl+t",
@@ -125,7 +125,7 @@ pub const BINDINGS: &[Binding] = &[
     },
     Binding {
         keys: "@name · #name",
-        description: "from the hub, send the rest of the line to that conversation",
+        description: "from @main, send the rest of the line to that conversation",
     },
     Binding {
         keys: "ctrl+l",
@@ -266,7 +266,7 @@ mod tests {
         };
         assert!(find("/open").description.contains("@agent"));
         assert!(
-            find("esc").description.contains("back to hub"),
+            find("esc").description.contains("back to @main"),
             "and Esc says where it goes from one"
         );
     }
@@ -288,7 +288,7 @@ mod tests {
             switcher.contains("ctrl+x"),
             "the stop key is only discoverable from here: {switcher}"
         );
-        assert!(find("@name · #name").description.contains("hub"));
+        assert!(find("@name · #name").description.contains("@main"));
         // The kill ctrl+k used to be is still documented, under its new key.
         assert!(find("ctrl+w/u · alt+k").description.contains("to end"));
         assert!(

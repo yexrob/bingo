@@ -274,7 +274,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // work and hiring someone new (D53). A system block rather than a tool description:
     // compaction rewrites the message history and leaves `Session::system` alone, so the
     // routing rule is still there on turn fifty, when the roster matters most. The whole
-    // tree is named (D54) — a department the hub cannot see is one it will re-hire.
+    // tree is named (D54) — a department main cannot see is one it will re-hire.
     if let Ok(Some(tree)) = crate::team::load_team_tree(&project_dir) {
         system.push(crate::api::contract::SystemBlock {
             text: crate::team::crew_note(&tree, &home),

@@ -66,14 +66,14 @@ pub enum EscLayer {
     Directory,
     /// The task panel, when the user opened it themselves with ctrl+t.
     TaskPanel,
-    /// A conversation other than the hub: Esc goes home (D89).
+    /// A conversation other than main: Esc goes home (D89).
     ///
     /// Above the interrupt on purpose — navigation before interruption. Esc in
-    /// a DM is "take me back", never "stop the model": a hub turn running
-    /// behind you keeps running, and its interrupt is reachable from the hub,
+    /// a DM is "take me back", never "stop the model": a main turn running
+    /// behind you keeps running, and its interrupt is reachable from main,
     /// which is the only place it is the thing on screen. Ctrl+C is unchanged
     /// and still stops the turn from anywhere.
-    BackToHub,
+    BackToMain,
     /// The running turn.
     Interrupt,
     /// Bash mode on an empty input. Below the interrupt, unlike every other
@@ -101,7 +101,7 @@ impl EscLayer {
         EscLayer::HelpPanel,
         EscLayer::Directory,
         EscLayer::TaskPanel,
-        EscLayer::BackToHub,
+        EscLayer::BackToMain,
         EscLayer::Interrupt,
         EscLayer::BashMode,
         EscLayer::ClearInput,
@@ -131,11 +131,11 @@ fn speaker_of(item: &crate::tui::bufferview::FlowItem, role: Role, text: &str) -
         // @main's own flow. Its two speakers are never written down anywhere —
         // the role *is* the name — and since D99 they are named here so the
         // console can wear the same gutter every other conversation wears.
-        crate::tui::bufferview::Decor::Hub if role == Role::Assistant => {
-            Some(crate::channels::HUB_NAME.to_string())
+        crate::tui::bufferview::Decor::Home if role == Role::Assistant => {
+            Some(crate::channels::MAIN_NAME.to_string())
         }
-        crate::tui::bufferview::Decor::Hub if crate::tui::chat::is_state_line(text) => None,
-        crate::tui::bufferview::Decor::Hub => Some(crate::channels::USER_NAME.to_string()),
+        crate::tui::bufferview::Decor::Home if crate::tui::chat::is_state_line(text) => None,
+        crate::tui::bufferview::Decor::Home => Some(crate::channels::USER_NAME.to_string()),
         crate::tui::bufferview::Decor::Divider => None,
     }
 }
@@ -200,7 +200,7 @@ impl super::Chat {
     /// `/team <subcommand>` (D31 project-level formation): dispatched to
     /// team_cmd, and the answer lands in the team's own feed (D90, D95).
     ///
-    /// It used to go to the hub's info tier, which put the formation's own
+    /// It used to go to main's info tier, which put the formation's own
     /// report everywhere except where the formation's history lives. The feed
     /// is now a column of the directory rather than a board with a badge, so
     /// the pointer names the key that opens it: an answer stored somewhere the
@@ -487,12 +487,12 @@ impl super::Chat {
         // Checked before the emptiness test: the drain and the bell are separate
         // readers, and a turn already running can absorb the message before this
         // ever sees the mail that asked for the ring.
-        let urgent = self.session.channels.take_hub_mail_urgent();
+        let urgent = self.session.channels.take_main_mail_urgent();
         if urgent {
             self.notify
                 .attention(crate::tui::notify::Attention::AgentNotice);
         }
-        let waiting = self.session.channels.hub_mail_len();
+        let waiting = self.session.channels.main_mail_len();
         if waiting == 0 {
             self.mail_wake = None;
             return false;
@@ -1156,8 +1156,8 @@ impl super::Chat {
     /// opens the rewind selector, mirroring how the same two presses clear a
     /// draft that is not empty.
     ///
-    /// No hub check and no busy check are needed here and none is written:
-    /// `BackToHub` and `Interrupt` are both layers, so in a DM or under a
+    /// No home check and no busy check are needed here and none is written:
+    /// `BackToMain` and `Interrupt` are both layers, so in a DM or under a
     /// running turn `esc_layer()` answers before this ever runs. `open_rewind`
     /// keeps its own guards for the paths that do not come through a key.
     fn esc_rewind(&mut self, now: std::time::Instant) -> bool {
@@ -1205,7 +1205,7 @@ impl super::Chat {
             EscLayer::HelpPanel => self.help_visible,
             EscLayer::Directory => self.directory.is_some(),
             EscLayer::TaskPanel => self.tasks_visible && !self.tasks_auto,
-            EscLayer::BackToHub => *self.buffers.active() != crate::tui::buffer::BufferId::Hub,
+            EscLayer::BackToMain => *self.buffers.active() != crate::tui::buffer::BufferId::Hub,
             EscLayer::Interrupt => self.busy,
             EscLayer::BashMode => self.bash_mode && self.input.is_empty(),
             EscLayer::ClearInput => !self.input.is_empty(),
@@ -1258,7 +1258,7 @@ impl super::Chat {
                 self.dirty = true;
                 true
             }
-            EscLayer::BackToHub => {
+            EscLayer::BackToMain => {
                 self.switch_to(crate::tui::buffer::BufferId::Hub);
                 true
             }
@@ -1300,7 +1300,7 @@ impl super::Chat {
             Some(EscLayer::Interrupt) | None => "esc to interrupt",
             // Esc leaves the conversation rather than closing anything, and a
             // turn running behind it survives the press (D89).
-            Some(EscLayer::BackToHub) => "esc to hub",
+            Some(EscLayer::BackToMain) => "esc to @main",
             Some(_) => "esc to close",
         }
     }
@@ -1965,7 +1965,7 @@ impl super::Chat {
             // Mail landing in a fully idle session is the one thing that has to
             // wake the clock rather than ride an event: nothing else is
             // happening, and the digest window has to be able to expire (D98).
-            || self.session.channels.has_hub_mail()
+            || self.session.channels.has_main_mail()
             || self.mail_wake.is_some()
     }
 
@@ -2652,9 +2652,9 @@ impl super::Chat {
             self.reply_cache.clear();
         }
         let theme = self.theme.clone();
-        // What the one message store looks like on screen (D89): the hub's own
+        // What the one message store looks like on screen (D89): main's own
         // messages, with each conversation's rows spliced in where it was
-        // opened, and the hub's tail held back while a conversation is still
+        // opened, and main's tail held back while a conversation is still
         // open. Segment numbering counts *flow positions*, not message indices,
         // because those are what the reader sees go by: 0 = welcome card,
         // k+1 = flow[k]. The order is append-only, so the flush cursor keeps
@@ -2704,7 +2704,7 @@ impl super::Chat {
             let g = &conversation_gutter;
             let mut seen = vec![
                 g.index_for(crate::channels::USER_NAME),
-                g.index_for(crate::channels::HUB_NAME),
+                g.index_for(crate::channels::MAIN_NAME),
             ];
             if let crate::tui::buffer::BufferId::Dm(name) = self.active_buffer() {
                 seen.push(g.index_for(&name));
