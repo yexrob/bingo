@@ -108,9 +108,23 @@ impl EscLayer {
     ];
 }
 
-/// Who a flow position belongs to, for sender grouping. A rule belongs to
-/// nobody, which is what makes the first message after one carry its name.
-fn speaker_of(item: &crate::tui::bufferview::FlowItem, role: Role) -> Option<String> {
+/// Who a flow position belongs to, for the gutter face and for sender grouping.
+/// A rule belongs to nobody, which is what makes the first message after one
+/// carry its name.
+///
+/// **A state line belongs to nobody either** (D99 review). The console's
+/// user-role rows are not all the user's: a failed-agent alert, a route receipt,
+/// an ask receipt, an interrupt marker and a rewind line are the runtime
+/// reporting, and the human's portrait beside `⚠ @scout · connection reset`
+/// would say the human wrote it. Returning `None` costs them the face and takes
+/// them out of the run, so main speaking → alert → main speaking again re-leads
+/// with main's face; the gutter *indentation* is not decided here, and they keep
+/// it, so the message column never jogs. This is the ruling the DM tail's
+/// live-only states already carry (`bufferview::tail_post_rows`).
+///
+/// A steered message (`↪ …`) is not a state line and is not covered: the user
+/// typed it, so the face is right.
+fn speaker_of(item: &crate::tui::bufferview::FlowItem, role: Role, text: &str) -> Option<String> {
     match &item.decor {
         crate::tui::bufferview::Decor::Said(who) if role == Role::Assistant => Some(who.clone()),
         crate::tui::bufferview::Decor::Said(_) => Some(crate::channels::USER_NAME.to_string()),
@@ -120,6 +134,7 @@ fn speaker_of(item: &crate::tui::bufferview::FlowItem, role: Role) -> Option<Str
         crate::tui::bufferview::Decor::Hub if role == Role::Assistant => {
             Some(crate::channels::HUB_NAME.to_string())
         }
+        crate::tui::bufferview::Decor::Hub if crate::tui::chat::is_state_line(text) => None,
         crate::tui::bufferview::Decor::Hub => Some(crate::channels::USER_NAME.to_string()),
         crate::tui::bufferview::Decor::Divider => None,
     }
@@ -2700,7 +2715,8 @@ impl super::Chat {
             // sender's name is not repeated over every message in a run — and
             // is repeated the moment somebody else speaks (sender grouping,
             // the one workspace decoration the flow keeps).
-            let previous = std::mem::replace(&mut spoke, speaker_of(item, role));
+            let previous =
+                std::mem::replace(&mut spoke, speaker_of(item, role, &self.messages[i].text));
             if pos + 1 < skip {
                 continue;
             }
@@ -2719,17 +2735,18 @@ impl super::Chat {
                 ));
                 continue;
             }
-            // Who this row is drawn as. A conversation message names its own
-            // speaker; @main's two are the participants they always were, and
-            // since D99 they wear the same gutter — main's reserved portrait and
-            // the user's own face — so a message looks like itself wherever it
-            // is read. Only a rule has nobody behind it.
-            let said = speaker_of(item, role);
-            let gutter = said.as_ref().and(Some(&conversation_gutter));
-            let inner = match gutter {
-                Some(g) => width.saturating_sub(g.width()),
-                None => width,
-            };
+            // Who this row is drawn as — `spoke` was just set to it. A
+            // conversation message names its own speaker; @main's two are the
+            // participants they always were, and since D99 they wear the same
+            // gutter, so a message looks like itself wherever it is read. A rule
+            // and a state line have nobody behind them.
+            let said = spoke.clone();
+            // **Every row takes the gutter; only a speaker takes the face.** A
+            // rule already `continue`d above, so what is left is a message or a
+            // state, and a state that gave up the column too would make the
+            // message column jog around it — rules span, states align.
+            let gutter = &conversation_gutter;
+            let inner = width.saturating_sub(gutter.width());
             // In a conversation with more than two speakers the name is not
             // decoration, it is the only thing that says who is talking. Your
             // own messages keep the `❯` bubble, which already says so.
@@ -2775,22 +2792,21 @@ impl super::Chat {
             // (D89 retired it, D97 brings it back as a row-builder concern).
             // The blank spacing row stays outside it, so a portrait never sits
             // beside nothing.
-            let block = match (gutter, said) {
-                (Some(g), Some(who)) => {
-                    let index = g.index_for(&who);
+            let cells = match &said {
+                Some(who) => {
+                    let index = gutter.index_for(who);
                     self.faces.insert(index);
-                    let lead = spoke != previous;
-                    El::col(vec![
-                        El::Blank,
-                        El::gutter(
-                            g.cells(index, &who, lead),
-                            g.blank(),
-                            El::col(stack.split_off(1)),
-                        ),
-                    ])
+                    gutter.cells(index, who, spoke != previous)
                 }
-                _ => El::col(stack),
+                // Nobody said it, so there is nothing to draw and no face is
+                // claimed for transmission: `gutter_rows` falls back to the
+                // blank cell on every row of the block.
+                None => Vec::new(),
             };
+            let block = El::col(vec![
+                El::Blank,
+                El::gutter(cells, gutter.blank(), El::col(stack.split_off(1))),
+            ]);
             blocks.push(Block::settled(block, settled));
         }
         if let Some(ask) = self.ask_el(&theme) {

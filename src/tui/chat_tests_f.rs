@@ -841,3 +841,90 @@ fn the_console_counts_what_main_says_while_you_are_elsewhere() {
         Some(false)
     );
 }
+
+/// D99 review: the console's user-role rows are not all the user's. A failure
+/// alert, a route receipt, an interrupt marker — the runtime reporting — must
+/// not wear the human's portrait, or the gutter says the human wrote them. They
+/// keep the *indentation*, so the message column does not jog around them, and
+/// they leave the run, so the next thing main says re-leads with main's face:
+/// the visual break the interruption already is. The same ruling the DM tail's
+/// live-only states have carried since D97.
+#[test]
+fn a_state_line_takes_the_indentation_and_nobodys_face() {
+    for images in [false, true] {
+        let mut chat = chat_at(78, 40);
+        if images {
+            chat.image_cap = Some(crate::tui::gfx::ImageCap::default_cells());
+        }
+        chat.messages
+            .push(msg(Role::Assistant, "scout is on the parser."));
+        chat.push_agent_alert("scout · fix the parser", Some("connection reset"));
+        chat.messages
+            .push(msg(Role::Assistant, "I will hire a replacement."));
+        chat.build_rows(78);
+        let rows: Vec<String> = chat.doc.rows.iter().map(|r| r.line.plain_text()).collect();
+        let row_with = |needle: &str| -> String {
+            rows.iter()
+                .find(|row| row.contains(needle))
+                .unwrap_or_else(|| panic!("no row contains {needle:?}: {rows:#?}"))
+                .clone()
+        };
+
+        let gutter = crate::tui::avatar::gutter_width(images);
+        let alert = row_with("⚠ @scout");
+        let cut = alert.find('⚠').unwrap_or(0);
+        assert_eq!(
+            crate::tui::line::text_width(&alert[..cut]),
+            gutter,
+            "the alert starts at the gutter's edge ({images}): {alert:?}"
+        );
+        assert_eq!(
+            alert[..cut].trim(),
+            "",
+            "and the cells before it are blank — no chip, no portrait ({images}): {alert:?}"
+        );
+        assert!(
+            !alert[..cut].contains(crate::tui::gfx::PLACEHOLDER),
+            "least of all an image ({images}): {alert:?}"
+        );
+
+        // The run broke: main's reply after the alert opens a fresh one.
+        let before = row_with("scout is on the parser.");
+        let after = row_with("I will hire a replacement.");
+        assert_eq!(
+            before[..before.find('⏺').unwrap_or(0)],
+            after[..after.find('⏺').unwrap_or(0)],
+            "main re-leads with its own face after the interruption ({images})"
+        );
+        assert_ne!(
+            after[..after.find('⏺').unwrap_or(0)].trim(),
+            "",
+            "and that face is drawn, not blank ({images}): {after:?}"
+        );
+    }
+}
+
+/// A steered message is the user's own words and keeps the user's face: it is
+/// not a state line, and the `↪` marker says where in the reply it landed
+/// rather than that nobody wrote it.
+#[test]
+fn a_steered_message_still_wears_the_users_face() {
+    let mut chat = chat_at(78, 40);
+    chat.messages.push(msg(Role::Assistant, "working on it"));
+    chat.absorb_steered(&[crate::steer::SteerItem {
+        id: 1,
+        text: "also check the lexer".to_string(),
+    }]);
+    chat.build_rows(78);
+    let row = chat
+        .doc
+        .rows
+        .iter()
+        .map(|r| r.line.plain_text())
+        .find(|row| row.contains("also check the lexer"))
+        .unwrap_or_else(|| panic!("the steered line renders"));
+    assert!(
+        row.starts_with(" U "),
+        "the user typed it, so the face is right: {row:?}"
+    );
+}

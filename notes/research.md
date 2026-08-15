@@ -3155,10 +3155,20 @@ D99 removes the premise, and with both in place `experimental.chatAvatars` drew 
 portrait twice on one message. `avatar::sender_band` and `Chat::sender_band_el` are deleted; the switch
 keeps the one job the gutter does not do, the portrait on a subagent's watch row.
 
-*`speaker_of` names @main's two speakers.* The console's participants were never written down —
-the role *was* the name — so the gutter had nothing to key on. Extending `speaker_of(item, role)` to
-answer `main`/`user` for `Decor::Hub` gives the row builder one question with one answer for every
-surface, and the run rule (`spoke != previous`) then works in the console for free.
+*`speaker_of` names @main's two speakers — and refuses to name a state line.* The console's
+participants were never written down (the role *was* the name), so the gutter had nothing to key on;
+`speaker_of(item, role, text)` answers `main`/`user` for `Decor::Hub`, and the run rule
+(`spoke != previous`) then works in the console for free. But not every user-role row in the console
+is the user's: the D98 failure alert, a route receipt, an ask receipt, the interrupt marker and a
+rewind line are the runtime reporting, and the first cut hung the human's portrait on all of them —
+`⚠ @scout · connection reset` with the user's chip beside it says the human wrote it. So a
+`Decor::Hub` row that satisfies `is_state_line` answers `None`, which costs it the face and takes it
+out of the run; main speaking after an alert therefore re-leads with its own, which is the visual
+break the interruption already is. **The gutter stopped being decided by the speaker**: every
+non-rule row takes the column and only a speaker takes the cells, because a state that gave up the
+indentation as well would make the message column jog around it — rules span, states align. This is
+the ruling the DM tail's live-only states have carried since D97, applied to the surface that just
+grew a gutter. A steered message (`↪ …`) is not a state line and is untouched: the user typed it.
 
 *Unread is measured where the measure was already stated.* `Lane::messages` has said "process rows are
 work, not messages" since D96; the bar never read it. `pair_measure` returns `(Said count, an agent
@@ -3192,12 +3202,14 @@ the one line here nobody chose to say.
   replies, which now belong to nobody's lane; they were given the user message the reply answers,
   which is what a pair conversation is. Four row-prefix assertions in `chat_tests_b` read through a new
   `test_util::body`, which takes the gutter off a row rather than asserting around it.
-- 1445 + 13 tests before, 1457 + 13 after (17 added: 4 pair-lane projection — the filter, reply
+- 1445 + 13 tests before, 1459 + 13 after (19 added: 4 pair-lane projection — the filter, reply
   attribution, the work it carries, the run break; 3 replay — activity groups and their wording, the
-  standalone call closing a group, the budget; 4 gutter — the console's gutter, both skins laying out
-  alike, main's reserved face, the console naming its speakers in the gutter and not above them;
-  3 accounting — Said-only counting, mention on an agent's Said, @main's unread; 1 the live tail gated
-  by run trigger; 1 the room mention predicate; 1 the switch keeping the watch row and losing the band.
+  standalone call closing a group, the budget; 6 gutter — the console's gutter, both skins laying out
+  alike, main's reserved face, the console naming its speakers in the gutter and not above them, a
+  state line taking the indentation and nobody's face in both skins with the run re-leading after it,
+  and a steered message keeping the user's; 3 accounting — Said-only counting, mention on an agent's
+  Said, @main's unread; 1 the live tail gated by run trigger; 1 the room mention predicate; 1 the
+  switch keeping the watch row and losing the band.
   5 removed: the two band tests, the hub's absence of a gutter, `a_dm_is_addressed_to_you_by_construction`,
   and the no-face-without-the-switch claim — each renamed or replaced above rather than dropped).
 
