@@ -189,6 +189,17 @@ fn split_user_text(text: &str, at: u64, first: bool) -> Vec<(Target, Post)> {
     {
         return split_user_text(body.trim(), at, false);
     }
+    // The pre-D98 envelope. Histories recorded before the rename still carry
+    // it, and a reader that forgot the old shape would file the whole block as
+    // the hub speaking. The lines inside wear their own markers, so unwrapping
+    // attributes them the same way the new envelope's are.
+    if let Some(body) = text
+        .trim()
+        .strip_prefix("<channel-messages>")
+        .and_then(|rest| rest.trim_end().strip_suffix("</channel-messages>"))
+    {
+        return split_user_text(body.trim(), at, false);
+    }
     if runtime_only(text) {
         out.push((
             Target::TimelineOnly,
@@ -659,6 +670,29 @@ mod tests {
                 .iter()
                 .any(|p| p.text == "#build · zoe: the tests pass"),
             "and a room relay in the same block is still the room's, recorded once"
+        );
+    }
+
+    /// A history recorded before D98 wraps its inbox in `<channel-messages>`.
+    /// The old envelope reads the same as the new one: its lines wear their
+    /// own markers, and forgetting the shape would file the block as the hub
+    /// speaking.
+    #[test]
+    fn the_pre_d98_envelope_is_still_read() {
+        let inbox = "<channel-messages>\n[#build msg #2] zoe: still failing\n</channel-messages>";
+        let history = vec![user("task"), user(inbox)];
+        let page = dossier("scout", &history, &[1, 2], &[]);
+        let timeline = lane_of(&page, &LaneId::Timeline).expect("a timeline");
+        assert!(
+            timeline
+                .posts
+                .iter()
+                .any(|p| p.text == "#build · zoe: still failing"),
+            "the relay inside is attributed, not misfiled as hub prose"
+        );
+        assert!(
+            lane_of(&page, &LaneId::Dm(HUB_NAME.to_string())).is_none(),
+            "and nothing in the legacy block reads as the hub speaking"
         );
     }
 
