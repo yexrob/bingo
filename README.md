@@ -570,20 +570,37 @@ drops off the bar while staying readable.
 directory rather than a board with a badge. `Ctrl+T` cycles tasks → team →
 closed. The directory shows the roster with presence and each member's rooms,
 every room with its members, and the last ten lifecycle events (spawn, done, and
-`/team` output). ↑/↓ move, Enter opens a member's DM or a room, `j` joins the
-room under the cursor. It navigates and informs only — stopping an agent stays
-in the Ctrl+B manager.
+`/team` output). **Main is on the roster, first** — it is a participant like the
+rest, with a conversation, rooms and a record of its own — and Enter on its row
+goes to the console rather than to a DM. ↑/↓ move, Enter opens a member's
+conversation or a room, `o` opens a member's record, `j` joins the room under the
+cursor. It navigates and informs only — stopping an agent stays in the Ctrl+B
+manager, and main is not stoppable at all.
 
-**Every agent has a page of its own.** `tab` on an agent in the Ctrl+B manager's
-detail opens its perspective page: a read-only, two-level dossier of everything
-it has said and been told. The index groups its threads — a merged `timeline`,
-its `direct messages` one row per counterpart, its `rooms`, and the `intake` it
-was handed — with a count and a clock on each; Enter opens a thread, Esc walks
-back, `q` closes. A thread reads as a conversation with that agent as the
-protagonist: its thinking and tool calls are shown in *every* thread, whoever it
-was talking to. This is the audit layer — the one place an agent's conversations
-with someone other than you are visible, while your own DM with it stays a pair
-conversation and mixes nothing in. It is a snapshot: reopening is the refresh.
+**Every participant has a page of its own, main included.** The perspective page
+is a read-only, two-level dossier of everything one of them has said and been
+told. The index groups its threads — a merged `timeline`, its `direct messages`
+one row per counterpart, its `rooms`, and the `intake` it was handed — with a
+count and a clock on each; Enter opens a thread, Esc walks back, `q` closes. A
+thread reads as a conversation with that participant as the protagonist: its
+thinking and tool calls are shown in *every* thread, whoever it was talking to.
+This is the audit layer — the one place an agent's conversations with someone
+other than you are visible, while your own DM with it stays a pair conversation
+and mixes nothing in. It is a snapshot: reopening is the refresh.
+
+**Three doors reach it**: `tab` on an empty composer inside a conversation (the
+agent's page in `@agent`, main's in the console; a room has no single
+protagonist, so nothing happens there), `o` on a member in the team directory,
+and `tab` on an agent in the Ctrl+B manager's detail. Main's page is built from
+the session transcript — its console conversation as its `@user` lane, one lane
+per agent that wrote to it, its rooms, its dispatch notifications as intake —
+and the only clock a transcript carries is the turn marker, so times on it are
+turn times and a session recorded before those markers shows none.
+
+**An `@agent` you have never spoken to says so.** An agent main spawned and you
+never wrote to has an empty pair view — its task and its report belong to main —
+so it opens with one dim line, `· no conversation yet · tab opens @scout's
+record ·`, instead of an empty screen under a rule.
 
 **Avatars**: on terminals that can place kitty images — the same capability
 behind inline image rendering (Ghostty/kitty, and tmux with passthrough) — each

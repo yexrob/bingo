@@ -1025,6 +1025,12 @@ impl super::Chat {
                 self.complete_bash_history();
                 true
             }
+            // tab on an *empty* composer opens the record of the conversation
+            // you are in (D100) — the door the observation page was missing.
+            // With text in the composer tab is completion and reaches here only
+            // when no dropdown claimed it, so the two never compete: the
+            // slash and `@` menus are judged well above this match.
+            KeyCode::Tab if self.input.is_empty() => self.open_conversation_record(),
             // Shift+Enter (available when the terminal reports enhanced keyboards) and pasted Enter are both newlines.
             KeyCode::Enter
                 if pasting || modifiers.intersects(KeyModifiers::SHIFT | KeyModifiers::ALT) =>

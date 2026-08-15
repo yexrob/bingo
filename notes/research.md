@@ -3225,3 +3225,120 @@ the one line here nobody chose to say.
 4. *`pending`/`in_flight` are filtered by sender, not by run.* A message main queued while the user's
    run is in flight is correctly absent from the DM, but a *chase* the harness queued has no sender at
    all and is already excluded by `pending_of`'s own rule, which predates this batch.
+
+### D100. The record's doors, and a page for the console
+
+**Problem.** D96 built the observation page and D99 made its walk the pair view's only reader, which
+left two gaps the model names and the code did not fill. The page existed for *subagents* only —
+`perspective_ui::snapshot` reads `agents.view_of(name)`, and main is not in that registry, so the one
+participant whose whole job is coordination had no record of its own coordination. And the page was
+four keys deep: `ctrl+b` → ↑/↓ → Enter → tab, from a manager whose other verbs are about stopping
+things. D99 also shipped an honest consequence with no way out of it: an agent main spawned and the
+user never wrote to opens an **empty** `@agent`, because its task is intake and its report answers
+main — a blank screen under a rule, with the thing you actually wanted one key away and unmentioned.
+
+**Decision.**
+
+*The unmarked default is a property of the protagonist, not a constant.* Everything the page does
+already worked for main except one line: `split_user_text` filed unmarked user-role prose to
+`HUB_NAME`, which is right in a subagent's record (the hub is the one sender `direct_text` leaves
+unmarked) and exactly wrong in main's, where unmarked prose is the human typing into the console.
+Nothing else writes plain prose into a session transcript. The second flip rides with it: the
+first-user-message-is-intake rule exists because the `Agent` tool's prompt is the task that created
+the instance, and nobody dispatched main, so the first thing ever typed into the console is a
+message. Both are `Protagonist { name, default, spawned }`, resolved by `Protagonist::of(name)` —
+`main` is a reserved member name (`channels::HUB_NAME`), so no instance can answer to it and the
+resolution cannot mistake a teammate for the console. `LineSource::HubBatched` follows the same
+default rather than a second hardcoded name: it *is* the unmarked sender, wearing a batch label
+because the batch made its boundaries ambiguous.
+
+`buffer::line_source` was **not** extended. Everything main's transcript can hold was already a
+recognised shape — the `<messages>` envelope and its pre-D98 `<channel-messages>` predecessor unwrap,
+`[message from @X]` lands in the sender's lane (the seam D98 built for exactly this), `[#room msg #N]`
+stays timeline-only because the room's log is authoritative, `<task-notifications>` and the task
+reminder are intake, the steer block is the user, interrupt/compaction/stop-hook/max-tokens are
+timeline-only. The main-specific shape a reader might expect — a marker naming the user — does not
+exist and must not be invented: in main's record the *absence* of a marker is what names them.
+
+*The clock is the turn marker, and that is the whole answer.* A subagent's history is stamped per
+message (`AgentRegistry::finish`). A transcript is not: `Transcript::append` writes bare messages, and
+the one wall clock on disk is D91's `{"type":"turn","at":…}` line, written by `record_turn_open`
+before the message that *opens* a turn. Everything recorded inside that turn — the
+`<task-notifications>` block, the `<messages>` inbox, every assistant reply — goes down through plain
+`record` and carries nothing. So `main_record` reads `load_projection()` (which already surfaces the
+marker as `Entry.opens_turn`) and **carries the turn's stamp forward** across the messages recorded
+inside it. That is a turn clock, not a message clock, and it is named as one: the messages of a turn
+did belong to that turn, and the alternative — stamping only the opener — would have left main's
+agent lanes reading zero and sorting by nothing, since mail and notifications are never turn openers.
+A transcript written before D91 has no markers at all and reads 0 throughout, which is the
+projection's documented "no clock": lanes sort by a zero and the index shows no time beside them,
+exactly as a compacted agent's page already does. Only the index's trailing stamp and the lane
+ordering read `at`; `settled_post_rows` never did.
+
+*Three doors, one page, and the composer decides which key.* `tab` on an **empty** composer opens the
+active conversation's record: `BufferId::Dm(name)` → that agent, `BufferId::Hub` → main,
+`BufferId::Channel(_)` → nothing at all, because a room has no single protagonist and giving the key
+a second meaning there would be inventing one. Tab survived unchanged as completion because it never
+had to be taken from anything: the slash dropdown and the `@` mention dropdown are judged far above
+the editing keys and both require text, `KeyCode::Tab if self.bash_mode` keeps history completion, and
+before this batch a bare `Tab` on an empty composer fell through to `_ => false` — an unbound key. So
+the two readings cannot compete, and the ctrl+g fallback the dispatch offered was not needed. The
+door is inert behind `pending_ask`, the rule the switcher and the directory already carry (D81): a
+full-screen surface must not open over a question holding up a turn. In the directory, `o` opens the
+member under the cursor and closes the panel behind it, the way Enter already hands the screen over;
+on a room it does nothing and the panel stays open. `ctrl+b` detail → `tab` is byte-identical.
+
+*Main is a row on the roster, and the roster is where it always belonged.* Its presence is the **host
+turn** (`chat.busy`) rather than a registry state, its label is `main · console · idle` in the
+`kind.label()` grammar the other rows use, and its rooms come from `channels::rooms_of(HUB_NAME)` like
+anyone's. Enter on it is the one special case: `BufferId::Dm("main")` is not a conversation that
+exists, and `BufferId::Hub` *is* the pair view of the user and main, so Enter goes home. It gains no
+manage verbs, which costs nothing to enforce — the directory has none, by D95's ruling.
+
+*The empty pair's note is furniture, not replay.* Putting it in `Buffers::rehydrate` would have made
+it a replay *item*, and `Excursion::seen` counts items: the note would have set the cursor to one and
+`poll_active_conversation` would have read the pair's first real message as already printed. So it is
+emitted in `open_conversation` beside the rule, in the rule's own row shape, and counted nowhere —
+the same exclusion `replay_items` makes for the divider, for the same reason. Idempotence is read off
+the flow rather than stored: switching out and back prints `── hub ──` and `── @scout ──` again, so
+the check walks the message store backwards *past the rules* and prints nothing if the first real
+line it finds is the note itself. No new state, and the one thing that could go stale — whether the
+note is still the last thing that conversation said — is the question being asked.
+
+**Consequences.**
+
+- **Old assertions rewritten, not weakened.** `directory::enter_opens_a_member_dm_and_a_room` asserted
+  the target list is `[scout, parser]`; it is `[main, scout, parser]` now, so the list assertion states
+  the new contract and both Enters step past main's row. `j_joins_the_room_under_the_cursor` moved the
+  cursor down one before pressing `j`, because the row it was sitting on is main's now and `j` on a
+  member has never done anything. Every pre-existing `perspective` and `dm_posts` test passes
+  untouched, which is what "the flip does not regress a subagent's page" means.
+- The directory footer gains `o record`, and the module doc gains main's row and its reasoning.
+- `walk` and `split_user_text` take a `Protagonist`; `dossier` and `pair_lane` resolve it from the
+  name they were already given, so no caller outside this module changed.
+- 1459 + 13 tests before, 1471 + 13 after (12 added: 2 projection — main's page reading prose as the
+  user with mail in its sender's lane and notifications as intake, and the flip moving no marker;
+  2 snapshot — main's record from the transcript with the turn clock on every lane, and a session
+  with no transcript answering with an empty page rather than a panic; 4 doors — tab in each of the
+  three conversation kinds, tab with a draft still completing, tab inert behind a permission ask,
+  and `o` in the directory on main/an agent/a room; 1 roster — main first, its presence following the
+  host turn, Enter going to the console; 1 footer; 2 the empty-pair note — printed once across a
+  round trip and gone once the pair has content, and not swallowing the first message the poll
+  appends).
+
+**Named limits.**
+
+1. *Main's page is as live as its transcript.* The snapshot reads the file, so a turn in flight is not
+   on it (D82's semantics, stated) — but neither is anything the current turn has recorded and not yet
+   flushed through `record`. In practice `record` persists before it pushes, so the file leads the
+   in-memory history rather than trailing it; the gap is a turn's streaming text, which lands at the
+   turn's end.
+2. *The turn clock is a turn's clock.* Two messages sixty seconds apart inside one long turn read the
+   same time. The honest alternative was zero.
+3. *The empty-pair note's idempotence is textual.* It compares the flow's last non-rule message against
+   the note, and a rule is recognised as `── … ──`. A user message that is itself exactly that shape
+   would be mistaken for furniture — a cost of not adding state, and the same shape the flow already
+   treats as a rule everywhere else.
+4. *`o` is a directory key, not a global one.* There is no door to a *non-member's* record, because
+   there is no surface that lists one: an agent whose instance is gone has no history to show, which is
+   D96's limit, unchanged.

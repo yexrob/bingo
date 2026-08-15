@@ -13,6 +13,12 @@
 //! have meant two loops, two claims on the terminal and a snapshot rebuilt on
 //! every Enter — which is precisely the live-ness the page does not want.
 //!
+//! **Every participant has one, main included** (D100). The modal is unchanged
+//! by that — the titles already derive from the protagonist's name and read
+//! `@main · perspective · read-only` — and the only thing that differs is where
+//! [`snapshot`] reads the record from: the agent registry for a subagent, the
+//! session transcript for main.
+//!
 //! **The pager is [`TranscriptState`]**, unchanged: scrolling, paging, `g`/`G`
 //! and `/` search with `n`/`N` are the transcript's, so a reader who has used
 //! `ctrl+o` already knows this view. `ctrl+e` is deliberately **not** bound —
@@ -367,14 +373,57 @@ pub fn footer(state: &PerspectiveState, width: usize, theme: &Theme) -> Line {
     Line { segs, image: None }
 }
 
-/// Build the page for one agent, reading the two sources X's communications
-/// live in: its own transcript, and the logs of the rooms it is in.
+/// Main's record, and the clock it can actually offer (D100).
+///
+/// Main is not in the agent registry — its history is the **session
+/// transcript**, the same store `chat_tail::load_history` reads every turn's
+/// context from, so the page shows what the model itself is working from.
+///
+/// **The stamps are turn stamps.** A subagent's history carries one clock per
+/// message (`AgentRegistry::finish` stamps them); a transcript carries none —
+/// the one wall clock on disk is the D91 turn marker, written before the
+/// message that *opens* a turn. So the marker's clock is carried forward across
+/// the messages recorded inside that turn: they belong to that turn, and saying
+/// so is the truthful reading of what the file holds. A transcript written
+/// before D91 has no markers at all and reads 0 throughout — the projection's
+/// documented "no clock", which the page degrades under exactly as it does for a
+/// compacted agent: lanes sort by a zero and the index prints no time.
+fn main_record(chat: &Chat) -> (Vec<crate::api::types::Message>, Vec<u64>) {
+    let Some(transcript) = chat.session.runtime.transcript.borrow().clone() else {
+        return (Vec::new(), Vec::new());
+    };
+    let Ok(entries) = transcript.load_projection() else {
+        return (Vec::new(), Vec::new());
+    };
+    let mut history = Vec::with_capacity(entries.len());
+    let mut stamps = Vec::with_capacity(entries.len());
+    let mut turn_at = 0u64;
+    for entry in entries {
+        if let Some(at) = entry.opens_turn {
+            turn_at = at;
+        }
+        history.push(entry.message);
+        stamps.push(turn_at);
+    }
+    (history, stamps)
+}
+
+/// Build the page for one participant, reading the two sources X's
+/// communications live in: its own record, and the logs of the rooms it is in.
+///
+/// Main's record is the session transcript ([`main_record`]); every other
+/// participant's is its registry entry. The projection does not care which —
+/// it takes a history and its stamps — so the page is one page.
 ///
 /// A snapshot: taken once, when the page opens. Nothing here ticks.
 pub fn snapshot(chat: &Chat, agent: &str) -> Dossier {
-    let (history, stamps) = match chat.session.agents.view_of(agent) {
-        Some((history, stamps, ..)) => (history, stamps),
-        None => (Vec::new(), Vec::new()),
+    let (history, stamps) = if agent == crate::channels::HUB_NAME {
+        main_record(chat)
+    } else {
+        match chat.session.agents.view_of(agent) {
+            Some((history, stamps, ..)) => (history, stamps),
+            None => (Vec::new(), Vec::new()),
+        }
     };
     let rooms: Vec<(String, Vec<crate::channels::ChannelMessage>)> = chat
         .session
@@ -777,6 +826,85 @@ mod tests {
             first.contains("@scout ↔ @user") && first.contains("read-only"),
             "the thread's rule names both sides and the stance: {first}"
         );
+    }
+
+    /// Main's page is built from the session transcript, and the D91 turn marker
+    /// is the clock it has: the marker's stamp carries across the messages
+    /// recorded inside that turn, and a transcript with no markers reads zero
+    /// throughout — the same "no clock" a compacted agent's page degrades under.
+    #[test]
+    fn mains_page_is_built_from_the_session_transcript() {
+        let home = std::env::temp_dir().join(format!(
+            "bingo-perspective-main-{}-{}",
+            std::process::id(),
+            "snapshot"
+        ));
+        let cwd = home.join("project");
+        let _ = std::fs::create_dir_all(&cwd);
+        let chat = crate::tui::test_util::chat_at(100, 40);
+        let transcript = match crate::transcript::create(&home, &cwd) {
+            Ok(t) => t,
+            Err(e) => panic!("transcript: {e}"),
+        };
+        let _ = chat
+            .session
+            .runtime
+            .transcript_tx
+            .send(Some(transcript.clone()));
+        let write = |result: Result<(), crate::transcript::TranscriptError>| match result {
+            Ok(()) => {}
+            Err(e) => panic!("transcript write: {e}"),
+        };
+        write(transcript.append_turn(1_700_000_000));
+        write(transcript.append(&Message::user_text("ship the release")));
+        write(transcript.append(&Message {
+            role: ApiRole::Assistant,
+            content: vec![ContentBlock::Text {
+                text: "on it".to_string(),
+            }],
+        }));
+        // No turn marker: an injection inside the turn that has just opened.
+        write(transcript.append(&Message::user_text(format!(
+            "{}\n{}\n{}",
+            crate::query::MAIL_BLOCK_OPEN,
+            crate::channels::format_main_message("scout", "the migration is done"),
+            crate::query::MAIL_BLOCK_CLOSE
+        ))));
+
+        let page = snapshot(&chat, crate::channels::HUB_NAME);
+        assert_eq!(page.agent, crate::channels::HUB_NAME);
+        let labels: Vec<String> = page.lanes.iter().map(|lane| lane.id.label()).collect();
+        assert!(
+            labels.contains(&"@user".to_string()) && labels.contains(&"@scout".to_string()),
+            "the console conversation and the agent that wrote in: {labels:?}"
+        );
+        assert!(
+            !labels.contains(&"@main".to_string()),
+            "and main is never its own counterpart: {labels:?}"
+        );
+        for lane in &page.lanes {
+            assert_eq!(
+                lane.last_at, 1_700_000_000,
+                "{:?} carries the turn's clock",
+                lane.id
+            );
+        }
+
+        let state = PerspectiveState::new(page);
+        assert!(
+            state.title().starts_with("@main · perspective"),
+            "{}",
+            state.title()
+        );
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// A session with no transcript at all still answers with a page rather than
+    /// with a panic: an empty one, which is what "nothing has been said" is.
+    #[test]
+    fn mains_page_without_a_transcript_is_empty() {
+        let chat = crate::tui::test_util::chat_at(80, 24);
+        assert!(snapshot(&chat, crate::channels::HUB_NAME).is_empty());
     }
 
     /// The footer tells the reader which keys exist at the depth they are at.

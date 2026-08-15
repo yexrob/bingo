@@ -292,6 +292,33 @@ impl Chat {
         self.dirty = true;
     }
 
+    /// `tab` on an empty composer: open the record of the conversation you are
+    /// in (D100).
+    ///
+    /// A conversation has a protagonist and its record is that participant's
+    /// observation page — the agent in `@agent`, main in the console. A `#room`
+    /// has no single protagonist, so the key means nothing there and is left
+    /// unconsumed rather than given a surprising second meaning.
+    ///
+    /// Inert behind a permission ask, for the switcher's and the directory's
+    /// reason (D81): a surface that takes the whole screen must not open over a
+    /// question that is holding up a turn.
+    ///
+    /// Returns whether the key was consumed.
+    pub(crate) fn open_conversation_record(&mut self) -> bool {
+        if self.pending_ask.is_some() {
+            return false;
+        }
+        let who = match self.active_buffer() {
+            BufferId::Hub => crate::channels::HUB_NAME.to_string(),
+            BufferId::Dm(name) => name,
+            BufferId::Channel(_) => return false,
+        };
+        self.open_perspective = Some(who);
+        self.dirty = true;
+        true
+    }
+
     /// Open a segment for a conversation: the rule, then its recent history.
     fn open_conversation(&mut self, id: &BufferId) {
         let session = self.session.clone();
@@ -319,6 +346,9 @@ impl Chat {
             })
             .unwrap_or_else(|| id.rule());
         let mut rows = vec![self.push_flow_divider(rule)];
+        if let Some(note) = self.empty_pair_note(id, &items) {
+            rows.push(self.push_flow_divider(note));
+        }
         for replay in shown {
             rows.extend(self.push_replay(&replay));
         }
@@ -329,6 +359,41 @@ impl Chat {
             seen,
             closed: false,
         });
+    }
+
+    /// The one line an empty `@agent` opens with, or `None` when it has earned
+    /// none (D100).
+    ///
+    /// D99's honest consequence is that an agent main spawned and the user never
+    /// wrote to has an *empty* pair view: its first message is the task (intake)
+    /// and its report answers main. An empty conversation under a rule reads as
+    /// a bug; the record is where that agent's life actually is, so the note
+    /// says both — nothing here yet, and the door.
+    ///
+    /// It is furniture rather than replay: it takes the rule's row shape and is
+    /// not one of the `seen` items, so the first real message still appends
+    /// past the cursor instead of being counted as already printed.
+    ///
+    /// **Not repeated.** Switching out and back prints the rules again, and a
+    /// note that came with them would stack up. The flow itself is the state
+    /// that answers whether it is needed: if the last thing anybody printed —
+    /// looking past the rules a round trip leaves — is this note, it is still on
+    /// screen and is not printed twice.
+    fn empty_pair_note(&self, id: &BufferId, items: &[Replay]) -> Option<String> {
+        let BufferId::Dm(name) = id else {
+            return None;
+        };
+        if !items.is_empty() {
+            return None;
+        }
+        let note = format!("· no conversation yet · tab opens @{name}'s record ·");
+        let shown = self
+            .messages
+            .iter()
+            .rev()
+            .find(|message| !(message.text.starts_with("── ") && message.text.ends_with(" ──")))
+            .is_some_and(|message| message.text == note);
+        (!shown).then_some(note)
     }
 
     /// One replayed element into the flow. A message keeps its sender; a note
@@ -916,6 +981,7 @@ mod tests {
     use crate::channels::ChannelMode;
     use crate::tui::chat::UiMessage;
     use crate::tui::test_util::chat_at;
+    use crossterm::event::{KeyCode, KeyModifiers};
 
     fn test_chat() -> Chat {
         chat_at(100, 40)
@@ -1113,6 +1179,160 @@ mod tests {
         let back = chat.messages.len();
         chat.switch_to(BufferId::Hub);
         assert_eq!(chat.messages.len(), back);
+    }
+
+    // -- the record's doors (D100) -----------------------------------------
+
+    /// `tab` on an empty composer opens the record of the conversation you are
+    /// in: the agent's page in a DM, main's in the console. A room has no single
+    /// protagonist, so the key means nothing there and is not consumed.
+    #[test]
+    fn tab_on_an_empty_composer_opens_the_conversations_record() {
+        let mut chat = test_chat();
+        seed_agent(&chat, "scout", vec![from_user("hi"), assistant("hello")]);
+        chat.session
+            .channels
+            .create(
+                "build",
+                vec![crate::channels::USER_NAME.to_string()],
+                ChannelMode::Free,
+            )
+            .expect("room created");
+        chat.refresh_conversations();
+
+        assert!(chat.on_key(KeyCode::Tab, KeyModifiers::NONE), "the console");
+        assert_eq!(chat.open_perspective.as_deref(), Some("main"));
+
+        chat.open_perspective = None;
+        chat.switch_to(BufferId::Dm("scout".to_string()));
+        assert!(chat.on_key(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(chat.open_perspective.as_deref(), Some("scout"));
+
+        chat.open_perspective = None;
+        chat.switch_to(BufferId::Channel("build".to_string()));
+        assert!(
+            !chat.on_key(KeyCode::Tab, KeyModifiers::NONE),
+            "a room has no protagonist, so the key is left unclaimed"
+        );
+        assert_eq!(chat.open_perspective, None);
+    }
+
+    /// With text in the composer `tab` is still completion: the slash and `@`
+    /// dropdowns are judged well above the door, and a bare word reaches it only
+    /// to be ignored because the composer is not empty.
+    #[test]
+    fn tab_with_a_draft_still_completes_and_opens_nothing() {
+        let mut chat = test_chat();
+        chat.set_input("/mo");
+        assert!(chat.on_key(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(chat.input, "/model ");
+        assert_eq!(chat.open_perspective, None, "completion, not a page");
+
+        chat.set_input("half a sentence");
+        assert!(!chat.on_key(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(chat.open_perspective, None);
+        assert_eq!(chat.input, "half a sentence", "and the draft is untouched");
+    }
+
+    /// The door respects the modality every full-screen surface does (D81): a
+    /// permission question is holding up a turn, and nothing opens over it.
+    #[test]
+    fn the_record_door_is_inert_behind_a_permission_ask() {
+        let mut chat = test_chat();
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        chat.pending_ask = Some((
+            crate::ui::PermissionRequest::new(
+                "Allow Bash",
+                "cargo test",
+                vec![crate::ui::ASK_YES.into(), crate::ui::ASK_NO.into()],
+            ),
+            tx,
+        ));
+        assert!(!chat.on_key(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(chat.open_perspective, None);
+    }
+
+    /// D99's honest consequence gets a door: an agent main spawned and the user
+    /// never wrote to opens with its rule and one dim line pointing at the
+    /// record. It is not a replay item, so the first real message still prints.
+    #[test]
+    fn an_empty_pair_opens_with_a_note_pointing_at_the_record() {
+        let mut chat = test_chat();
+        // Spawn prompt and a report to main: both belong to lanes that are not
+        // the user's, so the pair view is empty.
+        seed_agent(
+            &chat,
+            "scout",
+            vec![user("map the parser"), assistant("mapped it")],
+        );
+        chat.refresh_conversations();
+        chat.switch_to(BufferId::Dm("scout".to_string()));
+
+        let text = flow(&mut chat);
+        assert!(text.contains("── @scout ──"), "{text}");
+        assert!(
+            text.contains("· no conversation yet · tab opens @scout's record ·"),
+            "{text}"
+        );
+        assert!(
+            !text.contains("mapped it"),
+            "the pair view stays pure: {text}"
+        );
+
+        // Switching out and back does not stack the note up: the flow already
+        // shows it, and the rules a round trip prints are not content.
+        chat.switch_to(BufferId::Hub);
+        chat.switch_to(BufferId::Dm("scout".to_string()));
+        let text = flow(&mut chat);
+        assert_eq!(
+            text.matches("no conversation yet").count(),
+            1,
+            "the note is printed once: {text}"
+        );
+
+        // And a message makes it moot: the note is gone from the next opening,
+        // and the message itself still prints.
+        chat.switch_to(BufferId::Hub);
+        chat.session.agents.finish(
+            "scout",
+            vec![
+                user("map the parser"),
+                assistant("mapped it"),
+                from_user("what did you find?"),
+                assistant("a missing case"),
+            ],
+            0,
+        );
+        chat.switch_to(BufferId::Dm("scout".to_string()));
+        let text = flow(&mut chat);
+        assert_eq!(
+            text.matches("no conversation yet").count(),
+            1,
+            "no second note once the pair has content: {text}"
+        );
+        assert!(text.contains("what did you find?"), "{text}");
+        assert!(text.contains("a missing case"), "{text}");
+    }
+
+    /// The note is furniture, not a replay item. If it were counted the poll's
+    /// cursor would start at one and the first message the pair ever gets would
+    /// be read as already printed.
+    #[test]
+    fn the_empty_pair_note_does_not_swallow_the_first_message() {
+        let mut chat = test_chat();
+        seed_agent(&chat, "scout", vec![user("map the parser")]);
+        chat.refresh_conversations();
+        chat.switch_to(BufferId::Dm("scout".to_string()));
+        assert!(flow(&mut chat).contains("no conversation yet"));
+
+        chat.session.agents.finish(
+            "scout",
+            vec![user("map the parser"), from_user("are you there?")],
+            0,
+        );
+        chat.poll_active_conversation();
+        let text = flow(&mut chat);
+        assert!(text.contains("are you there?"), "{text}");
     }
 
     // -- the excursion -----------------------------------------------------
