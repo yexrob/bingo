@@ -117,6 +117,32 @@ fn speaker_of(item: &crate::tui::bufferview::FlowItem) -> Option<String> {
     }
 }
 
+/// How long the main agent's inbox has to stay quiet before a digest turn
+/// starts. Two seconds at [`crate::tui::motion::TICK_MS`]: long enough that
+/// a room's back-and-forth arrives as one batch (agents answering each other
+/// land within a round trip of one another), short enough that a single
+/// message still feels like it was delivered rather than queued.
+pub(crate) const MAIL_QUIET_TICKS: u64 = 2_000 / crate::tui::motion::TICK_MS;
+
+/// The ceiling on that wait. A room that never stops talking would otherwise
+/// starve the wake forever — the window would restart on every post — so
+/// after fifteen seconds the digest runs on whatever has arrived and the next
+/// batch starts its own window.
+pub(crate) const MAIL_DEADLINE_TICKS: u64 = 15_000 / crate::tui::motion::TICK_MS;
+
+/// The debounce's state for one batch of waiting mail.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct MailWake {
+    /// Tick the batch started at (the deadline is measured from here).
+    first_seen: u64,
+    /// Tick the inbox last grew at (the quiet window restarts here).
+    last_change: u64,
+    /// How much was waiting when we last looked.
+    waiting: usize,
+    /// A digest turn has been asked for; the drain will clear the batch.
+    woken: bool,
+}
+
 impl super::Chat {
     pub(crate) fn slash_skills(&mut self) {
         let home = self.session.home.clone();
@@ -393,6 +419,85 @@ impl super::Chat {
             groups: Vec::new(),
             group_of: Vec::new(),
         });
+    }
+
+    /// The alert line a failed run leaves in the flow (D98), plus the D79 ring.
+    ///
+    /// The label is the run's, and every shape of it — `scout · fix the parser`,
+    /// `scout #3 · look again`, `scout #7 receipt` — opens with the instance
+    /// name, which is the only part of it the user needs here.
+    pub(crate) fn push_agent_alert(&mut self, label: &str, reason: Option<&str>) {
+        let instance = label.split_whitespace().next().unwrap_or(label);
+        self.messages.push(UiMessage {
+            role: Role::User,
+            text: crate::tui::bufferview::agent_alert_line(instance, reason),
+            at: crate::channels::now_unix(),
+            activities: Vec::new(),
+            insert_points: Vec::new(),
+            groups: Vec::new(),
+            group_of: Vec::new(),
+        });
+        self.notify
+            .attention(crate::tui::notify::Attention::AgentNotice);
+        self.dirty = true;
+    }
+
+    /// The main agent's inbox, digested on a quiet window rather than per message
+    /// (D98).
+    ///
+    /// Before this, every room post with main as a member woke a turn of its
+    /// own: three agents talking in a room for a minute bought the user three
+    /// digests of a conversation that had not finished happening. Coalescing is
+    /// the whole fix — the wake is deferred until the mail stops growing, or
+    /// until the deadline, so a room that never goes quiet still gets read.
+    ///
+    /// Urgent direct mail is the exception at both ends: it rings the attention
+    /// channel the moment it lands, and it does not wait out the window.
+    ///
+    /// Returns whether it asked for a digest turn this frame.
+    pub(crate) fn digest_mail(&mut self) -> bool {
+        // Checked before the emptiness test: the drain and the bell are separate
+        // readers, and a turn already running can absorb the message before this
+        // ever sees the mail that asked for the ring.
+        let urgent = self.session.channels.take_hub_mail_urgent();
+        if urgent {
+            self.notify
+                .attention(crate::tui::notify::Attention::AgentNotice);
+        }
+        let waiting = self.session.channels.hub_mail_len();
+        if waiting == 0 {
+            self.mail_wake = None;
+            return false;
+        }
+        let tick = self.tick;
+        let wake = self.mail_wake.get_or_insert(MailWake {
+            first_seen: tick,
+            last_change: tick,
+            waiting,
+            woken: false,
+        });
+        if wake.waiting != waiting {
+            wake.waiting = waiting;
+            wake.last_change = tick;
+        }
+        if wake.woken {
+            return false;
+        }
+        let quiet = tick.saturating_sub(wake.last_change) >= MAIL_QUIET_TICKS;
+        let overdue = tick.saturating_sub(wake.first_seen) >= MAIL_DEADLINE_TICKS;
+        if !(urgent || quiet || overdue) {
+            return false;
+        }
+        // Idle-only, as the per-post wake was: a running turn absorbs the mail at
+        // its own next round, and a queued user message goes first.
+        if self.busy || self.interrupted || !self.queued.is_empty() {
+            return false;
+        }
+        self.submit_auto();
+        if let Some(wake) = &mut self.mail_wake {
+            wake.woken = true;
+        }
+        true
     }
 
     /// System-triggered turn: a watchable signal/terminal notification wakes the main agent.
@@ -1727,15 +1832,12 @@ impl super::Chat {
         // repainting only when the bar's own entries change.
         if self.tick.is_multiple_of(15) {
             self.refresh_conversations();
-            // A rolled `notify_user` window owes its "N more" line even if the
-            // agent that filled it has gone quiet (D94), so the roll is checked
-            // on the clock rather than on the next notice. The relay emits back
-            // through the same channel, so the line arrives as an ordinary event.
-            self.session
-                .runtime
-                .notify_user
-                .flush_due(std::time::Instant::now());
         }
+        // The digest debounce (D98) runs every frame: it is two integer
+        // comparisons against a length the domain already keeps, and the thing it
+        // decides — whether the room has stopped talking — is a question about
+        // *this* frame.
+        let _ = self.digest_mail();
         // The conversation you are actually in follows every frame (D89). The
         // fifteen-tick poll is the right cadence for a registry sweep and the
         // wrong one for a message you are waiting on: it is one conversation's
@@ -1826,6 +1928,11 @@ impl super::Chat {
             || self.notice_until.is_some()
             || !self.events_rx.is_empty()
             || !self.asks_rx.is_empty()
+            // Mail landing in a fully idle session is the one thing that has to
+            // wake the clock rather than ride an event: nothing else is
+            // happening, and the digest window has to be able to expire (D98).
+            || self.session.channels.has_hub_mail()
+            || self.mail_wake.is_some()
     }
 
     /// Task-area data source: live snapshot of the on-disk store.
@@ -2628,12 +2735,12 @@ impl super::Chat {
                     // Send time beside the bubble's first row (D93). A state line
                     // gets none: nothing was sent, and the line is a state, not a
                     // message.
-                    // A `notify_user` relay (D94) is the exception among state
-                    // lines: it *is* a message, sent by someone, at a moment that
+                    // A failed-agent alert (D98) is the exception among state
+                    // lines: it *is* news, about someone, at a moment that
                     // matters — "the build broke" reads differently at 09:02 and
                     // at 17:40. The others describe now and have nothing to stamp.
                     let time = if crate::tui::chat::is_state_line(&self.messages[i].text)
-                        && !crate::tui::bufferview::is_relay_line(&self.messages[i].text)
+                        && !crate::tui::bufferview::is_agent_alert(&self.messages[i].text)
                     {
                         String::new()
                     } else {

@@ -275,6 +275,16 @@ struct Entry {
     /// The registry is shared by the hub and every subagent, so notifications are addressed:
     /// a running subagent must not consume a completion meant for the hub.
     owner: Option<String>,
+    /// Whether this watch's terminal states are the owner's business (D98).
+    ///
+    /// A run the user started themselves — a message they typed into an agent's
+    /// DM — is a conversation between the two of them: its end owes the main
+    /// agent no notification and no woken turn. Everything else (a dispatch, a
+    /// `SendMessage` continuation, a background command) does, so `true` is the
+    /// default and the exception has to ask for itself. The lifecycle feed is
+    /// unaffected: it rides the broadcast, which is never suppressed, because
+    /// the team directory is a record of every run.
+    notify_owner: bool,
 }
 
 struct Inner {
@@ -310,6 +320,22 @@ impl WatchRegistry {
         conditions: Vec<NotifyCondition>,
         owner: Option<String>,
     ) -> WatchId {
+        self.register_addressed(watchable, conditions, owner, true)
+    }
+
+    /// Register a watch that may keep its terminal states to itself (D98).
+    ///
+    /// `notify_owner: false` means the run exists — it broadcasts, it is drawn,
+    /// the lifecycle feed records it — but its end enqueues nothing for the
+    /// session that owns it, so nothing wakes and nothing is injected. That is
+    /// the shape of a run the user started in an agent's DM.
+    pub fn register_addressed(
+        self: &Arc<Self>,
+        watchable: Box<dyn Watchable>,
+        conditions: Vec<NotifyCondition>,
+        owner: Option<String>,
+        notify_owner: bool,
+    ) -> WatchId {
         let poll = watchable.poll();
         let label = watchable.label();
         let kind = watchable.kind();
@@ -330,12 +356,13 @@ impl WatchRegistry {
                     feed_buffer: Vec::new(),
                     total_lines: 0,
                     owner: owner.clone(),
+                    notify_owner,
                 },
             );
             id
         };
         // Initial state is force-broadcast (set_state's idempotency would swallow a state equal to the entry's).
-        if poll.state.is_terminal() || poll.state == WatchState::Idle {
+        if notify_owner && (poll.state.is_terminal() || poll.state == WatchState::Idle) {
             self.inner
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
@@ -445,15 +472,18 @@ impl WatchRegistry {
             }
             let entry_detail = entry.detail.clone();
             let owner = entry.owner.clone();
-            inner.notifications.push_back(Notification {
-                id,
-                label: label.clone(),
-                state,
-                detail,
-                payload: None,
-                signal: Some(signal.clone()),
-                owner,
-            });
+            let notify_owner = entry.notify_owner;
+            if notify_owner {
+                inner.notifications.push_back(Notification {
+                    id,
+                    label: label.clone(),
+                    state,
+                    detail,
+                    payload: None,
+                    signal: Some(signal.clone()),
+                    owner,
+                });
+            }
             (label, kind, state, entry_detail)
         };
         let elapsed_ms = {
@@ -513,7 +543,7 @@ impl WatchRegistry {
             let label = entry.label.clone();
             let kind = entry.kind;
             let owner = entry.owner.clone();
-            let notify = state.is_terminal() || state == WatchState::Idle;
+            let notify = entry.notify_owner && (state.is_terminal() || state == WatchState::Idle);
             if state.is_terminal() {
                 // After terminal, no more content feeding or condition matching: compact
                 // the entry and free the buffers.
@@ -889,6 +919,35 @@ mod tests {
         assert!(signals[0].contains("boom"), "{}", signals[0]);
         // Buffer cleared: another match yields no signal
         assert!(reg.match_conditions(id).is_empty(), "buffer drained");
+    }
+
+    /// D98: a run registered as none of its owner's business exists in every
+    /// way except one — it broadcasts, it is drawn, it is recorded — but it
+    /// enqueues nothing, so nothing wakes and nothing is injected.
+    #[test]
+    fn an_unaddressed_run_enqueues_nothing_for_its_owner() {
+        let reg = watch();
+        let quiet = reg.register_addressed(running_watch("dm run"), Vec::new(), None, false);
+        let mut events = reg.subscribe();
+        reg.set_state(quiet, WatchState::Done, Some("done".into()), None);
+        assert!(
+            !reg.has_wake_notifications(None),
+            "its end is not addressed to the main session"
+        );
+        assert!(reg.consume_notifications(None).is_empty());
+        let event = events.try_recv().unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(event.state, WatchState::Done, "the broadcast still happens");
+        assert_eq!(event.label, "dm run");
+
+        // A signal from the same run is silent for the same reason.
+        let quiet = reg.register_addressed(running_watch("dm run 2"), Vec::new(), None, false);
+        reg.emit_signal(quiet, "found error".into(), None);
+        assert!(!reg.has_wake_notifications(None), "no signal either");
+
+        // And the default is unchanged.
+        let loud = reg.register_with_conditions(running_watch("dispatch"), Vec::new(), None);
+        reg.set_state(loud, WatchState::Done, Some("done".into()), None);
+        assert!(reg.has_wake_notifications(None));
     }
 
     /// The registry is shared by the hub and every subagent, so notifications are addressed:

@@ -2959,3 +2959,125 @@ perspective page transmits all eight portraits on open rather than the ones it w
   load registering nothing, `/images` listing and Enter opening, the `Menu` Esc layer, the empty case,
   the click target on both row shapes, an ordinary row not being one, transcript `o` and its footer,
   and a failed open landing on the info tier).
+
+### D98. The quiet console, and one verb for speaking
+
+**Problem.** D94 removed the lifecycle *lines* from the hub and stopped there. Underneath, the bus
+was intact: `chat.rs`'s `WatchEvent` arm fired `submit_auto()` on every terminal state, trigger-blind,
+so the user typing into an agent's DM woke the main agent to digest their private exchange — D63's
+privacy line drawn everywhere except on the wake path — and every room post with `main` as a member
+bought its own woken turn, so three agents talking for a minute bought three digests of a conversation
+that had not finished happening. Meanwhile three tools meant "say something": `SendMessage` (main→sub),
+`Post` (→room), `notify_user` (sub→user). Three verbs, three vocabularies, one act.
+
+**The inventory**, taken at `e7df0e3` before anything changed:
+
+| Piece | Where | Now |
+|---|---|---|
+| `SendMessageTool` — main-only, input field `agent`, sender hardcoded `HUB_NAME` | `tool/agent.rs` | The one speech tool: `to` is the conversation namespace, assembled at every depth, sender stamped from `session.instance` |
+| `PostTool` — the room wrapper around `deliver_post` | `tool/channel.rs` | Deleted. `deliver_post` is untouched and is still the single path a post takes |
+| `NotifyUserTool` + `notify_user::{Relay, Notice, Verdict, NotifyLevel}` + `UiEvent::NotifyUser` + `RELAY_PREFIX`/`is_relay_line` + `Buffers::note_relay` + `Runtime.notify_user` + `ToolContext.notify_user` + the headless stderr sink | seven files | All deleted. Nothing else called any of it |
+| `submit_auto()` on every terminal `WatchEvent` | `chat.rs` | Gated on `has_wake_notifications(None)` — the same question TurnEnd already asked |
+| `has_hub_mail() → submit_auto()` at the channel row and at TurnEnd | `chat.rs` ×2 | One tick-driven debounce, `chat_tail::digest_mail` |
+| `<channel-messages>` injection, drained by **every** session | `query.rs` | `<messages>`, drained by the main session only |
+
+**Decision.**
+
+*One tool, because addressing is the thing that was actually being enforced.* Hub-and-spoke never
+needed a withheld tool; it needed a rule about who may be named. `to` is read by `parse_address` into
+`Agent(name)` or `Room(name)` — `#name` is a room, anything else is an agent and may wear the `@` the
+bar shows — and `check_target` narrows by caller: main reaches any instance and any room it is in, a
+subagent reaches `main` and the rooms it is a member of. The refusal names what the caller *may*
+address instead, because a refusal that only says no teaches nothing. The `channels_on` gate and the
+depth-1-named-instance cohort that governed the retired `Post`'s assembly now govern room *addressing*
+inside the tool, so the experimental feature's blast radius is unchanged.
+
+*The description is built from the session.* A subagent and the main agent read different tools with
+the same name — different reach, different lane advice, and the room clause missing entirely when
+rooms are off. `PostTool` already did this with `sender_of`; it is the one place the tool layer knows
+who is calling, and a static string would have had to describe both callers to each of them.
+
+*`urgent` is refused, not ignored, outside subagent→main.* It rings the user's attention channel, and
+main writing to a subagent, or anyone writing to a room, has nobody on the other end to interrupt. A
+silently-dropped flag is a contract the model cannot learn.
+
+*One inbox, one drain, one injection.* A direct message to main rides `hub_mail` — the store room
+relays already used — rather than getting a sibling store, so the query layer keeps exactly one
+drain-and-inject seam. What tells the two apart is the marker on the line: `[message from @scout]`,
+on its own line above the text, which is `[DM from user]`'s shape carrying the one thing that marker
+never had to (the human is the only human; `main` hears from many). The wrapper is renamed
+`<messages>` because it is no longer only channel messages. `line_source` gained `Agent { name }` and
+stays the single recognizer; the perspective page unwraps the block rather than collapsing it to one
+note, so D96's projection can put the message in the sender's lane — the seam D100 needs for main's
+own page. **A real bug fell out of the inventory**: `drain_hub_mail` was unguarded and the registry is
+shared, so a subagent's own turn boundary could eat mail addressed to main. Now gated on
+`session.instance.is_none()`, the same guard `release_hires` carries three lines above it.
+
+*The trigger decides whether a run's end is main's business, and it is decided at registration.*
+`wakes_owner(&items)` reads the batch that woke the run: empty (a dispatch — the `Agent` call itself
+is the trigger) or containing anything that is not a user-origin `Direct` ⇒ main's business. The
+answer is stamped into the watch entry as `notify_owner`, and a `false` entry enqueues no
+`Notification` on `set_state` or `emit_signal` — so `has_wake_notifications` is false, nothing is
+injected, and nothing wakes. **The suppression is at the queue, not at the wake site**, which is why
+one flag covers both the auto turn and the `<task-notifications>` line, and why the broadcast is
+untouched: the team directory's feed rides the broadcast and still records every run. `chat.rs`'s
+wake then gates on `has_wake_notifications(None)` — a question the code already asked at TurnEnd, so
+the two wake paths now say one thing, and a nested subagent's completion stops waking main as a
+side effect of asking it properly.
+
+*Bad news is the asymmetric case.* `Done` and `Cancelled` can wait for the main agent to narrate them,
+because the dispatch row's own state already says so and a narration that never comes costs nothing.
+A crash cannot: the turn that would have narrated it may never run. So `Failed` — and only `Failed` —
+draws `⚠ @scout · subagent failed: …` in the theme's error tier and rings D79. The instance name is
+`label.split_whitespace().next()`, which is the first token of every label shape the run watches
+produce (`scout · task`, `scout #3 · …`, `scout #7 receipt`). It keeps its send stamp, inheriting the
+exception D94 wrote for the relay: it is news, about someone, at a moment that matters.
+
+*The debounce runs on the tick, which is what makes it need nothing else.* `digest_mail` reads a
+length the domain already keeps; a burst is exactly a length that keeps changing, and every change
+restarts a 2s quiet window under a 15s ceiling. Constants in ticks (`MAIL_QUIET_TICKS`,
+`MAIL_DEADLINE_TICKS`) at the 33ms frame: two seconds is a room's round trip — agents answering each
+other land inside it — and fifteen is short enough that a room which never goes quiet is still read.
+`needs_tick` gained `has_hub_mail()`, because mail landing in a fully idle session is the one thing
+that has to wake the clock rather than ride an event. The urgent flag is read **before** the emptiness
+test: the drain and the ring are different readers on different clocks, and a turn already running can
+absorb the message before the tick ever sees it, so a bell owed must survive the drain that beat it.
+
+**Consequences.**
+
+- The three prompt notes were rewritten rather than patched: `SUBAGENT_NOTE` gains the deliberate road
+  to main (with what *not* to send), and `CHANNEL_NOTE`'s "only `Post` puts words in the room" — the
+  sentence that exists because the model cannot infer that turn text never reaches the room —
+  becomes "only a message addressed to the room". Its tests assert phrases, and one of them broke on a
+  line wrap rather than on a meaning; the phrase was moved off the fold rather than the assertion
+  weakened.
+- `AgentControl`, `Channel`, `deliver_post` and the whole ack-watchdog chain are byte-identical.
+- **Old assertions rewritten, not weakened.** `notify_user_is_a_subagent_tool_only` became
+  `a_subagent_gets_send_message_and_neither_retired_tool` — same question (what does the *other*
+  direction get), new answer. `channel_tools_gated_by_experimental_flag` dropped its `Post` clauses and
+  keeps every `Channel` one. The two `tool/channel.rs` delivery tests now drive `SendMessage(to:
+  "#room")` and assert the same outcomes, which is the point: the machinery did not change, only the
+  door. `terminal_watch_event_triggers_auto_turn_when_idle` and
+  `signal_triggers_auto_turn_even_while_typing` were synthesizing a `UiEvent` with no registered
+  watch behind it; they now register one and drive it, which is what production does — and the second
+  half of the rule got a test of its own beside them.
+- `perspective::a_notice_is_a_message_in_the_user_s_lane` became
+  `a_direct_message_to_main_lands_in_its_sender_s_lane`: the tool it was about is gone, and the thing
+  it was really pinning — an agent's words reaching a lane that is not the one it was working in — is
+  now the marker's job.
+- 1447 + 13 tests before, 1444 + 13 after (19 removed with the relay: 7 arithmetic, 6 tool surface, 6
+  hub rendering; 16 added: 6 addressing and delivery, 1 notification suppression, 1 unaddressed
+  terminal, 3 alert-line rendering, 4 debounce, 1 marker attribution).
+
+**Named limits.**
+
+1. *@main loses the unread count D94 gave it.* That counter existed only to count relays, so it
+   retired with them, and an alert line raises no badge this batch. D99 gives @main a real unread.
+2. *No wire event for a direct message on the JSON protocol host*, and no tick loop there or in
+   headless — mail waits for the main agent's next turn boundary, which is where it was already read.
+3. *The failure alert fires for every `WatchKind::Agent` failure*, ack-watchdog give-ups included. That
+   is deliberate (a chase that gave up is news), but it means one instance can produce two alerts for
+   one bad run: the run's own failure and its receipt's.
+4. *`wakes_owner` treats a room relay as main-relevant.* A room post that wakes an agent still wakes
+   main when that run ends. Narrowing it is a question about rooms, not about the user's DM, and this
+   batch did not open it.

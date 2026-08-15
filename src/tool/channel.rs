@@ -6,16 +6,21 @@
 //! creator is stamped into the roster it creates, and every other member has to
 //! be named. Nobody, including the user, is seated behind the caller's back.
 //!
-//! `Post`: any member (hub + depth-1 sub-agents) posts to a room — the sender is stamped
-//! by the session instance name (the model cannot forge it); on a serial room, lagging
-//! posts are bounced back with the increments attached (as a tool result, not an error —
-//! the model reads the increments in the same turn and decides whether to resend, amend,
-//! or drop). `Channel`: room management (create/invite/kick/list), available to the
+//! Speaking in a room is `SendMessage(to: "#room")` (D98): the tool wrapper that
+//! used to own it retired, but [`deliver_post`] — the machinery it wrapped — is
+//! unchanged and is still the one path a post takes, whoever sends it. The
+//! sender is stamped from the session instance name (the model cannot forge it);
+//! on a serial room, lagging posts are bounced back with the increments attached
+//! (as a tool result, not an error — the model reads the increments in the same
+//! turn and decides whether to resend, amend, or drop).
+//!
+//! `Channel`: room management (create/invite/kick/list), available to the
 //! main agent and to direct sub-agents alike, because a team that can only be
 //! grouped from the top is not a team that can organize itself.
 //! Delivery wake-up: messages land in every member's inbox; idle members are woken
-//! immediately, busy members get batched injection at turn boundaries; the hub is injected
-//! via hub_mail before the next round of reasoning. Silence = not calling Post.
+//! immediately, busy members get batched injection at turn boundaries; the main
+//! agent's copy lands in hub_mail and is digested on a debounce (D98).
+//! Silence = not sending.
 
 use std::sync::Arc;
 
@@ -83,8 +88,9 @@ pub(crate) enum PostDelivery {
     },
 }
 
-/// Post + delivery wake-up + display row refresh — the Post tool and the TUI channel room
-/// share the same path (the user's posts as `user` in the room go through here too).
+/// Post + delivery wake-up + display row refresh — `SendMessage(to: "#room")`
+/// and the TUI channel room share the same path (the user's posts as `user` in
+/// the room go through here too).
 pub(crate) fn deliver_post(
     session: &Arc<Session>,
     watch: &Arc<crate::watch::WatchRegistry>,
@@ -112,85 +118,6 @@ pub(crate) fn deliver_post(
             Ok(PostDelivery::Sent { seq })
         }
         PostOutcome::Stale { missed } => Ok(PostDelivery::Stale { missed }),
-    }
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-#[schemars(deny_unknown_fields)]
-pub struct PostInput {
-    #[schemars(description = "Channel name (without #)")]
-    channel: String,
-    #[schemars(description = "Message content")]
-    message: String,
-}
-
-/// Post to a channel (sender = this session's instance name, stamped by the runtime).
-pub struct PostTool {
-    session: Arc<Session>,
-}
-
-impl PostTool {
-    pub fn new(session: Arc<Session>) -> Self {
-        Self { session }
-    }
-}
-
-#[async_trait]
-impl Tool for PostTool {
-    fn name(&self) -> String {
-        "Post".to_string()
-    }
-    fn description(&self) -> String {
-        let who = sender_of(&self.session);
-        format!(
-            "Speak in a room. Your name in the room is {who} (the sender is stamped by the runtime and cannot be forged), and you can only speak in rooms you are a member of. \
-This tool is the only way to put words in the room: the text you write as your turn result goes to the hub, not to the room, so deciding to answer means calling this. \
-Room messages enter every member's context (in the same order); in a serial room, if you are behind the latest message the send bounces back with the new content attached — read it, then decide to resend, amend, or drop. \
-Every message wakes every other member, so who you are answering matters: when `user` or `main` addresses the room, answer once, briefly, the way a person answers the room they are in; when another member speaks you owe nothing unless they named you or you can unblock them; never answer an answer — that is what floods a room. When you have nothing to add, simply don't call this tool (silence costs nothing and wakes nobody). \
-The audience picks the lane: something every member should know belongs here; what concerns one agent alone goes to them directly — the hub reaches a member with SendMessage, a member reaches the hub in its turn text — not into everyone's context."
-        )
-    }
-    fn input_schema(&self) -> serde_json::Value {
-        super::schema_for::<PostInput>()
-    }
-    fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
-        false
-    }
-    fn is_read_only(&self, _input: &serde_json::Value) -> bool {
-        false
-    }
-    async fn call(
-        &self,
-        input: serde_json::Value,
-        ctx: &ToolContext,
-    ) -> Result<ToolResult, ToolError> {
-        let params: PostInput = parse_input(&input)?;
-        let from = sender_of(&self.session);
-        let channel = params.channel.trim_start_matches('#').to_string();
-        match deliver_post(&self.session, &ctx.watch, &from, &channel, &params.message)
-            .map_err(ToolError::failed)?
-        {
-            PostDelivery::Sent { seq } => Ok(ToolResult {
-                content: serde_json::Value::String(format!("sent (#{channel} msg #{seq})")),
-                is_error: false,
-                diff: None,
-            }),
-            PostDelivery::Stale { missed } => {
-                let lines: Vec<String> = missed
-                    .iter()
-                    .map(|m| format!("[#{channel} msg #{}] {}: {}", m.seq, m.from, m.text))
-                    .collect();
-                Ok(ToolResult {
-                    content: serde_json::Value::String(format!(
-                        "not sent — the channel got new messages while you were drafting:\n{}\n\
-Decide again from the latest content: resend as-is (call again unchanged), edit and resend, or drop the message.",
-                        lines.join("\n")
-                    )),
-                    is_error: false,
-                    diff: None,
-                })
-            }
-        }
     }
 }
 
@@ -279,7 +206,7 @@ impl Tool for ChannelTool {
 Creating one seats you ({who}) and nobody else — every other member has to be named in `members`, including `user` (the human) and `main` (the main agent). \
 That is the point: you can form a room with the two agents you need to work something out, without putting it in front of anyone else. \
 Actions: create (mode defaults to serial), invite (the new member starts listening from the current head and gets no backlog), kick, list (rooms with their rosters). \
-Joins and departures are written into the room where everyone in it can see them, so there is no quiet way in or out. Messages reach every member's context in one order; members speak with Post."
+Joins and departures are written into the room where everyone in it can see them, so there is no quiet way in or out. Messages reach every member's context in one order; members speak with SendMessage(to: \"#room\")."
         )
     }
     fn input_schema(&self) -> serde_json::Value {
@@ -407,7 +334,13 @@ mod tests {
             client: crate::api::client::Client::new("k".into(), "http://x".into()),
             runtime: crate::query::Runtime::new("m".into(), None, Default::default()),
             permission_mode: crate::permission::PermissionMode::Default,
-            settings: crate::settings::Settings::default(),
+            // Rooms are behind the experimental gate, and `SendMessage`'s room
+            // addressing reads the same flag the retired `Post` was assembled by.
+            settings: {
+                let mut settings = crate::settings::Settings::default();
+                settings.experimental.agent_channels = true;
+                settings
+            },
             system: Vec::new(),
             depth: 0,
             cwd: Arc::new(std::sync::Mutex::new(std::env::temp_dir())),
@@ -448,7 +381,6 @@ mod tests {
             ask_question: std::sync::Arc::new(|_t, _q, _o| Box::pin(async { None })),
             instance: None,
             rewind: Default::default(),
-            notify_user: Default::default(),
         }
     }
 
@@ -536,11 +468,11 @@ mod tests {
             )
             .await
             .unwrap();
-        // Post from a's (Running) perspective: stamped a; b is Running → accumulates in its inbox.
-        let post_a = PostTool::new(sub_session(&hub, "a"));
+        // Speaking from a's (Running) perspective: stamped a; b is Running → accumulates in its inbox.
+        let post_a = crate::tool::agent::SendMessageTool::new(sub_session(&hub, "a"));
         let out = post_a
             .call(
-                serde_json::json!({"channel": "t", "message": "hello everyone"}),
+                serde_json::json!({"to": "#t", "message": "hello everyone"}),
                 &ctx(&hub),
             )
             .await
@@ -556,11 +488,11 @@ mod tests {
                 if from == "a" && text == "hello everyone"),
             "stamped as a"
         );
-        // Hub posts: stamped main; hub_mail only receives others' posts.
-        let post_hub = PostTool::new(hub.clone());
+        // Main posts: stamped main; its own inbox only receives others' posts.
+        let post_hub = crate::tool::agent::SendMessageTool::new(hub.clone());
         let _ = post_hub
             .call(
-                serde_json::json!({"channel": "t", "message": "quiet"}),
+                serde_json::json!({"to": "#t", "message": "quiet"}),
                 &ctx(&hub),
             )
             .await
@@ -568,16 +500,14 @@ mod tests {
         let mail = hub.channels.drain_hub_mail();
         assert_eq!(mail.len(), 1, "{mail:?}");
         assert!(mail[0].contains("a: hello everyone"));
-        // Non-member posts error out.
-        let post_c = PostTool::new(sub_session(&hub, "c"));
+        // Non-member posts error out — refused by the addressing rules before
+        // the room's own membership check is ever reached.
+        let post_c = crate::tool::agent::SendMessageTool::new(sub_session(&hub, "c"));
         let err = post_c
-            .call(
-                serde_json::json!({"channel": "t", "message": "x"}),
-                &ctx(&hub),
-            )
+            .call(serde_json::json!({"to": "#t", "message": "x"}), &ctx(&hub))
             .await
             .unwrap_err();
-        assert!(err.to_string().contains("is not"), "{err}");
+        assert!(err.to_string().contains("not a member of #t"), "{err}");
     }
 
     #[tokio::test]
@@ -605,11 +535,11 @@ mod tests {
             )
             .await
             .unwrap();
-        let post_a = PostTool::new(sub_session(&hub, "a"));
-        let post_b = PostTool::new(sub_session(&hub, "b"));
+        let post_a = crate::tool::agent::SendMessageTool::new(sub_session(&hub, "a"));
+        let post_b = crate::tool::agent::SendMessageTool::new(sub_session(&hub, "b"));
         let _ = post_a
             .call(
-                serde_json::json!({"channel": "count", "message": "1"}),
+                serde_json::json!({"to": "#count", "message": "1"}),
                 &ctx(&hub),
             )
             .await
@@ -617,7 +547,7 @@ mod tests {
         // b lags → bounced back (tool result, not an error) with increments attached.
         let out = post_b
             .call(
-                serde_json::json!({"channel": "count", "message": "1"}),
+                serde_json::json!({"to": "#count", "message": "1"}),
                 &ctx(&hub),
             )
             .await
@@ -628,7 +558,7 @@ mod tests {
         // Resend lands (the model changed its message).
         let out = post_b
             .call(
-                serde_json::json!({"channel": "count", "message": "2"}),
+                serde_json::json!({"to": "#count", "message": "2"}),
                 &ctx(&hub),
             )
             .await

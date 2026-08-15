@@ -156,7 +156,6 @@ fn runtime_only(text: &str) -> bool {
         || trimmed == crate::query::MAX_TOKENS_RESUME_PROMPT
         || trimmed.starts_with(crate::transcript::COMPACT_SUMMARY_PREFIX)
         || trimmed.starts_with("(Stop hook blocked continuation)")
-        || trimmed.starts_with("<channel-messages>")
 }
 
 /// A note nobody said, for the timeline's completeness.
@@ -178,6 +177,18 @@ fn note(from: &str, at: u64, text: String) -> Post {
 /// task is intake.
 fn split_user_text(text: &str, at: u64, first: bool) -> Vec<(Target, Post)> {
     let mut out: Vec<(Target, Post)> = Vec::new();
+    // The main agent's inbox block (D98) is an envelope, not a message: what is
+    // in it are room relays and direct messages, each already wearing the marker
+    // that says whose they are. Unwrap and read the lines — collapsing the whole
+    // block to one timeline note, as the old `<channel-messages>` shape was, is
+    // what would lose the sender the marker exists to carry.
+    if let Some(body) = text
+        .trim()
+        .strip_prefix(crate::query::MAIL_BLOCK_OPEN)
+        .and_then(|rest| rest.trim_end().strip_suffix(crate::query::MAIL_BLOCK_CLOSE))
+    {
+        return split_user_text(body.trim(), at, false);
+    }
     if runtime_only(text) {
         out.push((
             Target::TimelineOnly,
@@ -240,6 +251,13 @@ fn split_user_text(text: &str, at: u64, first: bool) -> Vec<(Target, Post)> {
                 flush(&mut plain, &current, &mut out);
                 current = Target::Dm(HUB_NAME.to_string());
                 out.push((current.clone(), said(HUB_NAME, at, text)));
+            }
+            // An agent wrote to the protagonist directly (D98). Like the user's
+            // marker it is a header: the lane switches and the prose under it is
+            // that agent's, so a page can finally say who said what to main.
+            Some(LineSource::Agent { name }) => {
+                flush(&mut plain, &current, &mut out);
+                current = Target::Dm(name);
             }
             Some(LineSource::Room { channel, body }) => {
                 // The room's own log is the authoritative copy, so the relay is
@@ -358,18 +376,6 @@ pub fn dossier(
                     timeline.push(post.clone());
                     if let Some(lane) = &active {
                         dms.entry(lane.clone()).or_default().push(post);
-                    }
-                    // A notice is X speaking to the user, in the one tool that
-                    // can. It is a message in the user's lane as well as a step
-                    // of the work in the lane X was working in.
-                    if name == "notify_user"
-                        && let Some(text) = input.get("text").and_then(|t| t.as_str())
-                    {
-                        dms.entry(USER_NAME.to_string()).or_default().push(said(
-                            agent,
-                            at,
-                            text.to_string(),
-                        ));
                     }
                 }
                 (ApiRole::Assistant, ContentBlock::Thinking { .. }) => {
@@ -630,25 +636,29 @@ mod tests {
         );
     }
 
-    /// A notice is X speaking to the user: a message in their lane, and a step
-    /// of the work in the lane X was working in.
+    /// D98: an agent writing to main arrives under a marker that names it, and
+    /// that is what lets main's own page file the message in the sender's lane
+    /// rather than dropping the whole inbox block into the timeline as one note.
+    /// The envelope is scaffolding; what is inside it was said by someone.
     #[test]
-    fn a_notice_is_a_message_in_the_user_s_lane() {
-        let history = vec![
-            user("task"),
-            user("go on"),
-            assistant(vec![tool(
-                "notify_user",
-                serde_json::json!({"text": "the migration finished", "level": "info"}),
-            )]),
-        ];
-        let page = dossier("scout", &history, &[1, 2, 3], &[]);
-        let human = lane_of(&page, &LaneId::Dm(USER_NAME.to_string())).expect("a user lane");
-        assert_eq!(said_texts(human), vec!["the migration finished"]);
-        let hub = lane_of(&page, &LaneId::Dm(HUB_NAME.to_string())).expect("a hub lane");
+    fn a_direct_message_to_main_lands_in_its_sender_s_lane() {
+        let inbox = format!(
+            "{}\n{}\n[#build msg #4] zoe: the tests pass\n{}",
+            crate::query::MAIL_BLOCK_OPEN,
+            crate::channels::format_main_message("scout", "the migration is done"),
+            crate::query::MAIL_BLOCK_CLOSE
+        );
+        let history = vec![user("run the release"), user(&inbox)];
+        let page = dossier(HUB_NAME, &history, &[1, 2], &[]);
+        let lane = lane_of(&page, &LaneId::Dm("scout".to_string())).expect("a lane for the sender");
+        assert_eq!(said_texts(lane), vec!["the migration is done"]);
+        let timeline = lane_of(&page, &LaneId::Timeline).expect("a timeline");
         assert!(
-            hub.posts.iter().any(|p| p.kind == PostKind::Process),
-            "the call is still a step of the work in the lane it happened in"
+            timeline
+                .posts
+                .iter()
+                .any(|p| p.text == "#build · zoe: the tests pass"),
+            "and a room relay in the same block is still the room's, recorded once"
         );
     }
 

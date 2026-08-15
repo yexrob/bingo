@@ -538,7 +538,6 @@ mod tests {
             home: home.to_path_buf(),
             instance: None,
             rewind: Default::default(),
-            notify_user: Default::default(),
         }
     }
 

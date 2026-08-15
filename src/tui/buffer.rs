@@ -231,10 +231,6 @@ pub struct Buffers {
     list: Vec<Buffer>,
     active: BufferId,
     team: Vec<TeamEvent>,
-    /// How many `notify_user` relays the hub has been given (D94). The hub's
-    /// sequence, and the only one bingo counts itself — every other buffer
-    /// derives its sequence from a domain store.
-    relays: u64,
 }
 
 impl Default for Buffers {
@@ -256,7 +252,6 @@ impl Buffers {
             }],
             active: BufferId::Hub,
             team: Vec::new(),
-            relays: 0,
         }
     }
 
@@ -417,22 +412,6 @@ impl Buffers {
     /// on the display side.
     pub fn team_log(&self) -> &[TeamEvent] {
         &self.team
-    }
-
-    /// Tee of a `notify_user` relay (D94).
-    ///
-    /// The hub is the one buffer with no domain sequence behind it: it is the
-    /// user's own conversation, and until now nothing could arrive in it that the
-    /// user had not asked for, so an unread count would have had nothing to
-    /// count. A relay can arrive unasked — which is the entire point of it — so
-    /// the hub finally needs one. The line is put in the flow either way; the
-    /// badge is how the bar says it landed while the user was somewhere else.
-    ///
-    /// `mention` is true because a relay is addressed to the user by
-    /// construction: `notify_user` has no other recipient.
-    pub fn note_relay(&mut self, tick: u64) {
-        self.relays += 1;
-        self.observe(BufferId::Hub, self.relays, true, tick);
     }
 
     /// Post the host's own output to the feed (D90).
@@ -719,6 +698,10 @@ pub enum LineSource {
     /// The hub, labelled because a batch made the boundaries ambiguous. Unlike
     /// every other bracketed shape this one carries a real instruction.
     HubBatched { text: String },
+    /// An agent speaking directly to the main agent (D98's `SendMessage`).
+    /// Like [`LineSource::User`] it is a header line and the message is what
+    /// follows it — the sender is named because `main` hears from many.
+    Agent { name: String },
     /// An automatic chase for a hub message nobody answered. Carries no
     /// instruction — only the fact that somebody is still waiting.
     Chase,
@@ -735,6 +718,14 @@ pub fn line_source(line: &str) -> Option<LineSource> {
     }
     if line == crate::tool::agent::DM_FROM_USER_MARKER {
         return Some(LineSource::User);
+    }
+    if let Some(rest) = line.strip_prefix(crate::channels::MAIN_MESSAGE_PREFIX)
+        && let Some(name) = rest.strip_suffix(']')
+        && !name.is_empty()
+    {
+        return Some(LineSource::Agent {
+            name: name.to_string(),
+        });
     }
     if let Some(rest) = line.strip_prefix("[#")
         && let Some((head, body)) = rest.split_once("] ")
@@ -764,6 +755,9 @@ pub fn line_source(line: &str) -> Option<LineSource> {
 fn scaffold_note(source: &LineSource) -> Option<String> {
     match source {
         LineSource::Room { channel, body } => Some(format!("#{channel} · {body}")),
+        // Only ever seen in the main agent's own history, where the pair view is
+        // not what renders it; collapsed here so the parser has one total match.
+        LineSource::Agent { name } => Some(format!("@{name} · direct message")),
         // Both follow-up shapes collapse to one line here. The DM view has
         // nowhere to put the distinction — see the perspective page, which does.
         LineSource::HubBatched { .. } | LineSource::Chase => {

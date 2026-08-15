@@ -139,10 +139,12 @@ pub enum Attention {
     TurnComplete,
     /// A turn ended in a flow-level failure.
     TurnFailed,
-    /// A subagent called `notify_user` at the `urgent` level (D94): it is blocked
-    /// on the user, or has finished the whole task it was given. The fourth
-    /// trigger, and the first one the *model* side can pull — which is why it is
-    /// rate limited at the source (one per agent per minute) rather than here.
+    /// An agent needs looking at (D98): either it sent
+    /// `SendMessage(to: "main", urgent: true)` — it is blocked on the user, or
+    /// has finished the whole task it was given — or one of its runs failed.
+    /// The fourth trigger, and the only one whose first half the *model* side
+    /// can pull; the words stay the main agent's, only the bell is the
+    /// harness's.
     AgentNotice,
 }
 
@@ -152,9 +154,9 @@ impl Attention {
             Self::WaitingPermission => "Waiting for permission",
             Self::TurnComplete => "Turn complete",
             Self::TurnFailed => "Turn failed",
-            // No name and no count, by the same rule as the other three: the line
-            // is already in the hub, and a notification that carries detail the
-            // screen does not have is one the user cannot act on.
+            // No name and no count, by the same rule as the other three: what
+            // there is to read is on screen, and a notification carrying detail
+            // the screen does not have is one the user cannot act on.
             Self::AgentNotice => "An agent needs you",
         }
     }

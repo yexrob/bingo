@@ -37,6 +37,11 @@ const SUBAGENT_NOTE: &str = "\
   message is answered where it arrived, in your turn text.
 - You cannot question the user: AskUserQuestion is not available here. Permission prompts do
   reach the user, but anything else you need must be reported back to the hub.
+- `SendMessage(to: \"main\")` is your one deliberate way to reach the hub *between* turns —
+  for the overall task being finished, for being blocked on a decision, for a finding that
+  changes what is being coordinated. It is not for progress, acknowledgements, or anything
+  already in your reply: your work is visible in your DM and your final text is returned to
+  whoever started you. `urgent: true` interrupts the user wherever they are; reserve it.
 - Your turn ends when you stop calling tools, and background tasks you started will NOT wake
   you afterwards. Finish what needs finishing within this turn, or state what is still
   pending — the hub can resume you with a follow-up message.";
@@ -67,32 +72,34 @@ const SUBAGENT_NOTE: &str = "\
 const CHANNEL_NOTE: &str = "\
 # Speaking in a channel
 
-**Only `Post` puts words in the room.** The text you write in a turn woken by a channel message
-goes back to the hub as your result — nobody in the channel sees it. Writing \"standing by, no
-channel reply needed\" as your turn text is not an answer to the room; it is a private note to
-your manager, and from the room it is indistinguishable from ignoring the message. If you decide
-to answer, call Post.
+**Only `SendMessage(to: \"#channel\")` puts words in the room.** The text you write in a turn woken
+by a channel message goes back to the hub as your result — nobody in the channel sees it. Writing
+\"standing by, no channel reply needed\" as your turn text is not an answer to the room; it is a
+private note to your manager, and from the room it is indistinguishable from ignoring the message.
+If you decide to answer, send it to the room.
 
 **Who spoke decides whether you owe a reply** — not how the message is worded.
 
-- **`user` or `main` addressed the room**: answer once, briefly, with Post. When the person
+- **`user` or `main` addressed the room**: answer once, briefly, to the room. When the person
   running the room greets the team, asks who is around, or puts a question to everyone, a human
   answers — silence reads as absence, not as discipline. One short line, in your own voice, then
   stop.
-- **Another member spoke**: you owe them nothing. Post only if they named you, you can unblock
+- **Another member spoke**: you owe them nothing. Send only if they named you, you can unblock
   them, you disagree, or you are holding the result they are waiting on.
 - **Never answer an answer.** A room does not flood because members reply to the human; it floods
   because they reply to each other's replies. Your line is the end of that thread — do not
   acknowledge, thank, agree with, or restate what a colleague just said.
 
-Beyond that first line, post only what changes what someone else will do: a decision someone is
-blocked on, a disagreement, a result, a question you cannot continue without. Name the person you
-mean. When you have nothing to add, stop calling tools — silence costs nothing and wakes nobody.
+Beyond that first line, send to the room only what changes what someone else will do: a decision
+someone is blocked on, a disagreement, a result, a question you cannot continue without. Name the
+person you mean. When you have nothing to add, stop calling tools — silence costs nothing and wakes
+nobody.
 
 **The audience decides the lane — for what you initiate, not only for replies.** When your work
 surfaces something that changes what other members will do — a contract or interface change, a
-shared blocker, a hazard someone is about to walk into — Post it without waiting to be asked:
-reporting it only to the hub in your turn text leaves the team working on stale ground. What
+shared blocker, a hazard someone is about to walk into — take it to the room
+without waiting to be asked: reporting it only to the hub in your turn text leaves the team
+working on stale ground. What
 concerns nobody but you and the hub — your progress, partial results, questions only the hub can
 answer — stays in your turn text: the room's attention is the scarcest thing in it.
 
@@ -100,9 +107,10 @@ answer — stays in your turn text: the room's attention is the scarcest thing i
 `[#channel msg #N]`; text without that tag was sent to you alone — under a `[DM from user]`
 line when the user wrote it in your direct-message window, unmarked when it is the hub. Your
 turn text is exactly what the sender reads. Answer a direct message in your turn text —
-never with Post: the answer belongs to the person who asked, not to the room. What reaches
+never in a room: the answer belongs to the person who asked, not to the room. What reaches
 you privately stays private — do not repeat or summarize it into a channel unless the
-message itself tells you to take it there.";
+message itself tells you to take it there. When something private has to reach the hub between
+turns rather than at the end of one, that is `SendMessage(to: \"main\")`, never a room.";
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[schemars(deny_unknown_fields)]
@@ -708,8 +716,9 @@ fn register_run_watch(
     cell: Arc<AgentCell>,
     conditions: Vec<NotifyCondition>,
     owner: Option<String>,
+    notify_owner: bool,
 ) -> WatchId {
-    watch.register_with_conditions(
+    watch.register_addressed(
         Box::new(AgentWatch {
             cell,
             label,
@@ -717,7 +726,25 @@ fn register_run_watch(
         }),
         conditions,
         owner,
+        notify_owner,
     )
+}
+
+/// Whether the end of a run driven by these items is the owner's business (D98).
+///
+/// The trigger decides, not the run: a batch the *user* typed into this
+/// instance's DM is a conversation between the two of them, and its terminal
+/// state owes the main agent nothing — no task notification, no woken turn (the
+/// D63 privacy line, finally drawn on the wake path too). A dispatch (no items
+/// at all — the `Agent` call itself is the trigger), a `SendMessage`
+/// continuation, a room relay, or any batch that *mixes* one of those in, is
+/// main's business as it always was: one main-origin item in the batch is
+/// enough, because the reply that comes back answers it.
+pub(crate) fn wakes_owner(items: &[InboxItem]) -> bool {
+    items.is_empty()
+        || !items
+            .iter()
+            .all(|item| matches!(item, InboxItem::Direct { from, .. } if from == crate::channels::USER_NAME))
 }
 
 /// Drive an instance's run chain in the background: run_query → history saved to the registry → if
@@ -740,7 +767,14 @@ pub(crate) fn spawn_agent_loop(
     owner: Option<String>,
 ) -> WatchId {
     let cell = Arc::new(AgentCell::new(registry.clone()));
-    let first_id = register_run_watch(&watch, first_label, cell.clone(), conditions, owner.clone());
+    let first_id = register_run_watch(
+        &watch,
+        first_label,
+        cell.clone(),
+        conditions,
+        owner.clone(),
+        wakes_owner(&initial_items),
+    );
     registry.set_run_watch(&name, first_id);
     let loop_registry = registry.clone();
     let loop_name = name.clone();
@@ -811,6 +845,7 @@ pub(crate) fn spawn_agent_loop(
                                 cell.clone(),
                                 Vec::new(),
                                 owner.clone(),
+                                wakes_owner(&current_items),
                             );
                             loop_registry.set_run_watch(&name, id);
                             run = (id, cell);
@@ -1154,11 +1189,6 @@ pub(crate) fn build_sub_session(
     // parent's MCP handshake instead of starting from an empty manager (i.e. no MCP tools).
     runtime.permissions = parent.runtime.permissions.clone();
     runtime.mcp = parent.runtime.mcp.clone();
-    // `notify_user` exists precisely to cross from a subagent to the user's hub, so
-    // a fresh detached relay here would be a tool that does nothing. Inheriting the
-    // parent's handle also means the rate-limit table is the session's, not the
-    // spawn's: an agent restarted in a loop cannot buy itself a fresh window.
-    runtime.notify_user = parent.runtime.notify_user.clone();
     let _ = runtime.provider_tx.send(provider_name);
     let _ = runtime.thinking_tx.send(thinking);
     Ok(Arc::new(Session {
@@ -1312,12 +1342,14 @@ impl Tool for AgentTool {
             .clone()
             .map(|p| vec![NotifyCondition::Contains(p)])
             .unwrap_or_default();
+        // A dispatch is always the caller's business: they asked for it.
         let id = register_run_watch(
             &ctx.watch,
             format!("{name} · {description}"),
             cell.clone(),
             conditions,
             ctx.instance.clone(),
+            true,
         );
         self.session.agents.set_run_watch(&name, id);
         let output = Arc::new(Mutex::new(String::new()));
@@ -1421,17 +1453,23 @@ impl Tool for AgentTool {
 #[schemars(deny_unknown_fields)]
 pub struct SendMessageInput {
     #[schemars(
-        description = "Target subagent instance name (the name returned by the Agent tool; see AgentControl list)"
+        description = "Who to speak to, in the conversation namespace: an instance name (or @name) for an agent, #name for a room. Which of those you may address depends on who you are — see the tool description."
     )]
-    agent: String,
-    #[schemars(description = "Follow-up instruction/message to send")]
+    to: String,
+    #[schemars(description = "What to say")]
     message: String,
     /// Reply wait: arms the follow-up watchdog (see `spawn_ack_watchdog`).
     #[serde(default)]
     #[schemars(
-        description = "Reply wait in seconds, defaulting to 300 when omitted — the check is on by default, since a message nobody ever answers is the failure you would otherwise find out about last. Once the wait elapses the harness re-checks the same record AgentControl(action=messages) reports, and while you are still owed an answer — the message is queued, or it was read into a turn that ended saying nothing — it sends the receiver a follow-up asking it to reply, at most 3 rounds; anything other than an answer inside the wait comes back to you as a task notification. Shorten it when you are actively waiting on this instance, lengthen it for a long task that will be quiet for a while (clamped to 5-3600), or pass 0 to switch the check off for a message you need no answer to."
+        description = "Reply wait in seconds for a message to a subagent, defaulting to 300 when omitted — the check is on by default, since a message nobody ever answers is the failure you would otherwise find out about last. Once the wait elapses the harness re-checks the same record AgentControl(action=messages) reports, and while you are still owed an answer — the message is queued, or it was read into a turn that ended saying nothing — it sends the receiver a follow-up asking it to reply, at most 3 rounds; anything other than an answer inside the wait comes back to you as a task notification. Shorten it when you are actively waiting on this instance, lengthen it for a long task that will be quiet for a while (clamped to 5-3600), or pass 0 to switch the check off for a message you need no answer to. Ignored for a room and for a message to main: neither answers on a schedule."
     )]
     ack_timeout: Option<u64>,
+    /// Attention request, subagent→main only (see [`SendMessageTool::call`]).
+    #[serde(default)]
+    #[schemars(
+        description = "Ring the terminal's attention channel when this message lands (only when you are a subagent writing to main). Reserve it for something blocking that cannot wait for the user to look — it interrupts them wherever they are. Default false."
+    )]
+    urgent: bool,
 }
 
 /// Bounds on the reply wait: below the floor the watchdog would fire before the receiver could
@@ -1445,9 +1483,46 @@ const ACK_TIMEOUT_RANGE: std::ops::RangeInclusive<u64> = 5..=3600;
 /// quiet, and short enough that a hang is not discovered by the user an hour later.
 const DEFAULT_ACK_TIMEOUT_SECS: u64 = 300;
 
-/// Main→sub continuation channel (hub-and-spoke, main session only): an idle instance starts as
-/// soon as the dispatch point claims its inbox; a running instance absorbs queued mail between
-/// tool rounds.
+/// A resolved `to`: one of the two kinds of conversation there are.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Address {
+    /// An agent instance, `main` included.
+    Agent(String),
+    /// A room, named without its `#`.
+    Room(String),
+}
+
+/// Read the `to` field as the conversation namespace the interface already uses:
+/// `#name` is a room, anything else is an agent and may wear a leading `@`.
+///
+/// One address language for the tool layer and the display layer, so an agent
+/// naming a target says what the user's own composer says (D90's `@name ` /
+/// `#name ` routing) and what the bar shows.
+pub(crate) fn parse_address(to: &str) -> Result<Address, ToolError> {
+    let to = to.trim();
+    if let Some(room) = to.strip_prefix('#') {
+        let room = room.trim();
+        if room.is_empty() {
+            return Err(ToolError::failed("`to` is `#` with no room name after it"));
+        }
+        return Ok(Address::Room(room.to_string()));
+    }
+    let agent = to.strip_prefix('@').unwrap_or(to).trim();
+    if agent.is_empty() {
+        return Err(ToolError::failed(
+            "`to` is empty; name an agent instance (or @name), or a room as #name",
+        ));
+    }
+    Ok(Address::Agent(agent.to_string()))
+}
+
+/// The one way any participant speaks to any conversation (D98).
+///
+/// Two semantics, one verb: deliver and wake. Who may be addressed narrows by
+/// caller — main reaches any instance and any room it is in, a subagent reaches
+/// `main` and the rooms it is a member of — so hub-and-spoke is preserved by
+/// *addressing* rather than by a second tool. `Post` and `notify_user` retired
+/// into this one.
 pub struct SendMessageTool {
     session: Arc<Session>,
 }
@@ -1455,6 +1530,115 @@ pub struct SendMessageTool {
 impl SendMessageTool {
     pub fn new(session: Arc<Session>) -> Self {
         Self { session }
+    }
+
+    /// This session's name in a conversation: a subagent's instance name, or
+    /// `main`. Stamped by the runtime; the model cannot state it for itself.
+    fn sender(&self) -> String {
+        self.session
+            .instance
+            .clone()
+            .unwrap_or_else(|| crate::channels::HUB_NAME.to_string())
+    }
+
+    /// Whether this caller may address rooms at all. Rooms are still behind the
+    /// `experimental.agentChannels` gate, and the cohort that could hold a room
+    /// membership is the same one the retired `Post` was assembled for: the main
+    /// session, and named direct subagents.
+    fn rooms_allowed(&self) -> bool {
+        self.session.settings.experimental.agent_channels
+            && (self.session.depth == 0
+                || (self.session.depth == 1 && self.session.instance.is_some()))
+    }
+
+    /// Refuse a target this caller has no business addressing, in words that say
+    /// what it may address instead.
+    fn check_target(&self, address: &Address) -> Result<(), ToolError> {
+        let me = self.sender();
+        match address {
+            Address::Agent(name) if *name == me => Err(ToolError::failed(format!(
+                "{name} is you — a message to yourself is a note, not a message"
+            ))),
+            Address::Agent(name) => {
+                if self.session.depth == 0 || name == crate::channels::HUB_NAME {
+                    Ok(())
+                } else {
+                    Err(ToolError::failed(format!(
+                        "you may not message {name}: as a subagent you can write to main, and to rooms you are a member of. \
+Work that concerns another agent goes through main, or into a room you are both in."
+                    )))
+                }
+            }
+            Address::Room(room) => {
+                if !self.rooms_allowed() {
+                    return Err(ToolError::failed(format!(
+                        "rooms are not available to you; #{room} cannot be addressed from here"
+                    )));
+                }
+                if !self.session.channels.is_member(room, &me) {
+                    return Err(ToolError::failed(format!(
+                        "you are not a member of #{room} — join the room before speaking in it"
+                    )));
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// Speak in a room: the retired `Post`'s path, unchanged.
+    fn post(&self, ctx: &ToolContext, room: &str, message: &str) -> Result<ToolResult, ToolError> {
+        let from = self.sender();
+        match crate::tool::channel::deliver_post(&self.session, &ctx.watch, &from, room, message)
+            .map_err(ToolError::failed)?
+        {
+            crate::tool::channel::PostDelivery::Sent { seq } => Ok(ToolResult {
+                content: serde_json::Value::String(format!("sent (#{room} msg #{seq})")),
+                is_error: false,
+                diff: None,
+            }),
+            crate::tool::channel::PostDelivery::Stale { missed } => {
+                let lines: Vec<String> = missed
+                    .iter()
+                    .map(|m| format!("[#{room} msg #{}] {}: {}", m.seq, m.from, m.text))
+                    .collect();
+                Ok(ToolResult {
+                    content: serde_json::Value::String(format!(
+                        "not sent — the room got new messages while you were drafting:\n{}\n\
+Decide again from the latest content: resend as-is (call again unchanged), edit and resend, or drop the message.",
+                        lines.join("\n")
+                    )),
+                    is_error: false,
+                    diff: None,
+                })
+            }
+        }
+    }
+
+    /// Speak to main: into its inbox, drained at its next turn boundary.
+    ///
+    /// There is no delivery record and no chase, because main is not an instance
+    /// in the registry — it is the host turn loop. What answers a message here is
+    /// main saying something, which the user reads in the conversation they are
+    /// already in.
+    fn to_main(&self, message: &str, urgent: bool) -> ToolResult {
+        let from = self.sender();
+        self.session
+            .channels
+            .deliver_to_main(&from, message, urgent);
+        ToolResult {
+            content: serde_json::json!({
+                "status": "queued",
+                "to": crate::channels::HUB_NAME,
+                "from": from,
+                "urgent": urgent,
+                "note": "in main's inbox, read at its next turn boundary; it starts one now if it is idle. \
+Main answers by speaking to the user, not by replying to you — there is no receipt to wait for.",
+            })
+            .to_string()
+            .into(),
+            is_error: false,
+            diff: None,
+        }
     }
 }
 
@@ -1464,8 +1648,30 @@ impl Tool for SendMessageTool {
         "SendMessage".to_string()
     }
     fn description(&self) -> String {
-        "Send a follow-up instruction to a spawned subagent instance (a continuation that keeps its context). Returns a message_id after enqueueing: an idle receiver starts immediately, while a running receiver drains all mail waiting at its next tool round. Messages present when the receiver drains its inbox are batched into one prompt. Neither queued nor delivered is an acknowledgement — a receiver can read a message and end its turn saying nothing. AgentControl(action=messages) reports which of those it is: queued, delivered but unanswered, answered (with the run that replied), or dropped because the instance stopped. You do not have to poll that yourself: the harness runs the same check five minutes after sending (tune with ack_timeout) and follows up on the receiver, up to 3 rounds, reporting back if no answer ever comes. The instance name comes from the Agent tool's return value or AgentControl list. \
-This is the private lane: right for what concerns the receiver alone — an assignment, a follow-up, a correction. Something every member of a channel should act on belongs in one channel Post, not in per-member private copies that drift apart.".to_string()
+        let me = self.sender();
+        let rooms = if self.rooms_allowed() {
+            "; `#room` for a room you are a member of (every member's context gets it, in one order; in a serial room a stale send bounces back with what you missed attached)"
+        } else {
+            ""
+        };
+        let reach = if self.session.depth == 0 {
+            "You may write to any subagent instance (the name the Agent tool returned, or AgentControl list)".to_string()
+        } else {
+            "You may write to `main` and to nothing else in the agent namespace: work that concerns another agent goes through main, or into a room you are both in".to_string()
+        };
+        let lane = if self.session.depth == 0 {
+            "This is the private lane: right for what concerns the receiver alone — an assignment, a follow-up, a correction. Something every member of a room should act on belongs in one room message, not in per-member private copies that drift apart. \
+An idle receiver starts immediately; a running one drains everything waiting at its next tool round, batched into one prompt. Neither queued nor delivered is an acknowledgement — a receiver can read a message and end its turn saying nothing — so the harness re-checks five minutes after sending (tune with ack_timeout) and follows up, up to 3 rounds, reporting back if no answer ever comes; AgentControl(action=messages) shows the same record on demand."
+        } else {
+            "Writing to main is deliberate, not routine: your ordinary work is already visible in your DM with the user, and your final text is returned to whoever started you. Send when the overall task is finished, when you are blocked and need a decision, or when you found something that changes what is being coordinated — not for progress, acknowledgements, or anything already in your reply. \
+Set urgent only for something blocking that cannot wait for the user to look: it rings the terminal's attention channel, which interrupts them wherever they are."
+        };
+        format!(
+            "Speak to one conversation. Your name in it is {me} (stamped by the runtime; it cannot be forged). \
+`to` is the conversation namespace: an instance name or `@name` for an agent{rooms}. \
+{reach}. \
+{lane}"
+        )
     }
     fn input_schema(&self) -> serde_json::Value {
         super::schema_for::<SendMessageInput>()
@@ -1482,6 +1688,39 @@ This is the private lane: right for what concerns the receiver alone — an assi
         ctx: &ToolContext,
     ) -> Result<ToolResult, ToolError> {
         let params: SendMessageInput = parse_input(&input)?;
+        let address = parse_address(&params.to)?;
+        self.check_target(&address)?;
+        // The bell is the harness's and it has exactly one meaning: an agent
+        // needs the user. Main speaking to a subagent, or anyone speaking to a
+        // room, has no user on the other end to interrupt — refused rather than
+        // ignored, so a model that reaches for it learns the shape of the tool.
+        let sub_to_main =
+            self.session.depth > 0 && address == Address::Agent(crate::channels::HUB_NAME.into());
+        if params.urgent && !sub_to_main {
+            return Err(ToolError::failed(
+                "urgent only applies when a subagent writes to main — it rings the user's attention channel, and nobody else is on the other end of this message",
+            ));
+        }
+        let room = match address {
+            Address::Room(room) => room,
+            Address::Agent(_) if sub_to_main => {
+                return Ok(self.to_main(&params.message, params.urgent));
+            }
+            Address::Agent(agent) => return self.to_agent(ctx, &agent, &params).await,
+        };
+        self.post(ctx, &room, &params.message)
+    }
+}
+
+impl SendMessageTool {
+    /// Main→instance: the continuation channel, with the acknowledgement
+    /// watchdog it has carried since D44.
+    async fn to_agent(
+        &self,
+        ctx: &ToolContext,
+        agent: &str,
+        params: &SendMessageInput,
+    ) -> Result<ToolResult, ToolError> {
         let images = self.session.attachments.resolve(&params.message);
         let timeout = match params.ack_timeout {
             // The one way to opt out: an explicit "I am not waiting for an answer to this".
@@ -1494,13 +1733,7 @@ This is the private lane: right for what concerns the receiver alone — an assi
         let id = self
             .session
             .agents
-            .deliver(
-                &params.agent,
-                crate::channels::HUB_NAME,
-                &params.message,
-                images,
-                timeout,
-            )
+            .deliver(agent, &self.sender(), &params.message, images, timeout)
             .map_err(ToolError::failed)?;
         flush_agent_inbox(&self.session, &ctx.watch);
         let note = match timeout {
@@ -1515,7 +1748,7 @@ This is the private lane: right for what concerns the receiver alone — an assi
             spawn_ack_watchdog(
                 self.session.clone(),
                 ctx.watch.clone(),
-                params.agent.clone(),
+                agent.to_string(),
                 id,
                 timeout,
             );
@@ -1524,7 +1757,7 @@ This is the private lane: right for what concerns the receiver alone — an assi
             content: serde_json::json!({
                 "status": "queued",
                 "message_id": id.0,
-                "agent": params.agent,
+                "to": agent,
                 "ack_timeout_secs": timeout.map(|t| t.as_secs()),
                 "note": note,
             })
@@ -2342,7 +2575,6 @@ mod tests {
             ask_question: std::sync::Arc::new(|_t, _q, _o| Box::pin(async { None })),
             instance: None,
             rewind: Default::default(),
-            notify_user: Default::default(),
         };
         assert!(ctl.is_read_only(&serde_json::json!({"action": "list"})));
         assert!(!ctl.is_read_only(&serde_json::json!({"action": "stop", "agent": "scout"})));
@@ -2366,7 +2598,7 @@ mod tests {
         // After stopping, SendMessage rejects delivery.
         let send = SendMessageTool::new(session.clone());
         let err = send
-            .call(serde_json::json!({"agent": "scout", "message": "hi"}), &ctx)
+            .call(serde_json::json!({"to": "scout", "message": "hi"}), &ctx)
             .await
             .unwrap_err();
         assert!(err.to_string().contains("stopped"), "{err}");
@@ -2403,7 +2635,7 @@ mod tests {
         session.agents.mark_idle("worker");
         let out = SendMessageTool::new(session.clone())
             .call(
-                serde_json::json!({"agent": "worker", "message": "start now", "ack_timeout": 0}),
+                serde_json::json!({"to": "worker", "message": "start now", "ack_timeout": 0}),
                 &hub_ctx(&session),
             )
             .await
@@ -2441,10 +2673,10 @@ mod tests {
         // The acknowledgement wait is opt-in: omitting it keeps the plain fire-and-forget path.
         let schema = send.input_schema();
         assert!(schema["properties"]["ack_timeout"].is_object());
-        assert_eq!(schema["required"], serde_json::json!(["agent", "message"]));
+        assert_eq!(schema["required"], serde_json::json!(["message", "to"]));
         let out = send
             .call(
-                serde_json::json!({"agent": "worker", "message": "add more"}),
+                serde_json::json!({"to": "worker", "message": "add more"}),
                 &ctx,
             )
             .await
@@ -2460,7 +2692,7 @@ mod tests {
         assert_eq!(status.unacked, 1, "queued is not yet a receipt");
         // Unknown instance: the error lists the existing instance names.
         let err = send
-            .call(serde_json::json!({"agent": "nobody", "message": "x"}), &ctx)
+            .call(serde_json::json!({"to": "nobody", "message": "x"}), &ctx)
             .await
             .unwrap_err();
         assert!(err.to_string().contains("worker"), "{err}");
@@ -2487,7 +2719,7 @@ mod tests {
 
         let out = send
             .call(
-                serde_json::json!({"agent": "worker", "message": "default"}),
+                serde_json::json!({"to": "worker", "message": "default"}),
                 &ctx,
             )
             .await
@@ -2500,7 +2732,7 @@ mod tests {
 
         let out = send
             .call(
-                serde_json::json!({"agent": "worker", "message": "no wait for a reply", "ack_timeout": 0}),
+                serde_json::json!({"to": "worker", "message": "no wait for a reply", "ack_timeout": 0}),
                 &ctx,
             )
             .await
@@ -2535,8 +2767,233 @@ mod tests {
             ask_question: std::sync::Arc::new(|_t, _q, _o| Box::pin(async { None })),
             instance: None,
             rewind: Default::default(),
-            notify_user: Default::default(),
         }
+    }
+
+    /// A depth-1 sub-session under the same registries, instance name stamped —
+    /// the shape `build_sub_session` produces, minus the model plumbing these
+    /// tests do not exercise.
+    fn sub_of(parent: &Arc<Session>, instance: &str, rooms: bool) -> Arc<Session> {
+        let mut settings = parent.settings.clone();
+        settings.experimental.agent_channels = rooms;
+        Arc::new(Session {
+            depth: 1,
+            instance: Some(instance.to_string()),
+            settings,
+            ..(**parent).clone()
+        })
+    }
+
+    /// The address grammar is the conversation namespace: `#name` is a room,
+    /// anything else is an agent and may wear a leading `@`.
+    #[test]
+    fn to_is_read_as_the_conversation_namespace() {
+        assert_eq!(
+            parse_address("scout").unwrap_or_else(|e| panic!("{e}")),
+            Address::Agent("scout".into())
+        );
+        assert_eq!(
+            parse_address(" @scout ").unwrap_or_else(|e| panic!("{e}")),
+            Address::Agent("scout".into()),
+            "the sigil the bar shows is accepted, not required"
+        );
+        assert_eq!(
+            parse_address("#build").unwrap_or_else(|e| panic!("{e}")),
+            Address::Room("build".into())
+        );
+        for bad in ["", "   ", "@", "#"] {
+            assert!(parse_address(bad).is_err(), "{bad:?} is not an address");
+        }
+    }
+
+    /// Hub-and-spoke survives the merge of the two speech tools, but as an
+    /// addressing rule rather than as a withheld tool: a subagent holds
+    /// `SendMessage` and still cannot reach a sibling with it.
+    #[tokio::test]
+    async fn a_subagent_may_address_main_and_nothing_else_in_the_agent_namespace() {
+        let (session, _client) = parent_session();
+        session.agents.insert(
+            "sibling",
+            AgentKind::Hire,
+            None,
+            "work".into(),
+            session.clone(),
+        );
+        let ctx = hub_ctx(&session);
+        let send = SendMessageTool::new(sub_of(&session, "scout", false));
+
+        let err = send
+            .call(
+                serde_json::json!({"to": "sibling", "message": "take this"}),
+                &ctx,
+            )
+            .await
+            .unwrap_err();
+        let text = err.to_string();
+        assert!(text.contains("sibling"), "{text}");
+        assert!(
+            text.contains("main") && text.contains("rooms you are a member of"),
+            "the refusal has to say what it may address instead: {text}"
+        );
+
+        let err = send
+            .call(serde_json::json!({"to": "scout", "message": "note"}), &ctx)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("is you"), "{err}");
+
+        // And main is reachable.
+        let out = send
+            .call(
+                serde_json::json!({"to": "main", "message": "the migration is done"}),
+                &ctx,
+            )
+            .await
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert!(!out.is_error);
+    }
+
+    /// The message lands in the store the query layer drains into main's next
+    /// turn, under the calling instance's real name — not the hub's, which is
+    /// what the old sender field hardcoded.
+    #[tokio::test]
+    async fn a_message_to_main_lands_in_the_inbox_under_the_sender_s_own_name() {
+        let (session, _client) = parent_session();
+        let ctx = hub_ctx(&session);
+        SendMessageTool::new(sub_of(&session, "scout", false))
+            .call(
+                serde_json::json!({"to": "@main", "message": "the migration is done"}),
+                &ctx,
+            )
+            .await
+            .unwrap_or_else(|e| panic!("{e}"));
+
+        assert!(session.channels.has_hub_mail());
+        assert!(
+            !session.channels.take_hub_mail_urgent(),
+            "an ordinary message does not ring"
+        );
+        let mail = session.channels.drain_hub_mail();
+        assert_eq!(
+            mail,
+            vec!["[message from @scout]\nthe migration is done".to_string()],
+            "the marker names who, and the text follows it"
+        );
+    }
+
+    /// `urgent` is the harness's bell and it has exactly one meaning: an agent
+    /// needs the user. Anywhere else there is nobody on the other end, so it is
+    /// refused rather than quietly ignored.
+    #[tokio::test]
+    async fn urgent_is_a_subagent_to_main_flag_and_refused_elsewhere() {
+        let (session, _client) = parent_session();
+        session.agents.insert(
+            "worker",
+            AgentKind::Hire,
+            None,
+            "work".into(),
+            session.clone(),
+        );
+        let ctx = hub_ctx(&session);
+
+        SendMessageTool::new(sub_of(&session, "scout", false))
+            .call(
+                serde_json::json!({"to": "main", "message": "I need the deploy key", "urgent": true}),
+                &ctx,
+            )
+            .await
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert!(
+            session.channels.take_hub_mail_urgent(),
+            "the bell is owed on arrival"
+        );
+
+        let err = SendMessageTool::new(session.clone())
+            .call(
+                serde_json::json!({"to": "worker", "message": "look now", "urgent": true}),
+                &ctx,
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("urgent only applies"), "{err}");
+    }
+
+    /// Room addressing is still behind the experimental gate, and a member has
+    /// to be a member. Both refusals name the room.
+    #[tokio::test]
+    async fn room_addressing_is_gated_and_checked() {
+        let (session, _client) = parent_session();
+        let ctx = hub_ctx(&session);
+
+        let err = SendMessageTool::new(sub_of(&session, "scout", false))
+            .call(serde_json::json!({"to": "#build", "message": "hi"}), &ctx)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("#build"), "{err}");
+
+        let with_rooms = sub_of(&session, "scout", true);
+        let err = SendMessageTool::new(with_rooms.clone())
+            .call(serde_json::json!({"to": "#ghost", "message": "hi"}), &ctx)
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("not a member of #ghost"),
+            "an unknown room and a room you are not in are the same refusal: {err}"
+        );
+
+        session
+            .channels
+            .create(
+                "build",
+                vec!["scout".into()],
+                crate::channels::ChannelMode::Free,
+            )
+            .unwrap_or_else(|e| panic!("{e}"));
+        let out = SendMessageTool::new(with_rooms)
+            .call(serde_json::json!({"to": "#build", "message": "hi"}), &ctx)
+            .await
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert!(
+            out.content
+                .as_str()
+                .unwrap_or_default()
+                .contains("#build msg #1"),
+            "{out:?}"
+        );
+    }
+
+    /// Contract 3's discriminator, in isolation: what the run was woken *by*
+    /// decides whether its end is main's business.
+    #[test]
+    fn only_an_all_user_batch_keeps_its_end_to_itself() {
+        let user_item = |text: &str| InboxItem::Direct {
+            id: MsgId(1),
+            from: crate::channels::USER_NAME.to_string(),
+            text: text.to_string(),
+            images: Vec::new(),
+        };
+        let hub_item = InboxItem::Direct {
+            id: MsgId(2),
+            from: crate::channels::HUB_NAME.to_string(),
+            text: "carry on".to_string(),
+            images: Vec::new(),
+        };
+        assert!(
+            wakes_owner(&[]),
+            "a dispatch has no items: the Agent call itself is the trigger"
+        );
+        assert!(!wakes_owner(&[user_item("are you there?")]));
+        assert!(!wakes_owner(&[user_item("one"), user_item("two")]));
+        assert!(
+            wakes_owner(&[user_item("one"), hub_item]),
+            "one main-origin item in the batch and the reply answers it"
+        );
+        assert!(wakes_owner(&[InboxItem::Channel {
+            channel: "build".into(),
+            from: "zoe".into(),
+            text: "the tests pass".into(),
+            seq: 3,
+        }]));
     }
 
     /// A message that is never picked up is chased on the sender's own clock and then reported:
@@ -2556,7 +3013,7 @@ mod tests {
         let ctx = hub_ctx(&session);
         let out = SendMessageTool::new(session.clone())
             .call(
-                serde_json::json!({"agent": "worker", "message": "check the logs", "ack_timeout": 1}),
+                serde_json::json!({"to": "worker", "message": "check the logs", "ack_timeout": 1}),
                 &ctx,
             )
             .await
@@ -2609,7 +3066,7 @@ mod tests {
         let ctx = hub_ctx(&session);
         SendMessageTool::new(session.clone())
             .call(
-                serde_json::json!({"agent": "mute", "message": "report progress", "ack_timeout": 5}),
+                serde_json::json!({"to": "mute", "message": "report progress", "ack_timeout": 5}),
                 &ctx,
             )
             .await
@@ -2659,7 +3116,7 @@ mod tests {
         let ctx = hub_ctx(&session);
         SendMessageTool::new(session.clone())
             .call(
-                serde_json::json!({"agent": "worker", "message": "check the logs", "ack_timeout": 60}),
+                serde_json::json!({"to": "worker", "message": "check the logs", "ack_timeout": 60}),
                 &ctx,
             )
             .await
@@ -2928,7 +3385,7 @@ mod tests {
             "must name the reply-to-replies storm specifically, not just say \"keep it brief\""
         );
         assert!(
-            CHANNEL_NOTE.contains("Only `Post` puts words in the room"),
+            CHANNEL_NOTE.contains("puts words in the room"),
             "must state that the turn body never reaches the channel — otherwise members think they already answered"
         );
         assert!(
@@ -2936,7 +3393,7 @@ mod tests {
             "must spell out \"answer when a human speaks\", otherwise the silence rule overshoots"
         );
         assert!(
-            CHANNEL_NOTE.contains("never with Post"),
+            CHANNEL_NOTE.contains("never in a room"),
             "must state that a DM is answered in turn text — otherwise a member takes a private question to the room"
         );
         assert!(
@@ -2949,8 +3406,8 @@ mod tests {
         );
         assert!(
             CHANNEL_NOTE.contains("without waiting to be asked"),
-            "must impose the proactive Post duty — otherwise a team-wide finding reaches only \
-             the hub as turn text and the room works on stale ground (D67)"
+            "must impose the proactive duty to speak in the room — otherwise a team-wide finding \
+             reaches only the hub as turn text and the room works on stale ground (D67)"
         );
         assert!(
             CHANNEL_NOTE.contains("stays in your turn text"),
@@ -2961,7 +3418,7 @@ mod tests {
 
     /// The user reads a member's turn text in the DM window (D57), so the subagent note may
     /// not claim the user never sees it. That claim is what made a DM'd member believe the
-    /// only way to reach the human was a channel Post (D63).
+    /// only way to reach the human was a room message (D63).
     #[test]
     fn subagent_note_knows_the_dm_window_exists() {
         assert!(
@@ -3099,7 +3556,7 @@ mod tests {
         let watch = crate::watch::WatchRegistry::new();
         let registry = AgentRegistry::new();
         let cell = Arc::new(AgentCell::new(registry.clone()));
-        let id = register_run_watch(&watch, "think".into(), cell.clone(), Vec::new(), None);
+        let id = register_run_watch(&watch, "think".into(), cell.clone(), Vec::new(), None, true);
         let mut ui = subagent_hooks(
             SubagentOutput {
                 text: output.clone(),
@@ -3163,7 +3620,7 @@ mod tests {
         let watch = crate::watch::WatchRegistry::new();
         let registry = AgentRegistry::new();
         let cell = Arc::new(AgentCell::new(registry.clone()));
-        let id = register_run_watch(&watch, "retry".into(), cell.clone(), Vec::new(), None);
+        let id = register_run_watch(&watch, "retry".into(), cell.clone(), Vec::new(), None, true);
         let mut ui = subagent_hooks(
             SubagentOutput {
                 text: output.clone(),
@@ -3243,6 +3700,7 @@ mod tests {
             Arc::new(AgentCell::new(registry.clone())),
             Vec::new(),
             None,
+            true,
         );
         let mut ui = subagent_hooks(
             SubagentOutput {
@@ -3305,6 +3763,7 @@ mod tests {
             Arc::new(AgentCell::new(registry.clone())),
             Vec::new(),
             None,
+            true,
         );
         let mut ui = subagent_hooks(
             SubagentOutput {
@@ -3375,6 +3834,7 @@ mod tests {
             Arc::new(AgentCell::new(registry.clone())),
             Vec::new(),
             None,
+            true,
         );
         let ui = subagent_hooks(
             SubagentOutput {

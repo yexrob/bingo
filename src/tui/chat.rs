@@ -438,7 +438,7 @@ pub(crate) fn is_state_line(text: &str) -> bool {
         || text == ASK_CANCELLED_TEXT
         || is_ask_receipt(text)
         || crate::tui::bufferview::is_route_receipt(text)
-        || crate::tui::bufferview::is_relay_line(text)
+        || crate::tui::bufferview::is_agent_alert(text)
         || rewind_ui::is_rewind_line(text)
 }
 
@@ -961,6 +961,9 @@ pub struct Chat {
     pub(super) token_rate: crate::token_rate::TokenRateSampler,
     pub(super) context_usage: crate::context_usage::ContextUsage,
     pub tick: u64,
+    /// The digest debounce's state while mail is waiting (D98). `None` means the
+    /// main agent's inbox is empty and there is nothing to wait out.
+    pub(crate) mail_wake: Option<chat_tail::MailWake>,
     /// Tick at TurnStart: the relative timing baseline for running-state thinking.
     turn_start_tick: u64,
     /// Real clock at TurnStart (baseline for the status-row elapsed time; cleared at TurnEnd).
@@ -1305,13 +1308,6 @@ impl Chat {
         let live = crate::live::LiveBash::new(Arc::new(move |tail| {
             let _ = tail_events.send(UiEvent::BashTail(tail));
         }));
-        // The relay was built with the session, so a subagent already inherits it;
-        // what it lacked until now is somewhere to draw. Same road as the tail
-        // above: one more UiEvent on the channel the drain loop already wakes for.
-        let relay_events = events.clone();
-        session.runtime.notify_user.attach(Arc::new(move |notice| {
-            let _ = relay_events.send(UiEvent::NotifyUser(notice));
-        }));
         Self {
             session,
             events,
@@ -1362,6 +1358,7 @@ impl Chat {
             token_rate: crate::token_rate::TokenRateSampler::default(),
             context_usage,
             tick: 0,
+            mail_wake: None,
             turn_start_tick: 0,
             turn_started: None,
             warnings: Vec::new(),
@@ -1829,31 +1826,6 @@ impl Chat {
                     CollapseKind::AgentDelete => self.messages[i].groups[g].agent_deletes += 1,
                 }
             }
-            UiEvent::NotifyUser(notice) => {
-                // The rate limit already ran: everything that arrives here prints.
-                // The line goes into the flow whether or not the hub is what the
-                // user is looking at — an excursion holds the hub's tail back and
-                // replays it on the way home (D89), so nothing is buffered here.
-                let ring = matches!(
-                    notice,
-                    crate::notify_user::Notice::Relay { notifier: true, .. }
-                );
-                self.messages.push(UiMessage {
-                    role: Role::User,
-                    text: notice.line(),
-                    at: crate::channels::now_unix(),
-                    activities: Vec::new(),
-                    insert_points: Vec::new(),
-                    groups: Vec::new(),
-                    group_of: Vec::new(),
-                });
-                self.buffers.note_relay(self.tick);
-                if ring {
-                    self.notify
-                        .attention(crate::tui::notify::Attention::AgentNotice);
-                }
-                self.dirty = true;
-            }
             UiEvent::WatchEvent {
                 label,
                 kind,
@@ -1967,18 +1939,27 @@ impl Chat {
                         w.detail = Some(sig.clone());
                     }
                     // After the user interrupted a turn, never auto-run again (wait for an explicit submit).
-                    if !self.interrupted {
+                    //
+                    // D98: and only when this run's end is actually addressed to
+                    // the main agent. A run the user started in an agent's DM
+                    // registers with `notify_owner: false`, so it enqueues
+                    // nothing here — waking to digest an empty queue is how the
+                    // console got loud in the first place. The same question is
+                    // already asked at TurnEnd; asking it here too makes the two
+                    // wake paths say one thing.
+                    if !self.interrupted && self.session.watch.has_wake_notifications(None) {
                         self.submit_auto();
                     }
                 }
-                // A channel row updated and the hub is idle with mail: start a turn to digest it (when a subagent posts,
-                // the hub is usually not in a turn — without this wake-up the message would sleep until the user speaks).
-                if kind == crate::watch::WatchKind::Channel
-                    && !self.interrupted
-                    && self.queued.is_empty()
-                    && self.session.channels.has_hub_mail()
-                {
-                    self.submit_auto();
+                // The one direct line an agent's life still writes into this flow
+                // (D98): a run that failed, named, with its reason. `Done` and
+                // `Cancelled` draw nothing — the dispatch row's own state already
+                // says so — but bad news must not depend on the main agent
+                // choosing to narrate it, because the turn that would have
+                // narrated it may never run.
+                if kind == crate::watch::WatchKind::Agent && status == WatchState::Failed {
+                    let (who, why) = (label.clone(), detail.clone());
+                    self.push_agent_alert(&who, why.as_deref());
                 }
             }
             UiEvent::RoundEnd => {
@@ -2112,8 +2093,12 @@ impl Chat {
                 // settled/flushed with it) — nothing to clean at turn end, they persist with the session.
                 // After a user interruption, background-task completion must not auto-start a new turn;
                 // with queued messages, the user's message goes first (submitted together below).
-                if (self.session.watch.has_wake_notifications(None)
-                    || self.session.channels.has_hub_mail())
+                //
+                // Mail (room relays, direct messages) is deliberately not part of
+                // this condition since D98: it wakes through the digest debounce
+                // on the tick, so a burst costs one turn rather than one per
+                // message, and both wake paths cannot disagree about when.
+                if self.session.watch.has_wake_notifications(None)
                     && !self.interrupted
                     && self.queued.is_empty()
                 {
@@ -3800,7 +3785,10 @@ pub(crate) fn user_message_rows(text: &str, width: usize, theme: &Theme) -> Vec<
     // An interrupt marker is a user-role message the user never wrote: the harness
     // recorded it so the model learns the turn was cut off. It reads as a state line in
     // the error colour, never as a `❯` bubble putting words in the user's mouth.
-    if crate::query::is_interrupt_marker(text) {
+    // A failed agent (D98) joins it: the one line an agent's life still writes
+    // into this flow, and it is bad news, so it wears the error tier rather than
+    // the dim one every other unspoken line settles into.
+    if crate::query::is_interrupt_marker(text) || crate::tui::bufferview::is_agent_alert(text) {
         return vec![Row::new(Line::styled(
             crate::tui::markdown::truncate(text, width.max(1)),
             SegStyle::fg(theme.error),
@@ -3820,13 +3808,9 @@ pub(crate) fn user_message_rows(text: &str, width: usize, theme: &Theme) -> Vec<
     // receipt of a line routed out of the hub (D90): nothing failed, so they
     // settle dim rather than in the error colour, and none of them wears the
     // `❯` bubble — the user typed the envelope, not this line.
-    // A `notify_user` relay (D94) joins them: an agent said something to the user
-    // through the hub, and the hub shows it as a state rather than as a message —
-    // the user did not write it, and neither did the agent write it *here*.
     if text == ASK_CANCELLED_TEXT
         || is_ask_receipt(text)
         || crate::tui::bufferview::is_route_receipt(text)
-        || crate::tui::bufferview::is_relay_line(text)
     {
         return vec![Row::new(Line::styled(
             crate::tui::markdown::truncate(text, width.max(1)),

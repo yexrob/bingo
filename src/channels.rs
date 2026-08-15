@@ -189,8 +189,15 @@ struct Channel {
 
 struct Inner {
     channels: HashMap<String, Channel>,
-    /// Channel messages pending injection into the main agent's context (formatted text).
+    /// The main agent's inbox, pending injection into its context (formatted text).
+    /// Room relays and direct messages share it (D98) so there is exactly one
+    /// drain-and-inject seam into the host turn loop.
     hub_mail: Vec<String>,
+    /// A direct message in `hub_mail` asked for the attention channel (D98).
+    /// Independent of the mail itself: the turn that drains the mail and the
+    /// surface that rings the bell are different readers on different clocks,
+    /// and a bell owed must survive the drain that beat it.
+    hub_mail_urgent: bool,
     limits: ChannelLimits,
 }
 
@@ -203,6 +210,20 @@ pub struct ChannelRegistry {
 
 fn format_hub_line(channel: &str, msg: &ChannelMessage) -> String {
     format!("[#{channel} msg #{}] {}: {}", msg.seq, msg.from, msg.text)
+}
+
+/// Opening of the line a direct message to the main agent arrives under (D98):
+/// `[message from @scout]`, on its own line above the text.
+///
+/// The shape is [`crate::tool::agent::DM_FROM_USER_MARKER`]'s, with the sender
+/// named — the one thing that marker never had to carry, because the human is
+/// the only human. `main` hears from many agents, so its marker names which.
+/// [`crate::tui::buffer::line_source`] is the single parser of this shape.
+pub const MAIN_MESSAGE_PREFIX: &str = "[message from @";
+
+/// One direct message as it enters the main agent's context.
+pub fn format_main_message(from: &str, text: &str) -> String {
+    format!("{MAIN_MESSAGE_PREFIX}{from}]\n{text}")
 }
 
 /// Write a roster change into the room's record and hand back the entry.
@@ -233,6 +254,7 @@ impl ChannelRegistry {
             inner: Mutex::new(Inner {
                 channels: HashMap::new(),
                 hub_mail: Vec::new(),
+                hub_mail_urgent: false,
                 limits,
             }),
             share: Mutex::new(None),
@@ -641,9 +663,33 @@ impl ChannelRegistry {
         !self.lock().hub_mail.is_empty()
     }
 
+    /// How much is waiting. The digest debounce watches this rather than the
+    /// bare "is there any": a burst is exactly a count that keeps changing, and
+    /// the quiet window restarts every time it does.
+    pub fn hub_mail_len(&self) -> usize {
+        self.lock().hub_mail.len()
+    }
+
     /// Drain channel messages pending injection into the main agent (batch-injected at turn boundaries).
     pub fn drain_hub_mail(&self) -> Vec<String> {
         std::mem::take(&mut self.lock().hub_mail)
+    }
+
+    /// Land a direct message for the main agent (D98's `SendMessage(to: "main")`).
+    ///
+    /// It rides the room relays' store because the main agent has one inbox and
+    /// one place it is injected from; what tells the two apart is the marker on
+    /// the line, which is also what lets a reader attribute it.
+    pub fn deliver_to_main(&self, from: &str, text: &str, urgent: bool) {
+        let mut inner = self.lock();
+        inner.hub_mail.push(format_main_message(from, text));
+        inner.hub_mail_urgent |= urgent;
+    }
+
+    /// Take the pending attention request, if any. Reading it clears it: the
+    /// bell rings once per message that asked for it.
+    pub fn take_hub_mail_urgent(&self) -> bool {
+        std::mem::take(&mut self.lock().hub_mail_urgent)
     }
 }
 

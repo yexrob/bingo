@@ -1,22 +1,19 @@
-//! Chat state-machine tests, part six: D94's delivery rerouting and the
-//! `notify_user` relay.
+//! Chat state-machine tests, part six: what the console does and does not print
+//! (D94's delivery rerouting, D98's quiet console).
 //!
-//! Two halves, matching the batch. The first pins what the hub *stopped*
-//! printing: an agent's spawn and completion used to hang a `◉ name · task` row
-//! off whatever assistant message happened to be last, and now they do not —
-//! while the signal they carried still lands in the lifecycle log, on the bar,
-//! and in the agent's own DM. The second is the road that replaced it.
-//!
-//! The relay's own arithmetic (windows, coalescing, the notifier ceiling) is
-//! tested in `crate::notify_user`; these tests are about what the hub does with
-//! a notice once the arithmetic has spoken.
+//! Three parts. The first pins what the hub *stopped* printing: an agent's spawn
+//! and completion used to hang a `◉ name · task` row off whatever assistant
+//! message happened to be last, and now they do not — while the signal they
+//! carried still lands in the lifecycle log, on the bar, and in the agent's own
+//! DM. The second is the one line that still comes through, and the reason it
+//! does: a failure cannot depend on the main agent choosing to narrate it. The
+//! third is the digest debounce, which turns a burst of mail into one turn.
 
 use super::tests_a::*;
 use super::*;
 
 use crate::agents::AgentKind;
 use crate::api::types::{ContentBlock, Message};
-use crate::notify_user::{Notice, NotifyLevel};
 use crate::tui::buffer::BufferId;
 use crate::tui::notify::{Notifier, NotifyChannel, TerminalEnv};
 use crate::tui::test_util::chat_at;
@@ -251,169 +248,217 @@ fn a_command_watch_still_reaches_the_last_reply() {
 }
 
 // ---------------------------------------------------------------------------
-// B. the road that replaced it
+// B. the one line that still comes through (D98)
 // ---------------------------------------------------------------------------
 
-/// An `info` relay: one dim line in the hub, stamped, and no interruption.
+/// Bad news is the single exception to "nothing of an agent's life renders in
+/// @main": the turn that would have narrated a crash may never run.
 #[test]
-fn an_info_relay_lands_in_the_hub_with_a_stamp_and_no_bell() {
+fn a_failed_run_writes_one_alert_line_and_rings() {
     let mut chat = chat_with_bell();
-    chat.apply_event(UiEvent::NotifyUser(Notice::Relay {
-        agent: "scout".into(),
-        text: "the migration finished".into(),
-        level: NotifyLevel::Info,
-        notifier: false,
-    }));
+    chat.apply_event(lifecycle(
+        "scout #3 · fix the parser",
+        WatchState::Failed,
+        Some("subagent failed: connection reset"),
+    ));
 
     let rows = hub_rows(&mut chat);
-    let line = rows
-        .iter()
-        .find(|r| r.contains("🔔 @scout → you: the migration finished"))
-        .unwrap_or_else(|| panic!("the relay line is in the hub: {rows:?}"));
+    let alert: Vec<&String> = rows.iter().filter(|r| r.contains("⚠ @scout")).collect();
+    assert_eq!(
+        alert.len(),
+        1,
+        "exactly one line, not one per event: {rows:?}"
+    );
     assert!(
-        !line.contains('❯'),
-        "a relay is a state line: no bubble putting the agent's words in the user's mouth"
+        alert[0].contains("subagent failed: connection reset"),
+        "the reason travels with the name: {alert:?}"
+    );
+    assert!(
+        !alert[0].contains('❯'),
+        "nobody typed it: no bubble putting the harness's words in the user's mouth"
     );
     assert!(
         crate::tui::chat::is_state_line(&chat.messages[0].text),
         "and it is classified as one"
     );
-    // D93's stamp convention: beside the message, flush right.
-    let stamp = crate::tui::buffer::stamp(chat.messages[0].at);
     assert!(
-        line.trim_end().ends_with(&stamp),
-        "a relay keeps its stamp — when it arrived is part of what it says: {line:?}"
+        emitted(&mut chat).contains('\x07'),
+        "a failure reaches a user who is in another window"
     );
+}
+
+/// `Done` and `Cancelled` say themselves through the dispatch row's own state.
+/// A second line for each would be the flood D94 removed, wearing a badge.
+#[test]
+fn a_finished_or_cancelled_run_writes_nothing() {
+    let mut chat = chat_with_bell();
+    chat.messages
+        .push(msg(Role::Assistant, "I have asked scout"));
+    let before = hub_rows(&mut chat);
+
+    chat.apply_event(lifecycle(
+        "scout #3 · fix the parser",
+        WatchState::Done,
+        Some("done"),
+    ));
+    chat.apply_event(lifecycle(
+        "zoe #1 · read the logs",
+        WatchState::Cancelled,
+        Some("stopped"),
+    ));
+
+    assert_eq!(hub_rows(&mut chat), before, "the flow is byte-identical");
     assert_eq!(
         emitted(&mut chat),
         "",
-        "info waits for the user to look; it does not go and get them"
+        "and nothing went looking for the user"
     );
 }
 
-/// `urgent` is the level that reaches a user who is in another window.
+/// The alert keeps its send stamp. It is news, about someone, at a moment that
+/// matters — "the build broke" reads differently at 09:02 and at 17:40 — where
+/// the other state lines describe *now* and have nothing to stamp.
 #[test]
-fn an_urgent_relay_rings_the_attention_channel() {
-    let mut chat = chat_with_bell();
-    chat.apply_event(UiEvent::NotifyUser(Notice::Relay {
-        agent: "scout".into(),
-        text: "I need the deploy key".into(),
-        level: NotifyLevel::Urgent,
-        notifier: true,
-    }));
+fn the_alert_line_keeps_its_stamp() {
+    let mut chat = test_chat();
+    chat.apply_event(lifecycle(
+        "scout · fix the parser",
+        WatchState::Failed,
+        None,
+    ));
+    let stamp = crate::tui::buffer::stamp(chat.messages[0].at);
+    let rows = hub_rows(&mut chat);
+    assert!(
+        rows.iter()
+            .any(|r| r.contains("⚠ @scout") && r.trim_end().ends_with(&stamp)),
+        "{rows:?}"
+    );
+}
 
+// ---------------------------------------------------------------------------
+// C. the digest debounce (D98)
+// ---------------------------------------------------------------------------
+
+/// One room post used to buy one woken turn. A burst now buys one digest: the
+/// wake waits for the room to stop talking.
+#[test]
+fn a_burst_of_room_mail_wakes_once_after_the_quiet_window() {
+    let mut chat = test_chat();
+    chat.session.channels.deliver_to_main("scout", "one", false);
+    assert!(!chat.digest_mail(), "the window has only just opened");
+    assert!(
+        chat.mail_wake.is_some(),
+        "and the clock is armed, which is what keeps the tick alive"
+    );
+    assert!(
+        chat.needs_tick(),
+        "waiting mail keeps the frame loop running"
+    );
+
+    // A second message inside the window restarts it: the room is still talking.
+    chat.tick += super::chat_tail::MAIL_QUIET_TICKS - 1;
+    chat.session.channels.deliver_to_main("zoe", "two", false);
+    assert!(
+        !chat.digest_mail(),
+        "the window restarted with the new message"
+    );
+
+    chat.tick += super::chat_tail::MAIL_QUIET_TICKS - 1;
+    assert!(!chat.digest_mail(), "still inside the restarted window");
+    chat.tick += 1;
+    assert!(chat.digest_mail(), "the room went quiet; digest the batch");
+    assert!(
+        !chat.digest_mail(),
+        "and exactly once — a second ask for the same batch is the flood again"
+    );
+}
+
+/// A room that never stops talking would restart the window forever. The
+/// deadline is the floor under that: the digest runs on whatever has arrived.
+#[test]
+fn a_chatty_room_cannot_starve_the_wake_past_the_deadline() {
+    let mut chat = test_chat();
+    let step = super::chat_tail::MAIL_QUIET_TICKS - 1;
+    chat.session.channels.deliver_to_main("scout", "0", false);
+    assert!(!chat.digest_mail());
+    let mut fired = false;
+    for i in 1..=(super::chat_tail::MAIL_DEADLINE_TICKS / step + 1) {
+        chat.tick += step;
+        chat.session
+            .channels
+            .deliver_to_main("scout", &format!("{i}"), false);
+        if chat.digest_mail() {
+            fired = true;
+            break;
+        }
+    }
+    assert!(
+        fired,
+        "the deadline fires even though the quiet window never elapsed"
+    );
+    assert!(
+        chat.tick >= super::chat_tail::MAIL_DEADLINE_TICKS,
+        "and not before it: {}",
+        chat.tick
+    );
+}
+
+/// Urgent is the one thing that does not queue behind the window — and it rings
+/// on arrival, whether or not a turn is what happens next.
+#[test]
+fn urgent_direct_mail_rings_and_skips_the_window() {
+    let mut chat = chat_with_bell();
+    chat.session
+        .channels
+        .deliver_to_main("scout", "I need the deploy key", true);
+    assert!(chat.digest_mail(), "urgent does not wait out the window");
     assert!(
         emitted(&mut chat).contains('\x07'),
-        "the bell is the channel every terminal has"
-    );
-    let rows = hub_rows(&mut chat);
-    assert!(
-        rows.iter()
-            .any(|r| r.contains("🔔 @scout → you: I need the deploy key")),
-        "and the line is on screen too — the notification carries no detail of its own: {rows:?}"
+        "and it reaches a user who is in another window"
     );
 }
 
-/// The relay's ceiling reaches the notifier as well as the flow: a second urgent
-/// notice inside the window still prints, and still does not ring. The decision
-/// is the relay's; this pins that the hub honours it rather than re-deciding.
+/// The bell survives a turn that beat the tick to the mail: the drain and the
+/// ring are different readers, so the flag is cleared by the reader that rings.
 #[test]
-fn a_relay_that_lost_the_notifier_ceiling_prints_without_ringing() {
+fn the_ring_survives_a_turn_that_drained_the_mail_first() {
     let mut chat = chat_with_bell();
-    chat.apply_event(UiEvent::NotifyUser(Notice::Relay {
-        agent: "scout".into(),
-        text: "still blocked".into(),
-        level: NotifyLevel::Urgent,
-        notifier: false,
-    }));
-
-    assert_eq!(emitted(&mut chat), "", "the window already rang once");
-    let rows = hub_rows(&mut chat);
-    assert!(
-        rows.iter()
-            .any(|r| r.contains("🔔 @scout → you: still blocked")),
-        "urgent is never coalesced away: {rows:?}"
-    );
-}
-
-/// What the rolled window owes, rendered.
-#[test]
-fn a_coalesced_relay_names_the_count_and_points_at_the_dm() {
-    let mut chat = test_chat();
-    chat.apply_event(UiEvent::NotifyUser(Notice::Coalesced {
-        agent: "scout".into(),
-        count: 4,
-    }));
-
-    let rows = hub_rows(&mut chat);
-    assert!(
-        rows.iter()
-            .any(|r| r.contains("🔔 @scout: 4 more — see the DM")),
-        "the swallowed notices are accounted for, and the DM is named: {rows:?}"
-    );
-}
-
-/// A relay arrives whether or not the hub is what the user is looking at, and
-/// the badge is how the bar says so. The hub had no unread source before D94 —
-/// nothing could reach it that the user had not asked for.
-#[test]
-fn a_relay_bumps_the_hub_unread_when_the_user_is_elsewhere() {
-    let mut chat = test_chat();
-    seed_agent(&chat, "scout");
-    chat.refresh_conversations();
-    chat.switch_to(BufferId::Dm("scout".to_string()));
-    assert_eq!(*chat.buffers.active(), BufferId::Dm("scout".to_string()));
-
-    chat.apply_event(UiEvent::NotifyUser(Notice::Relay {
-        agent: "scout".into(),
-        text: "the migration finished".into(),
-        level: NotifyLevel::Info,
-        notifier: false,
-    }));
-
-    let hub = chat
-        .buffers
-        .get(&BufferId::Hub)
-        .expect("the hub is always listed");
+    chat.session
+        .channels
+        .deliver_to_main("scout", "blocked", true);
+    let drained = chat.session.channels.drain_hub_mail();
     assert_eq!(
-        hub.unread(),
+        drained.len(),
         1,
-        "the hub says something came while you were away"
+        "a running turn absorbed it at its next round"
     );
-    assert!(hub.mention(), "a relay is addressed to the user");
 
-    // Going home reads it.
-    chat.switch_to(BufferId::Hub);
-    assert_eq!(
-        chat.buffers
-            .get(&BufferId::Hub)
-            .map(crate::tui::buffer::Buffer::unread),
-        Some(0),
-        "entering a conversation reads it"
+    assert!(!chat.digest_mail(), "there is nothing left to digest");
+    assert!(
+        emitted(&mut chat).contains('\x07'),
+        "but the bell it asked for is still owed"
     );
 }
 
-/// The same event with the hub already active never raises a badge for the
-/// conversation the user is reading.
+/// The injected form names the sender, and `line_source` — the single
+/// recognizer of scaffolding shapes — reads it back.
 #[test]
-fn a_relay_read_where_it_lands_raises_no_badge() {
-    let mut chat = test_chat();
-    assert_eq!(*chat.buffers.active(), BufferId::Hub);
-
-    chat.apply_event(UiEvent::NotifyUser(Notice::Relay {
-        agent: "scout".into(),
-        text: "the migration finished".into(),
-        level: NotifyLevel::Info,
-        notifier: false,
-    }));
-
+fn a_direct_message_to_main_carries_the_sender_into_the_inbox() {
+    let chat = test_chat();
+    chat.session
+        .channels
+        .deliver_to_main("scout", "the migration is done", false);
+    let mail = chat.session.channels.drain_hub_mail();
+    assert_eq!(mail.len(), 1);
+    let mut lines = mail[0].lines();
     assert_eq!(
-        chat.buffers
-            .get(&BufferId::Hub)
-            .map(crate::tui::buffer::Buffer::unread),
-        Some(0),
-        "you are looking at it"
+        crate::tui::buffer::line_source(lines.next().unwrap_or_default()),
+        Some(crate::tui::buffer::LineSource::Agent {
+            name: "scout".to_string()
+        }),
+        "the marker is a header line, the way [DM from user] is: {mail:?}"
     );
+    assert_eq!(lines.next(), Some("the migration is done"));
 }
 
 // ---------------------------------------------------------------------------

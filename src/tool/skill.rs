@@ -136,7 +136,6 @@ mod tests {
             }),
             instance: None,
             rewind: Default::default(),
-            notify_user: Default::default(),
         }
     }
 

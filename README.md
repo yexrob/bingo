@@ -340,23 +340,23 @@ schema from a single source of truth):
 | `Edit` / `Write` | file editing (produces a unified diff preview for the UI) |
 | `WebFetch` / `WebSearch` | web fetching and search (shared HTTP connection pool; pre-approved domains auto-allowed) |
 | `Agent` | spawns a named sub-agent (async by default, completion notification injected into context; `background:false` waits synchronously) |
-| `SendMessage` / `AgentControl` | sub-agent continuation and lifecycle management (main session only) |
+| `SendMessage` | the one speech tool: `to` is an agent (`name` / `@name`) or a room (`#name`); the main agent reaches any instance, a sub-agent reaches `main` and its rooms |
+| `AgentControl` | sub-agent lifecycle management (main session only) |
 | `Team` | the project crew (main session only): `status`/`validate` read freely, `start`/`stop`/`save` are confirmed by the user in every permission mode |
 | `TaskCreate`/`TaskUpdate`/`TaskGet`/`TaskList` | task tracking (disk-backed, same source as the TUI task area, lifecycle hooks) |
 | `ExperiencePropose`/`ExperienceCommit`/`ExperienceQuery`/`ExperienceOutcome`/`ExperienceForget` | cross-session experience library (see below) |
 | `AskUserQuestion` | asks the user multiple-choice questions (reuses the permission prompt modal in the TUI) |
 | `Skill` | skill invocation (see below) |
-| `notify_user` | sub-agents only: one deliberate line to the user through the hub (rate limited to one per agent per minute, extras coalesced; `level: "urgent"` also fires the terminal attention channel) |
 | `mcp__<server>__<tool>` | tools exposed via MCP (see below) |
-| `Channel` / `Post` | experimental: agent channel messaging (see below) |
+| `Channel` | experimental: room management (see below) |
 
 ## Sub-agents
 
-- The main agent (depth 0) has `Agent`/`SendMessage`/`AgentControl`; sub-agents
-  (depth ≥ 1) keep only `Agent` (they can spawn further) and cannot manage
-  siblings — hub-and-spoke topology. One tool runs the other way: `notify_user`
-  is assembled for sub-agents and withheld from the main agent, which already
-  holds the hub and reaches the user by answering.
+- The main agent (depth 0) has `Agent`/`AgentControl`; sub-agents (depth ≥ 1)
+  keep `Agent` (they can spawn further) and cannot manage siblings —
+  hub-and-spoke topology. `SendMessage` is assembled everywhere and keeps that
+  topology by *addressing*: the main agent may write to any instance and any
+  room it is in, a sub-agent only to `main` and the rooms it is a member of.
 - **Named definitions**: `~/.config/bingo/agents/*.md` and `.bingo/agents/*.md`
   (walked upward from cwd; project-level wins on name clash); frontmatter
   `name/description/model/provider`, body = sub-agent system prompt; referenced
@@ -369,7 +369,14 @@ schema from a single source of truth):
   completion.
 - `SendMessage` sends follow-up instructions to an instance (context
   preserved); queued while busy, delivered automatically at the end of the
-  current turn.
+  current turn. A sub-agent's `SendMessage(to: "main")` lands in the main
+  agent's inbox and wakes it when idle; nothing of the arrival is drawn —
+  what the user sees is only what the main agent then says. `urgent: true`
+  (sub-agent→main only) rings the terminal attention channel on arrival.
+- A run that **fails** draws one `⚠ @name · reason` line in the hub and rings
+  the attention channel; done and cancelled draw nothing. A run whose trigger
+  was entirely the user's own DM messages produces no notification and no woken
+  turn for the main agent at all.
 - `AgentControl` can `list`/`stop`/`delete`.
 - Async by default: returns the instance name and task id immediately;
   completion notification is injected into the next turn's context.
@@ -455,9 +462,11 @@ surface.
 
 With `settings.experimental.agentChannels: true`:
 
-- The main agent gets `Channel`/`Post`: create channels, add/remove members
+- The main agent gets `Channel`: create channels, add/remove members
   (members are direct sub-agents; the main agent joins as `main`); members
-  post via `Post`, and messages enter every member's context (same order).
+  speak with `SendMessage(to: "#room")`, and messages enter every member's
+  context (same order). The main agent's own copy is digested on a debounce —
+  a burst of posts buys one turn, not one turn per post.
 - In a `serial` channel, stale posts are bounced back with the new messages
   attached (agents read and adjust — sequential coordination emerges); `free`
   channels allow interleaving.
