@@ -817,6 +817,7 @@ mod tests {
                 insert_points: Vec::new(),
                 groups: Vec::new(),
                 group_of: Vec::new(),
+                digest: false,
             });
         }
         chat.dirty = true;
@@ -839,6 +840,7 @@ mod tests {
                 insert_points: Vec::new(),
                 groups: Vec::new(),
                 group_of: Vec::new(),
+                digest: false,
             });
         }
         chat.dirty = true;
@@ -883,6 +885,7 @@ mod tests {
                 insert_points: Vec::new(),
                 groups: Vec::new(),
                 group_of: Vec::new(),
+                digest: false,
             });
         }
         chat.dirty = true;
@@ -936,6 +939,7 @@ mod tests {
                 insert_points: Vec::new(),
                 groups: Vec::new(),
                 group_of: Vec::new(),
+                digest: false,
             });
         }
         chat.dirty = true;
@@ -1215,6 +1219,7 @@ mod tests {
             insert_points: Vec::new(),
             groups: Vec::new(),
             group_of: Vec::new(),
+            digest: false,
         });
         chat.dirty = true;
         rebuild(&mut chat, size(80, 24), false);

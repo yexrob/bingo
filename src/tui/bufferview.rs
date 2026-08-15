@@ -184,6 +184,28 @@ pub struct Excursion {
 impl Chat {
     // -- the flow ----------------------------------------------------------
 
+    /// A digest turn that ended in the acknowledgement marker (D102).
+    ///
+    /// Both halves of the question are asked here, because either alone answers
+    /// the wrong one: the turn has to have been a **digest** — nobody typed into
+    /// it, so nobody is owed a reply — and the reply has to be the marker and
+    /// nothing else. The same marker at the end of a turn the user started is a
+    /// misfire, and a misfire the renderer swallows is a bug the user cannot
+    /// see; the same turn ending in prose is main speaking, and that is exactly
+    /// what `@main` is for.
+    ///
+    /// Nothing that answers true here ever reaches scrollback. It cannot: the
+    /// only message that can be quiet is the one the stream is writing into,
+    /// `message_static_settled` refuses to settle that message while
+    /// `stream_msg` points at it, and nothing flushes until it settles — so the
+    /// answer is already final by the time the flush cursor could have reached
+    /// it.
+    pub(crate) fn is_quiet(&self, i: usize) -> bool {
+        self.messages
+            .get(i)
+            .is_some_and(|m| m.digest && m.text.trim() == crate::query::QUIET_MARKER)
+    }
+
     /// The print order of [`Chat::messages`].
     ///
     /// Home messages and excursion rows share one store, and this is the single
@@ -191,9 +213,18 @@ impl Chat {
     /// the store, runs once per build, and is append-only across builds: an
     /// item that has been emitted keeps its position for the rest of the
     /// session, which is what the write-once flush cursor rests on.
+    ///
+    /// The one message that never takes a position is a digest turn's silent
+    /// acknowledgement ([`Chat::is_quiet`]). Append-only is unharmed: the only
+    /// message that can answer to it is the one the stream is still writing, so
+    /// it can never have flushed, and the positions it would have shifted are
+    /// all above the cursor.
     pub(crate) fn flow_order(&self) -> Vec<FlowItem> {
         if self.excursions.is_empty() {
-            return (0..self.messages.len()).map(FlowItem::home).collect();
+            return (0..self.messages.len())
+                .filter(|&i| !self.is_quiet(i))
+                .map(FlowItem::home)
+                .collect();
         }
         // Which indices belong to an excursion rather than to main. Main
         // is "everything nobody claimed", so no message needs to carry a flag
@@ -210,7 +241,7 @@ impl Chat {
         let mut cursor = 0usize;
         let push_main_upto = |upto: usize, cursor: &mut usize, out: &mut Vec<FlowItem>| {
             while *cursor < upto {
-                if !claimed[*cursor] {
+                if !claimed[*cursor] && !self.is_quiet(*cursor) {
                     out.push(FlowItem::home(*cursor));
                 }
                 *cursor += 1;
@@ -422,6 +453,7 @@ impl Chat {
             insert_points: Vec::new(),
             groups: Vec::new(),
             group_of: Vec::new(),
+            digest: false,
         });
         FlowItem {
             index,
@@ -731,6 +763,7 @@ impl Chat {
                     insert_points: Vec::new(),
                     groups: Vec::new(),
                     group_of: Vec::new(),
+                    digest: false,
                 });
                 self.dirty = true;
             }
@@ -1074,6 +1107,7 @@ mod tests {
             insert_points: Vec::new(),
             groups: Vec::new(),
             group_of: Vec::new(),
+            digest: false,
         });
     }
 

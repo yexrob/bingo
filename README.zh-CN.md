@@ -292,22 +292,22 @@ tmux 下仍显示 `#[image]` 占位（tmux 内的活动视口同样保持占位�
 | `Edit` / `Write` | 文件编辑（产生 unified diff 供 UI 预览） |
 | `WebFetch` / `WebSearch` | 网页抓取与搜索（共享 HTTP 连接池；预批准域名自动放行） |
 | `Agent` | 派生命名子代理（异步执行，完成通知注入上下文；`background:false` 可同步等待） |
-| `SendMessage` / `AgentControl` | 子代理续话与生命周期管理（仅主会话装配） |
+| `SendMessage` | 唯一的发言工具：`to` 是 agent（`name` / `@name`）或房间（`#name`）；主 agent 可达任意实例与自己所在的房间，子代理可达 `main` 与自己所在的房间 |
+| `AgentControl` | 子代理生命周期管理（仅主会话装配） |
 | `Team` | 项目编队（仅主会话装配）：`status`/`validate` 只读免询问，`start`/`stop`/`save` 在任何权限模式下都要用户当面确认 |
 | `TaskCreate`/`TaskUpdate`/`TaskGet`/`TaskList` | 任务追踪（磁盘存储，TUI 任务区同源，含生命周期 hook） |
 | `ExperiencePropose`/`ExperienceCommit`/`ExperienceQuery`/`ExperienceOutcome`/`ExperienceForget` | 跨会话经验库（见下） |
 | `AskUserQuestion` | 向用户提选择题（TUI 复用权限询问模态） |
-| `notify_user` | 仅子代理装配：经 main 给用户一行有意为之的通知（每 agent 每分钟一行，超出的合并计数；`level: "urgent"` 另外触发终端提醒通道） |
 | `Skill` | 技能调用（见下） |
 | `mcp__<server>__<tool>` | MCP 接入的工具（见下） |
-| `Channel` / `Post` | 实验：agent 频道互发（见下） |
+| `Channel` | 实验：房间管理（见下） |
 
 ## 子代理
 
-- 主 agent（depth 0）装配 `Agent`/`SendMessage`/`AgentControl`；子代理（depth ≥ 1）
-  只保留 `Agent`（可再派生），无法管理兄弟——hub-and-spoke 拓扑。
-  反方向只有一个工具：`notify_user` 只装配给子代理，主 agent 没有——它本来就在
-  @main 里，开口即抵达用户。
+- 主 agent（depth 0）装配 `Agent`/`AgentControl`；子代理（depth ≥ 1）只保留
+  `Agent`（可再派生），无法管理兄弟——hub-and-spoke 拓扑。`SendMessage` 各层都装配，
+  拓扑靠**寻址**而非藏工具来守：主 agent 可写任意实例与自己所在的任意房间，子代理
+  只能写 `main` 与自己所属的房间，越界一律拒绝。
 - **具名定义**：`~/.config/bingo/agents/*.md` 与 `.bingo/agents/*.md`
   （从 cwd 向上逐层查找，同名项目层优先）；frontmatter
   `name/description/model/provider`，正文 = 子代理 system prompt；
@@ -316,7 +316,14 @@ tmux 下仍显示 `#[image]` 占位（tmux 内的活动视口同样保持占位�
   派生它的那一轮显示为 `◉ 名字 · 任务`；而在没有轮次运行时到达的生命周期事件不再
   写进 @main——改由会话栏、编队生命周期日志与该实例自己的 DM 承载；完成后历史保留。
 - `SendMessage` 向实例发后续指令（上下文保留）；实例忙时排队，当前回合结束
-  自动送达。
+  自动送达。子代理的 `SendMessage(to: "main")` 落进主 agent 的收件箱，主 agent
+  空闲时被唤醒；到达本身不画任何东西——用户看到的只有主 agent 随后说的话。
+  `urgent: true`（仅子代理→main）在到达那一刻额外触发终端提醒通道。
+- 运行**失败**时在 @main 画一行 `⚠ @名字 · 原因`并触发提醒；完成与取消什么都不画。
+  完全由用户自己在 DM 里触发的那一轮，既不产生通知，也不唤醒主 agent。
+- **沉默契约**：被唤醒的那一轮（消化通知，而非用户发问）只有两种收尾——说出用户需要
+  知道或需要拍板的事，或者只回一个 `[[quiet]]` 标记，后者在界面上什么都不渲染：
+  派发行本身已经写着做完了。标记原样进记录，只是不进流。
 - `AgentControl` 可 `list`/`stop`/`delete`。
 - 默认异步执行：立即返回实例名与 task_id，完成时自动通知注入下一轮上下文。
 
@@ -398,8 +405,9 @@ tmux 下仍显示 `#[image]` 占位（tmux 内的活动视口同样保持占位�
 
 `settings.experimental.agentChannels: true` 开启后：
 
-- 主 agent 获得 `Channel`/`Post` 工具：建频道、进出成员（成员限直接子代理，
-  主 agent 名 `main` 自动入席）；成员用 `Post` 发言，消息进全体成员上下文（同序）。
+- 主 agent 获得 `Channel` 工具：建频道、进出成员（成员限直接子代理，主 agent 名
+  `main` 自动入席）；成员用 `SendMessage(to: "#房间")` 发言，消息进全体成员上下文
+  （同序）。主 agent 自己那一份按去抖消化：一阵密集发言只买一轮，而不是一条一轮。
 - `serial` 频道落后发言被弹回并附新增消息（agent 阅读后自行改口，报数式顺序
   由此涌现）；`free` 频道允许交叉。
 - 超限自动冻结频道并通知主 agent（`channelMessageLimit`/`agentMessageLimit` 预算闸）。

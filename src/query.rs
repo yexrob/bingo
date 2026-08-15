@@ -105,6 +105,31 @@ pub(crate) const MAX_TOKENS_RESUME_PROMPT: &str =
 pub(crate) const MAIL_BLOCK_OPEN: &str = "<messages>";
 pub(crate) const MAIL_BLOCK_CLOSE: &str = "</messages>";
 
+/// The silent end of a digest turn (D102).
+///
+/// A turn the main agent was woken into — an injected notification rather than
+/// the user's words — ends one of two ways: in prose, which renders in `@main`
+/// as main speaking, or in exactly this marker, which renders as nothing at
+/// all. The dispatch row already carries the state and the one-line result, so
+/// a completion the screen has told the user about needs no narration; the
+/// marker is how the model says "read, nothing to add" without saying it out
+/// loud. It is recorded verbatim like any other reply — the record stays
+/// complete, only the flow stays quiet. The contract that teaches it is the
+/// main session's system prompt ([`crate::system::DIGEST_HEADING`]); the render
+/// rule is `Chat::is_quiet`.
+///
+/// **Brackets, not a tag.** The obvious spelling for a marker in this codebase
+/// is XML-ish — that is what the injected envelopes wear — but assistant text
+/// is rendered as markdown, and a bare `<quiet/>` on a line of its own parses
+/// as an HTML block and renders to *zero rows*. That is fine where the marker
+/// is meant to disappear and fatal where it is not: the same marker in a turn
+/// the user started is a misfire, and a misfire has to be on screen.
+/// The doubled bracket keeps it in the family of markers the delivery path
+/// already uses (`[DM from user]`, `[follow-up n/m]`), out of reach of the
+/// link-reference syntax a single bracket would fall into, and visible verbatim
+/// wherever it is not suppressed — so "renders literally" needs no second rule.
+pub(crate) const QUIET_MARKER: &str = "[[quiet]]";
+
 /// Task reminder thresholds (TURNS_SINCE_WRITE / TURNS_BETWEEN_REMINDERS).
 const TASK_REMINDER_TURNS: u64 = 10;
 pub(crate) const TASK_REMINDER_MARKER: &str = "[SYSTEM NOTIFICATION - TASK REMINDER]";

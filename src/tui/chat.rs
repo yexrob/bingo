@@ -67,6 +67,12 @@ pub struct UiMessage {
     pub groups: Vec<CollapseGroup>,
     /// Index of the collapse group activities[i] belongs to (None = standalone activity).
     pub group_of: Vec<Option<usize>>,
+    /// This reply belongs to a digest turn (D102): opened by an injected
+    /// notification rather than by the user, through `submit_auto`. Carried on
+    /// the message rather than inferred at render time — "the user submitted
+    /// nothing" and "this is a digest" coincide today and are not the same fact
+    /// — and read by `Chat::is_quiet`, which is where the reasoning lives.
+    pub digest: bool,
 }
 
 /// Collapse group for consecutive Read/Search operations: collapses into a one-line rule summary (`Read 3 files`).
@@ -952,6 +958,11 @@ pub struct Chat {
     /// mid-turn answer. Recorded so a turn that ends without using it can drop it again —
     /// inferring that from "empty assistant message" would also catch messages nobody opened here.
     pub(crate) continuation_msg: Option<usize>,
+    /// The turn about to open was woken, not typed (D102). Set by
+    /// [`Chat::submit_auto`] and taken by the `TurnStart` that follows, which
+    /// stamps it onto the reply. `busy` is latched in between, so no other turn
+    /// can slip in and read it by mistake.
+    pub(crate) digest_turn: bool,
     pub(crate) thinking_buf: String,
     /// Whether the current thinking segment is open for continuation: closed after ToolStart/TextDelta
     /// (segment boundaries); deltas in the same segment continue without paragraph breaks; new segments (fresh reasoning after a tool) are aggregated with \n\n.
@@ -1216,6 +1227,7 @@ impl Chat {
             insert_points: Vec::new(),
             groups: Vec::new(),
             group_of: Vec::new(),
+            digest: false,
         });
         self.dirty = true;
     }
@@ -1355,6 +1367,7 @@ impl Chat {
             stream_msg: None,
             stream_attempt_checkpoint: None,
             continuation_msg: None,
+            digest_turn: false,
             thinking_buf: String::new(),
             thinking_seg_open: false,
             output_tokens: 0,
@@ -1561,6 +1574,9 @@ impl Chat {
                 self.token_rate.start(now);
                 self.notify
                     .set_title(Title::Busy(self.motion.title_glyph(self.tick)));
+                // Taken, not read (D102): a stamp consumed by the turn it was
+                // set for can never outlive it and colour the next one.
+                let digest = std::mem::take(&mut self.digest_turn);
                 self.messages.push(UiMessage {
                     role: Role::Assistant,
                     text: String::new(),
@@ -1569,6 +1585,7 @@ impl Chat {
                     insert_points: Vec::new(),
                     groups: Vec::new(),
                     group_of: Vec::new(),
+                    digest,
                 });
                 self.stream_msg = Some(self.messages.len() - 1);
                 // One verb per turn (D87): sampled here and reused by every
@@ -2067,17 +2084,29 @@ impl Chat {
             UiEvent::TurnEnd => {
                 self.busy = false;
                 self.bash_tail = None;
+                // The silence contract's one reading (D102), taken before
+                // anything downstream acts on the turn: a digest that ended in
+                // the acknowledgement marker is a turn that says nothing, and a
+                // turn that says nothing owes the user no badge, no bell and no
+                // row. Everything else about the turn is unchanged.
+                let quiet = self.stream_msg.is_some_and(|i| self.is_quiet(i));
                 // The `settle` blink starts here (D87): the completion row keeps
                 // the accent for one 120ms window, and the message it belongs to
                 // stays live for exactly that long, so the row freezes into
-                // scrollback at rest and write-once is never broken.
-                self.settle_at = Some(self.tick);
+                // scrollback at rest and write-once is never broken. A quiet
+                // turn settles nothing, so the blink has no subject — armed
+                // anyway it would hold the *previous* message live and re-accent
+                // a row that finished minutes ago.
+                self.settle_at = (!quiet).then_some(self.tick);
                 // A turn short enough to have been watched needs no
                 // notification; a long one is exactly what the user walked away
-                // from (D79). Read before the start time is cleared.
-                if self
-                    .turn_started
-                    .is_some_and(|at| at.elapsed() >= crate::tui::notify::LONG_TURN)
+                // from (D79). Read before the start time is cleared. A quiet
+                // digest is the one long turn that rings nothing: the user never
+                // walked away from it, because they never started it.
+                if !quiet
+                    && self
+                        .turn_started
+                        .is_some_and(|at| at.elapsed() >= crate::tui::notify::LONG_TURN)
                 {
                     self.notify.attention(Attention::TurnComplete);
                 }
@@ -2116,8 +2145,12 @@ impl Chat {
                     // standing in another conversation the bar is the only place
                     // that can say so. Prose only — a turn that said nothing has
                     // nothing to come back for, and `observe` zeroes the count
-                    // outright while @main is the active conversation.
-                    if !self.messages[i].text.trim().is_empty() {
+                    // outright while @main is the active conversation. Since D102
+                    // "said nothing" has a second spelling: the acknowledgement
+                    // marker is text on the wire and silence on the screen, and
+                    // `note_console` also carries the conversation's last-activity
+                    // stamp, so a quiet turn must not reach it at all.
+                    if !quiet && !self.messages[i].text.trim().is_empty() {
                         self.buffers.note_console(false, self.tick);
                     }
                     if let Some(g) = self.messages[i].groups.last_mut() {

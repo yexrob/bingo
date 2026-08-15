@@ -286,6 +286,14 @@ Example (.bingo/settings.json):
   than by withholding the tool). A subagent's message to `main` lands in main's inbox and starts a turn there if
   it is idle; nothing of the arrival is drawn — what the user sees is only what main then says. `urgent: true`
   (subagent→main only) additionally rings the terminal attention channel on arrival.
+  **The silence contract (D102)**: a turn the main agent was *woken* into — digesting a notification rather than
+  answering the user — ends either in prose, which renders in `@main` as main speaking and counts on its unread,
+  or in exactly `[[quiet]]`, which renders as nothing: no message block, no badge, no bell. The dispatch row
+  already carries the state and its one-line result, so a completion the user can see needs no narration; a
+  question, a blocker, a result that changes what they should do next, or anything they asked to be told about is
+  what prose is for. The marker is recorded verbatim like any other reply — the record stays complete, only the
+  flow stays quiet — and in a turn the user typed into it renders literally, because there it is a misfire. It is
+  taught to the main agent only; a subagent never runs a digest turn and never sees the contract.
   Writing to an instance returns a `message_id` after enqueueing and dispatches immediately: an idle instance starts
   now, while a running instance drains its inbox between tool rounds. Everything waiting when the receiver drains is
   folded into one prompt. Queued is not an acknowledgement: `AgentControl(action=messages, agent=…)` reports each
@@ -458,6 +466,12 @@ Example (.bingo/settings.json):
   `main` and the rooms it is a member of, and anything else is refused. A subagent's message to `main` lands in
   main's inbox and starts a turn there if it is idle; nothing of the arrival is drawn — what the user sees is only
   what main then says. `urgent: true` (subagent→main only) additionally rings the terminal attention channel.
+  **The silence contract (D102)**: a turn the main agent was *woken* into ends either in prose, which renders in
+  `@main` as main speaking and counts on its unread, or in exactly `[[quiet]]`, which renders as nothing at all —
+  no message block, no badge, no bell — because the dispatch row already carries the state and its one-line result.
+  Prose is for a question, a blocker, a result that changes what the user should do next, or anything they asked to
+  be told about. The marker is recorded verbatim; only the flow stays quiet. In a turn the user typed into it
+  renders literally, and a subagent never sees the contract at all.
   Writing to an instance returns a `message_id` after enqueueing and dispatches immediately: an idle instance starts now,
   while a running instance drains its inbox between tool rounds. Everything waiting when the receiver drains is folded into one prompt. Queued is not an acknowledgement:
   `AgentControl(action=messages, agent=…)` reports each message as delivered (with which run it landed in), still queued (with its wait time),

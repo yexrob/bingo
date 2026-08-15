@@ -625,6 +625,7 @@ impl Buffers {
                     insert_points: Vec::new(),
                     groups: Vec::new(),
                     group_of: Vec::new(),
+                    digest: false,
                 },
             },
         }));
@@ -977,6 +978,7 @@ fn blank_message(role: Role) -> UiMessage {
         insert_points: Vec::new(),
         groups: Vec::new(),
         group_of: Vec::new(),
+        digest: false,
     }
 }
 

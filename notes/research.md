@@ -3453,3 +3453,134 @@ sees byte-identical output before and after this batch.
    as a tool and `Channel` / `Post` as the room pair — both retired in D98, both already corrected in
    the English README. The vocabulary flip was applied to those lines because the rule applies to
    them; their *content* is a D98 sync debt and correcting it is that batch's call, not a rename's.
+
+### D102. The silence contract: two endings for a turn nobody asked for
+
+**Problem.** D98 gave main a second kind of turn and no rule about how to end it. A dispatch
+finishing, an agent's `SendMessage`, a room going quiet — each of those wakes main into a turn the
+user never typed into, and every one of those turns ended in prose, because prose is what a turn
+ends in. So a run whose dispatch row already said `⎿ done · fixed the parser` bought a paragraph
+saying the same thing again, and the console D98 made quiet filled back up with narration instead of
+lifecycle lines. The design doc's ruling: *a digest turn ends either in prose — which renders in
+@main as main speaking — or in a silent acknowledgement marker that renders as nothing.*
+
+**The flush question, answered before anything was written.** The write-once doctrine says the marker
+must never reach scrollback, not even for a frame, and the batch prompt allowed for two possible
+mechanisms. The existing pipeline already has the guard: `message_static_settled` opens with `if
+Some(i) == self.stream_msg { return false }`, prefix settlement is monotone, and `build_rows` puts
+only the settled prefix in `doc.settled` — which is the only thing `flush_items` ever hands to
+`InlineTerm::insert_history`. `stream_msg` is set in the `TurnStart` arm and cleared in `TurnEnd`, so
+**the message a turn is streaming into cannot settle, and therefore cannot flush, until the turn is
+over**; `streaming_content_is_not_flushed_until_settled` (chat_tests_b.rs) has pinned exactly this
+since the inline rewrite. So the intervention is at settle: `TurnEnd` reads the answer once, before
+`stream_msg` is cleared, and everything downstream branches on it. No transient-region holding was
+needed, and the invariant is proved rather than argued —
+`the_marker_never_reaches_flushed_scrollback` drives a turn frame by frame, flushing at the *last*
+settled mark every frame (more aggressive than production, which waits for the window top), and
+asserts that no captured row ever contains even a half-streamed prefix and that the cursor does not
+move for the turn at all.
+
+**Decision.**
+
+*The marker is bracketed, not tag-shaped, and that was forced by the renderer.* `<quiet/>` is the
+obvious spelling — the injected envelopes are `<messages>` and `<task-notifications>` — and it is
+wrong here, for a reason that only shows up when the contract fails. Assistant text is rendered as
+markdown; a bare `<quiet/>` alone on a line parses as an HTML block and `render_block` emits **zero
+rows** for it. That is harmless where the marker is meant to vanish and fatal where it is not: the
+same string at the end of a turn the user typed into is the model misfiring, and the rule says a
+misfire must be *visible*. A tag would have made "renders literally" depend on a second special case
+in the renderer. `[[quiet]]` renders verbatim in every position tested (alone, padded, mid-prose, in
+a list item), keeps the marker in the family the delivery path already uses (`[DM from user]`,
+`[message from @scout]`, `[follow-up n/m]`), and is doubled so the single-bracket link-reference
+syntax — which turns `[quiet]` into `quiet()` — cannot claim it. One definition,
+`query::QUIET_MARKER`, read by the prompt, the renderer and the projection.
+
+*Tag, don't infer.* The digest fact is stamped in `submit_auto`, the one door a turn nobody submitted
+comes through, into `Chat::digest_turn`; `TurnStart` takes it with `mem::take` and writes it onto the
+reply as `UiMessage::digest`. Three reasons for that shape rather than reading the empty prompt at
+render time: an empty user submission and a woken turn are different facts that happen to produce the
+same prompt string today; `mem::take` means a stamp cannot outlive the turn it was set for, and
+`busy` is latched between the two points so no other turn can read it by mistake; and putting it on
+the *message* rather than on `Chat` means it survives `/clear`, rewind and the transcript pager
+without a single invalidation rule. `open_continuation_message` copies it from the message it closes,
+because a continuation is the same turn.
+
+*One predicate, and it asks both halves.* `Chat::is_quiet(i)` is `digest && text.trim() ==
+QUIET_MARKER`, and `flow_order` — the single answer to what the message store looks like on screen —
+never gives such a message a position. That is the whole render rule: no block, no rows, and so
+nothing for the settled prefix or the flush cursor to see. Append-only survives it, because the only
+message that can answer true is the one the stream is writing, which by the paragraph above cannot
+have flushed; every position it would shift is above the cursor. Suppressing at `flow_order` rather
+than deleting the message is also what keeps `excursions[].at`, `exc.rows[].index` and `stream_msg`
+valid — a `Vec::remove` in the middle would corrupt all three, and the stream message is genuinely
+not always last (a failure alert or a mid-turn conversation switch pushes after it).
+
+*The accounting is three refusals, not one.* A quiet turn does not call `note_console` (which carries
+the unread, the mention accent **and** the conversation's `last_activity` — one call, three
+consequences, so the guard has to be in front of it), does not ring `Attention::TurnComplete` even
+when the turn ran past `LONG_TURN` (the user never walked away from a turn they never started), and
+does not arm the D87 settle blink: nothing settled, and an armed blink would hold the *previous*
+message live and re-accent a completion row that finished minutes ago. A prose digest turn keeps
+D99's behaviour byte for byte.
+
+*Tool calls go with it — the preferred ruling, taken without a fallback.* A digest turn's calls are
+activities *on the streaming message*, so suppressing the message suppresses its work for free, and
+the same `stream_msg` guard means none of those rows could have flushed either. The work is in the
+record and the dispatch row already said the run was done; repeating it on screen is the narration
+the contract exists to stop.
+
+*The record keeps what the flow drops.* The marker is written to the transcript by `record()` in the
+query layer, untouched by any of this. On main's observation page it would otherwise land in the lane
+of whichever agent happened to have woken main — raw protocol inside a conversation — so `walk` files
+an assistant text block equal to the marker as a `TimelineOnly` `Note`, verbatim: the same place
+`runtime_only` puts every other piece of scaffolding, and the symmetric arm to it.
+
+*The contract is main's alone, enforced by a drop.* It is a system block (`system::DIGEST_HEADING`,
+`# Digest turns`) built second in `build_system`, where it reads as a continuation of the base
+prompt's turn behaviour. But a subagent assembles from `parent.system.clone()`, so "main-only" cannot
+be a matter of where it is pushed: `build_sub_session` does
+`system.retain(|b| !b.text.starts_with(DIGEST_HEADING))` before appending `SUBAGENT_NOTE` — the same
+find-by-heading trick `with_model_capabilities` already uses. Nothing wakes a subagent with an
+injected notification, and an instance taught a marker that renders as nothing could only use it to
+disappear its own report.
+
+*No reminder inside the envelope, deliberately.* The batch left it to judgment and the answer is no,
+on evidence: both `<task-notifications>` and `<messages>` are rebuilt and `record`ed **every round**
+of every turn, so a reminder line becomes per-round repetition in the transcript and in the cached
+prefix; and `perspective::split_user_text` recognises the mail envelope by exact `strip_prefix` /
+`strip_suffix`, so a line after `</messages>` breaks D98's attribution outright while a line inside it
+gets filed as a message by `line_source`. The system prompt is the contract, and it is static, cached
+and read on every turn.
+
+**Consequences.**
+
+- `README.zh-CN.md`'s D98 debt, named as limit 4 of D101, is paid: `notify_user` leaves the tool
+  table, `SendMessage` and `AgentControl` become two rows with the real addressing rules,
+  `Channel` / `Post` becomes `Channel` (room management), the sub-agent section's "反方向只有一个
+  工具" paragraph is rewritten around addressing, and the channels section says
+  `SendMessage(to: "#房间")`. The register is the file's own; this is a translation catching up, not
+  new prose. Both READMEs and both of the guide's capability blocks gain the contract itself.
+- 1472 + 13 tests before, 1485 + 13 after (13 added, none removed, none weakened). Two in `system.rs`
+  (the contract says all four of its things; exactly one block carries the heading), one in
+  `tool/agent.rs` (a spawned instance does not inherit it, and inherits everything else), one in
+  `perspective.rs` (the marker is a timeline note, not speech in a lane), nine in `chat_tests_f.rs`
+  as its fourth part.
+- `build_system` gained a doc comment saying it builds the *main* session's blocks, because that is
+  now load-bearing rather than incidental.
+
+**Named limits.**
+
+1. *The contract is model discipline, and nothing enforces it.* A digest turn that ends in
+   `[[quiet]] done!` renders as prose, which is the safe failure; a turn that says nothing and
+   emits no marker renders as an empty assistant message, which is the same blank the pipeline has
+   always had for an empty reply. The floor is what the design doc named: the dispatch row is always
+   visible, `@main` badges, failures alert, the chase machinery still runs.
+2. *A quiet reply stays in `Chat::messages` forever, invisible.* Cheap (one `UiMessage` with a short
+   string per digest turn) and deliberate: suppressing at `flow_order` is what keeps every index into
+   the store valid. A session of thousands of digests would carry thousands of hidden messages.
+3. *The `ctrl+o` transcript pager is a flow view, so it is quiet too.* It renders through
+   `Chat::build_rows`, so the marker is absent there as well; the complete record is the session
+   transcript on disk and main's observation page, both of which keep it.
+4. *Only the TUI has digest turns.* `submit_auto` is a TUI method and the headless and JSON-events
+   hosts have no tick loop, so the contract sits in the main session's prompt for a turn shape those
+   hosts never open. Harmless, and it is the same asymmetry D98 documented for mail.

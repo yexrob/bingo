@@ -388,6 +388,7 @@ pub(super) fn msg(role: Role, text: &str) -> UiMessage {
         insert_points: Vec::new(),
         groups: Vec::new(),
         group_of: Vec::new(),
+        digest: false,
     }
 }
 

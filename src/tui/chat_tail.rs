@@ -441,6 +441,7 @@ impl super::Chat {
             insert_points: Vec::new(),
             groups: Vec::new(),
             group_of: Vec::new(),
+            digest: false,
         });
     }
 
@@ -459,6 +460,7 @@ impl super::Chat {
             insert_points: Vec::new(),
             groups: Vec::new(),
             group_of: Vec::new(),
+            digest: false,
         });
         // @main's own badge (D99). An alert is the one line here nobody chose to
         // say, so it is the one that earns the accent: a reader in another
@@ -530,6 +532,12 @@ impl super::Chat {
 
     /// System-triggered turn: a watchable signal/terminal notification wakes the main agent.
     /// No user input (the notification is injected in run_query's first round); user state is irrelevant.
+    ///
+    /// This is also where a turn is stamped a **digest** (D102). The fact is
+    /// recorded at the door rather than read off the empty prompt at render
+    /// time: an empty submission and a woken turn are two different things that
+    /// happen to produce the same prompt string today, and only one of them is
+    /// allowed to end in silence.
     pub(crate) fn submit_auto(&mut self) {
         if self.busy {
             return;
@@ -537,6 +545,7 @@ impl super::Chat {
         if tokio::runtime::Handle::try_current().is_err() {
             return;
         }
+        self.digest_turn = true;
         self.start_turn(String::new(), false);
     }
 
@@ -618,6 +627,7 @@ impl super::Chat {
                 insert_points: Vec::new(),
                 groups: Vec::new(),
                 group_of: Vec::new(),
+                digest: false,
             });
         }
         self.busy = true;
@@ -694,6 +704,7 @@ impl super::Chat {
             insert_points: Vec::new(),
             groups: Vec::new(),
             group_of: Vec::new(),
+            digest: false,
         });
         self.busy = true;
         // Same as start_turn: a fresh turn clears interrupt suppression —
@@ -761,6 +772,10 @@ impl super::Chat {
         // would try to merge into a block the new message does not have, and be dropped.
         self.thinking_buf.clear();
         self.thinking_seg_open = false;
+        // The continuation is the same turn (D102): whether that turn is a
+        // digest is a fact about the turn, so it travels from the message being
+        // closed to the one taking over the stream.
+        let digest = self.messages[prev].digest;
         self.messages.push(UiMessage {
             role: Role::Assistant,
             text: String::new(),
@@ -769,6 +784,7 @@ impl super::Chat {
             insert_points: Vec::new(),
             groups: Vec::new(),
             group_of: Vec::new(),
+            digest,
         });
         self.stream_msg = Some(self.messages.len() - 1);
         self.stream_attempt_checkpoint = self

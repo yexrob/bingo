@@ -377,6 +377,15 @@ schema from a single source of truth):
   the attention channel; done and cancelled draw nothing. A run whose trigger
   was entirely the user's own DM messages produces no notification and no woken
   turn for the main agent at all.
+- **The silence contract**: a turn the main agent was *woken* into — it is
+  digesting a notification, not answering the user — ends in one of two ways.
+  Either it says the thing the user needs to know or decide, which renders in
+  `@main` as the main agent speaking, or it replies with exactly `[[quiet]]`,
+  which renders as nothing at all: the dispatch row already carries the state
+  and the one-line result, so narrating a completion the user can see is noise.
+  The marker is recorded like any other reply — the record stays complete, only
+  the flow stays quiet — and in a turn the user typed into it renders literally,
+  because there it is a misfire.
 - `AgentControl` can `list`/`stop`/`delete`.
 - Async by default: returns the instance name and task id immediately;
   completion notification is injected into the next turn's context.

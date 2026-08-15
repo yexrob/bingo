@@ -1,13 +1,15 @@
 //! Chat state-machine tests, part six: what the console does and does not print
 //! (D94's delivery rerouting, D98's quiet console).
 //!
-//! Three parts. The first pins what main *stopped* printing: an agent's spawn
+//! Four parts. The first pins what main *stopped* printing: an agent's spawn
 //! and completion used to hang a `◉ name · task` row off whatever assistant
 //! message happened to be last, and now they do not — while the signal they
 //! carried still lands in the lifecycle log, on the bar, and in the agent's own
 //! DM. The second is the one line that still comes through, and the reason it
 //! does: a failure cannot depend on the main agent choosing to narrate it. The
-//! third is the digest debounce, which turns a burst of mail into one turn.
+//! third is the digest debounce, which turns a burst of mail into one turn. The
+//! fourth is D102's silence contract: what a woken turn is allowed to end in,
+//! and what the flow, the badge and the scrollback do with each ending.
 
 use super::tests_a::*;
 use super::*;
@@ -926,5 +928,321 @@ fn a_steered_message_still_wears_the_users_face() {
     assert!(
         row.starts_with(" U "),
         "the user typed it, so the face is right: {row:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// D102 — the silence contract
+// ---------------------------------------------------------------------------
+
+/// Open a turn the way `submit_auto` does: nobody typed into it, so it is a
+/// digest and the silence contract applies to how it ends.
+fn digest_turn(chat: &mut Chat) {
+    chat.digest_turn = true;
+    chat.apply_turn_start();
+}
+
+/// Everything the terminal would have written into scrollback since the last
+/// call, flushed as eagerly as the cursor allows.
+///
+/// Production picks a mark by where the window top is; this takes the *last*
+/// settled mark every frame, which is the most that could ever freeze. Rows it
+/// never sees are rows scrollback can never hold.
+fn frozen(chat: &mut Chat, width: usize) -> Vec<String> {
+    chat.build_rows(width);
+    let Some(mark) = chat.doc.settled_marks.last().copied() else {
+        return Vec::new();
+    };
+    let end = mark.row_end.min(chat.doc.rows.len());
+    let rows = if end > chat.tail_start {
+        chat.doc.rows[chat.tail_start..end]
+            .iter()
+            .map(|r| r.line.plain_text())
+            .collect()
+    } else {
+        Vec::new()
+    };
+    chat.advance_flushed_upto(mark);
+    rows
+}
+
+/// The contract's own sentence: a digest turn that ends in the acknowledgement
+/// marker renders as nothing — the dispatch row already said the work was done.
+/// The reply itself is kept verbatim, because the record is complete and only
+/// the flow is quiet.
+#[test]
+fn a_quiet_digest_turn_renders_as_nothing() {
+    let mut chat = test_chat();
+    chat.messages.push(msg(Role::User, "keep an eye on scout"));
+    let before = main_rows(&mut chat);
+
+    digest_turn(&mut chat);
+    chat.apply_event(UiEvent::TextDelta(crate::query::QUIET_MARKER.into()));
+    chat.apply_event(UiEvent::TurnEnd);
+
+    assert_eq!(
+        main_rows(&mut chat),
+        before,
+        "the flow is byte-identical the moment the turn ends"
+    );
+    assert!(
+        !chat.settling(),
+        "and no settle blink was armed for it: nothing settled, so holding the \
+         message above it live would only re-accent a row that finished long ago"
+    );
+    past_settle(&mut chat);
+    assert_eq!(
+        main_rows(&mut chat),
+        before,
+        "and still identical once the window the blink would have used has passed"
+    );
+    assert_eq!(
+        chat.messages.last().map(|m| m.text.as_str()),
+        Some(crate::query::QUIET_MARKER),
+        "the reply is kept exactly as it was written — silence is a render rule, not a deletion"
+    );
+}
+
+/// The badge half of the same rule, read from where a badge can be seen: the
+/// user is standing in a DM, so `@main`'s count is live. A quiet digest adds
+/// nothing to it and does not touch the conversation's activity clock either —
+/// `note_console` carries both, so the guard has to be in front of the call.
+#[test]
+fn a_quiet_digest_turn_raises_no_badge() {
+    let mut chat = test_chat();
+    seed_agent(&chat, "scout");
+    chat.refresh_conversations();
+    chat.switch_to(BufferId::Dm("scout".to_string()));
+    let console = BufferId::Hub;
+    let activity_before = chat.buffers.get(&console).map(|b| b.last_activity());
+
+    chat.tick();
+    digest_turn(&mut chat);
+    chat.apply_event(UiEvent::TextDelta(crate::query::QUIET_MARKER.into()));
+    chat.apply_event(UiEvent::TurnEnd);
+
+    assert_eq!(
+        chat.buffers.get(&console).map(|b| b.unread()),
+        Some(0),
+        "a turn that said nothing gives the reader nothing to come back for"
+    );
+    assert_eq!(
+        chat.buffers.get(&console).map(|b| b.mention()),
+        Some(false),
+        "and nothing that wants them"
+    );
+    assert_eq!(
+        chat.buffers.get(&console).map(|b| b.last_activity()),
+        activity_before,
+        "the console did nothing worth sorting the switcher by"
+    );
+
+    // The control, in the same conversation and on the same clock: prose from a
+    // digest turn is main speaking, and D99's count is untouched by D102.
+    digest_turn(&mut chat);
+    chat.apply_event(UiEvent::TextDelta(
+        "scout wants a decision on the schema".into(),
+    ));
+    chat.apply_event(UiEvent::TurnEnd);
+    assert_eq!(
+        chat.buffers.get(&console).map(|b| b.unread()),
+        Some(1),
+        "the other ending still badges"
+    );
+}
+
+/// A digest turn that speaks says it in `@main`. The contract adds an ending, it
+/// does not take one away.
+#[test]
+fn a_digest_turn_that_speaks_still_speaks() {
+    let mut chat = test_chat();
+
+    digest_turn(&mut chat);
+    chat.apply_event(UiEvent::TextDelta(
+        "scout wants a decision on the schema".into(),
+    ));
+    chat.apply_event(UiEvent::TurnEnd);
+    past_settle(&mut chat);
+
+    assert!(
+        main_rows(&mut chat)
+            .iter()
+            .any(|row| row.contains("scout wants a decision on the schema")),
+        "prose from a digest turn is main speaking, and main speaks in @main"
+    );
+}
+
+/// A digest turn long enough to have rung the D79 completion bell rings nothing
+/// when it ends in silence: the user never walked away from a turn they never
+/// started. The prose ending, on the same clock, still rings.
+#[test]
+fn a_long_digest_turn_that_goes_quiet_rings_nothing() {
+    // The OSC-9 channel rather than the bell one: a title is `OSC 2 … BEL`, so a
+    // bare `\x07` cannot tell a ring from the busy title this turn also sets.
+    const NOTICE: &str = "\x1b]9;";
+    let mut chat = test_chat();
+    chat.set_notifier(Notifier::new(
+        NotifyChannel::Iterm2,
+        &TerminalEnv::default(),
+    ));
+    let _ = chat.notify.take();
+
+    digest_turn(&mut chat);
+    chat.turn_started = Some(std::time::Instant::now() - crate::tui::notify::LONG_TURN);
+    chat.apply_event(UiEvent::TextDelta(crate::query::QUIET_MARKER.into()));
+    chat.apply_event(UiEvent::TurnEnd);
+    assert!(
+        !emitted(&mut chat).contains(NOTICE),
+        "silence does not go looking for the user"
+    );
+
+    digest_turn(&mut chat);
+    chat.turn_started = Some(std::time::Instant::now() - crate::tui::notify::LONG_TURN);
+    chat.apply_event(UiEvent::TextDelta("the migration needs your call".into()));
+    chat.apply_event(UiEvent::TurnEnd);
+    assert!(
+        emitted(&mut chat).contains(NOTICE),
+        "and the same turn ending in prose still does"
+    );
+}
+
+/// The marker is only silence where silence was the alternative. In a turn the
+/// user typed into, the same marker is the model misfiring, and a misfire the
+/// renderer swallows is a bug nobody can see.
+#[test]
+fn the_marker_in_a_turn_the_user_started_renders_literally() {
+    let mut chat = test_chat();
+    chat.apply_turn_start();
+    chat.apply_event(UiEvent::TextDelta(crate::query::QUIET_MARKER.into()));
+    chat.apply_event(UiEvent::TurnEnd);
+    past_settle(&mut chat);
+
+    assert!(
+        main_rows(&mut chat)
+            .iter()
+            .any(|row| row.contains(crate::query::QUIET_MARKER)),
+        "the user asked for something and got this: they must be able to see it"
+    );
+    assert_eq!(
+        chat.buffers.get(&BufferId::Hub).map(|b| b.unread()),
+        Some(0),
+        "the reader is standing in @main, so there is nothing to badge"
+    );
+}
+
+/// The hard invariant. Scrollback is written once and never rewritten, so the
+/// marker must not reach it — not at the end of the turn, and not for one frame
+/// in the middle of it either. The frame is taken after every step a turn can
+/// take, and each one flushes as much as the cursor will allow.
+#[test]
+fn the_marker_never_reaches_flushed_scrollback() {
+    let mut chat = test_chat();
+    let mut scrollback: Vec<String> = Vec::new();
+    // A settled exchange first, so the flush cursor is genuinely moving and the
+    // test is not passing because nothing ever freezes.
+    chat.messages.push(msg(Role::User, "keep an eye on scout"));
+    chat.apply_turn_start();
+    chat.apply_event(UiEvent::TextDelta("watching".into()));
+    chat.apply_event(UiEvent::TurnEnd);
+    past_settle(&mut chat);
+    scrollback.extend(frozen(&mut chat, 80));
+    let settled_before = chat.flushed_segments;
+    assert!(
+        scrollback.iter().any(|row| row.contains("watching")),
+        "the control: an ordinary reply does freeze"
+    );
+
+    digest_turn(&mut chat);
+    scrollback.extend(frozen(&mut chat, 80));
+    // The marker arrives in pieces, as a stream delivers it.
+    for chunk in ["[[qu", "ie", "t]]"] {
+        chat.apply_event(UiEvent::TextDelta(chunk.into()));
+        scrollback.extend(frozen(&mut chat, 80));
+        chat.tick();
+        scrollback.extend(frozen(&mut chat, 80));
+    }
+    chat.apply_event(UiEvent::TurnEnd);
+    scrollback.extend(frozen(&mut chat, 80));
+    past_settle(&mut chat);
+    scrollback.extend(frozen(&mut chat, 80));
+
+    assert!(
+        !scrollback.iter().any(|row| row.contains("[[")),
+        "nothing of the marker was ever frozen, not even a half-streamed prefix: {scrollback:?}"
+    );
+    assert_eq!(
+        chat.flushed_segments, settled_before,
+        "and the cursor did not move for it, so no blank segment was frozen in its place"
+    );
+}
+
+/// A digest turn that did work before going quiet renders as nothing at all —
+/// the work included. The record kept the calls and the dispatch row said the
+/// run was done; repeating that on screen is the narration the contract exists
+/// to stop.
+#[test]
+fn a_quiet_digest_turn_hides_the_work_it_did_too() {
+    let mut chat = test_chat();
+    let before = main_rows(&mut chat);
+
+    digest_turn(&mut chat);
+    chat.apply_event(UiEvent::ToolStart {
+        name: "Bash".into(),
+    });
+    chat.apply_event(UiEvent::ToolReady {
+        tool_call_id: "d102-tool".into(),
+        name: "Bash".into(),
+        input: serde_json::json!({"command": "git log -1"}),
+        standalone: false,
+    });
+    chat.apply_event(UiEvent::TextDelta(crate::query::QUIET_MARKER.into()));
+    chat.apply_event(UiEvent::TurnEnd);
+    past_settle(&mut chat);
+
+    assert!(
+        chat.messages
+            .last()
+            .is_some_and(|m| !m.activities.is_empty()),
+        "the calls are on the message, which is what makes this the interesting case"
+    );
+    assert_eq!(
+        main_rows(&mut chat),
+        before,
+        "and none of them printed a row"
+    );
+}
+
+/// Tag, don't infer: the digest fact is stamped at `submit_auto`, the one door a
+/// turn nobody typed into comes through, and the reply carries it from there. An
+/// ordinary turn opened with the same empty prompt is not a digest.
+#[tokio::test]
+async fn submit_auto_stamps_the_turn_a_digest() {
+    let mut chat = test_chat();
+    chat.submit_auto();
+    assert!(chat.busy, "the turn opened");
+    assert!(chat.digest_turn, "and it was stamped on the way through");
+    chat.apply_turn_start();
+    assert_eq!(
+        chat.messages.last().map(|m| m.digest),
+        Some(true),
+        "the reply carries the fact past the end of the turn"
+    );
+    assert!(
+        !chat.digest_turn,
+        "and the stamp is spent, so it cannot colour the next turn"
+    );
+}
+
+/// The same emptiness, the other origin: `start_turn` with no text is not a
+/// digest, so a marker in it is a misfire like any other. This is the pair of
+/// facts that must not be read off one another.
+#[test]
+fn an_empty_submission_is_not_a_digest() {
+    let mut chat = test_chat();
+    chat.apply_turn_start();
+    assert_eq!(
+        chat.messages.last().map(|m| m.digest),
+        Some(false),
+        "nothing stamped it, so nothing about it is silent"
     );
 }
