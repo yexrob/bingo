@@ -1390,9 +1390,9 @@ fn a_pending_prompt_keeps_the_title_it_needs() {
     );
 }
 
-/// D89: Esc in a conversation other than the hub is navigation, and navigation
-/// comes before interruption. A hub turn running behind it keeps running — its
-/// interrupt is reachable from the hub, which is the only place it is the thing
+/// D89: Esc in a conversation other than main is navigation, and navigation
+/// comes before interruption. A main turn running behind it keeps running — its
+/// interrupt is reachable from main, which is the only place it is the thing
 /// on screen. Ctrl+C is unchanged and still stops the turn from anywhere.
 #[test]
 fn esc_goes_home_before_it_interrupts() {
@@ -1410,10 +1410,10 @@ fn esc_goes_home_before_it_interrupts() {
     chat.busy = true;
     chat.switch_to(BufferId::Dm("scout".into()));
 
-    assert_eq!(chat.esc_layer(), Some(EscLayer::BackToHub));
+    assert_eq!(chat.esc_layer(), Some(EscLayer::BackToMain));
     assert_eq!(
         chat.esc_busy_hint(),
-        "esc to hub",
+        "esc to @main",
         "the status row says where the key goes"
     );
     assert!(chat.on_key(KeyCode::Esc, KeyModifiers::NONE));
@@ -1429,7 +1429,7 @@ fn esc_goes_home_before_it_interrupts() {
     assert_eq!(chat.esc_layer(), Some(EscLayer::Interrupt));
     assert_eq!(chat.esc_busy_hint(), "esc to interrupt");
     assert!(chat.on_key(KeyCode::Esc, KeyModifiers::NONE));
-    assert!(chat.interrupted, "the turn is reachable from the hub");
+    assert!(chat.interrupted, "the turn is reachable from main");
 }
 
 /// D89: the return home takes its place in the walk rather than shortcutting
@@ -1443,7 +1443,7 @@ fn esc_peels_the_conversation_in_its_place_above_the_interrupt() {
     assert_eq!(
         EscLayer::ORDER
             .iter()
-            .position(|layer| *layer == EscLayer::BackToHub)
+            .position(|layer| *layer == EscLayer::BackToMain)
             .map(|i| i + 1),
         EscLayer::ORDER
             .iter()
@@ -1484,7 +1484,7 @@ fn esc_peels_the_conversation_in_its_place_above_the_interrupt() {
         vec![
             EscLayer::InfoLines,
             EscLayer::HelpPanel,
-            EscLayer::BackToHub,
+            EscLayer::BackToMain,
             EscLayer::Interrupt,
         ],
         "the stack is walked top-down, one entry per press"
@@ -1553,7 +1553,7 @@ fn esc_peels_the_switcher_and_nothing_under_it() {
         vec![
             EscLayer::Switcher,
             EscLayer::HelpPanel,
-            EscLayer::BackToHub,
+            EscLayer::BackToMain,
             EscLayer::Interrupt,
         ],
         "the stack is walked top-down, one entry per press"
@@ -1644,11 +1644,11 @@ async fn a_dialog_reaches_the_user_inside_a_conversation() {
     );
 }
 
-/// D89: steering offers the running turn what the *hub's* composer submitted.
+/// D89: steering offers the running turn what `@main`'s composer submitted.
 /// A message typed into a DM is addressed to a subagent, so it must not reach
 /// the model's turn — neither as a steer nor as a queued item behind it.
 #[tokio::test]
-async fn a_dm_submission_never_steers_the_hubs_turn() {
+async fn a_dm_submission_never_steers_mains_turn() {
     use crate::tui::buffer::BufferId;
 
     let mut chat = chat_with_history("steer-dm");
@@ -1662,7 +1662,7 @@ async fn a_dm_submission_never_steers_the_hubs_turn() {
     chat.refresh_conversations();
     chat.busy = true;
 
-    // From the hub, the same text would be on offer at the next barrier.
+    // From main, the same text would be on offer at the next barrier.
     chat.switch_to(BufferId::Dm("scout".into()));
     chat.set_input("use tabs");
     chat.submit();
@@ -1677,12 +1677,13 @@ async fn a_dm_submission_never_steers_the_hubs_turn() {
         chat.session
             .agents
             .pending_of("scout")
-            .contains(&"use tabs".to_string())
+            .iter()
+            .any(|(from, text)| from == crate::channels::USER_NAME && text == "use tabs")
             || !chat.session.agents.take_running("scout", 0).is_empty(),
         "it went to the instance instead"
     );
 
-    // Back at the hub the offer works exactly as D83 left it.
+    // Back at main the offer works exactly as D83 left it.
     chat.switch_to(BufferId::Hub);
     chat.set_input("use tabs");
     chat.submit();
@@ -1692,7 +1693,7 @@ async fn a_dm_submission_never_steers_the_hubs_turn() {
             id: 0,
             text: "use tabs".into()
         }],
-        "the hub's composer still steers"
+        "main's composer still steers"
     );
 }
 

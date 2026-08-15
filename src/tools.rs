@@ -62,15 +62,21 @@ pub async fn assemble_tools(
         Box::new(ExperienceOutcomeTool),
         Box::new(ExperienceForgetTool),
     ];
-    // hub-and-spoke: continuation and lifecycle management only on the main session
-    // (subagents don't manage siblings).
+    // Every participant speaks with the same verb (D98). `SendMessage` is
+    // assembled at every depth and hub-and-spoke is preserved by *addressing*
+    // rather than by a second tool: main reaches any instance and any room it is
+    // in, a subagent reaches `main` and the rooms it is a member of. `Post` and
+    // `notify_user` retired into it — the first was a second name for speaking,
+    // the second a second name for speaking to main.
     let channels_on = session.settings.experimental.agent_channels;
+    tools.push(Box::new(SendMessageTool::new(session.clone())));
     if session.depth == 0 {
         // Only the session that owns the UI can question the user. A subagent's answer
         // channel is its return value, not a modal — shipping the tool there would just
         // buy an "unanswered" round trip.
         tools.push(Box::new(AskUserQuestionTool));
-        tools.push(Box::new(SendMessageTool::new(session.clone())));
+        // Continuation and lifecycle management stay the main session's:
+        // subagents don't manage siblings.
         tools.push(Box::new(AgentControlTool::new(session.clone())));
         // The crew is the project's, not a subagent's: a member that could restart or
         // rewrite the team it belongs to is a loop with the user's consent in the middle.
@@ -79,30 +85,17 @@ pub async fn assemble_tools(
             tools.push(Box::new(crate::tool::channel::ChannelTool::new(
                 session.clone(),
             )));
-            tools.push(Box::new(crate::tool::channel::PostTool::new(
-                session.clone(),
-            )));
         }
-    } else {
-        // The other direction (D94): only an agent the user is *not* looking at needs
-        // a way to reach them. The main agent already holds the hub — everything it
-        // says arrives by being said, so a notify tool there would be a second and
-        // worse way to speak. A subagent's work lives in its DM, which the user reads
-        // when they choose to; this is the one line it may put in front of them.
-        tools.push(Box::new(crate::tool::notify_user::NotifyUserTool));
-        if channels_on && session.depth == 1 && session.instance.is_some() {
-            // Room cohort (experimental): a direct subagent both speaks in rooms
-            // and forms them (D95). Grouping used to be the main agent's alone,
-            // which made every room a room the top of the tree had convened; a
-            // room is an arbitrary subset of the team, and two members who need
-            // to work something out are exactly such a subset.
-            tools.push(Box::new(crate::tool::channel::PostTool::new(
-                session.clone(),
-            )));
-            tools.push(Box::new(crate::tool::channel::ChannelTool::new(
-                session.clone(),
-            )));
-        }
+    } else if channels_on && session.depth == 1 && session.instance.is_some() {
+        // Room cohort (experimental): a direct subagent forms rooms of its own
+        // (D95). Grouping used to be the main agent's alone, which made every
+        // room a room the top of the tree had convened; a room is an arbitrary
+        // subset of the team, and two members who need to work something out are
+        // exactly such a subset. Speaking in one is `SendMessage(to: "#room")`,
+        // gated by the same cohort rule inside the tool.
+        tools.push(Box::new(crate::tool::channel::ChannelTool::new(
+            session.clone(),
+        )));
     }
     let mcp = {
         let mgr = session.runtime.mcp.clone();
@@ -206,11 +199,13 @@ mod tests {
     }
 
     /// hub-and-spoke: continuation/lifecycle tools only assembled for the main session,
-    /// not subagents.
+    /// not subagents. `SendMessage` left this list in D98 — it is assembled
+    /// everywhere now, and the topology is enforced by its addressing rules
+    /// instead (see the tool's own tests).
     #[tokio::test]
-    async fn hub_agent_tools_only_at_depth_zero() {
+    async fn main_agent_tools_only_at_depth_zero() {
         let mut warn = |_: String| {};
-        let hub: Vec<String> = assemble_tools(&session_at_depth(0), &mut warn)
+        let main_tools: Vec<String> = assemble_tools(&session_at_depth(0), &mut warn)
             .await
             .iter()
             .map(|t| t.name())
@@ -223,8 +218,8 @@ mod tests {
             "Team",
         ] {
             assert!(
-                hub.iter().any(|n| n == expected),
-                "missing {expected}: {hub:?}"
+                main_tools.iter().any(|n| n == expected),
+                "missing {expected}: {main_tools:?}"
             );
         }
         let sub: Vec<String> = assemble_tools(&session_at_depth(1), &mut warn)
@@ -237,7 +232,7 @@ mod tests {
             "subagents can still be spawned"
         );
         // AskUserQuestion needs a prompt surface: only the session that owns the UI has one.
-        for absent in ["SendMessage", "AgentControl", "AskUserQuestion", "Team"] {
+        for absent in ["AgentControl", "AskUserQuestion", "Team"] {
             assert!(
                 !sub.iter().any(|n| n == absent),
                 "{absent} must not be handed down: {sub:?}"
@@ -245,23 +240,13 @@ mod tests {
         }
     }
 
-    /// D94: `notify_user` runs the other way down the spoke. The main agent holds
-    /// the hub already — a tool for "reaching the user" there would be a second
-    /// and worse way to say something it can simply say — so it is the one tool
-    /// assembled for subagents and withheld from the session that owns the UI.
+    /// D98: one speech tool. A subagent gets `SendMessage` — which is how it
+    /// reaches main deliberately — and neither of the two tools that used to
+    /// share that job: `notify_user` (a second way to speak to main) and `Post`
+    /// (a second way to speak to a room).
     #[tokio::test]
-    async fn notify_user_is_a_subagent_tool_only() {
+    async fn a_subagent_gets_send_message_and_neither_retired_tool() {
         let mut warn = |_: String| {};
-        let hub: Vec<String> = assemble_tools(&session_at_depth(0), &mut warn)
-            .await
-            .iter()
-            .map(|t| t.name())
-            .collect();
-        assert!(
-            !hub.iter().any(|n| n == "notify_user"),
-            "the main agent talks to the user by talking: {hub:?}"
-        );
-
         for depth in [1, 2] {
             let sub: Vec<String> = assemble_tools(&session_at_depth(depth), &mut warn)
                 .await
@@ -269,44 +254,53 @@ mod tests {
                 .map(|t| t.name())
                 .collect();
             assert!(
-                sub.iter().any(|n| n == "notify_user"),
-                "a subagent at depth {depth} needs a road to the user: {sub:?}"
+                sub.iter().any(|n| n == "SendMessage"),
+                "a subagent at depth {depth} needs a road to main: {sub:?}"
+            );
+            for retired in ["notify_user", "Post"] {
+                assert!(
+                    !sub.iter().any(|n| n == retired),
+                    "{retired} retired into SendMessage: {sub:?}"
+                );
+            }
+        }
+        let main_tools: Vec<String> = assemble_tools(&session_with(0, true), &mut warn)
+            .await
+            .iter()
+            .map(|t| t.name())
+            .collect();
+        for retired in ["notify_user", "Post"] {
+            assert!(
+                !main_tools.iter().any(|n| n == retired),
+                "{retired} is gone from every assembly: {main_tools:?}"
             );
         }
     }
 
-    /// Channel tools (experimental): not assembled by default; when enabled the hub gets
-    /// Channel+Post, named depth-1 instances only get Post, deeper levels none.
+    /// Room management (experimental): not assembled by default; when enabled the
+    /// main session and named depth-1 instances get `Channel`, deeper levels none.
+    /// Speaking in a room is `SendMessage(to: "#room")` and needs no tool of its own.
     #[tokio::test]
     async fn channel_tools_gated_by_experimental_flag() {
         let mut warn = |_: String| {};
         let names =
             |tools: Vec<Box<dyn Tool>>| -> Vec<String> { tools.iter().map(|t| t.name()).collect() };
         let off = names(assemble_tools(&session_at_depth(0), &mut warn).await);
-        assert!(
-            !off.iter().any(|n| n == "Channel" || n == "Post"),
-            "{off:?}"
-        );
+        assert!(!off.iter().any(|n| n == "Channel"), "{off:?}");
 
-        let hub = names(assemble_tools(&session_with(0, true), &mut warn).await);
-        for expected in ["Channel", "Post"] {
-            assert!(
-                hub.iter().any(|n| n == expected),
-                "missing {expected}: {hub:?}"
-            );
-        }
+        let main_tools = names(assemble_tools(&session_with(0, true), &mut warn).await);
+        assert!(
+            main_tools.iter().any(|n| n == "Channel"),
+            "missing Channel: {main_tools:?}"
+        );
         let sub_session = std::sync::Arc::new(Session {
             instance: Some("a".into()),
             ..(*session_with(1, true)).clone()
         });
         let sub = names(assemble_tools(&sub_session, &mut warn).await);
         assert!(
-            sub.iter().any(|n| n == "Post"),
-            "cohort members can speak: {sub:?}"
-        );
-        assert!(
             sub.iter().any(|n| n == "Channel"),
-            "and form rooms of their own (D95): {sub:?}"
+            "cohort members form rooms of their own (D95): {sub:?}"
         );
         let deep = std::sync::Arc::new(Session {
             instance: Some("d".into()),
@@ -314,8 +308,8 @@ mod tests {
         });
         let deep = names(assemble_tools(&deep, &mut warn).await);
         assert!(
-            !deep.iter().any(|n| n == "Post"),
-            "deep layers get no channel tools: {deep:?}"
+            !deep.iter().any(|n| n == "Channel"),
+            "deep layers get no room tools: {deep:?}"
         );
     }
 

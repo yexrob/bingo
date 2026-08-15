@@ -99,6 +99,37 @@ const MAX_OUTPUT_TOKENS_RECOVERY_LIMIT: u32 = 3;
 pub(crate) const MAX_TOKENS_RESUME_PROMPT: &str =
     "Output token limit hit. Resume directly from where you left off. Do not apologize or explain.";
 
+/// Wrapper around the main agent's drained inbox (D98). It carries room relays
+/// and direct messages alike, so it is named for what it is rather than for one
+/// of the two; the marker on each line inside says which kind it is.
+pub(crate) const MAIL_BLOCK_OPEN: &str = "<messages>";
+pub(crate) const MAIL_BLOCK_CLOSE: &str = "</messages>";
+
+/// The silent end of a digest turn (D102).
+///
+/// A turn the main agent was woken into — an injected notification rather than
+/// the user's words — ends one of two ways: in prose, which renders in `@main`
+/// as main speaking, or in exactly this marker, which renders as nothing at
+/// all. The dispatch row already carries the state and the one-line result, so
+/// a completion the screen has told the user about needs no narration; the
+/// marker is how the model says "read, nothing to add" without saying it out
+/// loud. It is recorded verbatim like any other reply — the record stays
+/// complete, only the flow stays quiet. The contract that teaches it is the
+/// main session's system prompt ([`crate::system::DIGEST_HEADING`]); the render
+/// rule is `Chat::is_quiet`.
+///
+/// **Brackets, not a tag.** The obvious spelling for a marker in this codebase
+/// is XML-ish — that is what the injected envelopes wear — but assistant text
+/// is rendered as markdown, and a bare `<quiet/>` on a line of its own parses
+/// as an HTML block and renders to *zero rows*. That is fine where the marker
+/// is meant to disappear and fatal where it is not: the same marker in a turn
+/// the user started is a misfire, and a misfire has to be on screen.
+/// The doubled bracket keeps it in the family of markers the delivery path
+/// already uses (`[DM from user]`, `[follow-up n/m]`), out of reach of the
+/// link-reference syntax a single bracket would fall into, and visible verbatim
+/// wherever it is not suppressed — so "renders literally" needs no second rule.
+pub(crate) const QUIET_MARKER: &str = "[[quiet]]";
+
 /// Task reminder thresholds (TURNS_SINCE_WRITE / TURNS_BETWEEN_REMINDERS).
 const TASK_REMINDER_TURNS: u64 = 10;
 pub(crate) const TASK_REMINDER_MARKER: &str = "[SYSTEM NOTIFICATION - TASK REMINDER]";
@@ -755,7 +786,6 @@ pub(crate) fn tool_context(session: &Session, ui: &UiHooks) -> Result<ToolContex
         // Session-scoped, like `rewind`: a subagent inherits the parent's handle in
         // `build_sub_session`, so the per-agent rate limit is one table for the whole
         // session rather than one per spawn.
-        notify_user: session.runtime.notify_user.clone(),
     })
 }
 
@@ -960,7 +990,7 @@ async fn query_loop(
         // follow-up sent in the previous round has already refilled the inbox and renewed the
         // lease. Only fires in a project whose crew is up; elsewhere the sweep is a no-op.
         //
-        // The hub sweeps, and only the hub: every instance shares this registry, so letting a
+        // Main sweeps, and only main: every instance shares this registry, so letting a
         // subagent's own loop run it would have hires releasing each other — and themselves.
         let released = if session.instance.is_none() {
             session.agents.release_hires()
@@ -974,7 +1004,7 @@ async fn query_loop(
         let mut notes = session
             .watch
             .consume_notifications(session.instance.as_deref());
-        // Named rather than swept silently: without this the hub's next SendMessage to a
+        // Named rather than swept silently: without this main's next SendMessage to a
         // released hire fails with "no subagent named …", which reads as a bug rather than
         // as the lifetime it agreed to.
         if !released.is_empty() {
@@ -998,15 +1028,25 @@ async fn query_loop(
                 ui,
             );
         }
-        // Channel message injection (channels the hub is a member of): batched at turn
-        // boundaries, in order.
-        let mail = session.channels.drain_hub_mail();
+        // The main agent's inbox (D98): room relays it is a member of, plus direct
+        // messages an agent sent it, batched at turn boundaries, in order. One
+        // store, one drain, one block — the marker on each line says which kind
+        // it is, and `buffer::line_source` is what reads those markers back.
+        //
+        // Guarded on the main session: the registry is shared with every
+        // subagent, so an unguarded drain let a subagent's own turn boundary eat
+        // mail addressed to main.
+        let mail = if session.instance.is_none() {
+            session.channels.drain_main_mail()
+        } else {
+            Vec::new()
+        };
         if !mail.is_empty() {
             record(
                 session,
                 &mut messages,
                 Message::user_text(format!(
-                    "<channel-messages>\n{}\n</channel-messages>",
+                    "{MAIL_BLOCK_OPEN}\n{}\n{MAIL_BLOCK_CLOSE}",
                     mail.join("\n")
                 )),
                 ui,
@@ -3027,7 +3067,7 @@ mod tests {
             .agents
             .deliver(
                 "worker",
-                crate::channels::HUB_NAME,
+                crate::channels::MAIN_NAME,
                 "first",
                 Vec::new(),
                 None,
@@ -3037,7 +3077,7 @@ mod tests {
             .agents
             .deliver(
                 "worker",
-                crate::channels::HUB_NAME,
+                crate::channels::MAIN_NAME,
                 "second",
                 Vec::new(),
                 None,

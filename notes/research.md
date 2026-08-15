@@ -2959,3 +2959,628 @@ perspective page transmits all eight portraits on open rather than the ones it w
   load registering nothing, `/images` listing and Enter opening, the `Menu` Esc layer, the empty case,
   the click target on both row shapes, an ordinary row not being one, transcript `o` and its footer,
   and a failed open landing on the info tier).
+
+### D98. The quiet console, and one verb for speaking
+
+**Problem.** D94 removed the lifecycle *lines* from the hub and stopped there. Underneath, the bus
+was intact: `chat.rs`'s `WatchEvent` arm fired `submit_auto()` on every terminal state, trigger-blind,
+so the user typing into an agent's DM woke the main agent to digest their private exchange — D63's
+privacy line drawn everywhere except on the wake path — and every room post with `main` as a member
+bought its own woken turn, so three agents talking for a minute bought three digests of a conversation
+that had not finished happening. Meanwhile three tools meant "say something": `SendMessage` (main→sub),
+`Post` (→room), `notify_user` (sub→user). Three verbs, three vocabularies, one act.
+
+**The inventory**, taken at `e7df0e3` before anything changed:
+
+| Piece | Where | Now |
+|---|---|---|
+| `SendMessageTool` — main-only, input field `agent`, sender hardcoded `HUB_NAME` | `tool/agent.rs` | The one speech tool: `to` is the conversation namespace, assembled at every depth, sender stamped from `session.instance` |
+| `PostTool` — the room wrapper around `deliver_post` | `tool/channel.rs` | Deleted. `deliver_post` is untouched and is still the single path a post takes |
+| `NotifyUserTool` + `notify_user::{Relay, Notice, Verdict, NotifyLevel}` + `UiEvent::NotifyUser` + `RELAY_PREFIX`/`is_relay_line` + `Buffers::note_relay` + `Runtime.notify_user` + `ToolContext.notify_user` + the headless stderr sink | seven files | All deleted. Nothing else called any of it |
+| `submit_auto()` on every terminal `WatchEvent` | `chat.rs` | Gated on `has_wake_notifications(None)` — the same question TurnEnd already asked |
+| `has_hub_mail() → submit_auto()` at the channel row and at TurnEnd | `chat.rs` ×2 | One tick-driven debounce, `chat_tail::digest_mail` |
+| `<channel-messages>` injection, drained by **every** session | `query.rs` | `<messages>`, drained by the main session only |
+
+**Decision.**
+
+*One tool, because addressing is the thing that was actually being enforced.* Hub-and-spoke never
+needed a withheld tool; it needed a rule about who may be named. `to` is read by `parse_address` into
+`Agent(name)` or `Room(name)` — `#name` is a room, anything else is an agent and may wear the `@` the
+bar shows — and `check_target` narrows by caller: main reaches any instance and any room it is in, a
+subagent reaches `main` and the rooms it is a member of. The refusal names what the caller *may*
+address instead, because a refusal that only says no teaches nothing. The `channels_on` gate and the
+depth-1-named-instance cohort that governed the retired `Post`'s assembly now govern room *addressing*
+inside the tool, so the experimental feature's blast radius is unchanged.
+
+*The description is built from the session.* A subagent and the main agent read different tools with
+the same name — different reach, different lane advice, and the room clause missing entirely when
+rooms are off. `PostTool` already did this with `sender_of`; it is the one place the tool layer knows
+who is calling, and a static string would have had to describe both callers to each of them.
+
+*`urgent` is refused, not ignored, outside subagent→main.* It rings the user's attention channel, and
+main writing to a subagent, or anyone writing to a room, has nobody on the other end to interrupt. A
+silently-dropped flag is a contract the model cannot learn.
+
+*One inbox, one drain, one injection.* A direct message to main rides `hub_mail` — the store room
+relays already used — rather than getting a sibling store, so the query layer keeps exactly one
+drain-and-inject seam. What tells the two apart is the marker on the line: `[message from @scout]`,
+on its own line above the text, which is `[DM from user]`'s shape carrying the one thing that marker
+never had to (the human is the only human; `main` hears from many). The wrapper is renamed
+`<messages>` because it is no longer only channel messages. `line_source` gained `Agent { name }` and
+stays the single recognizer; the perspective page unwraps the block rather than collapsing it to one
+note, so D96's projection can put the message in the sender's lane — the seam D100 needs for main's
+own page. **A real bug fell out of the inventory**: `drain_hub_mail` was unguarded and the registry is
+shared, so a subagent's own turn boundary could eat mail addressed to main. Now gated on
+`session.instance.is_none()`, the same guard `release_hires` carries three lines above it.
+
+*The trigger decides whether a run's end is main's business, and it is decided at registration.*
+`wakes_owner(&items)` reads the batch that woke the run: empty (a dispatch — the `Agent` call itself
+is the trigger) or containing anything that is not a user-origin `Direct` ⇒ main's business. The
+answer is stamped into the watch entry as `notify_owner`, and a `false` entry enqueues no
+`Notification` on `set_state` or `emit_signal` — so `has_wake_notifications` is false, nothing is
+injected, and nothing wakes. **The suppression is at the queue, not at the wake site**, which is why
+one flag covers both the auto turn and the `<task-notifications>` line, and why the broadcast is
+untouched: the team directory's feed rides the broadcast and still records every run. `chat.rs`'s
+wake then gates on `has_wake_notifications(None)` — a question the code already asked at TurnEnd, so
+the two wake paths now say one thing, and a nested subagent's completion stops waking main as a
+side effect of asking it properly.
+
+*Bad news is the asymmetric case.* `Done` and `Cancelled` can wait for the main agent to narrate them,
+because the dispatch row's own state already says so and a narration that never comes costs nothing.
+A crash cannot: the turn that would have narrated it may never run. So `Failed` — and only `Failed` —
+draws `⚠ @scout · subagent failed: …` in the theme's error tier and rings D79. The instance name is
+`label.split_whitespace().next()`, which is the first token of every label shape the run watches
+produce (`scout · task`, `scout #3 · …`, `scout #7 receipt`). It keeps its send stamp, inheriting the
+exception D94 wrote for the relay: it is news, about someone, at a moment that matters.
+
+*The debounce runs on the tick, which is what makes it need nothing else.* `digest_mail` reads a
+length the domain already keeps; a burst is exactly a length that keeps changing, and every change
+restarts a 2s quiet window under a 15s ceiling. Constants in ticks (`MAIL_QUIET_TICKS`,
+`MAIL_DEADLINE_TICKS`) at the 33ms frame: two seconds is a room's round trip — agents answering each
+other land inside it — and fifteen is short enough that a room which never goes quiet is still read.
+`needs_tick` gained `has_hub_mail()`, because mail landing in a fully idle session is the one thing
+that has to wake the clock rather than ride an event. The urgent flag is read **before** the emptiness
+test: the drain and the ring are different readers on different clocks, and a turn already running can
+absorb the message before the tick ever sees it, so a bell owed must survive the drain that beat it.
+
+**Consequences.**
+
+- The three prompt notes were rewritten rather than patched: `SUBAGENT_NOTE` gains the deliberate road
+  to main (with what *not* to send), and `CHANNEL_NOTE`'s "only `Post` puts words in the room" — the
+  sentence that exists because the model cannot infer that turn text never reaches the room —
+  becomes "only a message addressed to the room". Its tests assert phrases, and one of them broke on a
+  line wrap rather than on a meaning; the phrase was moved off the fold rather than the assertion
+  weakened.
+- `AgentControl`, `Channel`, `deliver_post` and the whole ack-watchdog chain are byte-identical.
+- **Old assertions rewritten, not weakened.** `notify_user_is_a_subagent_tool_only` became
+  `a_subagent_gets_send_message_and_neither_retired_tool` — same question (what does the *other*
+  direction get), new answer. `channel_tools_gated_by_experimental_flag` dropped its `Post` clauses and
+  keeps every `Channel` one. The two `tool/channel.rs` delivery tests now drive `SendMessage(to:
+  "#room")` and assert the same outcomes, which is the point: the machinery did not change, only the
+  door. `terminal_watch_event_triggers_auto_turn_when_idle` and
+  `signal_triggers_auto_turn_even_while_typing` were synthesizing a `UiEvent` with no registered
+  watch behind it; they now register one and drive it, which is what production does — and the second
+  half of the rule got a test of its own beside them.
+- `perspective::a_notice_is_a_message_in_the_user_s_lane` became
+  `a_direct_message_to_main_lands_in_its_sender_s_lane`: the tool it was about is gone, and the thing
+  it was really pinning — an agent's words reaching a lane that is not the one it was working in — is
+  now the marker's job.
+- 1447 + 13 tests before, 1444 + 13 after (19 removed with the relay: 7 arithmetic, 6 tool surface, 6
+  hub rendering; 16 added: 6 addressing and delivery, 1 notification suppression, 1 unaddressed
+  terminal, 3 alert-line rendering, 4 debounce, 1 marker attribution).
+
+**Named limits.**
+
+1. *@main loses the unread count D94 gave it.* That counter existed only to count relays, so it
+   retired with them, and an alert line raises no badge this batch. D99 gives @main a real unread.
+2. *No wire event for a direct message on the JSON protocol host*, and no tick loop there or in
+   headless — mail waits for the main agent's next turn boundary, which is where it was already read.
+3. *The failure alert fires for every `WatchKind::Agent` failure*, ack-watchdog give-ups included. That
+   is deliberate (a chase that gave up is news), but it means one instance can produce two alerts for
+   one bad run: the run's own failure and its receipt's.
+4. *`wakes_owner` treats a room relay as main-relevant.* A room post that wakes an agent still wakes
+   main when that run ends. Narrowing it is a question about rooms, not about the user's DM, and this
+   batch did not open it.
+
+### D99. The pure pair, and a face for the console
+
+**Problem.** Two of the three surfaces the v3 model names were already right; the DM was not. `dm_posts`
+rendered an agent's *whole context* flat — the prompt the instance was spawned with, main's
+instructions, room relays, chases and the task reminder, collapsed to dim notes and interleaved with
+the user's own conversation — and its work as N flat `⏺ Tool(…)` lines that the settled replay then
+dropped altogether. Beside it, three pieces of accounting were measuring the wrong things: a DM's
+badge counted the history's length (a turn with forty tool calls read as forty unread messages), every
+DM change set `mention`, and @main had no unread at all since D98 retired the relay it used to count.
+
+**Decision.**
+
+*The DM is a lane of the projection, not a second reader of the record.* D96 built the machinery that
+answers "who said this" and left it four keys deep on a read-only page; D99 makes the pair view its
+first production consumer. `perspective::split_user_text` and the per-message loop that used to sit
+inside `dossier` are now one function, `walk(agent, history, stamps) -> Vec<Filed>`, which files every
+post in record order. `dossier` keeps every lane it files; `pair_lane` keeps `Dm(user)` and drops the
+rest, and `buffer::dm_posts` renders that. **`buffer::user_posts` and `scaffold_note` are deleted**:
+their whole job was collapsing somebody else's traffic into dim lines the DM should not have been
+showing. `line_source` is untouched and is still the single recognizer — the point of the batch is
+that there is now one *walk* over it as well as one parser.
+
+What falls out of the attribution rule, and is the batch's one behavioural surprise: **an agent that
+main spawned and the user never spoke to has an empty `@agent` view.** Its first user message is the
+task (intake), so `active` is `None` and its report attaches to no counterpart. That is the model's
+own answer — the report is main's news, and main's dispatch row already carries it — and it is named
+here because it is the thing a reader will notice first.
+
+*Work renders through the console's collapse machinery, which meant carrying the call and not the
+line.* `tool_call_line` throws the tool name and input away, and `classify_tool` needs both, so the
+walk carries `Work::{Tool{name, input}, Thinking}` beside each process post. `buffer::pair_replay`
+turns a run into **one `UiMessage`** — prose concatenated, each call an `Activity` at the char offset
+it happened at, groups opened and extended by the same rules `on_tool_ready` applies — and
+`Replay::Message` already routes that through `assistant_el`. So `⏺ Searched for 1 pattern, read 2
+files (ctrl+o to expand)` in a DM is `collapse_summary` itself, not an imitation of it. Tool names are
+**interned** rather than `Box::leak`ed per call, because a replay re-reads the same names on every
+switch and the live path's leak-once-per-call is only sound when the call happens once.
+
+*A run ends where anything at all stood between two of the agent's rows in the full walk.* This is the
+rule that keeps the flow append-only, and it is why `PairPost` carries `contiguous` rather than the
+consumer computing adjacency in the filtered lane: every continuation is triggered by an inbox item,
+every inbox item files *something* in the walk (main's prose, a `[#room …]` relay, a `[follow-up N/M]`
+chase), so a continuation can never extend a message the flow has already printed. Adjacency measured
+in the filtered lane would have merged across exactly those, and `poll_active_conversation` — which
+appends by count — would have shown the reader nothing.
+
+*The live tail is gated on whose run it is, and the messages beside it on whose they are.* D98 already
+computes main-relevance per run (`wakes_owner` over the drained batch) and stamps it on the watch
+entry; the same answer is now stamped on the instance (`set_run_trigger`/`run_is_the_users`) so the
+view can ask it. A run that is not the user's shows no stream **and no typing row** — the indicator is
+a promise of a reply, and none is owed. That alone is not enough, because `in_flight` and `pending`
+would still have drawn main's message as the user's bubble and kept the indicator alive through it, so
+`Entry.in_flight` gained the sender it was already being handed (`AgentView`'s fourth element is
+`(from, text)` now) and `dm_state` filters both to `user`. Two filters, because they answer two
+different questions: whose run, and whose message.
+
+*Main's portrait is reserved by removing one from circulation, not by adding a ninth.* The requirement
+is that main's face never move and never be a teammate's. A hash reserved at index 0 with the id still
+pinnable would have been probabilistic; bundling a ninth portrait would have meant authoring an asset
+to match eight that already agree. So `MAIN_INDEX = 0`, `index_of` hashes over `1..COUNT`, `ids()`
+returns the seven a blueprint may pin, `index_of_id` refuses main's, and `Gutter::index_for` answers
+`main` **before** the pinned table — a reservation a pin could override would not be one. The cost is
+one face out of eight and one retired pin id (`emi`); a `team.json` that pinned it falls through to
+the hash, which is what it already did for a typo. This also surfaced a latent bug in
+`team_cmd::crew_portraits`, which filtered by *position in `ids()`* against *portrait indices* — the
+same number until D99, not after.
+
+*The sender band retires with the console's gutter.* D97 put the band overhead with an explicit
+premise: "the main chat has no gutter — its bodies run the full width — so the face goes overhead."
+D99 removes the premise, and with both in place `experimental.chatAvatars` drew the same speaker's
+portrait twice on one message. `avatar::sender_band` and `Chat::sender_band_el` are deleted; the switch
+keeps the one job the gutter does not do, the portrait on a subagent's watch row.
+
+*`speaker_of` names @main's two speakers — and refuses to name a state line.* The console's
+participants were never written down (the role *was* the name), so the gutter had nothing to key on;
+`speaker_of(item, role, text)` answers `main`/`user` for `Decor::Hub`, and the run rule
+(`spoke != previous`) then works in the console for free. But not every user-role row in the console
+is the user's: the D98 failure alert, a route receipt, an ask receipt, the interrupt marker and a
+rewind line are the runtime reporting, and the first cut hung the human's portrait on all of them —
+`⚠ @scout · connection reset` with the user's chip beside it says the human wrote it. So a
+`Decor::Hub` row that satisfies `is_state_line` answers `None`, which costs it the face and takes it
+out of the run; main speaking after an alert therefore re-leads with its own, which is the visual
+break the interruption already is. **The gutter stopped being decided by the speaker**: every
+non-rule row takes the column and only a speaker takes the cells, because a state that gave up the
+indentation as well would make the message column jog around it — rules span, states align. This is
+the ruling the DM tail's live-only states have carried since D97, applied to the surface that just
+grew a gutter. A steered message (`↪ …`) is not a state line and is untouched: the user typed it.
+
+*Unread is measured where the measure was already stated.* `Lane::messages` has said "process rows are
+work, not messages" since D96; the bar never read it. `pair_measure` returns `(Said count, an agent
+Said after the read cursor)` from the pair lane, memoized per instance on the history's length —
+sound because a history is replaced wholesale at a run's end and never edited in place, and the one
+rewrite that exists (compaction) makes it shorter. @main's own counter is pushed rather than polled
+(`Buffers::note_console`), because @main is the one conversation with no domain store behind it: its
+record is the flow. Main's prose at `TurnEnd` counts; the D98 alert counts **and** mentions, which is
+the one line here nobody chose to say.
+
+**Consequences.**
+
+- `REPLAY_BUDGET` 30 → 8, with the reasoning restated: thirty was sized when a replay was the only way
+  back into a conversation, and it has not been since D82/D96.
+- Room mention detection is one predicate, `buffer::names`, case-insensitive with word boundaries on
+  both sides of the token. `@User` and `@USER,` reach the person; `@username` and `mail@user.example`
+  do not.
+- **Old assertions rewritten, not weakened**, each because the contract under it changed:
+  `the_hub_flow_wears_no_gutter` → `the_console_wears_the_same_gutter_every_conversation_does` (plus a
+  both-skins layout test, the D97 invariant extended); `without_the_switch_the_transcript_wears_no_face`
+  → `…_no_band` (the gutter is not the switch's any more);
+  `sender_band_names_the_speaker_and_records_its_face` and
+  `sender_band_costs_a_second_row_only_where_portraits_place` → one test that the console names its
+  speakers in the gutter and not above them; `a_dm_is_addressed_to_you_by_construction` →
+  `a_dm_wants_you_when_the_agent_answers_and_not_when_you_speak`, which is the opposite claim and the
+  right one; `unread_counts_one_per_message_and_moves_the_stamp`, both `a_replay_keeps_to_its_budget`
+  tests, `a_switch_opens_the_conversation_under_a_rule`,
+  `an_excursion_holds_the_hubs_tail_until_you_come_back`, `arrivals_print_here_and_count_there`,
+  `a_dm_wears_a_face_on_the_first_row_of_each_run`, `a_completion_bumps_the_dm_instead_of_the_hub` and
+  `the_pager_covers_the_conversations_the_flow_printed` all had histories of bare `assistant(…)`
+  replies, which now belong to nobody's lane; they were given the user message the reply answers,
+  which is what a pair conversation is. Four row-prefix assertions in `chat_tests_b` read through a new
+  `test_util::body`, which takes the gutter off a row rather than asserting around it.
+- 1445 + 13 tests before, 1459 + 13 after (19 added: 4 pair-lane projection — the filter, reply
+  attribution, the work it carries, the run break; 3 replay — activity groups and their wording, the
+  standalone call closing a group, the budget; 6 gutter — the console's gutter, both skins laying out
+  alike, main's reserved face, the console naming its speakers in the gutter and not above them, a
+  state line taking the indentation and nobody's face in both skins with the run re-leading after it,
+  and a steered message keeping the user's; 3 accounting — Said-only counting, mention on an agent's
+  Said, @main's unread; 1 the live tail gated by run trigger; 1 the room mention predicate; 1 the
+  switch keeping the watch row and losing the band.
+  5 removed: the two band tests, the hub's absence of a gutter, `a_dm_is_addressed_to_you_by_construction`,
+  and the no-face-without-the-switch claim — each renamed or replaced above rather than dropped).
+
+**Named limits.**
+
+1. *A collapse group cannot span two of the agent's runs.* In @main a turn is one message and a streak
+   of reads across four rounds is one group; here a run boundary is a message boundary. Within a run
+   (which is where a streak actually happens) the grouping is the console's exactly.
+2. *A replayed group has no output to expand.* The record kept the call; the result went to the model.
+   `ctrl+o` on one shows the calls it folded and nothing under them.
+3. *An agent whose lane is empty shows an empty DM.* See above — deliberate, and the reason D100's door
+   to the observation page matters more than it did.
+4. *`pending`/`in_flight` are filtered by sender, not by run.* A message main queued while the user's
+   run is in flight is correctly absent from the DM, but a *chase* the harness queued has no sender at
+   all and is already excluded by `pending_of`'s own rule, which predates this batch.
+
+### D100. The record's doors, and a page for the console
+
+**Problem.** D96 built the observation page and D99 made its walk the pair view's only reader, which
+left two gaps the model names and the code did not fill. The page existed for *subagents* only —
+`perspective_ui::snapshot` reads `agents.view_of(name)`, and main is not in that registry, so the one
+participant whose whole job is coordination had no record of its own coordination. And the page was
+four keys deep: `ctrl+b` → ↑/↓ → Enter → tab, from a manager whose other verbs are about stopping
+things. D99 also shipped an honest consequence with no way out of it: an agent main spawned and the
+user never wrote to opens an **empty** `@agent`, because its task is intake and its report answers
+main — a blank screen under a rule, with the thing you actually wanted one key away and unmentioned.
+
+**Decision.**
+
+*The unmarked default is a property of the protagonist, not a constant.* Everything the page does
+already worked for main except one line: `split_user_text` filed unmarked user-role prose to
+`HUB_NAME`, which is right in a subagent's record (the hub is the one sender `direct_text` leaves
+unmarked) and exactly wrong in main's, where unmarked prose is the human typing into the console.
+Nothing else writes plain prose into a session transcript. The second flip rides with it: the
+first-user-message-is-intake rule exists because the `Agent` tool's prompt is the task that created
+the instance, and nobody dispatched main, so the first thing ever typed into the console is a
+message. Both are `Protagonist { name, default, spawned }`, resolved by `Protagonist::of(name)` —
+`main` is a reserved member name (`channels::HUB_NAME`), so no instance can answer to it and the
+resolution cannot mistake a teammate for the console. `LineSource::HubBatched` follows the same
+default rather than a second hardcoded name: it *is* the unmarked sender, wearing a batch label
+because the batch made its boundaries ambiguous.
+
+`buffer::line_source` was **not** extended. Everything main's transcript can hold was already a
+recognised shape — the `<messages>` envelope and its pre-D98 `<channel-messages>` predecessor unwrap,
+`[message from @X]` lands in the sender's lane (the seam D98 built for exactly this), `[#room msg #N]`
+stays timeline-only because the room's log is authoritative, `<task-notifications>` and the task
+reminder are intake, the steer block is the user, interrupt/compaction/stop-hook/max-tokens are
+timeline-only. The main-specific shape a reader might expect — a marker naming the user — does not
+exist and must not be invented: in main's record the *absence* of a marker is what names them.
+
+*The clock is the turn marker, and that is the whole answer.* A subagent's history is stamped per
+message (`AgentRegistry::finish`). A transcript is not: `Transcript::append` writes bare messages, and
+the one wall clock on disk is D91's `{"type":"turn","at":…}` line, written by `record_turn_open`
+before the message that *opens* a turn. Everything recorded inside that turn — the
+`<task-notifications>` block, the `<messages>` inbox, every assistant reply — goes down through plain
+`record` and carries nothing. So `main_record` reads `load_projection()` (which already surfaces the
+marker as `Entry.opens_turn`) and **carries the turn's stamp forward** across the messages recorded
+inside it. That is a turn clock, not a message clock, and it is named as one: the messages of a turn
+did belong to that turn, and the alternative — stamping only the opener — would have left main's
+agent lanes reading zero and sorting by nothing, since mail and notifications are never turn openers.
+A transcript written before D91 has no markers at all and reads 0 throughout, which is the
+projection's documented "no clock": lanes sort by a zero and the index shows no time beside them,
+exactly as a compacted agent's page already does. Only the index's trailing stamp and the lane
+ordering read `at`; `settled_post_rows` never did.
+
+*Three doors, one page, and the composer decides which key.* `tab` on an **empty** composer opens the
+active conversation's record: `BufferId::Dm(name)` → that agent, `BufferId::Hub` → main,
+`BufferId::Channel(_)` → nothing at all, because a room has no single protagonist and giving the key
+a second meaning there would be inventing one. Tab survived unchanged as completion because it never
+had to be taken from anything: the slash dropdown and the `@` mention dropdown are judged far above
+the editing keys and both require text, `KeyCode::Tab if self.bash_mode` keeps history completion, and
+before this batch a bare `Tab` on an empty composer fell through to `_ => false` — an unbound key. So
+the two readings cannot compete, and the ctrl+g fallback the dispatch offered was not needed. The
+door is inert behind `pending_ask`, the rule the switcher and the directory already carry (D81): a
+full-screen surface must not open over a question holding up a turn. In the directory, `o` opens the
+member under the cursor and closes the panel behind it, the way Enter already hands the screen over;
+on a room it does nothing and the panel stays open. `ctrl+b` detail → `tab` is byte-identical.
+
+*Main is a row on the roster, and the roster is where it always belonged.* Its presence is the **host
+turn** (`chat.busy`) rather than a registry state, its label is `main · console · idle` in the
+`kind.label()` grammar the other rows use, and its rooms come from `channels::rooms_of(HUB_NAME)` like
+anyone's. Enter on it is the one special case: `BufferId::Dm("main")` is not a conversation that
+exists, and `BufferId::Hub` *is* the pair view of the user and main, so Enter goes home. It gains no
+manage verbs, which costs nothing to enforce — the directory has none, by D95's ruling.
+
+*The empty pair's note is furniture, not replay.* Putting it in `Buffers::rehydrate` would have made
+it a replay *item*, and `Excursion::seen` counts items: the note would have set the cursor to one and
+`poll_active_conversation` would have read the pair's first real message as already printed. So it is
+emitted in `open_conversation` beside the rule, in the rule's own row shape, and counted nowhere —
+the same exclusion `replay_items` makes for the divider, for the same reason. Idempotence is read off
+the flow rather than stored: switching out and back prints `── hub ──` and `── @scout ──` again, so
+the check walks the message store backwards *past the rules* and prints nothing if the first real
+line it finds is the note itself. No new state, and the one thing that could go stale — whether the
+note is still the last thing that conversation said — is the question being asked.
+
+**Consequences.**
+
+- **Old assertions rewritten, not weakened.** `directory::enter_opens_a_member_dm_and_a_room` asserted
+  the target list is `[scout, parser]`; it is `[main, scout, parser]` now, so the list assertion states
+  the new contract and both Enters step past main's row. `j_joins_the_room_under_the_cursor` moved the
+  cursor down one before pressing `j`, because the row it was sitting on is main's now and `j` on a
+  member has never done anything. Every pre-existing `perspective` and `dm_posts` test passes
+  untouched, which is what "the flip does not regress a subagent's page" means.
+- The directory footer gains `o record`, and the module doc gains main's row and its reasoning.
+- `walk` and `split_user_text` take a `Protagonist`; `dossier` and `pair_lane` resolve it from the
+  name they were already given, so no caller outside this module changed.
+- 1459 + 13 tests before, 1471 + 13 after (12 added: 2 projection — main's page reading prose as the
+  user with mail in its sender's lane and notifications as intake, and the flip moving no marker;
+  2 snapshot — main's record from the transcript with the turn clock on every lane, and a session
+  with no transcript answering with an empty page rather than a panic; 4 doors — tab in each of the
+  three conversation kinds, tab with a draft still completing, tab inert behind a permission ask,
+  and `o` in the directory on main/an agent/a room; 1 roster — main first, its presence following the
+  host turn, Enter going to the console; 1 footer; 2 the empty-pair note — printed once across a
+  round trip and gone once the pair has content, and not swallowing the first message the poll
+  appends).
+
+**Named limits.**
+
+1. *Main's page is as live as its transcript.* The snapshot reads the file, so a turn in flight is not
+   on it (D82's semantics, stated) — but neither is anything the current turn has recorded and not yet
+   flushed through `record`. In practice `record` persists before it pushes, so the file leads the
+   in-memory history rather than trailing it; the gap is a turn's streaming text, which lands at the
+   turn's end.
+2. *The turn clock is a turn's clock.* Two messages sixty seconds apart inside one long turn read the
+   same time. The honest alternative was zero.
+3. *The empty-pair note's idempotence is textual.* It compares the flow's last non-rule message against
+   the note, and a rule is recognised as `── … ──`. A user message that is itself exactly that shape
+   would be mistaken for furniture — a cost of not adding state, and the same shape the flow already
+   treats as a rule everywhere else.
+4. *`o` is a directory key, not a global one.* There is no door to a *non-member's* record, because
+   there is no surface that lists one: an agent whose instance is gone has no history to show, which is
+   D96's limit, unchanged.
+
+### D101. The rename: hub retires, @main is the floor
+
+**Problem.** The floor of the terminal was labelled `hub`, and by D100 the word named nothing. Its
+three historical meanings had already resolved separately: the bus died in D94 and D98 (no agent
+lifecycle line writes into the console at all), the pair view became one view type among many in
+D99, and D100 gave main a directory row, an observation page and a `console` label to go with them.
+What was left was a word the user read in the bar, in every rule the flow prints, in `/open`'s
+grammar and in the `?` panel — one participant addressed by a name the address grammar does not use,
+in a session where every other conversation is `@name` or `#name`. `HUB_NAME`'s value had been
+`"main"` since channels.rs was written (channels.rs:37), so the constant had been lying about
+itself for the whole program.
+
+**Decision.**
+
+*One rule, applied everywhere: where a name says "hub" and the thing it names is main-the-participant
+or the home conversation, it says main.* `BufferId::label()` returns `format!("@{MAIN_NAME}")` rather
+than a literal, so the label, `Display`, `rule()` (`── @main ──`), the bar, `ctrl+k`, `/open`'s
+completion and the conversation-bar entry all flip from one line — D88's "one vocabulary" property
+paying for itself. The constant is `channels::MAIN_NAME`, value unchanged. The mail path main drains
+is `main_mail` / `drain_main_mail` / `has_main_mail` / `take_main_mail_urgent` / `main_mail_len`, and
+the room relay it formats is `format_main_line`. `EscLayer::BackToHub` → `BackToMain`,
+`LineSource::HubBatched` → `MainBatched`, `Chat::route_from_hub` → `route_from_main`,
+`switcher::pin_hub` → `pin_main`, `flow_order`'s `push_hub_upto` → `push_main_upto`.
+
+*`BufferId::Hub` stays, and its doc comment now says why.* The design doc's explicit ruling, and it
+holds up under reading: home is the one buffer whose mechanics are genuinely different — it owns the
+turn loop, it has no sequence to read to, `rehydrate` returns nothing for it, it is never closable,
+and it sorts first by declaration order. A variant named for that is worth more than a variant named
+to match its label, and the label is one `format!` away. `Decor::Hub` did **not** earn the same
+exemption and became `Decor::Home` (with `FlowItem::hub` → `FlowItem::home`): it names a *rendering
+property* — "this position is the home conversation's own two-speaker message" — and "home" is
+precisely the property the design doc says survives the retirement. So "hub" appears in exactly one
+identifier in the tree, at the one place that carries the paragraph explaining it.
+
+*`hub-and-spoke` is kept, everywhere, unrephrased.* It names a **topology**, not a participant: main
+may address any instance and any room it is in, a subagent only main and its own rooms, and that
+shape is what the phrase means in every architecture text that has one. The v3 design doc itself
+still uses it after declaring hub retired (conversation-model-v3.md:138), which settles it. Kept
+verbatim in tools.rs, agents.rs, tool/agent.rs, guide.md and both READMEs rather than kept in some
+places and rephrased in others.
+
+*`/open` gains `main` and loses `hub`.* `resolve_target` had a hardcoded `eq_ignore_ascii_case("hub")`
+branch; it now resolves `@main` and a bare `main` through the same sigil grammar every other target
+uses — accepted, not required — while `#main` still reads as a room, so a room may carry that name
+without shadowing the floor. `hub` is refused outright rather than kept as an alias: the completion
+dropdown reads the registry (so it stopped offering the word the moment `label()` changed), and a
+spelling that survives only in the parser is exactly the second name this batch existed to remove.
+`/open hub` answers `no conversation called hub · /open lists what is open`, which is the same
+refusal every unknown target gets and says the word is gone rather than merely unlisted.
+
+*The word leaves what the model reads, too.* SUBAGENT_NOTE, CHANNEL_NOTE, `crew_note`, `hire_note`,
+the ack-chase follow-up line (`[follow-up n/3] Main sent you message …`) and the `Agent` /
+`SendMessage` / `AgentControl` descriptions all say main, so the address language in the prompt is
+the address language in the bar — the same argument D98 made when it merged the speech tools. The
+SUBAGENT_NOTE's opening gloss ("The main agent (the hub) spawned you") lost its parenthetical
+outright: it existed to introduce the name the rest of the note used, and the rest of the note now
+uses the name in the sentence.
+
+**The wire was investigated and says nothing.** `src/json_events.rs`, `src/share.rs`,
+`src/share_html.rs`, `tests/cli_black_box.rs` and `notes/gui-json-events-legacy-check.md` contain
+zero occurrences of "hub", case-insensitive. The share document's channel rosters and message
+senders are literal participant names — `share.rs:450`, `share.rs:484`, `share.rs:807` all read
+`"main"` — because `HUB_NAME` has always been `"main"` and the projection has always written the
+value, never the constant's spelling. `BufferId::label()` is a TUI function with no serializer on it.
+So there is no compatibility divergence to document and none was introduced: an external consumer
+sees byte-identical output before and after this batch.
+
+**Consequences.**
+
+- **Assertions rewritten to the new contract, never relaxed.** Every literal that named the bar's
+  first entry, a rule, a completion candidate or a switcher label moved from `"hub"` to `"@main"` and
+  still asserts equality. Seventeen test names renamed with their subject
+  (`a_lone_hub_shows_no_bar` → `a_lone_console_shows_no_bar`,
+  `the_hub_is_there_before_anything_else_is` → `main_is_there_before_anything_else_is`, and so on).
+  Two assertions that the mechanical pass would have turned tautological were rewritten by hand
+  instead: `"main is reserved for main"` became a sentence about what `claim_name` does, and
+  `"the main is listed"` became `"@main is listed"`.
+- **Three new assertions and one new test.** `an_id_names_its_conversation_in_one_vocabulary` now
+  states `BufferId::Hub.rule() == "── @main ──"` literally rather than deriving it from `label()` —
+  the point of a rename is the exact glyphs — and asserts no label contains "hub".
+  `open_completes_from_the_registry` asserts the retired word is absent from the dropdown.
+  `open_reaches_every_conversation_and_reports_the_ones_it_cannot` covers bare `main` resolving and `hub` being refused by
+  name. `the_bar_opens_with_main_and_keeps_it_first` (new) checks the first bar entry reads `@main`
+  and stays first after activity elsewhere and a switch away, and that the row contains no "hub".
+- `/open`'s description for the home candidate reads **`the console`** rather than "the conversation
+  with the model", so the completion dropdown, D100's directory row (`main · console · idle`) and the
+  observation page's title use one word for the surface. It is the only candidate described by what it
+  *is* rather than by what is waiting in it, and that was already true before the rename.
+- 1471 + 13 tests before, 1472 + 13 after.
+- `feedback-states.md` gains v1.69 and its stale header stamp (v1.65, three entries behind since
+  D98) is corrected to match. The guide's two duplicated capability blocks, `README.md` and
+  `README.zh-CN.md` flip the vocabulary wherever they describe the current UI; changelog and
+  historical entries stay as written, including the ones that say "hub" about what used to be true.
+
+**Named limits.**
+
+1. *Two spellings survive in the tree, both deliberately.* `BufferId::Hub` (doc-pinned, with the
+   reasoning in its doc comment) and `hub-and-spoke` (topology). A reader who greps for "hub" finds
+   them and finds the paragraph that says why; a reader who greps expecting zero hits will be
+   surprised, which is the cost of the design doc's ruling and not a defect of it.
+2. *`hub` is unreachable, including from muscle memory.* Anyone who typed `/open hub` gets a refusal
+   rather than a redirect. Judged correct — a retired word kept in the grammar is a second name — but
+   it is a real, if small, one-time cost paid by existing users, and no deprecation path exists.
+3. *Bare `main` now beats a room called `main`.* Under the old grammar a bare word preferred a channel
+   when one existed by that name; the home conversation now takes a bare `main` first. `#main` still
+   reaches the room, so the room is not unreachable, only un-defaulted.
+4. *`README.zh-CN.md` is behind D98, and this batch did not fix it.* It still documents `notify_user`
+   as a tool and `Channel` / `Post` as the room pair — both retired in D98, both already corrected in
+   the English README. The vocabulary flip was applied to those lines because the rule applies to
+   them; their *content* is a D98 sync debt and correcting it is that batch's call, not a rename's.
+
+### D102. The silence contract: two endings for a turn nobody asked for
+
+**Problem.** D98 gave main a second kind of turn and no rule about how to end it. A dispatch
+finishing, an agent's `SendMessage`, a room going quiet — each of those wakes main into a turn the
+user never typed into, and every one of those turns ended in prose, because prose is what a turn
+ends in. So a run whose dispatch row already said `⎿ done · fixed the parser` bought a paragraph
+saying the same thing again, and the console D98 made quiet filled back up with narration instead of
+lifecycle lines. The design doc's ruling: *a digest turn ends either in prose — which renders in
+@main as main speaking — or in a silent acknowledgement marker that renders as nothing.*
+
+**The flush question, answered before anything was written.** The write-once doctrine says the marker
+must never reach scrollback, not even for a frame, and the batch prompt allowed for two possible
+mechanisms. The existing pipeline already has the guard: `message_static_settled` opens with `if
+Some(i) == self.stream_msg { return false }`, prefix settlement is monotone, and `build_rows` puts
+only the settled prefix in `doc.settled` — which is the only thing `flush_items` ever hands to
+`InlineTerm::insert_history`. `stream_msg` is set in the `TurnStart` arm and cleared in `TurnEnd`, so
+**the message a turn is streaming into cannot settle, and therefore cannot flush, until the turn is
+over**; `streaming_content_is_not_flushed_until_settled` (chat_tests_b.rs) has pinned exactly this
+since the inline rewrite. So the intervention is at settle: `TurnEnd` reads the answer once, before
+`stream_msg` is cleared, and everything downstream branches on it. No transient-region holding was
+needed, and the invariant is proved rather than argued —
+`the_marker_never_reaches_flushed_scrollback` drives a turn frame by frame, flushing at the *last*
+settled mark every frame (more aggressive than production, which waits for the window top), and
+asserts that no captured row ever contains even a half-streamed prefix and that the cursor does not
+move for the turn at all.
+
+**Decision.**
+
+*The marker is bracketed, not tag-shaped, and that was forced by the renderer.* `<quiet/>` is the
+obvious spelling — the injected envelopes are `<messages>` and `<task-notifications>` — and it is
+wrong here, for a reason that only shows up when the contract fails. Assistant text is rendered as
+markdown; a bare `<quiet/>` alone on a line parses as an HTML block and `render_block` emits **zero
+rows** for it. That is harmless where the marker is meant to vanish and fatal where it is not: the
+same string at the end of a turn the user typed into is the model misfiring, and the rule says a
+misfire must be *visible*. A tag would have made "renders literally" depend on a second special case
+in the renderer. `[[quiet]]` renders verbatim in every position tested (alone, padded, mid-prose, in
+a list item), keeps the marker in the family the delivery path already uses (`[DM from user]`,
+`[message from @scout]`, `[follow-up n/m]`), and is doubled so the single-bracket link-reference
+syntax — which turns `[quiet]` into `quiet()` — cannot claim it. One definition,
+`query::QUIET_MARKER`, read by the prompt, the renderer and the projection.
+
+*Tag, don't infer.* The digest fact is stamped in `submit_auto`, the one door a turn nobody submitted
+comes through, into `Chat::digest_turn`; `TurnStart` takes it with `mem::take` and writes it onto the
+reply as `UiMessage::digest`. Three reasons for that shape rather than reading the empty prompt at
+render time: an empty user submission and a woken turn are different facts that happen to produce the
+same prompt string today; `mem::take` means a stamp cannot outlive the turn it was set for, and
+`busy` is latched between the two points so no other turn can read it by mistake; and putting it on
+the *message* rather than on `Chat` means it survives `/clear`, rewind and the transcript pager
+without a single invalidation rule. `open_continuation_message` copies it from the message it closes,
+because a continuation is the same turn.
+
+*One predicate, and it asks both halves.* `Chat::is_quiet(i)` is `digest && text.trim() ==
+QUIET_MARKER`, and `flow_order` — the single answer to what the message store looks like on screen —
+never gives such a message a position. That is the whole render rule: no block, no rows, and so
+nothing for the settled prefix or the flush cursor to see. Append-only survives it, because the only
+message that can answer true is the one the stream is writing, which by the paragraph above cannot
+have flushed; every position it would shift is above the cursor. Suppressing at `flow_order` rather
+than deleting the message is also what keeps `excursions[].at`, `exc.rows[].index` and `stream_msg`
+valid — a `Vec::remove` in the middle would corrupt all three, and the stream message is genuinely
+not always last (a failure alert or a mid-turn conversation switch pushes after it).
+
+*The accounting is three refusals, not one.* A quiet turn does not call `note_console` (which carries
+the unread, the mention accent **and** the conversation's `last_activity` — one call, three
+consequences, so the guard has to be in front of it), does not ring `Attention::TurnComplete` even
+when the turn ran past `LONG_TURN` (the user never walked away from a turn they never started), and
+does not arm the D87 settle blink: nothing settled, and an armed blink would hold the *previous*
+message live and re-accent a completion row that finished minutes ago. A prose digest turn keeps
+D99's behaviour byte for byte.
+
+*Tool calls go with it — the preferred ruling, taken without a fallback.* A digest turn's calls are
+activities *on the streaming message*, so suppressing the message suppresses its work for free, and
+the same `stream_msg` guard means none of those rows could have flushed either. The work is in the
+record and the dispatch row already said the run was done; repeating it on screen is the narration
+the contract exists to stop.
+
+*The record keeps what the flow drops.* The marker is written to the transcript by `record()` in the
+query layer, untouched by any of this. On main's observation page it would otherwise land in the lane
+of whichever agent happened to have woken main — raw protocol inside a conversation — so `walk` files
+an assistant text block equal to the marker as a `TimelineOnly` `Note`, verbatim: the same place
+`runtime_only` puts every other piece of scaffolding, and the symmetric arm to it.
+
+*The contract is main's alone, enforced by a drop.* It is a system block (`system::DIGEST_HEADING`,
+`# Digest turns`) built second in `build_system`, where it reads as a continuation of the base
+prompt's turn behaviour. But a subagent assembles from `parent.system.clone()`, so "main-only" cannot
+be a matter of where it is pushed: `build_sub_session` does
+`system.retain(|b| !b.text.starts_with(DIGEST_HEADING))` before appending `SUBAGENT_NOTE` — the same
+find-by-heading trick `with_model_capabilities` already uses. Nothing wakes a subagent with an
+injected notification, and an instance taught a marker that renders as nothing could only use it to
+disappear its own report.
+
+*No reminder inside the envelope, deliberately.* The batch left it to judgment and the answer is no,
+on evidence: both `<task-notifications>` and `<messages>` are rebuilt and `record`ed **every round**
+of every turn, so a reminder line becomes per-round repetition in the transcript and in the cached
+prefix; and `perspective::split_user_text` recognises the mail envelope by exact `strip_prefix` /
+`strip_suffix`, so a line after `</messages>` breaks D98's attribution outright while a line inside it
+gets filed as a message by `line_source`. The system prompt is the contract, and it is static, cached
+and read on every turn.
+
+**Consequences.**
+
+- `README.zh-CN.md`'s D98 debt, named as limit 4 of D101, is paid: `notify_user` leaves the tool
+  table, `SendMessage` and `AgentControl` become two rows with the real addressing rules,
+  `Channel` / `Post` becomes `Channel` (room management), the sub-agent section's "反方向只有一个
+  工具" paragraph is rewritten around addressing, and the channels section says
+  `SendMessage(to: "#房间")`. The register is the file's own; this is a translation catching up, not
+  new prose. Both READMEs and both of the guide's capability blocks gain the contract itself.
+- 1472 + 13 tests before, 1485 + 13 after (13 added, none removed, none weakened). Two in `system.rs`
+  (the contract says all four of its things; exactly one block carries the heading), one in
+  `tool/agent.rs` (a spawned instance does not inherit it, and inherits everything else), one in
+  `perspective.rs` (the marker is a timeline note, not speech in a lane), nine in `chat_tests_f.rs`
+  as its fourth part.
+- `build_system` gained a doc comment saying it builds the *main* session's blocks, because that is
+  now load-bearing rather than incidental.
+
+**Named limits.**
+
+1. *The contract is model discipline, and nothing enforces it.* A digest turn that ends in
+   `[[quiet]] done!` renders as prose, which is the safe failure; a turn that says nothing and
+   emits no marker renders as an empty assistant message, which is the same blank the pipeline has
+   always had for an empty reply. The floor is what the design doc named: the dispatch row is always
+   visible, `@main` badges, failures alert, the chase machinery still runs.
+2. *A quiet reply stays in `Chat::messages` forever, invisible.* Cheap (one `UiMessage` with a short
+   string per digest turn) and deliberate: suppressing at `flow_order` is what keeps every index into
+   the store valid. A session of thousands of digests would carry thousands of hidden messages.
+3. *The `ctrl+o` transcript pager is a flow view, so it is quiet too.* It renders through
+   `Chat::build_rows`, so the marker is absent there as well; the complete record is the session
+   transcript on disk and main's observation page, both of which keep it.
+4. *Only the TUI has digest turns.* `submit_auto` is a TUI method and the headless and JSON-events
+   hosts have no tick loop, so the contract sits in the main session's prompt for a turn shape those
+   hosts never open. Harmless, and it is the same asymmetry D98 documented for mail.

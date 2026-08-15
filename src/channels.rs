@@ -34,7 +34,7 @@ use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
 
 /// Reserved member name of the main agent in channels.
-pub const HUB_NAME: &str = "main";
+pub const MAIN_NAME: &str = "main";
 /// Reserved member name of the user (a human) in channels: speaks under this
 /// identity in a room and is shown as the sender of their own messages. Exempt
 /// from budgets, like `main`. Since D95 the user is an *ordinary* member in
@@ -149,7 +149,7 @@ impl ChannelLimits {
 /// Result of post.
 #[derive(Debug)]
 pub enum PostOutcome {
-    /// Committed: deliver to these members (excluding the sender and hub — hub goes through hub_mail).
+    /// Committed: deliver to these members (excluding the sender and main — main goes through main_mail).
     Sent {
         seq: u64,
         deliveries: Vec<(String, ChannelMessage)>,
@@ -189,8 +189,15 @@ struct Channel {
 
 struct Inner {
     channels: HashMap<String, Channel>,
-    /// Channel messages pending injection into the main agent's context (formatted text).
-    hub_mail: Vec<String>,
+    /// The main agent's inbox, pending injection into its context (formatted text).
+    /// Room relays and direct messages share it (D98) so there is exactly one
+    /// drain-and-inject seam into the host turn loop.
+    main_mail: Vec<String>,
+    /// A direct message in `main_mail` asked for the attention channel (D98).
+    /// Independent of the mail itself: the turn that drains the mail and the
+    /// surface that rings the bell are different readers on different clocks,
+    /// and a bell owed must survive the drain that beat it.
+    main_mail_urgent: bool,
     limits: ChannelLimits,
 }
 
@@ -201,8 +208,22 @@ pub struct ChannelRegistry {
     share: Mutex<Option<Arc<crate::share::ShareStore>>>,
 }
 
-fn format_hub_line(channel: &str, msg: &ChannelMessage) -> String {
+fn format_main_line(channel: &str, msg: &ChannelMessage) -> String {
     format!("[#{channel} msg #{}] {}: {}", msg.seq, msg.from, msg.text)
+}
+
+/// Opening of the line a direct message to the main agent arrives under (D98):
+/// `[message from @scout]`, on its own line above the text.
+///
+/// The shape is [`crate::tool::agent::DM_FROM_USER_MARKER`]'s, with the sender
+/// named — the one thing that marker never had to carry, because the human is
+/// the only human. `main` hears from many agents, so its marker names which.
+/// [`crate::tui::buffer::line_source`] is the single parser of this shape.
+pub const MAIN_MESSAGE_PREFIX: &str = "[message from @";
+
+/// One direct message as it enters the main agent's context.
+pub fn format_main_message(from: &str, text: &str) -> String {
+    format!("{MAIN_MESSAGE_PREFIX}{from}]\n{text}")
 }
 
 /// Write a roster change into the room's record and hand back the entry.
@@ -232,7 +253,8 @@ impl ChannelRegistry {
         Arc::new(Self {
             inner: Mutex::new(Inner {
                 channels: HashMap::new(),
-                hub_mail: Vec::new(),
+                main_mail: Vec::new(),
+                main_mail_urgent: false,
                 limits,
             }),
             share: Mutex::new(None),
@@ -422,9 +444,9 @@ impl ChannelRegistry {
     /// Unseat a member and write the departure into the room's record.
     ///
     /// The user is removable like anybody else (that is what leaving a room
-    /// is); `main` is not, because the hub's relay path is seated through it.
+    /// is); `main` is not, because main's relay path is seated through it.
     pub fn kick(&self, name: &str, member: &str) -> Result<(), String> {
-        if member == HUB_NAME {
+        if member == MAIN_NAME {
             return Err(format!(
                 "{member} is a reserved member and cannot be removed from a room"
             ));
@@ -473,7 +495,7 @@ impl ChannelRegistry {
     pub fn post(&self, from: &str, name: &str, text: &str) -> Result<PostOutcome, String> {
         let mut inner = self.lock();
         let limits = inner.limits;
-        let hub_line;
+        let main_line;
         let outcome = {
             let Some(ch) = inner.channels.get_mut(name) else {
                 return Err(format!("no room #{name}"));
@@ -508,7 +530,7 @@ impl ChannelRegistry {
                 }
             }
             let sent = ch.sent.get(from).copied().unwrap_or(0);
-            if from != HUB_NAME && from != USER_NAME && sent >= limits.per_agent {
+            if from != MAIN_NAME && from != USER_NAME && sent >= limits.per_agent {
                 return Err(format!(
                     "your posts in #{name} hit the per-agent cap {} (budget gate)",
                     limits.per_agent
@@ -516,7 +538,7 @@ impl ChannelRegistry {
             }
             if ch.seq >= channel_total {
                 ch.frozen = true;
-                inner.hub_mail.push(format!(
+                inner.main_mail.push(format!(
                     "⚠ channel #{name} hit the {channel_total} total message cap and is now frozen (further posts will be rejected)",
                 ));
                 return Err(format!(
@@ -538,11 +560,13 @@ impl ChannelRegistry {
             let deliveries: Vec<(String, ChannelMessage)> = ch
                 .members
                 .iter()
-                .filter(|m| m.as_str() != from && m.as_str() != HUB_NAME && m.as_str() != USER_NAME)
+                .filter(|m| {
+                    m.as_str() != from && m.as_str() != MAIN_NAME && m.as_str() != USER_NAME
+                })
                 .map(|m| (m.clone(), msg.clone()))
                 .collect();
-            hub_line = if from != HUB_NAME && ch.members.iter().any(|m| m == HUB_NAME) {
-                Some(format_hub_line(name, &msg))
+            main_line = if from != MAIN_NAME && ch.members.iter().any(|m| m == MAIN_NAME) {
+                Some(format_main_line(name, &msg))
             } else {
                 None
             };
@@ -551,8 +575,8 @@ impl ChannelRegistry {
                 deliveries,
             }
         };
-        if let Some(line) = hub_line {
-            inner.hub_mail.push(line);
+        if let Some(line) = main_line {
+            inner.main_mail.push(line);
         }
         Ok(outcome)
     }
@@ -637,13 +661,37 @@ impl ChannelRegistry {
         out
     }
 
-    pub fn has_hub_mail(&self) -> bool {
-        !self.lock().hub_mail.is_empty()
+    pub fn has_main_mail(&self) -> bool {
+        !self.lock().main_mail.is_empty()
+    }
+
+    /// How much is waiting. The digest debounce watches this rather than the
+    /// bare "is there any": a burst is exactly a count that keeps changing, and
+    /// the quiet window restarts every time it does.
+    pub fn main_mail_len(&self) -> usize {
+        self.lock().main_mail.len()
     }
 
     /// Drain channel messages pending injection into the main agent (batch-injected at turn boundaries).
-    pub fn drain_hub_mail(&self) -> Vec<String> {
-        std::mem::take(&mut self.lock().hub_mail)
+    pub fn drain_main_mail(&self) -> Vec<String> {
+        std::mem::take(&mut self.lock().main_mail)
+    }
+
+    /// Land a direct message for the main agent (D98's `SendMessage(to: "main")`).
+    ///
+    /// It rides the room relays' store because the main agent has one inbox and
+    /// one place it is injected from; what tells the two apart is the marker on
+    /// the line, which is also what lets a reader attribute it.
+    pub fn deliver_to_main(&self, from: &str, text: &str, urgent: bool) {
+        let mut inner = self.lock();
+        inner.main_mail.push(format_main_message(from, text));
+        inner.main_mail_urgent |= urgent;
+    }
+
+    /// Take the pending attention request, if any. Reading it clears it: the
+    /// bell rings once per message that asked for it.
+    pub fn take_main_mail_urgent(&self) -> bool {
+        std::mem::take(&mut self.lock().main_mail_urgent)
     }
 }
 
@@ -691,7 +739,7 @@ mod tests {
         assert!(reg.invite("table", "c").is_err(), "duplicate invite");
         reg.kick("table", "b").unwrap_or_else(|e| panic!("{e}"));
         assert!(reg.kick("table", "b").is_err(), "not present");
-        assert!(reg.kick("table", "main").is_err(), "hub cannot be removed");
+        assert!(reg.kick("table", "main").is_err(), "main cannot be removed");
         assert_eq!(reg.list()[0].members, vec!["a", "c"]);
         // The user joins and leaves like anybody else: that is what a
         // membership is, and a member who cannot leave is a fixture.
@@ -717,12 +765,12 @@ mod tests {
     }
 
     #[test]
-    fn post_fans_out_excluding_sender_and_hub() {
+    fn post_fans_out_excluding_sender_and_main() {
         let reg = registry();
         reg.create(
             "t",
             vec![
-                HUB_NAME.into(),
+                MAIN_NAME.into(),
                 USER_NAME.into(),
                 "a".into(),
                 "b".into(),
@@ -737,22 +785,22 @@ mod tests {
         );
         assert_eq!(seq, 1);
         let names: Vec<&str> = deliveries.iter().map(|(m, _)| m.as_str()).collect();
-        assert_eq!(names, vec!["b", "c"], "not delivered to the sender or hub");
+        assert_eq!(names, vec!["b", "c"], "not delivered to the sender or main");
         assert!(
             deliveries
                 .iter()
                 .all(|(_, m)| m.from == "a" && m.text == "hello everyone")
         );
-        // Hub is a member: messages go to hub_mail; the hub's own posts don't.
-        assert!(reg.has_hub_mail());
-        let mail = reg.drain_hub_mail();
+        // Main is a member: messages go to main_mail; main's own posts don't.
+        assert!(reg.has_main_mail());
+        let mail = reg.drain_main_mail();
         assert_eq!(mail, vec!["[#t msg #1] a: hello everyone"]);
         let _ = sent(
             reg.post("main", "t", "quiet")
                 .unwrap_or_else(|e| panic!("{e}")),
         );
-        assert!(!reg.has_hub_mail(), "hub's own posts do not flow back");
-        // user (a human) is a natural member: can post, hub hears it, doesn't consume the per_agent budget.
+        assert!(!reg.has_main_mail(), "main's own posts do not flow back");
+        // user (a human) is a natural member: can post, main hears it, doesn't consume the per_agent budget.
         let (_, deliveries) = sent(
             reg.post("user", "t", "everyone stop")
                 .unwrap_or_else(|e| panic!("{e}")),
@@ -765,7 +813,7 @@ mod tests {
             vec!["a", "b", "c"],
             "user's post wakes all agent members"
         );
-        assert!(reg.drain_hub_mail()[0].contains("user: everyone stop"));
+        assert!(reg.drain_main_mail()[0].contains("user: everyone stop"));
         // Non-member / unknown channel error.
         assert!(reg.post("ghost", "t", "x").is_err());
         assert!(reg.post("a", "nope", "x").is_err());
@@ -888,7 +936,7 @@ mod tests {
     }
 
     #[test]
-    fn budgets_freeze_channel_and_notify_hub_once() {
+    fn budgets_freeze_channel_and_notify_main_once() {
         let reg = ChannelRegistry::new(ChannelLimits {
             channel_total: 2,
             per_agent: 2,
@@ -900,18 +948,18 @@ mod tests {
         // a hits the per_agent cap.
         let err = reg.post("a", "t", "3").unwrap_err();
         assert!(err.contains("cap 2"), "{err}");
-        // b triggers the channel total cap: freeze + hub gets one warning.
-        let _ = reg.drain_hub_mail();
+        // b triggers the channel total cap: freeze + main gets one warning.
+        let _ = reg.drain_main_mail();
         let err = reg.post("b", "t", "x").unwrap_err();
         assert!(err.contains("frozen"), "{err}");
         assert!(reg.list()[0].frozen);
-        let mail = reg.drain_hub_mail();
+        let mail = reg.drain_main_mail();
         assert_eq!(mail.len(), 1, "{mail:?}");
         assert!(mail[0].contains("now frozen"));
         // Posting after freeze: rejected, no repeated notification.
         let err = reg.post("b", "t", "y").unwrap_err();
         assert!(err.contains("is frozen"), "{err}");
-        assert!(!reg.has_hub_mail());
+        assert!(!reg.has_main_mail());
     }
 
     #[test]

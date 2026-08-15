@@ -30,6 +30,8 @@ pub const ROWS: usize = 2;
 /// The bundled portraits (`assets/avatars`, CC0 — see that directory's README).
 /// The name is the id `.bingo/team.json` pins with, so a crew member keeps one face
 /// across sessions instead of whatever a hash of its instance name lands on.
+///
+/// **The first one is main's, and only main's** — see [`MAIN_INDEX`].
 const PORTRAITS: [(&str, &[u8]); 8] = [
     ("emi", include_bytes!("../../assets/avatars/emi.png")),
     ("kenji", include_bytes!("../../assets/avatars/kenji.png")),
@@ -41,27 +43,55 @@ const PORTRAITS: [(&str, &[u8]); 8] = [
     ("rio", include_bytes!("../../assets/avatars/rio.png")),
 ];
 
-/// Every portrait id, in order — the vocabulary a blueprint may pin.
-pub fn ids() -> [&'static str; COUNT] {
-    PORTRAITS.map(|(id, _)| id)
-}
-
-/// The number of distinct portraits, so a roster can hand out different ones.
+/// The number of distinct portraits.
 pub const COUNT: usize = PORTRAITS.len();
 
-/// A pinned id → its portrait. Unknown ids fall through to the hash, so a typo in
-/// team.json costs a face, not a crash.
+/// The main agent's portrait, reserved (D99).
+///
+/// @main wears a face like every other participant now that the console has a
+/// gutter, and its face has to be *the same one every session* and one no
+/// teammate can be handed. Rather than bundle a ninth image, the first portrait
+/// is taken out of circulation: [`index_of`] hashes over `1..COUNT` and
+/// [`ids`] — the vocabulary `.bingo/team.json` may pin — no longer lists it. So
+/// the reservation is total rather than probabilistic, and it costs the crew one
+/// face out of eight.
+pub const MAIN_INDEX: usize = 0;
+
+/// The portrait ids a blueprint may pin, in order. [`MAIN_INDEX`]'s is not among
+/// them: a pinned `main` face would be exactly the collision the reservation
+/// exists to prevent.
+pub fn ids() -> [&'static str; COUNT - 1] {
+    let mut out = [""; COUNT - 1];
+    let mut i = MAIN_INDEX + 1;
+    while i < COUNT {
+        out[i - 1] = PORTRAITS[i].0;
+        i += 1;
+    }
+    out
+}
+
+/// A pinned id → its portrait. Unknown ids — and main's, which is not pinnable —
+/// fall through to the hash, so a typo in team.json costs a face, not a crash.
 pub fn index_of_id(id: &str) -> Option<usize> {
-    PORTRAITS.iter().position(|(name, _)| *name == id)
+    PORTRAITS
+        .iter()
+        .position(|(name, _)| *name == id)
+        .filter(|index| *index != MAIN_INDEX)
 }
 
 /// Which portrait a sender wears when nothing pinned one. Same hash the colour chip
 /// uses, so a member keeps one identity whether or not the terminal draws pictures.
+///
+/// The main agent is answered before the hash and everybody else is hashed over
+/// what is left, so no teammate can land on main's face.
 pub fn index_of(name: &str) -> usize {
+    if name == crate::channels::MAIN_NAME {
+        return MAIN_INDEX;
+    }
     let hash = name
         .bytes()
         .fold(0u32, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u32));
-    hash as usize % PORTRAITS.len()
+    MAIN_INDEX + 1 + hash as usize % (PORTRAITS.len() - 1)
 }
 
 /// The image key a portrait is transmitted and addressed under. Keyed by portrait
@@ -238,7 +268,7 @@ fn chip(name: &str, index: usize, pal: &Palette) -> Line {
 /// layout was not already spending.
 ///
 /// The portrait index is resolved by the caller: the transcript knows it before
-/// it knows the name (neither the hub nor the human is a blueprint member), and
+/// it knows the name (neither main nor the human is a blueprint member), and
 /// a table to look it up in would have been cloned every frame.
 pub fn gutter_cell(index: usize, name: &str, row: usize, images: bool, pal: &Palette) -> Line {
     if images {
@@ -255,36 +285,17 @@ pub fn gutter_cell(index: usize, name: &str, row: usize, images: bool, pal: &Pal
     Line::styled(" ".repeat(gutter(images)), SegStyle::fg(pal.main_dim))
 }
 
-/// A sender band: the portrait beside the name, as the rows a transcript puts
-/// *above* a message rather than beside it. The main chat has no gutter — its
-/// bodies run the full width and its `⏺` markers separate prose from tool rows
-/// inside one message — so the face goes overhead, where it costs two rows once
-/// per message and nothing below it has to move.
-///
-/// One row where the terminal cannot place images: unlike the workspace gutter,
-/// nothing here depends on the two skins having equal height.
-pub fn sender_band(
-    index: usize,
-    name: &str,
-    shown: &str,
-    images: bool,
-    pal: &Palette,
-) -> Vec<Line> {
-    let mut head = gutter_cell(index, name, 0, images, pal);
-    head.push_styled(shown.to_string(), SegStyle::fg(pal.main_text).bold());
-    if !images {
-        return vec![head];
-    }
-    vec![head, gutter_cell(index, name, 1, images, pal)]
-}
-
 /// The message gutter of a conversation view (D97): how wide it is, which
 /// portrait a sender wears, and the cells that portrait occupies.
 ///
-/// One value threaded through every conversation row builder — the DM and room
-/// flow, the live tail, the perspective page — so the three surfaces cannot
-/// drift on width, on who gets a face, or on which skin the terminal is in.
-/// The hub builds none: its grammar is Claude Code's, and it stays avatar-free.
+/// One value threaded through every conversation row builder — @main, the DM and
+/// room flow, the live tail, the perspective page — so the surfaces cannot drift
+/// on width, on who gets a face, or on which skin the terminal is in.
+///
+/// **@main has one too, since D99.** A conversation is a conversation: main is a
+/// participant like the rest, its portrait is [`MAIN_INDEX`], and the console
+/// gets the gutter through this same value rather than through a second
+/// convention of its own.
 #[derive(Clone, Copy)]
 pub struct Gutter<'a> {
     /// Whether the terminal can place images (chip fallback when it cannot).
@@ -318,8 +329,13 @@ impl<'a> Gutter<'a> {
         Line::styled(" ".repeat(self.width()), SegStyle::fg(self.pal.main_dim))
     }
 
-    /// The portrait `name` wears, honouring a blueprint pin before the hash.
+    /// The portrait `name` wears, honouring a blueprint pin before the hash —
+    /// except main's, which is answered before either (D99): its face is
+    /// reserved, and a reservation a pin could override would not be one.
     pub fn index_for(&self, name: &str) -> usize {
+        if name == crate::channels::MAIN_NAME {
+            return MAIN_INDEX;
+        }
         self.pinned
             .get(name)
             .copied()
@@ -372,10 +388,10 @@ mod tests {
         let (_, bottom) = placeholder(3, 1).unwrap_or_else(|| panic!("row 1"));
         assert_eq!(top, bottom, "same image");
         assert_eq!(index_of("scout"), index_of("scout"));
-        // Different names generally differ; the set is only eight, so this asserts
+        // Different names generally differ; the set is only seven, so this asserts
         // the mapping is a function of the name, not that it is injective.
         let spread: std::collections::HashSet<usize> =
-            ["scout", "qa", "dev", "ui", "main", "user", "docs", "ops"]
+            ["scout", "qa", "dev", "ui", "user", "docs", "ops", "parser"]
                 .iter()
                 .map(|n| index_of(n))
                 .collect();
@@ -386,17 +402,45 @@ mod tests {
     }
 
     /// Pinning is what makes a crew member's face survive a rename or a reshuffle.
+    /// The vocabulary it may pin is every portrait but main's.
     #[test]
     fn ids_pin_a_portrait_and_unknown_ones_fall_through() {
-        assert_eq!(ids().len(), COUNT);
-        for (i, id) in ids().into_iter().enumerate() {
-            assert_eq!(index_of_id(id), Some(i), "{id}");
+        assert_eq!(ids().len(), COUNT - 1);
+        for (offset, id) in ids().into_iter().enumerate() {
+            assert_eq!(index_of_id(id), Some(MAIN_INDEX + 1 + offset), "{id}");
         }
         assert_eq!(
             index_of_id("nobody"),
             None,
             "unknown ids are not recognized; fall back to the hash"
         );
+    }
+
+    /// @main's face is fixed and nobody else's, which is what lets the console
+    /// wear the gutter without a portrait that moves between sessions (D99).
+    #[test]
+    fn main_keeps_a_face_no_teammate_can_take() {
+        let pal = Palette::new(&Theme::dark());
+        let mut pinned = std::collections::HashMap::new();
+        // Even a blueprint that tries to hand main's portrait to somebody, and
+        // even one that tries to repin main itself, does not move it.
+        pinned.insert("scout".to_string(), MAIN_INDEX);
+        pinned.insert(crate::channels::MAIN_NAME.to_string(), 5);
+        let gutter = Gutter::new(false, &pal, &pinned);
+        assert_eq!(gutter.index_for(crate::channels::MAIN_NAME), MAIN_INDEX);
+        assert_eq!(index_of(crate::channels::MAIN_NAME), MAIN_INDEX);
+
+        // The id of main's portrait is not in the pinnable vocabulary at all, so
+        // no team.json can reach it by name.
+        let main_id = PORTRAITS[MAIN_INDEX].0;
+        assert!(!ids().contains(&main_id), "{main_id} is main's");
+        assert_eq!(index_of_id(main_id), None);
+
+        // And the hash never lands there, whatever the name.
+        for i in 0..500 {
+            let name = format!("agent-{i}");
+            assert_ne!(index_of(&name), MAIN_INDEX, "{name} took main's face");
+        }
     }
 
     /// Transmit once per portrait, not once per frame or once per sender.

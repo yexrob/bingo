@@ -817,6 +817,7 @@ mod tests {
                 insert_points: Vec::new(),
                 groups: Vec::new(),
                 group_of: Vec::new(),
+                digest: false,
             });
         }
         chat.dirty = true;
@@ -839,6 +840,7 @@ mod tests {
                 insert_points: Vec::new(),
                 groups: Vec::new(),
                 group_of: Vec::new(),
+                digest: false,
             });
         }
         chat.dirty = true;
@@ -877,12 +879,13 @@ mod tests {
         for i in 0..80 {
             chat.messages.push(crate::tui::chat::UiMessage {
                 role: crate::tui::chat::Role::User,
-                text: format!("hub line {i}"),
+                text: format!("main line {i}"),
                 at: 0,
                 activities: Vec::new(),
                 insert_points: Vec::new(),
                 groups: Vec::new(),
                 group_of: Vec::new(),
+                digest: false,
             });
         }
         chat.dirty = true;
@@ -930,12 +933,13 @@ mod tests {
         for i in 0..80 {
             chat.messages.push(crate::tui::chat::UiMessage {
                 role: crate::tui::chat::Role::User,
-                text: format!("hub line {i}"),
+                text: format!("main line {i}"),
                 at: 0,
                 activities: Vec::new(),
                 insert_points: Vec::new(),
                 groups: Vec::new(),
                 group_of: Vec::new(),
+                digest: false,
             });
         }
         chat.dirty = true;
@@ -1215,6 +1219,7 @@ mod tests {
             insert_points: Vec::new(),
             groups: Vec::new(),
             group_of: Vec::new(),
+            digest: false,
         });
         chat.dirty = true;
         rebuild(&mut chat, size(80, 24), false);

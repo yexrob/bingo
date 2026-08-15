@@ -200,9 +200,9 @@ pub enum Refresh {
 }
 
 /// Sweeps a finished hire survives before it is released. One is not enough: a hire that
-/// finishes during hub round N has its result reported in round N+1, which is the round
-/// the hub can first act on it — releasing at the end of N+1's own sweep would take the
-/// instance away in the same round its result arrived. Two gives the hub exactly one round
+/// finishes during main round N has its result reported in round N+1, which is the round
+/// main can first act on it — releasing at the end of N+1's own sweep would take the
+/// instance away in the same round its result arrived. Two gives main exactly one round
 /// to send a follow-up (which refills the inbox and resets the count) before the name goes.
 const HIRE_LEASE: u8 = 2;
 
@@ -260,7 +260,7 @@ pub enum AckState {
     Delivered {
         run: u64,
     },
-    /// Run #N ended with a reply for the hub, which answers this message (not necessarily the run
+    /// Run #N ended with a reply for main, which answers this message (not necessarily the run
     /// that first read it: a message read during a silent run is answered by the one that speaks).
     Answered {
         run: u64,
@@ -319,14 +319,14 @@ pub enum FollowUp {
     Gone,
 }
 
-/// Inbox item: a direct hub command, or a channel message (injected in batch on wake, in order).
+/// Inbox item: a direct main command, or a channel message (injected in batch on wake, in order).
 #[derive(Debug, Clone)]
 pub enum InboxItem {
     Direct {
         id: MsgId,
-        /// Who sent it: [`crate::channels::HUB_NAME`] for the hub's SendMessage,
+        /// Who sent it: [`crate::channels::MAIN_NAME`] for main's SendMessage,
         /// [`crate::channels::USER_NAME`] when the human wrote it (DM window, `/team assign`).
-        /// The hub is the default voice of direct instructions and stays untagged in the
+        /// Main is the default voice of direct instructions and stays untagged in the
         /// prompt; the user is the exception worth marking (D64).
         from: String,
         text: String,
@@ -340,7 +340,7 @@ pub enum InboxItem {
         text: String,
         seq: u64,
     },
-    /// Automatic chase for a direct message the hub never got an answer to. It carries no new
+    /// Automatic chase for a direct message main never got an answer to. It carries no new
     /// instruction — only the fact that the sender is still waiting.
     FollowUp {
         original: MsgId,
@@ -360,12 +360,13 @@ pub enum InboxItem {
 /// What [`AgentRegistry::view_of`] samples for the DM view: history, the
 /// landing-time stamp of each history message (unix seconds, 0 = unknown),
 /// the live tail, the direct messages claimed by the current run but not yet
-/// landed in history, and the instance state.
+/// landed in history — `(sender, text)`, because a pair view has one
+/// conversation in it (D99) — and the instance state.
 pub type AgentView = (
     Vec<Message>,
     Vec<u64>,
     Vec<LiveBlock>,
-    Vec<String>,
+    Vec<(String, String)>,
     AgentState,
 );
 
@@ -403,18 +404,25 @@ struct Entry {
     /// Inbox accumulated since the last drain (commands + channel messages, claimed as one
     /// batch when the receiver is ready).
     inbox: Vec<InboxItem>,
-    /// Direct messages drained into the current run and not yet landed in `history`.
+    /// Direct messages drained into the current run and not yet landed in `history`,
+    /// each with the sender it came from.
     /// Without this record a sent message vanishes for the whole turn: the inbox is
     /// emptied at the claim point and `history` only catches up at [`AgentRegistry::finish`].
     /// The DM view bridges that window from here; cleared when the history lands, and
-    /// pruned when a failed run puts its batch back in the inbox.
-    in_flight: Vec<(MsgId, String)>,
+    /// pruned when a failed run puts its batch back in the inbox. The sender is kept
+    /// because the pair view is one conversation (D99): main's instruction in flight
+    /// is not the user's message and must not render as one.
+    in_flight: Vec<(MsgId, String, String)>,
     /// Delivery records for direct messages, oldest first, capped at MAX_ACKS.
     acks: Vec<Ack>,
     session: Arc<Session>,
     abort: Option<tokio::task::AbortHandle>,
     /// Cumulative run count (watch lines are labeled `#N`).
     runs: u64,
+    /// Whether the run in flight was triggered by the user's own DM alone
+    /// (D99) — the same discrimination D98 stamps on the watch entry, kept on
+    /// the instance so the pair view can ask whose tail it is looking at.
+    user_run: bool,
     /// Watch line of the current turn (used to set Cancelled on stop/delete).
     watch_id: Option<crate::watch::WatchId>,
     /// Streaming output of the current turn (shares the same Arc with subagent_hooks;
@@ -603,7 +611,7 @@ impl AgentRegistry {
 
     /// Claim an instance name: use the base name when free, otherwise append `-2`/`-3`…
     /// (so parallel same-name instances stay distinguishable).
-    /// `main`/`user` are reserved for the hub and the user (channel member names) and
+    /// `main`/`user` are reserved for main and the user (channel member names) and
     /// are never handed out.
     pub fn claim_name(&self, base: &str) -> String {
         let base = if base.trim().is_empty() {
@@ -612,7 +620,7 @@ impl AgentRegistry {
             base.trim()
         };
         let taken = |inner: &HashMap<String, Entry>, name: &str| {
-            name == crate::channels::HUB_NAME
+            name == crate::channels::MAIN_NAME
                 || name == crate::channels::USER_NAME
                 || inner.contains_key(name)
         };
@@ -653,6 +661,7 @@ impl AgentRegistry {
                 stamps: Vec::new(),
                 inbox: Vec::new(),
                 in_flight: Vec::new(),
+                user_run: false,
                 acks: Vec::new(),
                 session,
                 abort: None,
@@ -724,11 +733,11 @@ impl AgentRegistry {
     ///
     /// Only fires while a crew member is actually up: a hire is "temporary" relative to a
     /// standing crew, and in a project with none, an ad-hoc subagent is the ordinary way to
-    /// work — sweeping those would delete instances the hub still expects to address.
+    /// work — sweeping those would delete instances main still expects to address.
     ///
-    /// Done means the instance is idle with nothing waiting: no inbox, no message the hub is
+    /// Done means the instance is idle with nothing waiting: no inbox, no message main is
     /// still owed an answer to, and at least one run behind it (a hire the loop has not
-    /// picked up yet is not finished, it is unstarted). A hire the hub stopped is released on
+    /// picked up yet is not finished, it is unstarted). A hire main stopped is released on
     /// the spot — it will never run again, and holding the name serves nobody.
     pub fn release_hires(&self) -> Vec<String> {
         let mut inner = self.lock();
@@ -821,7 +830,7 @@ impl AgentRegistry {
             entry
                 .in_flight
                 .iter()
-                .map(|(_, text)| text.clone())
+                .map(|(_, from, text)| (from.clone(), text.clone()))
                 .collect(),
             entry.state,
         ))
@@ -873,7 +882,7 @@ impl AgentRegistry {
             abort.abort();
             for item in &items {
                 if let InboxItem::Direct { id, .. } = item {
-                    entry.in_flight.retain(|(flying, _)| flying != id);
+                    entry.in_flight.retain(|(flying, ..)| flying != id);
                     if let Some(ack) = entry.acks.iter_mut().find(|ack| ack.id == *id) {
                         ack.state = AckState::Dropped {
                             reason: "instance stopped".to_string(),
@@ -908,6 +917,26 @@ impl AgentRegistry {
         if let Some(entry) = self.lock().get_mut(name) {
             entry.watch_id = Some(id);
         }
+    }
+
+    /// Record whose run this is, at the moment it is registered (D99).
+    ///
+    /// D98 already decides this to answer "does the end of this run wake main"
+    /// (`tool::agent::wakes_owner`). The pair view asks the same question from
+    /// the other side: a run nobody in this conversation started has a live tail
+    /// that belongs on the agent's own page, not under the user's composer.
+    pub fn set_run_trigger(&self, name: &str, wakes_owner: bool) {
+        if let Some(entry) = self.lock().get_mut(name) {
+            entry.user_run = !wakes_owner;
+        }
+    }
+
+    /// Whether the run in flight was started by the user's own message. False
+    /// when nothing is running — there is no tail to claim.
+    pub fn run_is_the_users(&self, name: &str) -> bool {
+        self.lock()
+            .get(name)
+            .is_some_and(|entry| entry.user_run && entry.state == AgentState::Running)
     }
 
     /// Turn finished: store the latest history. Inbox non-empty → stay Running and
@@ -1025,7 +1054,7 @@ impl AgentRegistry {
         if entry.state == AgentState::Stopped {
             for item in &items {
                 if let InboxItem::Direct { id, .. } = item {
-                    entry.in_flight.retain(|(flying, _)| flying != id);
+                    entry.in_flight.retain(|(flying, ..)| flying != id);
                     if let Some(ack) = entry.acks.iter_mut().find(|ack| ack.id == *id) {
                         ack.state = AckState::Dropped {
                             reason: "instance stopped".to_string(),
@@ -1040,7 +1069,7 @@ impl AgentRegistry {
             if let InboxItem::Direct { id, .. } = item {
                 // Back in the inbox, back to the pending view — a message rendered
                 // both as sent and as queued would be on screen twice.
-                entry.in_flight.retain(|(flying, _)| flying != id);
+                entry.in_flight.retain(|(flying, ..)| flying != id);
                 if let Some(ack) = entry.acks.iter_mut().find(|ack| ack.id == *id) {
                     ack.state = AckState::Queued;
                     ack.delivered_after_chars = None;
@@ -1071,7 +1100,7 @@ impl AgentRegistry {
         }
     }
 
-    /// Queue a hub command. Returns the message id — the receipt the sender uses to check the
+    /// Queue a main command. Returns the message id — the receipt the sender uses to check the
     /// outcome later. Idle instances are claimed by the immediate dispatcher; running instances
     /// absorb the batch between tool rounds. `ack_timeout` records the wait the sender allowed
     /// before the acknowledgement is chased (see `follow_up`); it is a note on the record, not a
@@ -1181,9 +1210,11 @@ impl AgentRegistry {
         Some(self.lock().get(name)?.acks.clone())
     }
 
-    /// Direct messages still sitting in the inbox, in order. The DM view renders
-    /// them after the history so a message just sent stays visible until the receiver claims it.
-    pub fn pending_of(&self, name: &str) -> Vec<String> {
+    /// Direct messages still sitting in the inbox, in order, each with its
+    /// sender. The DM view renders the user's own after the history so a message
+    /// just sent stays visible until the receiver claims it — and leaves main's
+    /// alone, because that is somebody else's conversation (D99).
+    pub fn pending_of(&self, name: &str) -> Vec<(String, String)> {
         self.lock()
             .get(name)
             .map(|entry| {
@@ -1191,7 +1222,7 @@ impl AgentRegistry {
                     .inbox
                     .iter()
                     .filter_map(|item| match item {
-                        InboxItem::Direct { text, .. } => Some(text.clone()),
+                        InboxItem::Direct { from, text, .. } => Some((from.clone(), text.clone())),
                         // A follow-up is the harness chasing an acknowledgement, not something
                         // the sender wrote — rendering it as their pending message would lie.
                         InboxItem::Channel { .. } | InboxItem::FollowUp { .. } => None,
@@ -1315,10 +1346,10 @@ fn answer_acks(entry: &mut Entry, output_chars: usize) {
 
 fn mark_delivered(entry: &mut Entry, items: &[InboxItem], run: u64, output_chars: usize) {
     for item in items {
-        if let InboxItem::Direct { id, text, .. } = item {
+        if let InboxItem::Direct { id, from, text, .. } = item {
             // Delivered into a run means gone from the inbox but not yet in the
             // history: record it so the DM keeps showing what was sent.
-            entry.in_flight.push((*id, text.clone()));
+            entry.in_flight.push((*id, from.clone(), text.clone()));
             if let Some(ack) = entry.acks.iter_mut().find(|ack| ack.id == *id) {
                 ack.state = AckState::Delivered { run };
                 ack.delivered_after_chars = Some(output_chars);
@@ -1578,7 +1609,7 @@ mod tests {
     }
 
     /// A hire serves one task and goes (D53): once it is idle with nothing waiting, the
-    /// lease runs out and the name is released. The crew is never touched, and the hub gets
+    /// lease runs out and the name is released. The crew is never touched, and main gets
     /// one round to follow up before the instance disappears under it.
     #[test]
     fn a_finished_hire_is_released_and_the_crew_is_not() {
@@ -1607,11 +1638,11 @@ mod tests {
         assert_eq!(reg.list().len(), 2, "a working hire keeps its name");
 
         // Finished: idle, empty inbox, nothing owed. One sweep is not enough — that would
-        // take the instance away in the very round its result reaches the hub.
+        // take the instance away in the very round its result reaches main.
         assert!(reg.finish("temp", Vec::new(), 1).is_none());
         assert!(
             reg.release_hires().is_empty(),
-            "the hub still has a round to follow up in"
+            "main still has a round to follow up in"
         );
         assert_eq!(reg.release_hires(), vec!["temp".to_string()]);
         let left = reg.list();
@@ -1620,7 +1651,7 @@ mod tests {
         assert_eq!(left[0].kind, AgentKind::Crew);
     }
 
-    /// A follow-up renews the lease: the hire the hub is still talking to is not swept out
+    /// A follow-up renews the lease: the hire main is still talking to is not swept out
     /// from under the conversation.
     #[test]
     fn a_hire_with_work_waiting_keeps_its_name() {
@@ -1649,7 +1680,7 @@ mod tests {
         let _ = reg
             .deliver(
                 "temp",
-                crate::channels::HUB_NAME,
+                crate::channels::MAIN_NAME,
                 "one more thing",
                 Vec::new(),
                 None,
@@ -1691,7 +1722,7 @@ mod tests {
         assert!(reg.finish("temp", Vec::new(), 1).is_none());
         let _ = reg.deliver(
             "temp",
-            crate::channels::HUB_NAME,
+            crate::channels::MAIN_NAME,
             "answer me",
             Vec::new(),
             None,
@@ -1721,7 +1752,7 @@ mod tests {
 
     /// Without a crew there is nothing for a hire to be temporary *relative to*: an ad-hoc
     /// subagent is the ordinary way to work in such a project, and sweeping it would delete
-    /// instances the hub still expects to address.
+    /// instances main still expects to address.
     #[test]
     fn hires_are_not_swept_in_a_project_with_no_crew() {
         let reg = AgentRegistry::new();
@@ -1800,7 +1831,7 @@ mod tests {
         let first = reg
             .deliver(
                 "scout",
-                crate::channels::HUB_NAME,
+                crate::channels::MAIN_NAME,
                 "add A",
                 Vec::new(),
                 None,
@@ -1898,13 +1929,20 @@ mod tests {
         let _ = reg
             .deliver(
                 "scout",
-                crate::channels::HUB_NAME,
+                crate::channels::MAIN_NAME,
                 "map the module",
                 Vec::new(),
                 None,
             )
             .unwrap_or_else(|e| panic!("{e}"));
-        assert_eq!(reg.pending_of("scout"), vec!["map the module".to_string()]);
+        assert_eq!(
+            reg.pending_of("scout"),
+            vec![(
+                crate::channels::MAIN_NAME.to_string(),
+                "map the module".to_string()
+            )],
+            "the sender rides with the message: a pair view has one conversation in it"
+        );
 
         // Claimed: gone from the inbox, not yet in the history — in flight.
         assert_eq!(reg.flush_pending().len(), 1);
@@ -1912,7 +1950,13 @@ mod tests {
         let (history, _, _, in_flight, _) =
             reg.view_of("scout").unwrap_or_else(|| panic!("exists"));
         assert!(history.is_empty());
-        assert_eq!(in_flight, vec!["map the module".to_string()]);
+        assert_eq!(
+            in_flight,
+            vec![(
+                crate::channels::MAIN_NAME.to_string(),
+                "map the module".to_string()
+            )]
+        );
 
         // Landed: the stored history carries it, the bridge record is gone.
         let landed = vec![
@@ -1948,7 +1992,7 @@ mod tests {
         let _ = reg
             .deliver(
                 "scout",
-                crate::channels::HUB_NAME,
+                crate::channels::MAIN_NAME,
                 "map the module",
                 Vec::new(),
                 None,
@@ -1964,7 +2008,14 @@ mod tests {
         reg.restore_inbox("scout", wake.items);
         let (_, _, _, in_flight, _) = reg.view_of("scout").unwrap_or_else(|| panic!("exists"));
         assert!(in_flight.is_empty(), "{in_flight:?}");
-        assert_eq!(reg.pending_of("scout"), vec!["map the module".to_string()]);
+        assert_eq!(
+            reg.pending_of("scout"),
+            vec![(
+                crate::channels::MAIN_NAME.to_string(),
+                "map the module".to_string()
+            )],
+            "the sender rides with the message: a pair view has one conversation in it"
+        );
     }
 
     #[test]
@@ -1981,7 +2032,7 @@ mod tests {
         let first = reg
             .deliver(
                 "scout",
-                crate::channels::HUB_NAME,
+                crate::channels::MAIN_NAME,
                 "add A",
                 Vec::new(),
                 None,
@@ -2011,7 +2062,7 @@ mod tests {
         let _ = reg
             .deliver(
                 "scout",
-                crate::channels::HUB_NAME,
+                crate::channels::MAIN_NAME,
                 "look at B again",
                 Vec::new(),
                 None,
@@ -2040,7 +2091,7 @@ mod tests {
         reg.insert("w", AgentKind::Hire, None, "w".into(), test_session());
         let _ = reg.deliver(
             "w",
-            crate::channels::HUB_NAME,
+            crate::channels::MAIN_NAME,
             "do 1 first",
             Vec::new(),
             None,
@@ -2132,7 +2183,7 @@ mod tests {
         // while Running queues; two instructions create the queue scenario).
         reg.deliver(
             "scout",
-            crate::channels::HUB_NAME,
+            crate::channels::MAIN_NAME,
             "check again",
             Vec::new(),
             None,
@@ -2140,7 +2191,7 @@ mod tests {
         .unwrap_or_else(|e| panic!("{e}"));
         reg.deliver(
             "scout",
-            crate::channels::HUB_NAME,
+            crate::channels::MAIN_NAME,
             "check once more",
             Vec::new(),
             None,
@@ -2162,12 +2213,12 @@ mod tests {
     }
 
     #[test]
-    fn hub_name_is_reserved() {
+    fn main_name_is_reserved() {
         let reg = AgentRegistry::new();
         assert_eq!(
             reg.claim_name("main"),
             "main-2",
-            "main is reserved for the hub"
+            "the main agent owns the name; a subagent asking for it is renamed"
         );
     }
 
@@ -2179,7 +2230,7 @@ mod tests {
         reg.insert("w", AgentKind::Hire, None, "w".into(), test_session());
         assert!(reg.finish("w", Vec::new(), 1).is_none(), "turns idle first");
         for text in ["look at A first", "look at B again", "and finally C"] {
-            reg.deliver("w", crate::channels::HUB_NAME, text, Vec::new(), None)
+            reg.deliver("w", crate::channels::MAIN_NAME, text, Vec::new(), None)
                 .unwrap_or_else(|e| panic!("{e}"));
         }
         assert_eq!(
@@ -2208,7 +2259,7 @@ mod tests {
         let id = reg
             .deliver(
                 "w",
-                crate::channels::HUB_NAME,
+                crate::channels::MAIN_NAME,
                 "is it too late",
                 Vec::new(),
                 None,
@@ -2237,7 +2288,7 @@ mod tests {
         let id = reg
             .deliver(
                 "w",
-                crate::channels::HUB_NAME,
+                crate::channels::MAIN_NAME,
                 "check the logs",
                 Vec::new(),
                 Some(Duration::from_secs(30)),
@@ -2313,7 +2364,7 @@ mod tests {
         let id = reg
             .deliver(
                 "mute",
-                crate::channels::HUB_NAME,
+                crate::channels::MAIN_NAME,
                 "report progress",
                 Vec::new(),
                 Some(Duration::from_secs(30)),
@@ -2324,7 +2375,7 @@ mod tests {
             1,
             "idle instances receive at the boundary"
         );
-        // The turn ends producing no text for the hub.
+        // The turn ends producing no text for main.
         assert!(reg.finish("mute", Vec::new(), 0).is_none());
         let acks = reg.acks_of("mute").unwrap_or_else(|| unreachable!());
         assert!(
@@ -2367,7 +2418,7 @@ mod tests {
         let id = reg
             .deliver(
                 "w",
-                crate::channels::HUB_NAME,
+                crate::channels::MAIN_NAME,
                 "is it too late",
                 Vec::new(),
                 Some(Duration::from_secs(10)),
@@ -2393,8 +2444,14 @@ mod tests {
     fn messages_survive_a_failed_run_and_are_retried() {
         let reg = AgentRegistry::new();
         reg.insert("w", AgentKind::Hire, None, "w".into(), test_session());
-        reg.deliver("w", crate::channels::HUB_NAME, "continue", Vec::new(), None)
-            .unwrap_or_else(|e| panic!("{e}"));
+        reg.deliver(
+            "w",
+            crate::channels::MAIN_NAME,
+            "continue",
+            Vec::new(),
+            None,
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
         // The run failed (spawn_agent_loop's error branch) — it only marks the instance idle.
         reg.mark_idle("w");
         assert_eq!(
@@ -2415,7 +2472,7 @@ mod tests {
         let id = reg
             .deliver(
                 "w",
-                crate::channels::HUB_NAME,
+                crate::channels::MAIN_NAME,
                 "late instruction",
                 Vec::new(),
                 None,
@@ -2449,8 +2506,14 @@ mod tests {
         let reg = AgentRegistry::new();
         reg.insert("w", AgentKind::Hire, None, "w".into(), test_session());
         let _ = reg.next_run("w");
-        reg.deliver("w", crate::channels::HUB_NAME, "retry me", Vec::new(), None)
-            .unwrap_or_else(|e| panic!("{e}"));
+        reg.deliver(
+            "w",
+            crate::channels::MAIN_NAME,
+            "retry me",
+            Vec::new(),
+            None,
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
         let items = reg.take_running("w", 0);
         assert!(matches!(
             reg.acks_of("w").unwrap_or_else(|| unreachable!())[0].state,
@@ -2472,7 +2535,7 @@ mod tests {
         let reg = AgentRegistry::new();
         reg.insert("w", AgentKind::Hire, None, "w".into(), test_session());
         reg.mark_idle("w");
-        reg.deliver("w", crate::channels::HUB_NAME, "start", Vec::new(), None)
+        reg.deliver("w", crate::channels::MAIN_NAME, "start", Vec::new(), None)
             .unwrap_or_else(|e| panic!("{e}"));
         let wake = reg.flush_pending().pop().unwrap_or_else(|| unreachable!());
         assert_eq!(wake.run, 1);
@@ -2502,7 +2565,7 @@ mod tests {
         assert!(
             reg.deliver(
                 "x",
-                crate::channels::HUB_NAME,
+                crate::channels::MAIN_NAME,
                 "still there",
                 Vec::new(),
                 None
@@ -2517,7 +2580,7 @@ mod tests {
         assert!(reg.list().is_empty());
         assert_eq!(reg.claim_name("x"), "x", "deletion frees the name");
         assert!(
-            reg.deliver("x", crate::channels::HUB_NAME, "hi", Vec::new(), None)
+            reg.deliver("x", crate::channels::MAIN_NAME, "hi", Vec::new(), None)
                 .is_err(),
             "unknown instance errors"
         );

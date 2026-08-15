@@ -6,23 +6,28 @@
 //! creator is stamped into the roster it creates, and every other member has to
 //! be named. Nobody, including the user, is seated behind the caller's back.
 //!
-//! `Post`: any member (hub + depth-1 sub-agents) posts to a room — the sender is stamped
-//! by the session instance name (the model cannot forge it); on a serial room, lagging
-//! posts are bounced back with the increments attached (as a tool result, not an error —
-//! the model reads the increments in the same turn and decides whether to resend, amend,
-//! or drop). `Channel`: room management (create/invite/kick/list), available to the
+//! Speaking in a room is `SendMessage(to: "#room")` (D98): the tool wrapper that
+//! used to own it retired, but [`deliver_post`] — the machinery it wrapped — is
+//! unchanged and is still the one path a post takes, whoever sends it. The
+//! sender is stamped from the session instance name (the model cannot forge it);
+//! on a serial room, lagging posts are bounced back with the increments attached
+//! (as a tool result, not an error — the model reads the increments in the same
+//! turn and decides whether to resend, amend, or drop).
+//!
+//! `Channel`: room management (create/invite/kick/list), available to the
 //! main agent and to direct sub-agents alike, because a team that can only be
 //! grouped from the top is not a team that can organize itself.
 //! Delivery wake-up: messages land in every member's inbox; idle members are woken
-//! immediately, busy members get batched injection at turn boundaries; the hub is injected
-//! via hub_mail before the next round of reasoning. Silence = not calling Post.
+//! immediately, busy members get batched injection at turn boundaries; the main
+//! agent's copy lands in main_mail and is digested on a debounce (D98).
+//! Silence = not sending.
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde::Deserialize;
 
-use crate::channels::{ChannelMode, HUB_NAME, PostOutcome};
+use crate::channels::{ChannelMode, MAIN_NAME, PostOutcome};
 use crate::query::Session;
 use crate::tool::agent::flush_agent_inbox;
 use crate::tool::{Tool, ToolContext, ToolError, ToolResult, parse_input};
@@ -70,7 +75,7 @@ fn sender_of(session: &Arc<Session>) -> String {
     session
         .instance
         .clone()
-        .unwrap_or_else(|| HUB_NAME.to_string())
+        .unwrap_or_else(|| MAIN_NAME.to_string())
 }
 
 /// Post outcome (the two exit paths of deliver_post).
@@ -83,8 +88,9 @@ pub(crate) enum PostDelivery {
     },
 }
 
-/// Post + delivery wake-up + display row refresh — the Post tool and the TUI channel room
-/// share the same path (the user's posts as `user` in the room go through here too).
+/// Post + delivery wake-up + display row refresh — `SendMessage(to: "#room")`
+/// and the TUI channel room share the same path (the user's posts as `user` in
+/// the room go through here too).
 pub(crate) fn deliver_post(
     session: &Arc<Session>,
     watch: &Arc<crate::watch::WatchRegistry>,
@@ -112,85 +118,6 @@ pub(crate) fn deliver_post(
             Ok(PostDelivery::Sent { seq })
         }
         PostOutcome::Stale { missed } => Ok(PostDelivery::Stale { missed }),
-    }
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-#[schemars(deny_unknown_fields)]
-pub struct PostInput {
-    #[schemars(description = "Channel name (without #)")]
-    channel: String,
-    #[schemars(description = "Message content")]
-    message: String,
-}
-
-/// Post to a channel (sender = this session's instance name, stamped by the runtime).
-pub struct PostTool {
-    session: Arc<Session>,
-}
-
-impl PostTool {
-    pub fn new(session: Arc<Session>) -> Self {
-        Self { session }
-    }
-}
-
-#[async_trait]
-impl Tool for PostTool {
-    fn name(&self) -> String {
-        "Post".to_string()
-    }
-    fn description(&self) -> String {
-        let who = sender_of(&self.session);
-        format!(
-            "Speak in a room. Your name in the room is {who} (the sender is stamped by the runtime and cannot be forged), and you can only speak in rooms you are a member of. \
-This tool is the only way to put words in the room: the text you write as your turn result goes to the hub, not to the room, so deciding to answer means calling this. \
-Room messages enter every member's context (in the same order); in a serial room, if you are behind the latest message the send bounces back with the new content attached — read it, then decide to resend, amend, or drop. \
-Every message wakes every other member, so who you are answering matters: when `user` or `main` addresses the room, answer once, briefly, the way a person answers the room they are in; when another member speaks you owe nothing unless they named you or you can unblock them; never answer an answer — that is what floods a room. When you have nothing to add, simply don't call this tool (silence costs nothing and wakes nobody). \
-The audience picks the lane: something every member should know belongs here; what concerns one agent alone goes to them directly — the hub reaches a member with SendMessage, a member reaches the hub in its turn text — not into everyone's context."
-        )
-    }
-    fn input_schema(&self) -> serde_json::Value {
-        super::schema_for::<PostInput>()
-    }
-    fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
-        false
-    }
-    fn is_read_only(&self, _input: &serde_json::Value) -> bool {
-        false
-    }
-    async fn call(
-        &self,
-        input: serde_json::Value,
-        ctx: &ToolContext,
-    ) -> Result<ToolResult, ToolError> {
-        let params: PostInput = parse_input(&input)?;
-        let from = sender_of(&self.session);
-        let channel = params.channel.trim_start_matches('#').to_string();
-        match deliver_post(&self.session, &ctx.watch, &from, &channel, &params.message)
-            .map_err(ToolError::failed)?
-        {
-            PostDelivery::Sent { seq } => Ok(ToolResult {
-                content: serde_json::Value::String(format!("sent (#{channel} msg #{seq})")),
-                is_error: false,
-                diff: None,
-            }),
-            PostDelivery::Stale { missed } => {
-                let lines: Vec<String> = missed
-                    .iter()
-                    .map(|m| format!("[#{channel} msg #{}] {}: {}", m.seq, m.from, m.text))
-                    .collect();
-                Ok(ToolResult {
-                    content: serde_json::Value::String(format!(
-                        "not sent — the channel got new messages while you were drafting:\n{}\n\
-Decide again from the latest content: resend as-is (call again unchanged), edit and resend, or drop the message.",
-                        lines.join("\n")
-                    )),
-                    is_error: false,
-                    diff: None,
-                })
-            }
-        }
     }
 }
 
@@ -252,7 +179,7 @@ impl ChannelTool {
     /// the main agent, or the user — the last because a room that cannot invite
     /// the human is a room the human can only ever gate-crash.
     fn validate_member(&self, member: &str) -> Result<(), ToolError> {
-        if member == HUB_NAME || member == crate::channels::USER_NAME {
+        if member == MAIN_NAME || member == crate::channels::USER_NAME {
             return Ok(());
         }
         match self.session.agents.depth_of(member) {
@@ -279,7 +206,7 @@ impl Tool for ChannelTool {
 Creating one seats you ({who}) and nobody else — every other member has to be named in `members`, including `user` (the human) and `main` (the main agent). \
 That is the point: you can form a room with the two agents you need to work something out, without putting it in front of anyone else. \
 Actions: create (mode defaults to serial), invite (the new member starts listening from the current head and gets no backlog), kick, list (rooms with their rosters). \
-Joins and departures are written into the room where everyone in it can see them, so there is no quiet way in or out. Messages reach every member's context in one order; members speak with Post."
+Joins and departures are written into the room where everyone in it can see them, so there is no quiet way in or out. Messages reach every member's context in one order; members speak with SendMessage(to: \"#room\")."
         )
     }
     fn input_schema(&self) -> serde_json::Value {
@@ -402,12 +329,18 @@ mod tests {
     use super::*;
     use crate::agents::AgentRegistry;
 
-    fn hub_session() -> Arc<Session> {
+    fn main_session() -> Arc<Session> {
         Arc::new(Session {
             client: crate::api::client::Client::new("k".into(), "http://x".into()),
             runtime: crate::query::Runtime::new("m".into(), None, Default::default()),
             permission_mode: crate::permission::PermissionMode::Default,
-            settings: crate::settings::Settings::default(),
+            // Rooms are behind the experimental gate, and `SendMessage`'s room
+            // addressing reads the same flag the retired `Post` was assembled by.
+            settings: {
+                let mut settings = crate::settings::Settings::default();
+                settings.experimental.agent_channels = true;
+                settings
+            },
             system: Vec::new(),
             depth: 0,
             cwd: Arc::new(std::sync::Mutex::new(std::env::temp_dir())),
@@ -426,11 +359,11 @@ mod tests {
     }
 
     /// A depth-1 sub-session under the same registry/channel table (instance name stamped).
-    fn sub_session(hub: &Arc<Session>, instance: &str) -> Arc<Session> {
+    fn sub_session(main: &Arc<Session>, instance: &str) -> Arc<Session> {
         Arc::new(Session {
             depth: 1,
             instance: Some(instance.to_string()),
-            ..(**hub).clone()
+            ..(**main).clone()
         })
     }
 
@@ -448,35 +381,34 @@ mod tests {
             ask_question: std::sync::Arc::new(|_t, _q, _o| Box::pin(async { None })),
             instance: None,
             rewind: Default::default(),
-            notify_user: Default::default(),
         }
     }
 
     #[tokio::test]
     async fn create_validates_cohort_and_registers_row() {
-        let hub = hub_session();
-        let tool = ChannelTool::new(hub.clone());
+        let main = main_session();
+        let tool = ChannelTool::new(main.clone());
         // Unknown members are rejected.
         let err = tool
             .call(
                 serde_json::json!({"action": "create", "channel": "t", "members": ["ghost"]}),
-                &ctx(&hub),
+                &ctx(&main),
             )
             .await
             .unwrap_err();
         assert!(err.to_string().contains("ghost"), "{err}");
-        // depth-1 members pass; the hub joins automatically.
-        hub.agents.insert(
+        // depth-1 members pass; main joins automatically.
+        main.agents.insert(
             "a",
             crate::agents::AgentKind::Hire,
             None,
             "a".into(),
-            sub_session(&hub, "a"),
+            sub_session(&main, "a"),
         );
         let out = tool
             .call(
                 serde_json::json!({"action": "create", "channel": "t", "members": ["a"]}),
-                &ctx(&hub),
+                &ctx(&main),
             )
             .await
             .unwrap();
@@ -485,9 +417,9 @@ mod tests {
         // Deeper instances are refused entry to the channel.
         let deep = Arc::new(Session {
             depth: 2,
-            ..(*sub_session(&hub, "deep")).clone()
+            ..(*sub_session(&main, "deep")).clone()
         });
-        hub.agents.insert(
+        main.agents.insert(
             "deep",
             crate::agents::AgentKind::Hire,
             None,
@@ -497,14 +429,14 @@ mod tests {
         let err = tool
             .call(
                 serde_json::json!({"action": "invite", "channel": "t", "members": ["deep"]}),
-                &ctx(&hub),
+                &ctx(&main),
             )
             .await
             .unwrap_err();
         assert!(err.to_string().contains("direct subagent"), "{err}");
         // list outputs members and mode.
         let out = tool
-            .call(serde_json::json!({"action": "list"}), &ctx(&hub))
+            .call(serde_json::json!({"action": "list"}), &ctx(&main))
             .await
             .unwrap();
         assert!(out.content.as_str().unwrap().contains("main, a"));
@@ -513,40 +445,40 @@ mod tests {
 
     #[tokio::test]
     async fn post_stamps_sender_and_queues_to_running_members() {
-        let hub = hub_session();
-        hub.agents.insert(
+        let main = main_session();
+        main.agents.insert(
             "a",
             crate::agents::AgentKind::Hire,
             None,
             "a".into(),
-            sub_session(&hub, "a"),
+            sub_session(&main, "a"),
         );
-        hub.agents.insert(
+        main.agents.insert(
             "b",
             crate::agents::AgentKind::Hire,
             None,
             "b".into(),
-            sub_session(&hub, "b"),
+            sub_session(&main, "b"),
         );
-        let mgmt = ChannelTool::new(hub.clone());
+        let mgmt = ChannelTool::new(main.clone());
         let _ = mgmt
             .call(
                 serde_json::json!({"action": "create", "channel": "t", "members": ["a", "b"], "mode": "free"}),
-                &ctx(&hub),
+                &ctx(&main),
             )
             .await
             .unwrap();
-        // Post from a's (Running) perspective: stamped a; b is Running → accumulates in its inbox.
-        let post_a = PostTool::new(sub_session(&hub, "a"));
+        // Speaking from a's (Running) perspective: stamped a; b is Running → accumulates in its inbox.
+        let post_a = crate::tool::agent::SendMessageTool::new(sub_session(&main, "a"));
         let out = post_a
             .call(
-                serde_json::json!({"channel": "t", "message": "hello everyone"}),
-                &ctx(&hub),
+                serde_json::json!({"to": "#t", "message": "hello everyone"}),
+                &ctx(&main),
             )
             .await
             .unwrap();
         assert!(out.content.as_str().unwrap().contains("msg #1"));
-        let items = hub
+        let items = main
             .agents
             .finish("b", Vec::new(), 1)
             .unwrap_or_else(|| panic!("b's inbox should have a message"))
@@ -556,69 +488,67 @@ mod tests {
                 if from == "a" && text == "hello everyone"),
             "stamped as a"
         );
-        // Hub posts: stamped main; hub_mail only receives others' posts.
-        let post_hub = PostTool::new(hub.clone());
-        let _ = post_hub
+        // Main posts: stamped main; its own inbox only receives others' posts.
+        let post_main = crate::tool::agent::SendMessageTool::new(main.clone());
+        let _ = post_main
             .call(
-                serde_json::json!({"channel": "t", "message": "quiet"}),
-                &ctx(&hub),
+                serde_json::json!({"to": "#t", "message": "quiet"}),
+                &ctx(&main),
             )
             .await
             .unwrap();
-        let mail = hub.channels.drain_hub_mail();
+        let mail = main.channels.drain_main_mail();
         assert_eq!(mail.len(), 1, "{mail:?}");
         assert!(mail[0].contains("a: hello everyone"));
-        // Non-member posts error out.
-        let post_c = PostTool::new(sub_session(&hub, "c"));
+        // Non-member posts error out — refused by the addressing rules before
+        // the room's own membership check is ever reached.
+        let post_c = crate::tool::agent::SendMessageTool::new(sub_session(&main, "c"));
         let err = post_c
-            .call(
-                serde_json::json!({"channel": "t", "message": "x"}),
-                &ctx(&hub),
-            )
+            .call(serde_json::json!({"to": "#t", "message": "x"}), &ctx(&main))
             .await
             .unwrap_err();
-        assert!(err.to_string().contains("is not"), "{err}");
+        assert!(err.to_string().contains("not a member of #t"), "{err}");
     }
 
     #[tokio::test]
     async fn serial_bounce_returns_increments_as_result() {
-        let hub = hub_session();
-        hub.agents.insert(
+        let main = main_session();
+        main.agents.insert(
             "a",
             crate::agents::AgentKind::Hire,
             None,
             "a".into(),
-            sub_session(&hub, "a"),
+            sub_session(&main, "a"),
         );
-        hub.agents.insert(
+        main.agents.insert(
             "b",
             crate::agents::AgentKind::Hire,
             None,
             "b".into(),
-            sub_session(&hub, "b"),
+            sub_session(&main, "b"),
         );
-        let mgmt = ChannelTool::new(hub.clone());
+        let mgmt = ChannelTool::new(main.clone());
         let _ = mgmt
             .call(
                 serde_json::json!({"action": "create", "channel": "count", "members": ["a", "b"]}),
-                &ctx(&hub),
+                &ctx(&main),
             )
             .await
             .unwrap();
-        let post_a = PostTool::new(sub_session(&hub, "a"));
-        let post_b = PostTool::new(sub_session(&hub, "b"));
+        let post_a = crate::tool::agent::SendMessageTool::new(sub_session(&main, "a"));
+        let post_b = crate::tool::agent::SendMessageTool::new(sub_session(&main, "b"));
         let _ = post_a
             .call(
-                serde_json::json!({"channel": "count", "message": "1"}),
-                &ctx(&hub),
+                serde_json::json!({"to": "#count", "message": "1"}),
+                &ctx(&main),
             )
             .await
             .unwrap();
         // b lags → bounced back (tool result, not an error) with increments attached.
         let out = post_b
             .call(
-                serde_json::json!({"channel": "count", "message": "1"}),
-                &ctx(&hub),
+                serde_json::json!({"to": "#count", "message": "1"}),
+                &ctx(&main),
             )
             .await
             .unwrap();
@@ -628,8 +558,8 @@ mod tests {
         // Resend lands (the model changed its message).
         let out = post_b
             .call(
-                serde_json::json!({"channel": "count", "message": "2"}),
-                &ctx(&hub),
+                serde_json::json!({"to": "#count", "message": "2"}),
+                &ctx(&main),
             )
             .await
             .unwrap();

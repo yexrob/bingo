@@ -1,5 +1,6 @@
 use super::tests_a::*;
 use super::*;
+use crate::tui::test_util::body;
 use base64::Engine;
 use serde_json::json;
 #[test]
@@ -208,6 +209,11 @@ async fn terminal_watch_event_triggers_auto_turn_when_idle() {
     let mut chat = test_chat();
     chat.messages.push(msg(Role::Assistant, ""));
     chat.stream_msg = Some(0);
+    // D98: the wake follows the *notification*, not the bare event, so the run
+    // has to be registered — which is what production does, and what tells a
+    // main-relevant run from a user's own DM exchange.
+    let watch = chat.session.watch.clone();
+    let id = watch.register_with_conditions(Box::new(FakeWatchable), Vec::new(), None);
     let _ = chat.events.send(UiEvent::WatchEvent {
         label: "Agent: long task".into(),
         kind: crate::watch::WatchKind::Agent,
@@ -219,6 +225,7 @@ async fn terminal_watch_event_triggers_auto_turn_when_idle() {
     });
     chat.drain_events();
     assert!(!chat.busy);
+    watch.set_state(id, WatchState::Done, Some("done".into()), None);
     let _ = chat.events.send(UiEvent::WatchEvent {
         label: "Agent: long task".into(),
         kind: crate::watch::WatchKind::Agent,
@@ -232,7 +239,47 @@ async fn terminal_watch_event_triggers_auto_turn_when_idle() {
     tokio::task::yield_now().await;
     chat.drain_events();
     assert!(chat.busy, "auto turn started");
-    assert_eq!(chat.messages.len(), 2, "new message for auto turn");
+}
+
+/// The other half of the same rule (D98): a terminal state whose run was
+/// registered as none of main's business wakes nothing. That is a run the user
+/// started themselves in an agent's DM — a conversation between the two of them.
+#[tokio::test]
+async fn a_terminal_event_with_no_notification_for_main_wakes_nothing() {
+    let mut chat = test_chat();
+    chat.messages.push(msg(Role::Assistant, ""));
+    let watch = chat.session.watch.clone();
+    let id = watch.register_addressed(Box::new(FakeWatchable), Vec::new(), None, false);
+    watch.set_state(id, WatchState::Done, Some("done".into()), None);
+    assert!(
+        !watch.has_wake_notifications(None),
+        "the run's end was never addressed to main"
+    );
+    assert!(
+        watch.consume_notifications(None).is_empty(),
+        "and there is nothing to inject either"
+    );
+    let _ = chat.events.send(UiEvent::WatchEvent {
+        label: "scout #2 · answer the user".into(),
+        kind: crate::watch::WatchKind::Agent,
+        status: WatchState::Done,
+        detail: Some("done".into()),
+        duration_ms: 900,
+        payload: None,
+        signal: None,
+    });
+    chat.drain_events();
+    tokio::task::yield_now().await;
+    chat.drain_events();
+    assert!(!chat.busy, "no turn was started");
+    // The record is still complete: the directory feed takes every run.
+    assert!(
+        chat.buffers
+            .team_log()
+            .iter()
+            .any(|e| e.label == "scout #2 · answer the user"),
+        "the lifecycle feed is a record, and records do not get scoped"
+    );
 }
 
 #[tokio::test]
@@ -241,6 +288,8 @@ async fn signal_triggers_auto_turn_even_while_typing() {
     chat.input = "still typing".to_string();
     chat.messages.push(msg(Role::Assistant, ""));
     chat.stream_msg = Some(0);
+    let watch = chat.session.watch.clone();
+    let id = watch.register_with_conditions(Box::new(FakeWatchable), Vec::new(), None);
     let _ = chat.events.send(UiEvent::WatchEvent {
         label: "tail -f app.log".into(),
         kind: crate::watch::WatchKind::Command,
@@ -251,6 +300,7 @@ async fn signal_triggers_auto_turn_even_while_typing() {
         signal: None,
     });
     chat.drain_events();
+    watch.emit_signal(id, "found error: ERROR boom".into(), None);
     let _ = chat.events.send(UiEvent::WatchEvent {
         label: "tail -f app.log".into(),
         kind: crate::watch::WatchKind::Command,
@@ -757,7 +807,7 @@ fn user_message_has_bubble_background() {
         .doc
         .rows
         .iter()
-        .find(|r| r.line.plain_text().starts_with("❯"));
+        .find(|r| body(&r.line, false).plain_text().starts_with("❯"));
     assert!(row.is_some(), "user row rendered");
     assert_eq!(row.unwrap().bg, Some(chat.theme.user_message_bg));
 }
@@ -781,9 +831,17 @@ fn multiline_user_message_wraps_into_single_line_rows() {
             );
         }
     }
-    assert!(bubbles[0].line.plain_text().starts_with("❯ first line"));
+    assert!(
+        body(&bubbles[0].line, false)
+            .plain_text()
+            .starts_with("❯ first line")
+    );
     // Continuation lines align with indentation, never repeating the prefix.
-    assert!(bubbles[1].line.plain_text().starts_with("  second line"));
+    assert!(
+        body(&bubbles[1].line, false)
+            .plain_text()
+            .starts_with("  second line")
+    );
 }
 
 /// Overlong (newline-free) user messages wrap to the terminal width instead of spilling off screen.
@@ -3586,8 +3644,9 @@ fn interrupted_tool_row_reads_interrupted_in_the_warning_color() {
         .doc
         .rows
         .iter()
-        .find(|row| row.line.plain_text().starts_with("⏺ Bash"))
-        .and_then(|row| row.line.segs.first().map(|seg| seg.style.fg));
+        .map(|row| body(&row.line, false))
+        .find(|line| line.plain_text().starts_with("⏺ Bash"))
+        .and_then(|line| line.segs.first().map(|seg| seg.style.fg));
     assert_eq!(
         glyph,
         Some(Some(Theme::dark().warning)),
@@ -3679,10 +3738,9 @@ fn the_completion_row_blinks_accent_before_it_freezes() {
         chat.doc
             .rows
             .iter()
-            .find(|row| {
-                row.line.plain_text().starts_with("✻ ") && row.line.plain_text().contains(" for ")
-            })
-            .and_then(|row| row.line.segs.first().and_then(|seg| seg.style.fg))
+            .map(|row| body(&row.line, false))
+            .find(|line| line.plain_text().starts_with("✻ ") && line.plain_text().contains(" for "))
+            .and_then(|line| line.segs.first().and_then(|seg| seg.style.fg))
     };
     assert_eq!(
         completion_color(&mut chat),

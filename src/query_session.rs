@@ -33,12 +33,6 @@ pub struct Runtime {
     /// taken right now belong to. Starts detached, so a host that never opens a
     /// checkpoint records nothing and costs nothing.
     pub rewind: Arc<crate::rewind::Recorder>,
-    /// The user's attention (D94): where a subagent's `notify_user` line lands,
-    /// and the per-agent rate limit in front of it. Session-scoped so a subagent
-    /// inherits the parent's handle and one agent cannot reset its own window by
-    /// being re-run. Starts detached, so a host that never attaches a surface
-    /// still rate limits and still answers the model the same way.
-    pub notify_user: Arc<crate::notify_user::Relay>,
 }
 
 impl Runtime {
@@ -62,7 +56,6 @@ impl Runtime {
             thinking_tx,
             thinking,
             rewind: Arc::new(crate::rewind::Recorder::default()),
-            notify_user: crate::notify_user::Relay::detached(),
             mcp: Arc::new(tokio::sync::Mutex::new(crate::mcp::McpManager::new(
                 HashMap::new(),
                 Default::default(),
@@ -82,7 +75,7 @@ pub struct Session {
     pub system: Vec<SystemBlock>,
     /// Sub-agent nesting depth (Agent tool recursion).
     pub depth: usize,
-    /// Session working directory, shared by the hub and all derived sub-sessions.
+    /// Session working directory, shared by main and all derived sub-sessions.
     pub cwd: Arc<std::sync::Mutex<PathBuf>>,
     /// User home (memdir memory location).
     pub home: PathBuf,
@@ -108,7 +101,7 @@ pub struct Session {
     /// channel member name main).
     pub instance: Option<String>,
     /// Images the user mounted on the input box, addressed by the `#[image N]` markers left in
-    /// the message text. Sub-sessions share the table, so the hub forwards an image to a
+    /// the message text. Sub-sessions share the table, so main forwards an image to a
     /// subagent by repeating its marker.
     pub attachments: Arc<crate::api::image::Attachments>,
 }

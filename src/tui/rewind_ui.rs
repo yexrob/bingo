@@ -1,4 +1,4 @@
-//! The rewind selector (D91): two stages over the hub's own history.
+//! The rewind selector (D91): two stages over main's own history.
 //!
 //! esc-esc on an empty composer opens it — the one press Esc had no answer for
 //! since D80 reserved the slot. Stage one lists the turns the user opened and
@@ -493,7 +493,7 @@ mod tests {
         home
     }
 
-    /// A hub chat whose session home — and so whose snapshot store — is this
+    /// A main chat whose session home — and so whose snapshot store — is this
     /// test's alone.
     fn chat_at_home(home: &Path) -> Chat {
         let mut session = (*crate::tui::test_util::test_session()).clone();

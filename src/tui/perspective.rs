@@ -7,15 +7,27 @@
 //! privacy stance names — X's DM with somebody who is not the user is visible
 //! *here*, and only here, while the user's own `@X` pair view stays pure.
 //!
-//! **Why the split is work rather than a filter.** [`crate::tui::buffer::dm_posts`]
-//! does not filter by counterpart at all: it renders the whole of X's history
-//! with every user-role message attributed to the user, because a pair view has
-//! two parties and the bubble already says which one spoke. A perspective page
-//! has as many parties as ever wrote to X, so it has to recover the sender —
-//! and the sender is not a field. `InboxItem::Direct` carries a real `from`,
-//! but `absorb_inbox` renders it into one flat prompt string and the name is
-//! gone: what survives is a set of literal markers, which
-//! [`crate::tui::buffer::line_source`] is the single parser for.
+//! **Why the split is work rather than a filter.** The sender is not a field.
+//! `InboxItem::Direct` carries a real `from`, but `absorb_inbox` renders the
+//! batch into one flat prompt string and the name is gone: what survives is a
+//! set of literal markers, which [`crate::tui::buffer::line_source`] is the
+//! single parser for. Recovering who said what is therefore a walk, and [`walk`]
+//! is it.
+//!
+//! **And the walk has two readers (D99).** [`dossier`] keeps every lane the walk
+//! files. [`pair_lane`] keeps exactly one — the user's — and that is what
+//! [`crate::tui::buffer::dm_posts`] renders, so `@X` is the pure pair the model
+//! says it is and this page is where everything else in X's life is read. The
+//! two cannot disagree about attribution, because there is one walk.
+//!
+//! **And two protagonists (D100).** Main has a page too, over its own session
+//! transcript, and the unmarked default *flips*: in a subagent's history
+//! unmarked user-role prose is main speaking, because main is the sender
+//! `direct_text` leaves unmarked; in main's own history it is the human at the
+//! keyboard, because nothing else writes plain prose there. Nor is there a spawn
+//! task, so the first-message-is-intake rule does not apply. Both facts are
+//! [`Protagonist`], which the walk carries instead of the two constants it used
+//! to hardcode. Every already-recognised shape keeps its home.
 //!
 //! **What the markers can and cannot say** (the D96 attribution inventory):
 //!
@@ -23,27 +35,28 @@
 //! |---|---|---|
 //! | `[DM from user]` heading a line | `tool::agent::direct_text` | the user |
 //! | `[Message from user, sent while you were working]` block | `steer::SteerItem::block_text` | the user |
-//! | `[follow-up instruction] …` | `direct_text`, batched | the hub |
-//! | unmarked prose | `direct_text`, single | the hub — it is the one sender left unmarked |
+//! | `[follow-up instruction] …` | `direct_text`, batched | the protagonist's default counterpart |
+//! | unmarked prose | `direct_text`, single | the default: main in a subagent's record, the user in main's |
 //! | `[#room msg #N] who: …` | `absorb_inbox` | the room (timeline only; the room's own log is authoritative) |
 //! | `[follow-up N/M] …` | `absorb_inbox` | intake — a chase, nobody wrote it |
 //! | `[SYSTEM NOTIFICATION - TASK REMINDER]` | `query::maybe_inject_task_reminder` | intake |
 //! | `<task-notifications>` | `query` | intake |
-//! | the first user message | the `Agent` tool's prompt | intake — the task that created X |
+//! | the first user message | the `Agent` tool's prompt | intake — the task that created X (subagents only: main was not spawned) |
 //! | interrupt / compaction / stop-hook / max-tokens | `query`, `compact` | nobody: timeline only |
 //!
-//! **The one thing the domain cannot express today.** Every production caller of
-//! `AgentRegistry::deliver` passes either `main` or `user`, and `SendMessage` —
-//! which hardcodes `main` — is assembled for depth 0 only. So agent→agent
-//! *direct* messages do not exist yet; agents reach each other through rooms.
-//! The counterpart lane is keyed by name rather than by an enum precisely so
-//! that the day `deliver` carries a real sender, this projection needs no
-//! change to show it.
+//! **The one thing the domain cannot express today.** `SendMessage` is
+//! assembled at every depth since D98, but `check_target` narrows by caller:
+//! main reaches any instance, a subagent reaches `main` and the rooms it is in.
+//! So agent→agent *direct* messages still do not exist; agents reach each other
+//! through rooms. The counterpart lane is keyed by name rather than by an enum
+//! precisely so that the day the addressing rules open, this projection needs no
+//! change to show it. (The stale half of this paragraph — `SendMessage`
+//! hardcoding `main` at depth 0 — was left behind by D98 and is corrected here.)
 
 use std::collections::BTreeMap;
 
 use crate::api::types::{ContentBlock, Message, Role as ApiRole};
-use crate::channels::{ChannelMessage, HUB_NAME, USER_NAME};
+use crate::channels::{ChannelMessage, MAIN_NAME, USER_NAME};
 use crate::tui::buffer::{
     LineSource, Post, PostKind, THINKING_ROW, channel_posts, line_source, tool_call_line,
 };
@@ -53,8 +66,9 @@ use crate::tui::buffer::{
 pub enum LaneId {
     /// Everything, in order — the complete record of X's own transcript.
     Timeline,
-    /// A pair conversation with one counterpart (`user`, `main`, and one day
-    /// another agent).
+    /// A pair conversation with one counterpart: `user` and `main` on a
+    /// subagent's page, `user` and every agent that wrote in on main's, and one
+    /// day another agent on a subagent's.
     Dm(String),
     /// A room X speaks in. Its posts are the *room's* log, not X's history.
     Room(String),
@@ -135,7 +149,7 @@ impl Dossier {
 
 /// Where one piece of a user-role message belongs.
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum Target {
+pub(crate) enum Target {
     /// A counterpart's DM lane. Also becomes the *active* lane, which is what
     /// X's following turns attach to.
     Dm(String),
@@ -145,10 +159,226 @@ enum Target {
     TimelineOnly,
 }
 
+/// What one of X's own rows *was*, for a reader that needs more than the line.
+///
+/// The line ([`tool_call_line`], [`THINKING_ROW`]) is all a thread pager needs.
+/// The pair view (D99) renders X's work the way the console renders main's —
+/// collapsed activity groups — and the classifier that builds those groups
+/// reads the call, not the sentence it printed.
+#[derive(Debug, Clone)]
+pub(crate) enum Work {
+    Tool {
+        name: String,
+        input: serde_json::Value,
+    },
+    Thinking,
+}
+
+/// Whose record is being walked, and therefore what its unmarked shapes mean.
+///
+/// The markers are the same for everybody; the *defaults* are not. A subagent's
+/// history is written by `absorb_inbox`, which leaves exactly one sender —
+/// main — unmarked, and opens with the prompt the `Agent` tool spawned it
+/// with. Main's history is its session transcript: the unmarked prose in it is
+/// the human typing into the console, and there is no spawn prompt because
+/// nobody dispatched main. Two facts, carried rather than hardcoded, so one walk
+/// serves both pages.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Protagonist<'a> {
+    /// The agent whose record this is: every one of its own rows is `from` this.
+    pub name: &'a str,
+    /// Who unmarked user-role prose belongs to — and, labelled, `[follow-up
+    /// instruction]`, which is the same sender with a batch label on it.
+    pub default: &'a str,
+    /// The first user text is the task that created this instance, and therefore
+    /// intake rather than conversation. False for main, which was never spawned.
+    pub spawned: bool,
+}
+
+impl<'a> Protagonist<'a> {
+    /// A subagent: main is its unmarked voice, and its history opens with the
+    /// task it was dispatched with.
+    fn agent(name: &'a str) -> Self {
+        Self {
+            name,
+            default: MAIN_NAME,
+            spawned: true,
+        }
+    }
+
+    /// Main, over its own session transcript.
+    fn main() -> Self {
+        Self {
+            name: MAIN_NAME,
+            default: USER_NAME,
+            spawned: false,
+        }
+    }
+
+    /// Which one a name is. The main agent's member name is reserved
+    /// (`channels::MAIN_NAME`), so no instance can answer to it and this cannot
+    /// mistake a teammate for the console.
+    pub(crate) fn of(name: &'a str) -> Self {
+        if name == MAIN_NAME {
+            Self::main()
+        } else {
+            Self::agent(name)
+        }
+    }
+}
+
+/// One piece of an agent's record, in the order the record holds it.
+#[derive(Debug, Clone)]
+pub(crate) struct Filed {
+    pub target: Target,
+    pub post: Post,
+    /// Set only on X's own work rows.
+    pub work: Option<Work>,
+}
+
+/// One agent's history → every post in it, in order, each already filed.
+///
+/// **The single recognition walk (D99).** The perspective page files every item
+/// into its lane; the user's `@X` pair view keeps the one lane it is in
+/// ([`pair_lane`]). Both therefore agree about who said what by construction,
+/// rather than by two parsers that happen to read the same markers today.
+pub(crate) fn walk(who: Protagonist<'_>, history: &[Message], stamps: &[u64]) -> Vec<Filed> {
+    let agent = who.name;
+    let mut out: Vec<Filed> = Vec::new();
+    // Which lane X's own turns belong to: the counterpart it last heard from.
+    // Where interleaving makes exact reply-attribution impossible this is a
+    // best effort by construction — the timeline is the lane that is complete.
+    let mut active: Option<String> = None;
+    let mut seen_user_text = false;
+    let turn = |active: &Option<String>, post: Post, work: Option<Work>| Filed {
+        target: match active {
+            Some(name) => Target::Dm(name.clone()),
+            None => Target::TimelineOnly,
+        },
+        post,
+        work,
+    };
+    for (i, msg) in history.iter().enumerate() {
+        let at = stamps.get(i).copied().unwrap_or(0);
+        for block in &msg.content {
+            match (msg.role, block) {
+                (ApiRole::User, ContentBlock::Text { text }) => {
+                    let first = who.spawned && !seen_user_text;
+                    seen_user_text = true;
+                    for (target, post) in split_user_text(text, at, first, who) {
+                        if let Target::Dm(name) = &target {
+                            active = Some(name.clone());
+                        }
+                        out.push(Filed {
+                            target,
+                            post,
+                            work: None,
+                        });
+                    }
+                }
+                // A digest turn's silent acknowledgement (D102) is scaffolding
+                // wearing an assistant's role: it was written to the record so
+                // the record stays complete, and it renders as nothing in the
+                // flow. Here it keeps its text verbatim and takes the place
+                // every other piece of runtime scaffolding takes — the
+                // timeline, dim, in nobody's lane. Filing it as speech would
+                // put raw protocol in a counterpart's conversation.
+                (ApiRole::Assistant, ContentBlock::Text { text })
+                    if text.trim() == crate::query::QUIET_MARKER =>
+                {
+                    out.push(Filed {
+                        target: Target::TimelineOnly,
+                        post: note(agent, at, text.trim().to_string()),
+                        work: None,
+                    });
+                }
+                (ApiRole::Assistant, ContentBlock::Text { text }) => out.push(turn(
+                    &active,
+                    Post {
+                        from: agent.to_string(),
+                        you: false,
+                        at,
+                        text: text.clone(),
+                        kind: PostKind::Said,
+                    },
+                    None,
+                )),
+                (ApiRole::Assistant, ContentBlock::ToolUse { name, input, .. }) => out.push(turn(
+                    &active,
+                    Post {
+                        from: agent.to_string(),
+                        you: false,
+                        at: 0,
+                        text: tool_call_line(name, input),
+                        kind: PostKind::Process,
+                    },
+                    Some(Work::Tool {
+                        name: name.clone(),
+                        input: input.clone(),
+                    }),
+                )),
+                (ApiRole::Assistant, ContentBlock::Thinking { .. }) => out.push(turn(
+                    &active,
+                    Post {
+                        from: agent.to_string(),
+                        you: false,
+                        at: 0,
+                        text: THINKING_ROW.to_string(),
+                        kind: PostKind::Process,
+                    },
+                    Some(Work::Thinking),
+                )),
+                _ => {}
+            }
+        }
+    }
+    out
+}
+
+/// One post of the user↔agent pair lane, plus the one thing a filter loses.
+pub(crate) struct PairPost {
+    pub post: Post,
+    pub work: Option<Work>,
+    /// Whether the previous item of the *full* walk is the previous item here.
+    ///
+    /// The pair view merges X's consecutive rows into one message, the way the
+    /// console holds a turn. What must not merge is two runs with something
+    /// between them — a room relay, an instruction from main, a chase — because
+    /// that something is exactly what ended the first run, even though it
+    /// renders nowhere in this lane.
+    pub contiguous: bool,
+}
+
+/// The user's side of an agent's record: what the user said, what X answered
+/// them, and the work X did for those turns (D99).
+///
+/// Everything else — main's instructions, room relays, `[message from @X]`
+/// mail, chases, reminders, and the task that created the instance — belongs to
+/// a lane that is not this one, and lives on the observation page.
+pub(crate) fn pair_lane(agent: &str, history: &[Message], stamps: &[u64]) -> Vec<PairPost> {
+    let mut out: Vec<PairPost> = Vec::new();
+    let mut previous: Option<usize> = None;
+    for (i, filed) in walk(Protagonist::of(agent), history, stamps)
+        .into_iter()
+        .enumerate()
+    {
+        if !matches!(&filed.target, Target::Dm(name) if name == USER_NAME) {
+            continue;
+        }
+        out.push(PairPost {
+            post: filed.post,
+            work: filed.work,
+            contiguous: previous == Some(i.wrapping_sub(1)),
+        });
+        previous = Some(i);
+    }
+    out
+}
+
 /// Scaffolding that no counterpart wrote: the runtime talking to itself.
 ///
 /// These are recognised so they cannot fall through to the unmarked-prose rule
-/// and be misfiled as the hub speaking — the failure mode that would put words
+/// and be misfiled as main speaking — the failure mode that would put words
 /// in somebody's mouth.
 fn runtime_only(text: &str) -> bool {
     let trimmed = text.trim();
@@ -156,7 +386,6 @@ fn runtime_only(text: &str) -> bool {
         || trimmed == crate::query::MAX_TOKENS_RESUME_PROMPT
         || trimmed.starts_with(crate::transcript::COMPACT_SUMMARY_PREFIX)
         || trimmed.starts_with("(Stop hook blocked continuation)")
-        || trimmed.starts_with("<channel-messages>")
 }
 
 /// A note nobody said, for the timeline's completeness.
@@ -174,10 +403,34 @@ fn note(from: &str, at: u64, text: String) -> Post {
 ///
 /// `first` marks the very first user text in the history: the prompt the `Agent`
 /// tool started X with. It is unmarked prose and would otherwise read as the
-/// hub speaking, which is nearly true and still wrong — it is the task, and the
-/// task is intake.
-fn split_user_text(text: &str, at: u64, first: bool) -> Vec<(Target, Post)> {
+/// main speaking, which is nearly true and still wrong — it is the task, and the
+/// task is intake. It is never set for main, which nobody dispatched (D100), so
+/// the first thing the user ever typed into the console stays a message.
+fn split_user_text(text: &str, at: u64, first: bool, who: Protagonist<'_>) -> Vec<(Target, Post)> {
     let mut out: Vec<(Target, Post)> = Vec::new();
+    // The main agent's inbox block (D98) is an envelope, not a message: what is
+    // in it are room relays and direct messages, each already wearing the marker
+    // that says whose they are. Unwrap and read the lines — collapsing the whole
+    // block to one timeline note, as the old `<channel-messages>` shape was, is
+    // what would lose the sender the marker exists to carry.
+    if let Some(body) = text
+        .trim()
+        .strip_prefix(crate::query::MAIL_BLOCK_OPEN)
+        .and_then(|rest| rest.trim_end().strip_suffix(crate::query::MAIL_BLOCK_CLOSE))
+    {
+        return split_user_text(body.trim(), at, false, who);
+    }
+    // The pre-D98 envelope. Histories recorded before the rename still carry
+    // it, and a reader that forgot the old shape would file the whole block as
+    // main speaking. The lines inside wear their own markers, so unwrapping
+    // attributes them the same way the new envelope's are.
+    if let Some(body) = text
+        .trim()
+        .strip_prefix("<channel-messages>")
+        .and_then(|rest| rest.trim_end().strip_suffix("</channel-messages>"))
+    {
+        return split_user_text(body.trim(), at, false, who);
+    }
     if runtime_only(text) {
         out.push((
             Target::TimelineOnly,
@@ -206,9 +459,11 @@ fn split_user_text(text: &str, at: u64, first: bool) -> Vec<(Target, Post)> {
         return out;
     }
 
-    // The hub is the sender `direct_text` leaves unmarked, so prose belongs to
-    // it until a marker says otherwise.
-    let mut current = Target::Dm(HUB_NAME.to_string());
+    // Unmarked prose belongs to the protagonist's default counterpart until a
+    // marker says otherwise: main in a subagent's record (it is the sender
+    // `direct_text` leaves unmarked), the user in main's (nothing else writes
+    // plain prose into a session transcript).
+    let mut current = Target::Dm(who.default.to_string());
     let mut plain: Vec<&str> = Vec::new();
     let flush = |plain: &mut Vec<&str>, current: &Target, out: &mut Vec<(Target, Post)>| {
         let joined = plain.join("\n");
@@ -236,10 +491,20 @@ fn split_user_text(text: &str, at: u64, first: bool) -> Vec<(Target, Post)> {
                 flush(&mut plain, &current, &mut out);
                 current = Target::Dm(USER_NAME.to_string());
             }
-            Some(LineSource::HubBatched { text }) => {
+            // The same sender as unmarked prose, wearing a batch label because
+            // the batch made its boundaries ambiguous — so it files where the
+            // unmarked default files, and not at a second hardcoded name.
+            Some(LineSource::MainBatched { text }) => {
                 flush(&mut plain, &current, &mut out);
-                current = Target::Dm(HUB_NAME.to_string());
-                out.push((current.clone(), said(HUB_NAME, at, text)));
+                current = Target::Dm(who.default.to_string());
+                out.push((current.clone(), said(who.default, at, text)));
+            }
+            // An agent wrote to the protagonist directly (D98). Like the user's
+            // marker it is a header: the lane switches and the prose under it is
+            // that agent's, so a page can finally say who said what to main.
+            Some(LineSource::Agent { name }) => {
+                flush(&mut plain, &current, &mut out);
+                current = Target::Dm(name);
             }
             Some(LineSource::Room { channel, body }) => {
                 // The room's own log is the authoritative copy, so the relay is
@@ -286,6 +551,10 @@ fn one_line_summary(text: &str) -> String {
 
 /// Build one agent's dossier.
 ///
+/// `agent` is any participant, `main` included (D100): the projection reads
+/// [`Protagonist::of`] to decide what its unmarked shapes mean, and everything
+/// downstream — lanes, ordering, counts, titles — is the same page for both.
+///
 /// `rooms` is the room name plus that room's whole log, which the caller reads
 /// from the channel registry — the projection stays pure, so a test can hand it
 /// a history and a log and get a page back.
@@ -302,91 +571,13 @@ pub fn dossier(
     let mut timeline: Vec<Post> = Vec::new();
     let mut dms: BTreeMap<String, Vec<Post>> = BTreeMap::new();
     let mut intake: Vec<Post> = Vec::new();
-    // Which lane X's own turns belong to: the counterpart it last heard from.
-    // Where interleaving makes exact reply-attribution impossible this is a
-    // best effort by construction — the timeline is the lane that is complete.
-    let mut active: Option<String> = None;
-    let mut seen_user_text = false;
 
-    let file = |target: &Target,
-                post: Post,
-                dms: &mut BTreeMap<String, Vec<Post>>,
-                intake: &mut Vec<Post>| {
-        match target {
-            Target::Dm(name) => dms.entry(name.clone()).or_default().push(post),
-            Target::Intake => intake.push(post),
+    for filed in walk(Protagonist::of(agent), history, stamps) {
+        timeline.push(filed.post.clone());
+        match filed.target {
+            Target::Dm(name) => dms.entry(name).or_default().push(filed.post),
+            Target::Intake => intake.push(filed.post),
             Target::TimelineOnly => {}
-        }
-    };
-
-    for (i, msg) in history.iter().enumerate() {
-        let at = stamps.get(i).copied().unwrap_or(0);
-        for block in &msg.content {
-            match (msg.role, block) {
-                (ApiRole::User, ContentBlock::Text { text }) => {
-                    let first = !seen_user_text;
-                    seen_user_text = true;
-                    for (target, post) in split_user_text(text, at, first) {
-                        timeline.push(post.clone());
-                        if let Target::Dm(name) = &target {
-                            active = Some(name.clone());
-                        }
-                        file(&target, post, &mut dms, &mut intake);
-                    }
-                }
-                (ApiRole::Assistant, ContentBlock::Text { text }) => {
-                    let post = Post {
-                        from: agent.to_string(),
-                        you: false,
-                        at,
-                        text: text.clone(),
-                        kind: PostKind::Said,
-                    };
-                    timeline.push(post.clone());
-                    if let Some(name) = &active {
-                        dms.entry(name.clone()).or_default().push(post);
-                    }
-                }
-                (ApiRole::Assistant, ContentBlock::ToolUse { name, input, .. }) => {
-                    let post = Post {
-                        from: agent.to_string(),
-                        you: false,
-                        at: 0,
-                        text: tool_call_line(name, input),
-                        kind: PostKind::Process,
-                    };
-                    timeline.push(post.clone());
-                    if let Some(lane) = &active {
-                        dms.entry(lane.clone()).or_default().push(post);
-                    }
-                    // A notice is X speaking to the user, in the one tool that
-                    // can. It is a message in the user's lane as well as a step
-                    // of the work in the lane X was working in.
-                    if name == "notify_user"
-                        && let Some(text) = input.get("text").and_then(|t| t.as_str())
-                    {
-                        dms.entry(USER_NAME.to_string()).or_default().push(said(
-                            agent,
-                            at,
-                            text.to_string(),
-                        ));
-                    }
-                }
-                (ApiRole::Assistant, ContentBlock::Thinking { .. }) => {
-                    let post = Post {
-                        from: agent.to_string(),
-                        you: false,
-                        at: 0,
-                        text: THINKING_ROW.to_string(),
-                        kind: PostKind::Process,
-                    };
-                    timeline.push(post.clone());
-                    if let Some(lane) = &active {
-                        dms.entry(lane.clone()).or_default().push(post);
-                    }
-                }
-                _ => {}
-            }
         }
     }
 
@@ -478,11 +669,11 @@ mod tests {
     #[test]
     fn a_page_groups_every_counterpart_the_markers_can_name() {
         let history = vec![
-            // The task that created it: unmarked prose, and still not the hub
+            // The task that created it: unmarked prose, and still not main
             // making conversation.
             user("map the parser module"),
             assistant(vec![text("on it")]),
-            // The hub, single and therefore unmarked.
+            // Main, single and therefore unmarked.
             user("also check the lexer"),
             assistant(vec![text("will do")]),
             // The user, marked.
@@ -491,10 +682,10 @@ mod tests {
                 crate::tool::agent::DM_FROM_USER_MARKER
             )),
             assistant(vec![text("nearly")]),
-            // A batch: the hub labelled, the user marked, a room relayed, a
+            // A batch: main labelled, the user marked, a room relayed, a
             // chase, all in one absorbed prompt.
             user(&format!(
-                "[follow-up instruction] and the printer\n{}\nping\n[#parser msg #3] scout: found it\n[follow-up 1/3] The hub sent you message #2 and has had no reply",
+                "[follow-up instruction] and the printer\n{}\nping\n[#parser msg #3] scout: found it\n[follow-up 1/3] Main sent you message #2 and has had no reply",
                 crate::tool::agent::DM_FROM_USER_MARKER
             )),
             // Scaffolding nobody wrote.
@@ -507,11 +698,12 @@ mod tests {
         let stamps = vec![10, 20, 30, 40, 50, 60, 70, 80, 90];
         let page = dossier("scout", &history, &stamps, &[]);
 
-        let hub = lane_of(&page, &LaneId::Dm(HUB_NAME.to_string())).expect("a hub lane");
+        let main_lane =
+            lane_of(&page, &LaneId::Dm(MAIN_NAME.to_string())).expect("a main_lane lane");
         assert_eq!(
-            said_texts(hub),
+            said_texts(main_lane),
             vec!["also check the lexer", "will do", "and the printer"],
-            "the hub's unmarked single and its labelled batch line, plus the reply it drew"
+            "the main_lane's unmarked single and its labelled batch line, plus the reply it drew"
         );
 
         let human = lane_of(&page, &LaneId::Dm(USER_NAME.to_string())).expect("a user lane");
@@ -630,25 +822,206 @@ mod tests {
         );
     }
 
-    /// A notice is X speaking to the user: a message in their lane, and a step
-    /// of the work in the lane X was working in.
+    /// D98: an agent writing to main arrives under a marker that names it, and
+    /// that is what lets main's own page file the message in the sender's lane
+    /// rather than dropping the whole inbox block into the timeline as one note.
+    /// The envelope is scaffolding; what is inside it was said by someone.
     #[test]
-    fn a_notice_is_a_message_in_the_user_s_lane() {
-        let history = vec![
-            user("task"),
-            user("go on"),
-            assistant(vec![tool(
-                "notify_user",
-                serde_json::json!({"text": "the migration finished", "level": "info"}),
-            )]),
-        ];
-        let page = dossier("scout", &history, &[1, 2, 3], &[]);
-        let human = lane_of(&page, &LaneId::Dm(USER_NAME.to_string())).expect("a user lane");
-        assert_eq!(said_texts(human), vec!["the migration finished"]);
-        let hub = lane_of(&page, &LaneId::Dm(HUB_NAME.to_string())).expect("a hub lane");
+    fn a_direct_message_to_main_lands_in_its_sender_s_lane() {
+        let inbox = format!(
+            "{}\n{}\n[#build msg #4] zoe: the tests pass\n{}",
+            crate::query::MAIL_BLOCK_OPEN,
+            crate::channels::format_main_message("scout", "the migration is done"),
+            crate::query::MAIL_BLOCK_CLOSE
+        );
+        let history = vec![user("run the release"), user(&inbox)];
+        let page = dossier(MAIN_NAME, &history, &[1, 2], &[]);
+        let lane = lane_of(&page, &LaneId::Dm("scout".to_string())).expect("a lane for the sender");
+        assert_eq!(said_texts(lane), vec!["the migration is done"]);
+        let timeline = lane_of(&page, &LaneId::Timeline).expect("a timeline");
         assert!(
-            hub.posts.iter().any(|p| p.kind == PostKind::Process),
-            "the call is still a step of the work in the lane it happened in"
+            timeline
+                .posts
+                .iter()
+                .any(|p| p.text == "#build · zoe: the tests pass"),
+            "and a room relay in the same block is still the room's, recorded once"
+        );
+    }
+
+    /// D102: a digest turn's silent acknowledgement is scaffolding wearing an
+    /// assistant's role. It was written to the record so the record stays
+    /// complete, and it renders as nothing in the flow — so on the page it takes
+    /// the place every other piece of scaffolding takes: the timeline, verbatim,
+    /// in nobody's lane. Filed as speech it would put raw protocol into the
+    /// conversation of whichever agent happened to have woken main.
+    #[test]
+    fn a_silent_acknowledgement_is_timeline_scaffolding_not_speech() {
+        let inbox = format!(
+            "{}\n{}\n{}",
+            crate::query::MAIL_BLOCK_OPEN,
+            crate::channels::format_main_message("scout", "the migration is done"),
+            crate::query::MAIL_BLOCK_CLOSE
+        );
+        let history = vec![
+            user(&inbox),
+            assistant(vec![text(crate::query::QUIET_MARKER)]),
+        ];
+        let page = dossier(MAIN_NAME, &history, &[1, 2], &[]);
+
+        let scout =
+            lane_of(&page, &LaneId::Dm("scout".to_string())).expect("a lane for the sender");
+        assert_eq!(
+            said_texts(scout),
+            vec!["the migration is done"],
+            "the message is in the lane and the acknowledgement is not"
+        );
+        let timeline = lane_of(&page, &LaneId::Timeline).expect("a timeline");
+        assert!(
+            timeline
+                .posts
+                .iter()
+                .any(|p| p.text == crate::query::QUIET_MARKER && p.kind == PostKind::Note),
+            "and it is on the timeline, verbatim, as a note: {:?}",
+            timeline.posts.iter().map(|p| &p.text).collect::<Vec<_>>()
+        );
+    }
+
+    /// Main's own page (D100). The record is its session transcript, and the
+    /// unmarked default flips: the prose in it is the human at the keyboard, not
+    /// main talking to itself. Nothing dispatched main either, so the first
+    /// message is the first thing the user ever said — a message, not intake.
+    #[test]
+    fn mains_page_reads_unmarked_prose_as_the_user() {
+        let history = vec![
+            // The first thing typed into the console. In a subagent's record
+            // this shape is the spawn task; here there is no spawn.
+            user("ship the release"),
+            assistant(vec![text("on it")]),
+            // An agent wrote to main (D98), inside main's own inbox envelope.
+            user(&format!(
+                "{}\n{}\n[#build msg #4] zoe: the tests pass\n{}",
+                crate::query::MAIL_BLOCK_OPEN,
+                crate::channels::format_main_message("scout", "the migration is done"),
+                crate::query::MAIL_BLOCK_CLOSE
+            )),
+            assistant(vec![text("thanks")]),
+            // Dispatch notifications are handed to main, not said to it.
+            user("<task-notifications>\nscout finished\n</task-notifications>"),
+        ];
+        let page = dossier(MAIN_NAME, &history, &[10, 20, 30, 40, 50], &[]);
+
+        let human = lane_of(&page, &LaneId::Dm(USER_NAME.to_string())).expect("a user lane");
+        assert_eq!(
+            said_texts(human),
+            vec!["ship the release", "on it"],
+            "unmarked prose in main's record is the user, and the first line is not intake"
+        );
+        assert!(
+            lane_of(&page, &LaneId::Dm(MAIN_NAME.to_string())).is_none(),
+            "and main is never its own counterpart"
+        );
+
+        let scout =
+            lane_of(&page, &LaneId::Dm("scout".to_string())).expect("a lane for the sender");
+        assert_eq!(
+            said_texts(scout),
+            vec!["the migration is done", "thanks"],
+            "mail lands in its sender's lane, and the reply it drew with it"
+        );
+
+        let intake = lane_of(&page, &LaneId::Intake).expect("an intake lane");
+        assert_eq!(
+            intake
+                .posts
+                .iter()
+                .map(|p| p.text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["system note · task notifications"],
+            "the notifications are intake and nothing else is"
+        );
+
+        let timeline = lane_of(&page, &LaneId::Timeline).expect("a timeline");
+        assert!(
+            timeline
+                .posts
+                .iter()
+                .any(|p| p.text == "#build · zoe: the tests pass"),
+            "a room relay in the same block stays the room's, recorded once"
+        );
+    }
+
+    /// The flip is a property of the protagonist, not of the shapes: main's page
+    /// still reads every marker the way a subagent's does, the legacy envelope
+    /// included, and a subagent's page still files unmarked prose to main
+    /// (which is what every test above this one asserts, unchanged).
+    #[test]
+    fn the_flipped_default_does_not_move_any_marker() {
+        let history = vec![
+            user("<channel-messages>\n[#build msg #2] zoe: still failing\n</channel-messages>"),
+            user(&format!(
+                "{}\nnot main",
+                crate::tool::agent::DM_FROM_USER_MARKER
+            )),
+            user(&format!(
+                "{}\nThe task tools haven't been used recently.",
+                crate::query::TASK_REMINDER_MARKER
+            )),
+            user(crate::query::INTERRUPT_MARKER),
+        ];
+        let page = dossier(MAIN_NAME, &history, &[1, 2, 3, 4], &[]);
+        let timeline = lane_of(&page, &LaneId::Timeline).expect("a timeline");
+        assert!(
+            timeline
+                .posts
+                .iter()
+                .any(|p| p.text == "#build · zoe: still failing"),
+            "the pre-D98 envelope is unwrapped on main's page too"
+        );
+        assert_eq!(
+            said_texts(lane_of(&page, &LaneId::Dm(USER_NAME.to_string())).expect("a user lane")),
+            vec!["not main"],
+            "an explicit user marker files where it always did"
+        );
+        assert!(
+            lane_of(&page, &LaneId::Intake)
+                .expect("an intake lane")
+                .posts
+                .iter()
+                .any(|p| p.text == "system note · task tools"),
+            "the reminder is intake for main as well"
+        );
+        for lane in &page.lanes {
+            if lane.id == LaneId::Timeline {
+                continue;
+            }
+            assert!(
+                !lane.posts.iter().any(|p| p.text.contains("interrupted")),
+                "{:?} took the runtime's own words",
+                lane.id
+            );
+        }
+    }
+
+    /// A history recorded before D98 wraps its inbox in `<channel-messages>`.
+    /// The old envelope reads the same as the new one: its lines wear their
+    /// own markers, and forgetting the shape would file the block as main
+    /// speaking.
+    #[test]
+    fn the_pre_d98_envelope_is_still_read() {
+        let inbox = "<channel-messages>\n[#build msg #2] zoe: still failing\n</channel-messages>";
+        let history = vec![user("task"), user(inbox)];
+        let page = dossier("scout", &history, &[1, 2], &[]);
+        let timeline = lane_of(&page, &LaneId::Timeline).expect("a timeline");
+        assert!(
+            timeline
+                .posts
+                .iter()
+                .any(|p| p.text == "#build · zoe: still failing"),
+            "the relay inside is attributed, not misfiled as main prose"
+        );
+        assert!(
+            lane_of(&page, &LaneId::Dm(MAIN_NAME.to_string())).is_none(),
+            "and nothing in the legacy block reads as main speaking"
         );
     }
 
@@ -717,7 +1090,7 @@ mod tests {
     fn the_timeline_is_a_superset_of_the_threads_it_split() {
         let history = vec![
             user("task"),
-            user("hub says hi"),
+            user("main says hi"),
             assistant(vec![text("hello")]),
             user(&format!(
                 "{}\nuser says hi",
@@ -755,7 +1128,7 @@ mod tests {
     fn lanes_are_ordered_by_last_activity() {
         let history = vec![
             user("task"),
-            user("hub early"),
+            user("main early"),
             user(&format!(
                 "{}\nuser late",
                 crate::tool::agent::DM_FROM_USER_MARKER
@@ -802,5 +1175,121 @@ mod tests {
     fn an_agent_with_no_history_has_an_empty_page() {
         let page = dossier("scout", &[], &[], &[]);
         assert!(page.is_empty());
+    }
+
+    // ---- the pair lane (D99) ---------------------------------------------
+
+    fn from_user(text: &str) -> Message {
+        user(&format!(
+            "{}\n{text}",
+            crate::tool::agent::DM_FROM_USER_MARKER
+        ))
+    }
+
+    fn pair_texts(history: &[Message]) -> Vec<String> {
+        pair_lane("scout", history, &[])
+            .into_iter()
+            .map(|item| item.post.text)
+            .collect()
+    }
+
+    /// The `@agent` view is the user's lane and nothing else. Everything the
+    /// old flat view mixed into it — the task the instance was created with,
+    /// main's instructions, a room relay, another agent's mail, a chase, the
+    /// task reminder — belongs to a lane that is not this one.
+    #[test]
+    fn the_pair_lane_keeps_the_user_and_drops_everybody_else() {
+        let history = vec![
+            user("map the parser module"),
+            assistant(vec![text("on it")]),
+            user(
+                format!(
+                    "[#build msg #4] qa: the suite is red\n{}\nwhat did you find?",
+                    crate::tool::agent::DM_FROM_USER_MARKER
+                )
+                .as_str(),
+            ),
+            assistant(vec![text("a missing case")]),
+            user("[follow-up instruction] also check the lexer"),
+            assistant(vec![text("checked the lexer")]),
+            user("[follow-up 2/3] still waiting"),
+            user("[message from @qa]\nthe suite is red"),
+            user(&format!("{} something", crate::query::TASK_REMINDER_MARKER)),
+        ];
+        assert_eq!(
+            pair_texts(&history),
+            vec!["what did you find?", "a missing case"],
+            "the spawn prompt, the room relay, main's instruction, the chase, \
+             the mail and the reminder all live on the page"
+        );
+    }
+
+    /// Attribution is the perspective's own rule: a turn attaches to the
+    /// counterpart it last heard from. So a reply main drew stays out of the
+    /// user's lane and a reply the user drew stays in — the same walk answers
+    /// both, which is why they cannot disagree.
+    #[test]
+    fn a_reply_belongs_to_whoever_drew_it() {
+        let history = vec![
+            from_user("what did you find?"),
+            assistant(vec![text("for you")]),
+            user("look again"),
+            assistant(vec![text("for main")]),
+            from_user("and now?"),
+            assistant(vec![text("for you again")]),
+        ];
+        assert_eq!(
+            pair_texts(&history),
+            vec!["what did you find?", "for you", "and now?", "for you again"]
+        );
+    }
+
+    /// The agent's work rides with the turn it belongs to (the protagonist
+    /// rule), and the walk keeps the call itself so the pair view can hand it
+    /// to the console's collapse classifier.
+    #[test]
+    fn the_pair_lane_carries_the_work_of_its_own_turns() {
+        let history = vec![
+            from_user("find the leak"),
+            assistant(vec![
+                text("looking"),
+                tool("Grep", serde_json::json!({"pattern": "leak"})),
+            ]),
+        ];
+        let lane = pair_lane("scout", &history, &[]);
+        let work: Vec<&Post> = lane
+            .iter()
+            .map(|item| &item.post)
+            .filter(|p| p.kind == PostKind::Process)
+            .collect();
+        assert_eq!(work.len(), 1, "{lane:?}", lane = pair_texts(&history));
+        assert!(
+            matches!(
+                lane.iter().find_map(|item| item.work.as_ref()),
+                Some(Work::Tool { name, .. }) if name == "Grep"
+            ),
+            "the call survives the projection, not only the line it printed"
+        );
+    }
+
+    /// Contiguity is measured in the *full* walk, so anything that stood
+    /// between two of the agent's rows breaks the run even where this lane
+    /// never shows it. That is what keeps a replay append-only: every
+    /// continuation is triggered by something, and that something is a break.
+    #[test]
+    fn a_run_breaks_on_what_the_lane_does_not_show() {
+        let history = vec![
+            from_user("go"),
+            assistant(vec![text("first")]),
+            user("[follow-up 2/3] still waiting"),
+            assistant(vec![text("second")]),
+        ];
+        let lane = pair_lane("scout", &history, &[]);
+        let contiguous: Vec<bool> = lane.iter().map(|item| item.contiguous).collect();
+        assert_eq!(
+            contiguous,
+            vec![false, true, false],
+            "the chase is invisible here and still ends the run"
+        );
     }
 }

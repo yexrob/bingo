@@ -1,22 +1,21 @@
-//! Chat state-machine tests, part six: D94's delivery rerouting and the
-//! `notify_user` relay.
+//! Chat state-machine tests, part six: what the console does and does not print
+//! (D94's delivery rerouting, D98's quiet console).
 //!
-//! Two halves, matching the batch. The first pins what the hub *stopped*
-//! printing: an agent's spawn and completion used to hang a `◉ name · task` row
-//! off whatever assistant message happened to be last, and now they do not —
-//! while the signal they carried still lands in the lifecycle log, on the bar,
-//! and in the agent's own DM. The second is the road that replaced it.
-//!
-//! The relay's own arithmetic (windows, coalescing, the notifier ceiling) is
-//! tested in `crate::notify_user`; these tests are about what the hub does with
-//! a notice once the arithmetic has spoken.
+//! Four parts. The first pins what main *stopped* printing: an agent's spawn
+//! and completion used to hang a `◉ name · task` row off whatever assistant
+//! message happened to be last, and now they do not — while the signal they
+//! carried still lands in the lifecycle log, on the bar, and in the agent's own
+//! DM. The second is the one line that still comes through, and the reason it
+//! does: a failure cannot depend on the main agent choosing to narrate it. The
+//! third is the digest debounce, which turns a burst of mail into one turn. The
+//! fourth is D102's silence contract: what a woken turn is allowed to end in,
+//! and what the flow, the badge and the scrollback do with each ending.
 
 use super::tests_a::*;
 use super::*;
 
 use crate::agents::AgentKind;
 use crate::api::types::{ContentBlock, Message};
-use crate::notify_user::{Notice, NotifyLevel};
 use crate::tui::buffer::BufferId;
 use crate::tui::notify::{Notifier, NotifyChannel, TerminalEnv};
 use crate::tui::test_util::chat_at;
@@ -58,8 +57,8 @@ fn lifecycle(label: &str, status: WatchState, detail: Option<&str>) -> UiEvent {
     }
 }
 
-/// The hub as the user sees it: every rendered row, flattened.
-fn hub_rows(chat: &mut Chat) -> Vec<String> {
+/// Main as the user sees it: every rendered row, flattened.
+fn main_rows(chat: &mut Chat) -> Vec<String> {
     chat.build_rows(80);
     chat.doc
         .rows
@@ -81,15 +80,15 @@ fn emitted(chat: &mut Chat) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// A. the hub stops being the bus
+// A. main stops being the bus
 // ---------------------------------------------------------------------------
 
 /// The inventory this batch was written against: a spawn and a completion
-/// arriving while the hub is idle used to add a `◉ scout · fix the parser` row
+/// arriving while main is idle used to add a `◉ scout · fix the parser` row
 /// with a `⎿ done` under it, stapled to the last assistant message — a reply
 /// that had nothing to do with either event.
 #[test]
-fn a_spawn_and_a_completion_add_no_rows_to_an_idle_hub() {
+fn a_spawn_and_a_completion_add_no_rows_to_an_idle_console() {
     let mut chat = test_chat();
     chat.messages.push(msg(Role::User, "have someone look"));
     chat.messages
@@ -98,7 +97,7 @@ fn a_spawn_and_a_completion_add_no_rows_to_an_idle_hub() {
         chat.stream_msg.is_none(),
         "the turn is over: what arrives now is the bus, not the conversation"
     );
-    let before = hub_rows(&mut chat);
+    let before = main_rows(&mut chat);
 
     chat.apply_event(lifecycle(
         "scout · fix the parser",
@@ -112,9 +111,9 @@ fn a_spawn_and_a_completion_add_no_rows_to_an_idle_hub() {
     ));
 
     assert_eq!(
-        hub_rows(&mut chat),
+        main_rows(&mut chat),
         before,
-        "the hub flow is byte-identical: no spawn row, no completion row"
+        "main flow is byte-identical: no spawn row, no completion row"
     );
     assert!(
         chat.messages.iter().all(|m| m.activities.is_empty()),
@@ -123,9 +122,9 @@ fn a_spawn_and_a_completion_add_no_rows_to_an_idle_hub() {
 }
 
 /// The signal is rerouted, not dropped. D95 renders this log as the team
-/// directory; until then it is where a hub-idle lifecycle event is written down.
+/// directory; until then it is where a main-idle lifecycle event is written down.
 #[test]
-fn the_lifecycle_log_keeps_what_the_hub_no_longer_prints() {
+fn the_lifecycle_log_keeps_what_the_console_no_longer_prints() {
     let mut chat = test_chat();
     chat.messages.push(msg(Role::Assistant, ""));
 
@@ -151,9 +150,9 @@ fn the_lifecycle_log_keeps_what_the_hub_no_longer_prints() {
 /// the DM says so with an unread badge. Nothing new was built for this — the
 /// badge follows the instance's history, and the lifecycle event's own registry
 /// sweep is what re-reads it — so the test exists to pin that the chain holds
-/// end to end now that the hub prints nothing.
+/// end to end now that main prints nothing.
 #[test]
-fn a_completion_bumps_the_dm_instead_of_the_hub() {
+fn a_completion_bumps_the_dm_instead_of_main() {
     let mut chat = test_chat();
     chat.messages.push(msg(Role::Assistant, ""));
     seed_agent(&chat, "scout");
@@ -167,13 +166,24 @@ fn a_completion_bumps_the_dm_instead_of_the_hub() {
         Some(0),
         "a conversation seen for the first time starts read"
     );
-    let before = hub_rows(&mut chat);
+    let before = main_rows(&mut chat);
 
     // The agent finishes: its reply lands in its history, then the lifecycle
     // event arrives — the order the domain actually produces.
-    chat.session
-        .agents
-        .finish("scout", vec![assistant("the parser is fixed")], 0);
+    chat.session.agents.finish(
+        "scout",
+        vec![
+            // A DM the user sent, then the reply to it: the badge counts the
+            // pair lane (D99), and an agent's report on the task main gave it
+            // is main's news rather than the user's.
+            crate::api::types::Message::user_text(format!(
+                "{}\nhow is the parser?",
+                crate::tool::agent::DM_FROM_USER_MARKER
+            )),
+            assistant("the parser is fixed"),
+        ],
+        0,
+    );
     chat.apply_event(lifecycle(
         "scout · fix the parser",
         WatchState::Done,
@@ -181,15 +191,15 @@ fn a_completion_bumps_the_dm_instead_of_the_hub() {
     ));
 
     assert_eq!(
-        hub_rows(&mut chat),
+        main_rows(&mut chat),
         before,
-        "the hub is untouched by someone else's completion"
+        "main is untouched by someone else's completion"
     );
     assert_eq!(
         chat.buffers
             .get(&dm)
             .map(crate::tui::buffer::Buffer::unread),
-        Some(1),
+        Some(2),
         "the report is in the DM, and the DM is what carries the badge"
     );
     assert_eq!(
@@ -203,7 +213,7 @@ fn a_completion_bumps_the_dm_instead_of_the_hub() {
 
 /// The exception, and the reason the rule is about *when* rather than *what*:
 /// `Agent` is a hidden tool, so this watch row is the only row the Task call the
-/// user just watched the model make will ever have. Inside the turn it is hub
+/// user just watched the model make will ever have. Inside the turn it is main
 /// content and it stays.
 #[test]
 fn the_running_turn_keeps_the_row_for_its_own_task_call() {
@@ -217,14 +227,14 @@ fn the_running_turn_keeps_the_row_for_its_own_task_call() {
         None,
     ));
 
-    let rows = hub_rows(&mut chat);
+    let rows = main_rows(&mut chat);
     assert!(
         rows.iter().any(|r| r.contains("◉ scout · fix the parser")),
         "the turn's own tool row is not bus noise: {rows:?}"
     );
 }
 
-/// A background command is the hub's own tool and keeps the walk-back it always
+/// A background command is main's own tool and keeps the walk-back it always
 /// had: D94 reroutes agents, and only agents.
 #[test]
 fn a_command_watch_still_reaches_the_last_reply() {
@@ -243,177 +253,225 @@ fn a_command_watch_still_reaches_the_last_reply() {
         signal: None,
     });
 
-    let rows = hub_rows(&mut chat);
+    let rows = main_rows(&mut chat);
     assert!(
         rows.iter().any(|r| r.contains("⏺ cargo watch")),
-        "a command watch is the hub's own tool: {rows:?}"
+        "a command watch is main's own tool: {rows:?}"
     );
 }
 
 // ---------------------------------------------------------------------------
-// B. the road that replaced it
+// B. the one line that still comes through (D98)
 // ---------------------------------------------------------------------------
 
-/// An `info` relay: one dim line in the hub, stamped, and no interruption.
+/// Bad news is the single exception to "nothing of an agent's life renders in
+/// @main": the turn that would have narrated a crash may never run.
 #[test]
-fn an_info_relay_lands_in_the_hub_with_a_stamp_and_no_bell() {
+fn a_failed_run_writes_one_alert_line_and_rings() {
     let mut chat = chat_with_bell();
-    chat.apply_event(UiEvent::NotifyUser(Notice::Relay {
-        agent: "scout".into(),
-        text: "the migration finished".into(),
-        level: NotifyLevel::Info,
-        notifier: false,
-    }));
+    chat.apply_event(lifecycle(
+        "scout #3 · fix the parser",
+        WatchState::Failed,
+        Some("subagent failed: connection reset"),
+    ));
 
-    let rows = hub_rows(&mut chat);
-    let line = rows
-        .iter()
-        .find(|r| r.contains("🔔 @scout → you: the migration finished"))
-        .unwrap_or_else(|| panic!("the relay line is in the hub: {rows:?}"));
+    let rows = main_rows(&mut chat);
+    let alert: Vec<&String> = rows.iter().filter(|r| r.contains("⚠ @scout")).collect();
+    assert_eq!(
+        alert.len(),
+        1,
+        "exactly one line, not one per event: {rows:?}"
+    );
     assert!(
-        !line.contains('❯'),
-        "a relay is a state line: no bubble putting the agent's words in the user's mouth"
+        alert[0].contains("subagent failed: connection reset"),
+        "the reason travels with the name: {alert:?}"
+    );
+    assert!(
+        !alert[0].contains('❯'),
+        "nobody typed it: no bubble putting the harness's words in the user's mouth"
     );
     assert!(
         crate::tui::chat::is_state_line(&chat.messages[0].text),
         "and it is classified as one"
     );
-    // D93's stamp convention: beside the message, flush right.
-    let stamp = crate::tui::buffer::stamp(chat.messages[0].at);
     assert!(
-        line.trim_end().ends_with(&stamp),
-        "a relay keeps its stamp — when it arrived is part of what it says: {line:?}"
+        emitted(&mut chat).contains('\x07'),
+        "a failure reaches a user who is in another window"
     );
+}
+
+/// `Done` and `Cancelled` say themselves through the dispatch row's own state.
+/// A second line for each would be the flood D94 removed, wearing a badge.
+#[test]
+fn a_finished_or_cancelled_run_writes_nothing() {
+    let mut chat = chat_with_bell();
+    chat.messages
+        .push(msg(Role::Assistant, "I have asked scout"));
+    let before = main_rows(&mut chat);
+
+    chat.apply_event(lifecycle(
+        "scout #3 · fix the parser",
+        WatchState::Done,
+        Some("done"),
+    ));
+    chat.apply_event(lifecycle(
+        "zoe #1 · read the logs",
+        WatchState::Cancelled,
+        Some("stopped"),
+    ));
+
+    assert_eq!(main_rows(&mut chat), before, "the flow is byte-identical");
     assert_eq!(
         emitted(&mut chat),
         "",
-        "info waits for the user to look; it does not go and get them"
+        "and nothing went looking for the user"
     );
 }
 
-/// `urgent` is the level that reaches a user who is in another window.
+/// The alert keeps its send stamp. It is news, about someone, at a moment that
+/// matters — "the build broke" reads differently at 09:02 and at 17:40 — where
+/// the other state lines describe *now* and have nothing to stamp.
 #[test]
-fn an_urgent_relay_rings_the_attention_channel() {
-    let mut chat = chat_with_bell();
-    chat.apply_event(UiEvent::NotifyUser(Notice::Relay {
-        agent: "scout".into(),
-        text: "I need the deploy key".into(),
-        level: NotifyLevel::Urgent,
-        notifier: true,
-    }));
+fn the_alert_line_keeps_its_stamp() {
+    let mut chat = test_chat();
+    chat.apply_event(lifecycle(
+        "scout · fix the parser",
+        WatchState::Failed,
+        None,
+    ));
+    let stamp = crate::tui::buffer::stamp(chat.messages[0].at);
+    let rows = main_rows(&mut chat);
+    assert!(
+        rows.iter()
+            .any(|r| r.contains("⚠ @scout") && r.trim_end().ends_with(&stamp)),
+        "{rows:?}"
+    );
+}
 
+// ---------------------------------------------------------------------------
+// C. the digest debounce (D98)
+// ---------------------------------------------------------------------------
+
+/// One room post used to buy one woken turn. A burst now buys one digest: the
+/// wake waits for the room to stop talking.
+#[test]
+fn a_burst_of_room_mail_wakes_once_after_the_quiet_window() {
+    let mut chat = test_chat();
+    chat.session.channels.deliver_to_main("scout", "one", false);
+    assert!(!chat.digest_mail(), "the window has only just opened");
+    assert!(
+        chat.mail_wake.is_some(),
+        "and the clock is armed, which is what keeps the tick alive"
+    );
+    assert!(
+        chat.needs_tick(),
+        "waiting mail keeps the frame loop running"
+    );
+
+    // A second message inside the window restarts it: the room is still talking.
+    chat.tick += super::chat_tail::MAIL_QUIET_TICKS - 1;
+    chat.session.channels.deliver_to_main("zoe", "two", false);
+    assert!(
+        !chat.digest_mail(),
+        "the window restarted with the new message"
+    );
+
+    chat.tick += super::chat_tail::MAIL_QUIET_TICKS - 1;
+    assert!(!chat.digest_mail(), "still inside the restarted window");
+    chat.tick += 1;
+    assert!(chat.digest_mail(), "the room went quiet; digest the batch");
+    assert!(
+        !chat.digest_mail(),
+        "and exactly once — a second ask for the same batch is the flood again"
+    );
+}
+
+/// A room that never stops talking would restart the window forever. The
+/// deadline is the floor under that: the digest runs on whatever has arrived.
+#[test]
+fn a_chatty_room_cannot_starve_the_wake_past_the_deadline() {
+    let mut chat = test_chat();
+    let step = super::chat_tail::MAIL_QUIET_TICKS - 1;
+    chat.session.channels.deliver_to_main("scout", "0", false);
+    assert!(!chat.digest_mail());
+    let mut fired = false;
+    for i in 1..=(super::chat_tail::MAIL_DEADLINE_TICKS / step + 1) {
+        chat.tick += step;
+        chat.session
+            .channels
+            .deliver_to_main("scout", &format!("{i}"), false);
+        if chat.digest_mail() {
+            fired = true;
+            break;
+        }
+    }
+    assert!(
+        fired,
+        "the deadline fires even though the quiet window never elapsed"
+    );
+    assert!(
+        chat.tick >= super::chat_tail::MAIL_DEADLINE_TICKS,
+        "and not before it: {}",
+        chat.tick
+    );
+}
+
+/// Urgent is the one thing that does not queue behind the window — and it rings
+/// on arrival, whether or not a turn is what happens next.
+#[test]
+fn urgent_direct_mail_rings_and_skips_the_window() {
+    let mut chat = chat_with_bell();
+    chat.session
+        .channels
+        .deliver_to_main("scout", "I need the deploy key", true);
+    assert!(chat.digest_mail(), "urgent does not wait out the window");
     assert!(
         emitted(&mut chat).contains('\x07'),
-        "the bell is the channel every terminal has"
-    );
-    let rows = hub_rows(&mut chat);
-    assert!(
-        rows.iter()
-            .any(|r| r.contains("🔔 @scout → you: I need the deploy key")),
-        "and the line is on screen too — the notification carries no detail of its own: {rows:?}"
+        "and it reaches a user who is in another window"
     );
 }
 
-/// The relay's ceiling reaches the notifier as well as the flow: a second urgent
-/// notice inside the window still prints, and still does not ring. The decision
-/// is the relay's; this pins that the hub honours it rather than re-deciding.
+/// The bell survives a turn that beat the tick to the mail: the drain and the
+/// ring are different readers, so the flag is cleared by the reader that rings.
 #[test]
-fn a_relay_that_lost_the_notifier_ceiling_prints_without_ringing() {
+fn the_ring_survives_a_turn_that_drained_the_mail_first() {
     let mut chat = chat_with_bell();
-    chat.apply_event(UiEvent::NotifyUser(Notice::Relay {
-        agent: "scout".into(),
-        text: "still blocked".into(),
-        level: NotifyLevel::Urgent,
-        notifier: false,
-    }));
-
-    assert_eq!(emitted(&mut chat), "", "the window already rang once");
-    let rows = hub_rows(&mut chat);
-    assert!(
-        rows.iter()
-            .any(|r| r.contains("🔔 @scout → you: still blocked")),
-        "urgent is never coalesced away: {rows:?}"
-    );
-}
-
-/// What the rolled window owes, rendered.
-#[test]
-fn a_coalesced_relay_names_the_count_and_points_at_the_dm() {
-    let mut chat = test_chat();
-    chat.apply_event(UiEvent::NotifyUser(Notice::Coalesced {
-        agent: "scout".into(),
-        count: 4,
-    }));
-
-    let rows = hub_rows(&mut chat);
-    assert!(
-        rows.iter()
-            .any(|r| r.contains("🔔 @scout: 4 more — see the DM")),
-        "the swallowed notices are accounted for, and the DM is named: {rows:?}"
-    );
-}
-
-/// A relay arrives whether or not the hub is what the user is looking at, and
-/// the badge is how the bar says so. The hub had no unread source before D94 —
-/// nothing could reach it that the user had not asked for.
-#[test]
-fn a_relay_bumps_the_hub_unread_when_the_user_is_elsewhere() {
-    let mut chat = test_chat();
-    seed_agent(&chat, "scout");
-    chat.refresh_conversations();
-    chat.switch_to(BufferId::Dm("scout".to_string()));
-    assert_eq!(*chat.buffers.active(), BufferId::Dm("scout".to_string()));
-
-    chat.apply_event(UiEvent::NotifyUser(Notice::Relay {
-        agent: "scout".into(),
-        text: "the migration finished".into(),
-        level: NotifyLevel::Info,
-        notifier: false,
-    }));
-
-    let hub = chat
-        .buffers
-        .get(&BufferId::Hub)
-        .expect("the hub is always listed");
+    chat.session
+        .channels
+        .deliver_to_main("scout", "blocked", true);
+    let drained = chat.session.channels.drain_main_mail();
     assert_eq!(
-        hub.unread(),
+        drained.len(),
         1,
-        "the hub says something came while you were away"
+        "a running turn absorbed it at its next round"
     );
-    assert!(hub.mention(), "a relay is addressed to the user");
 
-    // Going home reads it.
-    chat.switch_to(BufferId::Hub);
-    assert_eq!(
-        chat.buffers
-            .get(&BufferId::Hub)
-            .map(crate::tui::buffer::Buffer::unread),
-        Some(0),
-        "entering a conversation reads it"
+    assert!(!chat.digest_mail(), "there is nothing left to digest");
+    assert!(
+        emitted(&mut chat).contains('\x07'),
+        "but the bell it asked for is still owed"
     );
 }
 
-/// The same event with the hub already active never raises a badge for the
-/// conversation the user is reading.
+/// The injected form names the sender, and `line_source` — the single
+/// recognizer of scaffolding shapes — reads it back.
 #[test]
-fn a_relay_read_where_it_lands_raises_no_badge() {
-    let mut chat = test_chat();
-    assert_eq!(*chat.buffers.active(), BufferId::Hub);
-
-    chat.apply_event(UiEvent::NotifyUser(Notice::Relay {
-        agent: "scout".into(),
-        text: "the migration finished".into(),
-        level: NotifyLevel::Info,
-        notifier: false,
-    }));
-
+fn a_direct_message_to_main_carries_the_sender_into_the_inbox() {
+    let chat = test_chat();
+    chat.session
+        .channels
+        .deliver_to_main("scout", "the migration is done", false);
+    let mail = chat.session.channels.drain_main_mail();
+    assert_eq!(mail.len(), 1);
+    let mut lines = mail[0].lines();
     assert_eq!(
-        chat.buffers
-            .get(&BufferId::Hub)
-            .map(crate::tui::buffer::Buffer::unread),
-        Some(0),
-        "you are looking at it"
+        crate::tui::buffer::line_source(lines.next().unwrap_or_default()),
+        Some(crate::tui::buffer::LineSource::Agent {
+            name: "scout".to_string()
+        }),
+        "the marker is a header line, the way [DM from user] is: {mail:?}"
     );
+    assert_eq!(lines.next(), Some("the migration is done"));
 }
 
 // ---------------------------------------------------------------------------
@@ -740,4 +798,451 @@ fn a_failed_open_lands_on_the_info_tier() {
         chat.slash_info_lines
     );
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// D99: @main gets a real unread. D94 left it with none at all once the
+/// relay lines retired, so main could speak into a conversation the reader
+/// was not in and the bar said nothing. Main's prose counts; the D98 failure
+/// alert counts *and* wants you; entering the console clears both.
+#[test]
+fn the_console_counts_what_main_says_while_you_are_elsewhere() {
+    let mut chat = test_chat();
+    seed_agent(&chat, "scout");
+    chat.refresh_conversations();
+    chat.switch_to(BufferId::Dm("scout".to_string()));
+
+    let console = || BufferId::Hub;
+    assert_eq!(
+        chat.buffers.get(&console()).map(|b| b.unread()),
+        Some(0),
+        "nothing has been said yet"
+    );
+
+    chat.apply_turn_start();
+    chat.apply_event(crate::ui::UiEvent::TextDelta("here is the answer".into()));
+    chat.apply_event(crate::ui::UiEvent::TurnEnd);
+    assert_eq!(chat.buffers.get(&console()).map(|b| b.unread()), Some(1));
+    assert_eq!(
+        chat.buffers.get(&console()).map(|b| b.mention()),
+        Some(false),
+        "main answering is news, not a summons"
+    );
+
+    chat.push_agent_alert("scout · fix the parser", Some("connection reset"));
+    assert_eq!(chat.buffers.get(&console()).map(|b| b.unread()), Some(2));
+    assert_eq!(
+        chat.buffers.get(&console()).map(|b| b.mention()),
+        Some(true),
+        "an alert is the one line nobody chose to say"
+    );
+
+    chat.switch_to(BufferId::Hub);
+    assert_eq!(chat.buffers.get(&console()).map(|b| b.unread()), Some(0));
+    assert_eq!(
+        chat.buffers.get(&console()).map(|b| b.mention()),
+        Some(false)
+    );
+}
+
+/// D99 review: the console's user-role rows are not all the user's. A failure
+/// alert, a route receipt, an interrupt marker — the runtime reporting — must
+/// not wear the human's portrait, or the gutter says the human wrote them. They
+/// keep the *indentation*, so the message column does not jog around them, and
+/// they leave the run, so the next thing main says re-leads with main's face:
+/// the visual break the interruption already is. The same ruling the DM tail's
+/// live-only states have carried since D97.
+#[test]
+fn a_state_line_takes_the_indentation_and_nobodys_face() {
+    for images in [false, true] {
+        let mut chat = chat_at(78, 40);
+        if images {
+            chat.image_cap = Some(crate::tui::gfx::ImageCap::default_cells());
+        }
+        chat.messages
+            .push(msg(Role::Assistant, "scout is on the parser."));
+        chat.push_agent_alert("scout · fix the parser", Some("connection reset"));
+        chat.messages
+            .push(msg(Role::Assistant, "I will hire a replacement."));
+        chat.build_rows(78);
+        let rows: Vec<String> = chat.doc.rows.iter().map(|r| r.line.plain_text()).collect();
+        let row_with = |needle: &str| -> String {
+            rows.iter()
+                .find(|row| row.contains(needle))
+                .unwrap_or_else(|| panic!("no row contains {needle:?}: {rows:#?}"))
+                .clone()
+        };
+
+        let gutter = crate::tui::avatar::gutter_width(images);
+        let alert = row_with("⚠ @scout");
+        let cut = alert.find('⚠').unwrap_or(0);
+        assert_eq!(
+            crate::tui::line::text_width(&alert[..cut]),
+            gutter,
+            "the alert starts at the gutter's edge ({images}): {alert:?}"
+        );
+        assert_eq!(
+            alert[..cut].trim(),
+            "",
+            "and the cells before it are blank — no chip, no portrait ({images}): {alert:?}"
+        );
+        assert!(
+            !alert[..cut].contains(crate::tui::gfx::PLACEHOLDER),
+            "least of all an image ({images}): {alert:?}"
+        );
+
+        // The run broke: main's reply after the alert opens a fresh one.
+        let before = row_with("scout is on the parser.");
+        let after = row_with("I will hire a replacement.");
+        assert_eq!(
+            before[..before.find('⏺').unwrap_or(0)],
+            after[..after.find('⏺').unwrap_or(0)],
+            "main re-leads with its own face after the interruption ({images})"
+        );
+        assert_ne!(
+            after[..after.find('⏺').unwrap_or(0)].trim(),
+            "",
+            "and that face is drawn, not blank ({images}): {after:?}"
+        );
+    }
+}
+
+/// A steered message is the user's own words and keeps the user's face: it is
+/// not a state line, and the `↪` marker says where in the reply it landed
+/// rather than that nobody wrote it.
+#[test]
+fn a_steered_message_still_wears_the_users_face() {
+    let mut chat = chat_at(78, 40);
+    chat.messages.push(msg(Role::Assistant, "working on it"));
+    chat.absorb_steered(&[crate::steer::SteerItem {
+        id: 1,
+        text: "also check the lexer".to_string(),
+    }]);
+    chat.build_rows(78);
+    let row = chat
+        .doc
+        .rows
+        .iter()
+        .map(|r| r.line.plain_text())
+        .find(|row| row.contains("also check the lexer"))
+        .unwrap_or_else(|| panic!("the steered line renders"));
+    assert!(
+        row.starts_with(" U "),
+        "the user typed it, so the face is right: {row:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// D102 — the silence contract
+// ---------------------------------------------------------------------------
+
+/// Open a turn the way `submit_auto` does: nobody typed into it, so it is a
+/// digest and the silence contract applies to how it ends.
+fn digest_turn(chat: &mut Chat) {
+    chat.digest_turn = true;
+    chat.apply_turn_start();
+}
+
+/// Everything the terminal would have written into scrollback since the last
+/// call, flushed as eagerly as the cursor allows.
+///
+/// Production picks a mark by where the window top is; this takes the *last*
+/// settled mark every frame, which is the most that could ever freeze. Rows it
+/// never sees are rows scrollback can never hold.
+fn frozen(chat: &mut Chat, width: usize) -> Vec<String> {
+    chat.build_rows(width);
+    let Some(mark) = chat.doc.settled_marks.last().copied() else {
+        return Vec::new();
+    };
+    let end = mark.row_end.min(chat.doc.rows.len());
+    let rows = if end > chat.tail_start {
+        chat.doc.rows[chat.tail_start..end]
+            .iter()
+            .map(|r| r.line.plain_text())
+            .collect()
+    } else {
+        Vec::new()
+    };
+    chat.advance_flushed_upto(mark);
+    rows
+}
+
+/// The contract's own sentence: a digest turn that ends in the acknowledgement
+/// marker renders as nothing — the dispatch row already said the work was done.
+/// The reply itself is kept verbatim, because the record is complete and only
+/// the flow is quiet.
+#[test]
+fn a_quiet_digest_turn_renders_as_nothing() {
+    let mut chat = test_chat();
+    chat.messages.push(msg(Role::User, "keep an eye on scout"));
+    let before = main_rows(&mut chat);
+
+    digest_turn(&mut chat);
+    chat.apply_event(UiEvent::TextDelta(crate::query::QUIET_MARKER.into()));
+    chat.apply_event(UiEvent::TurnEnd);
+
+    assert_eq!(
+        main_rows(&mut chat),
+        before,
+        "the flow is byte-identical the moment the turn ends"
+    );
+    assert!(
+        !chat.settling(),
+        "and no settle blink was armed for it: nothing settled, so holding the \
+         message above it live would only re-accent a row that finished long ago"
+    );
+    past_settle(&mut chat);
+    assert_eq!(
+        main_rows(&mut chat),
+        before,
+        "and still identical once the window the blink would have used has passed"
+    );
+    assert_eq!(
+        chat.messages.last().map(|m| m.text.as_str()),
+        Some(crate::query::QUIET_MARKER),
+        "the reply is kept exactly as it was written — silence is a render rule, not a deletion"
+    );
+}
+
+/// The badge half of the same rule, read from where a badge can be seen: the
+/// user is standing in a DM, so `@main`'s count is live. A quiet digest adds
+/// nothing to it and does not touch the conversation's activity clock either —
+/// `note_console` carries both, so the guard has to be in front of the call.
+#[test]
+fn a_quiet_digest_turn_raises_no_badge() {
+    let mut chat = test_chat();
+    seed_agent(&chat, "scout");
+    chat.refresh_conversations();
+    chat.switch_to(BufferId::Dm("scout".to_string()));
+    let console = BufferId::Hub;
+    let activity_before = chat.buffers.get(&console).map(|b| b.last_activity());
+
+    chat.tick();
+    digest_turn(&mut chat);
+    chat.apply_event(UiEvent::TextDelta(crate::query::QUIET_MARKER.into()));
+    chat.apply_event(UiEvent::TurnEnd);
+
+    assert_eq!(
+        chat.buffers.get(&console).map(|b| b.unread()),
+        Some(0),
+        "a turn that said nothing gives the reader nothing to come back for"
+    );
+    assert_eq!(
+        chat.buffers.get(&console).map(|b| b.mention()),
+        Some(false),
+        "and nothing that wants them"
+    );
+    assert_eq!(
+        chat.buffers.get(&console).map(|b| b.last_activity()),
+        activity_before,
+        "the console did nothing worth sorting the switcher by"
+    );
+
+    // The control, in the same conversation and on the same clock: prose from a
+    // digest turn is main speaking, and D99's count is untouched by D102.
+    digest_turn(&mut chat);
+    chat.apply_event(UiEvent::TextDelta(
+        "scout wants a decision on the schema".into(),
+    ));
+    chat.apply_event(UiEvent::TurnEnd);
+    assert_eq!(
+        chat.buffers.get(&console).map(|b| b.unread()),
+        Some(1),
+        "the other ending still badges"
+    );
+}
+
+/// A digest turn that speaks says it in `@main`. The contract adds an ending, it
+/// does not take one away.
+#[test]
+fn a_digest_turn_that_speaks_still_speaks() {
+    let mut chat = test_chat();
+
+    digest_turn(&mut chat);
+    chat.apply_event(UiEvent::TextDelta(
+        "scout wants a decision on the schema".into(),
+    ));
+    chat.apply_event(UiEvent::TurnEnd);
+    past_settle(&mut chat);
+
+    assert!(
+        main_rows(&mut chat)
+            .iter()
+            .any(|row| row.contains("scout wants a decision on the schema")),
+        "prose from a digest turn is main speaking, and main speaks in @main"
+    );
+}
+
+/// A digest turn long enough to have rung the D79 completion bell rings nothing
+/// when it ends in silence: the user never walked away from a turn they never
+/// started. The prose ending, on the same clock, still rings.
+#[test]
+fn a_long_digest_turn_that_goes_quiet_rings_nothing() {
+    // The OSC-9 channel rather than the bell one: a title is `OSC 2 … BEL`, so a
+    // bare `\x07` cannot tell a ring from the busy title this turn also sets.
+    const NOTICE: &str = "\x1b]9;";
+    let mut chat = test_chat();
+    chat.set_notifier(Notifier::new(
+        NotifyChannel::Iterm2,
+        &TerminalEnv::default(),
+    ));
+    let _ = chat.notify.take();
+
+    digest_turn(&mut chat);
+    chat.turn_started = Some(std::time::Instant::now() - crate::tui::notify::LONG_TURN);
+    chat.apply_event(UiEvent::TextDelta(crate::query::QUIET_MARKER.into()));
+    chat.apply_event(UiEvent::TurnEnd);
+    assert!(
+        !emitted(&mut chat).contains(NOTICE),
+        "silence does not go looking for the user"
+    );
+
+    digest_turn(&mut chat);
+    chat.turn_started = Some(std::time::Instant::now() - crate::tui::notify::LONG_TURN);
+    chat.apply_event(UiEvent::TextDelta("the migration needs your call".into()));
+    chat.apply_event(UiEvent::TurnEnd);
+    assert!(
+        emitted(&mut chat).contains(NOTICE),
+        "and the same turn ending in prose still does"
+    );
+}
+
+/// The marker is only silence where silence was the alternative. In a turn the
+/// user typed into, the same marker is the model misfiring, and a misfire the
+/// renderer swallows is a bug nobody can see.
+#[test]
+fn the_marker_in_a_turn_the_user_started_renders_literally() {
+    let mut chat = test_chat();
+    chat.apply_turn_start();
+    chat.apply_event(UiEvent::TextDelta(crate::query::QUIET_MARKER.into()));
+    chat.apply_event(UiEvent::TurnEnd);
+    past_settle(&mut chat);
+
+    assert!(
+        main_rows(&mut chat)
+            .iter()
+            .any(|row| row.contains(crate::query::QUIET_MARKER)),
+        "the user asked for something and got this: they must be able to see it"
+    );
+    assert_eq!(
+        chat.buffers.get(&BufferId::Hub).map(|b| b.unread()),
+        Some(0),
+        "the reader is standing in @main, so there is nothing to badge"
+    );
+}
+
+/// The hard invariant. Scrollback is written once and never rewritten, so the
+/// marker must not reach it — not at the end of the turn, and not for one frame
+/// in the middle of it either. The frame is taken after every step a turn can
+/// take, and each one flushes as much as the cursor will allow.
+#[test]
+fn the_marker_never_reaches_flushed_scrollback() {
+    let mut chat = test_chat();
+    let mut scrollback: Vec<String> = Vec::new();
+    // A settled exchange first, so the flush cursor is genuinely moving and the
+    // test is not passing because nothing ever freezes.
+    chat.messages.push(msg(Role::User, "keep an eye on scout"));
+    chat.apply_turn_start();
+    chat.apply_event(UiEvent::TextDelta("watching".into()));
+    chat.apply_event(UiEvent::TurnEnd);
+    past_settle(&mut chat);
+    scrollback.extend(frozen(&mut chat, 80));
+    let settled_before = chat.flushed_segments;
+    assert!(
+        scrollback.iter().any(|row| row.contains("watching")),
+        "the control: an ordinary reply does freeze"
+    );
+
+    digest_turn(&mut chat);
+    scrollback.extend(frozen(&mut chat, 80));
+    // The marker arrives in pieces, as a stream delivers it.
+    for chunk in ["[[qu", "ie", "t]]"] {
+        chat.apply_event(UiEvent::TextDelta(chunk.into()));
+        scrollback.extend(frozen(&mut chat, 80));
+        chat.tick();
+        scrollback.extend(frozen(&mut chat, 80));
+    }
+    chat.apply_event(UiEvent::TurnEnd);
+    scrollback.extend(frozen(&mut chat, 80));
+    past_settle(&mut chat);
+    scrollback.extend(frozen(&mut chat, 80));
+
+    assert!(
+        !scrollback.iter().any(|row| row.contains("[[")),
+        "nothing of the marker was ever frozen, not even a half-streamed prefix: {scrollback:?}"
+    );
+    assert_eq!(
+        chat.flushed_segments, settled_before,
+        "and the cursor did not move for it, so no blank segment was frozen in its place"
+    );
+}
+
+/// A digest turn that did work before going quiet renders as nothing at all —
+/// the work included. The record kept the calls and the dispatch row said the
+/// run was done; repeating that on screen is the narration the contract exists
+/// to stop.
+#[test]
+fn a_quiet_digest_turn_hides_the_work_it_did_too() {
+    let mut chat = test_chat();
+    let before = main_rows(&mut chat);
+
+    digest_turn(&mut chat);
+    chat.apply_event(UiEvent::ToolStart {
+        name: "Bash".into(),
+    });
+    chat.apply_event(UiEvent::ToolReady {
+        tool_call_id: "d102-tool".into(),
+        name: "Bash".into(),
+        input: serde_json::json!({"command": "git log -1"}),
+        standalone: false,
+    });
+    chat.apply_event(UiEvent::TextDelta(crate::query::QUIET_MARKER.into()));
+    chat.apply_event(UiEvent::TurnEnd);
+    past_settle(&mut chat);
+
+    assert!(
+        chat.messages
+            .last()
+            .is_some_and(|m| !m.activities.is_empty()),
+        "the calls are on the message, which is what makes this the interesting case"
+    );
+    assert_eq!(
+        main_rows(&mut chat),
+        before,
+        "and none of them printed a row"
+    );
+}
+
+/// Tag, don't infer: the digest fact is stamped at `submit_auto`, the one door a
+/// turn nobody typed into comes through, and the reply carries it from there. An
+/// ordinary turn opened with the same empty prompt is not a digest.
+#[tokio::test]
+async fn submit_auto_stamps_the_turn_a_digest() {
+    let mut chat = test_chat();
+    chat.submit_auto();
+    assert!(chat.busy, "the turn opened");
+    assert!(chat.digest_turn, "and it was stamped on the way through");
+    chat.apply_turn_start();
+    assert_eq!(
+        chat.messages.last().map(|m| m.digest),
+        Some(true),
+        "the reply carries the fact past the end of the turn"
+    );
+    assert!(
+        !chat.digest_turn,
+        "and the stamp is spent, so it cannot colour the next turn"
+    );
+}
+
+/// The same emptiness, the other origin: `start_turn` with no text is not a
+/// digest, so a marker in it is a misfire like any other. This is the pair of
+/// facts that must not be read off one another.
+#[test]
+fn an_empty_submission_is_not_a_digest() {
+    let mut chat = test_chat();
+    chat.apply_turn_start();
+    assert_eq!(
+        chat.messages.last().map(|m| m.digest),
+        Some(false),
+        "nothing stamped it, so nothing about it is silent"
+    );
 }

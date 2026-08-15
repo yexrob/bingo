@@ -66,14 +66,14 @@ pub enum EscLayer {
     Directory,
     /// The task panel, when the user opened it themselves with ctrl+t.
     TaskPanel,
-    /// A conversation other than the hub: Esc goes home (D89).
+    /// A conversation other than main: Esc goes home (D89).
     ///
     /// Above the interrupt on purpose — navigation before interruption. Esc in
-    /// a DM is "take me back", never "stop the model": a hub turn running
-    /// behind you keeps running, and its interrupt is reachable from the hub,
+    /// a DM is "take me back", never "stop the model": a main turn running
+    /// behind you keeps running, and its interrupt is reachable from main,
     /// which is the only place it is the thing on screen. Ctrl+C is unchanged
     /// and still stops the turn from anywhere.
-    BackToHub,
+    BackToMain,
     /// The running turn.
     Interrupt,
     /// Bash mode on an empty input. Below the interrupt, unlike every other
@@ -101,20 +101,69 @@ impl EscLayer {
         EscLayer::HelpPanel,
         EscLayer::Directory,
         EscLayer::TaskPanel,
-        EscLayer::BackToHub,
+        EscLayer::BackToMain,
         EscLayer::Interrupt,
         EscLayer::BashMode,
         EscLayer::ClearInput,
     ];
 }
 
-/// Who a flow position belongs to, for sender grouping. A rule belongs to
-/// nobody, which is what makes the first message after one carry its name.
-fn speaker_of(item: &crate::tui::bufferview::FlowItem) -> Option<String> {
+/// Who a flow position belongs to, for the gutter face and for sender grouping.
+/// A rule belongs to nobody, which is what makes the first message after one
+/// carry its name.
+///
+/// **A state line belongs to nobody either** (D99 review). The console's
+/// user-role rows are not all the user's: a failed-agent alert, a route receipt,
+/// an ask receipt, an interrupt marker and a rewind line are the runtime
+/// reporting, and the human's portrait beside `⚠ @scout · connection reset`
+/// would say the human wrote it. Returning `None` costs them the face and takes
+/// them out of the run, so main speaking → alert → main speaking again re-leads
+/// with main's face; the gutter *indentation* is not decided here, and they keep
+/// it, so the message column never jogs. This is the ruling the DM tail's
+/// live-only states already carry (`bufferview::tail_post_rows`).
+///
+/// A steered message (`↪ …`) is not a state line and is not covered: the user
+/// typed it, so the face is right.
+fn speaker_of(item: &crate::tui::bufferview::FlowItem, role: Role, text: &str) -> Option<String> {
     match &item.decor {
-        crate::tui::bufferview::Decor::Said(who) => Some(who.clone()),
-        _ => None,
+        crate::tui::bufferview::Decor::Said(who) if role == Role::Assistant => Some(who.clone()),
+        crate::tui::bufferview::Decor::Said(_) => Some(crate::channels::USER_NAME.to_string()),
+        // @main's own flow. Its two speakers are never written down anywhere —
+        // the role *is* the name — and since D99 they are named here so the
+        // console can wear the same gutter every other conversation wears.
+        crate::tui::bufferview::Decor::Home if role == Role::Assistant => {
+            Some(crate::channels::MAIN_NAME.to_string())
+        }
+        crate::tui::bufferview::Decor::Home if crate::tui::chat::is_state_line(text) => None,
+        crate::tui::bufferview::Decor::Home => Some(crate::channels::USER_NAME.to_string()),
+        crate::tui::bufferview::Decor::Divider => None,
     }
+}
+
+/// How long the main agent's inbox has to stay quiet before a digest turn
+/// starts. Two seconds at [`crate::tui::motion::TICK_MS`]: long enough that
+/// a room's back-and-forth arrives as one batch (agents answering each other
+/// land within a round trip of one another), short enough that a single
+/// message still feels like it was delivered rather than queued.
+pub(crate) const MAIL_QUIET_TICKS: u64 = 2_000 / crate::tui::motion::TICK_MS;
+
+/// The ceiling on that wait. A room that never stops talking would otherwise
+/// starve the wake forever — the window would restart on every post — so
+/// after fifteen seconds the digest runs on whatever has arrived and the next
+/// batch starts its own window.
+pub(crate) const MAIL_DEADLINE_TICKS: u64 = 15_000 / crate::tui::motion::TICK_MS;
+
+/// The debounce's state for one batch of waiting mail.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct MailWake {
+    /// Tick the batch started at (the deadline is measured from here).
+    first_seen: u64,
+    /// Tick the inbox last grew at (the quiet window restarts here).
+    last_change: u64,
+    /// How much was waiting when we last looked.
+    waiting: usize,
+    /// A digest turn has been asked for; the drain will clear the batch.
+    woken: bool,
 }
 
 impl super::Chat {
@@ -151,7 +200,7 @@ impl super::Chat {
     /// `/team <subcommand>` (D31 project-level formation): dispatched to
     /// team_cmd, and the answer lands in the team's own feed (D90, D95).
     ///
-    /// It used to go to the hub's info tier, which put the formation's own
+    /// It used to go to main's info tier, which put the formation's own
     /// report everywhere except where the formation's history lives. The feed
     /// is now a column of the directory rather than a board with a badge, so
     /// the pointer names the key that opens it: an answer stored somewhere the
@@ -392,11 +441,103 @@ impl super::Chat {
             insert_points: Vec::new(),
             groups: Vec::new(),
             group_of: Vec::new(),
+            digest: false,
         });
+    }
+
+    /// The alert line a failed run leaves in the flow (D98), plus the D79 ring.
+    ///
+    /// The label is the run's, and every shape of it — `scout · fix the parser`,
+    /// `scout #3 · look again`, `scout #7 receipt` — opens with the instance
+    /// name, which is the only part of it the user needs here.
+    pub(crate) fn push_agent_alert(&mut self, label: &str, reason: Option<&str>) {
+        let instance = label.split_whitespace().next().unwrap_or(label);
+        self.messages.push(UiMessage {
+            role: Role::User,
+            text: crate::tui::bufferview::agent_alert_line(instance, reason),
+            at: crate::channels::now_unix(),
+            activities: Vec::new(),
+            insert_points: Vec::new(),
+            groups: Vec::new(),
+            group_of: Vec::new(),
+            digest: false,
+        });
+        // @main's own badge (D99). An alert is the one line here nobody chose to
+        // say, so it is the one that earns the accent: a reader in another
+        // conversation must be able to tell "main answered" from "something
+        // broke" without coming back to look.
+        self.buffers.note_console(true, self.tick);
+        self.notify
+            .attention(crate::tui::notify::Attention::AgentNotice);
+        self.dirty = true;
+    }
+
+    /// The main agent's inbox, digested on a quiet window rather than per message
+    /// (D98).
+    ///
+    /// Before this, every room post with main as a member woke a turn of its
+    /// own: three agents talking in a room for a minute bought the user three
+    /// digests of a conversation that had not finished happening. Coalescing is
+    /// the whole fix — the wake is deferred until the mail stops growing, or
+    /// until the deadline, so a room that never goes quiet still gets read.
+    ///
+    /// Urgent direct mail is the exception at both ends: it rings the attention
+    /// channel the moment it lands, and it does not wait out the window.
+    ///
+    /// Returns whether it asked for a digest turn this frame.
+    pub(crate) fn digest_mail(&mut self) -> bool {
+        // Checked before the emptiness test: the drain and the bell are separate
+        // readers, and a turn already running can absorb the message before this
+        // ever sees the mail that asked for the ring.
+        let urgent = self.session.channels.take_main_mail_urgent();
+        if urgent {
+            self.notify
+                .attention(crate::tui::notify::Attention::AgentNotice);
+        }
+        let waiting = self.session.channels.main_mail_len();
+        if waiting == 0 {
+            self.mail_wake = None;
+            return false;
+        }
+        let tick = self.tick;
+        let wake = self.mail_wake.get_or_insert(MailWake {
+            first_seen: tick,
+            last_change: tick,
+            waiting,
+            woken: false,
+        });
+        if wake.waiting != waiting {
+            wake.waiting = waiting;
+            wake.last_change = tick;
+        }
+        if wake.woken {
+            return false;
+        }
+        let quiet = tick.saturating_sub(wake.last_change) >= MAIL_QUIET_TICKS;
+        let overdue = tick.saturating_sub(wake.first_seen) >= MAIL_DEADLINE_TICKS;
+        if !(urgent || quiet || overdue) {
+            return false;
+        }
+        // Idle-only, as the per-post wake was: a running turn absorbs the mail at
+        // its own next round, and a queued user message goes first.
+        if self.busy || self.interrupted || !self.queued.is_empty() {
+            return false;
+        }
+        self.submit_auto();
+        if let Some(wake) = &mut self.mail_wake {
+            wake.woken = true;
+        }
+        true
     }
 
     /// System-triggered turn: a watchable signal/terminal notification wakes the main agent.
     /// No user input (the notification is injected in run_query's first round); user state is irrelevant.
+    ///
+    /// This is also where a turn is stamped a **digest** (D102). The fact is
+    /// recorded at the door rather than read off the empty prompt at render
+    /// time: an empty submission and a woken turn are two different things that
+    /// happen to produce the same prompt string today, and only one of them is
+    /// allowed to end in silence.
     pub(crate) fn submit_auto(&mut self) {
         if self.busy {
             return;
@@ -404,6 +545,7 @@ impl super::Chat {
         if tokio::runtime::Handle::try_current().is_err() {
             return;
         }
+        self.digest_turn = true;
         self.start_turn(String::new(), false);
     }
 
@@ -485,6 +627,7 @@ impl super::Chat {
                 insert_points: Vec::new(),
                 groups: Vec::new(),
                 group_of: Vec::new(),
+                digest: false,
             });
         }
         self.busy = true;
@@ -561,6 +704,7 @@ impl super::Chat {
             insert_points: Vec::new(),
             groups: Vec::new(),
             group_of: Vec::new(),
+            digest: false,
         });
         self.busy = true;
         // Same as start_turn: a fresh turn clears interrupt suppression —
@@ -628,6 +772,10 @@ impl super::Chat {
         // would try to merge into a block the new message does not have, and be dropped.
         self.thinking_buf.clear();
         self.thinking_seg_open = false;
+        // The continuation is the same turn (D102): whether that turn is a
+        // digest is a fact about the turn, so it travels from the message being
+        // closed to the one taking over the stream.
+        let digest = self.messages[prev].digest;
         self.messages.push(UiMessage {
             role: Role::Assistant,
             text: String::new(),
@@ -636,6 +784,7 @@ impl super::Chat {
             insert_points: Vec::new(),
             groups: Vec::new(),
             group_of: Vec::new(),
+            digest,
         });
         self.stream_msg = Some(self.messages.len() - 1);
         self.stream_attempt_checkpoint = self
@@ -892,6 +1041,12 @@ impl super::Chat {
                 self.complete_bash_history();
                 true
             }
+            // tab on an *empty* composer opens the record of the conversation
+            // you are in (D100) — the door the observation page was missing.
+            // With text in the composer tab is completion and reaches here only
+            // when no dropdown claimed it, so the two never compete: the
+            // slash and `@` menus are judged well above this match.
+            KeyCode::Tab if self.input.is_empty() => self.open_conversation_record(),
             // Shift+Enter (available when the terminal reports enhanced keyboards) and pasted Enter are both newlines.
             KeyCode::Enter
                 if pasting || modifiers.intersects(KeyModifiers::SHIFT | KeyModifiers::ALT) =>
@@ -1017,8 +1172,8 @@ impl super::Chat {
     /// opens the rewind selector, mirroring how the same two presses clear a
     /// draft that is not empty.
     ///
-    /// No hub check and no busy check are needed here and none is written:
-    /// `BackToHub` and `Interrupt` are both layers, so in a DM or under a
+    /// No home check and no busy check are needed here and none is written:
+    /// `BackToMain` and `Interrupt` are both layers, so in a DM or under a
     /// running turn `esc_layer()` answers before this ever runs. `open_rewind`
     /// keeps its own guards for the paths that do not come through a key.
     fn esc_rewind(&mut self, now: std::time::Instant) -> bool {
@@ -1066,7 +1221,7 @@ impl super::Chat {
             EscLayer::HelpPanel => self.help_visible,
             EscLayer::Directory => self.directory.is_some(),
             EscLayer::TaskPanel => self.tasks_visible && !self.tasks_auto,
-            EscLayer::BackToHub => *self.buffers.active() != crate::tui::buffer::BufferId::Hub,
+            EscLayer::BackToMain => *self.buffers.active() != crate::tui::buffer::BufferId::Hub,
             EscLayer::Interrupt => self.busy,
             EscLayer::BashMode => self.bash_mode && self.input.is_empty(),
             EscLayer::ClearInput => !self.input.is_empty(),
@@ -1119,7 +1274,7 @@ impl super::Chat {
                 self.dirty = true;
                 true
             }
-            EscLayer::BackToHub => {
+            EscLayer::BackToMain => {
                 self.switch_to(crate::tui::buffer::BufferId::Hub);
                 true
             }
@@ -1161,7 +1316,7 @@ impl super::Chat {
             Some(EscLayer::Interrupt) | None => "esc to interrupt",
             // Esc leaves the conversation rather than closing anything, and a
             // turn running behind it survives the press (D89).
-            Some(EscLayer::BackToHub) => "esc to hub",
+            Some(EscLayer::BackToMain) => "esc to @main",
             Some(_) => "esc to close",
         }
     }
@@ -1727,15 +1882,12 @@ impl super::Chat {
         // repainting only when the bar's own entries change.
         if self.tick.is_multiple_of(15) {
             self.refresh_conversations();
-            // A rolled `notify_user` window owes its "N more" line even if the
-            // agent that filled it has gone quiet (D94), so the roll is checked
-            // on the clock rather than on the next notice. The relay emits back
-            // through the same channel, so the line arrives as an ordinary event.
-            self.session
-                .runtime
-                .notify_user
-                .flush_due(std::time::Instant::now());
         }
+        // The digest debounce (D98) runs every frame: it is two integer
+        // comparisons against a length the domain already keeps, and the thing it
+        // decides — whether the room has stopped talking — is a question about
+        // *this* frame.
+        let _ = self.digest_mail();
         // The conversation you are actually in follows every frame (D89). The
         // fifteen-tick poll is the right cadence for a registry sweep and the
         // wrong one for a message you are waiting on: it is one conversation's
@@ -1826,6 +1978,11 @@ impl super::Chat {
             || self.notice_until.is_some()
             || !self.events_rx.is_empty()
             || !self.asks_rx.is_empty()
+            // Mail landing in a fully idle session is the one thing that has to
+            // wake the clock rather than ride an event: nothing else is
+            // happening, and the digest window has to be able to expire (D98).
+            || self.session.channels.has_main_mail()
+            || self.mail_wake.is_some()
     }
 
     /// Task-area data source: live snapshot of the on-disk store.
@@ -2511,9 +2668,9 @@ impl super::Chat {
             self.reply_cache.clear();
         }
         let theme = self.theme.clone();
-        // What the one message store looks like on screen (D89): the hub's own
+        // What the one message store looks like on screen (D89): main's own
         // messages, with each conversation's rows spliced in where it was
-        // opened, and the hub's tail held back while a conversation is still
+        // opened, and main's tail held back while a conversation is still
         // open. Segment numbering counts *flow positions*, not message indices,
         // because those are what the reader sees go by: 0 = welcome card,
         // k+1 = flow[k]. The order is append-only, so the flush cursor keeps
@@ -2551,13 +2708,20 @@ impl super::Chat {
         // it is a handful of short strings, next to the theme clone this
         // function already pays for.
         let pinned = self.faces_pinned.clone();
-        let conversation_gutter = (self.active_buffer() != crate::tui::buffer::BufferId::Hub)
-            .then(|| crate::tui::avatar::Gutter::new(self.image_cap.is_some(), &pal, &pinned));
+        // Every conversation, @main included (D99): a portrait for main, and
+        // whatever the user's rows already wore in a DM. One machinery, one more
+        // call site — the console is not a second kind of surface.
+        let conversation_gutter =
+            crate::tui::avatar::Gutter::new(self.image_cap.is_some(), &pal, &pinned);
         // The faces the live tail will draw, recorded before the rows are
         // built: the transmit sweep reads `Chat::faces`, and a portrait whose
         // placeholder cells reached the screen without its data is a hole.
-        if let Some(g) = &conversation_gutter {
-            let mut seen = vec![g.index_for(crate::channels::USER_NAME)];
+        {
+            let g = &conversation_gutter;
+            let mut seen = vec![
+                g.index_for(crate::channels::USER_NAME),
+                g.index_for(crate::channels::MAIN_NAME),
+            ];
             if let crate::tui::buffer::BufferId::Dm(name) = self.active_buffer() {
                 seen.push(g.index_for(&name));
             }
@@ -2567,17 +2731,18 @@ impl super::Chat {
         }
         let mut spoke: Option<String> = None;
         for (pos, item) in flow.iter().enumerate() {
+            let i = item.index;
+            let role = self.messages[i].role;
             // Who the last row belonged to, tracked across the whole flow so a
             // sender's name is not repeated over every message in a run — and
             // is repeated the moment somebody else speaks (sender grouping,
             // the one workspace decoration the flow keeps).
-            let previous = std::mem::replace(&mut spoke, speaker_of(item));
+            let previous =
+                std::mem::replace(&mut spoke, speaker_of(item, role, &self.messages[i].text));
             if pos + 1 < skip {
                 continue;
             }
             let settled = settled_flags[pos];
-            let i = item.index;
-            let role = self.messages[i].role;
             if item.decor == Decor::Divider {
                 // A rule is not a message: no band, no bubble, no stamp.
                 blocks.push(Block::settled(
@@ -2592,23 +2757,18 @@ impl super::Chat {
                 ));
                 continue;
             }
-            // A conversation message wears the gutter; the hub's own does not
-            // (D97). `Decor::Said` is exactly the distinction: it is set by the
-            // conversation replay and by nothing else, so the hub's two-speaker
-            // grammar is left alone without asking which buffer is active.
-            let said = match &item.decor {
-                Decor::Said(who) if role == Role::Assistant => Some(who.clone()),
-                Decor::Said(_) => Some(crate::channels::USER_NAME.to_string()),
-                _ => None,
-            };
-            let gutter = said.as_ref().and(conversation_gutter.as_ref());
-            let inner = match gutter {
-                Some(g) => width.saturating_sub(g.width()),
-                None => width,
-            };
-            // The band is the experimental face (`experimental.chatAvatars`): switched
-            // off, a message opens on its body, exactly as it did before D50.
-            let band = self.chat_avatars.then(|| self.sender_band_el(role, &pal));
+            // Who this row is drawn as — `spoke` was just set to it. A
+            // conversation message names its own speaker; @main's two are the
+            // participants they always were, and since D99 they wear the same
+            // gutter, so a message looks like itself wherever it is read. A rule
+            // and a state line have nobody behind them.
+            let said = spoke.clone();
+            // **Every row takes the gutter; only a speaker takes the face.** A
+            // rule already `continue`d above, so what is left is a message or a
+            // state, and a state that gave up the column too would make the
+            // message column jog around it — rules span, states align.
+            let gutter = &conversation_gutter;
+            let inner = width.saturating_sub(gutter.width());
             // In a conversation with more than two speakers the name is not
             // decoration, it is the only thing that says who is talking. Your
             // own messages keep the `❯` bubble, which already says so.
@@ -2628,12 +2788,12 @@ impl super::Chat {
                     // Send time beside the bubble's first row (D93). A state line
                     // gets none: nothing was sent, and the line is a state, not a
                     // message.
-                    // A `notify_user` relay (D94) is the exception among state
-                    // lines: it *is* a message, sent by someone, at a moment that
+                    // A failed-agent alert (D98) is the exception among state
+                    // lines: it *is* news, about someone, at a moment that
                     // matters — "the build broke" reads differently at 09:02 and
                     // at 17:40. The others describe now and have nothing to stamp.
                     let time = if crate::tui::chat::is_state_line(&self.messages[i].text)
-                        && !crate::tui::bufferview::is_relay_line(&self.messages[i].text)
+                        && !crate::tui::bufferview::is_agent_alert(&self.messages[i].text)
                     {
                         String::new()
                     } else {
@@ -2646,7 +2806,6 @@ impl super::Chat {
             };
             // Message block spacing (CC marginTop=1): one blank row after the welcome card and before each message.
             let mut stack = vec![El::Blank];
-            stack.extend(band);
             stack.extend(name);
             stack.push(body);
             // The gutter wraps the name row and the body together: the portrait
@@ -2655,22 +2814,21 @@ impl super::Chat {
             // (D89 retired it, D97 brings it back as a row-builder concern).
             // The blank spacing row stays outside it, so a portrait never sits
             // beside nothing.
-            let block = match (gutter, said) {
-                (Some(g), Some(who)) => {
-                    let index = g.index_for(&who);
+            let cells = match &said {
+                Some(who) => {
+                    let index = gutter.index_for(who);
                     self.faces.insert(index);
-                    let lead = spoke != previous;
-                    El::col(vec![
-                        El::Blank,
-                        El::gutter(
-                            g.cells(index, &who, lead),
-                            g.blank(),
-                            El::col(stack.split_off(1)),
-                        ),
-                    ])
+                    gutter.cells(index, who, spoke != previous)
                 }
-                _ => El::col(stack),
+                // Nobody said it, so there is nothing to draw and no face is
+                // claimed for transmission: `gutter_rows` falls back to the
+                // blank cell on every row of the block.
+                None => Vec::new(),
             };
+            let block = El::col(vec![
+                El::Blank,
+                El::gutter(cells, gutter.blank(), El::col(stack.split_off(1))),
+            ]);
             blocks.push(Block::settled(block, settled));
         }
         if let Some(ask) = self.ask_el(&theme) {
@@ -2735,29 +2893,6 @@ impl super::Chat {
             banner,
             !self.session.client.is_configured(&provider),
         ))
-    }
-
-    /// The band above a message: who is speaking, as a portrait and a name.
-    ///
-    /// The names are the room's own — `main` for the hub, and the human's own
-    /// messages read `You`. So the name on the band is the name that addresses
-    /// the speaker, with no display-name table to keep honest beside it.
-    ///
-    /// Neither speaker is a blueprint member, so both faces come from the same
-    /// name hash the workspace falls back to — pinning is for the crew.
-    fn sender_band_el(&mut self, role: Role, pal: &crate::tui::avatar::Palette) -> El {
-        let (name, shown) = match role {
-            Role::User => (crate::channels::USER_NAME, "You"),
-            Role::Assistant => (crate::channels::HUB_NAME, crate::channels::HUB_NAME),
-        };
-        let index = crate::tui::avatar::index_of(name);
-        self.faces.insert(index);
-        El::Rows(
-            crate::tui::avatar::sender_band(index, name, shown, self.image_cap.is_some(), pal)
-                .into_iter()
-                .map(Row::new)
-                .collect(),
-        )
     }
 
     /// Assistant message: markdown text and activities interleaved in model

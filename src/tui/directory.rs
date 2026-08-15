@@ -7,8 +7,9 @@
 //! all. So it is a directory instead: a read-only view on the second stop of
 //! the `ctrl+t` cycle, built from live sources every time it is drawn.
 //!
-//! **Navigation and information only.** Enter opens a member's DM or a room;
-//! `j` joins the room under the cursor. Stopping an agent, restarting one,
+//! **Navigation and information only.** Enter opens a member's conversation (a
+//! DM, or the console for main) or a room; `o` opens a member's observation
+//! page; `j` joins the room under the cursor. Stopping an agent, restarting one,
 //! reading its stats — all of that stays in the `ctrl+b` manager, which already
 //! owns those verbs and their warnings. A second surface that could stop an
 //! agent would be a second place for "stop" to mean something slightly
@@ -19,10 +20,18 @@
 //! registry is the room list, and [`crate::tui::buffer::Buffers::team_log`] —
 //! the bounded lifecycle log that used to back the `#team` board — is the feed.
 //! The board's storage was never the problem; where it was rendered was.
+//!
+//! **Main is on the roster (D100)**, first and always present. It is a
+//! participant like the rest — it has a conversation, rooms and a record — and
+//! a roster that listed everyone it dispatches but not itself was a roster of
+//! the team minus its first member. What stays special is the host machinery,
+//! not the row: main's presence is the host turn rather than a registry state,
+//! and it is not stoppable — which costs nothing here, because this surface has
+//! no verb that stops anybody.
 
 use crossterm::event::{KeyCode, KeyModifiers};
 
-use crate::channels::USER_NAME;
+use crate::channels::{MAIN_NAME, USER_NAME};
 use crate::tui::buffer::{BufferId, team_line};
 use crate::tui::chat::{Chat, Row, one_line};
 use crate::tui::line::{Line, SegStyle};
@@ -124,6 +133,23 @@ impl Chat {
     /// cached roster is a roster that can be wrong.
     pub(crate) fn directory_rows(&self) -> Vec<DirRow> {
         let mut rows = vec![DirRow::heading("Team")];
+        // Main is a participant, so it is on the roster — first, because it is
+        // the one member of the team that is always there (D100). Its presence
+        // is the host turn: `busy` is the console's own running state, where a
+        // subagent's comes from the registry. It is not stoppable and not
+        // manageable, and the directory has no verb that could try.
+        let presence = if self.busy { "●" } else { "○" };
+        let state = if self.busy { "running" } else { "idle" };
+        let rooms = rooms_label(&self.session.channels.rooms_of(MAIN_NAME));
+        let tail = if rooms.is_empty() {
+            String::new()
+        } else {
+            format!(" · {rooms}")
+        };
+        rows.push(DirRow::at(
+            format!("{presence} {MAIN_NAME} · console · {state}{tail}"),
+            DirTarget::Member(MAIN_NAME.to_string()),
+        ));
         let agents = self.session.agents.list();
         if agents.is_empty() {
             rows.push(DirRow::note("no teammates yet".to_string()));
@@ -233,10 +259,28 @@ impl Chat {
                     // the composer will do — both derived from membership, so
                     // there is no second door to keep in step with this one.
                     Some(DirTarget::Room(name)) => self.switch_to(BufferId::Channel(name.clone())),
+                    // Main's conversation is the console, not a DM with an
+                    // instance: `BufferId::Hub` *is* the pair view of the user
+                    // and main, so Enter on its row goes home.
+                    Some(DirTarget::Member(name)) if name == MAIN_NAME => {
+                        self.switch_to(BufferId::Hub)
+                    }
                     Some(DirTarget::Member(name)) => self.switch_to(BufferId::Dm(name.clone())),
                     None => {}
                 }
                 return true;
+            }
+            // `o` opens the member's observation page (D100). It is the same
+            // record `tab` reaches from inside a conversation and the ctrl+b
+            // detail reaches from the manager — one page, three doors — and
+            // like Enter it hands the screen over, so the panel closes behind
+            // it. On a room it does nothing: a room has no protagonist.
+            KeyCode::Char('o') => {
+                if let Some(DirTarget::Member(name)) = targets.get(state.selected) {
+                    self.open_perspective = Some(name.clone());
+                    self.dirty = true;
+                    return true;
+                }
             }
             // Join from the directory. The panel stays open on purpose: the mark
             // flips under the cursor, which is the confirmation, and the reader
@@ -299,7 +343,7 @@ impl Chat {
             )));
         }
         out.push(Row::new(Line::styled(
-            "↑/↓ select · Enter open · j join room · ctrl+t / Esc close",
+            "↑/↓ select · Enter open · o record · j join room · ctrl+t / Esc close",
             SegStyle::fg(theme.text_secondary),
         )));
         crate::tui::chat::manager_box(out, width, theme)
@@ -441,16 +485,19 @@ mod tests {
         assert_eq!(
             chat.directory_targets(),
             vec![
+                DirTarget::Member(MAIN_NAME.to_string()),
                 DirTarget::Member("scout".to_string()),
                 DirTarget::Room("parser".to_string())
             ],
-            "headings are not destinations"
+            "headings are not destinations, and main leads the roster (D100)"
         );
+        chat.directory_key(KeyCode::Down, KeyModifiers::NONE);
         chat.directory_key(KeyCode::Enter, KeyModifiers::NONE);
         assert_eq!(*chat.buffers.active(), BufferId::Dm("scout".to_string()));
         assert!(chat.directory.is_none(), "opening closes the directory");
 
         chat.open_directory();
+        chat.directory_key(KeyCode::Down, KeyModifiers::NONE);
         chat.directory_key(KeyCode::Down, KeyModifiers::NONE);
         chat.directory_key(KeyCode::Enter, KeyModifiers::NONE);
         assert_eq!(
@@ -458,6 +505,97 @@ mod tests {
             BufferId::Channel("parser".to_string()),
             "a room the user is not in opens all the same"
         );
+    }
+
+    /// Main is a participant, so it is on the roster — first, present, with the
+    /// rooms it is in — and Enter on it goes to the console rather than to a DM
+    /// with an instance that does not exist.
+    #[test]
+    fn main_leads_the_roster_and_enter_on_it_opens_the_console() {
+        let mut chat = test_chat();
+        seed_agent(&chat, "scout", AgentKind::Crew);
+        chat.session
+            .channels
+            .create(
+                "build",
+                vec![MAIN_NAME.to_string(), "scout".to_string()],
+                ChannelMode::Free,
+            )
+            .expect("room created");
+        chat.refresh_conversations();
+        chat.open_directory();
+
+        let rows = texts(&chat);
+        assert_eq!(rows[0], "Team", "{rows:?}");
+        assert_eq!(
+            rows[1], "○ main · console · idle · #build",
+            "main is the first row, with its presence, its label and its rooms"
+        );
+        assert!(
+            rows.iter().any(|row| row.contains("scout")),
+            "and the teammates follow it: {rows:?}"
+        );
+
+        // Presence is the host turn, not a registry state.
+        chat.busy = true;
+        assert_eq!(texts(&chat)[1], "● main · console · running · #build");
+
+        chat.switch_to(BufferId::Dm("scout".to_string()));
+        chat.open_directory();
+        chat.directory_key(KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(
+            *chat.buffers.active(),
+            BufferId::Hub,
+            "main's conversation is the console, not a DM with an instance"
+        );
+    }
+
+    /// `o` opens the member's observation page — the same record `tab` reaches
+    /// from a conversation — and it works on main's row too. On a room it does
+    /// nothing: a room has no protagonist.
+    #[test]
+    fn o_opens_the_record_of_the_member_under_the_cursor() {
+        let mut chat = test_chat();
+        seed_agent(&chat, "scout", AgentKind::Crew);
+        chat.session
+            .channels
+            .create("parser", vec!["scout".to_string()], ChannelMode::Free)
+            .expect("room created");
+        chat.refresh_conversations();
+
+        chat.open_directory();
+        assert!(chat.directory_key(KeyCode::Char('o'), KeyModifiers::NONE));
+        assert_eq!(chat.open_perspective.as_deref(), Some(MAIN_NAME));
+        assert!(chat.directory.is_none(), "the page takes the screen");
+
+        chat.open_perspective = None;
+        chat.open_directory();
+        chat.directory_key(KeyCode::Down, KeyModifiers::NONE);
+        chat.directory_key(KeyCode::Char('o'), KeyModifiers::NONE);
+        assert_eq!(chat.open_perspective.as_deref(), Some("scout"));
+
+        chat.open_perspective = None;
+        chat.open_directory();
+        chat.directory_key(KeyCode::Down, KeyModifiers::NONE);
+        chat.directory_key(KeyCode::Down, KeyModifiers::NONE);
+        chat.directory_key(KeyCode::Char('o'), KeyModifiers::NONE);
+        assert_eq!(chat.open_perspective, None, "a room has no protagonist");
+        assert!(chat.directory.is_some(), "and the panel stays open");
+    }
+
+    /// The footer names the keys the panel actually has, `o` included.
+    #[test]
+    fn the_footer_names_the_record_door() {
+        let mut chat = test_chat();
+        chat.open_directory();
+        let text = chat
+            .directory_view_rows(100)
+            .iter()
+            .map(|row| row.line.plain_text())
+            .collect::<Vec<String>>()
+            .join("\n");
+        assert!(text.contains("o record"), "{text}");
+        assert!(text.contains("Enter open"), "{text}");
     }
 
     /// `j` joins the room under the cursor: the roster changes, the room becomes
@@ -479,6 +617,8 @@ mod tests {
         );
 
         chat.open_directory();
+        // Past main's row, which now leads the roster (D100).
+        chat.directory_key(KeyCode::Down, KeyModifiers::NONE);
         chat.directory_key(KeyCode::Char('j'), KeyModifiers::NONE);
 
         assert!(

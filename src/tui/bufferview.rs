@@ -10,12 +10,12 @@
 //! count. Nothing buffers *rows* for a conversation you are not in.
 //!
 //! **The flow is a projection, not the message list.** `Chat::messages` is one
-//! append-only store holding both the hub's transcript and the rows every
+//! append-only store holding both main's transcript and the rows every
 //! excursion has printed. [`Chat::flow_order`] decides what that store looks
-//! like on screen: hub messages up to the point where you left, then the
+//! like on screen: home messages up to the point where you left, then the
 //! excursion's rows, and — while the excursion is still open — nothing else, so
-//! a hub turn that lands while you are reading a DM does not print into the DM.
-//! Coming back closes the excursion with a `── hub ──` rule, and the hub's
+//! a main turn that lands while you are reading a DM does not print into the DM.
+//! Coming back closes the excursion with a `── @main ──` rule, and main's
 //! unprinted tail follows it.
 //!
 //! Two properties fall out of that shape, and both are why it has this shape:
@@ -24,8 +24,8 @@
 //!   never moves, so the write-once flush cursor
 //!   (`Chat::flushed_segments`) stays valid and scrollback is never rewritten.
 //! - **There is no second renderer.** An excursion's rows are `UiMessage`s in
-//!   the same list the hub's are, so `build_rows`/`assistant_el` render a
-//!   replayed DM message with the code that renders a live hub reply — the
+//!   the same list main's are, so `build_rows`/`assistant_el` render a
+//!   replayed DM message with the code that renders a live reply from main — the
 //!   markdown, the bubbles, the stamps and the CJK wrapping are the same by
 //!   construction rather than by imitation.
 //!
@@ -43,11 +43,11 @@ use crate::tui::el::El;
 use crate::tui::line::{Line, SegStyle, wrap_words};
 use crate::tui::markdown::MarkdownRenderer;
 
-/// The receipt a routed submit leaves in the hub flow: `→ @scout: look at…`.
+/// The receipt a routed submit leaves in the @main flow: `→ @scout: look at…`.
 ///
 /// Display-only, like the dialog receipts (D80/D81): the model's history never
 /// carries it, because nothing was said to the model. It exists so a line that
-/// left the hub is not simply gone — without it the composer would clear and
+/// left @main is not simply gone — without it the composer would clear and
 /// the flow would show nothing at all, which is indistinguishable from a
 /// message that was dropped.
 pub const ROUTE_RECEIPT_PREFIX: &str = "→ ";
@@ -65,17 +65,26 @@ pub(crate) fn is_route_receipt(text: &str) -> bool {
         .is_some_and(|rest| rest.starts_with('@') || rest.starts_with('#'))
 }
 
-/// A `notify_user` relay (D94) opens with the bell, in both its shapes:
-/// `🔔 @scout → you: …` and `🔔 @scout: 3 more — see the DM`.
+/// The one line an agent's life still writes into the @main flow (D98):
+/// `⚠ @scout · subagent failed: connection reset`.
 ///
-/// The glyph is the marker rather than a prefix constant per shape, because both
-/// shapes are built by [`crate::notify_user::Notice::line`] and there is exactly
-/// one producer. A user pasting a bell into the composer writes an ordinary
-/// message: this predicate only ever reads text the harness itself pushed.
-pub(crate) const RELAY_PREFIX: &str = "🔔 @";
+/// Everything else about a run — spawn, progress, completion, cancellation —
+/// reaches the user through the dispatch row's own state and through whatever
+/// the main agent then says. A failure cannot depend on that narration: the
+/// turn that would have narrated it may never run. So bad news, and only bad
+/// news, comes straight through.
+pub(crate) const AGENT_ALERT_PREFIX: &str = "⚠ @";
 
-pub(crate) fn is_relay_line(text: &str) -> bool {
-    text.starts_with(RELAY_PREFIX)
+pub(crate) fn is_agent_alert(text: &str) -> bool {
+    text.starts_with(AGENT_ALERT_PREFIX)
+}
+
+/// The alert line for one failed run: who, and one line of why.
+pub(crate) fn agent_alert_line(instance: &str, reason: Option<&str>) -> String {
+    match reason.map(str::trim).filter(|r| !r.is_empty()) {
+        Some(reason) => format!("{AGENT_ALERT_PREFIX}{instance} · {reason}"),
+        None => format!("{AGENT_ALERT_PREFIX}{instance} · failed"),
+    }
 }
 
 /// `→ @scout: look at the parser` — one line, whitespace flattened, cut to
@@ -91,9 +100,16 @@ fn receipt_line(id: &BufferId, text: &str) -> String {
 }
 
 /// How many messages a switch replays. Messages, not rows: rows exist only
-/// after a layout at a known width, and a conversation's last thirty messages
-/// is a promise that can be kept at any width.
-pub const REPLAY_BUDGET: usize = 30;
+/// after a layout at a known width, and a conversation's last eight messages is
+/// a promise that can be kept at any width.
+///
+/// Eight, not thirty (D99). Thirty was sized when a replay was the only way back
+/// into a conversation; it is not any more — the record keeps the whole thing
+/// (`ctrl+o`, the observation page) and the flow keeps the scrollback of every
+/// visit. What a switch owes the reader is the thread of the last exchange, and
+/// a screenful of somebody else's history above the composer is a wall, not a
+/// welcome.
+pub const REPLAY_BUDGET: usize = 8;
 
 /// A replay minus its opening rule: everything that occupies a position in the
 /// conversation, in order. The rule is furniture the host prints once, so it is
@@ -106,18 +122,19 @@ fn replay_items(all: &[Replay]) -> Vec<Replay> {
         .collect()
 }
 
-/// What a flow position is, beyond the hub's two roles.
+/// What a flow position is, beyond the home conversation's two roles.
 ///
-/// The hub's transcript has exactly two speakers and needs no decoration. A DM
+/// `@main`'s transcript has exactly two speakers and needs no decoration. A DM
 /// or a channel has a name over each message and a rule where it begins, and
 /// those are decorations of a *position in the flow* rather than facts about
-/// the message — the same `UiMessage` renders undecorated in the hub.
+/// the message — the same `UiMessage` renders undecorated in `@main`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Decor {
-    /// The hub's own message: the user and the model, rendered as always.
-    Hub,
+    /// The home conversation's own message: the user and main, rendered as
+    /// always.
+    Home,
     /// A rule: the one that opens a conversation, or the one that hands the
-    /// flow back to the hub. The message text is the rule.
+    /// flow back home. The message text is the rule.
     Divider,
     /// Spoken by this name, in a DM or a channel.
     Said(String),
@@ -132,53 +149,84 @@ pub struct FlowItem {
 }
 
 impl FlowItem {
-    fn hub(index: usize) -> Self {
+    fn home(index: usize) -> Self {
         Self {
             index,
-            decor: Decor::Hub,
+            decor: Decor::Home,
         }
     }
 }
 
-/// One visit to a conversation other than the hub.
+/// One visit to a conversation other than `@main`.
 ///
 /// An excursion is a *segment* of the flow: the rows this conversation printed,
-/// spliced in at the hub-message index the switch happened at. It is not a copy
-/// of the conversation — the rows are indices into the one message store, and
-/// the conversation itself stays in its domain store the whole time.
+/// spliced in at the home-message index the switch happened at. It is not a
+/// copy of the conversation — the rows are indices into the one message store,
+/// and the conversation itself stays in its domain store the whole time.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Excursion {
     pub id: BufferId,
-    /// How much of the hub had been printed when this excursion opened. Hub
+    /// How much of `@main` had been printed when this excursion opened. Home
     /// messages past it wait here until the excursion closes.
     pub at: usize,
     /// The rows this conversation has put on screen, in print order: the
     /// opening rule, the replay, whatever arrived while it was active, and —
-    /// once it closes — the `── hub ──` rule that ends it.
+    /// once it closes — the `── @main ──` rule that ends it.
     pub rows: Vec<FlowItem>,
     /// Messages the source had already produced when it was last printed, so
     /// the poll appends only what is new. Counted in posts, which is the unit
     /// the replay is built in.
     pub seen: usize,
-    /// The flow has been handed back to the hub.
+    /// The flow has been handed back to `@main`.
     pub closed: bool,
 }
 
 impl Chat {
     // -- the flow ----------------------------------------------------------
 
+    /// A digest turn that ended in the acknowledgement marker (D102).
+    ///
+    /// Both halves of the question are asked here, because either alone answers
+    /// the wrong one: the turn has to have been a **digest** — nobody typed into
+    /// it, so nobody is owed a reply — and the reply has to be the marker and
+    /// nothing else. The same marker at the end of a turn the user started is a
+    /// misfire, and a misfire the renderer swallows is a bug the user cannot
+    /// see; the same turn ending in prose is main speaking, and that is exactly
+    /// what `@main` is for.
+    ///
+    /// Nothing that answers true here ever reaches scrollback. It cannot: the
+    /// only message that can be quiet is the one the stream is writing into,
+    /// `message_static_settled` refuses to settle that message while
+    /// `stream_msg` points at it, and nothing flushes until it settles — so the
+    /// answer is already final by the time the flush cursor could have reached
+    /// it.
+    pub(crate) fn is_quiet(&self, i: usize) -> bool {
+        self.messages
+            .get(i)
+            .is_some_and(|m| m.digest && m.text.trim() == crate::query::QUIET_MARKER)
+    }
+
     /// The print order of [`Chat::messages`].
     ///
-    /// Hub messages and excursion rows share one store, and this is the single
+    /// Home messages and excursion rows share one store, and this is the single
     /// answer to what that store looks like on screen. Walking it is linear in
     /// the store, runs once per build, and is append-only across builds: an
     /// item that has been emitted keeps its position for the rest of the
     /// session, which is what the write-once flush cursor rests on.
+    ///
+    /// The one message that never takes a position is a digest turn's silent
+    /// acknowledgement ([`Chat::is_quiet`]). Append-only is unharmed: the only
+    /// message that can answer to it is the one the stream is still writing, so
+    /// it can never have flushed, and the positions it would have shifted are
+    /// all above the cursor.
     pub(crate) fn flow_order(&self) -> Vec<FlowItem> {
         if self.excursions.is_empty() {
-            return (0..self.messages.len()).map(FlowItem::hub).collect();
+            return (0..self.messages.len())
+                .filter(|&i| !self.is_quiet(i))
+                .map(FlowItem::home)
+                .collect();
         }
-        // Which indices belong to an excursion rather than to the hub. The hub
+        // Which indices belong to an excursion rather than to main. Main
         // is "everything nobody claimed", so no message needs to carry a flag
         // saying which conversation printed it.
         let mut claimed = vec![false; self.messages.len()];
@@ -191,25 +239,25 @@ impl Chat {
         }
         let mut out: Vec<FlowItem> = Vec::with_capacity(self.messages.len());
         let mut cursor = 0usize;
-        let push_hub_upto = |upto: usize, cursor: &mut usize, out: &mut Vec<FlowItem>| {
+        let push_main_upto = |upto: usize, cursor: &mut usize, out: &mut Vec<FlowItem>| {
             while *cursor < upto {
-                if !claimed[*cursor] {
-                    out.push(FlowItem::hub(*cursor));
+                if !claimed[*cursor] && !self.is_quiet(*cursor) {
+                    out.push(FlowItem::home(*cursor));
                 }
                 *cursor += 1;
             }
         };
         for exc in &self.excursions {
-            push_hub_upto(exc.at.min(self.messages.len()), &mut cursor, &mut out);
+            push_main_upto(exc.at.min(self.messages.len()), &mut cursor, &mut out);
             out.extend(exc.rows.iter().cloned());
-            // An open excursion holds the hub's tail: the messages a running
-            // turn lands while you are away are the hub's news, and printing
+            // An open excursion holds main's tail: the messages a running
+            // turn lands while you are away are main's news, and printing
             // them here would interleave two conversations in one flow.
             if !exc.closed {
                 return out;
             }
         }
-        push_hub_upto(self.messages.len(), &mut cursor, &mut out);
+        push_main_upto(self.messages.len(), &mut cursor, &mut out);
         out
     }
 
@@ -218,7 +266,7 @@ impl Chat {
         self.buffers.active().clone()
     }
 
-    /// The excursion currently open, if the active conversation is not the hub.
+    /// The excursion currently open, if the active conversation is not main.
     fn open_excursion(&mut self) -> Option<&mut Excursion> {
         self.excursions.last_mut().filter(|exc| !exc.closed)
     }
@@ -245,7 +293,7 @@ impl Chat {
         let draft = self.buffers.take_draft(&id);
         self.set_input(draft);
         self.cursor = self.input.len();
-        // Composer modes that mean something to the hub and nothing to a
+        // Composer modes that mean something to main and nothing to a
         // conversation: `!` runs a command, and the completion surfaces are
         // about the line that was just abandoned.
         self.bash_mode = false;
@@ -254,7 +302,7 @@ impl Chat {
         self.mention_dismissed = false;
 
         // Leaving a conversation closes its segment with the rule that hands
-        // the flow back; the hub's own tail follows it, unprinted until now.
+        // the flow back; main's own tail follows it, unprinted until now.
         if from != BufferId::Hub {
             let divider = self.push_flow_divider(BufferId::Hub.rule());
             if let Some(exc) = self.open_excursion() {
@@ -276,6 +324,33 @@ impl Chat {
         self.dirty = true;
     }
 
+    /// `tab` on an empty composer: open the record of the conversation you are
+    /// in (D100).
+    ///
+    /// A conversation has a protagonist and its record is that participant's
+    /// observation page — the agent in `@agent`, main in the console. A `#room`
+    /// has no single protagonist, so the key means nothing there and is left
+    /// unconsumed rather than given a surprising second meaning.
+    ///
+    /// Inert behind a permission ask, for the switcher's and the directory's
+    /// reason (D81): a surface that takes the whole screen must not open over a
+    /// question that is holding up a turn.
+    ///
+    /// Returns whether the key was consumed.
+    pub(crate) fn open_conversation_record(&mut self) -> bool {
+        if self.pending_ask.is_some() {
+            return false;
+        }
+        let who = match self.active_buffer() {
+            BufferId::Hub => crate::channels::MAIN_NAME.to_string(),
+            BufferId::Dm(name) => name,
+            BufferId::Channel(_) => return false,
+        };
+        self.open_perspective = Some(who);
+        self.dirty = true;
+        true
+    }
+
     /// Open a segment for a conversation: the rule, then its recent history.
     fn open_conversation(&mut self, id: &BufferId) {
         let session = self.session.clone();
@@ -288,7 +363,7 @@ impl Chat {
         let start = seen.saturating_sub(REPLAY_BUDGET);
         let shown = items[start..].to_vec();
 
-        // Where the hub had got to before any of this was appended: the point
+        // Where main had got to before any of this was appended: the point
         // its unprinted tail resumes from when the excursion closes.
         let at = self.messages.len();
         // The rule comes from the replay rather than being formatted again
@@ -303,6 +378,9 @@ impl Chat {
             })
             .unwrap_or_else(|| id.rule());
         let mut rows = vec![self.push_flow_divider(rule)];
+        if let Some(note) = self.empty_pair_note(id, &items) {
+            rows.push(self.push_flow_divider(note));
+        }
         for replay in shown {
             rows.extend(self.push_replay(&replay));
         }
@@ -313,6 +391,41 @@ impl Chat {
             seen,
             closed: false,
         });
+    }
+
+    /// The one line an empty `@agent` opens with, or `None` when it has earned
+    /// none (D100).
+    ///
+    /// D99's honest consequence is that an agent main spawned and the user never
+    /// wrote to has an *empty* pair view: its first message is the task (intake)
+    /// and its report answers main. An empty conversation under a rule reads as
+    /// a bug; the record is where that agent's life actually is, so the note
+    /// says both — nothing here yet, and the door.
+    ///
+    /// It is furniture rather than replay: it takes the rule's row shape and is
+    /// not one of the `seen` items, so the first real message still appends
+    /// past the cursor instead of being counted as already printed.
+    ///
+    /// **Not repeated.** Switching out and back prints the rules again, and a
+    /// note that came with them would stack up. The flow itself is the state
+    /// that answers whether it is needed: if the last thing anybody printed —
+    /// looking past the rules a round trip leaves — is this note, it is still on
+    /// screen and is not printed twice.
+    fn empty_pair_note(&self, id: &BufferId, items: &[Replay]) -> Option<String> {
+        let BufferId::Dm(name) = id else {
+            return None;
+        };
+        if !items.is_empty() {
+            return None;
+        }
+        let note = format!("· no conversation yet · tab opens @{name}'s record ·");
+        let shown = self
+            .messages
+            .iter()
+            .rev()
+            .find(|message| !(message.text.starts_with("── ") && message.text.ends_with(" ──")))
+            .is_some_and(|message| message.text == note);
+        (!shown).then_some(note)
     }
 
     /// One replayed element into the flow. A message keeps its sender; a note
@@ -340,6 +453,7 @@ impl Chat {
             insert_points: Vec::new(),
             groups: Vec::new(),
             group_of: Vec::new(),
+            digest: false,
         });
         FlowItem {
             index,
@@ -391,7 +505,7 @@ impl Chat {
 
     /// Send the composer's text to the active conversation.
     ///
-    /// Never starts a hub turn: `busy` belongs to the model conversation, and a
+    /// Never starts a main turn: `busy` belongs to the model conversation, and a
     /// message to a subagent is a delivery, not a turn. The echo is immediate
     /// in both directions — a channel post lands in the log and the poll picks
     /// it up, a DM lands in the instance's inbox and the live tail shows it
@@ -407,7 +521,7 @@ impl Chat {
             // An observed room's refusal and a delivery failure read the same
             // way: information about what did not happen, above the composer.
             Delivery::Rejected(why) => self.push_slash_info(why),
-            // Unreachable — only the hub routes to a turn, and the hub does not
+            // Unreachable — only main routes to a turn, and main does not
             // come through here — but a silent drop would be the worse answer.
             Delivery::Turn(text) => self.start_turn(text, true),
         }
@@ -434,10 +548,8 @@ impl Chat {
         let (history, stamps, live, in_flight, pending) = self.dm_state(&name)?;
         // The settled prefix is what the flow already shows; `dm_posts` appends
         // the live states after it, so the difference is exactly the tail.
-        let settled = dm_posts(&history, &stamps, &[], &[], &[], &name, USER_NAME);
-        let all = dm_posts(
-            &history, &stamps, &in_flight, &live, &pending, &name, USER_NAME,
-        );
+        let settled = dm_posts(&history, &stamps, &[], &[], &[], &name);
+        let all = dm_posts(&history, &stamps, &in_flight, &live, &pending, &name);
         if all.len() <= settled.len() {
             return None;
         }
@@ -450,7 +562,7 @@ impl Chat {
         let rows: Vec<Row> = tail
             .iter()
             .zip(runs)
-            .flat_map(|(post, lead)| self.tail_post_rows(post, &name, width, gutter.as_ref(), lead))
+            .flat_map(|(post, lead)| self.tail_post_rows(post, &name, width, Some(&gutter), lead))
             .collect();
         if rows.is_empty() {
             return None;
@@ -458,29 +570,34 @@ impl Chat {
         Some(El::Rows(rows))
     }
 
-    /// The avatar gutter this view draws, or `None` where there is none.
+    /// The avatar gutter this view draws.
     ///
-    /// The hub is the one conversation without one: its grammar is Claude
-    /// Code's — two speakers, `⏺` markers, bodies running the full width — and
-    /// a portrait column beside it would be a second convention in the same
-    /// window. Rooms, DMs and the perspective page are group-shaped, and there
-    /// the face is what says who is talking.
+    /// Every conversation has one since D99, @main included: main is a
+    /// participant like the rest, and a face is how a participant is
+    /// recognised. One value, so the flow, the live tail and the perspective
+    /// page cannot drift on width, on who wears what, or on which skin the
+    /// terminal is in.
     pub(crate) fn conversation_gutter<'a>(
         &'a self,
         pal: &'a crate::tui::avatar::Palette,
-    ) -> Option<crate::tui::avatar::Gutter<'a>> {
-        if self.active_buffer() == BufferId::Hub {
-            return None;
-        }
-        Some(crate::tui::avatar::Gutter::new(
-            self.image_cap.is_some(),
-            pal,
-            &self.faces_pinned,
-        ))
+    ) -> crate::tui::avatar::Gutter<'a> {
+        crate::tui::avatar::Gutter::new(self.image_cap.is_some(), pal, &self.faces_pinned)
     }
 
-    /// The instance's live state, or `None` when the registry has never heard
-    /// of it (a DM whose agent was deleted still has a conversation to read).
+    /// The instance's live state *for the pair view*, or `None` when the
+    /// registry has never heard of it (a DM whose agent was deleted still has a
+    /// conversation to read).
+    ///
+    /// Two filters, both D99, both about the same thing — this conversation has
+    /// two participants in it:
+    ///
+    /// - **The messages in flight and queued are the user's own.** An
+    ///   instruction main sent, sitting in the same inbox, is not a bubble the
+    ///   user wrote and must not be drawn as one.
+    /// - **The live tail belongs to the run the user started.** A run triggered
+    ///   by main, by a room or by a chase is that agent working for somebody
+    ///   else; its stream is on its own page, and here it is not even a typing
+    ///   row — the indicator would be a promise of a reply nobody asked for.
     #[allow(clippy::type_complexity)]
     fn dm_state(
         &self,
@@ -493,14 +610,27 @@ impl Chat {
         Vec<String>,
     )> {
         let (history, stamps, live, in_flight, _state) = self.session.agents.view_of(name)?;
-        let pending = self.session.agents.pending_of(name);
+        let mine = |(from, text): (String, String)| (from == USER_NAME).then_some(text);
+        let in_flight: Vec<String> = in_flight.into_iter().filter_map(mine).collect();
+        let pending: Vec<String> = self
+            .session
+            .agents
+            .pending_of(name)
+            .into_iter()
+            .filter_map(mine)
+            .collect();
+        let live = if self.session.agents.run_is_the_users(name) {
+            live
+        } else {
+            Vec::new()
+        };
         Some((history, stamps, live, in_flight, pending))
     }
 
     /// One live post as rows. The vocabulary is the transcript's own: a message
     /// you sent is your bubble, a step of the agent's work is one dim line, and
     /// the wait is the same spinner the rest of the app waits with (D87
-    /// `pulse`), so a DM in flight and a hub turn in flight read alike.
+    /// `pulse`), so a DM in flight and a main turn in flight read alike.
     fn tail_post_rows(
         &self,
         post: &Post,
@@ -572,14 +702,14 @@ impl Chat {
 
     // -- line-leading routing ---------------------------------------------
 
-    /// A hub submit that opens with another conversation's name.
+    /// A main submit that opens with another conversation's name.
     ///
     /// `@scout look at the parser` delivers `look at the parser` to scout and
     /// leaves the flow where it is: the point is to say one thing to a teammate
     /// *without* the cost of going there and coming back, which is the whole
     /// difference between this and `ctrl+k`.
     ///
-    /// **Only from the hub.** In a DM or a channel the buffer already *is* the
+    /// **Only from main.** In a DM or a channel the buffer already *is* the
     /// target, so a leading `@name` there is what it looks like — a person
     /// being addressed inside a message — and treating it as an envelope would
     /// silently redirect a sentence the user meant to send where they were.
@@ -588,7 +718,7 @@ impl Chat {
     ///
     /// **Names resolve exactly.** The sigil is required and the name is matched
     /// case-sensitively against the registry, so `@unknown hi` is not an error
-    /// and not magic — it is prose, and it submits to the hub verbatim. D85's
+    /// and not magic — it is prose, and it submits to main verbatim. D85's
     /// completion offers the names that do resolve, which is where discovery
     /// belongs.
     pub(crate) fn leading_route(&self, text: &str) -> Option<(BufferId, String)> {
@@ -618,9 +748,9 @@ impl Chat {
     ///
     /// The delivery is [`crate::tui::buffer::deliver`], the same call a submit
     /// made from inside that conversation performs — one path, so a message
-    /// routed from the hub is indistinguishable at the domain from one typed
+    /// routed from main is indistinguishable at the domain from one typed
     /// in the DM itself.
-    pub(crate) fn route_from_hub(&mut self, id: BufferId, text: String) {
+    pub(crate) fn route_from_main(&mut self, id: BufferId, text: String) {
         let target = self.buffers.route_submit(&self.session, &id, &text);
         match crate::tui::buffer::deliver(&self.session, target) {
             Delivery::Sent => {
@@ -633,6 +763,7 @@ impl Chat {
                     insert_points: Vec::new(),
                     groups: Vec::new(),
                     group_of: Vec::new(),
+                    digest: false,
                 });
                 self.dirty = true;
             }
@@ -640,7 +771,7 @@ impl Chat {
             // happen, above the composer — never as a receipt, which would
             // claim something was delivered.
             Delivery::Rejected(why) => self.push_slash_info(why),
-            // Unreachable: a leading name always carries a sigil, and the hub
+            // Unreachable: a leading name always carries a sigil, and main
             // has none — but a silent drop would be the worse answer.
             Delivery::Turn(text) => self.start_turn(text, true),
         }
@@ -655,7 +786,7 @@ impl Chat {
         let arg = arg.trim();
         if arg.is_empty() {
             self.push_slash_info(
-                "usage: /open @agent · /open #room · /open hub · ctrl+t for the team directory"
+                "usage: /open @agent · /open #room · /open @main · ctrl+t for the team directory"
                     .to_string(),
             );
             return;
@@ -745,12 +876,19 @@ impl Chat {
     /// `scout` and `#build` all name what the user obviously means, and a name
     /// that is both a channel and an instance resolves to the channel, which is
     /// what the `#` reading of a bare word would have given.
+    ///
+    /// The home conversation answers to the same grammar as any participant —
+    /// `@main` and a bare `main` — because it *is* a participant's pair view
+    /// (D101). `hub` is not accepted: the word retired with the concept, and a
+    /// retired spelling kept alive in the grammar is a second name for the one
+    /// thing this batch existed to give a single name. `#main` still reads as a
+    /// room, so a room may keep that name without shadowing the floor.
     pub(crate) fn resolve_target(&self, arg: &str) -> Option<BufferId> {
         let arg = arg.trim();
-        if arg.eq_ignore_ascii_case("hub") {
+        let bare = arg.trim_start_matches(['@', '#']);
+        if !arg.starts_with('#') && bare.eq_ignore_ascii_case(crate::channels::MAIN_NAME) {
             return Some(BufferId::Hub);
         }
-        let bare = arg.trim_start_matches(['@', '#']);
         if bare.is_empty() {
             return None;
         }
@@ -775,7 +913,10 @@ impl Chat {
             .map(|buffer| {
                 let unread = buffer.unread();
                 let description = match (buffer.id(), unread) {
-                    (BufferId::Hub, _) => "the conversation with the model".to_string(),
+                    // The one candidate described by what it *is* rather than by
+                    // what is waiting in it, and named the way D100's directory
+                    // row names it, so the two doors into home agree.
+                    (BufferId::Hub, _) => "the console".to_string(),
                     (_, 0) => String::new(),
                     // A conversation that named you is worth saying out loud,
                     // because it is the one you were going to open anyway.
@@ -867,7 +1008,7 @@ pub(crate) fn sender_runs(posts: &[Post]) -> Vec<bool> {
     out
 }
 
-/// An agent's prose, rendered the way the hub renders the model's.
+/// An agent's prose, rendered the way main renders the model's.
 fn agent_text_rows(theme: &crate::tui::theme::Theme, text: &str, width: usize) -> Vec<Row> {
     let mut processor = MarkdownProcessor::default();
     let mut renderer = MarkdownRenderer::with_theme(width.saturating_sub(2), theme.clone());
@@ -884,6 +1025,7 @@ mod tests {
     use crate::channels::ChannelMode;
     use crate::tui::chat::UiMessage;
     use crate::tui::test_util::chat_at;
+    use crossterm::event::{KeyCode, KeyModifiers};
 
     fn test_chat() -> Chat {
         chat_at(100, 40)
@@ -921,6 +1063,16 @@ mod tests {
         }
     }
 
+    /// A message the *user* sent, in the shape `absorb_inbox` records it: the
+    /// D64 marker heading the text. Unmarked prose in an instance's record is
+    /// the main agent talking, and the pair view keeps the two apart (D99).
+    fn from_user(text: &str) -> ApiMessage {
+        user(&format!(
+            "{}\n{text}",
+            crate::tool::agent::DM_FROM_USER_MARKER
+        ))
+    }
+
     /// An instance with history already behind it.
     fn seed_agent(chat: &Chat, name: &str, history: Vec<ApiMessage>) {
         chat.session.agents.insert(
@@ -946,7 +1098,7 @@ mod tests {
         );
     }
 
-    fn hub_message(chat: &mut Chat, role: Role, text: &str) {
+    fn main_message(chat: &mut Chat, role: Role, text: &str) {
         chat.messages.push(UiMessage {
             role,
             text: text.to_string(),
@@ -955,6 +1107,7 @@ mod tests {
             insert_points: Vec::new(),
             groups: Vec::new(),
             group_of: Vec::new(),
+            digest: false,
         });
     }
 
@@ -969,7 +1122,7 @@ mod tests {
         seed_agent(
             &chat,
             "scout",
-            vec![user("look at the parser"), assistant("found it")],
+            vec![from_user("look at the parser"), assistant("found it")],
         );
         chat.refresh_conversations();
         chat.switch_to(BufferId::Dm("scout".to_string()));
@@ -986,7 +1139,7 @@ mod tests {
             .agents
             .view_of("scout")
             .expect("the instance is registered");
-        let want: Vec<String> = dm_posts(&history, &stamps, &[], &[], &[], "scout", USER_NAME)
+        let want: Vec<String> = dm_posts(&history, &stamps, &[], &[], &[], "scout")
             .into_iter()
             .filter(|post| matches!(post.kind, PostKind::Said | PostKind::Note))
             .map(|post| post.text)
@@ -1001,8 +1154,16 @@ mod tests {
     #[test]
     fn a_replay_keeps_to_its_budget_and_keeps_the_tail() {
         let mut chat = test_chat();
+        // Alternating, because a run of the agent's replies is one message now
+        // (D99) and a budget counted over messages needs messages to count.
         let history: Vec<ApiMessage> = (0..REPLAY_BUDGET + 6)
-            .map(|i| assistant(&format!("message {i}")))
+            .map(|i| {
+                if i % 2 == 0 {
+                    from_user(&format!("message {i}"))
+                } else {
+                    assistant(&format!("message {i}"))
+                }
+            })
             .collect();
         seed_agent(&chat, "scout", history);
         chat.refresh_conversations();
@@ -1030,13 +1191,13 @@ mod tests {
         seed_agent(&chat, "scout", Vec::new());
         chat.refresh_conversations();
 
-        chat.set_input("half a hub thought");
+        chat.set_input("half a main thought");
         chat.switch_to(BufferId::Dm("scout".to_string()));
         assert_eq!(chat.input, "", "the DM starts empty");
 
         chat.set_input("half a scout thought");
         chat.switch_to(BufferId::Hub);
-        assert_eq!(chat.input, "half a hub thought", "the hub's draft is back");
+        assert_eq!(chat.input, "half a main thought", "main's draft is back");
 
         chat.switch_to(BufferId::Dm("scout".to_string()));
         assert_eq!(chat.input, "half a scout thought", "and so is the DM's");
@@ -1058,28 +1219,186 @@ mod tests {
         assert_eq!(chat.messages.len(), rows, "nothing was appended");
         assert_eq!(flow(&mut chat), once, "and nothing was reprinted");
 
-        // The hub is not special: re-entering it from the hub is the same no-op.
+        // Main is not special: re-entering it from main is the same no-op.
         chat.switch_to(BufferId::Hub);
         let back = chat.messages.len();
         chat.switch_to(BufferId::Hub);
         assert_eq!(chat.messages.len(), back);
     }
 
+    // -- the record's doors (D100) -----------------------------------------
+
+    /// `tab` on an empty composer opens the record of the conversation you are
+    /// in: the agent's page in a DM, main's in the console. A room has no single
+    /// protagonist, so the key means nothing there and is not consumed.
+    #[test]
+    fn tab_on_an_empty_composer_opens_the_conversations_record() {
+        let mut chat = test_chat();
+        seed_agent(&chat, "scout", vec![from_user("hi"), assistant("hello")]);
+        chat.session
+            .channels
+            .create(
+                "build",
+                vec![crate::channels::USER_NAME.to_string()],
+                ChannelMode::Free,
+            )
+            .expect("room created");
+        chat.refresh_conversations();
+
+        assert!(chat.on_key(KeyCode::Tab, KeyModifiers::NONE), "the console");
+        assert_eq!(chat.open_perspective.as_deref(), Some("main"));
+
+        chat.open_perspective = None;
+        chat.switch_to(BufferId::Dm("scout".to_string()));
+        assert!(chat.on_key(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(chat.open_perspective.as_deref(), Some("scout"));
+
+        chat.open_perspective = None;
+        chat.switch_to(BufferId::Channel("build".to_string()));
+        assert!(
+            !chat.on_key(KeyCode::Tab, KeyModifiers::NONE),
+            "a room has no protagonist, so the key is left unclaimed"
+        );
+        assert_eq!(chat.open_perspective, None);
+    }
+
+    /// With text in the composer `tab` is still completion: the slash and `@`
+    /// dropdowns are judged well above the door, and a bare word reaches it only
+    /// to be ignored because the composer is not empty.
+    #[test]
+    fn tab_with_a_draft_still_completes_and_opens_nothing() {
+        let mut chat = test_chat();
+        chat.set_input("/mo");
+        assert!(chat.on_key(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(chat.input, "/model ");
+        assert_eq!(chat.open_perspective, None, "completion, not a page");
+
+        chat.set_input("half a sentence");
+        assert!(!chat.on_key(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(chat.open_perspective, None);
+        assert_eq!(chat.input, "half a sentence", "and the draft is untouched");
+    }
+
+    /// The door respects the modality every full-screen surface does (D81): a
+    /// permission question is holding up a turn, and nothing opens over it.
+    #[test]
+    fn the_record_door_is_inert_behind_a_permission_ask() {
+        let mut chat = test_chat();
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        chat.pending_ask = Some((
+            crate::ui::PermissionRequest::new(
+                "Allow Bash",
+                "cargo test",
+                vec![crate::ui::ASK_YES.into(), crate::ui::ASK_NO.into()],
+            ),
+            tx,
+        ));
+        assert!(!chat.on_key(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(chat.open_perspective, None);
+    }
+
+    /// D99's honest consequence gets a door: an agent main spawned and the user
+    /// never wrote to opens with its rule and one dim line pointing at the
+    /// record. It is not a replay item, so the first real message still prints.
+    #[test]
+    fn an_empty_pair_opens_with_a_note_pointing_at_the_record() {
+        let mut chat = test_chat();
+        // Spawn prompt and a report to main: both belong to lanes that are not
+        // the user's, so the pair view is empty.
+        seed_agent(
+            &chat,
+            "scout",
+            vec![user("map the parser"), assistant("mapped it")],
+        );
+        chat.refresh_conversations();
+        chat.switch_to(BufferId::Dm("scout".to_string()));
+
+        let text = flow(&mut chat);
+        assert!(text.contains("── @scout ──"), "{text}");
+        assert!(
+            text.contains("· no conversation yet · tab opens @scout's record ·"),
+            "{text}"
+        );
+        assert!(
+            !text.contains("mapped it"),
+            "the pair view stays pure: {text}"
+        );
+
+        // Switching out and back does not stack the note up: the flow already
+        // shows it, and the rules a round trip prints are not content.
+        chat.switch_to(BufferId::Hub);
+        chat.switch_to(BufferId::Dm("scout".to_string()));
+        let text = flow(&mut chat);
+        assert_eq!(
+            text.matches("no conversation yet").count(),
+            1,
+            "the note is printed once: {text}"
+        );
+
+        // And a message makes it moot: the note is gone from the next opening,
+        // and the message itself still prints.
+        chat.switch_to(BufferId::Hub);
+        chat.session.agents.finish(
+            "scout",
+            vec![
+                user("map the parser"),
+                assistant("mapped it"),
+                from_user("what did you find?"),
+                assistant("a missing case"),
+            ],
+            0,
+        );
+        chat.switch_to(BufferId::Dm("scout".to_string()));
+        let text = flow(&mut chat);
+        assert_eq!(
+            text.matches("no conversation yet").count(),
+            1,
+            "no second note once the pair has content: {text}"
+        );
+        assert!(text.contains("what did you find?"), "{text}");
+        assert!(text.contains("a missing case"), "{text}");
+    }
+
+    /// The note is furniture, not a replay item. If it were counted the poll's
+    /// cursor would start at one and the first message the pair ever gets would
+    /// be read as already printed.
+    #[test]
+    fn the_empty_pair_note_does_not_swallow_the_first_message() {
+        let mut chat = test_chat();
+        seed_agent(&chat, "scout", vec![user("map the parser")]);
+        chat.refresh_conversations();
+        chat.switch_to(BufferId::Dm("scout".to_string()));
+        assert!(flow(&mut chat).contains("no conversation yet"));
+
+        chat.session.agents.finish(
+            "scout",
+            vec![user("map the parser"), from_user("are you there?")],
+            0,
+        );
+        chat.poll_active_conversation();
+        let text = flow(&mut chat);
+        assert!(text.contains("are you there?"), "{text}");
+    }
+
     // -- the excursion -----------------------------------------------------
 
     /// The ruling's central promise: while you are in a conversation, nothing
-    /// else prints into it. A hub turn that lands while you are away is the
-    /// hub's news, and it waits at the hub for you.
+    /// else prints into it. A main turn that lands while you are away is
+    /// main's news, and it waits at @main for you.
     #[test]
-    fn an_excursion_holds_the_hubs_tail_until_you_come_back() {
+    fn an_excursion_holds_mains_tail_until_you_come_back() {
         let mut chat = test_chat();
-        seed_agent(&chat, "scout", vec![assistant("on it")]);
+        seed_agent(
+            &chat,
+            "scout",
+            vec![from_user("have a look"), assistant("on it")],
+        );
         chat.refresh_conversations();
-        hub_message(&mut chat, Role::Assistant, "before you left");
+        main_message(&mut chat, Role::Assistant, "before you left");
 
         chat.switch_to(BufferId::Dm("scout".to_string()));
-        // A hub turn completes while the DM is on screen.
-        hub_message(&mut chat, Role::Assistant, "landed while you were away");
+        // A main turn completes while the DM is on screen.
+        main_message(&mut chat, Role::Assistant, "landed while you were away");
 
         let away = flow(&mut chat);
         assert!(away.contains("before you left"), "{away}");
@@ -1087,21 +1406,21 @@ mod tests {
         assert!(away.contains("on it"), "{away}");
         assert!(
             !away.contains("landed while you were away"),
-            "the hub printed into the DM: {away}"
+            "main printed into the DM: {away}"
         );
 
         chat.switch_to(BufferId::Hub);
         let home = flow(&mut chat);
         assert!(
-            home.contains("── hub ──"),
+            home.contains("── @main ──"),
             "the rule hands the flow back: {home}"
         );
         assert!(
             home.contains("landed while you were away"),
-            "the hub's tail follows it: {home}"
+            "main's tail follows it: {home}"
         );
-        // Order: the DM segment closes before the hub's tail resumes.
-        let rule = home.find("── hub ──").expect("the closing rule");
+        // Order: the DM segment closes before main's tail resumes.
+        let rule = home.find("── @main ──").expect("the closing rule");
         let tail = home.find("landed while you were away").expect("the tail");
         assert!(rule < tail, "the tail follows the rule: {home}");
         assert!(
@@ -1118,7 +1437,7 @@ mod tests {
         let mut chat = test_chat();
         seed_agent(&chat, "scout", vec![assistant("first")]);
         chat.refresh_conversations();
-        hub_message(&mut chat, Role::Assistant, "hub one");
+        main_message(&mut chat, Role::Assistant, "main one");
 
         let mut seen = chat.flow_order();
         let step = |chat: &Chat, seen: &mut Vec<FlowItem>| {
@@ -1131,11 +1450,11 @@ mod tests {
         };
         chat.switch_to(BufferId::Dm("scout".to_string()));
         step(&chat, &mut seen);
-        hub_message(&mut chat, Role::Assistant, "hub two");
+        main_message(&mut chat, Role::Assistant, "main two");
         step(&chat, &mut seen);
         chat.switch_to(BufferId::Hub);
         step(&chat, &mut seen);
-        hub_message(&mut chat, Role::Assistant, "hub three");
+        main_message(&mut chat, Role::Assistant, "main three");
         step(&chat, &mut seen);
         chat.switch_to(BufferId::Dm("scout".to_string()));
         step(&chat, &mut seen);
@@ -1157,12 +1476,9 @@ mod tests {
 
         chat.set_input("have a look at the parser");
         chat.submit();
-        assert!(!chat.busy, "no hub turn was started");
+        assert!(!chat.busy, "no main turn was started");
         assert!(chat.input.is_empty(), "the composer cleared");
-        assert!(
-            chat.queued.is_empty(),
-            "and it did not queue behind the hub"
-        );
+        assert!(chat.queued.is_empty(), "and it did not queue behind main");
 
         // The shape the workspace composer produced: an inbox item from
         // `user`, which is what earns the D64 marker when the instance picks it
@@ -1196,7 +1512,7 @@ mod tests {
 
         chat.set_input("ship it");
         chat.submit();
-        assert!(!chat.busy, "no hub turn was started");
+        assert!(!chat.busy, "no main turn was started");
 
         let log = chat.session.channels.log_of("build");
         assert_eq!(log.len(), 1, "one post: {log:?}");
@@ -1268,7 +1584,7 @@ mod tests {
         );
 
         // Esc goes home, exactly as it does from every other conversation: the
-        // destination must not depend on how you arrived (D89's BackToHub). The
+        // destination must not depend on how you arrived (D89's BackToMain). The
         // info line is peeled first, as it is anywhere else.
         chat.slash_info_lines.clear();
         assert!(chat.on_key(
@@ -1361,12 +1677,16 @@ mod tests {
         chat.refresh_conversations();
         chat.switch_to(BufferId::Dm("scout".to_string()));
 
-        chat.session
-            .agents
-            .finish("scout", vec![assistant("the parser is fine")], 0);
-        chat.session
-            .agents
-            .finish("zoe", vec![assistant("nobody is reading this")], 0);
+        chat.session.agents.finish(
+            "scout",
+            vec![from_user("how is it?"), assistant("the parser is fine")],
+            0,
+        );
+        chat.session.agents.finish(
+            "zoe",
+            vec![from_user("and you?"), assistant("nobody is reading this")],
+            0,
+        );
         // The active conversation follows every frame; the registry's unread
         // accounting rides the fifteen-tick poll, so run a full cadence.
         for _ in 0..15 {
@@ -1383,8 +1703,8 @@ mod tests {
             .buffers
             .get(&BufferId::Dm("zoe".to_string()))
             .expect("zoe has a buffer");
-        assert_eq!(zoe.unread(), 1, "it counted instead");
-        assert!(zoe.mention(), "and a DM always wants you");
+        assert_eq!(zoe.unread(), 2, "it counted instead");
+        assert!(zoe.mention(), "and it answered you, so it wants you (D99)");
     }
 
     /// The in-flight state is a state, not a record: it renders in the tail and
@@ -1421,9 +1741,95 @@ mod tests {
         );
     }
 
+    /// D99: the DM's live tail is the *user's* run. An agent working on a room
+    /// relay, on main's instruction or on a chase is not answering the person
+    /// reading this conversation, so its stream shows nothing here — not even
+    /// the typing row, which would promise a reply nobody asked for. Its own
+    /// page is where that run is watched.
+    #[tokio::test]
+    async fn a_run_that_is_not_yours_has_no_tail_in_your_dm() {
+        let mut chat = test_chat();
+        seed_agent(&chat, "scout", Vec::new());
+        chat.refresh_conversations();
+        chat.switch_to(BufferId::Dm("scout".to_string()));
+
+        // Main sends, and the run that drains it starts.
+        chat.session
+            .agents
+            .deliver(
+                "scout",
+                crate::channels::MAIN_NAME,
+                "look at the parser",
+                Vec::new(),
+                None,
+            )
+            .unwrap_or_else(|e| panic!("{e}"));
+        let items = chat.session.agents.take_running("scout", 0);
+        chat.session
+            .agents
+            .set_run_trigger("scout", crate::tool::agent::wakes_owner(&items));
+        chat.session.agents.set_live(
+            "scout",
+            Some(std::sync::Arc::new(std::sync::Mutex::new(vec![
+                crate::agents::LiveBlock::Text("main, I am on it".to_string()),
+            ]))),
+            None,
+        );
+
+        let text = tail_text(&mut chat);
+        assert!(
+            !text.contains("main, I am on it"),
+            "main's run streams onto main's page, not into the DM: {text}"
+        );
+        assert!(
+            !text.contains("look at the parser"),
+            "and main's message is not the user's bubble: {text}"
+        );
+        assert!(
+            !text.contains("is replying…"),
+            "no typing row for a reply that is not owed to you: {text}"
+        );
+
+        // The same instance, the same stream, once the run draining it is the
+        // user's own: the tail is back, and so is what they sent.
+        chat.set_input("and for me?");
+        chat.submit();
+        let mine = chat.session.agents.take_running("scout", 0);
+        assert!(
+            !crate::tool::agent::wakes_owner(&mine),
+            "a batch of the user's own DMs is nobody else's business"
+        );
+        chat.session
+            .agents
+            .set_run_trigger("scout", crate::tool::agent::wakes_owner(&mine));
+        let text = tail_text(&mut chat);
+        assert!(text.contains("and for me?"), "{text}");
+        assert!(text.contains("main, I am on it"), "{text}");
+    }
+
+    /// Everything the flow has printed plus the transient tail, as text.
+    fn tail_text(chat: &mut Chat) -> String {
+        chat.build_rows(100);
+        chat.doc
+            .rows
+            .iter()
+            .map(|row| row.line.plain_text())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// The budget is eight, and it is stated where the reasoning is (D99): the
+    /// record keeps the whole conversation and the flow keeps the scrollback of
+    /// every visit, so a switch owes the reader the last exchange rather than a
+    /// screenful of history above the composer.
+    #[test]
+    fn a_switch_replays_the_last_exchange_rather_than_a_screenful() {
+        assert_eq!(REPLAY_BUDGET, 8);
+    }
+
     // -- the team feed -----------------------------------------------------
 
-    /// `/team` answers into the team's feed, and the hub keeps one line saying
+    /// `/team` answers into the team's feed, and main keeps one line saying
     /// where the answer went. The feed is a column of the directory now, so the
     /// pointer names the key that opens it rather than a buffer to switch to
     /// (`the_board_renders_its_lifecycle_log` moved to `tui::directory`, which
@@ -1447,7 +1853,7 @@ mod tests {
             chat.slash_info_lines
                 .iter()
                 .any(|line| line == "→ team (ctrl+t)"),
-            "and the hub points at the key that opens it: {:?}",
+            "and main points at the key that opens it: {:?}",
             chat.slash_info_lines
         );
         assert!(
@@ -1487,7 +1893,7 @@ mod tests {
     /// move, and no turn starts. The domain assertion is the one the DM-buffer
     /// submit makes, because it has to be the same delivery.
     #[tokio::test]
-    async fn a_leading_name_delivers_from_the_hub_without_moving() {
+    async fn a_leading_name_delivers_from_main_without_moving() {
         let mut chat = test_chat();
         seed_agent(&chat, "scout", Vec::new());
         chat.refresh_conversations();
@@ -1497,10 +1903,7 @@ mod tests {
 
         assert!(!chat.busy, "a delivery is not a turn");
         assert_eq!(*chat.buffers.active(), BufferId::Hub, "the flow stayed put");
-        assert!(
-            chat.queued.is_empty(),
-            "and it did not queue behind the hub"
-        );
+        assert!(chat.queued.is_empty(), "and it did not queue behind main");
 
         // Byte-identical to what a submit inside the DM produces (D88/D89).
         let items = chat.session.agents.take_running("scout", 0);
@@ -1551,7 +1954,7 @@ mod tests {
     }
 
     /// No magic and no error: a name that resolves to nothing is prose, and
-    /// prose submits to the hub exactly as typed.
+    /// prose submits to main exactly as typed.
     #[tokio::test]
     async fn an_unknown_name_is_just_prose() {
         let mut chat = test_chat();
@@ -1560,7 +1963,7 @@ mod tests {
         chat.set_input("@nobody are you there");
         chat.submit();
 
-        assert!(chat.busy, "it opened an ordinary hub turn");
+        assert!(chat.busy, "it opened an ordinary main turn");
         assert_eq!(
             chat.last_prompt, "@nobody are you there",
             "verbatim, envelope and all"
@@ -1603,7 +2006,7 @@ mod tests {
     }
 
     /// A name with nothing after it is not an envelope — it is someone being
-    /// mentioned, and it belongs to the hub like any other sentence.
+    /// mentioned, and it belongs to main like any other sentence.
     #[test]
     fn a_bare_name_is_not_a_route() {
         let mut chat = test_chat();
@@ -1683,11 +2086,31 @@ mod tests {
             *chat.buffers.active(),
             BufferId::Channel("build".to_string())
         );
-        chat.run_slash("open hub");
+        chat.run_slash("open @main");
         assert_eq!(*chat.buffers.active(), BufferId::Hub);
         // The sigil is an accepted spelling, not a requirement.
         chat.run_slash("open scout");
         assert_eq!(*chat.buffers.active(), BufferId::Dm("scout".to_string()));
+        // …and home follows the same grammar as any participant (D101).
+        chat.run_slash("open main");
+        assert_eq!(*chat.buffers.active(), BufferId::Hub);
+
+        // The retired word is not a second spelling of it: `hub` names nothing.
+        chat.run_slash("open @scout");
+        chat.slash_info_lines.clear();
+        chat.run_slash("open hub");
+        assert_eq!(
+            *chat.buffers.active(),
+            BufferId::Dm("scout".to_string()),
+            "the retired word moves nothing"
+        );
+        assert!(
+            chat.slash_info_lines
+                .iter()
+                .any(|line| line.contains("hub")),
+            "and it is refused by name: {:?}",
+            chat.slash_info_lines
+        );
 
         chat.slash_info_lines.clear();
         chat.run_slash("open @nobody");
@@ -1727,9 +2150,13 @@ mod tests {
             .iter()
             .map(|item| item.name.clone())
             .collect();
-        assert!(offered.contains(&"hub".to_string()), "{offered:?}");
+        assert!(offered.contains(&"@main".to_string()), "{offered:?}");
         assert!(offered.contains(&"@scout".to_string()), "{offered:?}");
         assert!(offered.contains(&"#build".to_string()), "{offered:?}");
+        assert!(
+            !offered.iter().any(|name| name.contains("hub")),
+            "the retired word left the grammar with the concept: {offered:?}"
+        );
 
         // And every one of them resolves — the offer is the registry, so it
         // cannot name something `/open` would then refuse.
@@ -1772,7 +2199,7 @@ mod tests {
             &chat,
             "scout",
             vec![
-                user("look at the parser"),
+                from_user("look at the parser"),
                 assistant("found it"),
                 assistant("and fixed it"),
             ],
@@ -1808,18 +2235,91 @@ mod tests {
         );
     }
 
-    /// The hub keeps Claude Code's grammar: two speakers, no portrait column.
-    /// A gutter there would be a second convention in the same window.
+    /// Rewritten for D99: the console wears the gutter too. It used to be the
+    /// one conversation without one, on the argument that its grammar is Claude
+    /// Code's; the better reading is that main is a participant like any other,
+    /// and a face is how a participant is recognised. The user's rows wear here
+    /// exactly what they wear in a DM, because it is the same machinery at one
+    /// more call site.
     #[test]
-    fn the_hub_flow_wears_no_gutter() {
+    fn the_console_wears_the_same_gutter_every_conversation_does() {
         let mut chat = test_chat();
-        hub_message(&mut chat, Role::Assistant, "hub prose");
+        main_message(&mut chat, Role::User, "a question");
+        main_message(&mut chat, Role::Assistant, "main prose");
         let rows = raw_rows(&mut chat);
-        let row = row_with(&rows, "hub prose");
+        let gutter = crate::tui::avatar::gutter_width(false);
+
+        let mine = row_with(&rows, "a question");
         assert!(
-            !row.starts_with("    "),
-            "the hub's body is not indented into a gutter: {row:?}"
+            mine.starts_with(" U "),
+            "the user's chip is the same one a DM draws: {mine:?}"
         );
+        let main = row_with(&rows, "main prose");
+        assert!(
+            main.starts_with(" M "),
+            "and main wears its own reserved face: {main:?}"
+        );
+        assert_eq!(
+            crate::tui::avatar::Gutter::new(
+                false,
+                &crate::tui::avatar::Palette::new(&chat.theme),
+                &chat.faces_pinned
+            )
+            .index_for(crate::channels::MAIN_NAME),
+            crate::tui::avatar::MAIN_INDEX
+        );
+        // Everything below the opening row of a run takes the indentation and
+        // no face, exactly as in a DM.
+        main_message(&mut chat, Role::Assistant, "a second paragraph");
+        let rows = raw_rows(&mut chat);
+        let body = row_with(&rows, "a second paragraph");
+        assert_eq!(
+            body.chars().take(gutter).collect::<String>(),
+            " ".repeat(gutter),
+            "a continuation of main's run has a blank gutter: {body:?}"
+        );
+    }
+
+    /// The D97 invariant, extended to the console: the two skins differ in the
+    /// gutter and nowhere else, so a terminal that cannot place images lays the
+    /// window out exactly as one that can.
+    #[test]
+    fn the_console_lays_out_identically_in_both_skins() {
+        let mut chip = test_chat();
+        let mut placed = test_chat();
+        placed.image_cap = Some(crate::tui::gfx::ImageCap::default_cells());
+        for chat in [&mut chip, &mut placed] {
+            main_message(chat, Role::User, "a question");
+            main_message(chat, Role::Assistant, "main prose that runs on a while");
+        }
+        let chip_rows = raw_rows(&mut chip);
+        let placed_rows = raw_rows(&mut placed);
+        assert_eq!(
+            chip_rows.len(),
+            placed_rows.len(),
+            "the row count is the same in both skins"
+        );
+        use crate::tui::line::text_width;
+        // The message column opens at the gutter's own width in either skin, and
+        // the body that follows is the same text: what changes between them is
+        // the picture, never where the picture leaves off.
+        let column = |rows: &[String], needle: &str, images: bool| {
+            let row = row_with(rows, needle);
+            let cut = row.find(needle).unwrap_or(0);
+            assert_eq!(
+                text_width(&row[..cut]),
+                crate::tui::avatar::gutter_width(images),
+                "{needle:?} does not start at the gutter's edge: {row:?}"
+            );
+            row[cut..].to_string()
+        };
+        for needle in ["❯ a question", "⏺ main prose"] {
+            assert_eq!(
+                column(&chip_rows, needle, false),
+                column(&placed_rows, needle, true),
+                "the message column differs between the skins"
+            );
+        }
     }
 
     /// A tool row and a membership line take the indent and no face: the column

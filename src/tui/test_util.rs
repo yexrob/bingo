@@ -52,6 +52,27 @@ pub fn test_session() -> Arc<Session> {
     })
 }
 
+/// One document row with its avatar gutter taken off — the message column
+/// alone.
+///
+/// Every conversation row wears a gutter since D99, @main's included, and the
+/// gutter is spliced in as whole segments after the body was built. So a test
+/// that asserts what a row *says*, or what colour the first thing on it is,
+/// drops the leading segments the gutter occupies and reads what is left.
+pub fn body(line: &crate::tui::line::Line, images: bool) -> crate::tui::line::Line {
+    let want = crate::tui::avatar::gutter_width(images);
+    let mut taken = 0;
+    let mut segs = line.segs.clone();
+    while taken < want && !segs.is_empty() {
+        taken += crate::tui::line::text_width(&segs[0].text);
+        segs.remove(0);
+    }
+    crate::tui::line::Line {
+        segs,
+        image: line.image.clone(),
+    }
+}
+
 /// A [`Chat`] sized to the given terminal (dark theme, offline session).
 pub fn chat_at(width: usize, height: usize) -> Chat {
     let (events_tx, events_rx) = tokio::sync::mpsc::unbounded_channel();
