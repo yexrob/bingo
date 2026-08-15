@@ -110,10 +110,18 @@ impl EscLayer {
 
 /// Who a flow position belongs to, for sender grouping. A rule belongs to
 /// nobody, which is what makes the first message after one carry its name.
-fn speaker_of(item: &crate::tui::bufferview::FlowItem) -> Option<String> {
+fn speaker_of(item: &crate::tui::bufferview::FlowItem, role: Role) -> Option<String> {
     match &item.decor {
-        crate::tui::bufferview::Decor::Said(who) => Some(who.clone()),
-        _ => None,
+        crate::tui::bufferview::Decor::Said(who) if role == Role::Assistant => Some(who.clone()),
+        crate::tui::bufferview::Decor::Said(_) => Some(crate::channels::USER_NAME.to_string()),
+        // @main's own flow. Its two speakers are never written down anywhere —
+        // the role *is* the name — and since D99 they are named here so the
+        // console can wear the same gutter every other conversation wears.
+        crate::tui::bufferview::Decor::Hub if role == Role::Assistant => {
+            Some(crate::channels::HUB_NAME.to_string())
+        }
+        crate::tui::bufferview::Decor::Hub => Some(crate::channels::USER_NAME.to_string()),
+        crate::tui::bufferview::Decor::Divider => None,
     }
 }
 
@@ -437,6 +445,11 @@ impl super::Chat {
             groups: Vec::new(),
             group_of: Vec::new(),
         });
+        // @main's own badge (D99). An alert is the one line here nobody chose to
+        // say, so it is the one that earns the accent: a reader in another
+        // conversation must be able to tell "main answered" from "something
+        // broke" without coming back to look.
+        self.buffers.note_console(true, self.tick);
         self.notify
             .attention(crate::tui::notify::Attention::AgentNotice);
         self.dirty = true;
@@ -2658,13 +2671,20 @@ impl super::Chat {
         // it is a handful of short strings, next to the theme clone this
         // function already pays for.
         let pinned = self.faces_pinned.clone();
-        let conversation_gutter = (self.active_buffer() != crate::tui::buffer::BufferId::Hub)
-            .then(|| crate::tui::avatar::Gutter::new(self.image_cap.is_some(), &pal, &pinned));
+        // Every conversation, @main included (D99): a portrait for main, and
+        // whatever the user's rows already wore in a DM. One machinery, one more
+        // call site — the console is not a second kind of surface.
+        let conversation_gutter =
+            crate::tui::avatar::Gutter::new(self.image_cap.is_some(), &pal, &pinned);
         // The faces the live tail will draw, recorded before the rows are
         // built: the transmit sweep reads `Chat::faces`, and a portrait whose
         // placeholder cells reached the screen without its data is a hole.
-        if let Some(g) = &conversation_gutter {
-            let mut seen = vec![g.index_for(crate::channels::USER_NAME)];
+        {
+            let g = &conversation_gutter;
+            let mut seen = vec![
+                g.index_for(crate::channels::USER_NAME),
+                g.index_for(crate::channels::HUB_NAME),
+            ];
             if let crate::tui::buffer::BufferId::Dm(name) = self.active_buffer() {
                 seen.push(g.index_for(&name));
             }
@@ -2674,17 +2694,17 @@ impl super::Chat {
         }
         let mut spoke: Option<String> = None;
         for (pos, item) in flow.iter().enumerate() {
+            let i = item.index;
+            let role = self.messages[i].role;
             // Who the last row belonged to, tracked across the whole flow so a
             // sender's name is not repeated over every message in a run — and
             // is repeated the moment somebody else speaks (sender grouping,
             // the one workspace decoration the flow keeps).
-            let previous = std::mem::replace(&mut spoke, speaker_of(item));
+            let previous = std::mem::replace(&mut spoke, speaker_of(item, role));
             if pos + 1 < skip {
                 continue;
             }
             let settled = settled_flags[pos];
-            let i = item.index;
-            let role = self.messages[i].role;
             if item.decor == Decor::Divider {
                 // A rule is not a message: no band, no bubble, no stamp.
                 blocks.push(Block::settled(
@@ -2699,23 +2719,17 @@ impl super::Chat {
                 ));
                 continue;
             }
-            // A conversation message wears the gutter; the hub's own does not
-            // (D97). `Decor::Said` is exactly the distinction: it is set by the
-            // conversation replay and by nothing else, so the hub's two-speaker
-            // grammar is left alone without asking which buffer is active.
-            let said = match &item.decor {
-                Decor::Said(who) if role == Role::Assistant => Some(who.clone()),
-                Decor::Said(_) => Some(crate::channels::USER_NAME.to_string()),
-                _ => None,
-            };
-            let gutter = said.as_ref().and(conversation_gutter.as_ref());
+            // Who this row is drawn as. A conversation message names its own
+            // speaker; @main's two are the participants they always were, and
+            // since D99 they wear the same gutter — main's reserved portrait and
+            // the user's own face — so a message looks like itself wherever it
+            // is read. Only a rule has nobody behind it.
+            let said = speaker_of(item, role);
+            let gutter = said.as_ref().and(Some(&conversation_gutter));
             let inner = match gutter {
                 Some(g) => width.saturating_sub(g.width()),
                 None => width,
             };
-            // The band is the experimental face (`experimental.chatAvatars`): switched
-            // off, a message opens on its body, exactly as it did before D50.
-            let band = self.chat_avatars.then(|| self.sender_band_el(role, &pal));
             // In a conversation with more than two speakers the name is not
             // decoration, it is the only thing that says who is talking. Your
             // own messages keep the `❯` bubble, which already says so.
@@ -2753,7 +2767,6 @@ impl super::Chat {
             };
             // Message block spacing (CC marginTop=1): one blank row after the welcome card and before each message.
             let mut stack = vec![El::Blank];
-            stack.extend(band);
             stack.extend(name);
             stack.push(body);
             // The gutter wraps the name row and the body together: the portrait
@@ -2842,29 +2855,6 @@ impl super::Chat {
             banner,
             !self.session.client.is_configured(&provider),
         ))
-    }
-
-    /// The band above a message: who is speaking, as a portrait and a name.
-    ///
-    /// The names are the room's own — `main` for the hub, and the human's own
-    /// messages read `You`. So the name on the band is the name that addresses
-    /// the speaker, with no display-name table to keep honest beside it.
-    ///
-    /// Neither speaker is a blueprint member, so both faces come from the same
-    /// name hash the workspace falls back to — pinning is for the crew.
-    fn sender_band_el(&mut self, role: Role, pal: &crate::tui::avatar::Palette) -> El {
-        let (name, shown) = match role {
-            Role::User => (crate::channels::USER_NAME, "You"),
-            Role::Assistant => (crate::channels::HUB_NAME, crate::channels::HUB_NAME),
-        };
-        let index = crate::tui::avatar::index_of(name);
-        self.faces.insert(index);
-        El::Rows(
-            crate::tui::avatar::sender_band(index, name, shown, self.image_cap.is_some(), pal)
-                .into_iter()
-                .map(Row::new)
-                .collect(),
-        )
     }
 
     /// Assistant message: markdown text and activities interleaved in model

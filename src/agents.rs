@@ -360,12 +360,13 @@ pub enum InboxItem {
 /// What [`AgentRegistry::view_of`] samples for the DM view: history, the
 /// landing-time stamp of each history message (unix seconds, 0 = unknown),
 /// the live tail, the direct messages claimed by the current run but not yet
-/// landed in history, and the instance state.
+/// landed in history — `(sender, text)`, because a pair view has one
+/// conversation in it (D99) — and the instance state.
 pub type AgentView = (
     Vec<Message>,
     Vec<u64>,
     Vec<LiveBlock>,
-    Vec<String>,
+    Vec<(String, String)>,
     AgentState,
 );
 
@@ -403,18 +404,25 @@ struct Entry {
     /// Inbox accumulated since the last drain (commands + channel messages, claimed as one
     /// batch when the receiver is ready).
     inbox: Vec<InboxItem>,
-    /// Direct messages drained into the current run and not yet landed in `history`.
+    /// Direct messages drained into the current run and not yet landed in `history`,
+    /// each with the sender it came from.
     /// Without this record a sent message vanishes for the whole turn: the inbox is
     /// emptied at the claim point and `history` only catches up at [`AgentRegistry::finish`].
     /// The DM view bridges that window from here; cleared when the history lands, and
-    /// pruned when a failed run puts its batch back in the inbox.
-    in_flight: Vec<(MsgId, String)>,
+    /// pruned when a failed run puts its batch back in the inbox. The sender is kept
+    /// because the pair view is one conversation (D99): main's instruction in flight
+    /// is not the user's message and must not render as one.
+    in_flight: Vec<(MsgId, String, String)>,
     /// Delivery records for direct messages, oldest first, capped at MAX_ACKS.
     acks: Vec<Ack>,
     session: Arc<Session>,
     abort: Option<tokio::task::AbortHandle>,
     /// Cumulative run count (watch lines are labeled `#N`).
     runs: u64,
+    /// Whether the run in flight was triggered by the user's own DM alone
+    /// (D99) — the same discrimination D98 stamps on the watch entry, kept on
+    /// the instance so the pair view can ask whose tail it is looking at.
+    user_run: bool,
     /// Watch line of the current turn (used to set Cancelled on stop/delete).
     watch_id: Option<crate::watch::WatchId>,
     /// Streaming output of the current turn (shares the same Arc with subagent_hooks;
@@ -653,6 +661,7 @@ impl AgentRegistry {
                 stamps: Vec::new(),
                 inbox: Vec::new(),
                 in_flight: Vec::new(),
+                user_run: false,
                 acks: Vec::new(),
                 session,
                 abort: None,
@@ -821,7 +830,7 @@ impl AgentRegistry {
             entry
                 .in_flight
                 .iter()
-                .map(|(_, text)| text.clone())
+                .map(|(_, from, text)| (from.clone(), text.clone()))
                 .collect(),
             entry.state,
         ))
@@ -873,7 +882,7 @@ impl AgentRegistry {
             abort.abort();
             for item in &items {
                 if let InboxItem::Direct { id, .. } = item {
-                    entry.in_flight.retain(|(flying, _)| flying != id);
+                    entry.in_flight.retain(|(flying, ..)| flying != id);
                     if let Some(ack) = entry.acks.iter_mut().find(|ack| ack.id == *id) {
                         ack.state = AckState::Dropped {
                             reason: "instance stopped".to_string(),
@@ -908,6 +917,26 @@ impl AgentRegistry {
         if let Some(entry) = self.lock().get_mut(name) {
             entry.watch_id = Some(id);
         }
+    }
+
+    /// Record whose run this is, at the moment it is registered (D99).
+    ///
+    /// D98 already decides this to answer "does the end of this run wake main"
+    /// (`tool::agent::wakes_owner`). The pair view asks the same question from
+    /// the other side: a run nobody in this conversation started has a live tail
+    /// that belongs on the agent's own page, not under the user's composer.
+    pub fn set_run_trigger(&self, name: &str, wakes_owner: bool) {
+        if let Some(entry) = self.lock().get_mut(name) {
+            entry.user_run = !wakes_owner;
+        }
+    }
+
+    /// Whether the run in flight was started by the user's own message. False
+    /// when nothing is running — there is no tail to claim.
+    pub fn run_is_the_users(&self, name: &str) -> bool {
+        self.lock()
+            .get(name)
+            .is_some_and(|entry| entry.user_run && entry.state == AgentState::Running)
     }
 
     /// Turn finished: store the latest history. Inbox non-empty → stay Running and
@@ -1025,7 +1054,7 @@ impl AgentRegistry {
         if entry.state == AgentState::Stopped {
             for item in &items {
                 if let InboxItem::Direct { id, .. } = item {
-                    entry.in_flight.retain(|(flying, _)| flying != id);
+                    entry.in_flight.retain(|(flying, ..)| flying != id);
                     if let Some(ack) = entry.acks.iter_mut().find(|ack| ack.id == *id) {
                         ack.state = AckState::Dropped {
                             reason: "instance stopped".to_string(),
@@ -1040,7 +1069,7 @@ impl AgentRegistry {
             if let InboxItem::Direct { id, .. } = item {
                 // Back in the inbox, back to the pending view — a message rendered
                 // both as sent and as queued would be on screen twice.
-                entry.in_flight.retain(|(flying, _)| flying != id);
+                entry.in_flight.retain(|(flying, ..)| flying != id);
                 if let Some(ack) = entry.acks.iter_mut().find(|ack| ack.id == *id) {
                     ack.state = AckState::Queued;
                     ack.delivered_after_chars = None;
@@ -1181,9 +1210,11 @@ impl AgentRegistry {
         Some(self.lock().get(name)?.acks.clone())
     }
 
-    /// Direct messages still sitting in the inbox, in order. The DM view renders
-    /// them after the history so a message just sent stays visible until the receiver claims it.
-    pub fn pending_of(&self, name: &str) -> Vec<String> {
+    /// Direct messages still sitting in the inbox, in order, each with its
+    /// sender. The DM view renders the user's own after the history so a message
+    /// just sent stays visible until the receiver claims it — and leaves main's
+    /// alone, because that is somebody else's conversation (D99).
+    pub fn pending_of(&self, name: &str) -> Vec<(String, String)> {
         self.lock()
             .get(name)
             .map(|entry| {
@@ -1191,7 +1222,7 @@ impl AgentRegistry {
                     .inbox
                     .iter()
                     .filter_map(|item| match item {
-                        InboxItem::Direct { text, .. } => Some(text.clone()),
+                        InboxItem::Direct { from, text, .. } => Some((from.clone(), text.clone())),
                         // A follow-up is the harness chasing an acknowledgement, not something
                         // the sender wrote — rendering it as their pending message would lie.
                         InboxItem::Channel { .. } | InboxItem::FollowUp { .. } => None,
@@ -1315,10 +1346,10 @@ fn answer_acks(entry: &mut Entry, output_chars: usize) {
 
 fn mark_delivered(entry: &mut Entry, items: &[InboxItem], run: u64, output_chars: usize) {
     for item in items {
-        if let InboxItem::Direct { id, text, .. } = item {
+        if let InboxItem::Direct { id, from, text, .. } = item {
             // Delivered into a run means gone from the inbox but not yet in the
             // history: record it so the DM keeps showing what was sent.
-            entry.in_flight.push((*id, text.clone()));
+            entry.in_flight.push((*id, from.clone(), text.clone()));
             if let Some(ack) = entry.acks.iter_mut().find(|ack| ack.id == *id) {
                 ack.state = AckState::Delivered { run };
                 ack.delivered_after_chars = Some(output_chars);
@@ -1904,7 +1935,14 @@ mod tests {
                 None,
             )
             .unwrap_or_else(|e| panic!("{e}"));
-        assert_eq!(reg.pending_of("scout"), vec!["map the module".to_string()]);
+        assert_eq!(
+            reg.pending_of("scout"),
+            vec![(
+                crate::channels::HUB_NAME.to_string(),
+                "map the module".to_string()
+            )],
+            "the sender rides with the message: a pair view has one conversation in it"
+        );
 
         // Claimed: gone from the inbox, not yet in the history — in flight.
         assert_eq!(reg.flush_pending().len(), 1);
@@ -1912,7 +1950,13 @@ mod tests {
         let (history, _, _, in_flight, _) =
             reg.view_of("scout").unwrap_or_else(|| panic!("exists"));
         assert!(history.is_empty());
-        assert_eq!(in_flight, vec!["map the module".to_string()]);
+        assert_eq!(
+            in_flight,
+            vec![(
+                crate::channels::HUB_NAME.to_string(),
+                "map the module".to_string()
+            )]
+        );
 
         // Landed: the stored history carries it, the bridge record is gone.
         let landed = vec![
@@ -1964,7 +2008,14 @@ mod tests {
         reg.restore_inbox("scout", wake.items);
         let (_, _, _, in_flight, _) = reg.view_of("scout").unwrap_or_else(|| panic!("exists"));
         assert!(in_flight.is_empty(), "{in_flight:?}");
-        assert_eq!(reg.pending_of("scout"), vec!["map the module".to_string()]);
+        assert_eq!(
+            reg.pending_of("scout"),
+            vec![(
+                crate::channels::HUB_NAME.to_string(),
+                "map the module".to_string()
+            )],
+            "the sender rides with the message: a pair view has one conversation in it"
+        );
     }
 
     #[test]

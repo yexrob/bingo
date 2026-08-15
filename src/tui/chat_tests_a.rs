@@ -543,13 +543,13 @@ fn agent_watch_rows_wear_the_instance_face_only_where_images_place() {
     );
 }
 
-/// The band names the speaker with the name that addresses it: the hub is
-/// `main` in the room and on the band, and the human's own messages read
-/// `You`, exactly as the workspace already writes them. Both faces are
-/// recorded — the transmit layer sends what the rows drew, so a portrait no
-/// row asked for is never sent and one a row used is never missed.
+/// Rewritten for D99: the band retires. It existed because the console had no
+/// gutter — "the main chat has no gutter, so the face goes overhead" — and the
+/// console has one now, so a band would have drawn the same speaker's portrait
+/// twice on the same message. What names the speaker in @main is the gutter,
+/// and it names them without the switch and without a name row.
 #[test]
-fn sender_band_names_the_speaker_and_records_its_face() {
+fn the_console_names_its_speakers_in_the_gutter_and_not_above_them() {
     let mut chat = test_chat();
     chat.chat_avatars = true;
     chat.messages.push(msg(Role::User, "hi"));
@@ -562,57 +562,29 @@ fn sender_band_names_the_speaker_and_records_its_face() {
         .map(|r| r.line.plain_text().trim().to_string())
         .collect();
     assert!(
-        rows.iter().any(|r| r.ends_with("You")),
-        "the human's own band reads You: {rows:?}"
+        !rows
+            .iter()
+            .any(|r| r.ends_with("You") || r.ends_with(crate::channels::HUB_NAME)),
+        "no name row above a message, switch or no switch: {rows:?}"
     );
-    assert!(
-        rows.iter().any(|r| r.ends_with(crate::channels::HUB_NAME)),
-        "the hub's band reads its room name: {rows:?}"
-    );
+    assert!(rows.iter().any(|r| r.starts_with("U  ❯ hi")), "{rows:?}");
+    assert!(rows.iter().any(|r| r.starts_with("M  ⏺ hello")), "{rows:?}");
     let expected: HashSet<usize> = [
-        crate::tui::avatar::index_of(crate::channels::USER_NAME),
-        crate::tui::avatar::index_of(crate::channels::HUB_NAME),
+        avatar::index_of(crate::channels::USER_NAME),
+        avatar::MAIN_INDEX,
     ]
     .into_iter()
     .collect();
     assert_eq!(chat.faces, expected, "both faces recorded for transmission");
 }
 
-/// The two skins differ in height here and only here: the portrait needs a
-/// second row, the chip does not. Nothing below the band depends on it —
-/// unlike the workspace gutter, where unequal heights would shear the body.
+/// Rewritten for D99: the switch governs the *band* and the watch row's
+/// portrait, and nothing else. The console's own gutter is not experimental any
+/// more — main and the user wear their faces beside every message the way they
+/// do in a DM — so what "off" now means is no band over a message and no
+/// portrait replacing a watch row's `◉`, with the gutter untouched underneath.
 #[test]
-fn sender_band_costs_a_second_row_only_where_portraits_place() {
-    let build = |cap: Option<ImageCap>| -> (usize, bool) {
-        let mut chat = test_chat();
-        chat.chat_avatars = true;
-        chat.image_cap = cap;
-        chat.messages.push(msg(Role::User, "hi"));
-        chat.build_rows(80);
-        let placed = chat
-            .doc
-            .rows
-            .iter()
-            .any(|r| r.line.plain_text().contains(gfx::PLACEHOLDER));
-        (chat.doc.rows.len(), placed)
-    };
-    let (chip_rows, chip_placed) = build(None);
-    let (portrait_rows, portrait_placed) = build(Some(ImageCap::default_cells()));
-    assert_eq!(
-        portrait_rows,
-        chip_rows + 1,
-        "the portrait's second row is the whole difference"
-    );
-    assert!(portrait_placed, "image terminals get placeholder cells");
-    assert!(!chip_placed, "the chip skin places no image");
-}
-
-/// The switch is what the transcript's faces hang on, and it is off unless a
-/// settings layer asks for them: no band over a message, no portrait on a watch
-/// row, and nothing recorded for transmission — a face nobody drew must not be
-/// sent. The workspace views are not governed by this and are not touched here.
-#[test]
-fn without_the_switch_the_transcript_wears_no_face() {
+fn without_the_switch_the_transcript_wears_no_band() {
     let mut chat = test_chat();
     assert!(!chat.chat_avatars, "off unless a settings layer asks");
     chat.image_cap = Some(ImageCap::default_cells());
@@ -638,16 +610,23 @@ fn without_the_switch_the_transcript_wears_no_face() {
         .map(|r| r.line.plain_text().trim().to_string())
         .collect();
     assert!(
-        !rows.iter().any(|r| r.ends_with("You")
-            || r.ends_with(crate::channels::HUB_NAME)
-            || r.contains(gfx::PLACEHOLDER)),
-        "no band and no portrait: {rows:?}"
+        !rows
+            .iter()
+            .any(|r| r.ends_with("You") || r.ends_with(crate::channels::HUB_NAME)),
+        "no band names a speaker over a message: {rows:?}"
     );
     assert!(
         rows.iter().any(|r| r.contains("◉ 林夏 · UI review")),
         "the watch row keeps its glyph: {rows:?}"
     );
-    assert!(chat.faces.is_empty(), "nothing is claimed for transmission");
+    // The gutter is a different thing and is always on (D99): the portrait
+    // cells are on the rows they opened, and main's face is claimed for
+    // transmission before any of them is built.
+    assert!(
+        rows.iter().any(|r| r.contains(gfx::PLACEHOLDER)),
+        "{rows:?}"
+    );
+    assert!(chat.faces.contains(&avatar::MAIN_INDEX), "{:?}", chat.faces);
 }
 
 /// Task-family / AskUserQuestion calls are not shown in the transcript
@@ -1287,7 +1266,7 @@ fn thinking_completion_line_waits_for_turn_end() {
     assert!(
         !rows
             .iter()
-            .any(|l| l.starts_with("✻ ") && l.contains(" for ")),
+            .any(|l| l.trim_start().starts_with("✻ ") && l.contains(" for ")),
         "no completion line mid-turn: {rows:?}"
     );
     chat.apply_event(UiEvent::TurnEnd);
@@ -1295,7 +1274,7 @@ fn thinking_completion_line_waits_for_turn_end() {
     let rows: Vec<String> = chat.doc.rows.iter().map(|r| r.line.plain_text()).collect();
     assert!(
         rows.iter()
-            .any(|l| l.starts_with("✻ ") && l.contains(" for ")),
+            .any(|l| l.trim_start().starts_with("✻ ") && l.contains(" for ")),
         "a completion line must appear after the turn: {rows:?}"
     );
 }

@@ -279,7 +279,7 @@ otherwise the user layer — no `.bingo/` is conjured in arbitrary directories
 | `mcpServers` | object | see MCP below |
 | `disabledMcpServers` | string[] | disabled MCP servers (written by `/mcp disable`) |
 | `permissions` | object | `{allow[], deny[], ask[]}`, rule syntax under Permission system below |
-| `experimental` | object | experimental features: `agentChannels`, `channelMessageLimit` (default 500), `agentMessageLimit` (default 50), `chatAvatars` (default false = no faces above messages) |
+| `experimental` | object | experimental features: `agentChannels`, `channelMessageLimit` (default 500), `agentMessageLimit` (default 50), `chatAvatars` (default false = a subagent's watch row keeps its `◉` instead of wearing that agent's portrait) |
 | `team` | object | team startup behavior: `{"autoStart": true}` (default true = auto-pull the project team at startup; `--no-team` or false disables) |
 | `hooks` | object | per-event hooks, see Hooks below |
 
@@ -531,7 +531,7 @@ way and there is no pre-image to take before it does, so those changes stay.
 
 **What switching does**: the draft you were writing stays behind in the
 conversation you left and that conversation's own draft comes back; a `── @name ──`
-rule goes into the flow, followed by that conversation's last 30 messages. From
+rule goes into the flow, followed by that conversation's last eight messages. From
 then on only that conversation prints. Everything else keeps accumulating where
 it already lives and counts up an unread badge — nothing is buffered on your
 behalf, so nothing can be lost by not looking at it. Coming back prints a
@@ -594,19 +594,18 @@ placeholder cells. A team member's portrait is pinned in `.bingo/team.json`
 derived from their name. Terminals without that capability keep the sender's initial
 on a colour; the row count is identical either way, so only the gutter changes.
 
-**In the main chat**, behind `experimental.chatAvatars` (off by default), the
-same faces sit on a band above each message: the
-speaker's portrait beside their name — `main` for the hub, `You` for your own
-messages, the names the room itself uses. Message bodies are untouched
-underneath; they still run the full width, and the `⏺` markers inside a message
-keep separating prose from tool rows. The band is two rows where portraits place
-and one where they fall back to the chip — nothing below it depends on its
-height. One known degradation: a terminal that purges its image store (a resize
-does) gets the faces still on screen redrawn, but messages already in scrollback
-keep four blank columns where the portrait was, with the name intact. Switched
-off, the transcript carries no band and a subagent's watch row keeps its `◉`.
-In a DM or a channel the sender's name heads each run of messages either way —
-with more than two speakers in a room, the name is not decoration.
+**Every conversation wears them, `@main` included.** The face sits in a left
+gutter — four or five cells taken out of the width before the body wraps — with
+the portrait on the first row of each speaker's run and blank on every row after
+it; work steps and system lines take the indentation and no face. Main has a
+reserved portrait of its own that no teammate can be dealt or pin, so the console
+looks the same in every session. One known degradation: a terminal that purges
+its image store (a resize does) gets the faces still on screen redrawn, but rows
+already in scrollback keep blank columns where the portrait was. In a DM or a
+channel the sender's name also heads each run of messages — with more than two
+speakers in a room, the name is not decoration. `experimental.chatAvatars` (off
+by default) governs one remaining thing: whether a subagent's watch row wears
+that agent's portrait in place of its `◉`.
 
 ## Skills
 

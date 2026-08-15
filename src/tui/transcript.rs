@@ -1126,12 +1126,21 @@ mod tests {
         );
         chat.session.agents.finish(
             "scout",
-            vec![crate::api::types::Message {
-                role: crate::api::types::Role::Assistant,
-                content: vec![crate::api::types::ContentBlock::Text {
-                    text: "the parser is fine".to_string(),
-                }],
-            }],
+            vec![
+                // The user's own message, in the shape the record holds it: the
+                // pair view is what the DM replays, so a reply with nothing it
+                // answers belongs to main and never reaches this flow (D99).
+                crate::api::types::Message::user_text(format!(
+                    "{}\nhow is it?",
+                    crate::tool::agent::DM_FROM_USER_MARKER
+                )),
+                crate::api::types::Message {
+                    role: crate::api::types::Role::Assistant,
+                    content: vec![crate::api::types::ContentBlock::Text {
+                        text: "the parser is fine".to_string(),
+                    }],
+                },
+            ],
             0,
         );
         chat.refresh_conversations();

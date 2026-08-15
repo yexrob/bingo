@@ -1,5 +1,6 @@
 use super::tests_a::*;
 use super::*;
+use crate::tui::test_util::body;
 use base64::Engine;
 use serde_json::json;
 #[test]
@@ -806,7 +807,7 @@ fn user_message_has_bubble_background() {
         .doc
         .rows
         .iter()
-        .find(|r| r.line.plain_text().starts_with("❯"));
+        .find(|r| body(&r.line, false).plain_text().starts_with("❯"));
     assert!(row.is_some(), "user row rendered");
     assert_eq!(row.unwrap().bg, Some(chat.theme.user_message_bg));
 }
@@ -830,9 +831,17 @@ fn multiline_user_message_wraps_into_single_line_rows() {
             );
         }
     }
-    assert!(bubbles[0].line.plain_text().starts_with("❯ first line"));
+    assert!(
+        body(&bubbles[0].line, false)
+            .plain_text()
+            .starts_with("❯ first line")
+    );
     // Continuation lines align with indentation, never repeating the prefix.
-    assert!(bubbles[1].line.plain_text().starts_with("  second line"));
+    assert!(
+        body(&bubbles[1].line, false)
+            .plain_text()
+            .starts_with("  second line")
+    );
 }
 
 /// Overlong (newline-free) user messages wrap to the terminal width instead of spilling off screen.
@@ -3635,8 +3644,9 @@ fn interrupted_tool_row_reads_interrupted_in_the_warning_color() {
         .doc
         .rows
         .iter()
-        .find(|row| row.line.plain_text().starts_with("⏺ Bash"))
-        .and_then(|row| row.line.segs.first().map(|seg| seg.style.fg));
+        .map(|row| body(&row.line, false))
+        .find(|line| line.plain_text().starts_with("⏺ Bash"))
+        .and_then(|line| line.segs.first().map(|seg| seg.style.fg));
     assert_eq!(
         glyph,
         Some(Some(Theme::dark().warning)),
@@ -3728,10 +3738,9 @@ fn the_completion_row_blinks_accent_before_it_freezes() {
         chat.doc
             .rows
             .iter()
-            .find(|row| {
-                row.line.plain_text().starts_with("✻ ") && row.line.plain_text().contains(" for ")
-            })
-            .and_then(|row| row.line.segs.first().and_then(|seg| seg.style.fg))
+            .map(|row| body(&row.line, false))
+            .find(|line| line.plain_text().starts_with("✻ ") && line.plain_text().contains(" for "))
+            .and_then(|line| line.segs.first().and_then(|seg| seg.style.fg))
     };
     assert_eq!(
         completion_color(&mut chat),

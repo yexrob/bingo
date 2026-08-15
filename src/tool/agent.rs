@@ -767,15 +767,17 @@ pub(crate) fn spawn_agent_loop(
     owner: Option<String>,
 ) -> WatchId {
     let cell = Arc::new(AgentCell::new(registry.clone()));
+    let wakes_owner_first = wakes_owner(&initial_items);
     let first_id = register_run_watch(
         &watch,
         first_label,
         cell.clone(),
         conditions,
         owner.clone(),
-        wakes_owner(&initial_items),
+        wakes_owner_first,
     );
     registry.set_run_watch(&name, first_id);
+    registry.set_run_trigger(&name, wakes_owner_first);
     let loop_registry = registry.clone();
     let loop_name = name.clone();
     let retry_items = initial_items;
@@ -839,15 +841,17 @@ pub(crate) fn spawn_agent_loop(
                                 absorb_inbox(&session.channels, &name, &current_items);
                             let cell = Arc::new(AgentCell::new(loop_registry.clone()));
                             let label = format!("{name} #{} · {}", next.run, excerpt(&prompt));
+                            let wakes = wakes_owner(&current_items);
                             let id = register_run_watch(
                                 &watch,
                                 label,
                                 cell.clone(),
                                 Vec::new(),
                                 owner.clone(),
-                                wakes_owner(&current_items),
+                                wakes,
                             );
                             loop_registry.set_run_watch(&name, id);
+                            loop_registry.set_run_trigger(&name, wakes);
                             run = (id, cell);
                         }
                         None => break,

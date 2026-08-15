@@ -3081,3 +3081,135 @@ absorb the message before the tick ever sees it, so a bell owed must survive the
 4. *`wakes_owner` treats a room relay as main-relevant.* A room post that wakes an agent still wakes
    main when that run ends. Narrowing it is a question about rooms, not about the user's DM, and this
    batch did not open it.
+
+### D99. The pure pair, and a face for the console
+
+**Problem.** Two of the three surfaces the v3 model names were already right; the DM was not. `dm_posts`
+rendered an agent's *whole context* flat — the prompt the instance was spawned with, main's
+instructions, room relays, chases and the task reminder, collapsed to dim notes and interleaved with
+the user's own conversation — and its work as N flat `⏺ Tool(…)` lines that the settled replay then
+dropped altogether. Beside it, three pieces of accounting were measuring the wrong things: a DM's
+badge counted the history's length (a turn with forty tool calls read as forty unread messages), every
+DM change set `mention`, and @main had no unread at all since D98 retired the relay it used to count.
+
+**Decision.**
+
+*The DM is a lane of the projection, not a second reader of the record.* D96 built the machinery that
+answers "who said this" and left it four keys deep on a read-only page; D99 makes the pair view its
+first production consumer. `perspective::split_user_text` and the per-message loop that used to sit
+inside `dossier` are now one function, `walk(agent, history, stamps) -> Vec<Filed>`, which files every
+post in record order. `dossier` keeps every lane it files; `pair_lane` keeps `Dm(user)` and drops the
+rest, and `buffer::dm_posts` renders that. **`buffer::user_posts` and `scaffold_note` are deleted**:
+their whole job was collapsing somebody else's traffic into dim lines the DM should not have been
+showing. `line_source` is untouched and is still the single recognizer — the point of the batch is
+that there is now one *walk* over it as well as one parser.
+
+What falls out of the attribution rule, and is the batch's one behavioural surprise: **an agent that
+main spawned and the user never spoke to has an empty `@agent` view.** Its first user message is the
+task (intake), so `active` is `None` and its report attaches to no counterpart. That is the model's
+own answer — the report is main's news, and main's dispatch row already carries it — and it is named
+here because it is the thing a reader will notice first.
+
+*Work renders through the console's collapse machinery, which meant carrying the call and not the
+line.* `tool_call_line` throws the tool name and input away, and `classify_tool` needs both, so the
+walk carries `Work::{Tool{name, input}, Thinking}` beside each process post. `buffer::pair_replay`
+turns a run into **one `UiMessage`** — prose concatenated, each call an `Activity` at the char offset
+it happened at, groups opened and extended by the same rules `on_tool_ready` applies — and
+`Replay::Message` already routes that through `assistant_el`. So `⏺ Searched for 1 pattern, read 2
+files (ctrl+o to expand)` in a DM is `collapse_summary` itself, not an imitation of it. Tool names are
+**interned** rather than `Box::leak`ed per call, because a replay re-reads the same names on every
+switch and the live path's leak-once-per-call is only sound when the call happens once.
+
+*A run ends where anything at all stood between two of the agent's rows in the full walk.* This is the
+rule that keeps the flow append-only, and it is why `PairPost` carries `contiguous` rather than the
+consumer computing adjacency in the filtered lane: every continuation is triggered by an inbox item,
+every inbox item files *something* in the walk (main's prose, a `[#room …]` relay, a `[follow-up N/M]`
+chase), so a continuation can never extend a message the flow has already printed. Adjacency measured
+in the filtered lane would have merged across exactly those, and `poll_active_conversation` — which
+appends by count — would have shown the reader nothing.
+
+*The live tail is gated on whose run it is, and the messages beside it on whose they are.* D98 already
+computes main-relevance per run (`wakes_owner` over the drained batch) and stamps it on the watch
+entry; the same answer is now stamped on the instance (`set_run_trigger`/`run_is_the_users`) so the
+view can ask it. A run that is not the user's shows no stream **and no typing row** — the indicator is
+a promise of a reply, and none is owed. That alone is not enough, because `in_flight` and `pending`
+would still have drawn main's message as the user's bubble and kept the indicator alive through it, so
+`Entry.in_flight` gained the sender it was already being handed (`AgentView`'s fourth element is
+`(from, text)` now) and `dm_state` filters both to `user`. Two filters, because they answer two
+different questions: whose run, and whose message.
+
+*Main's portrait is reserved by removing one from circulation, not by adding a ninth.* The requirement
+is that main's face never move and never be a teammate's. A hash reserved at index 0 with the id still
+pinnable would have been probabilistic; bundling a ninth portrait would have meant authoring an asset
+to match eight that already agree. So `MAIN_INDEX = 0`, `index_of` hashes over `1..COUNT`, `ids()`
+returns the seven a blueprint may pin, `index_of_id` refuses main's, and `Gutter::index_for` answers
+`main` **before** the pinned table — a reservation a pin could override would not be one. The cost is
+one face out of eight and one retired pin id (`emi`); a `team.json` that pinned it falls through to
+the hash, which is what it already did for a typo. This also surfaced a latent bug in
+`team_cmd::crew_portraits`, which filtered by *position in `ids()`* against *portrait indices* — the
+same number until D99, not after.
+
+*The sender band retires with the console's gutter.* D97 put the band overhead with an explicit
+premise: "the main chat has no gutter — its bodies run the full width — so the face goes overhead."
+D99 removes the premise, and with both in place `experimental.chatAvatars` drew the same speaker's
+portrait twice on one message. `avatar::sender_band` and `Chat::sender_band_el` are deleted; the switch
+keeps the one job the gutter does not do, the portrait on a subagent's watch row.
+
+*`speaker_of` names @main's two speakers.* The console's participants were never written down —
+the role *was* the name — so the gutter had nothing to key on. Extending `speaker_of(item, role)` to
+answer `main`/`user` for `Decor::Hub` gives the row builder one question with one answer for every
+surface, and the run rule (`spoke != previous`) then works in the console for free.
+
+*Unread is measured where the measure was already stated.* `Lane::messages` has said "process rows are
+work, not messages" since D96; the bar never read it. `pair_measure` returns `(Said count, an agent
+Said after the read cursor)` from the pair lane, memoized per instance on the history's length —
+sound because a history is replaced wholesale at a run's end and never edited in place, and the one
+rewrite that exists (compaction) makes it shorter. @main's own counter is pushed rather than polled
+(`Buffers::note_console`), because @main is the one conversation with no domain store behind it: its
+record is the flow. Main's prose at `TurnEnd` counts; the D98 alert counts **and** mentions, which is
+the one line here nobody chose to say.
+
+**Consequences.**
+
+- `REPLAY_BUDGET` 30 → 8, with the reasoning restated: thirty was sized when a replay was the only way
+  back into a conversation, and it has not been since D82/D96.
+- Room mention detection is one predicate, `buffer::names`, case-insensitive with word boundaries on
+  both sides of the token. `@User` and `@USER,` reach the person; `@username` and `mail@user.example`
+  do not.
+- **Old assertions rewritten, not weakened**, each because the contract under it changed:
+  `the_hub_flow_wears_no_gutter` → `the_console_wears_the_same_gutter_every_conversation_does` (plus a
+  both-skins layout test, the D97 invariant extended); `without_the_switch_the_transcript_wears_no_face`
+  → `…_no_band` (the gutter is not the switch's any more);
+  `sender_band_names_the_speaker_and_records_its_face` and
+  `sender_band_costs_a_second_row_only_where_portraits_place` → one test that the console names its
+  speakers in the gutter and not above them; `a_dm_is_addressed_to_you_by_construction` →
+  `a_dm_wants_you_when_the_agent_answers_and_not_when_you_speak`, which is the opposite claim and the
+  right one; `unread_counts_one_per_message_and_moves_the_stamp`, both `a_replay_keeps_to_its_budget`
+  tests, `a_switch_opens_the_conversation_under_a_rule`,
+  `an_excursion_holds_the_hubs_tail_until_you_come_back`, `arrivals_print_here_and_count_there`,
+  `a_dm_wears_a_face_on_the_first_row_of_each_run`, `a_completion_bumps_the_dm_instead_of_the_hub` and
+  `the_pager_covers_the_conversations_the_flow_printed` all had histories of bare `assistant(…)`
+  replies, which now belong to nobody's lane; they were given the user message the reply answers,
+  which is what a pair conversation is. Four row-prefix assertions in `chat_tests_b` read through a new
+  `test_util::body`, which takes the gutter off a row rather than asserting around it.
+- 1445 + 13 tests before, 1457 + 13 after (17 added: 4 pair-lane projection — the filter, reply
+  attribution, the work it carries, the run break; 3 replay — activity groups and their wording, the
+  standalone call closing a group, the budget; 4 gutter — the console's gutter, both skins laying out
+  alike, main's reserved face, the console naming its speakers in the gutter and not above them;
+  3 accounting — Said-only counting, mention on an agent's Said, @main's unread; 1 the live tail gated
+  by run trigger; 1 the room mention predicate; 1 the switch keeping the watch row and losing the band.
+  5 removed: the two band tests, the hub's absence of a gutter, `a_dm_is_addressed_to_you_by_construction`,
+  and the no-face-without-the-switch claim — each renamed or replaced above rather than dropped).
+
+**Named limits.**
+
+1. *A collapse group cannot span two of the agent's runs.* In @main a turn is one message and a streak
+   of reads across four rounds is one group; here a run boundary is a message boundary. Within a run
+   (which is where a streak actually happens) the grouping is the console's exactly.
+2. *A replayed group has no output to expand.* The record kept the call; the result went to the model.
+   `ctrl+o` on one shows the calls it folded and nothing under them.
+3. *An agent whose lane is empty shows an empty DM.* See above — deliberate, and the reason D100's door
+   to the observation page matters more than it did.
+4. *`pending`/`in_flight` are filtered by sender, not by run.* A message main queued while the user's
+   run is in flight is correctly absent from the DM, but a *chase* the harness queued has no sender at
+   all and is already excluded by `pending_of`'s own rule, which predates this batch.

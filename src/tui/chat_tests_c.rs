@@ -1677,7 +1677,8 @@ async fn a_dm_submission_never_steers_the_hubs_turn() {
         chat.session
             .agents
             .pending_of("scout")
-            .contains(&"use tabs".to_string())
+            .iter()
+            .any(|(from, text)| from == crate::channels::USER_NAME && text == "use tabs")
             || !chat.session.agents.take_running("scout", 0).is_empty(),
         "it went to the instance instead"
     );

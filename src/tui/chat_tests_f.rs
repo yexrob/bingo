@@ -168,9 +168,20 @@ fn a_completion_bumps_the_dm_instead_of_the_hub() {
 
     // The agent finishes: its reply lands in its history, then the lifecycle
     // event arrives — the order the domain actually produces.
-    chat.session
-        .agents
-        .finish("scout", vec![assistant("the parser is fixed")], 0);
+    chat.session.agents.finish(
+        "scout",
+        vec![
+            // A DM the user sent, then the reply to it: the badge counts the
+            // pair lane (D99), and an agent's report on the task main gave it
+            // is main's news rather than the user's.
+            crate::api::types::Message::user_text(format!(
+                "{}\nhow is the parser?",
+                crate::tool::agent::DM_FROM_USER_MARKER
+            )),
+            assistant("the parser is fixed"),
+        ],
+        0,
+    );
     chat.apply_event(lifecycle(
         "scout · fix the parser",
         WatchState::Done,
@@ -186,7 +197,7 @@ fn a_completion_bumps_the_dm_instead_of_the_hub() {
         chat.buffers
             .get(&dm)
             .map(crate::tui::buffer::Buffer::unread),
-        Some(1),
+        Some(2),
         "the report is in the DM, and the DM is what carries the badge"
     );
     assert_eq!(
@@ -785,4 +796,48 @@ fn a_failed_open_lands_on_the_info_tier() {
         chat.slash_info_lines
     );
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// D99: @main gets a real unread. D94 left it with none at all once the
+/// relay lines retired, so main could speak into a conversation the reader
+/// was not in and the bar said nothing. Main's prose counts; the D98 failure
+/// alert counts *and* wants you; entering the console clears both.
+#[test]
+fn the_console_counts_what_main_says_while_you_are_elsewhere() {
+    let mut chat = test_chat();
+    seed_agent(&chat, "scout");
+    chat.refresh_conversations();
+    chat.switch_to(BufferId::Dm("scout".to_string()));
+
+    let console = || BufferId::Hub;
+    assert_eq!(
+        chat.buffers.get(&console()).map(|b| b.unread()),
+        Some(0),
+        "nothing has been said yet"
+    );
+
+    chat.apply_turn_start();
+    chat.apply_event(crate::ui::UiEvent::TextDelta("here is the answer".into()));
+    chat.apply_event(crate::ui::UiEvent::TurnEnd);
+    assert_eq!(chat.buffers.get(&console()).map(|b| b.unread()), Some(1));
+    assert_eq!(
+        chat.buffers.get(&console()).map(|b| b.mention()),
+        Some(false),
+        "main answering is news, not a summons"
+    );
+
+    chat.push_agent_alert("scout · fix the parser", Some("connection reset"));
+    assert_eq!(chat.buffers.get(&console()).map(|b| b.unread()), Some(2));
+    assert_eq!(
+        chat.buffers.get(&console()).map(|b| b.mention()),
+        Some(true),
+        "an alert is the one line nobody chose to say"
+    );
+
+    chat.switch_to(BufferId::Hub);
+    assert_eq!(chat.buffers.get(&console()).map(|b| b.unread()), Some(0));
+    assert_eq!(
+        chat.buffers.get(&console()).map(|b| b.mention()),
+        Some(false)
+    );
 }

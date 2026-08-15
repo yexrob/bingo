@@ -1007,11 +1007,15 @@ pub struct Chat {
     /// it, so re-reading it per frame would be waste (the workspace learned the
     /// same thing in D49).
     pub(crate) faces_pinned: HashMap<String, usize>,
-    /// Faces in the transcript at all (`experimental.chatAvatars`, off by default).
-    /// Off means no sender band and no portrait on a watch row — the transcript the
-    /// hub wrote before D50. The workspace views keep their portraits either way:
-    /// there the face sits in a gutter the layout already spends, here it costs
-    /// rows of its own, which is what the switch is for.
+    /// A subagent's portrait on its watch row (`experimental.chatAvatars`, off by
+    /// default): with it on, `◉ scout · task` wears scout's face instead of the
+    /// glyph.
+    ///
+    /// **The sender band retired with D99.** The band existed because the console
+    /// had no gutter and a face had to go overhead; the console has one now, and
+    /// a band would have drawn the same speaker's portrait twice on one message.
+    /// So every conversation's faces are unconditional and this switch governs
+    /// the one place a portrait still costs something it did not already own.
     pub(crate) chat_avatars: bool,
     /// Loaded image cache (url → PNG bytes + cell dimensions).
     pub images: HashMap<String, Arc<ImageMeta>>,
@@ -2108,6 +2112,14 @@ impl Chat {
                     // The reply's send time is when it landed, not when the turn
                     // opened — the same clock the workspace DM stamps carry.
                     self.messages[i].at = crate::channels::now_unix();
+                    // @main's unread (D99): main just spoke, and if the reader is
+                    // standing in another conversation the bar is the only place
+                    // that can say so. Prose only — a turn that said nothing has
+                    // nothing to come back for, and `observe` zeroes the count
+                    // outright while @main is the active conversation.
+                    if !self.messages[i].text.trim().is_empty() {
+                        self.buffers.note_console(false, self.tick);
+                    }
                     if let Some(g) = self.messages[i].groups.last_mut() {
                         g.active = false;
                     }

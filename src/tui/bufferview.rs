@@ -100,9 +100,16 @@ fn receipt_line(id: &BufferId, text: &str) -> String {
 }
 
 /// How many messages a switch replays. Messages, not rows: rows exist only
-/// after a layout at a known width, and a conversation's last thirty messages
-/// is a promise that can be kept at any width.
-pub const REPLAY_BUDGET: usize = 30;
+/// after a layout at a known width, and a conversation's last eight messages is
+/// a promise that can be kept at any width.
+///
+/// Eight, not thirty (D99). Thirty was sized when a replay was the only way back
+/// into a conversation; it is not any more — the record keeps the whole thing
+/// (`ctrl+o`, the observation page) and the flow keeps the scrollback of every
+/// visit. What a switch owes the reader is the thread of the last exchange, and
+/// a screenful of somebody else's history above the composer is a wall, not a
+/// welcome.
+pub const REPLAY_BUDGET: usize = 8;
 
 /// A replay minus its opening rule: everything that occupies a position in the
 /// conversation, in order. The rule is furniture the host prints once, so it is
@@ -443,10 +450,8 @@ impl Chat {
         let (history, stamps, live, in_flight, pending) = self.dm_state(&name)?;
         // The settled prefix is what the flow already shows; `dm_posts` appends
         // the live states after it, so the difference is exactly the tail.
-        let settled = dm_posts(&history, &stamps, &[], &[], &[], &name, USER_NAME);
-        let all = dm_posts(
-            &history, &stamps, &in_flight, &live, &pending, &name, USER_NAME,
-        );
+        let settled = dm_posts(&history, &stamps, &[], &[], &[], &name);
+        let all = dm_posts(&history, &stamps, &in_flight, &live, &pending, &name);
         if all.len() <= settled.len() {
             return None;
         }
@@ -459,7 +464,7 @@ impl Chat {
         let rows: Vec<Row> = tail
             .iter()
             .zip(runs)
-            .flat_map(|(post, lead)| self.tail_post_rows(post, &name, width, gutter.as_ref(), lead))
+            .flat_map(|(post, lead)| self.tail_post_rows(post, &name, width, Some(&gutter), lead))
             .collect();
         if rows.is_empty() {
             return None;
@@ -467,29 +472,34 @@ impl Chat {
         Some(El::Rows(rows))
     }
 
-    /// The avatar gutter this view draws, or `None` where there is none.
+    /// The avatar gutter this view draws.
     ///
-    /// The hub is the one conversation without one: its grammar is Claude
-    /// Code's — two speakers, `⏺` markers, bodies running the full width — and
-    /// a portrait column beside it would be a second convention in the same
-    /// window. Rooms, DMs and the perspective page are group-shaped, and there
-    /// the face is what says who is talking.
+    /// Every conversation has one since D99, @main included: main is a
+    /// participant like the rest, and a face is how a participant is
+    /// recognised. One value, so the flow, the live tail and the perspective
+    /// page cannot drift on width, on who wears what, or on which skin the
+    /// terminal is in.
     pub(crate) fn conversation_gutter<'a>(
         &'a self,
         pal: &'a crate::tui::avatar::Palette,
-    ) -> Option<crate::tui::avatar::Gutter<'a>> {
-        if self.active_buffer() == BufferId::Hub {
-            return None;
-        }
-        Some(crate::tui::avatar::Gutter::new(
-            self.image_cap.is_some(),
-            pal,
-            &self.faces_pinned,
-        ))
+    ) -> crate::tui::avatar::Gutter<'a> {
+        crate::tui::avatar::Gutter::new(self.image_cap.is_some(), pal, &self.faces_pinned)
     }
 
-    /// The instance's live state, or `None` when the registry has never heard
-    /// of it (a DM whose agent was deleted still has a conversation to read).
+    /// The instance's live state *for the pair view*, or `None` when the
+    /// registry has never heard of it (a DM whose agent was deleted still has a
+    /// conversation to read).
+    ///
+    /// Two filters, both D99, both about the same thing — this conversation has
+    /// two participants in it:
+    ///
+    /// - **The messages in flight and queued are the user's own.** An
+    ///   instruction main sent, sitting in the same inbox, is not a bubble the
+    ///   user wrote and must not be drawn as one.
+    /// - **The live tail belongs to the run the user started.** A run triggered
+    ///   by main, by a room or by a chase is that agent working for somebody
+    ///   else; its stream is on its own page, and here it is not even a typing
+    ///   row — the indicator would be a promise of a reply nobody asked for.
     #[allow(clippy::type_complexity)]
     fn dm_state(
         &self,
@@ -502,7 +512,20 @@ impl Chat {
         Vec<String>,
     )> {
         let (history, stamps, live, in_flight, _state) = self.session.agents.view_of(name)?;
-        let pending = self.session.agents.pending_of(name);
+        let mine = |(from, text): (String, String)| (from == USER_NAME).then_some(text);
+        let in_flight: Vec<String> = in_flight.into_iter().filter_map(mine).collect();
+        let pending: Vec<String> = self
+            .session
+            .agents
+            .pending_of(name)
+            .into_iter()
+            .filter_map(mine)
+            .collect();
+        let live = if self.session.agents.run_is_the_users(name) {
+            live
+        } else {
+            Vec::new()
+        };
         Some((history, stamps, live, in_flight, pending))
     }
 
@@ -930,6 +953,16 @@ mod tests {
         }
     }
 
+    /// A message the *user* sent, in the shape `absorb_inbox` records it: the
+    /// D64 marker heading the text. Unmarked prose in an instance's record is
+    /// the main agent talking, and the pair view keeps the two apart (D99).
+    fn from_user(text: &str) -> ApiMessage {
+        user(&format!(
+            "{}\n{text}",
+            crate::tool::agent::DM_FROM_USER_MARKER
+        ))
+    }
+
     /// An instance with history already behind it.
     fn seed_agent(chat: &Chat, name: &str, history: Vec<ApiMessage>) {
         chat.session.agents.insert(
@@ -978,7 +1011,7 @@ mod tests {
         seed_agent(
             &chat,
             "scout",
-            vec![user("look at the parser"), assistant("found it")],
+            vec![from_user("look at the parser"), assistant("found it")],
         );
         chat.refresh_conversations();
         chat.switch_to(BufferId::Dm("scout".to_string()));
@@ -995,7 +1028,7 @@ mod tests {
             .agents
             .view_of("scout")
             .expect("the instance is registered");
-        let want: Vec<String> = dm_posts(&history, &stamps, &[], &[], &[], "scout", USER_NAME)
+        let want: Vec<String> = dm_posts(&history, &stamps, &[], &[], &[], "scout")
             .into_iter()
             .filter(|post| matches!(post.kind, PostKind::Said | PostKind::Note))
             .map(|post| post.text)
@@ -1010,8 +1043,16 @@ mod tests {
     #[test]
     fn a_replay_keeps_to_its_budget_and_keeps_the_tail() {
         let mut chat = test_chat();
+        // Alternating, because a run of the agent's replies is one message now
+        // (D99) and a budget counted over messages needs messages to count.
         let history: Vec<ApiMessage> = (0..REPLAY_BUDGET + 6)
-            .map(|i| assistant(&format!("message {i}")))
+            .map(|i| {
+                if i % 2 == 0 {
+                    from_user(&format!("message {i}"))
+                } else {
+                    assistant(&format!("message {i}"))
+                }
+            })
             .collect();
         seed_agent(&chat, "scout", history);
         chat.refresh_conversations();
@@ -1082,7 +1123,11 @@ mod tests {
     #[test]
     fn an_excursion_holds_the_hubs_tail_until_you_come_back() {
         let mut chat = test_chat();
-        seed_agent(&chat, "scout", vec![assistant("on it")]);
+        seed_agent(
+            &chat,
+            "scout",
+            vec![from_user("have a look"), assistant("on it")],
+        );
         chat.refresh_conversations();
         hub_message(&mut chat, Role::Assistant, "before you left");
 
@@ -1370,12 +1415,16 @@ mod tests {
         chat.refresh_conversations();
         chat.switch_to(BufferId::Dm("scout".to_string()));
 
-        chat.session
-            .agents
-            .finish("scout", vec![assistant("the parser is fine")], 0);
-        chat.session
-            .agents
-            .finish("zoe", vec![assistant("nobody is reading this")], 0);
+        chat.session.agents.finish(
+            "scout",
+            vec![from_user("how is it?"), assistant("the parser is fine")],
+            0,
+        );
+        chat.session.agents.finish(
+            "zoe",
+            vec![from_user("and you?"), assistant("nobody is reading this")],
+            0,
+        );
         // The active conversation follows every frame; the registry's unread
         // accounting rides the fifteen-tick poll, so run a full cadence.
         for _ in 0..15 {
@@ -1392,8 +1441,8 @@ mod tests {
             .buffers
             .get(&BufferId::Dm("zoe".to_string()))
             .expect("zoe has a buffer");
-        assert_eq!(zoe.unread(), 1, "it counted instead");
-        assert!(zoe.mention(), "and a DM always wants you");
+        assert_eq!(zoe.unread(), 2, "it counted instead");
+        assert!(zoe.mention(), "and it answered you, so it wants you (D99)");
     }
 
     /// The in-flight state is a state, not a record: it renders in the tail and
@@ -1428,6 +1477,92 @@ mod tests {
             chat.doc.transient_rows > 0,
             "the tail is transient, so it never freezes into scrollback"
         );
+    }
+
+    /// D99: the DM's live tail is the *user's* run. An agent working on a room
+    /// relay, on main's instruction or on a chase is not answering the person
+    /// reading this conversation, so its stream shows nothing here — not even
+    /// the typing row, which would promise a reply nobody asked for. Its own
+    /// page is where that run is watched.
+    #[tokio::test]
+    async fn a_run_that_is_not_yours_has_no_tail_in_your_dm() {
+        let mut chat = test_chat();
+        seed_agent(&chat, "scout", Vec::new());
+        chat.refresh_conversations();
+        chat.switch_to(BufferId::Dm("scout".to_string()));
+
+        // Main sends, and the run that drains it starts.
+        chat.session
+            .agents
+            .deliver(
+                "scout",
+                crate::channels::HUB_NAME,
+                "look at the parser",
+                Vec::new(),
+                None,
+            )
+            .unwrap_or_else(|e| panic!("{e}"));
+        let items = chat.session.agents.take_running("scout", 0);
+        chat.session
+            .agents
+            .set_run_trigger("scout", crate::tool::agent::wakes_owner(&items));
+        chat.session.agents.set_live(
+            "scout",
+            Some(std::sync::Arc::new(std::sync::Mutex::new(vec![
+                crate::agents::LiveBlock::Text("main, I am on it".to_string()),
+            ]))),
+            None,
+        );
+
+        let text = tail_text(&mut chat);
+        assert!(
+            !text.contains("main, I am on it"),
+            "main's run streams onto main's page, not into the DM: {text}"
+        );
+        assert!(
+            !text.contains("look at the parser"),
+            "and main's message is not the user's bubble: {text}"
+        );
+        assert!(
+            !text.contains("is replying…"),
+            "no typing row for a reply that is not owed to you: {text}"
+        );
+
+        // The same instance, the same stream, once the run draining it is the
+        // user's own: the tail is back, and so is what they sent.
+        chat.set_input("and for me?");
+        chat.submit();
+        let mine = chat.session.agents.take_running("scout", 0);
+        assert!(
+            !crate::tool::agent::wakes_owner(&mine),
+            "a batch of the user's own DMs is nobody else's business"
+        );
+        chat.session
+            .agents
+            .set_run_trigger("scout", crate::tool::agent::wakes_owner(&mine));
+        let text = tail_text(&mut chat);
+        assert!(text.contains("and for me?"), "{text}");
+        assert!(text.contains("main, I am on it"), "{text}");
+    }
+
+    /// Everything the flow has printed plus the transient tail, as text.
+    fn tail_text(chat: &mut Chat) -> String {
+        chat.build_rows(100);
+        chat.doc
+            .rows
+            .iter()
+            .map(|row| row.line.plain_text())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// The budget is eight, and it is stated where the reasoning is (D99): the
+    /// record keeps the whole conversation and the flow keeps the scrollback of
+    /// every visit, so a switch owes the reader the last exchange rather than a
+    /// screenful of history above the composer.
+    #[test]
+    fn a_switch_replays_the_last_exchange_rather_than_a_screenful() {
+        assert_eq!(REPLAY_BUDGET, 8);
     }
 
     // -- the team feed -----------------------------------------------------
@@ -1781,7 +1916,7 @@ mod tests {
             &chat,
             "scout",
             vec![
-                user("look at the parser"),
+                from_user("look at the parser"),
                 assistant("found it"),
                 assistant("and fixed it"),
             ],
@@ -1817,18 +1952,91 @@ mod tests {
         );
     }
 
-    /// The hub keeps Claude Code's grammar: two speakers, no portrait column.
-    /// A gutter there would be a second convention in the same window.
+    /// Rewritten for D99: the console wears the gutter too. It used to be the
+    /// one conversation without one, on the argument that its grammar is Claude
+    /// Code's; the better reading is that main is a participant like any other,
+    /// and a face is how a participant is recognised. The user's rows wear here
+    /// exactly what they wear in a DM, because it is the same machinery at one
+    /// more call site.
     #[test]
-    fn the_hub_flow_wears_no_gutter() {
+    fn the_console_wears_the_same_gutter_every_conversation_does() {
         let mut chat = test_chat();
+        hub_message(&mut chat, Role::User, "a question");
         hub_message(&mut chat, Role::Assistant, "hub prose");
         let rows = raw_rows(&mut chat);
-        let row = row_with(&rows, "hub prose");
+        let gutter = crate::tui::avatar::gutter_width(false);
+
+        let mine = row_with(&rows, "a question");
         assert!(
-            !row.starts_with("    "),
-            "the hub's body is not indented into a gutter: {row:?}"
+            mine.starts_with(" U "),
+            "the user's chip is the same one a DM draws: {mine:?}"
         );
+        let main = row_with(&rows, "hub prose");
+        assert!(
+            main.starts_with(" M "),
+            "and main wears its own reserved face: {main:?}"
+        );
+        assert_eq!(
+            crate::tui::avatar::Gutter::new(
+                false,
+                &crate::tui::avatar::Palette::new(&chat.theme),
+                &chat.faces_pinned
+            )
+            .index_for(crate::channels::HUB_NAME),
+            crate::tui::avatar::MAIN_INDEX
+        );
+        // Everything below the opening row of a run takes the indentation and
+        // no face, exactly as in a DM.
+        hub_message(&mut chat, Role::Assistant, "a second paragraph");
+        let rows = raw_rows(&mut chat);
+        let body = row_with(&rows, "a second paragraph");
+        assert_eq!(
+            body.chars().take(gutter).collect::<String>(),
+            " ".repeat(gutter),
+            "a continuation of main's run has a blank gutter: {body:?}"
+        );
+    }
+
+    /// The D97 invariant, extended to the console: the two skins differ in the
+    /// gutter and nowhere else, so a terminal that cannot place images lays the
+    /// window out exactly as one that can.
+    #[test]
+    fn the_console_lays_out_identically_in_both_skins() {
+        let mut chip = test_chat();
+        let mut placed = test_chat();
+        placed.image_cap = Some(crate::tui::gfx::ImageCap::default_cells());
+        for chat in [&mut chip, &mut placed] {
+            hub_message(chat, Role::User, "a question");
+            hub_message(chat, Role::Assistant, "hub prose that runs on a while");
+        }
+        let chip_rows = raw_rows(&mut chip);
+        let placed_rows = raw_rows(&mut placed);
+        assert_eq!(
+            chip_rows.len(),
+            placed_rows.len(),
+            "the row count is the same in both skins"
+        );
+        use crate::tui::line::text_width;
+        // The message column opens at the gutter's own width in either skin, and
+        // the body that follows is the same text: what changes between them is
+        // the picture, never where the picture leaves off.
+        let column = |rows: &[String], needle: &str, images: bool| {
+            let row = row_with(rows, needle);
+            let cut = row.find(needle).unwrap_or(0);
+            assert_eq!(
+                text_width(&row[..cut]),
+                crate::tui::avatar::gutter_width(images),
+                "{needle:?} does not start at the gutter's edge: {row:?}"
+            );
+            row[cut..].to_string()
+        };
+        for needle in ["❯ a question", "⏺ hub prose"] {
+            assert_eq!(
+                column(&chip_rows, needle, false),
+                column(&placed_rows, needle, true),
+                "the message column differs between the skins"
+            );
+        }
     }
 
     /// A tool row and a membership line take the indent and no face: the column

@@ -33,7 +33,7 @@
 
 use std::sync::Arc;
 
-use crate::api::types::{ContentBlock, Message, Role as ApiRole};
+use crate::api::types::Message;
 use crate::channels::{ChannelMessage, USER_NAME};
 use crate::query::Session;
 use crate::tui::chat::{Role, UiMessage};
@@ -224,6 +224,51 @@ fn state_word(state: WatchState) -> &'static str {
     }
 }
 
+/// What a DM's badge is measured in (D99): one entry per Said post of the pair
+/// lane, `true` where the agent is the one who spoke.
+///
+/// Kept beside the length of the history it was derived from, because deriving
+/// it means walking the whole record and the poll runs every fifteen frames. A
+/// history that has not changed length has not changed: it is replaced
+/// wholesale at the end of a run and never edited in place, and a compaction —
+/// the one rewrite — makes it *shorter*, which the length sees.
+#[derive(Debug, Clone, Default)]
+struct SaidCache {
+    history: usize,
+    authors: Vec<bool>,
+}
+
+/// Whether a room post says a name at somebody (D99).
+///
+/// Case-insensitive with word boundaries on both sides of the token: an agent
+/// writing `@User`, `@USER,` or `(@user)` is addressing the person and reaches
+/// them, while `@username` and `mail@user.example` are not and do not. The
+/// literal-`@user` test this replaced meant a badge that depended on the model
+/// getting the case right.
+fn names(text: &str, name: &str) -> bool {
+    let haystack = text.to_lowercase();
+    let needle = format!("@{}", name.to_lowercase());
+    let part_of_a_word = |c: char| c.is_alphanumeric() || c == '_' || c == '-';
+    let mut from = 0;
+    while let Some(offset) = haystack.get(from..).and_then(|rest| rest.find(&needle)) {
+        let start = from + offset;
+        let end = start + needle.len();
+        let before_ok = haystack[..start]
+            .chars()
+            .next_back()
+            .is_none_or(|c| !part_of_a_word(c));
+        let after_ok = haystack[end..]
+            .chars()
+            .next()
+            .is_none_or(|c| !part_of_a_word(c));
+        if before_ok && after_ok {
+            return true;
+        }
+        from = end;
+    }
+    false
+}
+
 /// The registry: the hub plus whatever the domain currently has.
 #[derive(Debug, Clone)]
 pub struct Buffers {
@@ -231,6 +276,8 @@ pub struct Buffers {
     list: Vec<Buffer>,
     active: BufferId,
     team: Vec<TeamEvent>,
+    /// Per instance, the pair lane's measure — see [`SaidCache`].
+    said: std::collections::HashMap<String, SaidCache>,
 }
 
 impl Default for Buffers {
@@ -252,6 +299,7 @@ impl Buffers {
             }],
             active: BufferId::Hub,
             team: Vec::new(),
+            said: std::collections::HashMap::new(),
         }
     }
 
@@ -339,7 +387,6 @@ impl Buffers {
     /// the user is a member of it and drops out of the registry when they
     /// leave, which is what makes the bar mean "conversations I am in".
     pub fn refresh(&mut self, session: &Arc<Session>, tick: u64) {
-        let token = format!("@{USER_NAME}");
         let mut mine: Vec<String> = Vec::new();
         for status in session.channels.list() {
             if !status.members.iter().any(|m| m == USER_NAME) {
@@ -356,7 +403,7 @@ impl Buffers {
                     .channels
                     .log_of(&status.name)
                     .iter()
-                    .any(|m| m.seq > read && m.text.contains(&token));
+                    .any(|m| m.seq > read && names(&m.text, USER_NAME));
             self.observe(id, status.seq, mention, tick);
         }
         // A room the user has left (or that is gone) stops being one of their
@@ -367,17 +414,59 @@ impl Buffers {
             BufferId::Channel(name) => mine.iter().any(|kept| kept == name),
             _ => true,
         });
-        let agents = session.agents.list();
-        for status in agents {
-            let seq = session
-                .agents
-                .view_of(&status.name)
-                .map(|(history, ..)| history.len() as u64)
-                .unwrap_or(0);
-            // A DM is addressed to you by construction, so anything new in one
-            // is a mention. There is no other kind of message in a DM.
-            self.observe(BufferId::Dm(status.name), seq, true, tick);
+        let mut live: Vec<String> = Vec::new();
+        for status in session.agents.list() {
+            let id = BufferId::Dm(status.name.clone());
+            let read = self.get(&id).map(|b| b.read).unwrap_or(0) as usize;
+            let (seq, mention) = self.pair_measure(session, &status.name, read);
+            live.push(status.name);
+            self.observe(id, seq, mention, tick);
         }
+        self.said
+            .retain(|name, _| live.iter().any(|kept| kept == name));
+    }
+
+    /// A DM's badge, measured in the pair lane (D99): how many messages it holds
+    /// and whether the agent is the one who wrote any of the unread ones.
+    ///
+    /// **Said, not history length.** The old measure counted every row the
+    /// record grew, so a turn that made forty tool calls read as forty unread
+    /// messages; the measure the observation page already states — "process rows
+    /// are work, not messages" — is the one the bar wants. **And a mention
+    /// means it answered you**: marking every change was badge blindness by
+    /// construction, because a DM was then always accented and the accent said
+    /// nothing.
+    ///
+    /// Memoized on the history length, so the fifteen-frame poll walks a record
+    /// only when the record moved. See [`SaidCache`].
+    fn pair_measure(&mut self, session: &Arc<Session>, name: &str, read: usize) -> (u64, bool) {
+        let Some((history, stamps, ..)) = session.agents.view_of(name) else {
+            return (0, false);
+        };
+        let entry = self.said.entry(name.to_string()).or_default();
+        if entry.history != history.len() {
+            entry.history = history.len();
+            entry.authors = crate::tui::perspective::pair_lane(name, &history, &stamps)
+                .into_iter()
+                .filter(|item| item.post.kind == PostKind::Said)
+                .map(|item| !item.post.you)
+                .collect();
+        }
+        (
+            entry.authors.len() as u64,
+            entry.authors.iter().skip(read).any(|&by_agent| by_agent),
+        )
+    }
+
+    /// The console's own unread (D99).
+    ///
+    /// @main is the one conversation with no domain store behind it — its record
+    /// *is* the flow — so the host says when main has spoken rather than the
+    /// registry counting a source. `mention` is reserved for the one line that
+    /// arrives without main's consent: the D98 failure alert.
+    pub fn note_console(&mut self, mention: bool, tick: u64) {
+        let seq = self.get(&BufferId::Hub).map(|b| b.seq).unwrap_or(0) + 1;
+        self.observe(BufferId::Hub, seq, mention, tick);
     }
 
     /// Tee of the lifecycle stream (`UiEvent::WatchEvent`).
@@ -480,20 +569,26 @@ impl Buffers {
         if *id == BufferId::Hub {
             return Vec::new();
         }
-        let posts: Vec<Post> = match id {
-            BufferId::Hub => Vec::new(),
-            BufferId::Channel(name) => channel_posts(&session.channels.log_of(name), USER_NAME),
-            BufferId::Dm(name) => match session.agents.view_of(name) {
-                // Settled history only: the live tail, the in-flight claim and
-                // the queued items are states, not record, and the host draws
-                // those itself once it is showing the conversation.
-                Some((history, stamps, ..)) => {
-                    dm_posts(&history, &stamps, &[], &[], &[], name, USER_NAME)
-                }
-                None => Vec::new(),
-            },
-        };
         let mut out = vec![Replay::Divider(self.rule_for(session, id))];
+        // A DM's work is folded into the message it belongs to (D99), so its
+        // replay is built by the pair walk rather than assembled from posts —
+        // an activity has nowhere to live on a `Post`.
+        if let BufferId::Dm(name) = id {
+            // Settled history only: the live tail, the in-flight claim and the
+            // queued items are states, not record, and the host draws those
+            // itself once it is showing the conversation.
+            let mut items = match session.agents.view_of(name) {
+                Some((history, stamps, ..)) => pair_replay(name, &history, &stamps),
+                None => Vec::new(),
+            };
+            let start = items.len().saturating_sub(budget);
+            out.extend(items.drain(start..));
+            return out;
+        }
+        let posts: Vec<Post> = match id {
+            BufferId::Channel(name) => channel_posts(&session.channels.log_of(name), USER_NAME),
+            BufferId::Hub | BufferId::Dm(_) => Vec::new(),
+        };
         let kept: Vec<&Post> = posts
             .iter()
             .filter(|p| matches!(p.kind, PostKind::Said | PostKind::Note))
@@ -605,10 +700,11 @@ pub fn deliver(session: &Arc<Session>, target: SubmitTarget) -> Delivery {
 // Extraction: a domain store's messages → posts
 //
 // These rules moved here from the retired workspace skin (D89). They are the
-// one place a stored conversation becomes displayable messages — the D64
-// `[DM from user]` handling, the scaffolding collapse and the live-turn tail
-// all live in `dm_posts`, and a second parser beside it was the one thing worth
-// avoiding.
+// one place a stored conversation becomes displayable messages. The recognition
+// of what a stored line *is* lives in `line_source`, and the attribution walk
+// over it in `tui::perspective`; what stays here is the presentation each view
+// wants — the pair lane and its live-turn tail (`dm_posts`), a room's log
+// (`channel_posts`), and the replay elements the flow prints (`pair_replay`).
 // ---------------------------------------------------------------------------
 
 /// What a message row shows besides its text.
@@ -678,12 +774,12 @@ pub fn channel_posts(log: &[ChannelMessage], me: &str) -> Vec<Post> {
 /// What one line of a stored user-role message *is*, by the shape the runtime
 /// composed it in (`absorb_inbox`, the task reminder, the steer path).
 ///
-/// One parser, two readers. The DM view collapses these to dim notes and throws
-/// the source away, because a pair conversation has only two parties and the
-/// bubble already says which. The perspective page (D96) needs the source
-/// itself, to decide which thread a line belongs to. Recognising the shapes
-/// twice was the one thing worth avoiding, so they are recognised here and each
-/// caller takes what it needs.
+/// **One parser, one walk.** The shapes are recognised here and nowhere else,
+/// and [`crate::tui::perspective::walk`] is the single reader that turns them
+/// into attributed posts. The observation page keeps every lane the walk files;
+/// the user's `@X` pair view ([`dm_posts`]) keeps the one lane it is in and
+/// drops the rest, which is why a room relay or a chase no longer renders in a
+/// DM as a dim note (D99) — it is not the user's conversation to read there.
 ///
 /// Anything the runtime wraps in its own brackets is not a message somebody
 /// typed; `None` is prose, which is the hub's default voice (the hub is the one
@@ -750,86 +846,6 @@ pub fn line_source(line: &str) -> Option<LineSource> {
     None
 }
 
-/// One line of runtime scaffolding → how it reads collapsed, or `None` for text
-/// a person actually wrote.
-fn scaffold_note(source: &LineSource) -> Option<String> {
-    match source {
-        LineSource::Room { channel, body } => Some(format!("#{channel} · {body}")),
-        // Only ever seen in the main agent's own history, where the pair view is
-        // not what renders it; collapsed here so the parser has one total match.
-        LineSource::Agent { name } => Some(format!("@{name} · direct message")),
-        // Both follow-up shapes collapse to one line here. The DM view has
-        // nowhere to put the distinction — see the perspective page, which does.
-        LineSource::HubBatched { .. } | LineSource::Chase => {
-            Some("follow-up · waiting for a reply".to_string())
-        }
-        // Handled by `user_posts` before it gets this far: one is dropped, the
-        // other ends the message.
-        LineSource::User | LineSource::TaskReminder => None,
-    }
-}
-
-/// A user-role message → posts. Runtime scaffolding collapses to [`PostKind::Note`]
-/// lines; whatever a person actually wrote stays a message.
-fn user_posts(text: &str, at: u64, me: &str) -> Vec<Post> {
-    let mut out = Vec::new();
-    let mut plain: Vec<&str> = Vec::new();
-    let flush = |plain: &mut Vec<&str>, out: &mut Vec<Post>| {
-        let joined = plain.join("\n");
-        plain.clear();
-        if joined.trim().is_empty() {
-            return;
-        }
-        out.push(Post {
-            from: me.to_string(),
-            you: true,
-            at,
-            text: joined,
-            kind: PostKind::Said,
-        });
-    };
-    for line in text.lines() {
-        match line_source(line) {
-            // The task reminder is a block, not a line: its marker heads a
-            // paragraph of instructions and the current task list, and
-            // everything after it in this message belongs to it.
-            Some(LineSource::TaskReminder) => {
-                flush(&mut plain, &mut out);
-                out.push(Post {
-                    from: me.to_string(),
-                    you: true,
-                    at: 0,
-                    text: "system note · task tools".to_string(),
-                    kind: PostKind::Note,
-                });
-                return out;
-            }
-            // The user's own DM marker is transport scaffolding: the bubble already says who
-            // spoke, so the line is dropped rather than shown — but it still flushes, so two
-            // batched DMs stay two bubbles instead of one merged paragraph.
-            Some(LineSource::User) => {
-                flush(&mut plain, &mut out);
-                continue;
-            }
-            Some(source) => {
-                if let Some(note) = scaffold_note(&source) {
-                    flush(&mut plain, &mut out);
-                    out.push(Post {
-                        from: me.to_string(),
-                        you: true,
-                        at: 0,
-                        text: note,
-                        kind: PostKind::Note,
-                    });
-                }
-            }
-            None => plain.push(line),
-        }
-    }
-    flush(&mut plain, &mut out);
-    out
-}
-
 /// The collapsed reasoning row, exactly the transcript's header: the phase is
 /// shown, the stream is not.
 pub(crate) const THINKING_ROW: &str = "✻ Thinking";
@@ -847,13 +863,25 @@ pub(crate) fn tool_call_line(name: &str, input: &serde_json::Value) -> String {
     }
 }
 
-/// Subagent history + live turn → posts. User turns and assistant prose form
-/// the conversation; the work between them — tool calls and reasoning phases —
-/// shows as dim [`PostKind::Process`] rows, mirroring the main transcript
-/// (which keeps `⏺ Tool(…)` lines and the collapsed `✻ Thinking` header in the
-/// scrollback). `in_flight` is the messages already claimed by the running turn
-/// but not yet landed in history: rendered as ordinary sent messages, so a
-/// message never vanishes between the send and the turn's end.
+/// Subagent history + live turn → the **pair lane**: the user's conversation
+/// with this agent and nothing else (D99).
+///
+/// What renders is what the user said (the D64 marker, the steer path), what
+/// the agent answered *them*, and the work the agent did for those turns — the
+/// protagonist rule, borrowed whole from the observation page. Main's
+/// instructions, room relays, `[message from @X]` mail, chases, the task
+/// reminder and the prompt the instance was created with all belong to a lane
+/// that is not this one, and the page ([`crate::tui::perspective`]) is where
+/// they are read.
+///
+/// The lane comes from [`crate::tui::perspective::pair_lane`] rather than from a
+/// splitter of its own: [`line_source`] is the one parser, and the attribution
+/// walk above it is the one walk.
+///
+/// `in_flight` is the messages already claimed by the running turn but not yet
+/// landed in history, and `pending` the ones still in the inbox; both are the
+/// user's own — the caller filters by sender — so a message never vanishes
+/// between the send and the turn's end.
 pub fn dm_posts(
     history: &[Message],
     stamps: &[u64],
@@ -861,9 +889,7 @@ pub fn dm_posts(
     live: &[crate::agents::LiveBlock],
     pending: &[String],
     who: &str,
-    me: &str,
 ) -> Vec<Post> {
-    let mut out = Vec::new();
     let process = |text: String| Post {
         from: who.to_string(),
         you: false,
@@ -871,36 +897,15 @@ pub fn dm_posts(
         text,
         kind: PostKind::Process,
     };
-    for (i, msg) in history.iter().enumerate() {
-        // `stamps[i]` is when `history[i]` landed in the record (0 = no clock).
-        let at = stamps.get(i).copied().unwrap_or(0);
-        for block in &msg.content {
-            match (msg.role, block) {
-                (ApiRole::User, ContentBlock::Text { text }) => {
-                    out.extend(user_posts(text, at, me))
-                }
-                (ApiRole::Assistant, ContentBlock::Text { text }) => out.push(Post {
-                    from: who.to_string(),
-                    you: false,
-                    at,
-                    text: text.clone(),
-                    kind: PostKind::Said,
-                }),
-                (ApiRole::Assistant, ContentBlock::ToolUse { name, input, .. }) => {
-                    out.push(process(tool_call_line(name, input)));
-                }
-                (ApiRole::Assistant, ContentBlock::Thinking { .. }) => {
-                    out.push(process(THINKING_ROW.to_string()));
-                }
-                _ => {}
-            }
-        }
-    }
+    let mut out: Vec<Post> = crate::tui::perspective::pair_lane(who, history, stamps)
+        .into_iter()
+        .map(|item| item.post)
+        .collect();
     // Claimed by the running turn, not yet in the record: an ordinary message
     // (it is one — the run's prompt carries it), just without a landing clock.
     for text in in_flight {
         out.push(Post {
-            from: me.to_string(),
+            from: USER_NAME.to_string(),
             you: true,
             at: 0,
             text: text.clone(),
@@ -909,7 +914,7 @@ pub fn dm_posts(
     }
     for text in pending {
         out.push(Post {
-            from: me.to_string(),
+            from: USER_NAME.to_string(),
             you: true,
             at: 0,
             text: text.clone(),
@@ -951,6 +956,187 @@ pub fn dm_posts(
             kind: PostKind::Typing,
         });
     }
+    out
+}
+
+/// An empty message of one role — the shape every replayed element starts from.
+fn blank_message(role: Role) -> UiMessage {
+    UiMessage {
+        role,
+        text: String::new(),
+        at: 0,
+        activities: Vec::new(),
+        insert_points: Vec::new(),
+        groups: Vec::new(),
+        group_of: Vec::new(),
+    }
+}
+
+/// A replayed tool name as a `&'static str`, interned.
+///
+/// The activity model holds tool names by static reference, and the live path
+/// leaks the streamed name once per call. A replay re-reads the same names on
+/// every switch, so it interns instead: one leak per distinct name for the life
+/// of the process, rather than one per switch.
+fn interned_tool(name: &str) -> &'static str {
+    use std::collections::HashSet;
+    use std::sync::{Mutex, OnceLock};
+    static NAMES: OnceLock<Mutex<HashSet<&'static str>>> = OnceLock::new();
+    let mut seen = NAMES
+        .get_or_init(|| Mutex::new(HashSet::new()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(found) = seen.get(name) {
+        return found;
+    }
+    let leaked: &'static str = Box::leak(name.to_string().into_boxed_str());
+    seen.insert(leaked);
+    leaked
+}
+
+/// Hang one step of an agent's work on the message it belongs to, exactly the
+/// way the console's tool events hang it on main's (D99).
+///
+/// The grouping rules are not restated here — [`crate::tui::chat::classify_tool`]
+/// decides what collapses and [`crate::tui::chat::collapse_summary`] words it,
+/// so `4 searches, 2 reads` reads the same in an agent's DM as in @main. What a
+/// replay cannot supply is the *output*: a stored history keeps the call, and
+/// the tool's result went to the model, not to the record. So expanding a
+/// replayed group shows the calls it folded and no output rows — the record
+/// (ctrl+o, the observation page) is where the rest is.
+fn push_work(message: &mut UiMessage, work: &crate::tui::perspective::Work) {
+    use crate::tui::activities::{Activity, ActivityKind, Thinking, ThinkingState, ToolCall};
+    use crate::tui::chat::{CollapseGroup, CollapseKind, classify_tool};
+
+    let idx = message.activities.len();
+    let at = message.text.chars().count();
+    match work {
+        crate::tui::perspective::Work::Thinking => {
+            message
+                .activities
+                .push(Activity::new(ActivityKind::Thinking(Thinking {
+                    state: ThinkingState::Done,
+                    duration_ms: 0,
+                    stage: "",
+                    done_verb: None,
+                    start_tick: 0,
+                    segments: 1,
+                })));
+            message.insert_points.push(at);
+            message.group_of.push(None);
+        }
+        crate::tui::perspective::Work::Tool { name, input } => {
+            message
+                .activities
+                .push(Activity::new(ActivityKind::Tool(ToolCall {
+                    name: interned_tool(name),
+                    // Settled: the call is in the record, so it ran to an end.
+                    status: crate::tui::activities::ToolStatus::Done,
+                    summary: crate::query::summarize_input(name, input),
+                    duration_ms: 0,
+                    output: None,
+                    result_summary: None,
+                })));
+            message.insert_points.push(at);
+            message.group_of.push(None);
+            let Some(kind) = classify_tool(name, input) else {
+                // A call that does not collapse ends whatever run was open —
+                // the console's rule, so a `Write` between two reads breaks the
+                // group here too.
+                if let Some(group) = message.groups.last_mut() {
+                    group.active = false;
+                }
+                return;
+            };
+            let open = message
+                .groups
+                .last()
+                .is_some_and(|g| g.active && !g.activities.is_empty());
+            if !open {
+                message.groups.push(CollapseGroup {
+                    active: true,
+                    ..CollapseGroup::default()
+                });
+            }
+            let g = message.groups.len().saturating_sub(1);
+            message.group_of[idx] = Some(g);
+            message.groups[g].activities.push(idx);
+            match kind {
+                CollapseKind::Search => message.groups[g].search += 1,
+                CollapseKind::Read(Some(path)) => message.groups[g].read_paths.push(path),
+                CollapseKind::Read(None) => message.groups[g].read_ops += 1,
+                CollapseKind::List => message.groups[g].list += 1,
+                CollapseKind::Bash => message.groups[g].bash += 1,
+                CollapseKind::AgentCheck => message.groups[g].agent_checks += 1,
+                CollapseKind::AgentStop => message.groups[g].agent_stops += 1,
+                CollapseKind::AgentDelete => message.groups[g].agent_deletes += 1,
+            }
+        }
+    }
+}
+
+/// The pair lane as replay elements (D99).
+///
+/// The user's messages come back one bubble each. The agent's *run* — its prose
+/// and the work it did between sentences — comes back as **one message with
+/// activities**, which is the unit the console holds a turn in, so the same
+/// renderer folds it into `⏺ Searched for 4 patterns, read 2 files`. That is
+/// the whole reason this is not a list of dim `⏺ Tool(…)` lines any more.
+///
+/// A run ends where anything at all stood between two of the agent's rows in
+/// the full record — a message from main, a room relay, a chase — because that
+/// something is what ended it, even though this lane never shows it. The rule
+/// also keeps the replay **append-only**: every continuation is triggered by an
+/// item that breaks the run, so a message already printed never grows.
+fn pair_replay(who: &str, history: &[Message], stamps: &[u64]) -> Vec<Replay> {
+    let mut out: Vec<Replay> = Vec::new();
+    let mut open: Option<UiMessage> = None;
+    fn flush(open: &mut Option<UiMessage>, out: &mut Vec<Replay>, who: &str) {
+        let Some(mut message) = open.take() else {
+            return;
+        };
+        // The turn is over, so nothing in it is still running: the console
+        // closes the last group at `TurnEnd` and a replay is all past tense.
+        if let Some(group) = message.groups.last_mut() {
+            group.active = false;
+        }
+        out.push(Replay::Message {
+            who: who.to_string(),
+            message,
+        });
+    }
+    for item in crate::tui::perspective::pair_lane(who, history, stamps) {
+        if item.post.you {
+            flush(&mut open, &mut out, who);
+            let mut message = blank_message(Role::User);
+            message.text = item.post.text;
+            message.at = item.post.at;
+            out.push(Replay::Message {
+                who: USER_NAME.to_string(),
+                message,
+            });
+            continue;
+        }
+        if !item.contiguous {
+            flush(&mut open, &mut out, who);
+        }
+        let message = open.get_or_insert_with(|| blank_message(Role::Assistant));
+        match &item.work {
+            Some(work) => push_work(message, work),
+            None => {
+                if !message.text.is_empty() {
+                    message.text.push_str("\n\n");
+                }
+                message.text.push_str(&item.post.text);
+                // The reply's clock is when its last piece landed, which is the
+                // rule the console stamps a turn with.
+                if item.post.at != 0 {
+                    message.at = item.post.at;
+                }
+            }
+        }
+    }
+    flush(&mut open, &mut out, who);
     out
 }
 
@@ -1003,6 +1189,24 @@ mod tests {
             content: vec![ContentBlock::Text {
                 text: text.to_string(),
             }],
+        }
+    }
+
+    /// A message the *user* sent, in the shape `absorb_inbox` records it: the
+    /// D64 marker heading the text. Unmarked prose is the main agent talking,
+    /// which is exactly what the pair view has to tell apart (D99).
+    fn from_user(text: &str) -> Message {
+        Message::user_text(format!(
+            "{}\n{text}",
+            crate::tool::agent::DM_FROM_USER_MARKER
+        ))
+    }
+
+    fn tool_use(name: &str, input: serde_json::Value) -> ContentBlock {
+        ContentBlock::ToolUse {
+            id: "toolu_1".to_string(),
+            name: name.to_string(),
+            input,
         }
     }
 
@@ -1182,6 +1386,9 @@ mod tests {
         );
     }
 
+    /// Rewritten for D99: the measure is the pair lane's messages, so the
+    /// history the badge counts has to be a conversation rather than a stack of
+    /// bare replies — an agent's report on its spawn task is main's, not yours.
     #[test]
     fn unread_counts_one_per_message_and_moves_the_stamp() {
         let session = test_session();
@@ -1191,16 +1398,16 @@ mod tests {
         let id = BufferId::Dm("scout".to_string());
         assert_eq!(buffers.get(&id).map(|buffer| buffer.last_activity), Some(1));
 
-        session.agents.finish("scout", vec![assistant("one")], 0);
+        let mut history = vec![from_user("look at the parser"), assistant("one")];
+        session.agents.finish("scout", history.clone(), 0);
         buffers.refresh(&session, 7);
-        assert_eq!(buffers.get(&id).map(Buffer::unread), Some(1));
+        assert_eq!(buffers.get(&id).map(Buffer::unread), Some(2));
         assert_eq!(buffers.get(&id).map(|buffer| buffer.last_activity), Some(7));
 
-        session
-            .agents
-            .finish("scout", vec![assistant("one"), assistant("two")], 0);
+        history.push(assistant("two"));
+        session.agents.finish("scout", history, 0);
         buffers.refresh(&session, 9);
-        assert_eq!(buffers.get(&id).map(Buffer::unread), Some(2));
+        assert_eq!(buffers.get(&id).map(Buffer::unread), Some(3));
         assert_eq!(buffers.get(&id).map(|buffer| buffer.last_activity), Some(9));
 
         // A poll that finds nothing new leaves the stamp where it was.
@@ -1208,14 +1415,88 @@ mod tests {
         assert_eq!(buffers.get(&id).map(|buffer| buffer.last_activity), Some(9));
     }
 
+    /// The badge counts what was *said* (D99). It used to count the history's
+    /// length, so a turn that made forty tool calls read as forty unread
+    /// messages — a number about the agent's work rather than about anything
+    /// addressed to the reader.
     #[test]
-    fn a_dm_is_addressed_to_you_by_construction() {
+    fn a_dm_counts_messages_and_not_the_work_between_them() {
+        let session = test_session();
+        seed_agent(&session, "scout", Vec::new());
         let mut buffers = Buffers::new();
-        buffers.observe(BufferId::Dm("scout".to_string()), 0, true, 1);
-        buffers.observe(BufferId::Dm("scout".to_string()), 1, true, 2);
-        let buf = buffers.get(&BufferId::Dm("scout".to_string()));
-        assert_eq!(buf.map(Buffer::unread), Some(1));
-        assert_eq!(buf.map(Buffer::mention), Some(true));
+        buffers.refresh(&session, 1);
+        let id = BufferId::Dm("scout".to_string());
+
+        let history = vec![
+            from_user("find the leak"),
+            Message {
+                role: crate::api::types::Role::Assistant,
+                content: vec![
+                    ContentBlock::Text {
+                        text: "looking".to_string(),
+                    },
+                    tool_use("Grep", serde_json::json!({"pattern": "leak"})),
+                    tool_use("Read", serde_json::json!({"file_path": "a.rs"})),
+                    tool_use("Read", serde_json::json!({"file_path": "b.rs"})),
+                ],
+            },
+            assistant("found it"),
+        ];
+        session.agents.finish("scout", history, 0);
+        buffers.refresh(&session, 2);
+        assert_eq!(
+            buffers.get(&id).map(Buffer::unread),
+            Some(3),
+            "one from you, two from it — the three tool calls are work"
+        );
+    }
+
+    /// A mention means the agent answered *you*. Every DM change used to raise
+    /// one, which is badge blindness by construction: the accent was always on,
+    /// so it said nothing (D99).
+    #[test]
+    fn a_dm_wants_you_when_the_agent_answers_and_not_when_you_speak() {
+        let session = test_session();
+        seed_agent(&session, "scout", Vec::new());
+        let mut buffers = Buffers::new();
+        buffers.refresh(&session, 1);
+        let id = BufferId::Dm("scout".to_string());
+
+        // Your own message landing in the record is not somebody wanting you.
+        session
+            .agents
+            .finish("scout", vec![from_user("look at the parser")], 0);
+        buffers.refresh(&session, 2);
+        assert_eq!(buffers.get(&id).map(Buffer::unread), Some(1));
+        assert_eq!(buffers.get(&id).map(Buffer::mention), Some(false));
+
+        session.agents.finish(
+            "scout",
+            vec![from_user("look at the parser"), assistant("found it")],
+            0,
+        );
+        buffers.refresh(&session, 3);
+        assert_eq!(buffers.get(&id).map(Buffer::mention), Some(true));
+
+        // And main's traffic through the same instance is not a DM at all.
+        buffers.mark_read(&id);
+        session.agents.finish(
+            "scout",
+            vec![
+                from_user("look at the parser"),
+                assistant("found it"),
+                Message::user_text("also check the lexer"),
+                assistant("checked"),
+            ],
+            0,
+        );
+        buffers.refresh(&session, 4);
+        assert_eq!(
+            buffers.get(&id).map(Buffer::unread),
+            Some(0),
+            "an exchange with main adds nothing to the user's own lane"
+        );
+        assert_eq!(buffers.get(&id).map(Buffer::mention), Some(false));
     }
 
     #[test]
@@ -1428,7 +1709,7 @@ mod tests {
         ];
         seed_agent(&session, "scout", history.clone());
         let (stored, stamps, ..) = session.agents.view_of("scout").expect("the instance");
-        let posts = dm_posts(&stored, &stamps, &[], &[], &[], "scout", USER_NAME);
+        let posts = dm_posts(&stored, &stamps, &[], &[], &[], "scout");
 
         let buffers = Buffers::new();
         let replay = buffers.rehydrate(&session, &BufferId::Dm("scout".to_string()), 50);
@@ -1507,21 +1788,140 @@ mod tests {
         assert_eq!(buffers.rule_for(&session, &id), "── #parser ──");
     }
 
+    /// Rewritten for D99: a run of the agent's replies is one message now, so a
+    /// budget of two has to be counted over an exchange rather than over three
+    /// consecutive answers that would fold into one.
     #[test]
     fn a_replay_keeps_to_its_budget() {
         let session = test_session();
         seed_agent(
             &session,
             "scout",
-            vec![assistant("one"), assistant("two"), assistant("three")],
+            vec![
+                from_user("one"),
+                assistant("two"),
+                from_user("three"),
+                assistant("four"),
+            ],
         );
         let buffers = Buffers::new();
         let replay = buffers.rehydrate(&session, &BufferId::Dm("scout".to_string()), 2);
         assert_eq!(
             texts(&replay),
-            vec!["── @scout ──", "two", "three"],
+            vec!["── @scout ──", "three", "four"],
             "the budget keeps the tail, not the head"
         );
+    }
+
+    /// D99: an agent's work comes back as activities on its own message, so the
+    /// console's collapse machinery folds it — `⏺ Searched for 1 pattern, read
+    /// 2 files` — instead of the four flat dim lines the DM used to print. The
+    /// grouping rules are not restated here; the point is that they are reached.
+    #[test]
+    fn a_dms_work_comes_back_as_activity_groups_and_never_as_flat_lines() {
+        let session = test_session();
+        seed_agent(
+            &session,
+            "scout",
+            vec![
+                from_user("find the leak"),
+                Message {
+                    role: crate::api::types::Role::Assistant,
+                    content: vec![
+                        ContentBlock::Text {
+                            text: "looking".to_string(),
+                        },
+                        tool_use("Grep", serde_json::json!({"pattern": "leak"})),
+                        tool_use("Read", serde_json::json!({"file_path": "a.rs"})),
+                        tool_use("Read", serde_json::json!({"file_path": "b.rs"})),
+                        ContentBlock::Text {
+                            text: "found it".to_string(),
+                        },
+                    ],
+                },
+            ],
+        );
+        let buffers = Buffers::new();
+        let replay = buffers.rehydrate(&session, &BufferId::Dm("scout".to_string()), 50);
+        assert_eq!(
+            texts(&replay),
+            vec!["── @scout ──", "find the leak", "looking\n\nfound it"],
+            "one message for the run, not one per block and none per tool"
+        );
+        let Replay::Message { message, .. } = &replay[2] else {
+            panic!("the agent's turn is a message: {replay:?}")
+        };
+        assert_eq!(message.activities.len(), 3, "every call is an activity");
+        assert_eq!(
+            message.groups.len(),
+            1,
+            "and consecutive collapsible calls are one group"
+        );
+        assert!(!message.groups[0].active, "a replayed group is past tense");
+        assert_eq!(
+            crate::tui::chat::collapse_summary(&message.groups[0], false),
+            "Searched for 1 pattern, read 2 files",
+            "the console's own wording, reached rather than reimplemented"
+        );
+        // The work sits between the prose it happened between, which is what an
+        // insert point is for.
+        assert_eq!(message.insert_points, vec![7, 7, 7]);
+    }
+
+    /// A tool call the console does not collapse ends the group, here too.
+    #[test]
+    fn a_standalone_call_closes_the_group_the_way_the_console_closes_it() {
+        let session = test_session();
+        seed_agent(
+            &session,
+            "scout",
+            vec![
+                from_user("fix it"),
+                Message {
+                    role: crate::api::types::Role::Assistant,
+                    content: vec![
+                        tool_use("Read", serde_json::json!({"file_path": "a.rs"})),
+                        tool_use("Write", serde_json::json!({"file_path": "a.rs"})),
+                        tool_use("Read", serde_json::json!({"file_path": "b.rs"})),
+                    ],
+                },
+            ],
+        );
+        let buffers = Buffers::new();
+        let replay = buffers.rehydrate(&session, &BufferId::Dm("scout".to_string()), 50);
+        let Replay::Message { message, .. } = &replay[2] else {
+            panic!("{replay:?}")
+        };
+        assert_eq!(message.groups.len(), 2, "the write broke the run");
+        assert_eq!(message.group_of, vec![Some(0), None, Some(1)]);
+    }
+
+    /// A name reaches the person whatever case it is written in, and a longer
+    /// word that merely starts with it does not (D99). The literal-`@user` test
+    /// this replaced made the badge depend on the model's typing.
+    #[test]
+    fn a_room_says_your_name_whatever_case_it_uses() {
+        for reaching in [
+            "@user can you look",
+            "@User can you look",
+            "@USER, look",
+            "(@user) look",
+            "look at this @user",
+        ] {
+            assert!(
+                names(reaching, USER_NAME),
+                "{reaching:?} is addressed to you"
+            );
+        }
+        for not in [
+            "@username can you look",
+            "@user-2 can you look",
+            "mail@user.example",
+            "the user should look",
+            "userful",
+        ] {
+            assert!(!names(not, USER_NAME), "{not:?} is not");
+        }
     }
 
     /// The lifecycle log survived the board it used to back: it is the

@@ -7,15 +7,18 @@
 //! privacy stance names — X's DM with somebody who is not the user is visible
 //! *here*, and only here, while the user's own `@X` pair view stays pure.
 //!
-//! **Why the split is work rather than a filter.** [`crate::tui::buffer::dm_posts`]
-//! does not filter by counterpart at all: it renders the whole of X's history
-//! with every user-role message attributed to the user, because a pair view has
-//! two parties and the bubble already says which one spoke. A perspective page
-//! has as many parties as ever wrote to X, so it has to recover the sender —
-//! and the sender is not a field. `InboxItem::Direct` carries a real `from`,
-//! but `absorb_inbox` renders it into one flat prompt string and the name is
-//! gone: what survives is a set of literal markers, which
-//! [`crate::tui::buffer::line_source`] is the single parser for.
+//! **Why the split is work rather than a filter.** The sender is not a field.
+//! `InboxItem::Direct` carries a real `from`, but `absorb_inbox` renders the
+//! batch into one flat prompt string and the name is gone: what survives is a
+//! set of literal markers, which [`crate::tui::buffer::line_source`] is the
+//! single parser for. Recovering who said what is therefore a walk, and [`walk`]
+//! is it.
+//!
+//! **And the walk has two readers (D99).** [`dossier`] keeps every lane the walk
+//! files. [`pair_lane`] keeps exactly one — the user's — and that is what
+//! [`crate::tui::buffer::dm_posts`] renders, so `@X` is the pure pair the model
+//! says it is and this page is where everything else in X's life is read. The
+//! two cannot disagree about attribution, because there is one walk.
 //!
 //! **What the markers can and cannot say** (the D96 attribution inventory):
 //!
@@ -135,7 +138,7 @@ impl Dossier {
 
 /// Where one piece of a user-role message belongs.
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum Target {
+pub(crate) enum Target {
     /// A counterpart's DM lane. Also becomes the *active* lane, which is what
     /// X's following turns attach to.
     Dm(String),
@@ -143,6 +146,149 @@ enum Target {
     /// Real, but attributable to nobody: it lands in the timeline and nowhere
     /// else, which is the rule that keeps a thread honest.
     TimelineOnly,
+}
+
+/// What one of X's own rows *was*, for a reader that needs more than the line.
+///
+/// The line ([`tool_call_line`], [`THINKING_ROW`]) is all a thread pager needs.
+/// The pair view (D99) renders X's work the way the console renders main's —
+/// collapsed activity groups — and the classifier that builds those groups
+/// reads the call, not the sentence it printed.
+#[derive(Debug, Clone)]
+pub(crate) enum Work {
+    Tool {
+        name: String,
+        input: serde_json::Value,
+    },
+    Thinking,
+}
+
+/// One piece of an agent's record, in the order the record holds it.
+#[derive(Debug, Clone)]
+pub(crate) struct Filed {
+    pub target: Target,
+    pub post: Post,
+    /// Set only on X's own work rows.
+    pub work: Option<Work>,
+}
+
+/// One agent's history → every post in it, in order, each already filed.
+///
+/// **The single recognition walk (D99).** The perspective page files every item
+/// into its lane; the user's `@X` pair view keeps the one lane it is in
+/// ([`pair_lane`]). Both therefore agree about who said what by construction,
+/// rather than by two parsers that happen to read the same markers today.
+pub(crate) fn walk(agent: &str, history: &[Message], stamps: &[u64]) -> Vec<Filed> {
+    let mut out: Vec<Filed> = Vec::new();
+    // Which lane X's own turns belong to: the counterpart it last heard from.
+    // Where interleaving makes exact reply-attribution impossible this is a
+    // best effort by construction — the timeline is the lane that is complete.
+    let mut active: Option<String> = None;
+    let mut seen_user_text = false;
+    let turn = |active: &Option<String>, post: Post, work: Option<Work>| Filed {
+        target: match active {
+            Some(name) => Target::Dm(name.clone()),
+            None => Target::TimelineOnly,
+        },
+        post,
+        work,
+    };
+    for (i, msg) in history.iter().enumerate() {
+        let at = stamps.get(i).copied().unwrap_or(0);
+        for block in &msg.content {
+            match (msg.role, block) {
+                (ApiRole::User, ContentBlock::Text { text }) => {
+                    let first = !seen_user_text;
+                    seen_user_text = true;
+                    for (target, post) in split_user_text(text, at, first) {
+                        if let Target::Dm(name) = &target {
+                            active = Some(name.clone());
+                        }
+                        out.push(Filed {
+                            target,
+                            post,
+                            work: None,
+                        });
+                    }
+                }
+                (ApiRole::Assistant, ContentBlock::Text { text }) => out.push(turn(
+                    &active,
+                    Post {
+                        from: agent.to_string(),
+                        you: false,
+                        at,
+                        text: text.clone(),
+                        kind: PostKind::Said,
+                    },
+                    None,
+                )),
+                (ApiRole::Assistant, ContentBlock::ToolUse { name, input, .. }) => out.push(turn(
+                    &active,
+                    Post {
+                        from: agent.to_string(),
+                        you: false,
+                        at: 0,
+                        text: tool_call_line(name, input),
+                        kind: PostKind::Process,
+                    },
+                    Some(Work::Tool {
+                        name: name.clone(),
+                        input: input.clone(),
+                    }),
+                )),
+                (ApiRole::Assistant, ContentBlock::Thinking { .. }) => out.push(turn(
+                    &active,
+                    Post {
+                        from: agent.to_string(),
+                        you: false,
+                        at: 0,
+                        text: THINKING_ROW.to_string(),
+                        kind: PostKind::Process,
+                    },
+                    Some(Work::Thinking),
+                )),
+                _ => {}
+            }
+        }
+    }
+    out
+}
+
+/// One post of the user↔agent pair lane, plus the one thing a filter loses.
+pub(crate) struct PairPost {
+    pub post: Post,
+    pub work: Option<Work>,
+    /// Whether the previous item of the *full* walk is the previous item here.
+    ///
+    /// The pair view merges X's consecutive rows into one message, the way the
+    /// console holds a turn. What must not merge is two runs with something
+    /// between them — a room relay, an instruction from main, a chase — because
+    /// that something is exactly what ended the first run, even though it
+    /// renders nowhere in this lane.
+    pub contiguous: bool,
+}
+
+/// The user's side of an agent's record: what the user said, what X answered
+/// them, and the work X did for those turns (D99).
+///
+/// Everything else — main's instructions, room relays, `[message from @X]`
+/// mail, chases, reminders, and the task that created the instance — belongs to
+/// a lane that is not this one, and lives on the observation page.
+pub(crate) fn pair_lane(agent: &str, history: &[Message], stamps: &[u64]) -> Vec<PairPost> {
+    let mut out: Vec<PairPost> = Vec::new();
+    let mut previous: Option<usize> = None;
+    for (i, filed) in walk(agent, history, stamps).into_iter().enumerate() {
+        if !matches!(&filed.target, Target::Dm(name) if name == USER_NAME) {
+            continue;
+        }
+        out.push(PairPost {
+            post: filed.post,
+            work: filed.work,
+            contiguous: previous == Some(i.wrapping_sub(1)),
+        });
+        previous = Some(i);
+    }
+    out
 }
 
 /// Scaffolding that no counterpart wrote: the runtime talking to itself.
@@ -331,79 +477,13 @@ pub fn dossier(
     let mut timeline: Vec<Post> = Vec::new();
     let mut dms: BTreeMap<String, Vec<Post>> = BTreeMap::new();
     let mut intake: Vec<Post> = Vec::new();
-    // Which lane X's own turns belong to: the counterpart it last heard from.
-    // Where interleaving makes exact reply-attribution impossible this is a
-    // best effort by construction — the timeline is the lane that is complete.
-    let mut active: Option<String> = None;
-    let mut seen_user_text = false;
 
-    let file = |target: &Target,
-                post: Post,
-                dms: &mut BTreeMap<String, Vec<Post>>,
-                intake: &mut Vec<Post>| {
-        match target {
-            Target::Dm(name) => dms.entry(name.clone()).or_default().push(post),
-            Target::Intake => intake.push(post),
+    for filed in walk(agent, history, stamps) {
+        timeline.push(filed.post.clone());
+        match filed.target {
+            Target::Dm(name) => dms.entry(name).or_default().push(filed.post),
+            Target::Intake => intake.push(filed.post),
             Target::TimelineOnly => {}
-        }
-    };
-
-    for (i, msg) in history.iter().enumerate() {
-        let at = stamps.get(i).copied().unwrap_or(0);
-        for block in &msg.content {
-            match (msg.role, block) {
-                (ApiRole::User, ContentBlock::Text { text }) => {
-                    let first = !seen_user_text;
-                    seen_user_text = true;
-                    for (target, post) in split_user_text(text, at, first) {
-                        timeline.push(post.clone());
-                        if let Target::Dm(name) = &target {
-                            active = Some(name.clone());
-                        }
-                        file(&target, post, &mut dms, &mut intake);
-                    }
-                }
-                (ApiRole::Assistant, ContentBlock::Text { text }) => {
-                    let post = Post {
-                        from: agent.to_string(),
-                        you: false,
-                        at,
-                        text: text.clone(),
-                        kind: PostKind::Said,
-                    };
-                    timeline.push(post.clone());
-                    if let Some(name) = &active {
-                        dms.entry(name.clone()).or_default().push(post);
-                    }
-                }
-                (ApiRole::Assistant, ContentBlock::ToolUse { name, input, .. }) => {
-                    let post = Post {
-                        from: agent.to_string(),
-                        you: false,
-                        at: 0,
-                        text: tool_call_line(name, input),
-                        kind: PostKind::Process,
-                    };
-                    timeline.push(post.clone());
-                    if let Some(lane) = &active {
-                        dms.entry(lane.clone()).or_default().push(post);
-                    }
-                }
-                (ApiRole::Assistant, ContentBlock::Thinking { .. }) => {
-                    let post = Post {
-                        from: agent.to_string(),
-                        you: false,
-                        at: 0,
-                        text: THINKING_ROW.to_string(),
-                        kind: PostKind::Process,
-                    };
-                    timeline.push(post.clone());
-                    if let Some(lane) = &active {
-                        dms.entry(lane.clone()).or_default().push(post);
-                    }
-                }
-                _ => {}
-            }
         }
     }
 
@@ -846,5 +926,121 @@ mod tests {
     fn an_agent_with_no_history_has_an_empty_page() {
         let page = dossier("scout", &[], &[], &[]);
         assert!(page.is_empty());
+    }
+
+    // ---- the pair lane (D99) ---------------------------------------------
+
+    fn from_user(text: &str) -> Message {
+        user(&format!(
+            "{}\n{text}",
+            crate::tool::agent::DM_FROM_USER_MARKER
+        ))
+    }
+
+    fn pair_texts(history: &[Message]) -> Vec<String> {
+        pair_lane("scout", history, &[])
+            .into_iter()
+            .map(|item| item.post.text)
+            .collect()
+    }
+
+    /// The `@agent` view is the user's lane and nothing else. Everything the
+    /// old flat view mixed into it — the task the instance was created with,
+    /// main's instructions, a room relay, another agent's mail, a chase, the
+    /// task reminder — belongs to a lane that is not this one.
+    #[test]
+    fn the_pair_lane_keeps_the_user_and_drops_everybody_else() {
+        let history = vec![
+            user("map the parser module"),
+            assistant(vec![text("on it")]),
+            user(
+                format!(
+                    "[#build msg #4] qa: the suite is red\n{}\nwhat did you find?",
+                    crate::tool::agent::DM_FROM_USER_MARKER
+                )
+                .as_str(),
+            ),
+            assistant(vec![text("a missing case")]),
+            user("[follow-up instruction] also check the lexer"),
+            assistant(vec![text("checked the lexer")]),
+            user("[follow-up 2/3] still waiting"),
+            user("[message from @qa]\nthe suite is red"),
+            user(&format!("{} something", crate::query::TASK_REMINDER_MARKER)),
+        ];
+        assert_eq!(
+            pair_texts(&history),
+            vec!["what did you find?", "a missing case"],
+            "the spawn prompt, the room relay, main's instruction, the chase, \
+             the mail and the reminder all live on the page"
+        );
+    }
+
+    /// Attribution is the perspective's own rule: a turn attaches to the
+    /// counterpart it last heard from. So a reply main drew stays out of the
+    /// user's lane and a reply the user drew stays in — the same walk answers
+    /// both, which is why they cannot disagree.
+    #[test]
+    fn a_reply_belongs_to_whoever_drew_it() {
+        let history = vec![
+            from_user("what did you find?"),
+            assistant(vec![text("for you")]),
+            user("look again"),
+            assistant(vec![text("for main")]),
+            from_user("and now?"),
+            assistant(vec![text("for you again")]),
+        ];
+        assert_eq!(
+            pair_texts(&history),
+            vec!["what did you find?", "for you", "and now?", "for you again"]
+        );
+    }
+
+    /// The agent's work rides with the turn it belongs to (the protagonist
+    /// rule), and the walk keeps the call itself so the pair view can hand it
+    /// to the console's collapse classifier.
+    #[test]
+    fn the_pair_lane_carries_the_work_of_its_own_turns() {
+        let history = vec![
+            from_user("find the leak"),
+            assistant(vec![
+                text("looking"),
+                tool("Grep", serde_json::json!({"pattern": "leak"})),
+            ]),
+        ];
+        let lane = pair_lane("scout", &history, &[]);
+        let work: Vec<&Post> = lane
+            .iter()
+            .map(|item| &item.post)
+            .filter(|p| p.kind == PostKind::Process)
+            .collect();
+        assert_eq!(work.len(), 1, "{lane:?}", lane = pair_texts(&history));
+        assert!(
+            matches!(
+                lane.iter().find_map(|item| item.work.as_ref()),
+                Some(Work::Tool { name, .. }) if name == "Grep"
+            ),
+            "the call survives the projection, not only the line it printed"
+        );
+    }
+
+    /// Contiguity is measured in the *full* walk, so anything that stood
+    /// between two of the agent's rows breaks the run even where this lane
+    /// never shows it. That is what keeps a replay append-only: every
+    /// continuation is triggered by something, and that something is a break.
+    #[test]
+    fn a_run_breaks_on_what_the_lane_does_not_show() {
+        let history = vec![
+            from_user("go"),
+            assistant(vec![text("first")]),
+            user("[follow-up 2/3] still waiting"),
+            assistant(vec![text("second")]),
+        ];
+        let lane = pair_lane("scout", &history, &[]);
+        let contiguous: Vec<bool> = lane.iter().map(|item| item.contiguous).collect();
+        assert_eq!(
+            contiguous,
+            vec![false, true, false],
+            "the chase is invisible here and still ends the run"
+        );
     }
 }

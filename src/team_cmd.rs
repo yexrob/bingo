@@ -376,8 +376,12 @@ fn validate(session: &Arc<Session>, cwd: &Path) -> Vec<String> {
     }
 }
 
-/// The portraits a scaffolded crew may wear: every one except the two the hub
-/// and the human already occupy in the transcript.
+/// The portraits a scaffolded crew may wear: every one except the two the main
+/// agent and the human already occupy in the transcript.
+///
+/// Filtered by the portrait each id *resolves to* rather than by its position in
+/// the list — since D99 reserved main's face, `ids()` no longer starts at
+/// portrait 0 and the two numbers are not the same.
 fn crew_portraits() -> Vec<&'static str> {
     let taken = [
         crate::tui::avatar::index_of(crate::channels::HUB_NAME),
@@ -385,9 +389,9 @@ fn crew_portraits() -> Vec<&'static str> {
     ];
     crate::tui::avatar::ids()
         .into_iter()
-        .enumerate()
-        .filter(|(i, _)| !taken.contains(i))
-        .map(|(_, id)| id)
+        .filter(|id| {
+            crate::tui::avatar::index_of_id(id).is_some_and(|index| !taken.contains(&index))
+        })
         .collect()
 }
 
