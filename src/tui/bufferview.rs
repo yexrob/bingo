@@ -995,10 +995,15 @@ mod tests {
         }
         let chip_rows = raw_rows(&mut chip);
         let placed_rows = raw_rows(&mut placed);
+        // The one licensed height difference: a lead message shorter than the
+        // portrait is padded to the portrait's two rows in the image skin only
+        // (the chip is one row and pads nothing). Here that is the one-line
+        // user question, so the placed skin is exactly one row taller — any
+        // other drift between the skins is still a bug this test catches.
         assert_eq!(
-            chip_rows.len(),
             placed_rows.len(),
-            "the row count is the same in both skins"
+            chip_rows.len() + 1,
+            "the skins differ by exactly the short message's pad row"
         );
         use crate::tui::line::text_width;
         // The message column opens at the gutter's own width in either skin, and

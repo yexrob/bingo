@@ -4761,3 +4761,20 @@ D109 (pane mode) is the only batch still to come and owns none of these.
 
 17. **`src/tool/agent.rs` is 3994 of its 4000-line cap.** Pre-existing, and now six lines from the
     gate. The next thing to add there has to split the file.
+
+### D108a. Smoke fixup: a short message no longer cuts the portrait at the waist
+
+Found on the first real-terminal run of v4, by the user, in the console and
+the room zoom alike: a lead message one row tall drew a two-row portrait with
+nowhere to put its second row — `gutter_rows` walks the rows it is given and
+silently drops the cells past the end, so the kitty placeholder's bottom row
+never reached the screen and the face rendered clipped.
+
+The rule now stated once at both entry points (`Gutter::apply` and the
+`El::Gutter` render arm): every gutter cell must have a row to ride, and a
+child shorter than its cells is padded with blank rows at the end. `cells()`
+stopped listing the chip skin's second row — it was the blank cell by another
+name — so only the image skin ever pads and the chip skin keeps its heights.
+That amends the D97 doctrine "the row count is identical either way" to
+"identical everywhere but a lead message shorter than the portrait", and the
+cross-skin layout test now pins the difference at exactly the pad row.

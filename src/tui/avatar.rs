@@ -14,8 +14,11 @@
 //! was already spending on indentation.
 //!
 //! Terminals that cannot place images keep the initial-on-colour chip. That is the
-//! only fallback: the row count is identical either way, so the two skins differ in
-//! the gutter and nowhere else.
+//! only fallback: the two skins differ in the gutter and nowhere else, and their
+//! row counts agree everywhere but one place — a lead message shorter than the
+//! portrait is padded to the portrait's height in the image skin (see
+//! [`Gutter::apply`]), because a face cut off at the waist is worse than a blank
+//! row, and the chip never needs the room.
 
 use ratatui::style::Color;
 
@@ -346,11 +349,18 @@ impl<'a> Gutter<'a> {
     /// `lead` is false for every message after the first of a sender's run —
     /// Slack's convention, and the reason a burst of replies reads as one turn
     /// instead of a column of repeated portraits.
+    ///
+    /// Only rows that carry something are returned: the portrait's [`ROWS`]
+    /// in the image skin, the chip's single row otherwise (its second row is
+    /// the blank cell, so listing it would only make a one-line message look
+    /// like it owed a row it does not). The length of this Vec is therefore
+    /// the number of rows the message must have — see [`Gutter::apply`].
     pub fn cells(&self, index: usize, name: &str, lead: bool) -> Vec<Line> {
         if !lead {
             return Vec::new();
         }
-        (0..ROWS)
+        let rows = if self.images { ROWS } else { 1 };
+        (0..rows)
             .map(|row| gutter_cell(index, name, row, self.images, self.pal))
             .collect()
     }
@@ -358,8 +368,17 @@ impl<'a> Gutter<'a> {
     /// Indent a message's rows in place. The only entry point the row builders
     /// use, so "avatar on the first row of the run, blank everywhere else" is
     /// stated once.
-    pub fn apply(&self, rows: &mut [crate::tui::el::Row], index: usize, name: &str, lead: bool) {
+    ///
+    /// A message shorter than its portrait is padded with blank rows first: the
+    /// face is two cells tall and each cell must have a row to ride, or a
+    /// one-line message cuts the portrait in half at the waist. The chip skin
+    /// never pads — its face is one row — so the two skins still keep identical
+    /// heights everywhere the portrait fits.
+    pub fn apply(&self, rows: &mut Vec<crate::tui::el::Row>, index: usize, name: &str, lead: bool) {
         let cells = self.cells(index, name, lead);
+        while rows.len() < cells.len() {
+            rows.push(crate::tui::el::Row::new(Line::empty()));
+        }
         crate::tui::el::gutter_rows(rows, &cells, &self.blank());
     }
 }
@@ -464,5 +483,47 @@ mod tests {
             !transmits(&[2], &cap, &mut sent).is_empty(),
             "new faces are sent"
         );
+    }
+
+    /// A one-line message under the image skin is padded to the portrait's
+    /// height — the fix for a face cut at the waist beside a short message
+    /// (found on the first real-terminal run of v4, in the console and the
+    /// room zoom alike; both come through [`Gutter::apply`] or the `El::Gutter`
+    /// arm, and both pad the same way). The chip skin's face is one row, so it
+    /// pads nothing and a short message keeps its height.
+    #[test]
+    fn a_short_message_is_padded_to_the_portraits_height() {
+        let pal = Palette::new(&Theme::dark());
+        let pinned = std::collections::HashMap::new();
+
+        let images = Gutter::new(true, &pal, &pinned);
+        assert_eq!(images.cells(1, "scout", true).len(), ROWS);
+        let mut rows = vec![crate::tui::el::Row::new(Line::styled(
+            "hi",
+            SegStyle::plain(),
+        ))];
+        images.apply(&mut rows, 1, "scout", true);
+        assert_eq!(rows.len(), ROWS, "the second face cell got a row to ride");
+
+        let chips = Gutter::new(false, &pal, &pinned);
+        assert_eq!(
+            chips.cells(1, "scout", true).len(),
+            1,
+            "the chip's second row is the blank cell and is not listed"
+        );
+        let mut rows = vec![crate::tui::el::Row::new(Line::styled(
+            "hi",
+            SegStyle::plain(),
+        ))];
+        chips.apply(&mut rows, 1, "scout", true);
+        assert_eq!(rows.len(), 1, "the chip skin pads nothing");
+
+        // A non-lead message wears no face and is never padded, in either skin.
+        let mut rows = vec![crate::tui::el::Row::new(Line::styled(
+            "hi",
+            SegStyle::plain(),
+        ))];
+        images.apply(&mut rows, 1, "scout", false);
+        assert_eq!(rows.len(), 1);
     }
 }

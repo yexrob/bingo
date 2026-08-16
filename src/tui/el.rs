@@ -290,11 +290,18 @@ fn walk(el: El, out: &mut Rendered) {
             child,
         } => {
             // The child renders first and is indented afterwards: it produces
-            // the same rows it would without a gutter, and the row count it
-            // produced is the row count that comes out — which is what lets the
-            // click ranges and the caret it declared stay correct.
+            // the same rows it would without a gutter, and the click ranges and
+            // caret it declared stay correct. One exception to "same row
+            // count": a child shorter than the gutter's cells is padded with
+            // blank rows at the end, so a two-row portrait beside a one-line
+            // message keeps its second row instead of being cut at the waist.
+            // The pad is appended after the child's rows, so nothing it
+            // declared moves.
             let start = out.rows.len();
             walk(*child, out);
+            while out.rows.len() - start < cells.len() {
+                out.rows.push(Row::new(crate::tui::line::Line::empty()));
+            }
             gutter_rows(&mut out.rows[start..], &cells, &blank);
         }
     }
@@ -389,6 +396,33 @@ mod tests {
         let out = render(el);
         assert_eq!(out.clicks.len(), 1);
         assert_eq!((out.clicks[0].start, out.clicks[0].end), (1, 3));
+    }
+
+    /// A child shorter than the gutter's cells is padded, not the portrait
+    /// truncated: a one-line message under a two-row face gains a blank row so
+    /// the face's second cell has a row to ride. The pad comes after the
+    /// child's rows, so anything it declared stays where it was.
+    #[test]
+    fn a_short_child_is_padded_to_the_gutter_cells() {
+        let cells = vec![
+            Line::styled("AB  ", SegStyle::plain()),
+            Line::styled("CD  ", SegStyle::plain()),
+        ];
+        let blank = Line::styled("    ", SegStyle::plain());
+        let out = render(El::gutter(
+            cells,
+            blank,
+            El::Lines(vec![Line::styled("hi", SegStyle::plain())]),
+        ));
+        let rows: Vec<String> = texts(&out)
+            .iter()
+            .map(|t| t.trim_end().to_string())
+            .collect();
+        assert_eq!(
+            rows,
+            vec!["AB  hi".to_string(), "CD".to_string()],
+            "one body row, two gutter cells: the second cell rides a pad row"
+        );
     }
 
     #[test]
