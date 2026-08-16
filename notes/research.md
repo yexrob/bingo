@@ -5131,3 +5131,73 @@ follows the same bit, and the pair of prompts is rewritten around it.
 Docs: guide.md (doctrine paragraph rewritten, main's half added),
 SendMessage room description states the send-side discipline.
 Tests: anchor set reworked as above. 1486 + 13 green.
+
+### D120. An agent's page is main's page
+
+The v6 headline, and the batch the wake gate was built for. The user's
+ruling, verbatim: enter an agent and it is *exactly like main* — same
+rendering, same conversation logic; main is just a slightly specialized
+agent. v4/v5's answer was the alt-screen zoom: a second renderer over
+flat post rows, no scrollback, no trace. Retired whole.
+
+- **One pipeline.** `conv.rs` builds an away page's messages from the
+  domain — `perspective::walk` for attribution (the same single walk the
+  pair lane uses), `group_ready_tool` (extracted from the live ToolReady
+  path) for collapse groups, so an agent's settled record folds exactly
+  the way the console folds its own work. The build swaps the page's
+  messages into `Chat::messages` for the duration of one `build_rows`
+  call: main's fields always describe main, main's events land in main's
+  store while any page is up, and the render/flush/scroll/click layers
+  needed no changes at all — the doc and its cursors simply describe
+  whichever page is active. A `speaker` field on `UiMessage` carries what
+  the marker walk cannot (a room's members); `None` falls back to
+  `speaker_of`, so main's flow is byte-identical.
+- **Switching is a page turn.** `term::page_break()` returns from
+  fix/page-switch@cf22b59 (D98's primitive, ported with its tests): rows
+  above the viewport bank into the terminal's own scrollback, the
+  viewport is erased, the next page starts at the top. Coming home parks
+  the flush cursor at the end and `rehydrate`s a windowful — the resize
+  machinery, D27's accepted duplicate. Fullscreen just swaps the doc.
+- **The page is live.** A fingerprint over the domain (history length,
+  live block sizes, in-flight, pending, state) rebuilds the page on
+  change; the streaming run rides after the settled messages as a
+  volatile block (prose as markdown, one dim row per tool call), never
+  flushed. The stable prefix is a pure function of append-only history,
+  which is what lets the flush cursor trust it.
+- **Same conversation logic.** Typing on a page is prose to its subject
+  through the `@name` grammar's own delivery (a `/` line is a message, a
+  stopped agent resumes, a room seats you before it speaks). Esc grew
+  two rungs on the one ladder: `AwayStop` (stop the page's run — main's
+  turn is out of reach while a page is up; ctrl+c keeps the override)
+  and `AwayHome` last. shift+tab cycles the viewed agent's mode and the
+  footer badge follows it. The room page is **speech only** — the v6
+  ruling — membership lines stay in the log and off the page.
+- **Deleted:** the zoom modal loop and its keys, `zoom_posts`/
+  `record_posts`/`channel_posts`/`settled_post_rows`/`sender_runs` (the
+  whole second renderer), `PostKind::{Queued,Typing}`, the
+  `open_zoom`/`close_zoom` signal fields, `zoom_chrome`/`zoom_footer`.
+  Net −1,200 lines while gaining full-parity pages.
+- Known limits, recorded honestly: history-derived Done rows carry no
+  per-call duration or token counts (the record never had them — D99's
+  limit, unchanged); the live tail is flat rows rather than the activity
+  tree (the registry publishes strings); ctrl+o's pager follows the
+  active page via `build_rows` but its fold toggles act on main's
+  messages while away. guide.md's zoom/keys sections are rewritten in
+  the next batch together with the roster's key changes — the two
+  batches rewrite the same sections and land adjacent.
+
+Docs: this record (guide/feedback-states fold into D121's sync).
+Tests: the zoom's modal suite retired with the modal; the page suite
+replaces it (`a_page_is_the_transcripts_own_pipeline`,
+`a_room_page_is_speech_only`,
+`typing_on_a_page_reaches_the_agent_as_the_user`,
+`a_message_to_a_stopped_agent_resumes_it`,
+`a_room_page_joins_before_it_speaks`,
+`esc_stops_the_run_first_and_comes_home_second`,
+`shift_tab_cycles_the_viewed_agents_mode_and_not_mains`,
+`entering_reads_the_conversation_and_leaving_gives_it_back`,
+`the_page_closes_when_its_subject_is_gone_and_stays_when_done`,
+`a_switch_owes_a_page_turn_and_home_reprints_the_tail`,
+`enter_on_a_tree_row_switches_comes_home_or_collapses`), plus
+`page_break_banks_the_page_and_erases_the_tail` in term.rs.
+1463 + 13 green.
