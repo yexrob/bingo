@@ -4100,3 +4100,27 @@ question intact. **1437 + 13 before, 1465 + 13 after.**
 6. *`README.zh-CN.md` is a batch behind.* It has no status-layer section at all and still names the team
    directory's retired `o` door — both inherited from D104. Nothing D105 did made it newly false, and D108
    owns the rewrite.
+
+### D105a. Review fixup: a message resumes a stopped instance
+
+D105's finding, closed by the reviewer. v4's member model (the CC subagent
+semantics the whole program replicates) says a message sent after a stop
+resumes the instance; `AgentRegistry::deliver` refused one instead, and every
+surface downstream had to carry the refusal as a named limit.
+
+The fix is four lines where the refusal was: a delivery that finds the entry
+`Stopped` flips it to `Idle` and lets the flush that already follows every
+delivery respawn the run — the registry never dropped the instance's session
+or history, so waking a stopped instance is literally the move `flush_pending`
+makes for an idle one. Nothing else resumes: `follow_up` pushes chase items
+without touching state and `deliver_channel` skips stopped members, so an
+automatic retry or a room broadcast cannot undo a stop the user asked for —
+only somebody addressing the instance on purpose can.
+
+Swept with it: the `AgentState::Stopped` doc, the tree's status comment, the
+guide's two grammar paragraphs and its named-limits row, feedback-states
+v1.74, and the zoom's pin test — `a_message_to_a_stopped_agent_says_what_did_
+not_happen` becomes `a_message_to_a_stopped_agent_resumes_it`, the same pin
+facing the other way. Both READMEs already claimed the resume worked (the
+D103-era text was written to the design, not the code) and are true now
+without an edit.

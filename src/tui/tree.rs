@@ -148,10 +148,10 @@ fn status_label(status: &AgentStatus, now: std::time::Instant) -> String {
         // CC's `[stopping]` slot. bingo's stop is synchronous, so the state
         // this row can be in is *stopped*, not stopping — and a stopped
         // instance stays on the roster because the registry keeps it: its
-        // history is intact and its record is still readable. It is **not**
-        // addressable, though: `AgentRegistry::deliver` refuses a stopped
-        // instance, so v4's resume-if-stopped semantics are unimplemented
-        // (D105's finding, and the correction to what D103 recorded here).
+        // history is intact, its record is still readable, and a direct
+        // message resumes it from that history (CC subagent semantics —
+        // `AgentRegistry::deliver` flips it back to idle and the delivery
+        // flush respawns the run).
         AgentState::Stopped => "[stopped]".to_string(),
         AgentState::Idle => format!(
             "Idle for {}",

@@ -939,18 +939,14 @@ mod tests {
         );
     }
 
-    /// **A stopped instance is not resumed by a message today**, and the zoom
-    /// reports the refusal instead of swallowing it.
-    ///
-    /// v4's member model says a message after a stop resumes the instance (CC
-    /// `SendMessageTool.ts:808-866`), and D103's record claimed bingo's deliver
-    /// path already did it. It does not: `AgentRegistry::deliver` answers
-    /// `"<name> is stopped and no longer accepts instructions"`. That is a
-    /// domain write path this batch is fenced out of, so the gap is pinned here
-    /// rather than papered over — and the one thing the view owes the user is
-    /// to say what did not happen.
+    /// **A message to a stopped instance resumes it** (CC subagent semantics,
+    /// `SendMessageTool.ts:808-866`): the registry kept its session and
+    /// history, so the delivery flips it off `Stopped` and the flush respawns
+    /// the run. D105 found this unimplemented and pinned the refusal here; the
+    /// review fixup implemented it, and this is the same pin facing the other
+    /// way — nothing on the warning tier, because something *did* happen.
     #[tokio::test]
-    async fn a_message_to_a_stopped_agent_says_what_did_not_happen() {
+    async fn a_message_to_a_stopped_agent_resumes_it() {
         let mut chat = test_chat();
         seed(&chat, "scout");
         chat.session.agents.stop("scout").expect("stopped");
@@ -964,16 +960,15 @@ mod tests {
         chat.set_input("carry on");
         key(&mut chat, KeyCode::Enter, KeyModifiers::NONE);
 
-        assert_eq!(chat.tree_instances()[0].state, AgentState::Stopped);
-        assert!(
-            chat.visible_warning()
-                .is_some_and(|w| w.contains("stopped") && w.contains("scout")),
-            "the refusal is on the warning tier: {:?}",
-            chat.visible_warning()
+        assert_ne!(
+            chat.tree_instances()[0].state,
+            AgentState::Stopped,
+            "the delivery woke the instance from its kept history"
         );
         assert!(
-            chat.slash_info_lines.is_empty(),
-            "and never as a receipt, which would claim a delivery"
+            chat.visible_warning().is_none(),
+            "nothing was refused: {:?}",
+            chat.visible_warning()
         );
     }
 

@@ -143,7 +143,7 @@ pub enum AgentState {
     Running,
     /// Waiting for a command (SendMessage wakes it immediately; history is kept).
     Idle,
-    /// Stopped (no longer receives messages; the name is released after delete).
+    /// Stopped (aborted; history is kept and a direct message resumes it — only delete releases the name).
     Stopped,
 }
 
@@ -1169,9 +1169,14 @@ impl AgentRegistry {
             });
         };
         if entry.state == AgentState::Stopped {
-            return Err(format!(
-                "{name} is stopped and no longer accepts instructions (delete removes the instance)"
-            ));
+            // CC subagent semantics (v4): a direct message after a stop resumes
+            // the instance. Its session and history never left the registry, so
+            // waking is the same move an idle instance makes — flip to Idle here
+            // and the flush that follows every delivery spawns the run. Only
+            // this door resumes: follow-up chases push without flipping state,
+            // and a room broadcast skips stopped members, so nothing automatic
+            // undoes a stop the user asked for.
+            entry.state = AgentState::Idle;
         }
         entry.last_active = Instant::now();
         entry.inbox.push(InboxItem::Direct {
@@ -2320,6 +2325,43 @@ mod tests {
         assert_eq!(reg.list()[0].pending, 0, "inbox cleared");
     }
 
+    /// CC subagent semantics (D105a): a direct message to a stopped instance
+    /// resumes it — the registry kept its session and history, so the delivery
+    /// flips it to idle and the ordinary wake path takes it from there. The
+    /// chase and the room broadcast deliberately do not take this door.
+    #[test]
+    fn a_direct_message_resumes_a_stopped_instance() {
+        let reg = AgentRegistry::new();
+        reg.insert("w", AgentKind::Hire, None, "w".into(), test_session());
+        reg.finish("w", vec![crate::api::types::Message::user_text("go")], 0);
+        reg.stop("w").unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(reg.list()[0].state, AgentState::Stopped);
+
+        reg.deliver(
+            "w",
+            crate::channels::MAIN_NAME,
+            "carry on",
+            Vec::new(),
+            None,
+        )
+        .unwrap_or_else(|e| panic!("a stopped instance accepts a direct message: {e}"));
+        assert_eq!(
+            reg.list()[0].state,
+            AgentState::Idle,
+            "flipped, not refused"
+        );
+
+        let woken = reg.flush_pending();
+        assert_eq!(woken.len(), 1, "the ordinary wake path picks it up");
+        assert_eq!(woken[0].name, "w");
+        assert_eq!(
+            woken[0].history,
+            vec![crate::api::types::Message::user_text("go")],
+            "resumed from the history the registry kept"
+        );
+        assert_eq!(reg.list()[0].state, AgentState::Running);
+    }
+
     /// The chase is bounded and self-cancelling: while a message goes unanswered each round leaves
     /// one follow-up riding with it, the budget stops at MAX_FOLLOW_UPS, and the reply that finally
     /// comes settles every later check.
@@ -2604,20 +2646,23 @@ mod tests {
             reg.stop("x").unwrap_or_else(|e| panic!("{e}")).0.is_none(),
             "idempotent"
         );
-        assert!(
-            reg.deliver(
-                "x",
-                crate::channels::MAIN_NAME,
-                "still there",
-                Vec::new(),
-                None
-            )
-            .is_err(),
-            "rejected after stop"
-        );
         // Turn finishing after a stop: history is still archived, no revival.
         assert!(reg.finish("x", vec![Message::user_text("h")], 1).is_none());
         assert_eq!(reg.list()[0].state, AgentState::Stopped);
+        // A direct message after the stop is the one thing that revives (D105a).
+        reg.deliver(
+            "x",
+            crate::channels::MAIN_NAME,
+            "still there",
+            Vec::new(),
+            None,
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(
+            reg.list()[0].state,
+            AgentState::Idle,
+            "resumed, not refused"
+        );
         reg.remove("x").unwrap_or_else(|e| panic!("{e}"));
         assert!(reg.list().is_empty());
         assert_eq!(reg.claim_name("x"), "x", "deletion frees the name");

@@ -2599,13 +2599,23 @@ mod tests {
             .await
             .unwrap();
         assert!(out.content.as_str().unwrap().contains("stopped"), "stop");
-        // After stopping, SendMessage rejects delivery.
+        // After stopping, SendMessage resumes the instance (D105a): the
+        // delivery lands and scout leaves the stopped state. Delete still
+        // works below because it stops whatever it finds first.
         let send = SendMessageTool::new(session.clone());
-        let err = send
-            .call(serde_json::json!({"to": "scout", "message": "hi"}), &ctx)
+        send.call(serde_json::json!({"to": "scout", "message": "hi"}), &ctx)
             .await
-            .unwrap_err();
-        assert!(err.to_string().contains("stopped"), "{err}");
+            .unwrap_or_else(|e| panic!("a stopped instance accepts a direct message: {e}"));
+        assert_ne!(
+            session
+                .agents
+                .list()
+                .iter()
+                .find(|s| s.name == "scout")
+                .map(|s| s.state),
+            Some(crate::agents::AgentState::Stopped),
+            "resumed, not refused"
+        );
         let out = ctl
             .call(
                 serde_json::json!({"action": "delete", "agent": "scout"}),
