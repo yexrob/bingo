@@ -470,22 +470,6 @@ impl super::Chat {
         self.push_flow_line(crate::tui::bufferview::agent_notice_line(label));
     }
 
-    /// One line for a message an agent sent main (D106): `@scout❯ found it` in
-    /// the sender's colour, the body kept for the `ctrl+o` transcript.
-    ///
-    /// It lands where the alert lands — appended, without splitting main's
-    /// running reply. D83 splits a turn for a *steered* message because the
-    /// user's words demonstrably entered that turn's context; mail may be drained
-    /// by the running turn's next round or may sit until the debounce wakes a new
-    /// one, and a renderer cannot know which at arrival time. So the flow states
-    /// when the message arrived, which is the thing it can be sure of.
-    ///
-    /// `summary` is the sender's own preview when it wrote one (D108).
-    pub(crate) fn push_teammate_line(&mut self, from: &str, text: &str, summary: Option<&str>) {
-        self.push_flow_line(crate::tui::bufferview::teammate_line(from, text, summary));
-        self.buffers.note_console(false, self.tick);
-    }
-
     /// A user-role line the harness wrote about somebody else's life.
     fn push_flow_line(&mut self, text: String) {
         self.messages.push(UiMessage {
@@ -2012,12 +1996,18 @@ impl super::Chat {
         }
     }
 
-    /// Turn the direct messages that landed for main into one transcript line
-    /// each (D106). The wake and its debounce are untouched: this reads a
-    /// mirror of the inbox, never the inbox itself.
+    /// Count the direct messages that landed for main, per sender (D114).
+    ///
+    /// D106 printed one `@name❯` transcript line per arrival; the inbox turn
+    /// removed it — main's mail is main's business, and the flow's whitelist
+    /// is the user's own conversation. What the user gets instead is the
+    /// status layer's dot on the sender, fed from this count and cleared when
+    /// that agent's zoom is visited. The wake and its debounce are untouched:
+    /// this reads a mirror of the inbox, never the inbox itself.
     fn absorb_arrivals(&mut self) {
         for arrival in self.session.channels.drain_main_arrivals() {
-            self.push_teammate_line(&arrival.from, &arrival.text, arrival.summary.as_deref());
+            *self.agent_mail.entry(arrival.from).or_insert(0) += 1;
+            self.dirty = true;
         }
     }
 
@@ -2651,15 +2641,11 @@ impl super::Chat {
                     // A failed-agent alert (D98) is the exception among state
                     // lines: it *is* news, about someone, at a moment that
                     // matters — "the build broke" reads differently at 09:02 and
-                    // at 17:40. The others describe now and have nothing to stamp.
-                    // The teammate line joins the alert as the second
-                    // exception: it *is* a message, sent by somebody, at a
-                    // moment worth knowing. The notification line is not — it
-                    // reports the end of a run whose own row already carries
-                    // how long that run took.
+                    // at 17:40. The others describe now and have nothing to
+                    // stamp; the notification line reports the end of a run
+                    // whose own row already carries how long that run took.
                     let time = if crate::tui::chat::is_state_line(&self.messages[i].text)
                         && !crate::tui::bufferview::is_agent_alert(&self.messages[i].text)
-                        && !crate::tui::bufferview::is_teammate_line(&self.messages[i].text)
                     {
                         String::new()
                     } else {
@@ -2688,17 +2674,14 @@ impl super::Chat {
                 None => Vec::new(),
             };
             // Consecutive arrivals read as one batch (the user's ruling, with
-            // the tool groups' own argument): three agents reporting in are one
-            // event to the reader, not three blocks with a blank row each. Only
-            // the arrival tiers coalesce — the `●` notice and the `@name❯` line
-            // — and only with each other; the `⚠` alert keeps its own block,
-            // because bad news does not queue politely. The decision reads
-            // nothing but the previous message's settled text, so a block
-            // renders the same on every frame (write-once).
-            let arrival = |text: &str| {
-                crate::tui::bufferview::is_agent_notice(text)
-                    || crate::tui::bufferview::is_teammate_line(text)
-            };
+            // the tool groups' own argument): three dispatches completing are
+            // one event to the reader, not three blocks with a blank row each.
+            // Only the `●` notices coalesce, and only with each other; the `⚠`
+            // alert keeps its own block, because bad news does not queue
+            // politely. The decision reads nothing but the previous message's
+            // settled text, so a block renders the same on every frame
+            // (write-once).
+            let arrival = |text: &str| crate::tui::bufferview::is_agent_notice(text);
             let in_streak = i > 0
                 && role == Role::User
                 && arrival(&self.messages[i].text)

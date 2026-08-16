@@ -57,6 +57,7 @@ fn lifecycle(label: &str, status: WatchState, detail: Option<&str>) -> UiEvent {
         payload: None,
         signal: None,
         notifies_main: false,
+        dispatch: true,
     }
 }
 
@@ -270,6 +271,7 @@ fn a_command_watch_still_reaches_the_last_reply() {
         payload: None,
         signal: None,
         notifies_main: false,
+        dispatch: true,
     });
 
     let rows = main_rows(&mut chat);
@@ -1160,6 +1162,7 @@ fn a_finished_dispatch_settles_into_what_the_run_cost() {
         payload: None,
         signal: None,
         notifies_main: false,
+        dispatch: true,
     });
     chat.tick();
 
@@ -1285,6 +1288,7 @@ fn a_completion_notification_leaves_one_dim_line() {
         payload: None,
         signal: None,
         notifies_main: true,
+        dispatch: true,
     });
     let rows = main_rows(&mut chat);
     assert!(
@@ -1322,6 +1326,7 @@ fn a_completion_notification_leaves_one_dim_line() {
         payload: None,
         signal: None,
         notifies_main: true,
+        dispatch: true,
     });
     let rows = main_rows(&mut chat);
     assert!(
@@ -1332,25 +1337,18 @@ fn a_completion_notification_leaves_one_dim_line() {
     assert!(!rows.iter().any(|r| r.contains("● @writer")), "{rows:?}");
 }
 
-/// v3 made an agent's message to main render nothing at all and let the woken
-/// turn speak for it. v4 restores CC's one visible line, in the sender's
-/// colour, with the body kept for `ctrl+o`. The delivery underneath is
-/// untouched: the same inbox, the same debounce, the same envelope.
+/// v3 made an agent's message to main render nothing; v4 printed one line per
+/// arrival; D114 keeps the batching for the rows that are left — consecutive
+/// `●` notices coalesce into one block, and the `⚠` alert never joins them.
 #[test]
-fn a_streak_of_arrivals_reads_as_one_batch() {
+fn a_streak_of_notices_reads_as_one_batch() {
     let mut chat = test_chat();
     seed_agent(&chat, "scout");
     seed_agent(&chat, "writer");
     chat.messages
         .push(msg(Role::Assistant, "dispatching them now."));
-    chat.session
-        .channels
-        .deliver_to_main("scout", "lexer done", None, false);
-    chat.tick();
-    chat.session
-        .channels
-        .deliver_to_main("writer", "draft ready", None, false);
-    chat.tick();
+    chat.push_agent_notice("scout · fix the lexer");
+    chat.push_agent_notice("writer · draft the notes");
 
     let rows = main_rows(&mut chat);
     let at = |needle: &str| -> usize {
@@ -1358,16 +1356,16 @@ fn a_streak_of_arrivals_reads_as_one_batch() {
             .position(|r| r.contains(needle))
             .unwrap_or_else(|| panic!("no row contains {needle:?}: {rows:?}"))
     };
-    // Two arrivals, adjacent: the second joins the first's block instead of
+    // Two notices, adjacent: the second joins the first's block instead of
     // opening its own with a blank row (D111 — consecutive arrivals are one
     // batch to the reader, the tool groups' own argument).
     assert_eq!(
-        at("@writer❯"),
-        at("@scout❯") + 1,
+        at("● @writer"),
+        at("● @scout") + 1,
         "no blank row inside the streak: {rows:?}"
     );
     // The streak itself still opens like any message: a blank above the first.
-    assert_eq!(rows[at("@scout❯") - 1], "", "{rows:?}");
+    assert_eq!(rows[at("● @scout") - 1], "", "{rows:?}");
 
     // An alert never joins the batch — bad news keeps its own block.
     chat.push_agent_alert("scout · fix the lexer", Some("connection reset"));
@@ -1383,89 +1381,34 @@ fn a_streak_of_arrivals_reads_as_one_batch() {
     );
 }
 
+/// The inbox turn (D114): a message an agent sends main writes nothing into
+/// the flow. The delivery is untouched — the mail is in main's inbox, the
+/// wake and debounce unchanged — and what the user gets is the status
+/// layer's fuel: the sender's mail count, cleared when its zoom is visited.
 #[test]
-fn a_message_from_an_agent_leaves_one_line_and_keeps_its_body() {
+fn a_message_from_an_agent_writes_no_line_and_counts_as_mail() {
     let mut chat = test_chat();
     seed_agent(&chat, "scout");
     let body = "the parser was fine; the lexer drops a token when the input ends mid-string";
-    chat.session
-        .channels
-        .deliver_to_main("scout", body, None, false);
-    chat.tick();
-
-    let rows = main_rows(&mut chat);
-    let line = rows
-        .iter()
-        .find(|r| r.contains("@scout❯"))
-        .unwrap_or_else(|| panic!("the sender's line: {rows:?}"));
-    assert!(
-        line.contains("the parser was fine; the lexer drops a token"),
-        "cut to CC's 50 columns: {line:?}"
-    );
-    assert!(
-        !rows.iter().any(|r| r.contains("mid-string")),
-        "the flow shows a summary, not the message: {rows:?}"
-    );
-    assert!(
-        chat.session.channels.has_main_mail(),
-        "and the message itself is still in main's inbox, unread and unchanged"
-    );
-
-    // ctrl+o is where the body lives.
-    let transcript: Vec<String> = crate::tui::transcript::transcript_rows(&mut chat, 80, false)
-        .iter()
-        .map(|r| r.line.plain_text())
-        .collect();
-    assert!(
-        transcript.iter().any(|r| r.contains("mid-string")),
-        "{transcript:?}"
-    );
-    assert!(
-        !main_rows(&mut chat)
-            .iter()
-            .any(|r| r.contains("mid-string")),
-        "and the flow is what it was on the way out"
-    );
-}
-
-/// D106 named the summary's absence as a limit: bingo's `SendMessage` had no
-/// `summary` field, so the line was always the message's first fifty columns.
-/// D108 adds the field, and the line prefers it — which is CC's own order
-/// (`SendMessageTool.ts:765`, summary first and `truncate(message, 50)` only
-/// as the stand-in).
-#[test]
-fn the_senders_own_summary_is_what_the_line_shows() {
-    let mut chat = test_chat();
-    seed_agent(&chat, "scout");
-    let body = "the parser was fine; the lexer drops a token when the input ends mid-string";
+    let before = main_rows(&mut chat);
     chat.session
         .channels
         .deliver_to_main("scout", body, Some("lexer drops a token at EOF"), false);
     chat.tick();
 
-    let rows = main_rows(&mut chat);
-    let line = rows
-        .iter()
-        .find(|r| r.contains("@scout❯"))
-        .unwrap_or_else(|| panic!("the sender's line: {rows:?}"));
-    assert!(
-        line.contains("lexer drops a token at EOF"),
-        "the summary, whole: {line:?}"
+    assert_eq!(
+        main_rows(&mut chat),
+        before,
+        "an arrival is main's mail, not the user's conversation"
+    );
+    assert_eq!(
+        chat.agent_mail.get("scout"),
+        Some(&1),
+        "the mirror feeds the sender's dot instead"
     );
     assert!(
-        !line.contains("the parser was fine"),
-        "and not the truncation it replaces: {line:?}"
-    );
-
-    // The body is untouched by the preview: `ctrl+o` still has all of it, and
-    // main's inbox still holds exactly what was said.
-    let transcript: Vec<String> = crate::tui::transcript::transcript_rows(&mut chat, 80, false)
-        .iter()
-        .map(|r| r.line.plain_text())
-        .collect();
-    assert!(
-        transcript.iter().any(|r| r.contains("mid-string")),
-        "{transcript:?}"
+        chat.session.channels.has_main_mail(),
+        "and the message itself is still in main's inbox, unread and unchanged"
     );
     assert!(
         chat.session
@@ -1477,26 +1420,73 @@ fn the_senders_own_summary_is_what_the_line_shows() {
     );
 }
 
-/// A summary that is not one cannot overrun the row. CC does not bound its
-/// summary at all, because its schema requires 5-10 words; bingo keeps the
-/// same fifty-column budget over both sources, so the parser reading the line
-/// back still finds one line whatever the sender wrote.
+/// The other half of the gate: a run main did not dispatch — a room post or a
+/// queued message waking a member — completes without a `●` line, even
+/// though its task notification reaches main's context exactly as before.
+/// Only `dispatch: true` — the run an `Agent` call asked for — prints one.
 #[test]
-fn an_oversized_summary_is_cut_to_the_same_budget() {
+fn a_delivery_triggered_run_completes_without_a_notice() {
     let mut chat = test_chat();
     seed_agent(&chat, "scout");
-    let long = "a summary that is really the whole message again, said twice over, at length";
-    chat.session
-        .channels
-        .deliver_to_main("scout", "short body", Some(long), false);
-    chat.tick();
+    chat.messages.push(msg(Role::Assistant, "the room is busy"));
+    let before = main_rows(&mut chat);
 
-    let line = main_rows(&mut chat)
-        .into_iter()
-        .find(|r| r.contains("@scout❯"))
-        .unwrap_or_else(|| panic!("the sender's line"));
-    assert!(!line.contains("at length"), "cut to fit: {line:?}");
-    assert!(line.contains("a summary that is really"), "{line:?}");
+    chat.apply_event(UiEvent::WatchEvent {
+        label: "scout #2 · answer the room".to_string(),
+        kind: WatchKind::Agent,
+        status: WatchState::Done,
+        detail: Some("done".to_string()),
+        duration_ms: 0,
+        payload: None,
+        signal: None,
+        notifies_main: true,
+        dispatch: false,
+    });
+    assert_eq!(
+        main_rows(&mut chat),
+        before,
+        "a delivery's end is the tree's business, not the flow's"
+    );
+}
+
+/// While main is streaming, only the runs *this turn* dispatched may hang a
+/// row on the streaming message. A member woken by a room post mid-turn used
+/// to appear under whatever main happened to be saying, as a "Running N
+/// agents" tree about work the turn never asked for.
+#[test]
+fn a_streaming_turn_staples_only_its_own_dispatches() {
+    let mut chat = test_chat();
+    seed_agent(&chat, "scout");
+    seed_agent(&chat, "writer");
+    chat.messages.push(msg(Role::Assistant, ""));
+    chat.stream_msg = Some(0);
+
+    chat.apply_event(UiEvent::WatchEvent {
+        label: "writer #3 · answer the room".to_string(),
+        kind: WatchKind::Agent,
+        status: WatchState::Running,
+        detail: None,
+        duration_ms: 0,
+        payload: None,
+        signal: None,
+        notifies_main: false,
+        dispatch: false,
+    });
+    assert!(
+        chat.messages[0].activities.is_empty(),
+        "a run the turn did not dispatch stays off its tree"
+    );
+
+    chat.apply_event(lifecycle(
+        "scout · fix the parser",
+        WatchState::Running,
+        None,
+    ));
+    assert_eq!(
+        chat.messages[0].activities.len(),
+        1,
+        "the turn's own dispatch is stapled as before"
+    );
 }
 
 /// The bottom row of the tiering table: an instance starting, going idle or

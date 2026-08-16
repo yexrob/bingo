@@ -18,8 +18,6 @@
 //! - **The completion notice** ([`agent_notice_line`], D106). One dim `●` line
 //!   where the task notification of a finished run reaches main's context,
 //!   before main says anything about it.
-//! - **The teammate line** ([`teammate_line`], D106). One line for a message an
-//!   agent sent main, in the sender's colour, its body kept for `ctrl+o`.
 //! - **The direct send** ([`Chat::parse_direct_send`]). A composer line shaped
 //!   `@scout fix the lexer` or `#build tests are green` bypasses the model and
 //!   goes straight to that inbox or that room, under the user's own name, with
@@ -87,62 +85,6 @@ pub(crate) fn agent_notice_line(label: &str) -> String {
     }
 }
 
-/// How wide the transcript's one-line form of a message is. It bounds both
-/// sources: the sender's own `summary` (D108), and — when there is none — CC's
-/// own fallback of the message itself
-/// (`tools/SendMessageTool/SendMessageTool.ts:765`: `truncate(input.message,
-/// 50)`).
-pub(crate) const TEAMMATE_SUMMARY_WIDTH: usize = 50;
-
-/// The pointer that closes the address on a teammate's transcript line —
-/// `figures.pointer`, which is what CC writes after `@name`
-/// (`components/messages/UserTeammateMessage.tsx:159`).
-pub(crate) const TEAMMATE_POINTER: char = '❯';
-
-/// One line for a message an agent sent `main` (D106): `@scout❯ found it` in
-/// the sender's identity colour, with the whole body underneath **only** in the
-/// `ctrl+o` transcript — which is CC's `isTranscriptMode` gate, letter for
-/// letter (`UserTeammateMessage.tsx:186`).
-///
-/// v3 (D98) rendered nothing at all here and let the wake speak for itself.
-/// v4 restores CC's line: the wake and its debounce are unchanged, only the
-/// screen is.
-///
-/// **The sender's own summary wins** (D108). `SendMessage` carries an optional
-/// 5-10 word `summary`, which is what CC's readers prefer and what its
-/// `truncate(input.message, 50)` stands in for when there is none
-/// (`SendMessageTool.ts:765`). Both go through [`one_line`] at the same width:
-/// a summary inside its budget passes through untouched, and one that is not a
-/// summary at all cannot overrun the row the parser has to read back.
-pub(crate) fn teammate_line(from: &str, text: &str, summary: Option<&str>) -> String {
-    let preview = one_line(summary.unwrap_or(text), TEAMMATE_SUMMARY_WIDTH);
-    format!("@{from}{TEAMMATE_POINTER} {preview}\n{text}")
-}
-
-/// Who a teammate line addresses, and what it summarises — `None` for anything
-/// that is not one. The shape is `@name❯ `, with the name a plain identifier,
-/// so an ordinary message that happens to open with an `@` cannot be mistaken
-/// for one (the same textual convention [`is_agent_alert`] has carried since
-/// D98).
-pub(crate) fn parse_teammate_line(text: &str) -> Option<(&str, &str, &str)> {
-    let head = text.lines().next()?;
-    let rest = head.strip_prefix('@')?;
-    let (name, tail) = rest.split_once(TEAMMATE_POINTER)?;
-    if name.is_empty()
-        || !name
-            .chars()
-            .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
-    {
-        return None;
-    }
-    let body = text.split_once('\n').map(|(_, b)| b).unwrap_or("");
-    Some((name, tail.trim_start(), body))
-}
-
-pub(crate) fn is_teammate_line(text: &str) -> bool {
-    parse_teammate_line(text).is_some()
-}
-
 /// Who a composer line addresses when it opens with a sigil (D103).
 ///
 /// CC's `parseDirectMemberMessage` (2.1.88 `utils/directMemberMessage.ts`) is
@@ -170,36 +112,21 @@ impl Chat {
     /// The rows a line about somebody else's life takes in the flow (D106) —
     /// `None` for anything the ordinary user-message renderer should draw.
     ///
-    /// Both shapes are one row: what a reader needs from an arriving message is
-    /// who and roughly what, and the transcript is one keystroke away. That
-    /// second row exists — CC hangs the whole body under the summary in
-    /// transcript mode (`UserTeammateMessage.tsx:186`) — and so does bingo's,
-    /// through [`Chat::transcript_mode`].
+    /// One shape is left: the dim `●` completion notice, and only for a run
+    /// main's own turn dispatched (D114). The `@name❯` arrival line retired
+    /// with the inbox turn — a message an agent sends main is main's mail,
+    /// shown as the sender's dot in the status layer, not as a flow row.
     pub(crate) fn agent_flow_rows(&self, text: &str, width: usize) -> Option<Vec<Row>> {
         let theme = &self.theme;
-        if is_agent_notice(text) {
-            let mut line = Line::styled(AGENT_NOTICE_PREFIX.to_string(), theme.tool_done());
-            line.push_styled(
-                one_line(text.trim_start_matches(AGENT_NOTICE_PREFIX), width),
-                theme.dim(),
-            );
-            return Some(vec![Row::new(line)]);
+        if !is_agent_notice(text) {
+            return None;
         }
-        let (from, summary, body) = parse_teammate_line(text)?;
-        let mut line = Line::styled(
-            format!("@{from}{TEAMMATE_POINTER}"),
-            SegStyle::fg(self.identity_color(from)),
+        let mut line = Line::styled(AGENT_NOTICE_PREFIX.to_string(), theme.tool_done());
+        line.push_styled(
+            one_line(text.trim_start_matches(AGENT_NOTICE_PREFIX), width),
+            theme.dim(),
         );
-        if !summary.is_empty() {
-            line.push_styled(format!(" {summary}"), SegStyle::fg(theme.text));
-        }
-        let mut rows = vec![Row::new(line)];
-        if self.transcript_mode && !body.trim().is_empty() {
-            for wrapped in wrap_words(body, width.saturating_sub(2).max(1)) {
-                rows.push(Row::new(Line::styled(format!("  {wrapped}"), theme.dim())));
-            }
-        }
-        Some(rows)
+        Some(vec![Row::new(line)])
     }
 
     /// A composer line that is a direct send, or `None` when it is a prompt.
@@ -581,38 +508,6 @@ mod tests {
             .filter(|line| !line.trim().is_empty())
             .collect::<Vec<_>>()
             .join("\n")
-    }
-
-    /// The teammate line is recognised by its shape and only its shape: an `@`,
-    /// a plain name, the pointer. Everything else is an ordinary message, which
-    /// matters because the user's own submissions arrive in the same store —
-    /// the same textual convention `is_agent_alert` has carried since D98.
-    #[test]
-    fn a_teammate_line_is_recognised_by_its_shape_alone() {
-        let line = teammate_line("scout", "found it in the lexer\nsecond paragraph", None);
-        assert_eq!(
-            parse_teammate_line(&line),
-            Some((
-                "scout",
-                "found it in the lexer second paragraph",
-                "found it in the lexer\nsecond paragraph"
-            )),
-            "the summary is one line and the body is whole"
-        );
-
-        for prose in [
-            "@scout fix the lexer",
-            "@ ❯ hi",
-            "@src/lexer.rs❯ why",
-            "look at @scout❯ that",
-            "❯ scout",
-            "",
-        ] {
-            assert!(
-                parse_teammate_line(prose).is_none(),
-                "ordinary text: {prose:?}"
-            );
-        }
     }
 
     /// The notice line and the alert line are different tiers of news and are

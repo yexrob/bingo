@@ -4889,3 +4889,37 @@ one person who never needs naming — and furniture (membership lines, work
 steps) names nobody. Both zoom kinds inherit, agent and room alike: main's
 instructions in an agent's record now read as `@main`'s, which the guide
 and README had (prematurely) promised since D105.
+
+### D114. The inbox turn — the flow's whitelist closes
+
+The three-survey research pass (CLI subagent rendering; orchestration
+mission-control; group-chat paradigm — record in
+notes/design/conversation-model-v5.md) converged on one sentence: the main
+flow is an inbox, not a monitor. v4's skeleton is exactly the industry's
+shape; what leaked was the social layer pushing rows into a write-once
+scrollback. Three leaks, closed at the same seam:
+
+- **Arrival lines retired.** `SendMessage(to: "main")` draws nothing;
+  `absorb_arrivals` now feeds `Chat::agent_mail` (per-sender count, the
+  status layer's dot) instead of printing `@name❯`. The renderer, parser,
+  50-column budget and streak membership went with the producer
+  (bufferview.rs, chat_tail.rs); `●` notices keep D111's coalescing.
+- **A `dispatch` bit on watch registrations** (watch.rs `Entry`/`WatchEvent`,
+  threaded through `register_run_watch`/`spawn_agent_loop`): true only for
+  the run an `Agent` call itself asked for — `launch_background`, the sync
+  path — false for `flush_agent_inbox` deliveries and loop continuations.
+  The streaming turn's staple and the `●` notice both gate on it, so a
+  member woken by a room post mid-turn no longer lands under main's prose
+  as a "Running N agents" tree, and its completion is the tree's business.
+- **Perception is not presentation.** The inbox, the wake, the debounce,
+  `wakes_owner` and the notification queue are untouched — every cut is in
+  the view layer, which is the answer to the user's question ("main 能感知
+  到吗": yes, byte-identical).
+
+Prerequisite housekeeping: `tool/agent.rs` sat at exactly 4000 lines, so the
+two NOTE constants moved verbatim to `tool/agent_notes.rs` (3902 after).
+Docs: feedback-states v1.81, README/zh, guide.md. Tests: the four arrival
+pins rewritten (`a_message_from_an_agent_writes_no_line_and_counts_as_mail`,
+`a_streak_of_notices_reads_as_one_batch`) plus two new gate pins
+(`a_delivery_triggered_run_completes_without_a_notice`,
+`a_streaming_turn_staples_only_its_own_dispatches`).

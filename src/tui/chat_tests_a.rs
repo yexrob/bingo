@@ -501,6 +501,7 @@ fn agent_watch_rows_wear_the_instance_face_only_where_images_place() {
             payload: None,
             signal: None,
             notifies_main: false,
+            dispatch: true,
         });
         chat.build_rows(80);
         chat.doc
@@ -603,6 +604,7 @@ fn without_the_switch_the_transcript_wears_no_band() {
         payload: None,
         signal: None,
         notifies_main: false,
+        dispatch: true,
     });
     chat.build_rows(80);
     let rows: Vec<String> = chat

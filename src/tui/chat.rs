@@ -393,7 +393,6 @@ pub(crate) fn is_state_line(text: &str) -> bool {
         || is_ask_receipt(text)
         || crate::tui::bufferview::is_agent_alert(text)
         || crate::tui::bufferview::is_agent_notice(text)
-        || crate::tui::bufferview::is_teammate_line(text)
         || rewind_ui::is_rewind_line(text)
 }
 
@@ -938,6 +937,12 @@ pub struct Chat {
     /// (`ctrl+shift+o`). A session-wide toggle rather than tree state, which is
     /// where CC keeps it too — it survives the tree closing and reopening.
     pub(crate) tree_preview: bool,
+    /// Direct messages to main since the sender's zoom was last visited,
+    /// per sender (D114). The flow no longer prints an arrival line — the
+    /// delivery underneath is untouched, main reads its inbox exactly as
+    /// before — so this mirror is what the status layer's dot is made of:
+    /// the sender's pill and tree row brighten until the user looks.
+    pub(crate) agent_mail: std::collections::HashMap<String, u64>,
     /// The esc-esc rewind selector (D91); `None` means it is closed.
     pub(crate) rewind: Option<rewind_ui::Rewind>,
     /// Interrupt signal: Ctrl+C / Esc while busy → send(true), aborting stream reads in the turn immediately.
@@ -1025,6 +1030,7 @@ impl Chat {
                             payload: ev.payload,
                             signal: ev.signal,
                             notifies_main: ev.notifies_main,
+                            dispatch: ev.dispatch,
                         })
                         .is_err()
                     {
@@ -1213,6 +1219,7 @@ impl Chat {
             dialog: None,
             tree: None,
             tree_preview: false,
+            agent_mail: std::collections::HashMap::new(),
             rewind: None,
             interrupted: false,
             cancel_tx: tokio::sync::watch::channel(false).0,
@@ -1611,6 +1618,7 @@ impl Chat {
                 payload,
                 signal,
                 notifies_main,
+                dispatch,
             } => {
                 // The registry sweep goes first: it is what materializes the
                 // conversation an event is about, so a DM's badge is observed
@@ -1667,7 +1675,15 @@ impl Chat {
                     // Command and channel watches keep the old walk-back: a
                     // background shell command is main's own tool, and a
                     // channel row belongs to the conversation it names.
+                    //
+                    // A streaming turn only staples the agent runs it asked
+                    // for (D114): a room post waking a member mid-turn used to
+                    // hang that member's run under whatever main happened to be
+                    // saying — a "Running 3 agents" tree about work this turn
+                    // never dispatched. Those runs live in the tree and the
+                    // dialog; the flow's whitelist is main's own dispatches.
                     let target = match self.stream_msg {
+                        Some(_) if kind == crate::watch::WatchKind::Agent && !dispatch => None,
                         Some(i) => Some(i),
                         None if kind == crate::watch::WatchKind::Agent => None,
                         None => self
@@ -1742,16 +1758,22 @@ impl Chat {
                 // context, which is CC's `UserAgentNotificationMessage`. It is
                 // gated on the notification actually being main's — a run the
                 // user started inside an agent's own conversation registers with
-                // `notify_owner: false` and tells nobody — and on `Done`, because
+                // `notify_owner: false` and tells nobody — on `Done`, because
                 // a failure already has its line above and a cancellation is
-                // something the user just did.
+                // something the user just did — and, since D114, on the run
+                // being a dispatch: a delivery-triggered run still notifies
+                // main's *context* exactly as before, but the flow says
+                // nothing, because the user never asked for that run. The
+                // `⚠` alert stays unconditional: bad news is whitelisted.
                 if kind == crate::watch::WatchKind::Agent {
                     match status {
                         WatchState::Failed => {
                             let (who, why) = (label.clone(), detail.clone());
                             self.push_agent_alert(&who, why.as_deref());
                         }
-                        WatchState::Done if notifies_main => self.push_agent_notice(&label),
+                        WatchState::Done if notifies_main && dispatch => {
+                            self.push_agent_notice(&label)
+                        }
                         _ => {}
                     }
                 }

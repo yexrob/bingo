@@ -238,6 +238,14 @@ pub struct WatchEvent {
     /// an agent's own conversation — reports its end to nobody, and a run owned
     /// by a subagent reports it to that subagent.
     pub notifies_main: bool,
+    /// Whether this run was born from the `Agent` tool — a dispatch the
+    /// caller's turn asked for by name (D114). Deliveries and continuations —
+    /// a room post waking a member, a queued message draining, a follow-up —
+    /// carry `false`. The flow's whitelist reads this: only a dispatched run
+    /// may staple a row into a streaming turn or print the dim `●` notice;
+    /// everything else lives in the tree and the dialog. Perception is not
+    /// presentation: the notification queue ignores this bit entirely.
+    pub dispatch: bool,
 }
 
 /// Snapshot: what the registry currently holds, for a surface that lists it
@@ -302,6 +310,9 @@ struct Entry {
     /// that draw a run — the dispatch row, the tree, the background dialog —
     /// say so.
     notify_owner: bool,
+    /// See [`WatchEvent::dispatch`]. Set once at registration, echoed on every
+    /// broadcast this entry makes.
+    dispatch: bool,
 }
 
 struct Inner {
@@ -337,7 +348,9 @@ impl WatchRegistry {
         conditions: Vec<NotifyCondition>,
         owner: Option<String>,
     ) -> WatchId {
-        self.register_addressed(watchable, conditions, owner, true)
+        // Not a dispatch: everything on this path — background commands,
+        // channel operations, ack chases — is machinery, not an `Agent` call.
+        self.register_addressed(watchable, conditions, owner, true, false)
     }
 
     /// Register a watch that may keep its terminal states to itself (D98).
@@ -352,6 +365,7 @@ impl WatchRegistry {
         conditions: Vec<NotifyCondition>,
         owner: Option<String>,
         notify_owner: bool,
+        dispatch: bool,
     ) -> WatchId {
         let poll = watchable.poll();
         let label = watchable.label();
@@ -374,6 +388,7 @@ impl WatchRegistry {
                     total_lines: 0,
                     owner: owner.clone(),
                     notify_owner,
+                    dispatch,
                 },
             );
             id
@@ -406,6 +421,7 @@ impl WatchRegistry {
             signal: None,
             elapsed_ms: 0,
             notifies_main,
+            dispatch,
         });
         let interval = watchable.check_interval();
         if let Some(interval) = interval {
@@ -479,7 +495,7 @@ impl WatchRegistry {
     pub fn emit_signal(&self, id: WatchId, signal: String, detail: Option<String>) {
         // Single-signal cap: any long text fed by callers is cut off here.
         let signal = truncate_chars(&signal, MAX_SIGNAL_CHARS);
-        let (label, kind, state, entry_detail, notifies_main) = {
+        let (label, kind, state, entry_detail, notifies_main, dispatch) = {
             let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
             let Some(entry) = inner.entries.get_mut(&id) else {
                 return;
@@ -487,6 +503,7 @@ impl WatchRegistry {
             let label = entry.label.clone();
             let kind = entry.kind;
             let state = entry.state;
+            let dispatch = entry.dispatch;
             if let Some(d) = &detail {
                 entry.detail = Some(d.clone());
             }
@@ -505,7 +522,7 @@ impl WatchRegistry {
                     owner,
                 });
             }
-            (label, kind, state, entry_detail, notifies_main)
+            (label, kind, state, entry_detail, notifies_main, dispatch)
         };
         let elapsed_ms = {
             let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
@@ -527,6 +544,7 @@ impl WatchRegistry {
             signal: Some(signal),
             elapsed_ms,
             notifies_main,
+            dispatch,
         });
     }
 
@@ -546,7 +564,7 @@ impl WatchRegistry {
         detail: Option<String>,
         payload: Option<serde_json::Value>,
     ) {
-        let (label, kind, notifies_main) = {
+        let (label, kind, notifies_main, dispatch) = {
             let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
             let Some(entry) = inner.entries.get_mut(&id) else {
                 return;
@@ -564,6 +582,7 @@ impl WatchRegistry {
             entry.payload = payload.clone();
             let label = entry.label.clone();
             let kind = entry.kind;
+            let dispatch = entry.dispatch;
             let owner = entry.owner.clone();
             let notify = entry.notify_owner && (state.is_terminal() || state == WatchState::Idle);
             let notifies_main = notify && owner.is_none();
@@ -587,7 +606,7 @@ impl WatchRegistry {
             if state.is_terminal() {
                 prune_terminal_entries(&mut inner);
             }
-            (label, kind, notifies_main)
+            (label, kind, notifies_main, dispatch)
         };
         let elapsed_ms = {
             let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
@@ -607,6 +626,7 @@ impl WatchRegistry {
             signal: None,
             elapsed_ms,
             notifies_main,
+            dispatch,
         });
     }
 
@@ -958,7 +978,7 @@ mod tests {
     #[test]
     fn an_unaddressed_run_enqueues_nothing_for_its_owner() {
         let reg = watch();
-        let quiet = reg.register_addressed(running_watch("dm run"), Vec::new(), None, false);
+        let quiet = reg.register_addressed(running_watch("dm run"), Vec::new(), None, false, false);
         let mut events = reg.subscribe();
         reg.set_state(quiet, WatchState::Done, Some("done".into()), None);
         assert!(
@@ -971,7 +991,8 @@ mod tests {
         assert_eq!(event.label, "dm run");
 
         // A signal from the same run is silent for the same reason.
-        let quiet = reg.register_addressed(running_watch("dm run 2"), Vec::new(), None, false);
+        let quiet =
+            reg.register_addressed(running_watch("dm run 2"), Vec::new(), None, false, false);
         reg.emit_signal(quiet, "found error".into(), None);
         assert!(!reg.has_wake_notifications(None), "no signal either");
 

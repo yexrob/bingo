@@ -162,6 +162,11 @@ pub enum UiEvent {
         /// the flow prints one line when one arrives, and only the registry can
         /// answer whether one did.
         notifies_main: bool,
+        /// The run was born from an `Agent` call (D114). The flow's whitelist:
+        /// only a dispatched run staples a row into a streaming turn or prints
+        /// the dim `●` notice; deliveries and continuations stay in the tree
+        /// and the dialog.
+        dispatch: bool,
     },
     /// `/model` secondary selector: a provider's model list finished fetching asynchronously
     /// (appended to the menu).

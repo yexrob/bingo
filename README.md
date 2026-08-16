@@ -373,16 +373,13 @@ schema from a single source of truth):
 - `SendMessage` sends follow-up instructions to an instance (context
   preserved); queued while busy, delivered automatically at the end of the
   current turn. A sub-agent's `SendMessage(to: "main")` lands in the main
-  agent's inbox and wakes it when idle, and leaves one line in `@main`:
-  `@scout❯ <summary>` in the sender's identity colour, with the whole body
-  reachable only through the `ctrl+o` transcript. The summary is the send's own
-  optional `summary` field — five to ten words, offered on a sub-agent's schema
-  because a sub-agent's message is the one that gets drawn — falling back to the
-  message's first fifty columns where none was written. A room relay draws
-  nothing. `urgent: true`
+  agent's inbox and wakes it when idle — and draws **nothing** in `@main`
+  (D114): the message is main's mail, not the user's conversation, and what
+  the user sees is the sender's mail signal in the status layer instead. A
+  room relay draws nothing either. `urgent: true`
   (sub-agent→main only) rings the terminal attention channel on arrival.
 - A run that **fails** draws one `⚠ @name · reason` line in `@main` and rings
-  the attention channel; a run that **completes** leaves one dim
+  the attention channel; a run main's own turn dispatched that **completes** leaves one dim
   `● @name completed · task` line where its notification reaches the main
   agent's context; a cancellation draws nothing. A run the user triggered
   themselves, by writing to the instance directly, produces no notification and
@@ -598,13 +595,15 @@ things the instance did while it runs — or one `In progress… · 4 tool uses 
 the run ends, into `Done (12 tool uses · 8.3k tokens · 1m 4s)`, which is what
 reaches scrollback. Several `Agent` calls from one round draw one
 `⏺ Running 2 agents…` block instead, with a `├─ @name: task` row each. A
-**completion** whose notification is the main agent's own adds one dim
-`● @scout completed · fix the parser`. A **message** from an agent adds one
-`@scout❯ <summary>` in the sender's colour. A **failure** adds one
+**completion** adds one dim `● @scout completed · fix the parser` — for a run
+this turn's own `Agent` call dispatched, and only for one: a run a delivery
+woke (a room post, a queued message) completes into the tree and the dialog,
+never the flow (D114). A **failure** adds one
 `⚠ @scout · connection reset` and rings the attention channel. Everything else
-— an instance starting, going idle, being stopped, a room post — writes nothing:
-state belongs to the tree, and a line per room post is the flood the digest
-debounce exists to prevent.
+— an instance starting, going idle, being stopped, a room post, a message an
+agent sends main — writes nothing:
+state belongs to the tree, mail belongs to main, and a line per room post is
+the flood the digest debounce exists to prevent.
 
 **One walk decides who said what**, because the sender is not a field: an
 absorbed inbox arrives as one flat prompt and only its literal markers survive

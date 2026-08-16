@@ -10,6 +10,7 @@ use crate::tasks::TaskStore;
 use crate::error::ErrorCode;
 
 pub mod agent;
+pub mod agent_notes;
 pub mod ask;
 pub mod bash;
 pub mod channel;
