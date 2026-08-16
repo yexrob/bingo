@@ -411,6 +411,46 @@ fn a_burst_of_room_mail_wakes_once_after_the_quiet_window() {
     );
 }
 
+/// v6 (D118): a room line naming nobody is penned, not mailed — it keeps the
+/// frame loop ticking toward the age pump but opens no quiet window; the
+/// mention releases the pen and only then does the debounce clock start.
+#[test]
+fn an_unnamed_room_line_waits_in_the_pen_and_release_starts_the_clock() {
+    let mut chat = test_chat();
+    chat.session
+        .channels
+        .create(
+            "crew",
+            vec![crate::channels::MAIN_NAME.into(), "scout".into()],
+            crate::channels::ChannelMode::Free,
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+    let _ = chat.session.channels.post("scout", "crew", "fyi: started");
+    assert!(!chat.session.channels.has_main_mail(), "penned, not mailed");
+    assert!(
+        chat.needs_tick(),
+        "a pen holds the frame loop open for the age pump"
+    );
+    chat.tick += super::chat_tail::MAIL_QUIET_TICKS + 1;
+    assert!(!chat.digest_mail(), "no quiet window opens on penned mail");
+    assert!(chat.mail_wake.is_none(), "the clock only starts at release");
+
+    let _ = chat.session.channels.post("scout", "crew", "@main look");
+    assert!(
+        chat.session.channels.has_main_mail(),
+        "the mention released the pen"
+    );
+    assert!(
+        !chat.digest_mail(),
+        "released mail still waits out the ordinary window"
+    );
+    chat.tick += super::chat_tail::MAIL_QUIET_TICKS;
+    assert!(
+        chat.digest_mail(),
+        "then digests once, backlog and mention together"
+    );
+}
+
 /// A room that never stops talking would restart the window forever. The
 /// deadline is the floor under that: the digest runs on whatever has arrived.
 #[test]

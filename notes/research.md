@@ -5039,3 +5039,44 @@ Tests: `unmentioned_room_lines_wake_in_bulk_or_on_age`,
 `post_resolves_mentions_against_the_roster`,
 `a_mention_interrupts_and_a_misfire_is_reported`; the accumulate/stamp
 tests updated to the gate with their v6 reasons inline. 1484 + 13 green.
+
+### D118. Main joins its own team — the pen
+
+The user's ruling closed the gap D117 left open: the wake gate governed
+every member except the one with no registry entry. `channels::post` had
+relayed every room line into `main_mail` unconditionally since D29, which
+after D117 made main the one member a room could still spam awake — and
+v5's law 5 ("perception is not presentation") said so proudly. Reversed,
+deliberately: main is a member under the same @-rules as everyone else.
+
+- **The pen.** `Inner::main_pen` holds unnamed room lines per room
+  (`MainPen { lines, first_at }`). `post` routes through
+  `pen_or_release`: a line naming main (`@main`, `@all`) releases the
+  room's pen ahead of itself — order within a room is preserved — and
+  goes straight to `main_mail`; an unnamed line pens up and bulk-releases
+  at `ROOM_UNREAD_WAKE`. The age half is `pump_main_gate(max_age)`
+  (parameterized so tests can force expiry), called from `digest_mail` on
+  the frame clock and from the query loop's main-guarded drain — so a
+  running main picks up aged lines at its own turn boundary, exactly
+  where a member absorbs its batch. `main_gate_waiting` keeps
+  `needs_tick` honest: a held pen keeps the frame loop ticking toward
+  the release; an empty pen keeps main asleep, same as an empty inbox.
+- **What was never a relay is never penned.** The frozen-budget `⚠`
+  lands directly (a runtime warning, not room speech); DM mail
+  (`deliver_to_main`, arrivals mirror, `urgent`) is byte-untouched; the
+  2s/15s digest debounce still shapes delivery — of what the gate has
+  released. Main's serial `seen` cursor keeps its old semantics (a pen
+  release is not a read; the stale bounce remains main's catch-up).
+- v5's delivery table row "room post → member deposit, debounced digest"
+  is now "room post → member deposit behind the wake gate; main_mail
+  behind the pen". The screen side of that row (badges, no flow lines)
+  is untouched until the view batches.
+
+Docs: guide.md (digest paragraph), feedback-states v1.84 (+ header
+desync v1.80→v1.84 repaired — v1.81..83 shipped without bumping it).
+Tests: `main_hears_a_room_through_the_gate` (mention releases in order,
+@all passes, bulk at five, own posts never relay),
+`an_unnamed_room_line_waits_in_the_pen_and_release_starts_the_clock`
+(no quiet window on penned mail; the clock starts at release);
+`post_fans_out…` and `post_stamps…` updated to the gate with reasons
+inline. 1486 + 13 green.

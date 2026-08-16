@@ -498,6 +498,14 @@ impl super::Chat {
     ///
     /// Returns whether it asked for a digest turn this frame.
     pub(crate) fn digest_mail(&mut self) -> bool {
+        // v6: room relays wait in per-room pens until a mention, bulk, or age
+        // releases them — main is a member under the same @-rules as everyone
+        // else. The age half runs on this frame clock; once released, the
+        // quiet/deadline windows below still shape delivery. DM mail was
+        // never penned.
+        self.session
+            .channels
+            .pump_main_gate(crate::channels::ROOM_UNREAD_MAX_AGE);
         // Checked before the emptiness test: the drain and the bell are separate
         // readers, and a turn already running can absorb the message before this
         // ever sees the mail that asked for the ring.
@@ -2058,6 +2066,7 @@ impl super::Chat {
             // wake the clock rather than ride an event: nothing else is
             // happening, and the digest window has to be able to expire (D98).
             || self.session.channels.has_main_mail()
+            || self.session.channels.main_gate_waiting()
             || self.mail_wake.is_some()
     }
 

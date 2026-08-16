@@ -302,7 +302,47 @@ struct Inner {
     /// draws the flow. Room relays are deliberately absent: see
     /// [`ChannelRegistry::drain_main_arrivals`].
     main_arrivals: VecDeque<MainArrival>,
+    /// Room lines addressed to nobody, held back per room from `main_mail`
+    /// until the gate opens (v6): main is a member under the same @-rules as
+    /// everyone else, restated here because it has no registry entry. A
+    /// mention (`@main`, `@all`) releases the room's pen and rides in behind
+    /// it; bulk releases at [`ROOM_UNREAD_WAKE`]; age is pumped by the frame
+    /// loop and the turn boundary. Direct messages were never penned.
+    main_pen: HashMap<String, MainPen>,
     limits: ChannelLimits,
+}
+
+/// One room's held-back relay lines and the age of the oldest.
+struct MainPen {
+    lines: Vec<String>,
+    first_at: std::time::Instant,
+}
+
+impl Inner {
+    /// The v6 gate on the main relay: release on mention, pen otherwise,
+    /// bulk-release at the count threshold. Order within a room is preserved
+    /// — a released pen precedes the line that released it.
+    fn pen_or_release(&mut self, room: &str, line: String, mentioned: bool) {
+        if mentioned {
+            self.release_pen(room);
+            self.main_mail.push(line);
+            return;
+        }
+        let pen = self.main_pen.entry(room.to_string()).or_insert(MainPen {
+            lines: Vec::new(),
+            first_at: std::time::Instant::now(),
+        });
+        pen.lines.push(line);
+        if pen.lines.len() >= ROOM_UNREAD_WAKE {
+            self.release_pen(room);
+        }
+    }
+
+    fn release_pen(&mut self, room: &str) {
+        if let Some(pen) = self.main_pen.remove(room) {
+            self.main_mail.extend(pen.lines);
+        }
+    }
 }
 
 /// A message that arrived for the main agent, as the transcript needs it: who
@@ -386,6 +426,7 @@ impl ChannelRegistry {
             inner: Mutex::new(Inner {
                 channels: HashMap::new(),
                 main_mail: Vec::new(),
+                main_pen: HashMap::new(),
                 main_mail_urgent: false,
                 main_arrivals: VecDeque::new(),
                 limits,
@@ -658,6 +699,8 @@ impl ChannelRegistry {
             }
             if ch.seq >= channel_total {
                 ch.frozen = true;
+                // A runtime warning, not a room relay: lands directly, gate or
+                // no gate (v6) — a frozen budget is main's business at once.
                 inner.main_mail.push(format!(
                     "⚠ channel #{name} hit the {channel_total} total message cap and is now frozen (further posts will be rejected)",
                 ));
@@ -679,6 +722,7 @@ impl ChannelRegistry {
             *ch.sent.entry(from.to_string()).or_insert(0) += 1;
             let tokens = mention_tokens(text);
             let at_all = tokens.iter().any(|t| t == ALL_NAME);
+            let main_mentioned = at_all || tokens.iter().any(|t| t == MAIN_NAME);
             let deliveries: Vec<RoomDelivery> = ch
                 .members
                 .iter()
@@ -696,7 +740,7 @@ impl ChannelRegistry {
                 .filter(|t| t != ALL_NAME && !ch.members.iter().any(|m| m.to_lowercase() == *t))
                 .collect();
             main_line = if from != MAIN_NAME && ch.members.iter().any(|m| m == MAIN_NAME) {
-                Some(format_main_line(name, &msg))
+                Some((format_main_line(name, &msg), main_mentioned))
             } else {
                 None
             };
@@ -706,10 +750,33 @@ impl ChannelRegistry {
                 unknown_mentions,
             }
         };
-        if let Some(line) = main_line {
-            inner.main_mail.push(line);
+        if let Some((line, mentioned)) = main_line {
+            inner.pen_or_release(name, line, mentioned);
         }
         Ok(outcome)
+    }
+
+    /// Release every pen whose oldest held line has waited past `max_age` —
+    /// the age half of main's gate (the count and mention halves release at
+    /// post time). `max_age` is a parameter so a test can force expiry;
+    /// production passes [`ROOM_UNREAD_MAX_AGE`].
+    pub fn pump_main_gate(&self, max_age: Duration) {
+        let mut inner = self.lock();
+        let due: Vec<String> = inner
+            .main_pen
+            .iter()
+            .filter(|(_, pen)| pen.first_at.elapsed() >= max_age)
+            .map(|(room, _)| room.clone())
+            .collect();
+        for room in due {
+            inner.release_pen(&room);
+        }
+    }
+
+    /// Whether any room line is penned up waiting for main's gate — the frame
+    /// loop's reason to keep ticking toward the age release.
+    pub fn main_gate_waiting(&self) -> bool {
+        !self.lock().main_pen.is_empty()
     }
 
     /// Mark the member's inbox as digested up to seq (its running turn was injected with channel messages up to seq).
@@ -948,14 +1015,20 @@ mod tests {
             deliveries.iter().all(|d| !d.mentioned),
             "a post naming nobody carries no needs-you-now bit"
         );
-        // Main is a member: messages go to main_mail; main's own posts don't.
-        assert!(reg.has_main_mail());
+        // Main is a member under the same @-rules (v6): an unnamed line is
+        // penned, not mailed; age (forced here) releases it. Main's own posts
+        // never flow back at all.
+        assert!(!reg.has_main_mail(), "unnamed lines wait in the pen");
+        assert!(reg.main_gate_waiting());
+        reg.pump_main_gate(Duration::ZERO);
         let mail = reg.drain_main_mail();
         assert_eq!(mail, vec!["[#t msg #1] a: hello everyone"]);
+        assert!(!reg.main_gate_waiting(), "released pens are gone");
         let _ = sent(
             reg.post("main", "t", "quiet")
                 .unwrap_or_else(|e| panic!("{e}")),
         );
+        reg.pump_main_gate(Duration::ZERO);
         assert!(!reg.has_main_mail(), "main's own posts do not flow back");
         // user (a human) is a natural member: can post, main hears it, doesn't consume the per_agent budget.
         let (_, deliveries) = sent(
@@ -970,6 +1043,7 @@ mod tests {
             vec!["a", "b", "c"],
             "user's post reaches every agent member's inbox"
         );
+        reg.pump_main_gate(Duration::ZERO);
         assert!(reg.drain_main_mail()[0].contains("user: everyone stop"));
         // Non-member / unknown channel error.
         assert!(reg.post("ghost", "t", "x").is_err());
@@ -1037,6 +1111,52 @@ mod tests {
         assert!(
             deliveries.iter().all(|d| d.mentioned),
             "@all names everyone"
+        );
+    }
+
+    /// Main's copy of the wake gate (v6): a mention releases the room's pen
+    /// at once and in order; unnamed lines release in bulk at the count
+    /// threshold; the frozen-budget warning was never a relay and never waits.
+    #[test]
+    fn main_hears_a_room_through_the_gate() {
+        let reg = registry();
+        reg.create("t", vec![MAIN_NAME.into(), "a".into()], ChannelMode::Free)
+            .unwrap_or_else(|e| panic!("{e}"));
+        let _ = sent(reg.post("a", "t", "one").unwrap_or_else(|e| panic!("{e}")));
+        let _ = sent(reg.post("a", "t", "two").unwrap_or_else(|e| panic!("{e}")));
+        assert!(!reg.has_main_mail(), "unnamed lines pen up");
+        let _ = sent(
+            reg.post("a", "t", "@main decide")
+                .unwrap_or_else(|e| panic!("{e}")),
+        );
+        assert_eq!(
+            reg.drain_main_mail(),
+            vec![
+                "[#t msg #1] a: one",
+                "[#t msg #2] a: two",
+                "[#t msg #3] a: @main decide",
+            ],
+            "the mention releases the pen ahead of itself, in room order"
+        );
+        // @all is a mention of main too.
+        let _ = sent(
+            reg.post("a", "t", "@all stand-up")
+                .unwrap_or_else(|e| panic!("{e}")),
+        );
+        assert_eq!(reg.main_mail_len(), 1, "@all goes straight through");
+        let _ = reg.drain_main_mail();
+        // Bulk: the ROOM_UNREAD_WAKE-th unnamed line releases the whole pen.
+        for n in 0..ROOM_UNREAD_WAKE {
+            assert!(!reg.has_main_mail(), "below the threshold the pen holds");
+            let _ = sent(
+                reg.post("a", "t", &format!("line {n}"))
+                    .unwrap_or_else(|e| panic!("{e}")),
+            );
+        }
+        assert_eq!(
+            reg.main_mail_len(),
+            ROOM_UNREAD_WAKE,
+            "the fifth line opens the gate on the whole batch"
         );
     }
 

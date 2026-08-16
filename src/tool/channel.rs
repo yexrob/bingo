@@ -548,6 +548,9 @@ mod tests {
             )
             .await
             .unwrap();
+        // The line named b, not main, so it waits in main's pen (v6); force
+        // the age release to read it.
+        main.channels.pump_main_gate(std::time::Duration::ZERO);
         let mail = main.channels.drain_main_mail();
         assert_eq!(mail.len(), 1, "{mail:?}");
         assert!(mail[0].contains("a: @b hello"));

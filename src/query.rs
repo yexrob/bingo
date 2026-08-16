@@ -1012,6 +1012,12 @@ async fn query_loop(
         // subagent, so an unguarded drain let a subagent's own turn boundary eat
         // mail addressed to main.
         let mail = if session.instance.is_none() {
+            // v6: expired pens release here too, so a running main picks up
+            // aged room lines at its own turn boundary — the same boundary a
+            // member absorbs its batch at. Unexpired pens stay penned.
+            session
+                .channels
+                .pump_main_gate(crate::channels::ROOM_UNREAD_MAX_AGE);
             session.channels.drain_main_mail()
         } else {
             Vec::new()
