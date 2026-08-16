@@ -75,7 +75,7 @@ pub struct PerspectiveState {
     pub level: Level,
     /// Cursor into [`Dossier::lanes`], not into rows: the group headings are
     /// furniture and the cursor must not be able to land on them (the D95
-    /// directory's rule).
+    /// modal's rule).
     pub selected: usize,
     pub pager: Option<TranscriptState>,
 }

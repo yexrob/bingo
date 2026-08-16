@@ -240,16 +240,25 @@ pub struct WatchEvent {
     pub notifies_main: bool,
 }
 
-/// Snapshot: for TUI initial render / state queries (the current display layer is driven
-/// by label; the API is reserved).
-#[allow(dead_code)]
+/// Snapshot: what the registry currently holds, for a surface that lists it
+/// rather than watching the broadcast go by.
+///
+/// The transcript is driven by [`WatchEvent`]s as they arrive; the background
+/// dialog's Shells section (D107) is the first reader that needs the *state of
+/// the world* instead — which commands are still running, which have finished
+/// and what they cost — so `kind` and `elapsed_ms` are carried here as well.
 #[derive(Debug, Clone)]
 pub struct WatchSnapshot {
     pub id: WatchId,
     pub label: String,
+    pub kind: WatchKind,
     pub state: WatchState,
     pub detail: Option<String>,
+    /// What a finished command printed — the shell detail's `Output:` tail.
     pub payload: Option<serde_json::Value>,
+    /// Milliseconds since registration — wall clock, unlike the host's frame
+    /// counter, so a row can say how long a command has been up.
+    pub elapsed_ms: u64,
 }
 
 /// Terminal notification pending injection into the model (adjacent Idle entries with the
@@ -604,21 +613,28 @@ impl WatchRegistry {
         self.tx.subscribe()
     }
 
-    /// Snapshot of all current watchables (TUI initial render / state queries).
-    #[allow(dead_code)]
+    /// Snapshot of every watchable the registry still holds, **oldest first**.
+    ///
+    /// The entries live in a map, so the order has to be imposed rather than
+    /// observed: ids are handed out in sequence, so sorting by id is start
+    /// order, which is the order a list of background work reads in.
     pub fn snapshot(&self) -> Vec<WatchSnapshot> {
         let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        inner
+        let mut out: Vec<WatchSnapshot> = inner
             .entries
             .iter()
             .map(|(id, e)| WatchSnapshot {
                 id: *id,
                 label: e.label.clone(),
+                kind: e.kind,
                 state: e.state,
                 detail: e.detail.clone(),
                 payload: e.payload.clone(),
+                elapsed_ms: e.born.elapsed().as_millis() as u64,
             })
-            .collect()
+            .collect();
+        out.sort_by_key(|snapshot| snapshot.id.0);
+        out
     }
 
     /// Whether there are unconsumed wake notifications (terminal or signal) — used to

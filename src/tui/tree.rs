@@ -10,7 +10,7 @@
 //! **Chrome, never scrollback.** Every row here is redrawn each frame and none
 //! of it is ever settled — the write-once doctrine in [`crate::tui::term`] is
 //! what makes that a rule rather than a habit. The tree is built from
-//! [`crate::agents::AgentRegistry::list`] at draw time, the way the directory
+//! [`crate::agents::AgentRegistry::list`] at draw time, the way the dialog
 //! is built from live sources, so nothing here can go stale.
 //!
 //! **The index space is CC's** (`useBackgroundTaskNavigation.ts:26-58`): `-1`
@@ -145,14 +145,15 @@ pub fn stats_body(tool_uses: usize, tokens: u64) -> String {
     )
 }
 
-/// What an instance's row says it is doing.
+/// What an instance's row says it is doing — the tree's status column, and
+/// the background dialog's (D107), so one ladder answers on both surfaces.
 ///
 /// Priority is CC's (`TeammateSpinnerLine.tsx:171-194`): the stopping state
 /// first, then idleness, then the activity. Two of CC's arms have no bingo
 /// analogue and are not invented here — `[awaiting approval]` belongs to the
 /// plan-approval protocol v4 explicitly does not copy, and the all-idle
 /// past-tense verb (`Brewed for 2m 5s`) belongs to the teammate idle loop.
-fn status_label(status: &AgentStatus, now: std::time::Instant) -> String {
+pub(crate) fn status_label(status: &AgentStatus, now: std::time::Instant) -> String {
     match status.state {
         // CC's `[stopping]` slot. bingo's stop is synchronous, so the state
         // this row can be in is *stopped*, not stopping — and a stopped
@@ -305,7 +306,7 @@ impl Chat {
     /// Keys the tree claims. Everything else falls through to the composer,
     /// which is the point: the tree is a readout, not a modal.
     ///
-    /// A permission dialog keeps priority (the directory's rule, D95): a panel
+    /// A permission dialog keeps priority (D81's rule): a panel
     /// must not move under a question that is holding up a turn.
     pub(crate) fn agent_tree_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> bool {
         if self.pending_ask.is_some() {
@@ -350,7 +351,7 @@ impl Chat {
                 return true;
             }
             let name = status.name.clone();
-            self.stop_agent_from_manager(&name);
+            self.stop_agent(&name);
             return true;
         }
         false
@@ -963,7 +964,7 @@ mod tests {
             chat.warnings
                 .iter()
                 .any(|(_, text)| text.contains("stopped scout")),
-            "through the manager's own path, so there is one warning: {:?}",
+            "through the one stop path, so there is one warning: {:?}",
             chat.warnings
         );
 

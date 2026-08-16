@@ -29,8 +29,8 @@
 //! round-trip test pins.
 //!
 //! **Two things it is over.** An agent — the ordinary case, entered from the
-//! tree or the ctrl+b detail — and a room, which is bingo's own extension and
-//! has no door until D107's dialog opens one.
+//! tree or from the background dialog's `f` — and a room, which is bingo's own
+//! extension and is reached from that dialog's Rooms section (D107).
 
 use std::io::stdout;
 
@@ -65,14 +65,13 @@ pub enum ZoomTarget {
     Agent(String),
     /// A room's log: the composer posts to it as the user, joining first.
     ///
-    /// **Doorless until D107**, deliberately. CC has no rooms at all — the
-    /// concept does not exist anywhere in 2.1.88 — so there is no key of its to
-    /// copy, and inventing a global binding for one surface is how a keymap
-    /// rots. The dialog D107 builds has a Rooms section and an `f`-to-zoom key
-    /// already (`BackgroundTasksDialog.tsx:290-299`), which is the door this is
-    /// waiting for. Everything below it works and is under test; only the way
-    /// in is missing.
-    #[allow(dead_code)] // D107 opens this
+    /// **The door is the background dialog's `f`** (D107). D105 built this view
+    /// with no way in, deliberately: CC has no rooms at all — the concept does
+    /// not exist anywhere in 2.1.88 — so there was no key of its to copy, and
+    /// inventing a global binding for one surface is how a keymap rots. The
+    /// dialog has a Rooms section and CC's `f to foreground` on it
+    /// (`BackgroundTasksDialog.tsx:414`), so the room is foregrounded by the
+    /// same key and the same verb as an agent.
     Room(String),
 }
 
@@ -638,7 +637,7 @@ pub fn on_key(
             // `abortController` does.
             if chat.zoom_is_running() {
                 if let Some(name) = chat.zoomed().map(str::to_string) {
-                    chat.stop_agent_from_manager(&name);
+                    chat.stop_agent(&name);
                 }
                 return Action::None;
             }
@@ -1221,10 +1220,7 @@ mod tests {
             key(&mut chat, KeyCode::Char(c), KeyModifiers::CONTROL);
         }
         assert!(!chat.open_transcript, "ctrl+o did not arm the pager");
-        assert!(
-            chat.agent_manager.is_none(),
-            "ctrl+b did not arm the manager"
-        );
+        assert!(chat.dialog.is_none(), "ctrl+b did not arm the dialog");
         assert!(!chat.open_editor, "ctrl+g did not arm the editor");
         assert!(chat.search.is_none(), "ctrl+r did not arm the search");
         assert!(chat.input.is_empty(), "and none of them typed a character");

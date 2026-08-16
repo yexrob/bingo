@@ -604,8 +604,7 @@ pub(crate) fn chrome(chat: &Chat, width: usize, fullscreen: bool) -> El {
     for line in chat.help_lines() {
         children.push(El::Row(dim_row(line, theme)));
     }
-    children.push(El::Rows(chat.agent_manager_rows(width)));
-    children.push(El::Rows(chat.directory_view_rows(width)));
+    children.push(El::Rows(chat.dialog_view_rows(width)));
     children.push(El::Rows(chat.rewind_rows(width)));
 
     // Pinned panels (login flows, long-operation progress): persistent until

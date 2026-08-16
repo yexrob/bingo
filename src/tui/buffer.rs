@@ -29,12 +29,6 @@ use crate::api::types::Message;
 use crate::channels::{ChannelMessage, USER_NAME};
 use crate::query::Session;
 use crate::tui::chat::CollapseGroup;
-use crate::watch::{WatchKind, WatchState};
-
-/// How many lifecycle events the team feed keeps. Spawn/done/ack are broadcast
-/// and retained nowhere else, so the feed is the one display-side store with no
-/// domain store behind it, and therefore the one that has to bound itself.
-const TEAM_LOG_MAX: usize = 200;
 
 /// Which conversation a buffer is.
 ///
@@ -45,8 +39,8 @@ const TEAM_LOG_MAX: usize = 200;
 /// **There is no `Team` variant, and that is the D95 ruling.** The team is the
 /// organization, not a conversation: you cannot speak to it, and everything it
 /// had to say — who exists, what rooms there are, what just happened — is a
-/// directory ([`crate::tui::directory`], off the ctrl+t cycle since D104 and
-/// absorbed by D107's background dialog) rather than a board you visit and a
+/// directory — the Agents and Rooms sections of the background dialog
+/// ([`crate::tui::background`], D107) — rather than a board you visit and a
 /// badge that asks you to. A read-only buffer in the bar was a
 /// conversation-shaped hole where a roster belonged.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -89,7 +83,7 @@ impl std::fmt::Display for BufferId {
 pub struct Buffer {
     pub id: BufferId,
     /// How far the source has got, in its own unit: channel `seq`, DM history
-    /// length, team-log length. Main has no sequence and stays at 0.
+    /// length. Main has no sequence and stays at 0.
     seq: u64,
     /// How far the user has read, in the same unit.
     read: u64,
@@ -99,18 +93,16 @@ pub struct Buffer {
     last_activity: u64,
 }
 
-/// The accounting readers, and the batch that will use them.
+/// The accounting readers, and the surface that asks for them.
 ///
-/// **D104 did not, and the reason is CC's.** The footer pills and the agent
-/// tree were the surface this was kept for, and neither carries a badge: CC's
-/// `AgentPill` renders `@name` and nothing else, and the tree's rows are
-/// `@name: <what it is doing> · <what that cost>` — no counter, no dot. Both
-/// take their dim and bold states from the agent's *state*, which is the
-/// registry's answer rather than this store's. So the markers move on rather
-/// than come off: D107's background dialog is the surface where "three unread
-/// from @scout" is the thing being asked for, and it is what absorbs the
-/// directory these numbers already fed.
-#[allow(dead_code)] // D107 absorbs these
+/// **The background dialog** (D107). D103 kept these alive through a batch
+/// that had no use for them and D104 declined them again, for CC's reason:
+/// its `AgentPill` renders `@name` and nothing else, and a tree row is
+/// `@name: <what it is doing> · <what that cost>` — no counter, no dot, both
+/// taking their dim and bold from the agent's *state*, which is the registry's
+/// answer rather than this store's. The dialog is the surface where "three
+/// unread from @scout" is the thing being asked for: its rows carry the count
+/// and its sections are ordered by what moved last.
 impl Buffer {
     pub fn id(&self) -> &BufferId {
         &self.id
@@ -122,9 +114,13 @@ impl Buffer {
         self.mention
     }
     /// Tick of the last observed change in the source. A registry sorted by
-    /// name answers "what exists"; this is what answers "what just happened".
-    /// The tree does not order by it — CC sorts its rows by name and so does
-    /// bingo's registry — so this waits for the dialog, like its neighbours.
+    /// name answers "what exists"; this is what answers "what just happened",
+    /// and it is how the dialog orders its sections.
+    ///
+    /// **An order, not a duration.** The host's frame counter only advances
+    /// while something is happening ([`crate::tui::chat::Chat::needs_tick`]),
+    /// so two of these can be compared and neither can be subtracted from the
+    /// clock on the wall.
     pub fn last_activity(&self) -> u64 {
         self.last_activity
     }
@@ -148,48 +144,6 @@ pub enum Delivery {
     Sent,
     /// A notice to put above the composer (English; the wording is final).
     Rejected(String),
-}
-
-/// One entry in the team feed — the directory's "recent" column.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TeamEvent {
-    /// The watch label, which already carries the instance name and run — or
-    /// the command that produced the entry, for the board's own output.
-    pub label: String,
-    /// The lifecycle state this entry reports. `None` means the entry is not a
-    /// lifecycle event at all but output posted to the feed (`/team`, D90):
-    /// there is no state to name, and naming one anyway would report a
-    /// transition that never happened.
-    pub state: Option<WatchState>,
-    pub detail: Option<String>,
-    /// Unix seconds.
-    pub at: u64,
-}
-
-/// One feed entry as a line.
-///
-/// A lifecycle event says what happened *and* what was reported, in that order:
-/// the detail alone used to be the whole row, so a finished run and a running
-/// one were told apart only by what the agent happened to say. Feed output
-/// (`/team`) has no state and is its own text.
-pub(crate) fn team_line(event: &TeamEvent) -> String {
-    match (event.state, &event.detail) {
-        (Some(state), Some(detail)) => format!("{} · {detail}", state_word(state)),
-        (Some(state), None) => state_word(state).to_string(),
-        (None, Some(detail)) => detail.clone(),
-        (None, None) => String::new(),
-    }
-}
-
-/// The word a lifecycle state goes by on the board.
-fn state_word(state: WatchState) -> &'static str {
-    match state {
-        WatchState::Running => "running",
-        WatchState::Idle => "idle",
-        WatchState::Done => "done",
-        WatchState::Failed => "failed",
-        WatchState::Cancelled => "cancelled",
-    }
 }
 
 /// What a DM's badge is measured in (D99): one entry per Said post of the pair
@@ -243,7 +197,6 @@ pub struct Buffers {
     /// Home first, always; the rest in [`BufferId`] order.
     list: Vec<Buffer>,
     active: BufferId,
-    team: Vec<TeamEvent>,
     /// Per instance, the pair lane's measure — see [`SaidCache`].
     said: std::collections::HashMap<String, SaidCache>,
 }
@@ -265,12 +218,10 @@ impl Buffers {
                 last_activity: 0,
             }],
             active: BufferId::Hub,
-            team: Vec::new(),
             said: std::collections::HashMap::new(),
         }
     }
 
-    #[allow(dead_code)] // D105 consumes this
     pub fn active(&self) -> &BufferId {
         &self.active
     }
@@ -278,10 +229,9 @@ impl Buffers {
     /// Point the accounting at the conversation being read: entering one reads
     /// it, so nothing in it is unread while it is on screen.
     ///
-    /// Between D103 and D105 the answer is always `@main`, because the
-    /// transcript is the only thing there is to read. The zoom is what moves it
-    /// again.
-    #[allow(dead_code)] // D105 consumes this
+    /// Between D103 and D105 the answer was always `@main`, because the
+    /// transcript was the only thing there was to read; the zoom moves it
+    /// again, and D107's dialog is where the badge it clears is read.
     pub fn set_active(&mut self, id: BufferId) {
         self.active = id.clone();
         self.mark_read(&id);
@@ -292,7 +242,6 @@ impl Buffers {
     }
 
     /// Every conversation, `@main` first and the rest in [`BufferId`] order.
-    #[allow(dead_code)] // D107 absorbs this
     pub fn iter(&self) -> impl Iterator<Item = &Buffer> {
         self.list.iter()
     }
@@ -358,7 +307,7 @@ impl Buffers {
     /// **Rooms are the exception, and membership is why** (D95). A DM survives
     /// its agent because the conversation was still yours; a room you are not
     /// in was never yours to begin with — it is somebody else's conversation,
-    /// findable in the directory and readable there. So a room is listed while
+    /// findable in the dialog and readable there. So a room is listed while
     /// the user is a member of it and drops out of the registry when they
     /// leave, which is what makes the bar mean "conversations I am in".
     pub fn refresh(&mut self, session: &Arc<Session>, tick: u64) {
@@ -442,68 +391,6 @@ impl Buffers {
     pub fn note_console(&mut self, mention: bool, tick: u64) {
         let seq = self.get(&BufferId::Hub).map(|b| b.seq).unwrap_or(0) + 1;
         self.observe(BufferId::Hub, seq, mention, tick);
-    }
-
-    /// Tee of the lifecycle stream (`UiEvent::WatchEvent`).
-    ///
-    /// Only agent events reach the feed. Room events belong to their own
-    /// conversation and command events are main's own tools, so neither is
-    /// team news. Nothing here is gated any more: the feed is a column in a
-    /// directory the user opens, not a buffer that asks to be read, so there is
-    /// no badge to withhold and no reason to decide whether a formation counts
-    /// as a formation before writing down that an agent started.
-    pub fn note_watch_event(
-        &mut self,
-        label: &str,
-        kind: WatchKind,
-        state: WatchState,
-        detail: Option<&str>,
-        _tick: u64,
-    ) {
-        if kind != WatchKind::Agent {
-            return;
-        }
-        self.push_team(TeamEvent {
-            label: label.to_string(),
-            state: Some(state),
-            detail: detail.map(str::to_string),
-            at: crate::channels::now_unix(),
-        });
-    }
-
-    /// The bounded lifecycle log, oldest first — the team directory's feed, and
-    /// since D94 the only place a main-idle spawn or completion is written down
-    /// on the display side.
-    pub fn team_log(&self) -> &[TeamEvent] {
-        &self.team
-    }
-
-    /// Post the host's own output to the feed (D90).
-    ///
-    /// `/team` reports what the formation is, and that is team news rather than
-    /// main news: without this the answer landed in main's info tier and
-    /// scrolled away. It goes where the rest of the formation's history goes,
-    /// and main keeps one line pointing at it.
-    pub fn note_team_output(&mut self, label: &str, text: &str) {
-        if text.trim().is_empty() {
-            return;
-        }
-        self.push_team(TeamEvent {
-            label: label.to_string(),
-            state: None,
-            detail: Some(text.to_string()),
-            at: crate::channels::now_unix(),
-        });
-    }
-
-    /// Append to the bounded feed. It is the one display-side store with no
-    /// domain store behind it, so it is the one that has to bound itself.
-    fn push_team(&mut self, event: TeamEvent) {
-        self.team.push(event);
-        if self.team.len() > TEAM_LOG_MAX {
-            let over = self.team.len() - TEAM_LOG_MAX;
-            self.team.drain(..over);
-        }
     }
 
     /// Mark everything in a conversation read.
@@ -1022,17 +909,11 @@ mod tests {
 
         let mut buffers = Buffers::new();
         buffers.refresh(&session, 1);
-        buffers.note_watch_event(
-            "scout #1 · go",
-            WatchKind::Agent,
-            WatchState::Running,
-            None,
-            1,
-        );
 
         // Home, rooms by name, DMs by name — and main stays at 0 however many
-        // conversations arrive after it. The team is not among them: it is a
-        // directory, not a conversation (D95).
+        // conversations arrive after it. The team is not among them: it is the
+        // organization, not a conversation (D95), and D107's dialog is where
+        // it is read.
         assert_eq!(
             ids(&buffers),
             vec!["@main", "#alpha", "#build", "@scout", "@zoe"]
@@ -1040,7 +921,7 @@ mod tests {
     }
 
     /// The bar is "conversations I am in". A room formed by two agents is real,
-    /// findable in the directory and readable — but it is not one of the user's
+    /// findable in the dialog and readable — but it is not one of the user's
     /// conversations, so it is not listed, and joining is what lists it.
     #[test]
     fn a_room_is_listed_exactly_while_the_user_is_in_it() {
@@ -1306,61 +1187,6 @@ mod tests {
         // cursor parked past the end.
         buffers.observe(scout.clone(), 4, true, 3);
         assert_eq!(buffers.get(&scout).map(Buffer::unread), Some(1));
-    }
-
-    // ---- the team feed ---------------------------------------------------
-
-    /// The feed hears agents and nothing else, and it hears them whoever they
-    /// are: the D93 crew gate is gone with the board it protected. A gate
-    /// existed because a badge asked to be read; a column in a directory the
-    /// user opens asks for nothing, so there is nothing to withhold.
-    #[test]
-    fn the_feed_hears_agents_and_nothing_else_and_raises_no_conversation() {
-        let session = test_session();
-        seed_agent(&session, "scout", Vec::new());
-        let mut buffers = Buffers::new();
-        buffers.refresh(&session, 1);
-        buffers.note_watch_event("ls", WatchKind::Command, WatchState::Done, None, 1);
-        buffers.note_watch_event("#build", WatchKind::Channel, WatchState::Running, None, 1);
-        assert_eq!(
-            buffers.team_log().len(),
-            0,
-            "a command and a room post are not team news"
-        );
-
-        buffers.note_watch_event(
-            "scout #1 · fix it",
-            WatchKind::Agent,
-            WatchState::Done,
-            Some("done"),
-            4,
-        );
-        assert_eq!(buffers.team_log().len(), 1);
-        assert_eq!(
-            ids(&buffers),
-            vec!["@main", "@scout"],
-            "a lifecycle event opens no conversation and asks for nothing"
-        );
-    }
-
-    #[test]
-    fn the_feed_bounds_what_it_remembers() {
-        let mut buffers = Buffers::new();
-        for i in 0..TEAM_LOG_MAX + 40 {
-            buffers.note_watch_event(
-                &format!("scout #{i}"),
-                WatchKind::Agent,
-                WatchState::Running,
-                None,
-                1,
-            );
-        }
-        assert_eq!(buffers.team_log().len(), TEAM_LOG_MAX);
-        assert_eq!(
-            buffers.team_log()[0].label,
-            format!("scout #{}", 40),
-            "the oldest events fall off the front"
-        );
     }
 
     // ---- the zoomed view's projection ------------------------------------
@@ -1630,31 +1456,6 @@ mod tests {
         ] {
             assert!(!names(not, USER_NAME), "{not:?} is not");
         }
-    }
-
-    /// The lifecycle log survived the board it used to back: it is the
-    /// directory's feed now, read through the same accessor the directory reads
-    /// (`the_board_replays_its_lifecycle_log`'s claim, moved to where the rows
-    /// are actually built — `tui::directory`).
-    #[test]
-    fn the_feed_keeps_what_happened_and_what_was_reported() {
-        let mut buffers = Buffers::new();
-        buffers.note_watch_event(
-            "scout #1 · fix it",
-            WatchKind::Agent,
-            WatchState::Running,
-            None,
-            1,
-        );
-        buffers.note_watch_event(
-            "scout #1 · fix it",
-            WatchKind::Agent,
-            WatchState::Done,
-            Some("fixed the parser"),
-            2,
-        );
-        let lines: Vec<String> = buffers.team_log().iter().map(team_line).collect();
-        assert_eq!(lines, vec!["running", "done · fixed the parser"]);
     }
 
     // ---- delivery -------------------------------------------------------

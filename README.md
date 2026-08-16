@@ -185,7 +185,7 @@ bingo starts even with no credentials: the welcome card carries onboarding (`/pr
 | `Ctrl+K` / `Alt+K` | kill to the end of the line |
 | `Ctrl+Y` / `Alt+Y` | yank the newest kill; `Alt+Y` right after it cycles the 10-entry kill ring |
 | `Shift+Enter` | insert a newline (wherever the terminal speaks the kitty keyboard protocol) |
-| `Ctrl+B` | move the running shell command to the background; with none running, manage background agents (`Enter` views one, `tab` opens its record) |
+| `Ctrl+B` | move the running shell command to the background; with none running, open the background dialog — agents, shells and rooms (`Enter` a detail, `f` foregrounds one, `x` stops one, `tab` opens an agent's record) |
 | `Ctrl+L` | clear and redraw |
 | `@` / `#` | at the start of a line, send the rest straight to that agent or room; mid-line, `@` mentions a project file or a running agent (fuzzy dropdown, `Tab`/`Enter` inserts) |
 | `Tab` | complete the slash command, its argument, the selected mention, or a `!` shell-history prefix |
@@ -565,7 +565,7 @@ here (` (@scout)`, in their colour) and what a task is waiting on
 (`› blocked by #3`) — display only, nothing assigns or claims.
 
 **The zoomed view** puts one agent's conversation on the screen for as long as
-you want it there. `Enter` on a tree row — or in the `Ctrl+B` detail — swaps to
+you want it there. `Enter` on a tree row — or `f` in the `Ctrl+B` dialog — swaps to
 `Viewing @scout · esc to return` over that agent's **whole record**: the task it
 was given, main's instructions, your own messages, its work folded the way
 `@main`'s is, its answers, and whatever it is streaming right now. The composer
@@ -576,13 +576,18 @@ the next press; `Shift+Tab` cycles *that agent's* permission mode; `Shift+↑/�
 walks the roster and the view follows. Leaving puts the transcript back exactly
 where it was — nothing was spliced into it and nothing reprints.
 
-**The team is not a conversation** — you cannot say anything to it, so it is a
-directory rather than a board with a badge. It shows the roster with presence and
-each member's rooms, every room with its members, and the last ten lifecycle
-events (spawn, done, and `/team` output). **Main is on the roster, first** — it is
-a participant like the rest, with rooms and a record of its own. `Ctrl+T` no
-longer reaches it: the agent tree took that stop and the background dialog is
-what will open it next.
+**The background dialog** is `Ctrl+B` with nothing running in the foreground:
+one modal over everything working in the background, in three sections. **Agents**
+is the roster and what each one is doing, with `(3 unread)` where its conversation
+has moved since you read it — in the accent where it said your name. **Shells** is
+the background commands, each with its status. **Rooms** is every room with its
+members and its message count, marked `you're not in` where you are not a member.
+`↑/↓` selects across all three, `Enter` opens a detail, `f` foregrounds an agent or
+a room into the zoomed view, `x` stops a running agent, `←`/`Esc` closes. Rows are
+ordered running-first and then by what moved last, and the cursor follows its row
+rather than a position. The team is not a conversation — you cannot say anything to
+it — so this is where the organization is read; the always-on version of the same
+roster is the agent tree, which leads with `@main`.
 
 **Every participant has a page of its own, main included.** The perspective page
 is a read-only, two-level dossier of everything one of them has said and been
@@ -595,9 +600,9 @@ This is the audit layer — the one place an agent's conversations with someone
 other than you are visible, while your own DM with it stays a pair conversation
 and mixes nothing in. It is a snapshot: reopening is the refresh.
 
-**One door reaches it**: `tab` on an agent in the Ctrl+B manager's
-detail — where `Enter` opens the zoomed view instead, which is the live
-conversation rather than the record. Main's page is built from
+**One door reaches it**: `tab` on an agent in the `Ctrl+B` dialog — where `f`
+opens the zoomed view instead, which is the live conversation rather than the
+record. Main's page is built from
 the session transcript — its console conversation as its `@user` lane, one lane
 per agent that wrote to it, its rooms, its dispatch notifications as intake —
 and the only clock a transcript carries is the turn marker, so times on it are

@@ -777,7 +777,6 @@ pub(crate) fn spawn_agent_loop(
         wakes_owner_first,
     );
     registry.set_run_watch(&name, first_id);
-    registry.set_run_trigger(&name, wakes_owner_first);
     let loop_registry = registry.clone();
     let loop_name = name.clone();
     let retry_items = initial_items;
@@ -851,7 +850,6 @@ pub(crate) fn spawn_agent_loop(
                                 wakes,
                             );
                             loop_registry.set_run_watch(&name, id);
-                            loop_registry.set_run_trigger(&name, wakes);
                             run = (id, cell);
                         }
                         None => break,

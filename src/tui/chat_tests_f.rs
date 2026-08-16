@@ -122,12 +122,21 @@ fn a_spawn_and_a_completion_add_no_rows_to_an_idle_console() {
     );
 }
 
-/// The signal is rerouted, not dropped. D95 renders this log as the team
-/// directory; until then it is where a main-idle lifecycle event is written down.
+/// The signal is rerouted, not dropped — and D107 is where the reroute ends.
+///
+/// D94 stopped printing a main-idle lifecycle event in the console and D95
+/// filed it in a team feed instead; this pinned the filing. D107 retired that
+/// feed with the directory column that was its only reader, so the surviving
+/// destination is the one the user actually reads: the instance's own row in
+/// the background dialog, where a finished run is what the row says it is.
+/// The console still prints nothing, which is the half of the claim that was
+/// always the point.
 #[test]
-fn the_lifecycle_log_keeps_what_the_console_no_longer_prints() {
+fn the_lifecycle_signal_reaches_the_dialog_and_not_the_console() {
     let mut chat = test_chat();
     chat.messages.push(msg(Role::Assistant, ""));
+    seed_agent(&chat, "scout");
+    chat.refresh_conversations();
 
     chat.apply_event(lifecycle(
         "scout · fix the parser",
@@ -140,11 +149,16 @@ fn the_lifecycle_log_keeps_what_the_console_no_longer_prints() {
         Some("fixed the parser"),
     ));
 
-    let log = chat.buffers.team_log();
-    assert_eq!(log.len(), 2, "both events were kept");
-    assert_eq!(log[0].state, Some(WatchState::Running));
-    assert_eq!(log[1].state, Some(WatchState::Done));
-    assert_eq!(log[1].detail.as_deref(), Some("fixed the parser"));
+    assert!(
+        chat.messages.iter().all(|m| m.activities.is_empty()),
+        "nothing was hung off a reply that had nothing to do with it"
+    );
+    chat.open_background_dialog();
+    let rows: Vec<String> = chat.dialog_rows().iter().map(|row| row.text()).collect();
+    assert!(
+        rows.iter().any(|row| row.contains("@scout")),
+        "the instance is on the dialog's roster: {rows:?}"
+    );
 }
 
 /// The other half of the reroute: a completed agent's report is in its DM, and

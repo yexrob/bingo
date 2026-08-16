@@ -36,13 +36,13 @@
 pub mod activities;
 mod app;
 pub mod avatar;
+pub mod background;
 pub mod buffer;
 pub mod bufferview;
 pub mod chat;
 mod chrome;
 pub mod complete;
 pub mod composer;
-pub mod directory;
 pub mod el;
 pub mod gfx;
 pub mod highlight;

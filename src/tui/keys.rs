@@ -109,7 +109,7 @@ pub const BINDINGS: &[Binding] = &[
     },
     Binding {
         keys: "ctrl+b",
-        description: "background the running command · manage agents (enter view · tab record)",
+        description: "background the running command · the dialog: agents · shells · rooms",
     },
     Binding {
         keys: "shift+↑/↓",
@@ -299,9 +299,14 @@ mod tests {
             viewing.contains("shift+tab"),
             "and where the mode being cycled is not main's: {viewing}"
         );
+        // D107: the dialog's own footer names its verbs (`Enter to view`,
+        // `f to foreground`, `tab to open the record`), because they are
+        // conditional on the row the cursor is on and a fixed help line cannot
+        // be. What the panel owes is the door and what is behind it.
+        let dialog = find("ctrl+b").description;
         assert!(
-            find("ctrl+b").description.contains("enter view"),
-            "the manager's detail names its two doors"
+            dialog.contains("agents") && dialog.contains("shells") && dialog.contains("rooms"),
+            "the panel names the dialog's three sections: {dialog}"
         );
         assert!(
             find("ctrl+shift+o").description.contains("preview"),
@@ -354,8 +359,9 @@ mod tests {
     }
 
     /// ctrl+b reads the situation: a shell command running in the foreground is
-    /// what it backgrounds, and only when there is none does it open the manager
-    /// (D84). The panel names both, in the order the key tries them.
+    /// what it backgrounds, and only when there is none does it open the
+    /// background dialog (D84, D107). The panel names both, in the order the
+    /// key tries them.
     #[test]
     fn ctrl_b_help_names_both_of_its_meanings() {
         let binding = BINDINGS
@@ -364,7 +370,7 @@ mod tests {
             .unwrap_or_else(|| panic!("ctrl+b binding missing"));
         assert_eq!(
             binding.description,
-            "background the running command · manage agents (enter view · tab record)"
+            "background the running command · the dialog: agents · shells · rooms"
         );
     }
 

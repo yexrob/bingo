@@ -277,13 +277,18 @@ async fn a_terminal_event_with_no_notification_for_main_wakes_nothing() {
     tokio::task::yield_now().await;
     chat.drain_events();
     assert!(!chat.busy, "no turn was started");
-    // The record is still complete: the directory feed takes every run.
+    // Nor does the run appear in main's own conversation. D95 filed every
+    // lifecycle event in a team feed and this asserted the filing was
+    // unscoped; D107 retired that feed with the directory column that read it,
+    // so what is left to assert is the rule itself — a run addressed to
+    // nobody wakes nobody and writes nothing where the user is reading.
     assert!(
-        chat.buffers
-            .team_log()
+        !chat
+            .messages
             .iter()
-            .any(|e| e.label == "scout #2 · answer the user"),
-        "the lifecycle feed is a record, and records do not get scoped"
+            .any(|message| message.text.contains("answer the user")),
+        "and it says nothing in @main: {:?}",
+        chat.messages.iter().map(|m| &m.text).collect::<Vec<_>>()
     );
 }
 
@@ -2413,6 +2418,13 @@ async fn queued_slashes_drain_through_run_slash() {
 
 /// D80: running agents no longer claim ↑/↓. With a background agent up and an
 /// empty composer, ↑ recalls the prompt history.
+///
+/// Rewritten for D107: the manager's detail became the background dialog's,
+/// and the two doors moved with it — `f` foregrounds the agent (CC's verb for
+/// the zoomed view) and `tab` still opens its record. `Enter` is what opens the
+/// detail now, which is CC's own meaning for it
+/// (`BackgroundTasksDialog.tsx:414`); nothing that was asserted here is
+/// dropped, each claim is made through the key that carries it now.
 #[test]
 fn running_agents_leave_the_arrows_to_history() {
     let mut chat = test_chat();
@@ -2432,13 +2444,9 @@ fn running_agents_leave_the_arrows_to_history() {
         chat.input, "earlier prompt",
         "↑ recalls history, not agents"
     );
-    // Ctrl+B → Enter (list) opens the detail; from there the two doors are
-    // `tab` for the record (D96) and Enter for the zoom (D105). Enter was left
-    // unbound by D103 precisely so that this batch could give it the meaning it
-    // was reserved for.
+
     chat.set_input("");
     assert!(chat.on_key(KeyCode::Char('b'), KeyModifiers::CONTROL));
-    assert!(chat.on_key(KeyCode::Enter, KeyModifiers::NONE));
     assert!(chat.on_key(KeyCode::Tab, KeyModifiers::NONE));
     assert_eq!(
         chat.open_perspective.as_deref(),
@@ -2449,26 +2457,33 @@ fn running_agents_leave_the_arrows_to_history() {
 
     chat.open_perspective = None;
     assert!(chat.on_key(KeyCode::Char('b'), KeyModifiers::CONTROL));
-    assert!(chat.on_key(KeyCode::Enter, KeyModifiers::NONE));
-    assert!(chat.on_key(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(chat.on_key(KeyCode::Char('f'), KeyModifiers::NONE));
     assert_eq!(
         chat.open_zoom,
         Some(crate::tui::zoom::ZoomTarget::Agent("scout".into())),
-        "Enter in the detail zooms the agent it is about"
+        "f foregrounds the agent under the cursor"
     );
     assert!(
         chat.open_perspective.is_none(),
         "and the zoom is not the record"
     );
     assert!(
-        chat.agent_manager.is_none(),
-        "the panel closes behind the door it opened"
+        chat.dialog.is_none(),
+        "the dialog closes behind the door it opened"
     );
 }
 
-/// Ctrl+B owns list/detail navigation and x stops the selected running agent.
+/// Ctrl+B opens the background dialog: it names what is running, the cursor
+/// walks it, `Enter` opens a detail and `x` stops the row it is on.
+///
+/// Rewritten for D107 from `agent_manager_lists_opens_details_and_stops_agents`.
+/// Every question it asked is still asked — the list names the instance and
+/// what its run has cost, `x` stops the selected row rather than the first,
+/// the detail carries prompt and progress, both views stay bounded, and an
+/// open dialog keeps the clock awake — against CC's copy for each of them
+/// (`BackgroundTasksDialog.tsx:425-426`, `InProcessTeammateDetailDialog.tsx:126-209`).
 #[test]
-fn agent_manager_lists_opens_details_and_stops_agents() {
+fn the_background_dialog_lists_opens_details_and_stops_agents() {
     let mut chat = test_chat();
     chat.session.agents.insert(
         "alpha",
@@ -2499,16 +2514,30 @@ fn agent_manager_lists_opens_details_and_stops_agents() {
 
     assert!(chat.on_key(KeyCode::Char('b'), KeyModifiers::CONTROL));
     let list = chat
-        .agent_manager_rows(100)
+        .dialog_view_rows(100)
         .iter()
         .map(|row| row.line.plain_text())
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(list.contains("Background agents · 2 running"), "{list}");
-    assert!(list.contains("scout · inspect the code"), "{list}");
-    assert!(list.contains("123 tokens · 2 tools"), "{list}");
+    assert!(list.contains("Background tasks"), "{list}");
+    assert!(
+        list.contains("2 agents"),
+        "the subtitle counts what runs: {list}"
+    );
+    assert!(list.contains("@scout"), "{list}");
     assert!(list.contains("Read(src/tui/chat.rs)"), "{list}");
+    assert!(
+        list.contains("↑/↓ to select · Enter to view"),
+        "the key row is CC's: {list}"
+    );
+
+    // The cursor lands on the first row and walks; `x` stops the row it is on.
     assert!(chat.on_key(KeyCode::Down, KeyModifiers::NONE));
+    assert_eq!(
+        chat.dialog_selection(),
+        Some(crate::tui::background::DialogTarget::Agent("scout".into())),
+        "↓ walks to the second instance"
+    );
     assert!(chat.on_key(KeyCode::Char('x'), KeyModifiers::NONE));
     let statuses = chat.session.agents.list();
     assert_eq!(
@@ -2527,10 +2556,15 @@ fn agent_manager_lists_opens_details_and_stops_agents() {
         Some(crate::agents::AgentState::Running)
     );
     assert!(
-        chat.agent_manager_rows(100).len() <= AGENT_MANAGER_ROWS_MAX + 4,
-        "manager list stays bounded"
+        chat.dialog.is_some(),
+        "and the dialog stays open: the row saying `[stopped]` is the receipt"
+    );
+    assert!(
+        chat.dialog_view_rows(100).len() <= 16,
+        "the list stays bounded"
     );
 
+    // Enter opens the detail on the selected row.
     chat.session.agents.insert(
         "scout",
         crate::agents::AgentKind::Hire,
@@ -2550,43 +2584,44 @@ fn agent_manager_lists_opens_details_and_stops_agents() {
             recent_activity: vec!["⏺Read(src/tui/chat.rs)".into()],
         },
     );
+    chat.dialog = Some(crate::tui::background::BackgroundDialog {
+        selected: Some(crate::tui::background::DialogTarget::Agent("scout".into())),
+        detail: None,
+    });
     assert!(chat.on_key(KeyCode::Enter, KeyModifiers::NONE));
     assert_eq!(
-        chat.agent_manager,
-        Some(AgentManager::Detail {
-            name: "scout".into()
-        })
+        chat.dialog.as_ref().and_then(|d| d.detail.clone()),
+        Some(crate::tui::background::DialogTarget::Agent("scout".into()))
     );
     let detail = chat
-        .agent_manager_rows(100)
+        .dialog_view_rows(100)
         .iter()
         .map(|row| row.line.plain_text())
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(detail.contains("scout › inspect the code"), "{detail}");
+    assert!(detail.contains("@scout"), "{detail}");
+    assert!(detail.contains("123 tokens"), "{detail}");
     assert!(detail.contains("Prompt"), "{detail}");
     assert!(detail.contains("Find the rendering seam"), "{detail}");
     assert!(detail.contains("Progress"), "{detail}");
     assert!(
-        chat.agent_manager_rows(100).len() <= AGENT_PROMPT_ROWS_MAX + 12,
-        "detail prompt is bounded"
+        detail.contains("← to go back · Esc/Enter/Space to close"),
+        "the detail's key row is CC's: {detail}"
     );
     assert!(
-        chat.has_dynamic_rows(),
-        "an open running detail keeps elapsed live"
+        chat.dialog_view_rows(100).len() <= 24,
+        "the detail is bounded"
     );
+    assert!(chat.has_dynamic_rows(), "an open dialog keeps elapsed live");
 
-    assert!(chat.on_key(KeyCode::Char('x'), KeyModifiers::NONE));
-    assert!(chat.agent_manager.is_none());
-    assert_eq!(
-        chat.session
-            .agents
-            .list()
-            .iter()
-            .find(|status| status.name == "scout")
-            .map(|status| status.state),
-        Some(crate::agents::AgentState::Stopped)
+    // `←` is the way back to the list; Esc closes the modal from either mode.
+    assert!(chat.on_key(KeyCode::Left, KeyModifiers::NONE));
+    assert!(
+        chat.dialog.as_ref().is_some_and(|d| d.detail.is_none()),
+        "← returns to the list"
     );
+    assert!(chat.on_key(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(chat.dialog.is_none(), "Esc closes the dialog");
 }
 
 /// Queues beyond the cap fold into one row (row count feeds chrome, so it must be bounded).

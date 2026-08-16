@@ -419,10 +419,6 @@ struct Entry {
     abort: Option<tokio::task::AbortHandle>,
     /// Cumulative run count (watch lines are labeled `#N`).
     runs: u64,
-    /// Whether the run in flight was triggered by the user's own DM alone
-    /// (D99) — the same discrimination D98 stamps on the watch entry, kept on
-    /// the instance so the pair view can ask whose tail it is looking at.
-    user_run: bool,
     /// Watch line of the current turn (used to set Cancelled on stop/delete).
     watch_id: Option<crate::watch::WatchId>,
     /// Streaming output of the current turn (shares the same Arc with subagent_hooks;
@@ -661,7 +657,6 @@ impl AgentRegistry {
                 stamps: Vec::new(),
                 inbox: Vec::new(),
                 in_flight: Vec::new(),
-                user_run: false,
                 acks: Vec::new(),
                 session,
                 abort: None,
@@ -951,34 +946,6 @@ impl AgentRegistry {
         if let Some(entry) = self.lock().get_mut(name) {
             entry.watch_id = Some(id);
         }
-    }
-
-    /// Record whose run this is, at the moment it is registered (D99).
-    ///
-    /// D98 already decides this to answer "does the end of this run wake main"
-    /// (`tool::agent::wakes_owner`). The pair view asks the same question from
-    /// the other side: a run nobody in this conversation started has a live tail
-    /// that belongs on the agent's own page, not under the user's composer.
-    pub fn set_run_trigger(&self, name: &str, wakes_owner: bool) {
-        if let Some(entry) = self.lock().get_mut(name) {
-            entry.user_run = !wakes_owner;
-        }
-    }
-
-    /// Whether the run in flight was started by the user's own message. False
-    /// when nothing is running — there is no tail to claim.
-    ///
-    /// **Unused since D105.** D99's pair view filtered the live tail by it: an
-    /// agent working for main was not the user's stream to watch. The zoomed
-    /// view shows the agent's whole life, whoever started the run, so the
-    /// filter went — and this is the fact it stood on. Kept rather than
-    /// deleted because the field behind it is a domain write path, and because
-    /// "whose run is this" is a question a roster row can still be asked.
-    #[allow(dead_code)] // D107 absorbs this
-    pub fn run_is_the_users(&self, name: &str) -> bool {
-        self.lock()
-            .get(name)
-            .is_some_and(|entry| entry.user_run && entry.state == AgentState::Running)
     }
 
     /// Turn finished: store the latest history. Inbox non-empty → stay Running and

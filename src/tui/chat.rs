@@ -327,11 +327,6 @@ pub const SLASH_SUGGESTIONS_MAX: usize = 5;
 pub const INPUT_ROWS_MAX: usize = 10;
 /// Max rows shown for queued messages (more collapse into `… +N more`).
 pub const QUEUE_ROWS_MAX: usize = 3;
-/// Max running agents shown at once in the background-agent manager.
-pub const AGENT_MANAGER_ROWS_MAX: usize = 8;
-/// Agent detail follows the reference dialog's bounded prompt preview.
-pub const AGENT_PROMPT_CHARS_MAX: usize = 300;
-pub const AGENT_PROMPT_ROWS_MAX: usize = 6;
 /// Undo stack depth (ctrl+_).
 pub const UNDO_MAX: usize = 20;
 /// Exit-confirmation window between two Ctrl+C presses.
@@ -960,9 +955,14 @@ pub struct Chat {
     /// ctrl+o requests the transcript view: the host opens the alternate-screen
     /// pager over the whole session (cleared after consumption, D82).
     pub open_transcript: bool,
-    /// `tab` in the ctrl+b manager's detail requests that agent's perspective
-    /// page: the host opens the read-only two-level dossier over a snapshot of
-    /// the agent's communications (cleared after consumption, D96).
+    /// `tab` in the background dialog requests that agent's perspective page:
+    /// the host opens the read-only two-level dossier over a snapshot of the
+    /// agent's communications (cleared after consumption, D96).
+    ///
+    /// **The page's one remaining door.** v4 retires it as a surface — the
+    /// zoom is the live full-transcript view now — and D108 owns the sweep;
+    /// D107 kept the key rather than half-retiring the page in the batch that
+    /// rebuilt the panel around it.
     pub open_perspective: Option<String>,
     /// ctrl+g (or `ctrl+x ctrl+e`) requests the `$EDITOR` compose: the host
     /// hands the terminal over and puts the edited draft back (cleared after
@@ -1205,13 +1205,11 @@ pub struct Chat {
     pub tasks_visible: bool,
     /// Whether the task area was auto-opened by TaskCreate (not manually via ctrl+t): hides automatically when everything is done.
     pub tasks_auto: bool,
-    /// Main-view background-agent manager; `None` means the panel is closed.
-    pub agent_manager: Option<AgentManager>,
-    /// The team directory (D95). No longer on the `ctrl+t` cycle since D104 —
-    /// the agent tree took that stop — and D107's background dialog is what
-    /// absorbs it. Nothing opens it in the meantime, which is why it is always
-    /// `None`; the rendering and key paths are kept whole for that batch.
-    pub(crate) directory: Option<crate::tui::directory::Directory>,
+    /// The background dialog (D107), `ctrl+b`'s second meaning: agents, shells
+    /// and rooms in one modal. `None` means it is closed. It holds a cursor and
+    /// a detail pointer and nothing else — every row is rebuilt from the
+    /// registries at draw time.
+    pub(crate) dialog: Option<crate::tui::background::BackgroundDialog>,
     /// The agent tree (D104), second stop of the `ctrl+t` cycle; `None` means
     /// it is closed. Its rows are built from the registry at draw time, so this
     /// holds nothing but the cursor.
@@ -1224,13 +1222,6 @@ pub struct Chat {
     pub(crate) rewind: Option<rewind_ui::Rewind>,
     /// Interrupt signal: Ctrl+C / Esc while busy → send(true), aborting stream reads in the turn immediately.
     pub(crate) cancel_tx: tokio::sync::watch::Sender<bool>,
-}
-
-/// Background-agent manager layered over the main chat.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum AgentManager {
-    List { selected: usize },
-    Detail { name: String },
 }
 
 impl Chat {
@@ -1500,8 +1491,7 @@ impl Chat {
             models_cache: HashMap::new(),
             tasks_visible: false,
             tasks_auto: false,
-            agent_manager: None,
-            directory: None,
+            dialog: None,
             tree: None,
             tree_preview: false,
             rewind: None,
@@ -1900,14 +1890,14 @@ impl Chat {
                 // The registry sweep goes first: it is what materializes the
                 // conversation an event is about, so a DM's badge is observed
                 // against a buffer that is already there rather than one this
-                // event has to create. The lifecycle feed itself is ungated
-                // (D95) and does not depend on the order.
+                // event has to create.
                 //
-                // No mut-borrow hazard: the sweep takes the session, the note
-                // takes the event.
+                // D95 teed the event into a lifecycle feed as well; D107
+                // retired that feed with the directory column that was its only
+                // reader, and what a run did is read where it happens — the
+                // flow's own dispatch and completion rows (D106), the dialog,
+                // and the instance's record.
                 self.refresh_conversations();
-                self.buffers
-                    .note_watch_event(&label, kind, status, detail.as_deref(), self.tick);
                 let found = self.messages.iter_mut().find_map(|m| {
                     m.activities
                         .iter_mut()
@@ -1944,9 +1934,10 @@ impl Chat {
                     // a new label, an ack watchdog reporting a chase — none of
                     // them answers anything the user did, and all of them landed
                     // under a reply that had nothing to do with them. The signal
-                    // survives elsewhere: presence and unread on the bar, the
-                    // bounded lifecycle log `note_watch_event` just filled, and
-                    // the agent's own DM, whose unread follows its history.
+                    // survives elsewhere: the instance's row in the background
+                    // dialog (D107), its unread badge there, and — since D106 —
+                    // the flow's own dispatch and completion rows, which belong
+                    // to the turn that made the call.
                     //
                     // Command and channel watches keep the old walk-back: a
                     // background shell command is main's own tool, and a

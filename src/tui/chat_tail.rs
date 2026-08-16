@@ -31,8 +31,15 @@ pub enum EscLayer {
     /// Menu-tier, beside the pickers rather than above them: it is a transient
     /// chooser over the composer, and it opens and closes on its own key.
     Rewind,
-    /// The ctrl+b background-agent overlay (detail returns to the list, the list closes).
-    AgentManager,
+    /// The `ctrl+b` background dialog (D107): agents, shells and rooms.
+    ///
+    /// **One layer, not two**, though it has a list and a detail: CC's detail
+    /// *replaces* the list rather than stacking on it
+    /// (`BackgroundTasksDialog.tsx:396`), and its own footer says
+    /// `Esc/Enter/Space to close` from either mode
+    /// (`InProcessTeammateDetailDialog.tsx:198`). `←` is the way back to the
+    /// list, so nothing is stranded by a press that closes the modal.
+    BackgroundDialog,
     /// Slash-command dropdown: closes, and takes a bare `/` query with it.
     SlashDropdown,
     /// The `@` mention dropdown: closes, leaving the typed token alone.
@@ -48,15 +55,10 @@ pub enum EscLayer {
     InfoLines,
     /// The `?` shortcut panel.
     HelpPanel,
-    /// The team directory (D95). Off the ctrl+t cycle since D104 and reachable
-    /// from nowhere until D107 absorbs it, so this layer is never open — the
-    /// slot is kept rather than renumbered, because the dialog that takes the
-    /// directory's place will want it back.
-    Directory,
     /// The agent tree (D104), the second stop of the ctrl+t cycle.
     ///
-    /// Its own layer, in the directory's stratum and immediately above the task
-    /// panel it cycles with, rather than a second meaning for the
+    /// Its own layer, immediately above the task panel it cycles with, rather
+    /// than a second meaning for the
     /// [`EscLayer::TaskPanel`] slot. The two are one *gesture* but not one
     /// surface — different state, different dismissal, and both can be reached
     /// from the same key — and `ORDER` is the single place that says which one
@@ -84,18 +86,17 @@ pub enum EscLayer {
 
 impl EscLayer {
     /// The stack, top first. The single source for Esc's priority.
-    pub const ORDER: [EscLayer; 16] = [
+    pub const ORDER: [EscLayer; 15] = [
         EscLayer::AskDialog,
         EscLayer::Menu,
         EscLayer::Rewind,
-        EscLayer::AgentManager,
+        EscLayer::BackgroundDialog,
         EscLayer::SlashDropdown,
         EscLayer::MentionDropdown,
         EscLayer::Search,
         EscLayer::ErrorRow,
         EscLayer::InfoLines,
         EscLayer::HelpPanel,
-        EscLayer::Directory,
         EscLayer::AgentTree,
         EscLayer::TaskPanel,
         EscLayer::Interrupt,
@@ -192,21 +193,16 @@ impl super::Chat {
     }
 
     /// `/team <subcommand>` (D31 project-level formation): dispatched to
-    /// team_cmd, and the answer lands in the team's own feed (D90, D95).
+    /// team_cmd, and the answer lands on the info tier — the tier every other
+    /// slash command answers on.
     ///
-    /// It used to go to main's info tier, which put the formation's own
-    /// report everywhere except where the formation's history lives. The feed
-    /// is now a column of the directory rather than a board with a badge, so
-    /// the pointer names the key that opens it: an answer stored somewhere the
-    /// user cannot find is the same as no answer.
+    /// D90 filed it in the team feed instead, because the board was the
+    /// formation's own history; D95 made that feed a column of the team
+    /// directory, D104 took the directory's door away and printed here as
+    /// well, and D107 retired the column with the directory. A store nobody
+    /// reads is not a store, so the tier is now the whole answer.
     pub(crate) fn slash_team(&mut self, arg: &str) {
         let lines = crate::team_cmd::run(&self.session, &std::path::PathBuf::from(&self.cwd), arg);
-        let label = if arg.trim().is_empty() {
-            "/team".to_string()
-        } else {
-            format!("/team {}", arg.trim())
-        };
-        self.buffers.note_team_output(&label, &lines.join("\n"));
         for line in lines {
             self.push_slash_info(line);
         }
@@ -958,20 +954,14 @@ impl super::Chat {
         if self.search.is_some() {
             return self.search_key(code, modifiers);
         }
-        // Main-view agent management takes precedence over global editing keys.
-        if self.agent_manager_key(code, modifiers) {
+        // The background dialog takes precedence over global editing keys: it
+        // is modal for what it uses (D107).
+        if self.background_dialog_key(code, modifiers) {
             return true;
         }
         // The rewind selector is modal while it is open (D91): it is a chooser
         // over the composer, and a stray key must not reach the draft.
         if self.rewind_key(code, modifiers) {
-            return true;
-        }
-        // The team directory (D95) is a chooser too, and modal for unmodified
-        // keys only: `j` joins a room, so it must not also type a `j`, while
-        // chords stay the application's. It has no door until D107 opens one,
-        // so this never fires; the path is kept for the dialog that will.
-        if self.directory_key(code, modifiers) {
             return true;
         }
         // The agent tree (D104) is the opposite of modal: it claims shift+↑/↓
@@ -1238,7 +1228,7 @@ impl super::Chat {
             EscLayer::AskDialog => self.pending_ask.is_some(),
             EscLayer::Menu => self.menu_open(),
             EscLayer::Rewind => self.rewind.is_some(),
-            EscLayer::AgentManager => self.agent_manager.is_some(),
+            EscLayer::BackgroundDialog => self.dialog.is_some(),
             EscLayer::SlashDropdown => !self.slash_suggestions.is_empty(),
             EscLayer::MentionDropdown => self.mention.is_some(),
             EscLayer::Search => self.search.is_some(),
@@ -1250,7 +1240,6 @@ impl super::Chat {
                 .is_some_and(|e| e.level != crate::error::ErrorLevel::Full),
             EscLayer::InfoLines => !self.slash_info_lines.is_empty(),
             EscLayer::HelpPanel => self.help_visible,
-            EscLayer::Directory => self.directory.is_some(),
             EscLayer::AgentTree => self.tree.is_some(),
             EscLayer::TaskPanel => self.tasks_visible && !self.tasks_auto,
             EscLayer::Interrupt => self.busy,
@@ -1276,7 +1265,7 @@ impl super::Chat {
                     || self.images_menu_key(ESC, NONE)
             }
             EscLayer::Rewind => self.rewind_key(ESC, NONE),
-            EscLayer::AgentManager => self.agent_manager_key(ESC, NONE),
+            EscLayer::BackgroundDialog => self.background_dialog_key(ESC, NONE),
             EscLayer::SlashDropdown => self.slash_menu_key(ESC, NONE),
             EscLayer::MentionDropdown => self.mention_menu_key(ESC, NONE),
             EscLayer::Search => self.search_key(ESC, NONE),
@@ -1296,7 +1285,6 @@ impl super::Chat {
                 self.help_visible = false;
                 true
             }
-            EscLayer::Directory => self.directory_key(ESC, NONE),
             // Selection first, then the panel: a cursor in the tree is a state
             // the user can be in, and taking the whole panel away to get out of
             // it would be two levels for one press.
@@ -2058,13 +2046,13 @@ impl super::Chat {
                     .tasks_cache
                     .iter()
                     .any(|t| t.status == TodoStatus::InProgress))
-            || (self.agent_manager.is_some()
-                && self
-                    .session
-                    .agents
-                    .list()
-                    .iter()
-                    .any(|status| status.state == crate::agents::AgentState::Running))
+            // The background dialog's rows move on their own — a running
+            // agent's activity, an idle one's `Idle for 14s`, a shell's
+            // runtime — so an open dialog with anybody on it keeps the clock
+            // awake, exactly as the tree does (D107).
+            || (self.dialog.is_some()
+                && (!self.session.agents.list().is_empty()
+                    || !self.session.watch.snapshot().is_empty()))
             // An open tree counts seconds — a running row's activity and an
             // idle row's `Idle for 14s` both move without an event arriving —
             // so it keeps the clock awake while anybody is on it (D104).
@@ -2407,114 +2395,10 @@ impl super::Chat {
         rows
     }
 
-    /// Main-view entry for running background-agent management — and, while a
-    /// shell command is running in the foreground, for moving that command to the
-    /// background instead (D84).
-    ///
-    /// The running command wins: it is the thing the key is about right now, it is
-    /// on screen with its tail under it, and it stops being promotable the moment
-    /// it exits — after which ctrl+b means what it meant before (D80).
-    pub fn agent_manager_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> bool {
-        let ctrl = modifiers.contains(KeyModifiers::CONTROL);
-        if self.agent_manager.is_none() && code == KeyCode::Char('b') && ctrl && self.live.promote()
-        {
-            // The tail's rows go with the row they hung under; the command reappears
-            // in the task panel as the background task it now is.
-            self.bash_tail = None;
-            self.dirty = true;
-            return true;
-        }
-        if self.agent_manager.is_none() && code == KeyCode::Char('b') && ctrl {
-            self.agent_manager = Some(AgentManager::List { selected: 0 });
-            self.dirty = true;
-            return true;
-        }
-        let Some(mut manager) = self.agent_manager.take() else {
-            return false;
-        };
-        let running = self
-            .session
-            .agents
-            .list()
-            .into_iter()
-            .filter(|status| status.state == crate::agents::AgentState::Running)
-            .collect::<Vec<_>>();
-        let keep = match &mut manager {
-            AgentManager::List { selected } => {
-                *selected = (*selected).min(running.len().saturating_sub(1));
-                match code {
-                    KeyCode::Up => {
-                        *selected = selected.saturating_sub(1);
-                        true
-                    }
-                    KeyCode::Down => {
-                        *selected = (*selected + 1).min(running.len().saturating_sub(1));
-                        true
-                    }
-                    KeyCode::Enter => {
-                        if let Some(status) = running.get(*selected) {
-                            manager = AgentManager::Detail {
-                                name: status.name.clone(),
-                            };
-                        }
-                        true
-                    }
-                    KeyCode::Char('x') => {
-                        if let Some(status) = running.get(*selected) {
-                            self.stop_agent_from_manager(&status.name);
-                        }
-                        true
-                    }
-                    KeyCode::Esc => false,
-                    _ => {
-                        self.agent_manager = Some(manager);
-                        return true;
-                    }
-                }
-            }
-            AgentManager::Detail { name } => match code {
-                KeyCode::Char('x') => {
-                    self.stop_agent_from_manager(name);
-                    false
-                }
-                KeyCode::Left | KeyCode::Esc => {
-                    manager = AgentManager::List { selected: 0 };
-                    true
-                }
-                // Enter zooms this agent (D105): the live view over its whole
-                // conversation, with the composer routed to it. Unbound between
-                // D103 and here — the DM it used to open retired with the
-                // buffers, and the promise was kept until there was something
-                // to keep it with.
-                KeyCode::Enter => {
-                    self.open_zoom = Some(crate::tui::zoom::ZoomTarget::Agent(name.clone()));
-                    self.dirty = true;
-                    false
-                }
-                // tab opens this agent's perspective page (D96): the read-only
-                // dossier of every conversation it has had.
-                KeyCode::Tab => {
-                    self.open_perspective = Some(name.clone());
-                    self.dirty = true;
-                    false
-                }
-                KeyCode::Char(' ') => false,
-                _ => {
-                    self.agent_manager = Some(manager);
-                    return true;
-                }
-            },
-        };
-        if keep {
-            self.agent_manager = Some(manager);
-        }
-        self.dirty = true;
-        true
-    }
-
-    /// Stop an agent. Every surface that stops one goes through here: one
-    /// path, one warning, one watch transition.
-    pub(crate) fn stop_agent_from_manager(&mut self, name: &str) {
+    /// Stop an agent. Every surface that stops one goes through here — the
+    /// tree's `k`, the dialog's `x`, the zoom's — so there is one path, one
+    /// warning and one watch transition.
+    pub(crate) fn stop_agent(&mut self, name: &str) {
         match self.session.agents.stop(name) {
             Ok((watch_id, dropped)) => {
                 if let Some(id) = watch_id {
@@ -2534,150 +2418,6 @@ impl super::Chat {
                 self.refresh_conversations();
             }
             Err(error) => self.push_warning(error),
-        }
-    }
-
-    /// Rows for the main-view manager overlay.
-    pub fn agent_manager_rows(&self, width: usize) -> Vec<Row> {
-        let Some(manager) = &self.agent_manager else {
-            return Vec::new();
-        };
-        let statuses = self.session.agents.list();
-        let running = statuses
-            .iter()
-            .filter(|status| status.state == crate::agents::AgentState::Running)
-            .collect::<Vec<_>>();
-        match manager {
-            AgentManager::List { selected } => {
-                let mut rows = vec![Row::new(Line::styled(
-                    format!("Background agents · {} running", running.len()),
-                    SegStyle::fg(self.theme.text).bold(),
-                ))];
-                if running.is_empty() {
-                    rows.push(Row::new(Line::styled(
-                        "No agents currently running",
-                        SegStyle::fg(self.theme.text_secondary),
-                    )));
-                } else {
-                    let selected = (*selected).min(running.len() - 1);
-                    let start = selected.saturating_sub(AGENT_MANAGER_ROWS_MAX - 1);
-                    for (index, status) in running
-                        .iter()
-                        .enumerate()
-                        .skip(start)
-                        .take(AGENT_MANAGER_ROWS_MAX)
-                    {
-                        let activity = status
-                            .recent_activity
-                            .last()
-                            .map(String::as_str)
-                            .unwrap_or("initializing…");
-                        let prefix = if index == selected { "❯ " } else { "  " };
-                        let stats = format_agent_stats(status);
-                        rows.push(Row::new(Line::styled(
-                            one_line(
-                                &format!(
-                                    "{prefix}◉ {} · {} · {} · {activity}",
-                                    status.name, status.description, stats
-                                ),
-                                width.saturating_sub(2),
-                            ),
-                            SegStyle::fg(if prefix == "❯ " {
-                                self.theme.permission
-                            } else {
-                                self.theme.text
-                            }),
-                        )));
-                    }
-                    if running.len() > AGENT_MANAGER_ROWS_MAX {
-                        rows.push(Row::new(Line::styled(
-                            format!("  … {} running agents", running.len()),
-                            SegStyle::fg(self.theme.text_secondary),
-                        )));
-                    }
-                }
-                rows.push(Row::new(Line::styled(
-                    "↑/↓ select · Enter details · x stop · Esc close",
-                    SegStyle::fg(self.theme.text_secondary),
-                )));
-                manager_box(rows, width, &self.theme)
-            }
-            AgentManager::Detail { name } => {
-                let status = statuses.iter().find(|status| &status.name == name);
-                let mut rows = vec![Row::new(Line::styled(
-                    status.map_or_else(
-                        || name.clone(),
-                        |s| format!("{} › {}", s.name, s.description),
-                    ),
-                    SegStyle::fg(self.theme.text).bold(),
-                ))];
-                if let Some(status) = status {
-                    rows.push(Row::new(Line::styled(
-                        format!("{} · {}", status.state.label(), format_agent_stats(status)),
-                        SegStyle::fg(self.theme.text_secondary),
-                    )));
-                    rows.push(Row::new(Line::empty()));
-                    rows.push(Row::new(Line::styled(
-                        "Progress",
-                        SegStyle::fg(self.theme.text_secondary).bold(),
-                    )));
-                    if status.recent_activity.is_empty() {
-                        rows.push(Row::new(Line::styled(
-                            "› initializing…",
-                            SegStyle::fg(self.theme.text_secondary),
-                        )));
-                    } else {
-                        for (index, activity) in status.recent_activity.iter().enumerate() {
-                            let prefix = if index + 1 == status.recent_activity.len() {
-                                "› "
-                            } else {
-                                "  "
-                            };
-                            rows.push(Row::new(Line::styled(
-                                one_line(&format!("{prefix}{activity}"), width.saturating_sub(2)),
-                                SegStyle::fg(if prefix == "› " {
-                                    self.theme.text
-                                } else {
-                                    self.theme.text_secondary
-                                }),
-                            )));
-                        }
-                    }
-                    rows.push(Row::new(Line::empty()));
-                    rows.push(Row::new(Line::styled(
-                        "Prompt",
-                        SegStyle::fg(self.theme.text_secondary).bold(),
-                    )));
-                    let prompt = if status.prompt.is_empty() {
-                        "(prompt unavailable)".to_string()
-                    } else {
-                        truncate_chars(&status.prompt, AGENT_PROMPT_CHARS_MAX)
-                    };
-                    let prompt_rows = wrap_words(&prompt, width.saturating_sub(4).max(1));
-                    for line in prompt_rows.iter().take(AGENT_PROMPT_ROWS_MAX) {
-                        rows.push(Row::new(Line::plain(line.clone())));
-                    }
-                    if prompt_rows.len() > AGENT_PROMPT_ROWS_MAX {
-                        rows.push(Row::new(Line::styled(
-                            format!(
-                                "… +{} prompt lines",
-                                prompt_rows.len() - AGENT_PROMPT_ROWS_MAX
-                            ),
-                            SegStyle::fg(self.theme.text_secondary),
-                        )));
-                    }
-                } else {
-                    rows.push(Row::new(Line::styled(
-                        "Agent is no longer available",
-                        SegStyle::fg(self.theme.text_secondary),
-                    )));
-                }
-                rows.push(Row::new(Line::styled(
-                    "←/Esc back · tab perspective · x stop",
-                    SegStyle::fg(self.theme.text_secondary),
-                )));
-                manager_box(rows, width, &self.theme)
-            }
         }
     }
 
@@ -3567,33 +3307,6 @@ fn hang_stamp(el: &mut El, time: &str, width: usize, theme: &Theme) {
         width.saturating_sub(padding_right),
         STAMP_GAP,
     );
-}
-
-fn truncate_chars(text: &str, max: usize) -> String {
-    let mut chars = text.chars();
-    let mut out = chars.by_ref().take(max).collect::<String>();
-    if chars.next().is_some() {
-        out.push('…');
-    }
-    out
-}
-
-fn format_agent_stats(status: &crate::agents::AgentStatus) -> String {
-    let elapsed = status.elapsed.unwrap_or_default().as_secs();
-    let elapsed = if elapsed >= 60 {
-        format!("{}m {:02}s", elapsed / 60, elapsed % 60)
-    } else {
-        format!("{elapsed}s")
-    };
-    let tools = if status.tool_uses == 1 {
-        "tool"
-    } else {
-        "tools"
-    };
-    format!(
-        "{elapsed} · {} tokens · {} {tools}",
-        status.output_tokens, status.tool_uses
-    )
 }
 
 pub(crate) fn manager_box(rows: Vec<Row>, width: usize, theme: &Theme) -> Vec<Row> {

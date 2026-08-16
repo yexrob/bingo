@@ -1277,9 +1277,9 @@ fn a_long_tail_line_is_clipped_to_the_width() {
 }
 
 /// D84: ctrl+b reads the situation. A command running in the foreground is what
-/// it backgrounds; with none running it keeps opening the manager (D80).
+/// it backgrounds; with none running it keeps opening the dialog (D80, D107).
 #[test]
-fn ctrl_b_backgrounds_the_running_command_before_it_opens_the_manager() {
+fn ctrl_b_backgrounds_the_running_command_before_it_opens_the_dialog() {
     let mut chat = test_chat();
     running_bash(&mut chat, "cargo build", false);
     tail(&mut chat, &["Compiling bingo"], 1);
@@ -1292,8 +1292,8 @@ fn ctrl_b_backgrounds_the_running_command_before_it_opens_the_manager() {
         "the running command was told to go to the background"
     );
     assert!(
-        chat.agent_manager.is_none(),
-        "the manager stays closed while a command owns the key"
+        chat.dialog.is_none(),
+        "the dialog stays closed while a command owns the key"
     );
     assert!(
         chat.bash_tail.is_none(),
@@ -1304,8 +1304,8 @@ fn ctrl_b_backgrounds_the_running_command_before_it_opens_the_manager() {
 
     assert!(chat.on_key(KeyCode::Char('b'), KeyModifiers::CONTROL));
     assert!(
-        chat.agent_manager.is_some(),
-        "with nothing running, ctrl+b is the background-agent manager"
+        chat.dialog.is_some(),
+        "with nothing running, ctrl+b is the background dialog"
     );
 }
 
@@ -1547,14 +1547,13 @@ fn esc_peels_the_agent_tree_in_the_slot_above_the_task_panel() {
         at(EscLayer::TaskPanel),
         "the two ctrl+t surfaces are adjacent, the tree first"
     );
-    assert_eq!(
-        at(EscLayer::Directory) + 1,
-        at(EscLayer::AgentTree),
-        "and the directory keeps its slot for D107, immediately above the tree"
+    assert!(
+        at(EscLayer::BackgroundDialog) < at(EscLayer::AgentTree),
+        "the modal is dismissed before the panel it is drawn over"
     );
     assert_eq!(
         EscLayer::ORDER.len(),
-        16,
+        15,
         "every variant is in ORDER — one missing is a layer Esc can never reach"
     );
 
@@ -1638,8 +1637,8 @@ fn ctrl_t_cycles_the_tasks_then_the_agents_then_away() {
         "and only one of the two is on screen at a time"
     );
     assert!(
-        chat.directory.is_none(),
-        "the directory is off the cycle since D104"
+        chat.dialog.is_none(),
+        "the cycle reaches no modal: the dialog is ctrl+b's (D107)"
     );
 
     assert!(ctrl_t(&mut chat));
@@ -1675,20 +1674,30 @@ fn an_empty_roster_leaves_ctrl_t_a_two_stop_toggle() {
     );
 }
 
-/// The directory is modal for the keys it uses and transparent to the chords it
-/// does not: `j` joins a room instead of typing a letter, while a chord still
+/// The dialog is modal for the keys it uses and transparent to the chords it
+/// does not: `x` stops a row instead of typing a letter, while a chord still
 /// reaches the application underneath.
+///
+/// Rewritten for D107 from the directory's version of the same claim — the
+/// surface changed and the letter it swallows changed with it; the property is
+/// the one the directory was built to have.
 #[test]
-fn the_directory_swallows_its_own_keys_and_passes_the_chords_through() {
+fn the_dialog_swallows_its_own_keys_and_passes_the_chords_through() {
     let mut chat = test_chat();
-    chat.open_directory();
+    chat.open_background_dialog();
 
     chat.set_input("draft");
-    assert!(chat.on_key(KeyCode::Char('j'), KeyModifiers::NONE));
+    assert!(chat.on_key(KeyCode::Char('x'), KeyModifiers::NONE));
     assert_eq!(chat.input, "draft", "a bare key never reached the composer");
 
     chat.cursor = 2;
     assert!(chat.on_key(KeyCode::Char('k'), KeyModifiers::CONTROL));
     assert_eq!(chat.input, "dr", "but a chord did");
-    assert!(chat.directory.is_some(), "and the panel stayed open");
+    assert!(chat.dialog.is_some(), "and the dialog stayed open");
+
+    // One chord is the exception: the key that opened it closes it, which is
+    // the ctrl+t panels' rule and beats leaving ctrl+b dead while it is up.
+    assert!(chat.on_key(KeyCode::Char('b'), KeyModifiers::CONTROL));
+    assert!(chat.dialog.is_none());
+    assert_eq!(chat.input, "dr", "and it did not edit the draft either");
 }

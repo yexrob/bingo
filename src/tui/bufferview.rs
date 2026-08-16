@@ -650,17 +650,18 @@ mod tests {
         });
     }
 
-    /// `/team` answers on the info tier, and the feed keeps a copy.
+    /// `/team` answers on the info tier, and only there.
     ///
-    /// Rewritten for D104, and the assertion is stronger rather than weaker.
-    /// D95 sent the answer to the feed alone and printed a pointer at the key
-    /// that opened it; D104 took that key away from the directory, so the
-    /// pointer would have named a door that is not there and the answer would
-    /// have had no reader at all. The lines come back to the tier every other
-    /// slash command answers on — and the feed entry, which is what D107's
-    /// dialog will show, is still asserted here.
+    /// Rewritten twice, each time onto what survived. D95 sent the answer to
+    /// the team feed alone and printed a pointer at the key that opened it;
+    /// D104 took that key away and brought the lines back to the tier every
+    /// other slash command answers on, keeping the feed copy for the dialog
+    /// that was going to show it. D107's dialog does not: CC's has no
+    /// recent-events column, so the feed retired with the directory column
+    /// that was its only reader. What is asserted is what is left — the whole
+    /// answer, on the tier, and nothing of it in the transcript.
     #[test]
-    fn team_output_lands_on_the_info_tier_and_in_the_feed() {
+    fn team_output_lands_on_the_info_tier() {
         let mut chat = test_chat();
         chat.session.agents.insert(
             "dev",
@@ -672,26 +673,11 @@ mod tests {
         chat.refresh_conversations();
         chat.run_slash("team");
 
-        assert!(
-            chat.buffers
-                .team_log()
-                .iter()
-                .any(|event| event.label == "/team"),
-            "the answer is in the feed: {:?}",
-            chat.buffers.team_log()
-        );
-        let filed = chat
-            .buffers
-            .team_log()
-            .iter()
-            .find(|event| event.label == "/team")
-            .map(|event| event.detail.clone().unwrap_or_default())
-            .unwrap_or_default();
-        assert!(!chat.slash_info_lines.is_empty());
+        let answer = crate::team_cmd::run(&chat.session, &std::path::PathBuf::from(&chat.cwd), "");
+        assert!(!chat.slash_info_lines.is_empty(), "the command answers");
         assert_eq!(
-            chat.slash_info_lines.join("\n"),
-            filed,
-            "the tier shows exactly what the feed filed"
+            chat.slash_info_lines, answer,
+            "the tier carries every line the command produced, in order"
         );
         assert!(
             !chat
@@ -699,12 +685,6 @@ mod tests {
                 .iter()
                 .any(|message| message.text.contains("/team")),
             "on the info tier, never as a message in the transcript"
-        );
-        assert!(
-            chat.directory_rows()
-                .iter()
-                .any(|row| row.text.starts_with("/team")),
-            "the feed entry names its command, for the dialog that will show it"
         );
     }
 
