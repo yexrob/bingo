@@ -11,13 +11,13 @@
 //!   (`ctrl+o`), the compensation for write-once scrollback.
 //! - [`composer`] owns the prompt's readline state (kill ring, the
 //!   `ctrl+x ctrl+e` chord) and the `$EDITOR` round trip.
-//! - [`buffer`] is the conversation engine (D88): every conversation — @main, DM,
-//!   channel, team board — as one shape, holding read cursors and drafts while
-//!   the transcripts stay in the domain stores they already live in.
-//! - [`bufferview`] is its host side (D89): one terminal, one flow, one active
-//!   conversation. Switching splices a divider and a replay into the flow and
-//!   holds the conversations you are not in; the composer routes to whichever
-//!   one is active.
+//! - [`buffer`] is the conversation registry (D88, D103): every conversation —
+//!   @main, DM, room — as one accounting shape, holding how far the user has
+//!   read and whether it wants them, while the transcripts stay in the domain
+//!   stores they already live in.
+//! - [`bufferview`] is what a reader who is *not* standing in one sees of it
+//!   (D103): a post as rows, the failure alert, and the `@name` / `#room`
+//!   direct send the composer makes from the transcript.
 //! - [`chat`] is the state machine and the transcript block builder
 //!   (`build_rows`); [`slash`] owns slash command metadata and pure
 //!   suggestion/help transformations; [`complete`] owns the fuzzy scorer, the
@@ -40,7 +40,6 @@ pub mod chat;
 mod chrome;
 pub mod complete;
 pub mod composer;
-pub mod convbar;
 pub mod directory;
 pub mod el;
 pub mod gfx;
@@ -60,7 +59,6 @@ pub mod perspective_ui;
 pub mod picker;
 pub mod slash;
 pub mod statics;
-pub mod switcher;
 pub(crate) mod term;
 #[cfg(test)]
 pub(crate) mod test_util;

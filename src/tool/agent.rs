@@ -1158,13 +1158,6 @@ pub(crate) fn build_sub_session(
         Some(d) => vec![persona(&d.system)],
         None => parent.system.clone(),
     };
-    // The silence contract is main's alone (D102). A subagent inherits the
-    // parent's blocks wholesale, and nothing wakes a subagent with an injected
-    // notification — it is spawned, or it is sent a message, and both are turns
-    // somebody is waiting on. Teaching it a marker that renders as nothing in a
-    // conversation it does not speak into would only invite it to disappear its
-    // own report.
-    system.retain(|b| !b.text.starts_with(crate::system::DIGEST_HEADING));
     // Uncached on purpose: a short tail block is not worth another cache breakpoint.
     system.push(SystemBlock {
         text: SUBAGENT_NOTE.to_string(),
@@ -3347,55 +3340,6 @@ mod tests {
                 SUBAGENT_NOTE,
                 &capability_block("def-model", "ds")
             ]
-        );
-    }
-
-    /// D102: the silence contract is the main agent's alone, and a subagent
-    /// assembles from the parent's blocks — so "main's alone" has to be a *drop*
-    /// on the spawn path. Without it every instance would carry a marker that
-    /// renders as nothing in a conversation it never speaks into, which is an
-    /// invitation to disappear its own report.
-    #[test]
-    fn a_subagent_does_not_inherit_the_silence_contract() {
-        let (mut parent, _c) = parent_session();
-        {
-            let session = Arc::get_mut(&mut parent).unwrap_or_else(|| panic!("exclusive"));
-            session.system = crate::system::build_system(
-                &crate::system::Memory::default(),
-                None,
-                false,
-                &std::env::temp_dir(),
-            );
-        }
-        assert!(
-            parent
-                .system
-                .iter()
-                .any(|b| b.text.starts_with(crate::system::DIGEST_HEADING)),
-            "the main agent has it"
-        );
-
-        let sub = build_sub_session(
-            &parent,
-            None,
-            None,
-            None,
-            None,
-            "scout",
-            MemberContext::default(),
-        )
-        .unwrap_or_else(|e| panic!("spawn: {e}"));
-        assert!(
-            !sub.system
-                .iter()
-                .any(|b| b.text.starts_with(crate::system::DIGEST_HEADING)),
-            "and the instance it spawns does not"
-        );
-        assert!(
-            sub.system
-                .iter()
-                .any(|b| b.text.starts_with("You are bingo")),
-            "everything else about the inherited system is untouched"
         );
     }
 

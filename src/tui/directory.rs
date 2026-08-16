@@ -7,14 +7,18 @@
 //! all. So it is a directory instead: a read-only view on the second stop of
 //! the `ctrl+t` cycle, built from live sources every time it is drawn.
 //!
-//! **Navigation and information only.** Enter opens a member's conversation (a
-//! DM, or the console for main) or a room; `o` opens a member's observation
-//! page; `j` joins the room under the cursor. Stopping an agent, restarting one,
+//! **Navigation and information only.** `o` opens a member's observation page;
+//! `j` joins the room under the cursor. Stopping an agent, restarting one,
 //! reading its stats — all of that stays in the `ctrl+b` manager, which already
 //! owns those verbs and their warnings. A second surface that could stop an
 //! agent would be a second place for "stop" to mean something slightly
-//! different, and the switcher's `ctrl+x` already pays that tax by routing
-//! through the manager's own path.
+//! different.
+//!
+//! **Enter opens nothing, for now (D103).** It used to point the terminal at
+//! the member's conversation, and there is no longer anywhere to point it: one
+//! transcript, and the only door into an agent's own record is `o`. D105's
+//! zoomed view is what Enter means next, which is why the key is left unbound
+//! rather than given a second meaning that would have to be taken back.
 //!
 //! Three sources, no copies: the agent registry is the roster, the channel
 //! registry is the room list, and [`crate::tui::buffer::Buffers::team_log`] —
@@ -32,7 +36,9 @@
 use crossterm::event::{KeyCode, KeyModifiers};
 
 use crate::channels::{MAIN_NAME, USER_NAME};
-use crate::tui::buffer::{BufferId, team_line};
+#[cfg(test)]
+use crate::tui::buffer::BufferId;
+use crate::tui::buffer::team_line;
 use crate::tui::chat::{Chat, Row, one_line};
 use crate::tui::line::{Line, SegStyle};
 
@@ -57,10 +63,9 @@ pub struct Directory {
 /// What the cursor can be on.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DirTarget {
-    /// A teammate: Enter opens their DM.
+    /// A teammate: `o` opens their record.
     Member(String),
-    /// A room: Enter opens it — as a conversation if you are in it, as
-    /// something you are watching if you are not.
+    /// A room: `j` joins it.
     Room(String),
 }
 
@@ -68,7 +73,7 @@ pub enum DirTarget {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DirRow {
     pub text: String,
-    /// `None` for a heading or a note; `Some` for anything Enter can open.
+    /// `None` for a heading or a note; `Some` for anything the cursor can act on.
     pub target: Option<DirTarget>,
     /// Headings carry the section name; the renderer emphasizes them.
     pub heading: bool,
@@ -235,10 +240,9 @@ impl Chat {
             return false;
         };
         // Chords belong to the application, not to the panel: `ctrl+t` is the
-        // cycle that opened this and must be able to close it, `ctrl+c` always
-        // means out (D80), and `ctrl+k` reaches the switcher from anywhere. The
-        // switcher swallows chords because it is filtering text; this list is
-        // not, so it has nothing to protect a draft from.
+        // cycle that opened this and must be able to close it, and `ctrl+c`
+        // always means out (D80). This list does not filter as you type, so it
+        // has no draft to protect and nothing to swallow them for.
         if modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
             self.directory = Some(state);
             return false;
@@ -252,29 +256,10 @@ impl Chat {
                 state.selected = (state.selected + 1).min(targets.len().saturating_sub(1));
             }
             KeyCode::Up => state.selected = state.selected.saturating_sub(1),
-            KeyCode::Enter => {
-                match targets.get(state.selected) {
-                    // A room you are not in opens the same way a room you are in
-                    // does. What differs is what the flow says about it and what
-                    // the composer will do — both derived from membership, so
-                    // there is no second door to keep in step with this one.
-                    Some(DirTarget::Room(name)) => self.switch_to(BufferId::Channel(name.clone())),
-                    // Main's conversation is the console, not a DM with an
-                    // instance: `BufferId::Hub` *is* the pair view of the user
-                    // and main, so Enter on its row goes home.
-                    Some(DirTarget::Member(name)) if name == MAIN_NAME => {
-                        self.switch_to(BufferId::Hub)
-                    }
-                    Some(DirTarget::Member(name)) => self.switch_to(BufferId::Dm(name.clone())),
-                    None => {}
-                }
-                return true;
-            }
             // `o` opens the member's observation page (D100). It is the same
-            // record `tab` reaches from inside a conversation and the ctrl+b
-            // detail reaches from the manager — one page, three doors — and
-            // like Enter it hands the screen over, so the panel closes behind
-            // it. On a room it does nothing: a room has no protagonist.
+            // record the ctrl+b detail's `tab` reaches — one page, two doors —
+            // and it hands the screen over, so the panel closes behind it. On a
+            // room it does nothing: a room has no protagonist.
             KeyCode::Char('o') => {
                 if let Some(DirTarget::Member(name)) = targets.get(state.selected) {
                     self.open_perspective = Some(name.clone());
@@ -343,7 +328,7 @@ impl Chat {
             )));
         }
         out.push(Row::new(Line::styled(
-            "↑/↓ select · Enter open · o record · j join room · ctrl+t / Esc close",
+            "↑/↓ select · o record · j join room · ctrl+t / Esc close",
             SegStyle::fg(theme.text_secondary),
         )));
         crate::tui::chat::manager_box(out, width, theme)
@@ -469,10 +454,12 @@ mod tests {
         assert!(feed[FEED_SHOWN - 1].starts_with("run #5"), "{feed:?}");
     }
 
-    /// The cursor walks destinations and skips headings, and Enter opens what
-    /// it is on — a DM for a member, the room itself for a room.
+    /// The cursor walks destinations and skips headings. Rewritten for D103:
+    /// Enter no longer opens anything — there is one transcript, so there is
+    /// nowhere to be taken — and the assertion is that pressing it changes
+    /// nothing and leaves the panel where it was.
     #[test]
-    fn enter_opens_a_member_dm_and_a_room() {
+    fn the_cursor_walks_destinations_and_enter_opens_nothing() {
         let mut chat = test_chat();
         seed_agent(&chat, "scout", AgentKind::Crew);
         chat.session
@@ -492,26 +479,26 @@ mod tests {
             "headings are not destinations, and main leads the roster (D100)"
         );
         chat.directory_key(KeyCode::Down, KeyModifiers::NONE);
-        chat.directory_key(KeyCode::Enter, KeyModifiers::NONE);
-        assert_eq!(*chat.buffers.active(), BufferId::Dm("scout".to_string()));
-        assert!(chat.directory.is_none(), "opening closes the directory");
-
-        chat.open_directory();
-        chat.directory_key(KeyCode::Down, KeyModifiers::NONE);
-        chat.directory_key(KeyCode::Down, KeyModifiers::NONE);
-        chat.directory_key(KeyCode::Enter, KeyModifiers::NONE);
         assert_eq!(
-            *chat.buffers.active(),
-            BufferId::Channel("parser".to_string()),
-            "a room the user is not in opens all the same"
+            chat.directory.as_ref().map(|d| d.selected),
+            Some(1),
+            "↓ walks past the heading onto the first teammate"
+        );
+        chat.directory_key(KeyCode::Enter, KeyModifiers::NONE);
+        assert!(
+            chat.directory.is_some(),
+            "Enter is unbound since D103, so the panel stays where it was"
+        );
+        assert!(
+            chat.open_perspective.is_none(),
+            "and it opens nothing: the record's door is `o`"
         );
     }
 
     /// Main is a participant, so it is on the roster — first, present, with the
-    /// rooms it is in — and Enter on it goes to the console rather than to a DM
-    /// with an instance that does not exist.
+    /// rooms it is in.
     #[test]
-    fn main_leads_the_roster_and_enter_on_it_opens_the_console() {
+    fn main_leads_the_roster() {
         let mut chat = test_chat();
         seed_agent(&chat, "scout", AgentKind::Crew);
         chat.session
@@ -539,20 +526,11 @@ mod tests {
         // Presence is the host turn, not a registry state.
         chat.busy = true;
         assert_eq!(texts(&chat)[1], "● main · console · running · #build");
-
-        chat.switch_to(BufferId::Dm("scout".to_string()));
-        chat.open_directory();
-        chat.directory_key(KeyCode::Enter, KeyModifiers::NONE);
-        assert_eq!(
-            *chat.buffers.active(),
-            BufferId::Hub,
-            "main's conversation is the console, not a DM with an instance"
-        );
     }
 
-    /// `o` opens the member's observation page — the same record `tab` reaches
-    /// from a conversation — and it works on main's row too. On a room it does
-    /// nothing: a room has no protagonist.
+    /// `o` opens the member's observation page — the same record the ctrl+b
+    /// detail's `tab` reaches — and it works on main's row too. On a room it
+    /// does nothing: a room has no protagonist.
     #[test]
     fn o_opens_the_record_of_the_member_under_the_cursor() {
         let mut chat = test_chat();
@@ -595,7 +573,10 @@ mod tests {
             .collect::<Vec<String>>()
             .join("\n");
         assert!(text.contains("o record"), "{text}");
-        assert!(text.contains("Enter open"), "{text}");
+        assert!(
+            !text.contains("Enter"),
+            "and it does not promise a key D103 unbound: {text}"
+        );
     }
 
     /// `j` joins the room under the cursor: the roster changes, the room becomes
@@ -636,7 +617,7 @@ mod tests {
             chat.buffers
                 .get(&BufferId::Channel("parser".to_string()))
                 .is_some(),
-            "the room is in the bar"
+            "the room is one of the user's conversations now"
         );
     }
 

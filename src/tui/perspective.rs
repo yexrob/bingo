@@ -276,22 +276,6 @@ pub(crate) fn walk(who: Protagonist<'_>, history: &[Message], stamps: &[u64]) ->
                         });
                     }
                 }
-                // A digest turn's silent acknowledgement (D102) is scaffolding
-                // wearing an assistant's role: it was written to the record so
-                // the record stays complete, and it renders as nothing in the
-                // flow. Here it keeps its text verbatim and takes the place
-                // every other piece of runtime scaffolding takes — the
-                // timeline, dim, in nobody's lane. Filing it as speech would
-                // put raw protocol in a counterpart's conversation.
-                (ApiRole::Assistant, ContentBlock::Text { text })
-                    if text.trim() == crate::query::QUIET_MARKER =>
-                {
-                    out.push(Filed {
-                        target: Target::TimelineOnly,
-                        post: note(agent, at, text.trim().to_string()),
-                        work: None,
-                    });
-                }
                 (ApiRole::Assistant, ContentBlock::Text { text }) => out.push(turn(
                     &active,
                     Post {
@@ -845,44 +829,6 @@ mod tests {
                 .iter()
                 .any(|p| p.text == "#build · zoe: the tests pass"),
             "and a room relay in the same block is still the room's, recorded once"
-        );
-    }
-
-    /// D102: a digest turn's silent acknowledgement is scaffolding wearing an
-    /// assistant's role. It was written to the record so the record stays
-    /// complete, and it renders as nothing in the flow — so on the page it takes
-    /// the place every other piece of scaffolding takes: the timeline, verbatim,
-    /// in nobody's lane. Filed as speech it would put raw protocol into the
-    /// conversation of whichever agent happened to have woken main.
-    #[test]
-    fn a_silent_acknowledgement_is_timeline_scaffolding_not_speech() {
-        let inbox = format!(
-            "{}\n{}\n{}",
-            crate::query::MAIL_BLOCK_OPEN,
-            crate::channels::format_main_message("scout", "the migration is done"),
-            crate::query::MAIL_BLOCK_CLOSE
-        );
-        let history = vec![
-            user(&inbox),
-            assistant(vec![text(crate::query::QUIET_MARKER)]),
-        ];
-        let page = dossier(MAIN_NAME, &history, &[1, 2], &[]);
-
-        let scout =
-            lane_of(&page, &LaneId::Dm("scout".to_string())).expect("a lane for the sender");
-        assert_eq!(
-            said_texts(scout),
-            vec!["the migration is done"],
-            "the message is in the lane and the acknowledgement is not"
-        );
-        let timeline = lane_of(&page, &LaneId::Timeline).expect("a timeline");
-        assert!(
-            timeline
-                .posts
-                .iter()
-                .any(|p| p.text == crate::query::QUIET_MARKER && p.kind == PostKind::Note),
-            "and it is on the timeline, verbatim, as a note: {:?}",
-            timeline.posts.iter().map(|p| &p.text).collect::<Vec<_>>()
         );
     }
 

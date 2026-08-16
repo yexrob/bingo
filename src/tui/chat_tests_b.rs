@@ -2397,8 +2397,7 @@ async fn queued_slashes_drain_through_run_slash() {
 }
 
 /// D80: running agents no longer claim ↑/↓. With a background agent up and an
-/// empty composer, ↑ recalls the prompt history — the agent's DM is reached
-/// through the ctrl+b manager instead.
+/// empty composer, ↑ recalls the prompt history.
 #[test]
 fn running_agents_leave_the_arrows_to_history() {
     let mut chat = test_chat();
@@ -2418,18 +2417,23 @@ fn running_agents_leave_the_arrows_to_history() {
         chat.input, "earlier prompt",
         "↑ recalls history, not agents"
     );
-    // Ctrl+B → Enter (list) → Enter (detail) opens that agent's DM. Since D89
-    // that switches this terminal onto the conversation instead of raising a
-    // modal over it.
+    // Ctrl+B → Enter (list) → tab (detail) opens that agent's record. Enter in
+    // the detail used to open its DM and is unbound since D103: there is one
+    // transcript, so there is nowhere to be taken.
     chat.set_input("");
     assert!(chat.on_key(KeyCode::Char('b'), KeyModifiers::CONTROL));
     assert!(chat.on_key(KeyCode::Enter, KeyModifiers::NONE));
-    assert!(chat.on_key(KeyCode::Enter, KeyModifiers::NONE));
-    assert_eq!(
-        *chat.buffers.active(),
-        crate::tui::buffer::BufferId::Dm("scout".into())
+    chat.on_key(KeyCode::Enter, KeyModifiers::NONE);
+    assert!(
+        chat.open_perspective.is_none(),
+        "Enter in the detail opens nothing"
     );
-    assert!(chat.agent_manager.is_none(), "the manager closes with it");
+    assert!(chat.on_key(KeyCode::Tab, KeyModifiers::NONE));
+    assert_eq!(
+        chat.open_perspective.as_deref(),
+        Some("scout"),
+        "tab is the door to the record"
+    );
 }
 
 /// Ctrl+B owns list/detail navigation and x stops the selected running agent.

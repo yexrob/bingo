@@ -67,12 +67,6 @@ pub struct UiMessage {
     pub groups: Vec<CollapseGroup>,
     /// Index of the collapse group activities[i] belongs to (None = standalone activity).
     pub group_of: Vec<Option<usize>>,
-    /// This reply belongs to a digest turn (D102): opened by an injected
-    /// notification rather than by the user, through `submit_auto`. Carried on
-    /// the message rather than inferred at render time — "the user submitted
-    /// nothing" and "this is a digest" coincide today and are not the same fact
-    /// — and read by `Chat::is_quiet`, which is where the reasoning lives.
-    pub digest: bool,
 }
 
 /// Collapse group for consecutive Read/Search operations: collapses into a one-line rule summary (`Read 3 files`).
@@ -443,7 +437,6 @@ pub(crate) fn is_state_line(text: &str) -> bool {
     crate::query::is_interrupt_marker(text)
         || text == ASK_CANCELLED_TEXT
         || is_ask_receipt(text)
-        || crate::tui::bufferview::is_route_receipt(text)
         || crate::tui::bufferview::is_agent_alert(text)
         || rewind_ui::is_rewind_line(text)
 }
@@ -958,11 +951,6 @@ pub struct Chat {
     /// mid-turn answer. Recorded so a turn that ends without using it can drop it again —
     /// inferring that from "empty assistant message" would also catch messages nobody opened here.
     pub(crate) continuation_msg: Option<usize>,
-    /// The turn about to open was woken, not typed (D102). Set by
-    /// [`Chat::submit_auto`] and taken by the `TurnStart` that follows, which
-    /// stamps it onto the reply. `busy` is latched in between, so no other turn
-    /// can slip in and read it by mistake.
-    pub(crate) digest_turn: bool,
     pub(crate) thinking_buf: String,
     /// Whether the current thinking segment is open for continuation: closed after ToolStart/TextDelta
     /// (segment boundaries); deltas in the same segment continue without paragraph breaks; new segments (fresh reasoning after a tool) are aggregated with \n\n.
@@ -1168,19 +1156,11 @@ pub struct Chat {
     pub tasks_auto: bool,
     /// Main-view background-agent manager; `None` means the panel is closed.
     pub agent_manager: Option<AgentManager>,
-    /// The ctrl+k conversation switcher (D90); `None` means it is closed.
-    pub(crate) switcher: Option<crate::tui::switcher::Switcher>,
     /// The team directory (D95), second stop of the ctrl+t cycle; `None` means
     /// it is closed. The team has no buffer — this panel is where it lives.
     pub(crate) directory: Option<crate::tui::directory::Directory>,
     /// The esc-esc rewind selector (D91); `None` means it is closed.
     pub(crate) rewind: Option<rewind_ui::Rewind>,
-    /// Visits to conversations other than main (D89), oldest first. Each one
-    /// is a segment of the flow: which rows it printed, and where in main's
-    /// transcript it sits. `Chat::flow_order` reads them to decide what the one
-    /// message store looks like on screen; the last one is open while a
-    /// conversation other than main is active.
-    pub(crate) excursions: Vec<crate::tui::bufferview::Excursion>,
     /// Interrupt signal: Ctrl+C / Esc while busy → send(true), aborting stream reads in the turn immediately.
     pub(crate) cancel_tx: tokio::sync::watch::Sender<bool>,
 }
@@ -1227,7 +1207,6 @@ impl Chat {
             insert_points: Vec::new(),
             groups: Vec::new(),
             group_of: Vec::new(),
-            digest: false,
         });
         self.dirty = true;
     }
@@ -1367,7 +1346,6 @@ impl Chat {
             stream_msg: None,
             stream_attempt_checkpoint: None,
             continuation_msg: None,
-            digest_turn: false,
             thinking_buf: String::new(),
             thinking_seg_open: false,
             output_tokens: 0,
@@ -1457,10 +1435,8 @@ impl Chat {
             tasks_visible: false,
             tasks_auto: false,
             agent_manager: None,
-            switcher: None,
             directory: None,
             rewind: None,
-            excursions: Vec::new(),
             interrupted: false,
             cancel_tx: tokio::sync::watch::channel(false).0,
         }
@@ -1574,9 +1550,6 @@ impl Chat {
                 self.token_rate.start(now);
                 self.notify
                     .set_title(Title::Busy(self.motion.title_glyph(self.tick)));
-                // Taken, not read (D102): a stamp consumed by the turn it was
-                // set for can never outlive it and colour the next one.
-                let digest = std::mem::take(&mut self.digest_turn);
                 self.messages.push(UiMessage {
                     role: Role::Assistant,
                     text: String::new(),
@@ -1585,7 +1558,6 @@ impl Chat {
                     insert_points: Vec::new(),
                     groups: Vec::new(),
                     group_of: Vec::new(),
-                    digest,
                 });
                 self.stream_msg = Some(self.messages.len() - 1);
                 // One verb per turn (D87): sampled here and reused by every
@@ -2084,29 +2056,17 @@ impl Chat {
             UiEvent::TurnEnd => {
                 self.busy = false;
                 self.bash_tail = None;
-                // The silence contract's one reading (D102), taken before
-                // anything downstream acts on the turn: a digest that ended in
-                // the acknowledgement marker is a turn that says nothing, and a
-                // turn that says nothing owes the user no badge, no bell and no
-                // row. Everything else about the turn is unchanged.
-                let quiet = self.stream_msg.is_some_and(|i| self.is_quiet(i));
                 // The `settle` blink starts here (D87): the completion row keeps
                 // the accent for one 120ms window, and the message it belongs to
                 // stays live for exactly that long, so the row freezes into
-                // scrollback at rest and write-once is never broken. A quiet
-                // turn settles nothing, so the blink has no subject — armed
-                // anyway it would hold the *previous* message live and re-accent
-                // a row that finished minutes ago.
-                self.settle_at = (!quiet).then_some(self.tick);
+                // scrollback at rest and write-once is never broken.
+                self.settle_at = Some(self.tick);
                 // A turn short enough to have been watched needs no
                 // notification; a long one is exactly what the user walked away
-                // from (D79). Read before the start time is cleared. A quiet
-                // digest is the one long turn that rings nothing: the user never
-                // walked away from it, because they never started it.
-                if !quiet
-                    && self
-                        .turn_started
-                        .is_some_and(|at| at.elapsed() >= crate::tui::notify::LONG_TURN)
+                // from (D79). Read before the start time is cleared.
+                if self
+                    .turn_started
+                    .is_some_and(|at| at.elapsed() >= crate::tui::notify::LONG_TURN)
                 {
                     self.notify.attention(Attention::TurnComplete);
                 }
@@ -2141,16 +2101,12 @@ impl Chat {
                     // The reply's send time is when it landed, not when the turn
                     // opened — the same clock the workspace DM stamps carry.
                     self.messages[i].at = crate::channels::now_unix();
-                    // @main's unread (D99): main just spoke, and if the reader is
-                    // standing in another conversation the bar is the only place
-                    // that can say so. Prose only — a turn that said nothing has
-                    // nothing to come back for, and `observe` zeroes the count
-                    // outright while @main is the active conversation. Since D102
-                    // "said nothing" has a second spelling: the acknowledgement
-                    // marker is text on the wire and silence on the screen, and
-                    // `note_console` also carries the conversation's last-activity
-                    // stamp, so a quiet turn must not reach it at all.
-                    if !quiet && !self.messages[i].text.trim().is_empty() {
+                    // @main's unread (D99): main just spoke, and the accounting
+                    // store carries the count D104's pills read. Prose only — a
+                    // turn that said nothing has nothing to come back for, and
+                    // `observe` zeroes the count outright while @main is the
+                    // active conversation.
+                    if !self.messages[i].text.trim().is_empty() {
                         self.buffers.note_console(false, self.tick);
                     }
                     if let Some(g) = self.messages[i].groups.last_mut() {
@@ -2453,39 +2409,24 @@ impl Chat {
             self.set_input(text);
             return;
         }
-        // A conversation other than main owns the composer (D89): the text
-        // goes to it, not to the model. Slash commands are the exception and
-        // deliberately so — they act on the application, and `/model` in a DM
-        // is still `/model` — so they fall through to the path below unchanged.
-        //
-        // This sits above the busy branch because `busy` is *main's* state:
-        // a message to a subagent neither queues behind a running turn nor
-        // steers it (D83 offers only main submissions), and the send must not
-        // start a turn of its own.
-        if self.buffers.active() != &crate::tui::buffer::BufferId::Hub && !text.starts_with('/') {
-            let text = self.expand_pastes(&text);
-            let text = self.expand_image_paths(&text);
-            self.record_history(&text);
-            self.send_to_active(text);
-            self.update_slash_suggestions();
-            return;
-        }
-        // A main submit that opens with another conversation's name delivers the
-        // rest there and stays put (D90). Same placement and the same reason as
-        // the branch above: it is a delivery, not a turn, so it must neither
-        // queue behind a running one nor start one. Slash commands and bash
-        // mode are checked first — `/` and `!` decide what a line *is* before
-        // its first word decides where it goes.
+        // A line that opens with a teammate's or a room's name is a **direct
+        // send** (D103, CC's `parseDirectMemberMessage`): the rest of it goes
+        // to that inbox or that room under the user's own name and the model
+        // never sees it. It sits above the busy branch because `busy` is
+        // *main's* state — a message to a subagent neither queues behind a
+        // running turn nor steers it — and it sits below the slash and bash
+        // checks because `/` and `!` decide what a line *is* before its first
+        // word decides where it goes.
         if !self.bash_mode
             && !text.starts_with('/')
-            && let Some((id, body)) = self.leading_route(&text)
+            && let Some((target, body)) = self.parse_direct_send(&text)
         {
             let body = self.expand_pastes(&body);
             let body = self.expand_image_paths(&body);
             // The whole line goes into history, envelope included: ↑ brings
             // back what was typed, not what was delivered.
             self.record_history(&text);
-            self.route_from_main(id, body);
+            self.direct_send(target, body);
             self.update_slash_suggestions();
             return;
         }
@@ -2868,7 +2809,6 @@ impl Chat {
             "skills" => self.slash_skills(),
             "tasks" => self.slash_tasks(),
             "team" => self.slash_team(arg),
-            "open" => self.slash_open(arg),
             "join" => self.slash_join(arg),
             "leave" => self.slash_leave(arg),
             other => {
@@ -3849,14 +3789,11 @@ pub(crate) fn user_message_rows(text: &str, width: usize, theme: &Theme) -> Vec<
             theme.dim(),
         ))];
     }
-    // A dialog the turn outlived, the receipt of one the user answered, or the
-    // receipt of a line routed out of main (D90): nothing failed, so they
-    // settle dim rather than in the error colour, and none of them wears the
-    // `❯` bubble — the user typed the envelope, not this line.
-    if text == ASK_CANCELLED_TEXT
-        || is_ask_receipt(text)
-        || crate::tui::bufferview::is_route_receipt(text)
-    {
+    // A dialog the turn outlived, or the receipt of one the user answered:
+    // nothing failed, so they settle dim rather than in the error colour, and
+    // neither wears the `❯` bubble — the user answered a question, they did not
+    // write this line.
+    if text == ASK_CANCELLED_TEXT || is_ask_receipt(text) {
         return vec![Row::new(Line::styled(
             crate::tui::markdown::truncate(text, width.max(1)),
             theme.dim(),
@@ -3911,8 +3848,8 @@ pub use chat_session::ResumeMenu;
 #[cfg(test)]
 pub(crate) use chat_session::parse_share_arg;
 
-/// The overlay frame the ctrl+b manager draws, reused by the ctrl+k switcher
-/// (D90) so the two overlays are the same object in the same place.
+/// The overlay frame the ctrl+b manager draws, reused by the rewind selector
+/// (D91) so the two overlays are the same object in the same place.
 pub(crate) use chat_tail::manager_box;
 
 #[path = "ask.rs"]

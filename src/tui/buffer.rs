@@ -1,35 +1,27 @@
-//! The conversation engine (D88): every conversation has the same shape.
+//! The conversation registry (D88, D103): every conversation has the same
+//! accounting shape.
 //!
 //! A buffer is one conversation — `@main`, a DM with a subagent, or a room the
-//! user is in. The engine holds what is *about* a conversation
-//! (how far you have read, whether it wants you, the draft you left in it) and
-//! nothing of what is *in* one: a buffer's transcript stays where the domain
-//! already keeps it, and [`BufferId`] is the key that reaches it. There is no
-//! second copy of any message here, and nothing is written to disk — unread
-//! marks and drafts are session-local by construction, and the registry
-//! rebuilds itself from the domain on the next start.
+//! user is in. The registry holds what is *about* a conversation (how far you
+//! have read, whether it wants you, when it last moved) and nothing of what is
+//! *in* one: a buffer's transcript stays where the domain already keeps it, and
+//! [`BufferId`] is the key that reaches it. There is no second copy of any
+//! message here, and nothing is written to disk — unread marks are
+//! session-local by construction, and the registry rebuilds itself from the
+//! domain on the next start.
 //!
-//! Two facts about the existing code shape this module more than the design did:
+//! **Unread is derived, not counted.** The workspace has always computed
+//! `seq - read_cursor` fresh on every frame rather than incrementing a counter
+//! (`entity.rs::snapshot`). The registry keeps that: [`Buffers::refresh`]
+//! re-reads the sequence numbers and the badge falls out of the subtraction. A
+//! counter fed by events can drift from the thing it counts; a cursor cannot.
 //!
-//! - **Unread is derived, not counted.** The workspace has always computed
-//!   `seq - read_cursor` fresh on every frame rather than incrementing a
-//!   counter (`entity.rs::snapshot`). The engine keeps that: [`Buffers::refresh`]
-//!   re-reads the sequence numbers and the badge falls out of the subtraction.
-//!   A counter fed by events can drift from the thing it counts; a cursor cannot.
-//! - **Nothing replays a stored conversation into rows yet.** `/resume` clears
-//!   the transcript and prints a line; `@main`'s row builder (`build_rows`)
-//!   reads `Vec<UiMessage>` and only the live flow ever fills it. So
-//!   [`Buffers::rehydrate`] produces `UiMessage` — the unit that builder already
-//!   consumes — and extracts it with the functions the workspace extracted posts
-//!   with ([`dm_posts`], [`channel_posts`], which moved here when the workspace
-//!   retired), and that is where the D64 `[DM from user]` rules and the batching
-//!   rules live. Writing a second parser next to them would have been the one
-//!   thing worth avoiding.
-//!
-//! [`crate::tui::bufferview`] is the host side: it switches conversations, puts
-//! a replay on screen and routes what the composer sends. The extraction rules
-//! that turn a domain store into displayable messages live at the bottom of this
-//! file, where the workspace skin left them (D89).
+//! D89 built a view layer on top of this — buffers you could switch to, spliced
+//! into one flow — and D103 retired it whole. What is left is the **book-keeping
+//! half**, which is what D104's footer pills and agent tree read. The extraction
+//! rules that turn a domain store into displayable posts live at the bottom of
+//! this file, where the workspace skin left them (D89); the observation page
+//! reads them, and D105's zoom will too.
 
 use std::sync::Arc;
 
@@ -83,13 +75,6 @@ impl BufferId {
             Self::Dm(name) => format!("@{name}"),
         }
     }
-
-    /// The rule that opens this conversation in the flow, and the one that
-    /// closes it. One formatter, so a replay and the hand-back home can
-    /// never drift into two shapes.
-    pub fn rule(&self) -> String {
-        format!("── {} ──", self.label())
-    }
 }
 
 impl std::fmt::Display for BufferId {
@@ -109,12 +94,15 @@ pub struct Buffer {
     read: u64,
     /// Something addressed to the user is waiting.
     mention: bool,
-    /// Composer text left behind on the way out (D89 puts it back on the way in).
-    draft: String,
     /// Tick of the last observed change in the source.
     last_activity: u64,
 }
 
+/// The accounting readers. Nothing on screen reads them between D103 and D104
+/// — the bar that did retired with the conversation engine — and D104's footer
+/// pills and agent tree are what read them next. They are three field reads
+/// with the derivation in them; deleting and re-deriving would be the churn.
+#[allow(dead_code)] // D104 consumes these
 impl Buffer {
     pub fn id(&self) -> &BufferId {
         &self.id
@@ -125,42 +113,43 @@ impl Buffer {
     pub fn mention(&self) -> bool {
         self.mention
     }
-    /// Tick of the last observed change in the source. The switcher orders by
-    /// it (D90), which is the reason it is readable at all: a registry sorted
-    /// by name answers "what exists", and a reader reaching for ctrl+k is
-    /// asking "what just happened".
+    /// Tick of the last observed change in the source. A registry sorted by
+    /// name answers "what exists"; this is what answers "what just happened",
+    /// and it is what D104's tree orders rows by.
     pub fn last_activity(&self) -> u64 {
         self.last_activity
     }
 }
 
-/// One element of a buffer's replay.
+/// One element of a conversation's settled replay.
+///
+/// **Unused between D103 and D105.** It is what [`pair_replay`] produces, and
+/// D105's zoomed view is the surface that prints it: the agent's own messages
+/// as `UiMessage`s the console's row builder already renders, and the runtime's
+/// own lines as notes nobody said. Kept rather than deleted because rebuilding
+/// it would mean re-deriving the run-folding rules below, which are the part
+/// that was hard to get right.
 ///
 /// Not comparable: `UiMessage` carries activities and fold state and has never
 /// been an equality type. Tests read the fields they mean.
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // D105 consumes this
 pub enum Replay {
-    /// The rule that opens the conversation on switch.
-    Divider(String),
-    /// A message from the source. `message` is the main transcript's own unit, so
+    /// A message from the source. `message` is the transcript's own unit, so
     /// the existing row builder renders it with the code the live flow uses;
-    /// `who` carries the sender main's two roles cannot express, for the
-    /// decorations D89 hangs on it.
+    /// `who` carries the sender the transcript's two roles cannot express.
     Message { who: String, message: UiMessage },
     /// Something that happened in the conversation that nobody said: a room's
     /// membership change, a wake-up the runtime wrote into an instance's
     /// history. One dim line, no name over it and no send stamp beside it,
-    /// because there is no sender and nothing was sent — the same row shape a
-    /// [`Replay::Divider`] gets, which is what [`PostKind::Note`] always
-    /// claimed to be and, until D95, was rendered as a quoted message anyway.
+    /// because there is no sender and nothing was sent — which is what
+    /// [`PostKind::Note`] always claimed to be.
     Note(String),
 }
 
-/// Where a composer submit belongs. Data only — [`deliver`] performs it.
+/// Where a direct send belongs. Data only — [`deliver`] performs it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SubmitTarget {
-    /// Main's normal turn path.
-    Turn(String),
     /// `AgentRegistry::deliver` under the user's name. The `[DM from user]`
     /// marker is *not* applied here and must not be: it is added downstream in
     /// `absorb_inbox`, derived from `from`, and adding it at both ends would
@@ -168,23 +157,11 @@ pub enum SubmitTarget {
     Dm { agent: String, text: String },
     /// `tool::channel::deliver_post` under the user's name.
     Channel { channel: String, text: String },
-    /// A room the user is only watching (D95): reading is free, speaking is a
-    /// membership event, so the composer says how to become a member rather
-    /// than posting under a name that is not on the roster.
-    Refused(&'static str),
 }
 
-/// What the composer says under a room the user is observing. Stated once: the
-/// refusal on submit and the standing hint above the prompt are the same
-/// sentence, so the answer to "why can't I type here" does not depend on
-/// whether you tried.
-pub const OBSERVER_HINT: &str = "read-only · /join to speak in this room";
-
-/// What came of a routed submit.
+/// What came of a direct send.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Delivery {
-    /// The host owns this one: run the text as a turn.
-    Turn(String),
     Sent,
     /// A notice to put above the composer (English; the wording is final).
     Rejected(String),
@@ -302,7 +279,6 @@ impl Buffers {
                 seq: 0,
                 read: 0,
                 mention: false,
-                draft: String::new(),
                 last_activity: 0,
             }],
             active: BufferId::Hub,
@@ -311,11 +287,18 @@ impl Buffers {
         }
     }
 
+    #[allow(dead_code)] // D105 consumes this
     pub fn active(&self) -> &BufferId {
         &self.active
     }
 
-    /// Point the engine at another conversation. Entering one reads it.
+    /// Point the accounting at the conversation being read: entering one reads
+    /// it, so nothing in it is unread while it is on screen.
+    ///
+    /// Between D103 and D105 the answer is always `@main`, because the
+    /// transcript is the only thing there is to read. The zoom is what moves it
+    /// again.
+    #[allow(dead_code)] // D105 consumes this
     pub fn set_active(&mut self, id: BufferId) {
         self.active = id.clone();
         self.mark_read(&id);
@@ -325,6 +308,8 @@ impl Buffers {
         self.list.iter().find(|b| b.id == *id)
     }
 
+    /// Every conversation, `@main` first and the rest in [`BufferId`] order.
+    #[allow(dead_code)] // D104 consumes this
     pub fn iter(&self) -> impl Iterator<Item = &Buffer> {
         self.list.iter()
     }
@@ -352,7 +337,6 @@ impl Buffers {
                     seq,
                     read: seq,
                     mention: false,
-                    draft: String::new(),
                     last_activity: tick,
                 },
             );
@@ -546,135 +530,13 @@ impl Buffers {
             buf.mention = false;
         }
     }
-
-    /// Leave a draft behind in a conversation.
-    pub fn stash_draft(&mut self, id: &BufferId, text: String) {
-        if let Some(buf) = self.list.iter_mut().find(|b| b.id == *id) {
-            buf.draft = text;
-        }
-    }
-
-    /// Take the draft back out. Reading it clears it: a draft that stayed put
-    /// after being restored would come back a second time on the next switch.
-    pub fn take_draft(&mut self, id: &BufferId) -> String {
-        match self.list.iter_mut().find(|b| b.id == *id) {
-            Some(buf) => std::mem::take(&mut buf.draft),
-            None => String::new(),
-        }
-    }
-
-    /// What to put on screen when switching to a conversation: a divider, then
-    /// its last `budget` messages.
-    ///
-    /// `budget` counts messages, not rows. A row budget cannot be honoured
-    /// here — rows exist only after a layout at a known width, which is the
-    /// host's business and D89's — and a number that silently meant something
-    /// else would be worse than a number that says what it is.
-    ///
-    /// Main yields nothing: it is already on screen, and replaying it would
-    /// print the transcript a second time under a rule.
-    pub fn rehydrate(&self, session: &Arc<Session>, id: &BufferId, budget: usize) -> Vec<Replay> {
-        if *id == BufferId::Hub {
-            return Vec::new();
-        }
-        let mut out = vec![Replay::Divider(self.rule_for(session, id))];
-        // A DM's work is folded into the message it belongs to (D99), so its
-        // replay is built by the pair walk rather than assembled from posts —
-        // an activity has nowhere to live on a `Post`.
-        if let BufferId::Dm(name) = id {
-            // Settled history only: the live tail, the in-flight claim and the
-            // queued items are states, not record, and the host draws those
-            // itself once it is showing the conversation.
-            let mut items = match session.agents.view_of(name) {
-                Some((history, stamps, ..)) => pair_replay(name, &history, &stamps),
-                None => Vec::new(),
-            };
-            let start = items.len().saturating_sub(budget);
-            out.extend(items.drain(start..));
-            return out;
-        }
-        let posts: Vec<Post> = match id {
-            BufferId::Channel(name) => channel_posts(&session.channels.log_of(name), USER_NAME),
-            BufferId::Hub | BufferId::Dm(_) => Vec::new(),
-        };
-        let kept: Vec<&Post> = posts
-            .iter()
-            .filter(|p| matches!(p.kind, PostKind::Said | PostKind::Note))
-            .collect();
-        let start = kept.len().saturating_sub(budget);
-        out.extend(kept[start..].iter().map(|post| match post.kind {
-            // Nobody said it, so nothing renders a name over it or a clock
-            // beside it — the stamp, where the source has one, is part of the
-            // line's own text.
-            PostKind::Note => Replay::Note(post.text.clone()),
-            _ => Replay::Message {
-                who: if post.you {
-                    USER_NAME.to_string()
-                } else {
-                    post.from.clone()
-                },
-                message: UiMessage {
-                    role: if post.you {
-                        Role::User
-                    } else {
-                        Role::Assistant
-                    },
-                    text: post.text.clone(),
-                    at: post.at,
-                    activities: Vec::new(),
-                    insert_points: Vec::new(),
-                    groups: Vec::new(),
-                    group_of: Vec::new(),
-                    digest: false,
-                },
-            },
-        }));
-        out
-    }
-
-    /// The rule a conversation opens under. A room the user is only watching
-    /// says so in the one place they cannot miss and cannot mistake for
-    /// somebody's message: `── #parser · observer · read-only ──`.
-    pub fn rule_for(&self, session: &Arc<Session>, id: &BufferId) -> String {
-        match id {
-            BufferId::Channel(name) if !session.channels.is_member(name, USER_NAME) => {
-                format!("── {} · observer · read-only ──", id.label())
-            }
-            _ => id.rule(),
-        }
-    }
-
-    /// Where a composer submit in this conversation belongs.
-    ///
-    /// The session is here for one question — am I in this room — and it is
-    /// asked at the router rather than at the caller so that every way of
-    /// submitting (the composer, `#room …` from main) gets the same answer.
-    pub fn route_submit(&self, session: &Arc<Session>, id: &BufferId, text: &str) -> SubmitTarget {
-        let text = text.to_string();
-        match id {
-            BufferId::Hub => SubmitTarget::Turn(text),
-            BufferId::Channel(name) if !session.channels.is_member(name, USER_NAME) => {
-                SubmitTarget::Refused(OBSERVER_HINT)
-            }
-            BufferId::Channel(name) => SubmitTarget::Channel {
-                channel: name.clone(),
-                text,
-            },
-            BufferId::Dm(name) => SubmitTarget::Dm {
-                agent: name.clone(),
-                text,
-            },
-        }
-    }
 }
 
-/// Perform a routed submit against the domain — the same two calls the
-/// workspace composer makes today, in the same order, so a message sent from a
-/// buffer is indistinguishable from one sent from the modal.
+/// Perform a direct send against the domain — the same two calls every other
+/// path makes, in the same order, so a message the user types into the
+/// transcript is indistinguishable at the domain from one a tool delivered.
 pub fn deliver(session: &Arc<Session>, target: SubmitTarget) -> Delivery {
     match target {
-        SubmitTarget::Turn(text) => Delivery::Turn(text),
-        SubmitTarget::Refused(why) => Delivery::Rejected(why.to_string()),
         SubmitTarget::Dm { agent, text } => {
             match session
                 .agents
@@ -713,7 +575,7 @@ pub fn deliver(session: &Arc<Session>, target: SubmitTarget) -> Delivery {
 // of what a stored line *is* lives in `line_source`, and the attribution walk
 // over it in `tui::perspective`; what stays here is the presentation each view
 // wants — the pair lane and its live-turn tail (`dm_posts`), a room's log
-// (`channel_posts`), and the replay elements the flow prints (`pair_replay`).
+// (`channel_posts`), and the settled elements a replay prints (`pair_replay`).
 // ---------------------------------------------------------------------------
 
 /// What a message row shows besides its text.
@@ -978,7 +840,6 @@ fn blank_message(role: Role) -> UiMessage {
         insert_points: Vec::new(),
         groups: Vec::new(),
         group_of: Vec::new(),
-        digest: false,
     }
 }
 
@@ -1098,6 +959,7 @@ fn push_work(message: &mut UiMessage, work: &crate::tui::perspective::Work) {
 /// something is what ended it, even though this lane never shows it. The rule
 /// also keeps the replay **append-only**: every continuation is triggered by an
 /// item that breaks the run, so a message already printed never grows.
+#[allow(dead_code)] // D105 consumes this
 fn pair_replay(who: &str, history: &[Message], stamps: &[u64]) -> Vec<Replay> {
     let mut out: Vec<Replay> = Vec::new();
     let mut open: Option<UiMessage> = None;
@@ -1270,31 +1132,22 @@ mod tests {
         assert_eq!(buffers.get(&BufferId::Hub).map(Buffer::unread), Some(0));
     }
 
-    /// One vocabulary for naming a conversation: the label the id goes by, the
-    /// rule the flow opens it with, and `Display`. D88 stated this as a `Source`
-    /// enum nothing consulted; D89 made [`BufferId::rule`] load-bearing (the
-    /// replay and the hand-back to main both read it), so the property is
-    /// checked where it is now used.
+    /// One vocabulary for naming a conversation: the label the id goes by and
+    /// `Display`. D89's divider read the same formatter and retired with the
+    /// flow it drew into (D103); the label is what D104's pills and tree print.
     #[test]
     fn an_id_names_its_conversation_in_one_vocabulary() {
         assert_eq!(BufferId::Hub.label(), "@main");
         assert_eq!(BufferId::Channel("build".to_string()).label(), "#build");
         assert_eq!(BufferId::Dm("scout".to_string()).label(), "@scout");
         assert_eq!(BufferId::Dm("scout".to_string()).to_string(), "@scout");
+        // D101: the home conversation is spelled the way every participant is.
         assert_eq!(BufferId::Hub.to_string(), "@main");
-        // D101: the home conversation is spelled the way every participant is,
-        // and the rule the flow hands back with says so literally. Written out
-        // rather than derived, because the whole point of the rename is the
-        // exact glyphs a reader sees.
-        assert_eq!(BufferId::Hub.rule(), "── @main ──");
-        // The rule is the label and nothing else, so a divider can never name a
-        // conversation differently from the way it is addressed.
         for id in [
             BufferId::Hub,
             BufferId::Channel("build".to_string()),
             BufferId::Dm("scout".to_string()),
         ] {
-            assert_eq!(id.rule(), format!("── {} ──", id.label()));
             assert!(!id.label().contains("hub"), "{id:?} still says hub");
         }
         assert_eq!(Buffers::new().iter().count(), 1, "main is always there");
@@ -1373,21 +1226,15 @@ mod tests {
         let mut buffers = Buffers::new();
         buffers.refresh(&session, 1);
         let before = buffers.iter().count();
-        buffers.stash_draft(
-            &BufferId::Dm("scout".to_string()),
-            "half a thought".to_string(),
-        );
-        // Three more polls must not clone the conversation or lose what is in it.
+        let id = BufferId::Dm("scout".to_string());
+        buffers.observe(id.clone(), 3, true, 1);
+        // Three more polls must not clone the conversation or lose what it
+        // knows: the accounting is the thing that has to survive a sweep.
         buffers.refresh(&session, 2);
         buffers.refresh(&session, 3);
         buffers.refresh(&session, 4);
         assert_eq!(buffers.iter().count(), before, "refresh is idempotent");
-        assert_eq!(
-            buffers
-                .get(&BufferId::Dm("scout".to_string()))
-                .map(|buffer| buffer.draft.as_str()),
-            Some("half a thought")
-        );
+        assert_eq!(buffers.get(&id).map(Buffer::mention), Some(true));
     }
 
     // ---- unread ---------------------------------------------------------
@@ -1657,58 +1504,54 @@ mod tests {
         );
     }
 
-    // ---- rehydrate ------------------------------------------------------
+    // ---- the pair replay -------------------------------------------------
+    //
+    // Unused between D103 and D105 (see [`Replay`]) and tested anyway: the run
+    // folding below is what the zoomed view will print, and machinery kept
+    // deliberately is machinery that has to keep working. The tests used to
+    // drive it through `Buffers::rehydrate`, which retired with the flow it fed;
+    // they drive [`pair_replay`] itself now, which is what they were about.
 
-    fn texts(replay: &[Replay]) -> Vec<String> {
+    fn replay_texts(replay: &[Replay]) -> Vec<String> {
         replay
             .iter()
-            .map(|r| match r {
-                Replay::Divider(text) | Replay::Note(text) => text.clone(),
+            .map(|item| match item {
+                Replay::Note(text) => text.clone(),
                 Replay::Message { message, .. } => message.text.clone(),
             })
             .collect()
     }
 
-    #[test]
-    fn main_replays_nothing_because_it_is_already_on_screen() {
-        let session = test_session();
-        let buffers = Buffers::new();
-        assert!(
-            buffers.rehydrate(&session, &BufferId::Hub, 50).is_empty(),
-            "replaying main would print the transcript twice"
-        );
+    fn pair_of(session: &Arc<Session>, name: &str) -> Vec<Replay> {
+        let (history, stamps, ..) = session.agents.view_of(name).expect("the instance");
+        pair_replay(name, &history, &stamps)
     }
 
+    /// The pair is the user's own exchange with the instance, in the same
+    /// vocabulary the transcript uses: the D64 marker is transport and does not
+    /// render, and each side keeps its own role and name.
     #[test]
-    fn a_dm_replays_under_a_divider() {
+    fn the_pair_replay_says_who_said_what() {
         let session = test_session();
         seed_agent(
             &session,
             "scout",
-            vec![
-                Message::user_text(format!(
-                    "{}\nlook at the parser",
-                    crate::tool::agent::DM_FROM_USER_MARKER
-                )),
-                assistant("found it"),
-            ],
+            vec![from_user("look at the parser"), assistant("found it")],
         );
-        let buffers = Buffers::new();
-        let replay = buffers.rehydrate(&session, &BufferId::Dm("scout".to_string()), 50);
-
+        let replay = pair_of(&session, "scout");
         assert_eq!(
-            texts(&replay),
-            vec!["── @scout ──", "look at the parser", "found it"],
+            replay_texts(&replay),
+            vec!["look at the parser", "found it"],
             "the marker line is scaffolding and does not render (D64)"
         );
-        match &replay[1] {
+        match &replay[0] {
             Replay::Message { who, message } => {
                 assert_eq!(who, USER_NAME);
                 assert_eq!(message.role, Role::User);
             }
             other => panic!("expected the user's message, got {other:?}"),
         }
-        match &replay[2] {
+        match &replay[1] {
             Replay::Message { who, message } => {
                 assert_eq!(who, "scout");
                 assert_eq!(message.role, Role::Assistant);
@@ -1717,8 +1560,11 @@ mod tests {
         }
     }
 
+    /// One extraction, one answer: the replay reads through the same post
+    /// builder every other view reads through, rather than parsing a history a
+    /// second way.
     #[test]
-    fn a_replay_says_what_the_workspace_says_about_the_same_history() {
+    fn the_pair_replay_says_what_dm_posts_says_about_the_same_history() {
         let session = test_session();
         let history = vec![
             Message::user_text(format!(
@@ -1728,110 +1574,13 @@ mod tests {
             )),
             assistant("both noted"),
         ];
-        seed_agent(&session, "scout", history.clone());
+        seed_agent(&session, "scout", history);
         let (stored, stamps, ..) = session.agents.view_of("scout").expect("the instance");
         let posts = dm_posts(&stored, &stamps, &[], &[], &[], "scout");
 
-        let buffers = Buffers::new();
-        let replay = buffers.rehydrate(&session, &BufferId::Dm("scout".to_string()), 50);
-
-        // Same extraction, same result: the engine reads through the workspace's
-        // own post builder rather than parsing history a second way.
-        let replayed: Vec<String> = texts(&replay).into_iter().skip(1).collect();
         let rendered: Vec<String> = posts.iter().map(|p| p.text.clone()).collect();
-        assert_eq!(replayed, rendered);
+        assert_eq!(replay_texts(&pair_of(&session, "scout")), rendered);
         assert_eq!(rendered, vec!["first", "second", "both noted"]);
-    }
-
-    #[test]
-    fn a_room_replays_its_log() {
-        let session = test_session();
-        seed_room(&session, "build", &["scout"]);
-        session
-            .channels
-            .post("scout", "build", "one")
-            .expect("posted");
-        session
-            .channels
-            .post("scout", "build", "two")
-            .expect("posted");
-        let buffers = Buffers::new();
-        let replay = buffers.rehydrate(&session, &BufferId::Channel("build".to_string()), 50);
-        assert_eq!(texts(&replay), vec!["── #build ──", "one", "two"]);
-    }
-
-    /// A roster change is part of the room's record and reads as one dim line
-    /// nobody said — never as a message with a name over it, which is what it
-    /// would have been if it had come back as a [`Replay::Message`].
-    #[test]
-    fn a_room_replays_its_membership_changes_as_notes() {
-        let session = test_session();
-        seed_room(&session, "build", &["scout"]);
-        session
-            .channels
-            .post("scout", "build", "starting")
-            .expect("posted");
-        session.channels.invite("build", "coder").expect("joined");
-        session.channels.kick("build", "scout").expect("left");
-
-        let buffers = Buffers::new();
-        let replay = buffers.rehydrate(&session, &BufferId::Channel("build".to_string()), 50);
-        assert!(matches!(replay[1], Replay::Message { .. }), "{replay:?}");
-        match (&replay[2], &replay[3]) {
-            (Replay::Note(joined), Replay::Note(left)) => {
-                assert!(joined.starts_with("· coder joined ·"), "{joined}");
-                assert!(left.starts_with("· scout left ·"), "{left}");
-            }
-            other => panic!("membership changes are notes, got {other:?}"),
-        }
-    }
-
-    /// The observer framing is a fact about the conversation, so it is decided
-    /// where the rule is: the same room is `── #parser ──` to a member and
-    /// `── #parser · observer · read-only ──` to somebody watching it.
-    #[test]
-    fn a_room_you_are_not_in_opens_under_an_observer_rule() {
-        let session = test_session();
-        session
-            .channels
-            .create("parser", vec!["scout".to_string()], ChannelMode::Free)
-            .expect("room created");
-        let buffers = Buffers::new();
-        let id = BufferId::Channel("parser".to_string());
-        assert_eq!(
-            buffers.rule_for(&session, &id),
-            "── #parser · observer · read-only ──"
-        );
-        session
-            .channels
-            .invite("parser", USER_NAME)
-            .expect("joined");
-        assert_eq!(buffers.rule_for(&session, &id), "── #parser ──");
-    }
-
-    /// Rewritten for D99: a run of the agent's replies is one message now, so a
-    /// budget of two has to be counted over an exchange rather than over three
-    /// consecutive answers that would fold into one.
-    #[test]
-    fn a_replay_keeps_to_its_budget() {
-        let session = test_session();
-        seed_agent(
-            &session,
-            "scout",
-            vec![
-                from_user("one"),
-                assistant("two"),
-                from_user("three"),
-                assistant("four"),
-            ],
-        );
-        let buffers = Buffers::new();
-        let replay = buffers.rehydrate(&session, &BufferId::Dm("scout".to_string()), 2);
-        assert_eq!(
-            texts(&replay),
-            vec!["── @scout ──", "three", "four"],
-            "the budget keeps the tail, not the head"
-        );
     }
 
     /// D99: an agent's work comes back as activities on its own message, so the
@@ -1839,7 +1588,7 @@ mod tests {
     /// 2 files` — instead of the four flat dim lines the DM used to print. The
     /// grouping rules are not restated here; the point is that they are reached.
     #[test]
-    fn a_dms_work_comes_back_as_activity_groups_and_never_as_flat_lines() {
+    fn the_pair_replays_work_as_activity_groups_and_never_as_flat_lines() {
         let session = test_session();
         seed_agent(
             &session,
@@ -1862,14 +1611,13 @@ mod tests {
                 },
             ],
         );
-        let buffers = Buffers::new();
-        let replay = buffers.rehydrate(&session, &BufferId::Dm("scout".to_string()), 50);
+        let replay = pair_of(&session, "scout");
         assert_eq!(
-            texts(&replay),
-            vec!["── @scout ──", "find the leak", "looking\n\nfound it"],
+            replay_texts(&replay),
+            vec!["find the leak", "looking\n\nfound it"],
             "one message for the run, not one per block and none per tool"
         );
-        let Replay::Message { message, .. } = &replay[2] else {
+        let Replay::Message { message, .. } = &replay[1] else {
             panic!("the agent's turn is a message: {replay:?}")
         };
         assert_eq!(message.activities.len(), 3, "every call is an activity");
@@ -1908,13 +1656,43 @@ mod tests {
                 },
             ],
         );
-        let buffers = Buffers::new();
-        let replay = buffers.rehydrate(&session, &BufferId::Dm("scout".to_string()), 50);
-        let Replay::Message { message, .. } = &replay[2] else {
+        let replay = pair_of(&session, "scout");
+        let Replay::Message { message, .. } = &replay[1] else {
             panic!("{replay:?}")
         };
         assert_eq!(message.groups.len(), 2, "the write broke the run");
         assert_eq!(message.group_of, vec![Some(0), None, Some(1)]);
+    }
+
+    /// A room's log as posts: what was said, and the roster changes as lines
+    /// nobody said. `channel_posts` is the one extraction, read by the
+    /// observation page and by the direct send's destination alike.
+    #[test]
+    fn a_rooms_log_reads_as_messages_with_membership_changes_as_notes() {
+        let session = test_session();
+        seed_room(&session, "build", &["scout"]);
+        session
+            .channels
+            .post("scout", "build", "starting")
+            .expect("posted");
+        session.channels.invite("build", "coder").expect("joined");
+        session.channels.kick("build", "scout").expect("left");
+
+        let posts = channel_posts(&session.channels.log_of("build"), USER_NAME);
+        let said: Vec<&Post> = posts
+            .iter()
+            .filter(|p| matches!(p.kind, PostKind::Said | PostKind::Note))
+            .collect();
+        assert_eq!(said[0].kind, PostKind::Said);
+        assert_eq!(said[0].text, "starting");
+        assert_eq!(said[1].kind, PostKind::Note, "{:?}", said[1]);
+        assert!(
+            said[1].text.starts_with("· coder joined ·"),
+            "{:?}",
+            said[1]
+        );
+        assert_eq!(said[2].kind, PostKind::Note);
+        assert!(said[2].text.starts_with("· scout left ·"), "{:?}", said[2]);
     }
 
     /// A name reaches the person whatever case it is written in, and a longer
@@ -1970,75 +1748,25 @@ mod tests {
         assert_eq!(lines, vec!["running", "done · fixed the parser"]);
     }
 
-    // ---- submit routing -------------------------------------------------
+    // ---- delivery -------------------------------------------------------
 
-    #[test]
-    fn every_conversation_routes_to_its_own_path() {
-        let session = test_session();
-        seed_room(&session, "build", &["scout"]);
-        let buffers = Buffers::new();
-        assert_eq!(
-            buffers.route_submit(&session, &BufferId::Hub, "hello"),
-            SubmitTarget::Turn("hello".to_string())
-        );
-        assert_eq!(
-            buffers.route_submit(&session, &BufferId::Dm("scout".to_string()), "hello"),
-            SubmitTarget::Dm {
-                agent: "scout".to_string(),
-                text: "hello".to_string()
-            }
-        );
-        assert_eq!(
-            buffers.route_submit(&session, &BufferId::Channel("build".to_string()), "hello"),
-            SubmitTarget::Channel {
-                channel: "build".to_string(),
-                text: "hello".to_string()
-            }
-        );
-    }
-
-    /// Reading somebody else's room is free; speaking in it is membership. The
-    /// refusal names the way in rather than merely saying no.
-    #[tokio::test]
-    async fn a_room_you_are_watching_refuses_to_be_spoken_in() {
-        let session = test_session();
-        session
-            .channels
-            .create("parser", vec!["scout".to_string()], ChannelMode::Free)
-            .expect("room created");
-        let buffers = Buffers::new();
-        let id = BufferId::Channel("parser".to_string());
-        let target = buffers.route_submit(&session, &id, "nice work everyone");
-        match deliver(&session, target) {
-            Delivery::Rejected(why) => assert_eq!(why, OBSERVER_HINT),
-            other => panic!("an observed room is read-only, got {other:?}"),
-        }
-        assert!(
-            session.channels.log_of("parser").is_empty(),
-            "and nothing was posted under a name that is not on the roster"
-        );
-
-        // Joining is the whole difference, and it is one call.
-        session
-            .channels
-            .invite("parser", USER_NAME)
-            .expect("joined");
-        let target = buffers.route_submit(&session, &id, "nice work everyone");
-        assert_eq!(deliver(&session, target), Delivery::Sent);
-    }
-
+    /// The two halves of a direct send, at the domain. Rewritten for D103: the
+    /// router that used to decide between them was the composer-in-a-buffer's,
+    /// and the composer is main's again — the target is now decided by the
+    /// sigil the user typed, and this is what the sigil resolves to.
     #[tokio::test]
     async fn a_dm_reaches_the_agent_under_the_user_marker() {
         let session = test_session();
         seed_agent(&session, "scout", Vec::new());
-        let buffers = Buffers::new();
-        let target =
-            buffers.route_submit(&session, &BufferId::Dm("scout".to_string()), "have a look");
+        let target = SubmitTarget::Dm {
+            agent: "scout".to_string(),
+            text: "have a look".to_string(),
+        };
         assert_eq!(deliver(&session, target), Delivery::Sent);
 
-        // The shape the workspace composer produces: an inbox item from `user`,
-        // which is what earns the D64 marker when the instance picks it up. The
-        // engine must not add the marker itself — that would double it.
+        // An inbox item from `user`, which is what earns the D64 marker when
+        // the instance picks it up. The send path must not add the marker
+        // itself — that would double it.
         let items = session.agents.take_running("scout", 0);
         let (prompt, _) = crate::tool::agent::absorb_inbox(&session.channels, "scout", &items);
         assert_eq!(
@@ -2050,8 +1778,10 @@ mod tests {
     #[tokio::test]
     async fn a_dm_to_nobody_is_reported_not_swallowed() {
         let session = test_session();
-        let buffers = Buffers::new();
-        let target = buffers.route_submit(&session, &BufferId::Dm("ghost".to_string()), "hello?");
+        let target = SubmitTarget::Dm {
+            agent: "ghost".to_string(),
+            text: "hello?".to_string(),
+        };
         assert!(matches!(deliver(&session, target), Delivery::Rejected(_)));
     }
 
@@ -2066,43 +1796,15 @@ mod tests {
                 ChannelMode::Free,
             )
             .expect("channel created");
-        let buffers = Buffers::new();
-        let target =
-            buffers.route_submit(&session, &BufferId::Channel("build".to_string()), "ship it");
+        let target = SubmitTarget::Channel {
+            channel: "build".to_string(),
+            text: "ship it".to_string(),
+        };
         assert_eq!(deliver(&session, target), Delivery::Sent);
 
         let log = session.channels.log_of("build");
         assert_eq!(log.len(), 1);
         assert_eq!(log[0].from, USER_NAME);
         assert_eq!(log[0].text, "ship it");
-    }
-
-    // ---- drafts ---------------------------------------------------------
-
-    #[test]
-    fn drafts_round_trip_and_stay_in_their_own_conversation() {
-        let session = test_session();
-        seed_agent(&session, "scout", Vec::new());
-        seed_agent(&session, "zoe", Vec::new());
-        let mut buffers = Buffers::new();
-        buffers.refresh(&session, 1);
-
-        let scout = BufferId::Dm("scout".to_string());
-        let zoe = BufferId::Dm("zoe".to_string());
-        buffers.stash_draft(&scout, "half a thought".to_string());
-        buffers.stash_draft(&zoe, "a different thought".to_string());
-
-        assert_eq!(buffers.take_draft(&scout), "half a thought");
-        assert_eq!(
-            buffers.get(&zoe).map(|buffer| buffer.draft.as_str()),
-            Some("a different thought"),
-            "taking one draft leaves the others alone"
-        );
-        assert_eq!(
-            buffers.take_draft(&scout),
-            "",
-            "a restored draft does not come back a second time"
-        );
-        assert_eq!(buffers.take_draft(&BufferId::Dm("ghost".to_string())), "");
     }
 }

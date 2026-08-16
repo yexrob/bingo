@@ -1,5 +1,5 @@
-//! Completion sources for the composer: the fuzzy scorer, the `@` mention
-//! dropdown, and slash **argument** completion (D85).
+//! Completion sources for the composer: the fuzzy scorer, the `@`/`#` typeahead
+//! and slash **argument** completion (D85, D103).
 //!
 //! Three rules shape this module:
 //!
@@ -13,6 +13,12 @@
 //! - **Gather once.** The file list is collected when the dropdown opens, not
 //!   per keystroke: [`MentionState::all`] is the snapshot, [`MentionState::items`]
 //!   the filtered view of it.
+//!
+//! **The sigil at the start of a line means something else** (D103). There, `@`
+//! and `#` open a direct send — the message goes to that agent or that room
+//! instead of to the model — so the dropdown offers exactly what the send can
+//! reach, with what it will do written beside it. Anywhere else in a line `@`
+//! is the file-and-agent reference it has always been, and `#` is prose.
 
 use std::path::Path;
 
@@ -181,13 +187,15 @@ pub fn fuzzy_rank<T>(query: &str, items: Vec<T>, key: impl Fn(&T) -> &str) -> Ve
 // `@` mention
 // ---------------------------------------------------------------------------
 
-/// What an `@` row refers to.
+/// What a typeahead row refers to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MentionKind {
     /// A file relative to the session working directory.
     File,
-    /// A live background/team agent.
+    /// A background/team agent.
     Agent,
+    /// A room, offered only at the start of a line (D103).
+    Room,
 }
 
 impl MentionKind {
@@ -196,26 +204,50 @@ impl MentionKind {
         match self {
             MentionKind::File => "Files",
             MentionKind::Agent => "Agents",
+            MentionKind::Room => "Rooms",
         }
     }
 }
 
-/// One `@` completion candidate.
+/// One typeahead candidate.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MentionItem {
-    /// Relative path (file) or agent name (agent).
+    /// Relative path (file), agent name, or room name.
     pub value: String,
     pub kind: MentionKind,
+    /// What this row does and what state it is in — `send message · running`
+    /// for an agent at the start of a line, empty for a plain reference. It is
+    /// the only thing that tells a direct send apart from a file reference
+    /// before the user has pressed Enter.
+    pub note: String,
 }
 
 impl MentionItem {
+    fn new(value: impl Into<String>, kind: MentionKind) -> Self {
+        Self {
+            value: value.into(),
+            kind,
+            note: String::new(),
+        }
+    }
+
+    fn noted(value: impl Into<String>, kind: MentionKind, note: impl Into<String>) -> Self {
+        Self {
+            value: value.into(),
+            kind,
+            note: note.into(),
+        }
+    }
+
     /// What selecting this row writes into the composer, without the trailing
-    /// space. A file drops the `@` (it becomes a path the model can read); an
-    /// agent keeps it, because `@name` is the token D90's routing reads.
+    /// space. A file drops the sigil (it becomes a path the model can read);
+    /// an agent and a room keep theirs, because `@name` / `#name` is the token
+    /// the direct send reads.
     pub fn insertion(&self) -> String {
         match self.kind {
             MentionKind::File => self.value.clone(),
             MentionKind::Agent => format!("@{}", self.value),
+            MentionKind::Room => format!("#{}", self.value),
         }
     }
 }
@@ -223,8 +255,10 @@ impl MentionItem {
 /// The open `@` dropdown.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MentionState {
-    /// Byte offset of the `@` in the composer — the replacement point.
+    /// Byte offset of the sigil in the composer — the replacement point.
     pub start: usize,
+    /// Which sigil opened it: `@` or `#`.
+    pub sigil: char,
     /// Text typed after the `@`.
     pub query: String,
     /// Everything gathered when the dropdown opened (never re-gathered while
@@ -239,12 +273,17 @@ pub struct MentionState {
     pub selected: usize,
 }
 
-/// The `@`-token under the caret, as `(byte offset of '@', query after it)`.
+/// The typeahead token under the caret, as `(byte offset, sigil, query)`.
 ///
 /// Opens only at a word boundary — the start of the input or right after
 /// whitespace — which is what keeps `user@example.com` an email address
 /// instead of a mention of `example.com`.
-pub fn mention_token(input: &str, cursor: usize) -> Option<(usize, &str)> {
+///
+/// `#` opens **only at the start of the line**, where it is the direct send's
+/// own sigil. Mid-line it is a hash in a sentence — an issue number, a colour,
+/// a heading in a pasted block — and a dropdown over any of those would be
+/// noise (D103).
+pub fn mention_token(input: &str, cursor: usize) -> Option<(usize, char, &str)> {
     let cursor = cursor.min(input.len());
     if !input.is_char_boundary(cursor) {
         return None;
@@ -256,8 +295,14 @@ pub fn mention_token(input: &str, cursor: usize) -> Option<(usize, &str)> {
         .map(|i| i + head[i..].chars().next().map_or(1, char::len_utf8))
         .unwrap_or(0);
     let token = &head[start..];
-    let query = token.strip_prefix('@')?;
-    Some((start, query))
+    let sigil = token.chars().next()?;
+    if sigil == '#' && start > 0 {
+        return None;
+    }
+    if sigil != '@' && sigil != '#' {
+        return None;
+    }
+    Some((start, sigil, &token[sigil.len_utf8()..]))
 }
 
 /// Project files relative to `cwd`, plus whether the list was cut at `cap`.
@@ -367,14 +412,26 @@ pub fn mention_rows(state: &MentionState, theme: &Theme, width: usize) -> Vec<Ro
         } else {
             theme.text_secondary
         };
+        let note = if item.note.is_empty() {
+            String::new()
+        } else {
+            format!(" · {}", item.note)
+        };
         let line = crate::tui::markdown::truncate(
-            &format!("{}{}", if selected { "❯ " } else { "  " }, item.insertion()),
+            &format!(
+                "{}{}{note}",
+                if selected { "❯ " } else { "  " },
+                item.insertion()
+            ),
             width.saturating_sub(2),
         );
         rows.push(Row::new(Line::styled(line, SegStyle::fg(color))));
     }
     let mut hint = if state.items.is_empty() {
-        "(no matching file or agent)".to_string()
+        match state.sigil {
+            '#' => "(no matching room)".to_string(),
+            _ => "(no matching file or agent)".to_string(),
+        }
     } else {
         "↑↓ select · tab/enter inserts · esc closes".to_string()
     };
@@ -468,7 +525,7 @@ impl Chat {
         } else {
             mention_token(&self.input, self.cursor)
         };
-        let Some((start, query)) = token else {
+        let Some((start, sigil, query)) = token else {
             self.mention = None;
             self.mention_dismissed = false;
             return;
@@ -478,13 +535,14 @@ impl Chat {
             return;
         }
         let reopen = match &self.mention {
-            Some(state) => state.start != start,
+            Some(state) => state.start != start || state.sigil != sigil,
             None => true,
         };
         if reopen {
-            let (all, truncated) = self.gather_mentions();
+            let (all, truncated) = self.gather_mentions(start == 0, sigil);
             self.mention = Some(MentionState {
                 start,
+                sigil,
                 query: String::new(),
                 all,
                 items: Vec::new(),
@@ -498,42 +556,106 @@ impl Chat {
         };
         state.query = query;
         let ranked = fuzzy_rank(&state.query, state.all.clone(), |item| item.value.as_str());
-        // Files lead (that is what `@` is for), agents keep a reserved tail so
-        // a big repository cannot push them off the list.
-        let (agents, files): (Vec<MentionItem>, Vec<MentionItem>) = ranked
+        let (people, files): (Vec<MentionItem>, Vec<MentionItem>) = ranked
             .into_iter()
-            .partition(|item| item.kind == MentionKind::Agent);
-        let agent_rows = agents.len().min(MENTION_MAX_AGENTS);
-        let file_rows = files.len().min(MENTION_MAX_ITEMS - agent_rows);
-        let total = agents.len() + files.len();
-        let mut items: Vec<MentionItem> = files.into_iter().take(file_rows).collect();
-        items.extend(agents.into_iter().take(agent_rows));
+            .partition(|item| item.kind != MentionKind::File);
+        // Mid-line, files lead — that is what `@` is for there — and the
+        // participants keep a reserved tail so a big repository cannot push
+        // them off the list. At the start of a line the order flips: the rows
+        // whose Enter bypasses the model are the ones being chosen between, and
+        // they get the whole list if no file matches.
+        let at_line_start = state.start == 0;
+        let people_rows = if at_line_start {
+            people.len().min(MENTION_MAX_ITEMS)
+        } else {
+            people.len().min(MENTION_MAX_AGENTS)
+        };
+        let file_rows = files.len().min(MENTION_MAX_ITEMS - people_rows);
+        let total = people.len() + files.len();
+        let mut items: Vec<MentionItem> = Vec::with_capacity(people_rows + file_rows);
+        if at_line_start {
+            items.extend(people.into_iter().take(people_rows));
+            items.extend(files.into_iter().take(file_rows));
+        } else {
+            items.extend(files.into_iter().take(file_rows));
+            items.extend(people.into_iter().take(people_rows));
+        }
         state.more = total - items.len();
         state.selected = state.selected.min(items.len().saturating_sub(1));
         state.items = items;
     }
 
-    /// Collects the dropdown's contents once: project files, then live agents.
-    /// Returns the items and whether the file source hit its cap.
-    fn gather_mentions(&self) -> (Vec<MentionItem>, bool) {
+    /// Collects the dropdown's contents once. Returns the items and whether the
+    /// file source hit its cap.
+    ///
+    /// **`#` at the start of a line is rooms and nothing else**: that sigil has
+    /// exactly one meaning and it is the direct send's.
+    ///
+    /// **`@` at the start of a line leads with the send targets** and each row
+    /// says what pressing Enter will do — `@scout · send message · running` —
+    /// because that is the one position where the line is about to bypass the
+    /// model. Every instance is listed, stopped ones included: a message
+    /// resumes a stopped instance, which is CC's subagent semantics and already
+    /// bingo's delivery path, so a list that hid them would refuse to offer
+    /// something the send can do.
+    ///
+    /// **Files stay in that list, under the agents.** `@src/lexer.rs why does
+    /// this loop?` is an ordinary prompt that happens to start with the file
+    /// sigil, and the send only fires on a name that resolves to an instance —
+    /// so the two grammars do not actually collide, and dropping files here
+    /// would take away a reference for a conflict that does not exist.
+    ///
+    /// Anywhere else it is the D85 reference dropdown, unchanged: project files
+    /// with the running agents on the tail.
+    fn gather_mentions(&self, at_line_start: bool, sigil: char) -> (Vec<MentionItem>, bool) {
+        if sigil == '#' {
+            let rooms = self
+                .session
+                .channels
+                .list()
+                .into_iter()
+                .map(|status| {
+                    let note = if status
+                        .members
+                        .iter()
+                        .any(|m| m == crate::channels::USER_NAME)
+                    {
+                        "post to room".to_string()
+                    } else {
+                        "post to room · joins you".to_string()
+                    };
+                    MentionItem::noted(status.name, MentionKind::Room, note)
+                })
+                .collect();
+            return (rooms, false);
+        }
         let (files, truncated) = project_files(Path::new(&self.cwd), MENTION_FILE_CAP);
-        let mut items: Vec<MentionItem> = files
-            .into_iter()
-            .map(|value| MentionItem {
-                value,
-                kind: MentionKind::File,
-            })
-            .collect();
-        items.extend(
+        let mut items: Vec<MentionItem> = if at_line_start {
+            self.session
+                .agents
+                .list()
+                .into_iter()
+                .map(|status| {
+                    MentionItem::noted(
+                        status.name,
+                        MentionKind::Agent,
+                        format!("send message · {}", status.state.label()),
+                    )
+                })
+                .collect()
+        } else {
             self.session
                 .agents
                 .list()
                 .into_iter()
                 .filter(|status| status.state == crate::agents::AgentState::Running)
-                .map(|status| MentionItem {
-                    value: status.name,
-                    kind: MentionKind::Agent,
-                }),
+                .map(|status| MentionItem::new(status.name, MentionKind::Agent))
+                .collect()
+        };
+        items.extend(
+            files
+                .into_iter()
+                .map(|value| MentionItem::new(value, MentionKind::File)),
         );
         (items, truncated)
     }
@@ -656,7 +778,6 @@ impl Chat {
             ("provider", ["login"] | ["logout"]) => Some(self.login_provider_candidates()),
             // The registry itself, so a name the dropdown offers is a
             // conversation that exists (D89).
-            ("open", []) => Some(self.open_candidates()),
             _ => None,
         }
     }
@@ -823,9 +944,9 @@ mod tests {
 
     #[test]
     fn mention_token_opens_at_a_word_boundary_only() {
-        assert_eq!(mention_token("@src", 4), Some((0, "src")));
-        assert_eq!(mention_token("look at @src/m", 14), Some((8, "src/m")));
-        assert_eq!(mention_token("@", 1), Some((0, "")));
+        assert_eq!(mention_token("@src", 4), Some((0, '@', "src")));
+        assert_eq!(mention_token("look at @src/m", 14), Some((8, '@', "src/m")));
+        assert_eq!(mention_token("@", 1), Some((0, '@', "")));
         // An email address is not a mention.
         assert_eq!(mention_token("user@example.com", 16), None);
         assert_eq!(mention_token("a@b", 3), None);
@@ -833,6 +954,17 @@ mod tests {
         assert_eq!(mention_token("plain text", 10), None);
         // The caret is what anchors it: before the `@` there is no token.
         assert_eq!(mention_token("@src", 0), None);
+    }
+
+    /// D103: `#` is the direct send's other sigil, and it opens **only** at the
+    /// start of a line. Mid-line a hash is a hash — an issue number, a colour, a
+    /// heading in a pasted block — and a dropdown over any of those is noise.
+    #[test]
+    fn a_hash_opens_the_typeahead_only_at_the_start_of_a_line() {
+        assert_eq!(mention_token("#bui", 4), Some((0, '#', "bui")));
+        assert_eq!(mention_token("#", 1), Some((0, '#', "")));
+        assert_eq!(mention_token("see #42", 7), None);
+        assert_eq!(mention_token("fix #42 first", 7), None);
     }
 
     #[test]

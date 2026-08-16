@@ -3584,3 +3584,159 @@ and read on every turn.
 4. *Only the TUI has digest turns.* `submit_auto` is a TUI method and the headless and JSON-events
    hosts have no tick loop, so the contract sits in the main session's prompt for a turn shape those
    hosts never open. Harmless, and it is the same asymmetry D98 documented for mail.
+
+### D103. The single transcript, and one line that can leave it
+
+**Problem.** Real use rejected v3's view layer. D89 made every conversation a *place* the terminal
+could be pointed at, D90 gave the places a bar and a switcher, and the result was a program where
+"where am I" was a question the user had to keep answering. The evidence tipped it: Claude Code has
+no in-app conversation switching at all, and its answer to many agents in one terminal is one
+transcript plus a status layer plus a temporary zoom. `notes/design/conversation-model-v4.md` is the
+program; this is its first batch, and it is almost entirely a retirement.
+
+**What went.** The conversation engine's *view* half: `switch_to`, `Excursion`, `flow_order`,
+`FlowItem`/`Decor`, the replay budget and `replay_items`, `open_conversation` and its dividers, the
+empty-pair note, `poll_active_conversation`, `send_to_active`, the live-tail call site, `/open` with
+its resolver and its completion source, the `→ @name: …` route receipt and `is_route_receipt`, the
+`tab` door (`open_conversation_record`), `EscLayer::BackToMain`, `Buffers::rehydrate`/`rule_for`/
+`route_submit` and the drafts a switch stashed, `SubmitTarget::{Turn, Refused}` with `OBSERVER_HINT`
+and `observer_hint`, `Delivery::Turn`, `BufferId::rule`, the whole of `convbar.rs` (600 lines) and
+the whole of `switcher.rs` (546). D102's silence contract went with them, on the user's parity
+ruling: `QUIET_MARKER`, `is_quiet`, the `# Digest turns` system block and the spawn-path drop that
+kept it main-only, the projection's marker arm, and the `digest` tag on `UiMessage` — checked for a
+second consumer, which it did not have, so the tag went too. In code: **1124 added against 5009
+removed** — **−3885** — across 25 source files, two of them deleted whole. `chat.rs` fell from 3948
+to 3885 of its 4000-line cap and `chat_tail.rs` from 3483 to 3362.
+
+**`build_rows` got shorter, which is the proof the retirement was real.** The flow was a projection
+of one store through `flow_order`; it is the store, in order. The loop lost the divider arm, the
+sender-name row, the `Decor` match and the per-frame question of which conversation the gutter
+belongs to. `speaker_of` went from five arms over a `FlowItem` to three over a role — the
+transcript has two participants and they are never written down anywhere, which is exactly what D99
+said when it gave the console a gutter. Segment numbering is unchanged in meaning and simpler in
+fact: flow positions *were* message indices for every session that never left `@main`, and now they
+always are, so `flushed_segments` keeps meaning what it meant and write-once is untouched.
+
+**The composer keeps exactly one way to address somebody else, and it is CC's.**
+`parseDirectMemberMessage` (2.1.88 `utils/directMemberMessage.ts`) is `/^@([\w-]+)\s+(.+)$/s`, read
+at submit, ahead of the empty check and ahead of the suggestion guard; on an unknown recipient
+`sendDirectMemberMessage` answers `unknown_recipient` and `PromptInput.tsx:1055` falls through to a
+normal prompt with the comment *"This allows e.g. `@utils explain this code` to be sent as a
+prompt"*. bingo's D90 line-leading routing was already this shape, so the batch kept the placement
+(below `/` and `!`, above `busy`) and changed three things: the target resolves against the **domain
+registries** rather than the accounting store, because an agent spawned two frames ago is already
+addressable and the store is refreshed on a poll; `#room` **joins first** when the user is not a
+member, which is the v3 ruling about speaking being participation and is why the domain writes the
+membership line where every member sees it; and the receipt moved off the flow.
+
+*The receipt is transient, and that is the whole difference from D90.* CC posts a 3s notification
+reading `Sent to @scout`; bingo puts the same sentence on the slash-info tier, which lives until the
+user acts. The old `→ @scout: look at…` was a `UiMessage` with a state-line predicate behind it — it
+settled into scrollback, it needed `is_route_receipt` in two renderers, and a session of ten
+deliveries carried ten lines of envelope in a transcript that never sent them. Nothing was said to
+the model, so nothing belongs in the model's history *or* in the record of it.
+
+*The sigil reads differently at the start of a line, and only there.* `mention_token` returns the
+sigil now, `#` opens only at offset zero, and `gather_mentions` takes the position. At line start
+`@` lists **every** instance with `send message · running` / `· idle` / `· stopped` — stopped
+included, because a message resumes one (CC `SendMessageTool.ts:808-866`, and already bingo's
+deliver path), so a list that hid them would refuse to offer something the send can do — and `#`
+lists the rooms with `post to room`, plus `· joins you` where the user is not a member, which is the
+one thing about the grammar a user could not guess.
+
+**One deviation from the brief, and the reason.** The brief said line-start `@` offers agent names.
+It offers agent names *and the project files under them*, because the two grammars do not collide:
+the send fires only on a name that resolves to an instance, so `@src/lexer.rs why does this loop?`
+is an ordinary prompt that happens to start with the file sigil, and dropping files there would take
+a reference away to settle a conflict that does not exist. `#` at line start is rooms and nothing
+else — that sigil has one meaning. Mid-line both are unchanged: `@` is D85's file-and-agent
+reference (running only, no note), `#` is a hash in a sentence.
+
+**Keys and doors, settled.** `ctrl+k` is readline's kill-to-end-of-line again — D90 spent it on the
+switcher and moved the kill to `alt+k`; the switcher is gone and a dead key is worse than a
+duplicated one, so `alt+k` stays an alias and nobody loses a binding. `Enter` in the `ctrl+b`
+manager's detail and in the `ctrl+t` directory is **unbound**: both opened a conversation and there
+is no conversation to open, and D105 says Enter means *zoom*, so binding it to something else for
+one batch would be a promise to break. The record is still one key away from both — `tab` in the
+detail, `o` in the directory — which is why nothing was invented to fill the gap.
+
+**What survives untouched, and what survives unused.** The domain and delivery layer is
+byte-identical: registry, inbox, `deliver`, `deliver_post`, `SendMessage`, channels, wake and
+debounce, the D98 failure alert, the D96/D99/D100 projection. `Buffers` survives as the **accounting
+store** — `observe`/`refresh`/`note_console`/`mark_read`, unread and mention and `last_activity` per
+`BufferId` — and its readers are marked `#[allow(dead_code)] // D104 consumes these` rather than
+deleted, because D104's footer pills and agent tree are the surface that reads them. Four more
+pieces carry `// D105 consumes this`: `Buffers::set_active` (the zoomed conversation is the one being
+read), `Replay` and `pair_replay` (the zoom's body), and `conversation_tail_el` with `dm_state` and
+`tail_post_rows` (the zoom's live tail, whose D99 filters — the user's own in-flight messages, the
+user's own run — are the part that was hard to get right). Everything else that fell out of use was
+deleted.
+
+**Old assertions rewritten to the new contract, never relaxed.** **Eighty-nine tests were deleted
+with the machinery they pinned** and none was weakened on the way out: 17 with the two files that
+went whole (`convbar.rs` 8, `switcher.rs` 9), 30 in `bufferview.rs` (the switch and its rule, the
+replay budget, the draft round trip, switching to the conversation you are in, main's held tail, the
+append-only print order, the empty-pair note ×2, the tab door ×3, the DM and channel submits, the
+observed room, the join announcement, the slash-through-a-conversation path, the live tail ×2, the
+arrivals poll, the leading-name routing ×5, `/open` ×2, the DM face run), 11 in `buffer.rs`
+(`rehydrate` ×7, the submit router ×2, the drafts ×1, the observer refusal ×1), 9 in `chat_tests_f.rs`
+(D102's whole part), 6 in `chat_tests_c.rs` (Esc going home, Esc peeling the conversation, Esc
+peeling the switcher, the ctrl+k switch, the dialog inside a conversation, the DM-does-not-steer
+pair), 4 in `chrome.rs` (the teammate tint, the bar ×2, the switcher overlay), 2 each in `app.rs`
+(scroll on switch), `directory.rs` (Enter's two destinations), `keys.rs` (the panel's door
+inventory) and `system.rs` (the contract's wording and its heading), and 1 each in `tool/agent.rs`
+(the spawn-path drop), `perspective.rs` (the marker as a timeline note) and `transcript.rs` (the
+pager covering excursions).
+
+**Eleven of those were rewritten rather than dropped**, each because the thing it was really about
+survives. `the_console_counts_what_main_says_while_you_are_elsewhere` drives the accounting store
+directly instead of through `switch_to` — the store was always what it was testing.
+`a_dm_submission_never_steers_mains_turn` → `a_direct_send_never_steers_mains_turn`: same question,
+new door. `ctrl_k_switches_and_alt_k_kills` → `both_kill_keys_kill_to_the_end_of_the_line`.
+`enter_opens_a_member_dm_and_a_room` → `the_cursor_walks_destinations_and_enter_opens_nothing`,
+which *states* the new contract rather than deleting the old one, and `the_footer_names_the_record_door`
+now asserts the footer no longer promises the key that was unbound.
+`mention_lists_running_agents` → `mention_lists_agents_by_what_the_position_can_reach`, which pins
+**both** readings of the sigil, so the line-start change cannot silently take the mid-line one with
+it. `an_id_names_its_conversation_in_one_vocabulary` kept every label assertion and lost only the
+retired `rule()`. `the_bottom_states_compose_around_the_bar` → `…_around_the_composer`, asserting
+the bar is *absent*. `running_agents_leave_the_arrows_to_history` walks ctrl+b → Enter → `tab` and
+asserts Enter opens nothing. `esc_peels_the_directory_in_the_slot_above_the_task_panel` and
+`esc_peels_the_rewind_selector_one_stage_at_a_time` restate their neighbours in the shortened stack.
+`a_digest_turn_that_speaks_still_speaks` → `a_woken_turn_renders_its_prose_as_main_speaking`.
+
+**Twenty-five were added.** Eight in `bufferview.rs`: the send reaches the inbox as the user and
+writes nothing into main's history, the receipt is transient and never a flow line, the room send
+posts and joins first, an unknown name falls through to a normal turn, the grammar's edges as one
+table (bare name, missing sigil, wrong case, `@main`, a newline body, an unknown room), a slash line
+is never a direct send, the flow is main's own messages in order with no rule reachable, and `/team`'s
+feed receipt (restored — it was collateral in the block that held the retired routing tests, and it
+pins surviving behaviour). Four in `buffer.rs` for the machinery kept dead: `pair_replay` driven
+directly rather than through the retired `rehydrate`, so the D99 run-folding rules D105 depends on
+stay under test, plus `channel_posts`'s membership notes. Three in `chat_tests_f.rs` (a woken turn's
+prose renders, the retired marker is ordinary prose, a woken turn counts on the console). Two each in
+`chat_tests_c.rs`, `chat_tests_d.rs` (the room typeahead and what it says a post will do),
+`directory.rs` and `keys.rs`, and one each in `complete.rs` (`#` opens only at line start) and
+`chrome.rs`. **1485 + 13 tests before, 1421 + 13 after.**
+
+**Named limits.**
+
+1. *There is no way to view an agent's conversation until D105.* Accepted before the batch started
+   and stated here as the cost it is: the pair view retired with the buffer it lived in, and the
+   observation page — which is the *record*, not the conversation — is what is left. No stopgap was
+   invented, because a stopgap would be a surface to retire again three batches later.
+2. *`@main` is not addressable, and that is correct rather than a gap.* `main` is a reserved name no
+   instance can claim, so `@main hello` resolves to nothing and opens an ordinary turn — which is
+   what talking to main already is.
+3. *The name matches exactly, case included.* `@Scout` is prose. Inherited from D90 and unchanged;
+   the typeahead is where discovery belongs, and a case-insensitive match would make the parser
+   guess.
+4. *A direct send is invisible afterwards.* The receipt is gone at the next keystroke and nothing on
+   screen remembers it, because the conversation that would have held it is not on screen. That is
+   the interim state of limit 1, not a separate decision.
+5. *The composer no longer tints.* D90 coloured the border and the `❯` for the teammate you were
+   talking to; there is nobody on the other end of the transcript's composer but main. D105 gives the
+   colour back to the zoom.
+6. *`refresh_conversations` no longer sets `dirty`.* Nothing on screen reads the accounting store
+   between this batch and D104, so a sweep cannot change a row; the fifteen-tick poll now costs a
+   registry read and no repaint. D104 restores the fingerprint when it has a surface to repaint.

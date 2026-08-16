@@ -817,7 +817,6 @@ mod tests {
                 insert_points: Vec::new(),
                 groups: Vec::new(),
                 group_of: Vec::new(),
-                digest: false,
             });
         }
         chat.dirty = true;
@@ -840,7 +839,6 @@ mod tests {
                 insert_points: Vec::new(),
                 groups: Vec::new(),
                 group_of: Vec::new(),
-                digest: false,
             });
         }
         chat.dirty = true;
@@ -859,106 +857,6 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(tail.contains("arrived 19"), "{tail}");
-    }
-
-    /// D93: switching conversation lands you at the tail, the way opening a
-    /// chat anywhere does — including for a viewer who had scrolled up.
-    #[test]
-    fn switching_conversation_snaps_the_view_to_the_bottom() {
-        use crate::tui::buffer::BufferId;
-
-        let mut chat = chat_at(80, 24);
-        chat.session.agents.insert(
-            "scout",
-            crate::agents::AgentKind::Hire,
-            None,
-            "test instance".to_string(),
-            chat.session.clone(),
-        );
-        chat.refresh_conversations();
-        for i in 0..80 {
-            chat.messages.push(crate::tui::chat::UiMessage {
-                role: crate::tui::chat::Role::User,
-                text: format!("main line {i}"),
-                at: 0,
-                activities: Vec::new(),
-                insert_points: Vec::new(),
-                groups: Vec::new(),
-                group_of: Vec::new(),
-                digest: false,
-            });
-        }
-        chat.dirty = true;
-        rebuild(&mut chat, size(80, 24), true);
-
-        // The reader is somewhere up the transcript, reading.
-        chat.scroll = 3;
-        chat.auto_scroll = false;
-
-        chat.switch_to(BufferId::Dm("scout".to_string()));
-        assert!(chat.auto_scroll, "a switch re-arms the stick");
-        rebuild(&mut chat, size(80, 24), true);
-        assert_eq!(
-            chat.scroll,
-            chat.doc.rows.len().saturating_sub(chat.viewport_height),
-            "the rule and the replay are on screen"
-        );
-        let tail: String = chat
-            .doc
-            .rows
-            .iter()
-            .skip(chat.scroll)
-            .map(row_text)
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(tail.contains("── @scout ──"), "{tail}");
-    }
-
-    /// The inline host has no scroll offset to go stale: its window is computed
-    /// from the tail every frame. Asserted rather than assumed, because it is
-    /// the reason the D93 scroll fix is fullscreen-only.
-    #[test]
-    fn a_switch_leaves_the_inline_tail_on_screen() {
-        use crate::tui::buffer::BufferId;
-
-        let mut chat = chat_at(80, 24);
-        chat.session.agents.insert(
-            "scout",
-            crate::agents::AgentKind::Hire,
-            None,
-            "test instance".to_string(),
-            chat.session.clone(),
-        );
-        chat.refresh_conversations();
-        for i in 0..80 {
-            chat.messages.push(crate::tui::chat::UiMessage {
-                role: crate::tui::chat::Role::User,
-                text: format!("main line {i}"),
-                at: 0,
-                activities: Vec::new(),
-                insert_points: Vec::new(),
-                groups: Vec::new(),
-                group_of: Vec::new(),
-                digest: false,
-            });
-        }
-        chat.dirty = true;
-        rebuild(&mut chat, size(80, 24), false);
-
-        chat.switch_to(BufferId::Dm("scout".to_string()));
-        chat.dirty = true;
-        rebuild(&mut chat, size(80, 24), false);
-        let frame = Frame::assemble(&chat, size(80, 24));
-        let text = frame
-            .rows
-            .iter()
-            .map(row_text)
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(
-            text.contains("── @scout ──"),
-            "the rule the switch printed is in the live region: {text}"
-        );
     }
 
     /// Frame height = the assembled row count, always < terminal height: no second chrome
@@ -1219,7 +1117,6 @@ mod tests {
             insert_points: Vec::new(),
             groups: Vec::new(),
             group_of: Vec::new(),
-            digest: false,
         });
         chat.dirty = true;
         rebuild(&mut chat, size(80, 24), false);

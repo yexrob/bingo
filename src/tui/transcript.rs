@@ -776,7 +776,6 @@ mod tests {
             insert_points: Vec::new(),
             groups: Vec::new(),
             group_of: Vec::new(),
-            digest: false,
         }
     }
 
@@ -1099,67 +1098,6 @@ mod tests {
         let all = texts(&transcript_rows(&mut chat, 80, true)).join("\n");
         assert!(all.contains("first question"), "{all}");
         assert!(all.contains("an answer"), "{all}");
-    }
-
-    /// D89: the pager reads the flow, so an excursion into a conversation is in
-    /// it, under the same rules that mark it on screen.
-    ///
-    /// D89's brief said to leave the pager showing main session alone. It
-    /// does not, and the reason is the pager's own design: D82 built it on
-    /// `build_rows` precisely so that it could never disagree with the screen,
-    /// and `build_rows` now prints the flow. Filtering the conversations back
-    /// out would mean giving the pager a second row builder — the one thing
-    /// this batch exists to remove — in exchange for showing the reader less
-    /// than their terminal actually printed. Which conversation the pager
-    /// *should* be scoped to is a real question, and it belongs to D90's bar,
-    /// where there is a way to say "this one".
-    #[test]
-    fn the_pager_covers_the_conversations_the_flow_printed() {
-        use crate::tui::buffer::BufferId;
-
-        let mut chat = chat_at(80, 30);
-        chat.session.agents.insert(
-            "scout",
-            crate::agents::AgentKind::Hire,
-            None,
-            "research".into(),
-            chat.session.clone(),
-        );
-        chat.session.agents.finish(
-            "scout",
-            vec![
-                // The user's own message, in the shape the record holds it: the
-                // pair view is what the DM replays, so a reply with nothing it
-                // answers belongs to main and never reaches this flow (D99).
-                crate::api::types::Message::user_text(format!(
-                    "{}\nhow is it?",
-                    crate::tool::agent::DM_FROM_USER_MARKER
-                )),
-                crate::api::types::Message {
-                    role: crate::api::types::Role::Assistant,
-                    content: vec![crate::api::types::ContentBlock::Text {
-                        text: "the parser is fine".to_string(),
-                    }],
-                },
-            ],
-            0,
-        );
-        chat.refresh_conversations();
-        chat.messages.push(message(Role::User, "first question"));
-        chat.switch_to(BufferId::Dm("scout".into()));
-        chat.switch_to(BufferId::Hub);
-        chat.messages.push(message(Role::Assistant, "an answer"));
-
-        let all = texts(&transcript_rows(&mut chat, 80, true)).join("\n");
-        assert!(all.contains("first question"), "main is there: {all}");
-        assert!(
-            all.contains("an answer"),
-            "including after the return: {all}"
-        );
-        assert!(
-            all.contains("── @scout ──") && all.contains("the parser is fine"),
-            "and so is the excursion, rule and all: {all}"
-        );
     }
 
     /// The footer states where the reader is and what the keys do; in search it

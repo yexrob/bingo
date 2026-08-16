@@ -388,7 +388,6 @@ pub(super) fn msg(role: Role, text: &str) -> UiMessage {
         insert_points: Vec::new(),
         groups: Vec::new(),
         group_of: Vec::new(),
-        digest: false,
     }
 }
 
@@ -2851,7 +2850,6 @@ fn slash_dispatch_covers_every_table_entry() {
         ("skills", "skills"),
         ("tasks", "tasks"),
         ("team", "team"),
-        ("open", "open"),
         ("join", "join"),
         ("leave", "leave"),
     ];
