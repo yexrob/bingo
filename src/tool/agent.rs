@@ -83,7 +83,10 @@ If you decide to answer, send it to the room.
 - **`user` or `main` addressed the room**: answer once, briefly, to the room. When the person
   running the room greets the team, asks who is around, or puts a question to everyone, a human
   answers — silence reads as absence, not as discipline. One short line, in your own voice, then
-  stop.
+  stop. But a broadcast is owed one *covered* answer, not one answer *each*: if the messages you
+  woke with — or a bounced send — show a colleague already answering the same broadcast, you are
+  covered, and you add your line only if it carries something theirs did not (a result, a blocker,
+  a correction). Five members returning one hello is noise wearing manners.
 - **Another member spoke**: you owe them nothing. Send only if they named you, you can unblock
   them, you disagree, or you are holding the result they are waiting on.
 - **Never answer an answer.** A room does not flood because members reply to the human; it floods
@@ -1616,7 +1619,10 @@ Work that concerns another agent goes through main, or into a room you are both 
                 Ok(ToolResult {
                     content: serde_json::Value::String(format!(
                         "not sent — the room got new messages while you were drafting:\n{}\n\
-Decide again from the latest content: resend as-is (call again unchanged), edit and resend, or drop the message.",
+Decide again from the latest content, and the default is to drop: if what landed already covers \
+your message — a colleague answered the same broadcast, reported the same result, said the same \
+hello — the room does not need it twice, and dropping it IS the answer. Resend (call again \
+unchanged) or edit and resend only when yours still adds something the room has not heard.",
                         lines.join("\n")
                     )),
                     is_error: false,

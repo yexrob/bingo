@@ -4842,3 +4842,50 @@ next addition would have to split something; it was this one), re-exported
 from `chat` so every consumer keeps its path. The pure classifier tests
 moved with it — `chat_tests_a.rs` had crossed the cap too, and a test should
 live beside what it pins.
+
+### D112. The room learns when not to speak
+
+The user's ruling on the greeting storm: members should judge for themselves
+when to speak, and the judgment should be taught by prompt — not enforced by
+machinery. The analysis that led here: one "Hi there" in #dev-team became
+~25 runs, but the members' *discipline* mostly held (the second-order wakes
+ended silent, exactly as the channel note teaches). What failed was the
+race: five members each woke on msg #1 alone, could not see each other, and
+all five answered the same broadcast. The room's serial mode even caught
+them — every late greeting bounced with the peers' greetings attached — but
+the bounce copy offered resend/edit/drop as three equal choices, and five
+models chose resend.
+
+Two prompt edits, both at the point where the information is:
+
+- **The channel note's broadcast rule** gains the covering clause: a
+  broadcast is owed one *covered* answer, not one answer each; a member who
+  can see a colleague already answering adds a line only if it carries
+  something theirs did not.
+- **The stale bounce flips its default to drop**: when what landed already
+  covers your message, dropping is the answer — resend is the exception
+  that has to justify itself.
+
+Not done, deliberately: the member-side wake debounce, the busy-turn watch
+stapling and the `●` gate stay as analyzed and unbuilt — the user chose the
+prompt lever for the speech question, and the view questions are separate
+rulings not yet made.
+
+### D113. A speaker's run opens with their name
+
+Found by the user the same hour, with avatars off (D110): a room's log was a
+wall of anonymous prose, because identity had ridden entirely on the gutter
+face/chip that D110 turned off. The ruling: an agent is identified by
+avatar + name, and by name alone when avatars are off.
+
+`settled_post_rows` now opens every speaking run of somebody-else's posts
+with a name row — `@dev`, identity colour, bold — before the gutter is
+applied, so with avatars on the portrait's first cell rides the name row,
+which is the geometry D97's module doc had described all along ("row 0
+rides the name line"), and the D108a pad row is mostly no longer needed
+(a one-line message under a name row is already two rows tall). The user's
+own bubble keeps its `❯` and gets no label — the glyph already names the
+one person who never needs naming — and furniture (membership lines, work
+steps) names nobody. Both zoom kinds inherit, agent and room alike: main's
+instructions in an agent's record now read as `@main`'s, which the guide
+and README had (prematurely) promised since D105.
