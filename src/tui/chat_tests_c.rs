@@ -8,6 +8,17 @@ use super::tests_a::*;
 use super::*;
 use serde_json::json;
 
+/// Register an instance on the chat's own session, the way a spawn would.
+fn seed_agent(chat: &Chat, name: &str) {
+    chat.session.agents.insert(
+        name,
+        crate::agents::AgentKind::Hire,
+        None,
+        "test instance".to_string(),
+        chat.session.clone(),
+    );
+}
+
 /// Three grouped reads, each with output of its own.
 fn grouped_reads(chat: &mut Chat, calls: &[(&str, &str)]) {
     chat.messages.push(msg(Role::Assistant, ""));
@@ -1515,12 +1526,16 @@ fn esc_peels_the_rewind_selector_one_stage_at_a_time() {
     );
 }
 
-/// D95: the team directory joined the stack in the slot directly above the task
-/// panel it cycles with. Its own layer rather than a second meaning for the task
-/// panel's, so `ORDER` — the single source of Esc's priority — can still answer
-/// which of the two a press closes.
+/// D95's slot, D104's occupant: the ctrl+t cycle's second stop joined the stack
+/// directly above the task panel it cycles with, as its own layer rather than a
+/// second meaning for the task panel's, so `ORDER` — the single source of Esc's
+/// priority — can still answer which of the two a press closes.
+///
+/// Rewritten for D104: the second stop is the agent tree, and the assertion it
+/// makes is the one it always made (adjacency, and that every variant is
+/// reachable) plus the tree's own two-stage peel, which the directory never had.
 #[test]
-fn esc_peels_the_directory_in_the_slot_above_the_task_panel() {
+fn esc_peels_the_agent_tree_in_the_slot_above_the_task_panel() {
     let at = |wanted: EscLayer| {
         EscLayer::ORDER
             .iter()
@@ -1528,21 +1543,27 @@ fn esc_peels_the_directory_in_the_slot_above_the_task_panel() {
             .unwrap_or_else(|| panic!("{wanted:?} is in the stack"))
     };
     assert_eq!(
-        at(EscLayer::Directory) + 1,
+        at(EscLayer::AgentTree) + 1,
         at(EscLayer::TaskPanel),
-        "the two ctrl+t surfaces are adjacent, directory first"
+        "the two ctrl+t surfaces are adjacent, the tree first"
+    );
+    assert_eq!(
+        at(EscLayer::Directory) + 1,
+        at(EscLayer::AgentTree),
+        "and the directory keeps its slot for D107, immediately above the tree"
     );
     assert_eq!(
         EscLayer::ORDER.len(),
-        15,
+        16,
         "every variant is in ORDER — one missing is a layer Esc can never reach"
     );
 
     let mut chat = test_chat();
+    seed_agent(&chat, "scout");
     chat.busy = true;
     chat.help_visible = true;
-    chat.open_directory();
-    assert!(chat.directory.is_some(), "ctrl+t opened it");
+    chat.open_agent_tree();
+    assert!(chat.tree.is_some(), "ctrl+t opened it");
 
     let t0 = std::time::Instant::now();
     let mut order = Vec::new();
@@ -1552,8 +1573,8 @@ fn esc_peels_the_directory_in_the_slot_above_the_task_panel() {
         if layer == EscLayer::Interrupt {
             break;
         }
-        if layer == EscLayer::Directory {
-            assert!(chat.directory.is_none(), "the directory closed");
+        if layer == EscLayer::AgentTree {
+            assert!(chat.tree.is_none(), "the tree closed");
         }
         assert!(
             !chat.interrupted,
@@ -1565,50 +1586,92 @@ fn esc_peels_the_directory_in_the_slot_above_the_task_panel() {
         order,
         vec![
             EscLayer::HelpPanel,
-            EscLayer::Directory,
+            EscLayer::AgentTree,
             EscLayer::Interrupt,
         ],
         "the stack is walked top-down, one entry per press"
     );
+
+    // With a row selected the layer peels twice: the cursor first, the panel
+    // second. One press, one level, as everywhere else in the stack.
+    let mut chat = test_chat();
+    seed_agent(&chat, "scout");
+    chat.on_key(KeyCode::Down, KeyModifiers::SHIFT);
+    assert!(chat.tree.as_ref().and_then(|tree| tree.selected).is_some());
+    assert!(chat.on_key(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(
+        chat.tree
+            .as_ref()
+            .is_some_and(|tree| tree.selected.is_none()),
+        "the first press cleared the cursor and left the tree open"
+    );
+    assert!(chat.on_key(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(chat.tree.is_none(), "the second press closed the panel");
 }
 
-/// D95: ctrl+t is one key with three stops — the tasks in flight, the team doing
-/// them, then back to the transcript. Two surfaces, never both at once, and the
-/// key that opened each is the key that closes it.
+/// D95's key, D104's cycle: ctrl+t is one key with three stops — the tasks in
+/// flight, the agents doing them, then back to the transcript. Two surfaces,
+/// never both at once, and the key that opened each is the key that closes it.
+///
+/// Rewritten for D104. The second stop was the team directory and is the agent
+/// tree, which is CC's own cycle (`useGlobalKeybindings.tsx:65-86`); the
+/// three-stop shape and the Esc behaviour it asserted are unchanged.
 #[test]
-fn ctrl_t_cycles_the_tasks_then_the_team_then_away() {
+fn ctrl_t_cycles_the_tasks_then_the_agents_then_away() {
     let mut chat = test_chat();
+    seed_agent(&chat, "scout");
     let ctrl_t = |chat: &mut Chat| chat.on_key(KeyCode::Char('t'), KeyModifiers::CONTROL);
 
     assert!(ctrl_t(&mut chat));
     assert!(chat.tasks_visible, "first stop: the task panel");
     assert!(!chat.tasks_auto, "opened by hand, so it stays open");
-    assert!(chat.directory.is_none());
+    assert!(chat.tree.is_none());
 
     assert!(ctrl_t(&mut chat));
-    assert!(chat.directory.is_some(), "second stop: the team directory");
+    assert!(chat.tree.is_some(), "second stop: the agent tree");
+    assert!(
+        chat.tree.as_ref().and_then(|tree| tree.selected).is_none(),
+        "opened, not selecting: the composer still owns every key"
+    );
     assert!(
         !chat.tasks_visible,
         "and only one of the two is on screen at a time"
     );
-
-    assert!(ctrl_t(&mut chat));
     assert!(
         chat.directory.is_none(),
-        "third press: back to the transcript"
+        "the directory is off the cycle since D104"
     );
+
+    assert!(ctrl_t(&mut chat));
+    assert!(chat.tree.is_none(), "third press: back to the transcript");
     assert!(!chat.tasks_visible);
 
     // Esc closes one stop rather than the whole cycle, and the panel underneath
     // is not reopened on the way out.
     assert!(ctrl_t(&mut chat));
     assert!(ctrl_t(&mut chat));
-    assert!(chat.directory.is_some());
+    assert!(chat.tree.is_some());
     assert!(chat.on_key(KeyCode::Esc, KeyModifiers::NONE));
-    assert!(chat.directory.is_none());
+    assert!(chat.tree.is_none());
     assert!(
         !chat.tasks_visible,
         "Esc left the cycle, it did not rewind it"
+    );
+}
+
+/// With nobody spawned the cycle has two stops, not three — CC collapses it the
+/// same way, because a tree of one row is a row saying nothing.
+#[test]
+fn an_empty_roster_leaves_ctrl_t_a_two_stop_toggle() {
+    let mut chat = test_chat();
+    let ctrl_t = |chat: &mut Chat| chat.on_key(KeyCode::Char('t'), KeyModifiers::CONTROL);
+
+    assert!(ctrl_t(&mut chat));
+    assert!(chat.tasks_visible);
+    assert!(ctrl_t(&mut chat));
+    assert!(
+        !chat.tasks_visible && chat.tree.is_none(),
+        "the second press goes straight back to the transcript"
     );
 }
 

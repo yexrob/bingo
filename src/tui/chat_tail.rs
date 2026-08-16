@@ -48,15 +48,27 @@ pub enum EscLayer {
     InfoLines,
     /// The `?` shortcut panel.
     HelpPanel,
-    /// The team directory (D95), the second stop of the ctrl+t cycle.
-    ///
-    /// Its own layer, immediately above the task panel it cycles with, rather
-    /// than a second meaning for the [`EscLayer::TaskPanel`] slot. The two are
-    /// one *gesture* but not one surface — different state, different
-    /// dismissal, and both can be reached from the same key — and `ORDER` is
-    /// the single place that says which one Esc closes. A shared slot would
-    /// have had to answer that question somewhere else.
+    /// The team directory (D95). Off the ctrl+t cycle since D104 and reachable
+    /// from nowhere until D107 absorbs it, so this layer is never open — the
+    /// slot is kept rather than renumbered, because the dialog that takes the
+    /// directory's place will want it back.
     Directory,
+    /// The agent tree (D104), the second stop of the ctrl+t cycle.
+    ///
+    /// Its own layer, in the directory's stratum and immediately above the task
+    /// panel it cycles with, rather than a second meaning for the
+    /// [`EscLayer::TaskPanel`] slot. The two are one *gesture* but not one
+    /// surface — different state, different dismissal, and both can be reached
+    /// from the same key — and `ORDER` is the single place that says which one
+    /// Esc closes.
+    ///
+    /// **It peels twice.** The tree with a row selected is a different state
+    /// from the tree merely open, so the first press clears the selection and
+    /// the second closes the panel — CC's own semantics for the first half
+    /// (`useBackgroundTaskNavigation.ts:166-175`: Esc leaves selection mode and
+    /// leaves the tree expanded), and D80's one-press-one-level rule for the
+    /// second.
+    AgentTree,
     /// The task panel, when the user opened it themselves with ctrl+t.
     TaskPanel,
     /// The running turn.
@@ -72,7 +84,7 @@ pub enum EscLayer {
 
 impl EscLayer {
     /// The stack, top first. The single source for Esc's priority.
-    pub const ORDER: [EscLayer; 15] = [
+    pub const ORDER: [EscLayer; 16] = [
         EscLayer::AskDialog,
         EscLayer::Menu,
         EscLayer::Rewind,
@@ -84,6 +96,7 @@ impl EscLayer {
         EscLayer::InfoLines,
         EscLayer::HelpPanel,
         EscLayer::Directory,
+        EscLayer::AgentTree,
         EscLayer::TaskPanel,
         EscLayer::Interrupt,
         EscLayer::BashMode,
@@ -189,8 +202,8 @@ impl super::Chat {
             format!("/team {}", arg.trim())
         };
         self.buffers.note_team_output(&label, &lines.join("\n"));
-        if self.directory.is_none() {
-            self.push_slash_info("→ team (ctrl+t)".to_string());
+        for line in lines {
+            self.push_slash_info(line);
         }
         self.dirty = true;
     }
@@ -913,8 +926,17 @@ impl super::Chat {
         }
         // The team directory (D95) is a chooser too, and modal for unmodified
         // keys only: `j` joins a room, so it must not also type a `j`, while
-        // ctrl+t has to reach the cycle that closes the panel.
+        // chords stay the application's. It has no door until D107 opens one,
+        // so this never fires; the path is kept for the dialog that will.
         if self.directory_key(code, modifiers) {
+            return true;
+        }
+        // The agent tree (D104) is the opposite of modal: it claims shift+↑/↓
+        // wherever it is, and `k` only while a row is selected. Everything else
+        // — every plain character, `k` included when nothing is selected —
+        // falls through to the composer, which is what makes a status panel
+        // safe to leave open while typing.
+        if self.agent_tree_key(code, modifiers) {
             return true;
         }
         // Interrupt (busy) and quit (idle) both live on Ctrl+C, judged before editing keys.
@@ -931,6 +953,19 @@ impl super::Chat {
         }
         // Slash dropdown keys (Tab completes / Esc closes / ↑↓ navigate) take priority over input.
         if !self.bash_mode && self.slash_menu_key(code, modifiers) {
+            return true;
+        }
+        // ctrl+shift+O toggles the tree's message preview (CC
+        // `defaultBindings.ts:48`, `app:toggleTeammatePreview`). Judged before
+        // the plain control keys because ctrl+O is the transcript view and the
+        // two must not collide; terminals without the enhanced keyboard
+        // protocol report both as 0x0F and only get the transcript.
+        if modifiers.contains(KeyModifiers::CONTROL)
+            && matches!(code, KeyCode::Char('o' | 'O'))
+            && (modifiers.contains(KeyModifiers::SHIFT) || code == KeyCode::Char('O'))
+        {
+            self.tree_preview = !self.tree_preview;
+            self.dirty = true;
             return true;
         }
         if modifiers.contains(KeyModifiers::CONTROL)
@@ -1173,6 +1208,7 @@ impl super::Chat {
             EscLayer::InfoLines => !self.slash_info_lines.is_empty(),
             EscLayer::HelpPanel => self.help_visible,
             EscLayer::Directory => self.directory.is_some(),
+            EscLayer::AgentTree => self.tree.is_some(),
             EscLayer::TaskPanel => self.tasks_visible && !self.tasks_auto,
             EscLayer::Interrupt => self.busy,
             EscLayer::BashMode => self.bash_mode && self.input.is_empty(),
@@ -1218,6 +1254,20 @@ impl super::Chat {
                 true
             }
             EscLayer::Directory => self.directory_key(ESC, NONE),
+            // Selection first, then the panel: a cursor in the tree is a state
+            // the user can be in, and taking the whole panel away to get out of
+            // it would be two levels for one press.
+            EscLayer::AgentTree => {
+                if let Some(tree) = self.tree.as_mut() {
+                    if tree.selected.is_some() {
+                        tree.selected = None;
+                    } else {
+                        self.tree = None;
+                    }
+                    self.dirty = true;
+                }
+                true
+            }
             // The tasks panel opened with ctrl+t closes with Esc (it used to have
             // no exit at all — the ? panel closed, this one squatted).
             EscLayer::TaskPanel => {
@@ -1392,17 +1442,26 @@ impl super::Chat {
                 true
             }
             // ctrl+t cycles the two things a key that means "show me the work"
-            // can mean (D95): the tasks in flight, then the team doing them,
-            // then back to the transcript. One key rather than two because they
-            // are the same question asked at two altitudes, and a second
-            // binding for the roster would have been a shortcut nobody found.
+            // can mean (D95, D104): the tasks in flight, then the agents doing
+            // them, then back to the transcript. One key rather than two
+            // because they are the same question asked at two altitudes.
+            //
+            // The second stop was the team directory and is the agent tree
+            // since D104 — CC's own cycle, `none → tasks → teammates → none`
+            // (`useGlobalKeybindings.tsx:65-86`), collapsing to `none ↔ tasks`
+            // when there is nobody to show. The directory did not shrink to fit
+            // that shape; it is a different question (who exists, what rooms,
+            // what happened) and D107's background dialog is where it goes.
             't' => {
-                if self.directory.is_some() {
-                    self.directory = None;
+                let anybody = !self.session.agents.list().is_empty();
+                if self.tree.is_some() {
+                    self.tree = None;
                 } else if self.tasks_visible {
                     self.tasks_visible = false;
                     self.tasks_auto = false;
-                    self.open_directory();
+                    if anybody {
+                        self.open_agent_tree();
+                    }
                 } else {
                     self.tasks_visible = true;
                     // Manually opened: keep the panel even when everything is done (the user explicitly wants to see it).
@@ -1911,6 +1970,10 @@ impl super::Chat {
                     .list()
                     .iter()
                     .any(|status| status.state == crate::agents::AgentState::Running))
+            // An open tree counts seconds — a running row's activity and an
+            // idle row's `Idle for 14s` both move without an event arriving —
+            // so it keeps the clock awake while anybody is on it (D104).
+            || (self.tree.is_some() && !self.session.agents.list().is_empty())
             || self.update_anim_active()
             || self.settling()
     }
@@ -1944,8 +2007,11 @@ impl super::Chat {
                     crate::tasks::TaskStatus::Completed => TodoStatus::Done,
                 };
                 TodoItem {
+                    id: t.id,
                     text: t.subject,
                     status,
+                    owner: t.owner,
+                    blocked_by: t.blocked_by,
                 }
             })
             .collect()
@@ -2030,16 +2096,59 @@ impl super::Chat {
             line.push_styled(t[idx].text.clone(), theme.strikethrough());
             out.push(line);
         }
+        // Who is still standing, for the owner suffix: a name in the store is a
+        // string, and only a name the registry answers to earns a colour and a
+        // row of its own (CC gates the same way on `ownerActive`,
+        // `TaskListV2.tsx:268`).
+        let roster = self.session.agents.list();
+        // What a blocker being "open" means: the task it names is not done.
+        // Nothing else — this is a readout, not a scheduler.
+        let unresolved: Vec<&str> = t
+            .iter()
+            .filter(|item| item.status != TodoStatus::Done)
+            .map(|item| item.id.as_str())
+            .collect();
+        let palette = crate::tui::avatar::Palette::new(theme);
+        let gutter = crate::tui::avatar::Gutter::new(false, &palette, &self.faces_pinned);
         let active: Vec<&TodoItem> = t.iter().filter(|i| i.status != TodoStatus::Done).collect();
         for item in active.iter().take(Self::TODO_SHOWN) {
+            let blockers: Vec<String> = item
+                .blocked_by
+                .iter()
+                .filter(|id| unresolved.contains(&id.as_str()))
+                .map(|id| format!("#{id}"))
+                .collect();
             // `☐` not done; in-progress items use the primary accent color for the whole row (CC's active-item highlight).
-            let style = match item.status {
-                TodoStatus::Pending => theme.task_open(),
-                TodoStatus::InProgress => SegStyle::fg(theme.claude).bold(),
-                TodoStatus::Done => unreachable!("filtered"),
+            // A blocked row is dim whatever its status: it is not what is
+            // happening now (`TaskListV2.tsx:322`).
+            let style = if !blockers.is_empty() {
+                SegStyle::fg(theme.text_secondary)
+            } else {
+                match item.status {
+                    TodoStatus::Pending => theme.task_open(),
+                    TodoStatus::InProgress => SegStyle::fg(theme.claude).bold(),
+                    TodoStatus::Done => unreachable!("filtered"),
+                }
             };
             let mut line = Line::styled("☐ ", style);
             line.push_styled(item.text.clone(), style);
+            if let Some(owner) = item.owner.as_deref()
+                && let Some(status) = roster.iter().find(|status| status.name == owner)
+                && status.state != crate::agents::AgentState::Stopped
+            {
+                line.push_styled(" (".to_string(), SegStyle::fg(theme.text_secondary));
+                line.push_styled(
+                    format!("@{owner}"),
+                    SegStyle::fg(palette.avatars[gutter.index_for(owner) % palette.avatars.len()]),
+                );
+                line.push_styled(")".to_string(), SegStyle::fg(theme.text_secondary));
+            }
+            if !blockers.is_empty() {
+                line.push_styled(
+                    format!(" › blocked by {}", blockers.join(", ")),
+                    SegStyle::fg(theme.text_secondary),
+                );
+            }
             out.push(line);
         }
         if active.len() > Self::TODO_SHOWN {
@@ -2162,11 +2271,13 @@ impl super::Chat {
 
     /// Poll the domain registries into the conversation engine (D88).
     ///
-    /// The store is the accounting D104's pills and tree read: how far the
-    /// user has read each conversation, whether one wants them, when it last
-    /// moved. Nothing on screen reads it between D103 and D104, which is why
-    /// the sweep no longer sets `dirty` — there is no row whose contents it
-    /// could change.
+    /// The store is the accounting a surface with badges would read: how far
+    /// the user has read each conversation, whether one wants them, when it
+    /// last moved. D104's status layer turned out not to be that surface — CC
+    /// puts no badge on a pill or a tree row — so the sweep still does not set
+    /// `dirty`, and still costs a registry read and no repaint. The tree keeps
+    /// its own clock through `has_dynamic_rows`, because it reads the registry
+    /// directly and counts seconds.
     pub fn refresh_conversations(&mut self) {
         let session = self.session.clone();
         self.buffers.refresh(&session, self.tick);
@@ -2461,7 +2572,7 @@ impl super::Chat {
                     )));
                 }
                 rows.push(Row::new(Line::styled(
-                    "←/Esc back · Enter opens DM · tab perspective · x stop",
+                    "←/Esc back · tab perspective · x stop",
                     SegStyle::fg(self.theme.text_secondary),
                 )));
                 manager_box(rows, width, &self.theme)

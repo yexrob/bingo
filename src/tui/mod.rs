@@ -18,6 +18,8 @@
 //! - [`bufferview`] is what a reader who is *not* standing in one sees of it
 //!   (D103): a post as rows, the failure alert, and the `@name` / `#room`
 //!   direct send the composer makes from the transcript.
+//! - [`tree`] is the status layer (D104): the agent tree and the footer pills,
+//!   both rebuilt from the agent registry every frame, both chrome.
 //! - [`chat`] is the state machine and the transcript block builder
 //!   (`build_rows`); [`slash`] owns slash command metadata and pure
 //!   suggestion/help transformations; [`complete`] owns the fuzzy scorer, the
@@ -64,6 +66,7 @@ pub(crate) mod term;
 pub(crate) mod test_util;
 pub mod theme;
 pub(crate) mod transcript;
+pub mod tree;
 mod view;
 
 use std::io::{Write as IoWrite, stdout};

@@ -2927,14 +2927,17 @@ fn task_lines_use_checkbox_glyphs() {
         TodoItem {
             text: "done one".into(),
             status: TodoStatus::Done,
+            ..Default::default()
         },
         TodoItem {
             text: "doing".into(),
             status: TodoStatus::InProgress,
+            ..Default::default()
         },
         TodoItem {
             text: "later".into(),
             status: TodoStatus::Pending,
+            ..Default::default()
         },
     ];
     let lines = chat.task_lines();
@@ -2961,6 +2964,77 @@ fn task_lines_use_checkbox_glyphs() {
         done_text.style.fg,
         Some(chat.theme.text_secondary),
         "and render dimmed"
+    );
+}
+
+/// D104: a task names its owner when the owner is somebody who is still here,
+/// and says what it is waiting on. Display only — nothing here assigns, claims
+/// or unblocks anything.
+#[test]
+fn task_lines_name_a_live_owner_and_what_blocks_the_row() {
+    let mut chat = chat_with_history("todo");
+    chat.session.agents.insert(
+        "scout",
+        crate::agents::AgentKind::Hire,
+        None,
+        "test instance".into(),
+        chat.session.clone(),
+    );
+    chat.tasks_visible = true;
+    chat.tasks_cache = vec![
+        TodoItem {
+            id: "1".into(),
+            text: "land the parser".into(),
+            status: TodoStatus::InProgress,
+            owner: Some("scout".into()),
+            blocked_by: Vec::new(),
+        },
+        TodoItem {
+            id: "2".into(),
+            text: "ship it".into(),
+            status: TodoStatus::Pending,
+            owner: Some("ghost".into()),
+            blocked_by: vec!["1".into(), "3".into()],
+        },
+        TodoItem {
+            id: "3".into(),
+            text: "already done".into(),
+            status: TodoStatus::Done,
+            owner: Some("scout".into()),
+            blocked_by: Vec::new(),
+        },
+    ];
+    let lines = chat.task_lines();
+    let joined: Vec<String> = lines.iter().map(|l| l.plain_text()).collect();
+
+    assert!(
+        joined.iter().any(|l| l == "☐ land the parser (@scout)"),
+        "a live owner is named in parens after the subject: {joined:?}"
+    );
+    let owner_seg = lines
+        .iter()
+        .find(|l| l.plain_text().contains("land the parser"))
+        .and_then(|l| l.segs.iter().find(|seg| seg.text == "@scout"))
+        .expect("owner segment");
+    let palette = crate::tui::avatar::Palette::new(&chat.theme);
+    let gutter = crate::tui::avatar::Gutter::new(false, &palette, &chat.faces_pinned);
+    assert_eq!(
+        owner_seg.style.fg,
+        Some(palette.avatars[gutter.index_for("scout") % palette.avatars.len()]),
+        "in the owner's own identity colour, the same one the tree gives it"
+    );
+
+    assert!(
+        joined.iter().any(|l| l == "☐ ship it › blocked by #1"),
+        "an owner nobody answers to is not named, and only the open blocker is: {joined:?}"
+    );
+
+    // Stopping the owner takes the name off the row: it points at nobody now.
+    chat.session.agents.stop("scout").expect("stopped");
+    let joined: Vec<String> = chat.task_lines().iter().map(|l| l.plain_text()).collect();
+    assert!(
+        joined.iter().any(|l| l == "☐ land the parser"),
+        "{joined:?}"
     );
 }
 

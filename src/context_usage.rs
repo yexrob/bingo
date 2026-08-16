@@ -71,14 +71,23 @@ impl ContextUsage {
             "{}{} {percent}% {}/{}",
             "▓".repeat(filled),
             "░".repeat(4 - filled),
-            compact_tokens(self.used),
-            compact_tokens(self.window)
+            compact_tokens(self.used, 100_000),
+            compact_tokens(self.window, 100_000)
         )
     }
 }
 
-fn compact_tokens(tokens: u64) -> String {
-    if tokens < 100_000 {
+/// `8.3k` — a count folded to thousands once it reaches `from`, and printed
+/// whole below it.
+///
+/// The threshold is the caller's because the two readers want different ones:
+/// the footer's context meter only compacts six-figure counts, where a `.0`
+/// would be noise beside a percentage, while the agent tree follows CC's
+/// `formatNumber` (`utils/format.ts:124-131`) and compacts from a thousand up.
+/// A trailing `.0` is dropped either way, which is CC's own `formatTokens`
+/// convention (`utils/format.ts:133`) rather than its `formatNumber` one.
+pub fn compact_tokens(tokens: u64, from: u64) -> String {
+    if tokens < from {
         return tokens.to_string();
     }
     if tokens.is_multiple_of(1_000) {

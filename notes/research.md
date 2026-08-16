@@ -3740,3 +3740,189 @@ prose renders, the retired marker is ordinary prose, a woken turn counts on the 
 6. *`refresh_conversations` no longer sets `dirty`.* Nothing on screen reads the accounting store
    between this batch and D104, so a sweep cannot change a row; the fifteen-tick poll now costs a
    registry read and no repaint. D104 restores the fingerprint when it has a surface to repaint.
+
+### D104. The status layer: a tree that says who is working, and a line that says it in one row
+
+**Problem.** D103 left the terminal with one transcript and nothing else. That was the right
+retirement and it cost the screen its only answer to "who is working": the bar was gone, the
+directory answered a different question two keys away, and an agent spawned three turns ago existed
+only as a row in scrollback that had already scrolled. CC's answer to many agents in one terminal is
+not a switcher — it is **one conversation plus a persistent status layer** — and this batch is the
+status layer.
+
+**What the tree is, and where it lives.** `src/tui/tree.rs`, 1053 lines, one new module: `@main`
+first, then one row per registry instance in name order, then a `hide` row while the cursor is in
+it. It is **chrome** — rebuilt from `session.agents.list()` on every draw, never settled, never one
+byte of scrollback (`term.rs`'s doctrine is not a habit here, it is the reason the panel can carry a
+second counter at all). Nothing is cached, for the directory's reason: a dozen rows drawn only while
+the panel is open, and a cached roster is a roster that can be wrong.
+
+```
+    ╒═ @main: Idle · shift + ↑/↓ to select
+    ├─ @scout: reading src/tui/chat.rs… · 12 tool uses · 8.3k tokens
+   ❯╞═ @writer: Idle for 14s · shift + ↑/↓ to select
+    │   drafted the section
+    │   and checked the numbers
+    ├─ @zoe: cargo test --all… · 1 tool use · 143k tokens
+    └─ hide
+```
+
+Every glyph in that block is CC's. The stem is `┌─ ├─ └─`, doubling to `╒═ ╞═ ╘═` on the highlighted
+row (`TeammateSpinnerTree.tsx:69`, `TeammateSpinnerLine.tsx:83`); the cursor is `figures.pointer` in
+column four with a space in its place otherwise (`TeammateSpinnerTree.tsx:57`); the separator is
+` · ` and never a dash; the stats read ` · 12 tool uses · 8.3k tokens`, singular on `use` and never
+on `tool` (`TeammateSpinnerLine.tsx:130`); the select hint is `shift + ↑/↓ to select` with the spaces
+around the `+` (`teammateSelectHint.ts:1`); the closing row is the bare word `hide`
+(`TeammateSpinnerTree.tsx:244`). The status column is CC's ladder too — `[stopping]` first,
+then `Idle for 14s`, then the activity with an ellipsis (`TeammateSpinnerLine.tsx:171-194`) — and so
+is the responsive fold, which drops the select hint before the stats and never lets the activity
+column below 25 cells (`TeammateSpinnerLine.tsx:141`, `:151-153`). Every segment goes through one
+`push_fit`, so a row cannot overrun the canvas whatever the arithmetic above it decided; a test walks
+20/40/60/80 columns and asserts it.
+
+**Selection is state, and that is the whole safety property.** `AgentTree` holds one field. `None` is
+not row zero — it is *not selecting*, which is what `ctrl+t` opens the tree into, and while it holds
+every key still belongs to the composer. The index space is CC's exactly
+(`useBackgroundTaskNavigation.ts:26-58`): `-1` is `@main`, `0..n-1` the instances, `n` the hide row,
+wrapping at both ends. `shift+↑/↓` with the tree **closed** opens it and parks on `@main` without
+moving — CC's comment says so in as many words — and with it open steps and wraps. `k` fires only on
+a selected instance row, through `stop_agent_from_manager`, so there is one stop path, one warning
+and one watch transition; **no confirmation**, which is CC's ruling
+(`useBackgroundTaskNavigation.ts:228-241`), and `k` with nothing selected is a character in the
+draft. `@main` has no `k` (index `-1` is excluded upstream and main is not stoppable here anyway) and
+the hide row indexes past the end, so both are no-ops rather than special cases. `esc` is a new
+`EscLayer::AgentTree`, slotted where the directory's was — immediately above `TaskPanel`, the panel
+it cycles with — and it **peels twice**: the cursor first, the panel second. The first half is CC's
+(`:166-175` leaves selection mode and leaves the tree expanded); the second is D80's one-press-one-
+level rule, and without it the panel would have had no exit but the key that opened it, because
+`enter` is unbound.
+
+**`enter` stays unbound, and two strings were left out to keep that honest.** CC's rows offer
+` · enter to view` and ` · enter to collapse`; D105 is what Enter means, so a row that promised it now
+would be a promise to break in one batch. Same interim ruling D103 made for the directory and the
+manager's detail.
+
+**`ctrl+shift+o` previews the record, not the activity feed.** CC's `getMessagePreview`
+(`TeammateSpinnerLine.tsx:26-70`) walks the teammate's *messages* newest-first, taking text lines
+from the end of each block and a tool call's own `description`/`prompt`/`command`/`query`/`pattern`
+before falling back to `Using <name>…`, cuts each to 80 columns and reverses the three into reading
+order. That is ported verbatim over `agents.view_of`, and the choice matters: `recent_activity` is
+the same string the row already shows in its activity column, so sourcing the preview from it would
+have printed the row three more times. Three lines, dim, hung under the stem (`│  ` or `   `). The
+binding is CC's (`defaultBindings.ts:48`, `app:toggleTeammatePreview`), judged before the plain
+control keys so `ctrl+o` keeps the transcript; on a terminal without the kitty keyboard protocol
+both arrive as `0x0F` and only the transcript is reachable, which is stated rather than papered over.
+
+**The pills take the row D103 vacated.** `@main @scout @writer · shift + ↓ to expand` — `@main`
+first and never sorted, running instances ahead of resting ones, the separator one space, the tail
+verbatim from `BackgroundTaskStatus.tsx`. Identity colours, dim where an instance is idle or stopped,
+`→` where the window is too narrow to name them all (CC scrolls a window with `←`/`→`; with no pill
+selection to chase, the window is always left-anchored, which is CC's own behaviour at index 0).
+Pills and tree are **exclusive**, which is CC's gate and its reason: the tree says everything a pill
+would. Bold is wired to `Chat::zoomed()`, a method that returns `None` and is marked `// D105
+consumes this` — the one place the zoom has to fill in for the pills, the tree's stem and the tree's
+highlight all to follow.
+
+**No badge, and the accounting store is re-marked rather than consumed.** The brief said the
+`Buffers` readers survived D103 "exactly to feed this". They do not, and CC is why: `AgentPill`
+renders `@name` and nothing else, and a tree row is `@name: <what it is doing> · <what that cost>` —
+no counter, no dot, no accent. Both surfaces take their dim and bold from the agent's **state**,
+which is the registry's answer, not the store's. So `Buffer::{id,unread,mention,last_activity}` and
+`Buffers::iter` moved their markers to `// D107 absorbs these`: the background dialog is where "three
+unread from @scout" is the question being asked, and it is the surface absorbing the directory those
+numbers already fed. D103's limit 6 stands for the same reason — `refresh_conversations` still does
+not set `dirty`, because the tree reads the registry directly. It keeps its own clock instead, in
+`has_dynamic_rows`: an open tree with anybody on it counts seconds, so `Idle for 14s` ticks.
+
+**Two additions to the task panel, both display-only.** ` (@scout)` in the owner's identity colour
+when the owner is still on the roster — an owner who was stopped or never existed is simply not
+named, which is CC's `ownerActive` gate (`TaskListV2.tsx:268`) — and ` › blocked by #3` listing only
+the blockers whose tasks are not done, with the blocked row dimmed (`TaskListV2.tsx:322`, `:334`).
+The glyph is `figures.pointerSmall`, `›`, not the `▸` the brief guessed; CC wins on presentation.
+`TodoItem` grew `id`, `owner` and `blocked_by` to carry the answers, because a row cannot state what
+the snapshot did not bring. **No assignment protocol and no claiming**, which is the design's
+explicit ruling and is why nothing here writes.
+
+**The directory left the cycle and has no door at all.** `ctrl+t` is `none → tasks → agents → none`,
+collapsing to `none ↔ tasks` with an empty roster — CC's cycle exactly
+(`useGlobalKeybindings.tsx:65-86`). `directory.rs` stays whole: its rows, its keys and its Esc layer
+are kept for D107's dialog, and only `open_directory` lost its caller and wears
+`#[allow(dead_code)] // D107 absorbs this`. **The interim record door was verified and still works**:
+`ctrl+b` → Enter (list) → `tab` (detail) opens the agent's perspective page, under test in
+`chat_tests_b.rs`, and the manager's detail footer stopped advertising `Enter opens DM`, which D103
+unbound and left in the copy.
+
+**`/team` had to be repaired, not just re-worded.** D95 filed its answer in the lifecycle feed and
+printed `→ team (ctrl+t)` pointing at the key that opened the column. Take the key away and the
+command answers into a room nobody can enter. So the lines print on the info tier — the tier every
+other slash command answers on — and the feed entry stays, because that is what D107's dialog will
+show. Its test is rewritten to assert the tier and the feed carry the same text, which is a stronger
+claim than the pointer's wording was.
+
+**Deviations from CC, each with its reason.**
+
+1. *The leader row is `@main`, not `team-lead`.* v4 forbids the teammate vocabulary outright, and CC
+   itself calls the same entity `@main` in its footer pills — so this picks the one of CC's two
+   strings the design mandates rather than inventing a third.
+2. *Main's row always states its own condition* (`: Idle` / `: <verb>…`). CC shows it only while
+   something else has the screen, because `Spinner.tsx:231-237` prints `✻ Idle · teammates running`
+   above the tree otherwise. bingo has no such row when idle, so the state lives on the row that has
+   the name on it.
+3. *Stopped instances stay on the roster*, rendered `[stopped]` in the slot CC gives `[stopping]`.
+   bingo's stop is synchronous, so there is no stopping state to show — and a stopped instance is not
+   gone: the registry keeps it and `@name <message>` resumes it, which is exactly why D103's typeahead
+   lists it. A roster that hid what the composer can reach would disagree with the row below it.
+4. *No per-row spinner glyph.* The brief asked for one through D87's motion layer; CC's rows have
+   none (`TeammateSpinnerLine.tsx:191-193` emits dim text and nothing else) because one spinner on
+   screen is the rule. CC wins.
+5. *The stats segment is empty at zero.* CC prints it unconditionally on an instance row, but its
+   progress is the teammate's whole life where bingo's is the current **run**, so every idle row
+   would have carried `0 tool uses · 0 tokens`. The gate is CC's own, taken from its leader row
+   (`TeammateSpinnerTree.tsx:111`) and applied one row down.
+6. *`1k`, not `1.0k`.* `context_usage::compact_tokens` was generalized with a threshold parameter
+   rather than duplicated — the footer's meter keeps compacting from 100k and the tree compacts from
+   1k, one rounding rule between them. The trailing `.0` is dropped, which is CC's own `formatTokens`
+   convention (`format.ts:133`) where its `formatNumber` keeps it.
+7. *`shift+↑/↓` is left alone with an empty roster.* CC swallows it; bingo's arrows belong to the
+   composer, and a key that visibly does nothing is worse than a key that does what it always did.
+8. *`[awaiting approval]` and the all-idle past-tense verb are not ported.* Both belong to the
+   teammate machinery — plan approval and the always-alive idle loop — that v4 names as explicitly
+   not copied.
+9. *The pills sit on the window's last row*, where the conversation bar was, rather than stacked
+   above the footer's other parts as CC stacks them. Same region; bingo's footer row is a single
+   composed line rather than CC's byline, so there was nothing to stack them on top of.
+
+**Tests: sixteen added, five rewritten, none deleted and none weakened.** Twelve new in `tree.rs`
+(the row shape and the hide row's arrival; what a running, idle and stopped row says; the idle row's
+copy and the duration formatter; the selection walk and its wrapping; the empty roster leaving the
+chord alone; `k`'s four cases; the preview walk; the rows a preview hangs; `ctrl+shift+o` not taking
+`ctrl+o`'s meaning; the pills' content, order and exclusivity; the pills windowing; the fit at four
+widths).
+One in `chrome.rs` (the tree takes the task slot, the pills take the last row, never both). One in
+`chat_tests_b.rs` (owner and blocked-by, including an owner nobody answers to and a blocker already
+done). One in `chat_tests_c.rs` (`an_empty_roster_leaves_ctrl_t_a_two_stop_toggle`). One in
+`keys.rs` (`the_panel_names_the_status_layer`). The five rewritten, each because the thing it was
+about survives with a new occupant: `ctrl_t_cycles_the_tasks_then_the_team_then_away` →
+`…_then_the_agents_then_away`, `esc_peels_the_directory_in_the_slot_above_the_task_panel` →
+`esc_peels_the_agent_tree_…` (which keeps both adjacency assertions and adds the two-stage peel),
+`the_panel_names_no_retired_surface` (which gained `team directory` to the list rather than losing
+anything), `team_output_lands_in_the_feed_and_says_where` →
+`team_output_lands_on_the_info_tier_and_in_the_feed`, and `task_lines_use_checkbox_glyphs` (unchanged
+assertions, new fields on the fixtures). **1421 + 13 before, 1437 + 13 after.**
+
+**Named limits.**
+
+1. *`enter` still opens nothing, anywhere.* The tree's hide row is selectable and inert, and that is
+   deliberate: it is the stem's closing corner and the selection's terminus, and D105 is what gives
+   it a verb.
+2. *`ctrl+shift+o` needs the kitty keyboard protocol.* Elsewhere the chord is `ctrl+o` and opens the
+   transcript, so the preview is unreachable there. No fallback binding was invented; a second key
+   for one feature is how a keymap rots.
+3. *The team directory is unreachable.* Not deprecated, not deleted — 663 lines with their tests
+   still green, waiting for D107's dialog. `/team`'s answer moved to the info tier so the command
+   still answers in the meantime.
+4. *The pill window is left-anchored.* CC scrolls it to keep a selected pill in view; bingo's pills
+   have no selection until D105 gives them one, and at index 0 CC's own window starts at the left.
+5. *No badge anywhere in the status layer.* The unread and mention counts are still measured on every
+   poll and read by nothing. That is the honest state, marked as such, and D107 is the surface for it.
+

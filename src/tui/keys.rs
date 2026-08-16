@@ -101,7 +101,7 @@ pub const BINDINGS: &[Binding] = &[
     },
     Binding {
         keys: "ctrl+t",
-        description: "toggle task list",
+        description: "tasks, then the agent tree, then closed",
     },
     Binding {
         keys: "ctrl+g",
@@ -112,8 +112,12 @@ pub const BINDINGS: &[Binding] = &[
         description: "background the running command · manage background agents (tab: perspective)",
     },
     Binding {
-        keys: "ctrl+t",
-        description: "tasks, then the team directory (roster · rooms · recent)",
+        keys: "shift+↑/↓",
+        description: "open the agent tree and pick a row (k stops it)",
+    },
+    Binding {
+        keys: "ctrl+shift+o",
+        description: "agent tree: 3-line message preview per agent",
     },
     Binding {
         keys: "@name · #name",
@@ -238,12 +242,18 @@ mod tests {
     }
 
     /// The panel must not advertise a surface that no longer exists: the D89
-    /// workspace modal, and now the D90 conversation switcher and `/open` that
-    /// D103 retired with the buffers they reached.
+    /// workspace modal, the D90 conversation switcher and `/open` that D103
+    /// retired with the buffers they reached, and — since D104 — the team
+    /// directory, which ctrl+t no longer reaches.
     #[test]
     fn the_panel_names_no_retired_surface() {
         for binding in BINDINGS {
-            for retired in ["workspace", "switch conversation", "/open"] {
+            for retired in [
+                "workspace",
+                "switch conversation",
+                "/open",
+                "team directory",
+            ] {
                 assert!(
                     !binding.description.contains(retired) && !binding.keys.contains(retired),
                     "{} still advertises {retired}",
@@ -251,6 +261,39 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The status layer is three keys and the panel names all three: the cycle
+    /// that shows it, the arrows that pick a row inside it, and the toggle that
+    /// hangs a preview off each one (D104). The stop key is named where the
+    /// selection is, because it only means anything there.
+    #[test]
+    fn the_panel_names_the_status_layer() {
+        let find = |keys: &str| {
+            BINDINGS
+                .iter()
+                .find(|binding| binding.keys == keys)
+                .unwrap_or_else(|| panic!("{keys} binding missing"))
+        };
+        let cycle = find("ctrl+t").description;
+        assert!(
+            cycle.contains("tasks") && cycle.contains("agent tree"),
+            "the cycle names both stops: {cycle}"
+        );
+        let select = find("shift+↑/↓").description;
+        assert!(
+            select.contains("agent tree") && select.contains('k'),
+            "{select}"
+        );
+        assert!(
+            find("ctrl+shift+o").description.contains("preview"),
+            "the preview toggle is undiscoverable otherwise"
+        );
+        assert_eq!(
+            BINDINGS.iter().filter(|b| b.keys == "ctrl+t").count(),
+            1,
+            "one key, one row: the cycle had two entries while it had two owners"
+        );
     }
 
     /// The one composer grammar that reaches somebody other than main is named

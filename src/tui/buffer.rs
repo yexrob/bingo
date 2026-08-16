@@ -45,8 +45,9 @@ const TEAM_LOG_MAX: usize = 200;
 /// **There is no `Team` variant, and that is the D95 ruling.** The team is the
 /// organization, not a conversation: you cannot speak to it, and everything it
 /// had to say — who exists, what rooms there are, what just happened — is a
-/// directory (`ctrl+t`, [`crate::tui::directory`]) rather than a board you
-/// visit and a badge that asks you to. A read-only buffer in the bar was a
+/// directory ([`crate::tui::directory`], off the ctrl+t cycle since D104 and
+/// absorbed by D107's background dialog) rather than a board you visit and a
+/// badge that asks you to. A read-only buffer in the bar was a
 /// conversation-shaped hole where a roster belonged.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum BufferId {
@@ -98,11 +99,18 @@ pub struct Buffer {
     last_activity: u64,
 }
 
-/// The accounting readers. Nothing on screen reads them between D103 and D104
-/// — the bar that did retired with the conversation engine — and D104's footer
-/// pills and agent tree are what read them next. They are three field reads
-/// with the derivation in them; deleting and re-deriving would be the churn.
-#[allow(dead_code)] // D104 consumes these
+/// The accounting readers, and the batch that will use them.
+///
+/// **D104 did not, and the reason is CC's.** The footer pills and the agent
+/// tree were the surface this was kept for, and neither carries a badge: CC's
+/// `AgentPill` renders `@name` and nothing else, and the tree's rows are
+/// `@name: <what it is doing> · <what that cost>` — no counter, no dot. Both
+/// take their dim and bold states from the agent's *state*, which is the
+/// registry's answer rather than this store's. So the markers move on rather
+/// than come off: D107's background dialog is the surface where "three unread
+/// from @scout" is the thing being asked for, and it is what absorbs the
+/// directory these numbers already fed.
+#[allow(dead_code)] // D107 absorbs these
 impl Buffer {
     pub fn id(&self) -> &BufferId {
         &self.id
@@ -114,8 +122,9 @@ impl Buffer {
         self.mention
     }
     /// Tick of the last observed change in the source. A registry sorted by
-    /// name answers "what exists"; this is what answers "what just happened",
-    /// and it is what D104's tree orders rows by.
+    /// name answers "what exists"; this is what answers "what just happened".
+    /// The tree does not order by it — CC sorts its rows by name and so does
+    /// bingo's registry — so this waits for the dialog, like its neighbours.
     pub fn last_activity(&self) -> u64 {
         self.last_activity
     }
@@ -309,7 +318,7 @@ impl Buffers {
     }
 
     /// Every conversation, `@main` first and the rest in [`BufferId`] order.
-    #[allow(dead_code)] // D104 consumes this
+    #[allow(dead_code)] // D107 absorbs this
     pub fn iter(&self) -> impl Iterator<Item = &Buffer> {
         self.list.iter()
     }

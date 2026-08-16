@@ -364,8 +364,7 @@ impl Chat {
     pub(crate) fn slash_join(&mut self, arg: &str) {
         let Some(room) = self.room_arg(arg) else {
             self.push_slash_info(
-                "usage: /join #room — or press j on a room in the team directory (ctrl+t)"
-                    .to_string(),
+                "usage: /join #room — the room typeahead lists what there is".to_string(),
             );
             return;
         };
@@ -553,11 +552,17 @@ mod tests {
         });
     }
 
-    /// `/team` answers into the team's feed, and main keeps one line saying
-    /// where the answer went — the feed is a column of the directory, so the
-    /// pointer names the key that opens it.
+    /// `/team` answers on the info tier, and the feed keeps a copy.
+    ///
+    /// Rewritten for D104, and the assertion is stronger rather than weaker.
+    /// D95 sent the answer to the feed alone and printed a pointer at the key
+    /// that opened it; D104 took that key away from the directory, so the
+    /// pointer would have named a door that is not there and the answer would
+    /// have had no reader at all. The lines come back to the tier every other
+    /// slash command answers on — and the feed entry, which is what D107's
+    /// dialog will show, is still asserted here.
     #[test]
-    fn team_output_lands_in_the_feed_and_says_where() {
+    fn team_output_lands_on_the_info_tier_and_in_the_feed() {
         let mut chat = test_chat();
         chat.session.agents.insert(
             "dev",
@@ -577,36 +582,31 @@ mod tests {
             "the answer is in the feed: {:?}",
             chat.buffers.team_log()
         );
-        assert!(
-            chat.slash_info_lines
-                .iter()
-                .any(|line| line == "→ team (ctrl+t)"),
-            "and main points at the key that opens it: {:?}",
-            chat.slash_info_lines
+        let filed = chat
+            .buffers
+            .team_log()
+            .iter()
+            .find(|event| event.label == "/team")
+            .map(|event| event.detail.clone().unwrap_or_default())
+            .unwrap_or_default();
+        assert!(!chat.slash_info_lines.is_empty());
+        assert_eq!(
+            chat.slash_info_lines.join("\n"),
+            filed,
+            "the tier shows exactly what the feed filed"
         );
         assert!(
             !chat
                 .messages
                 .iter()
-                .any(|message| message.text.contains("→ team")),
-            "the pointer is an info line, not a message in the transcript"
-        );
-
-        // With the directory already open, the answer is where you are looking
-        // and there is nothing to point at.
-        chat.open_directory();
-        chat.slash_info_lines.clear();
-        chat.run_slash("team");
-        assert!(
-            chat.slash_info_lines.is_empty(),
-            "no pointer is needed when you are already there: {:?}",
-            chat.slash_info_lines
+                .any(|message| message.text.contains("/team")),
+            "on the info tier, never as a message in the transcript"
         );
         assert!(
             chat.directory_rows()
                 .iter()
                 .any(|row| row.text.starts_with("/team")),
-            "the entry names its command"
+            "the feed entry names its command, for the dialog that will show it"
         );
     }
 

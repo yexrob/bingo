@@ -1156,9 +1156,19 @@ pub struct Chat {
     pub tasks_auto: bool,
     /// Main-view background-agent manager; `None` means the panel is closed.
     pub agent_manager: Option<AgentManager>,
-    /// The team directory (D95), second stop of the ctrl+t cycle; `None` means
-    /// it is closed. The team has no buffer — this panel is where it lives.
+    /// The team directory (D95). No longer on the `ctrl+t` cycle since D104 —
+    /// the agent tree took that stop — and D107's background dialog is what
+    /// absorbs it. Nothing opens it in the meantime, which is why it is always
+    /// `None`; the rendering and key paths are kept whole for that batch.
     pub(crate) directory: Option<crate::tui::directory::Directory>,
+    /// The agent tree (D104), second stop of the `ctrl+t` cycle; `None` means
+    /// it is closed. Its rows are built from the registry at draw time, so this
+    /// holds nothing but the cursor.
+    pub(crate) tree: Option<crate::tui::tree::AgentTree>,
+    /// Whether the tree hangs a three-line message preview off each instance
+    /// (`ctrl+shift+o`). A session-wide toggle rather than tree state, which is
+    /// where CC keeps it too — it survives the tree closing and reopening.
+    pub(crate) tree_preview: bool,
     /// The esc-esc rewind selector (D91); `None` means it is closed.
     pub(crate) rewind: Option<rewind_ui::Rewind>,
     /// Interrupt signal: Ctrl+C / Esc while busy → send(true), aborting stream reads in the turn immediately.
@@ -1436,6 +1446,8 @@ impl Chat {
             tasks_auto: false,
             agent_manager: None,
             directory: None,
+            tree: None,
+            tree_preview: false,
             rewind: None,
             interrupted: false,
             cancel_tx: tokio::sync::watch::channel(false).0,

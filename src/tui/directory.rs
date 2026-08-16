@@ -4,8 +4,16 @@
 //! ever addressed to it, and the thing you actually want from it is an answer
 //! to "who is here, what rooms exist, what just happened" — three questions a
 //! `#team` buffer answered by pretending to be a chat you could open, badge and
-//! all. So it is a directory instead: a read-only view on the second stop of
-//! the `ctrl+t` cycle, built from live sources every time it is drawn.
+//! all. So it is a directory instead: a read-only view built from live sources
+//! every time it is drawn.
+//!
+//! **It has no door between D104 and D107.** `ctrl+t`'s second stop is the
+//! agent tree now ([`crate::tui::tree`]) — CC's cycle is `none → tasks →
+//! teammates → none` and the roster is not one of its stops — and D107's
+//! background dialog (Agents · Shells · Rooms) is what absorbs these three
+//! sections. The view and its keys are kept whole rather than deleted and
+//! rewritten, because the dialog wants exactly this content; only
+//! [`Chat::open_directory`] lost its caller, and it is marked as such.
 //!
 //! **Navigation and information only.** `o` opens a member's observation page;
 //! `j` joins the room under the cursor. Stopping an agent, restarting one,
@@ -125,6 +133,10 @@ impl Chat {
     /// Open the directory. Inert behind a permission dialog, for the switcher's
     /// reason (D81): a surface that competes for Enter must not open over a
     /// question that is holding up a turn.
+    ///
+    /// Nothing calls this between D104 and D107: `ctrl+t` gave the stop to the
+    /// agent tree, and the background dialog is the next door.
+    #[allow(dead_code)] // D107 absorbs this
     pub(crate) fn open_directory(&mut self) {
         if self.pending_ask.is_some() {
             return;
@@ -239,10 +251,10 @@ impl Chat {
         let Some(mut state) = self.directory.take() else {
             return false;
         };
-        // Chords belong to the application, not to the panel: `ctrl+t` is the
-        // cycle that opened this and must be able to close it, and `ctrl+c`
-        // always means out (D80). This list does not filter as you type, so it
-        // has no draft to protect and nothing to swallow them for.
+        // Chords belong to the application, not to the panel: `ctrl+c` always
+        // means out (D80), and the cycle keys are the application's. This list
+        // does not filter as you type, so it has no draft to protect and
+        // nothing to swallow them for.
         if modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
             self.directory = Some(state);
             return false;
@@ -328,7 +340,7 @@ impl Chat {
             )));
         }
         out.push(Row::new(Line::styled(
-            "↑/↓ select · o record · j join room · ctrl+t / Esc close",
+            "↑/↓ select · o record · j join room · Esc close",
             SegStyle::fg(theme.text_secondary),
         )));
         crate::tui::chat::manager_box(out, width, theme)

@@ -119,9 +119,10 @@ pub struct Thinking {
 }
 
 /// Task lifecycle (pending → in_progress → completed).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TodoStatus {
     /// Not started.
+    #[default]
     Pending,
     /// In progress.
     InProgress,
@@ -130,12 +131,24 @@ pub enum TodoStatus {
 }
 
 /// A task item.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Carries the store's `id`, `owner` and `blocked_by` since D104: the panel
+/// names an owner who is a live instance and marks what a task is waiting on,
+/// and both are answers the row can only give if the snapshot brought them.
+/// **Display only** — there is no assignment protocol and no claiming here.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TodoItem {
+    /// Store id, which is what `blocked_by` names.
+    pub id: String,
     /// Task text.
     pub text: String,
     /// Lifecycle status.
     pub status: TodoStatus,
+    /// Who the store says is on it. Rendered only when it resolves to an
+    /// instance that is still on the roster.
+    pub owner: Option<String>,
+    /// Ids this task is waiting on. Rendered as those of them that are not done.
+    pub blocked_by: Vec<String>,
 }
 
 /// One line of a unified diff.

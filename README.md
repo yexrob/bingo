@@ -173,7 +173,9 @@ bingo starts even with no credentials: the welcome card carries onboarding (`/pr
 |---|---|
 | `Esc` | close the topmost dialog/menu/panel first / interrupt while busy / on double-press: clear the input, or open Rewind when it is empty |
 | `Ctrl+C` | interrupt while busy / clear text / exit on two presses with empty input |
-| `Ctrl+T` | toggle the task area |
+| `Ctrl+T` | cycle the status layer: the task area, then the agent tree, then closed |
+| `Shift+↑` / `Shift+↓` | open the agent tree and pick a row (`k` stops the instance under the cursor) |
+| `Ctrl+Shift+O` | agent tree: hang a three-line message preview off each row |
 | `Ctrl+O` | open the transcript view: the whole session with every tool output, on its own screen (`ctrl+e` collapse · `/` search · `o` open the image in view · `q` close) |
 | `Ctrl+G` | compose the draft in `$VISUAL`/`$EDITOR` (or the readline chord `Ctrl+X Ctrl+E`); a non-zero exit keeps the draft |
 | `Ctrl+P` / `Ctrl+N` | prompt history — the same keys as `↑`/`↓`, including pulling a queued message back |
@@ -361,8 +363,8 @@ schema from a single source of truth):
 - Instances have names (`name` parameter, defaults to the definition name/
   `agent`, auto `-2`/`-3` on collisions); the turn that spawns one shows
   `◉ name · task`, while a lifecycle event arriving when no turn is running no
-  longer writes into `@main` at all — the team lifecycle log, the team directory
-  and the instance's own record carry it instead; history is kept after
+  longer writes into `@main` at all — the team lifecycle log, the agent tree and
+  the instance's own record carry it instead; history is kept after
   completion.
 - `SendMessage` sends follow-up instructions to an instance (context
   preserved); queued while busy, delivered automatically at the end of the
@@ -537,19 +539,29 @@ else — `user` and `main` join only when named.
 You speak in a room with `#name <message>` from the composer. If you are not a
 member, that posts you in — there is no quiet way in, because joining and leaving
 are written into the room as dim `· user joined · 14:32` lines that every member
-sees. `/join #name` (or `j` on the room in the team directory) makes you a member
-without saying anything; `/leave #name` is the counterpart, and a room you leave
-stays readable. The team directory lists every room, marked `you're not in` where
-you are not a member.
+sees. `/join #name` makes you a member without saying anything; `/leave #name` is
+the counterpart, and a room you leave stays readable.
+
+**The status layer** is what says who is working. `Ctrl+T` cycles tasks → the
+agent tree → closed. The tree is `@main` plus one row per instance:
+`@scout: reading src/lib.rs… · 12 tool uses · 8.3k tokens` while it runs,
+`Idle for 14s` while it waits, `[stopped]` once it is stopped — names in their
+own colours, rebuilt from the registry every frame. `Shift+↑/↓` opens it and
+picks a row, `k` stops the instance under the cursor, `Ctrl+Shift+O` hangs a
+three-line preview of each one's conversation off its row, and `Esc` clears the
+cursor and then closes the panel. With the tree closed and anybody on the
+roster, one footer line names them: `@main @scout @writer · shift + ↓ to
+expand`, dim where they are resting. The task panel names an owner who is still
+here (` (@scout)`, in their colour) and what a task is waiting on
+(`› blocked by #3`) — display only, nothing assigns or claims.
 
 **The team is not a conversation** — you cannot say anything to it, so it is a
-directory rather than a board with a badge. `Ctrl+T` cycles tasks → team →
-closed. The directory shows the roster with presence and each member's rooms,
-every room with its members, and the last ten lifecycle events (spawn, done, and
-`/team` output). **Main is on the roster, first** — it is a participant like the
-rest, with rooms and a record of its own. ↑/↓ move, `o` opens a member's record
-and `j` joins the room under the cursor. It navigates and informs only — stopping an agent stays in the Ctrl+B
-manager, and main is not stoppable at all.
+directory rather than a board with a badge. It shows the roster with presence and
+each member's rooms, every room with its members, and the last ten lifecycle
+events (spawn, done, and `/team` output). **Main is on the roster, first** — it is
+a participant like the rest, with rooms and a record of its own. `Ctrl+T` no
+longer reaches it: the agent tree took that stop and the background dialog is
+what will open it next.
 
 **Every participant has a page of its own, main included.** The perspective page
 is a read-only, two-level dossier of everything one of them has said and been
@@ -562,8 +574,8 @@ This is the audit layer — the one place an agent's conversations with someone
 other than you are visible, while your own DM with it stays a pair conversation
 and mixes nothing in. It is a snapshot: reopening is the refresh.
 
-**Two doors reach it**: `o` on a member in the team directory, and `tab` on an
-agent in the Ctrl+B manager's detail. Main's page is built from
+**One door reaches it** for now: `tab` on an agent in the Ctrl+B manager's
+detail. Main's page is built from
 the session transcript — its console conversation as its `@user` lane, one lane
 per agent that wrote to it, its rooms, its dispatch notifications as intake —
 and the only clock a transcript carries is the turn marker, so times on it are
