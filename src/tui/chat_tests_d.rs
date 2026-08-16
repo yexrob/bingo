@@ -1,5 +1,5 @@
 //! Chat state-machine tests, part four: the composer's completion surfaces
-//! (D85) — the `@` mention dropdown and slash **argument** completion.
+//! (D85, D103) — the `@`/`#` typeahead and slash **argument** completion.
 //!
 //! `chat_tests_a` / `b` / `c` split by size alone (the 4000-line file cap);
 //! this file continues them.
@@ -137,10 +137,20 @@ fn mention_selection_inserts_a_relative_path_and_closes() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
-/// Live agents share the dropdown with files, and keep their `@` — that token
-/// is what D90's routing will read.
+/// Agents share the dropdown with files and keep their `@` — that token is what
+/// the direct send reads.
+///
+/// Rewritten for D103, which gave the sigil two readings by position. **At the
+/// start of a line** `@name ` bypasses the model, so the list is every instance
+/// the send can reach, and each row says what Enter will do. **Mid-line** it is
+/// D85's live reference, unchanged: running instances only, with no note.
+///
+/// *Stopped instances are still listed*, which is what D103 decided and what
+/// D105 found to be half true: the composer offers them and the domain then
+/// refuses (`AgentRegistry::deliver`). The listing is left exactly as it is —
+/// the gap is in the domain, and it is named where it lives (D105's record).
 #[test]
-fn mention_lists_running_agents() {
+fn mention_lists_agents_by_what_the_position_can_reach() {
     let (mut chat, root) = project_chat("agents");
     chat.session.agents.insert(
         "scout",
@@ -150,24 +160,102 @@ fn mention_lists_running_agents() {
         chat.session.clone(),
     );
 
-    chat.set_input("@scou");
-    let state = chat.mention.as_ref().unwrap_or_else(|| panic!("open"));
-    let agent = state
-        .items
-        .iter()
-        .find(|item| item.kind == MentionKind::Agent)
-        .unwrap_or_else(|| panic!("the running agent is offered"));
-    assert_eq!(agent.value, "scout");
-    assert_eq!(agent.insertion(), "@scout", "an agent keeps its @");
+    let agent_row = |chat: &Chat| {
+        chat.mention
+            .as_ref()
+            .and_then(|state| {
+                state
+                    .items
+                    .iter()
+                    .find(|item| item.kind == MentionKind::Agent)
+                    .cloned()
+            })
+            .unwrap_or_else(|| panic!("the agent is offered"))
+    };
 
-    // A stopped agent is not a live mention target.
+    chat.set_input("@scou");
+    let leading = agent_row(&chat);
+    assert_eq!(leading.value, "scout");
+    assert_eq!(leading.insertion(), "@scout", "an agent keeps its @");
+    assert_eq!(
+        leading.note, "send message · running",
+        "at the start of a line the row says the send is what Enter does"
+    );
+
+    chat.set_input("ask @scou");
+    assert_eq!(
+        agent_row(&chat).note,
+        "",
+        "mid-line it is a reference, and a reference does nothing on its own"
+    );
+
+    // A stopped agent is still offered by the typeahead (D103's ruling) —
+    // but it is not a live reference.
     let _ = chat.session.agents.stop("scout");
     chat.set_input("x");
     chat.set_input("@scou");
+    assert_eq!(agent_row(&chat).note, "send message · stopped");
+    chat.set_input("x");
+    chat.set_input("ask @scou");
     assert!(
         mention_values(&chat).iter().all(|v| v != "scout"),
-        "only running agents are offered"
+        "only running agents are offered mid-line"
     );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// D103: `#` at the start of a line offers the rooms, and says what posting to
+/// one will do — including that speaking in a room you are not in joins you,
+/// which is the only thing about the grammar a user could not guess.
+#[test]
+fn a_leading_hash_offers_the_rooms_and_what_a_post_will_do() {
+    let (mut chat, root) = project_chat("rooms");
+    chat.session
+        .channels
+        .create(
+            "build",
+            vec![crate::channels::USER_NAME.to_string()],
+            crate::channels::ChannelMode::Free,
+        )
+        .unwrap_or_else(|e| panic!("room: {e}"));
+    chat.session
+        .channels
+        .create(
+            "parser",
+            vec!["scout".to_string()],
+            crate::channels::ChannelMode::Free,
+        )
+        .unwrap_or_else(|e| panic!("room: {e}"));
+
+    chat.set_input("#");
+    let items = chat
+        .mention
+        .as_ref()
+        .map(|state| state.items.clone())
+        .unwrap_or_default();
+    assert!(
+        items.iter().all(|item| item.kind == MentionKind::Room),
+        "the room sigil has exactly one meaning: {items:?}"
+    );
+    let note = |name: &str| {
+        items
+            .iter()
+            .find(|item| item.value == name)
+            .unwrap_or_else(|| panic!("{name} is offered: {items:?}"))
+            .clone()
+    };
+    assert_eq!(note("build").insertion(), "#build", "a room keeps its #");
+    assert_eq!(note("build").note, "post to room");
+    assert_eq!(
+        note("parser").note,
+        "post to room · joins you",
+        "a room you are not in says that speaking is joining"
+    );
+
+    // Mid-line a hash is a hash.
+    chat.set_input("see #42");
+    assert!(chat.mention.is_none(), "no dropdown over an issue number");
 
     let _ = std::fs::remove_dir_all(&root);
 }

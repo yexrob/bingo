@@ -8,6 +8,17 @@ use super::tests_a::*;
 use super::*;
 use serde_json::json;
 
+/// Register an instance on the chat's own session, the way a spawn would.
+fn seed_agent(chat: &Chat, name: &str) {
+    chat.session.agents.insert(
+        name,
+        crate::agents::AgentKind::Hire,
+        None,
+        "test instance".to_string(),
+        chat.session.clone(),
+    );
+}
+
 /// Three grouped reads, each with output of its own.
 fn grouped_reads(chat: &mut Chat, calls: &[(&str, &str)]) {
     chat.messages.push(msg(Role::Assistant, ""));
@@ -1266,9 +1277,9 @@ fn a_long_tail_line_is_clipped_to_the_width() {
 }
 
 /// D84: ctrl+b reads the situation. A command running in the foreground is what
-/// it backgrounds; with none running it keeps opening the manager (D80).
+/// it backgrounds; with none running it keeps opening the dialog (D80, D107).
 #[test]
-fn ctrl_b_backgrounds_the_running_command_before_it_opens_the_manager() {
+fn ctrl_b_backgrounds_the_running_command_before_it_opens_the_dialog() {
     let mut chat = test_chat();
     running_bash(&mut chat, "cargo build", false);
     tail(&mut chat, &["Compiling bingo"], 1);
@@ -1281,8 +1292,8 @@ fn ctrl_b_backgrounds_the_running_command_before_it_opens_the_manager() {
         "the running command was told to go to the background"
     );
     assert!(
-        chat.agent_manager.is_none(),
-        "the manager stays closed while a command owns the key"
+        chat.dialog.is_none(),
+        "the dialog stays closed while a command owns the key"
     );
     assert!(
         chat.bash_tail.is_none(),
@@ -1293,8 +1304,8 @@ fn ctrl_b_backgrounds_the_running_command_before_it_opens_the_manager() {
 
     assert!(chat.on_key(KeyCode::Char('b'), KeyModifiers::CONTROL));
     assert!(
-        chat.agent_manager.is_some(),
-        "with nothing running, ctrl+b is the background-agent manager"
+        chat.dialog.is_some(),
+        "with nothing running, ctrl+b is the background dialog"
     );
 }
 
@@ -1390,268 +1401,29 @@ fn a_pending_prompt_keeps_the_title_it_needs() {
     );
 }
 
-/// D89: Esc in a conversation other than main is navigation, and navigation
-/// comes before interruption. A main turn running behind it keeps running — its
-/// interrupt is reachable from main, which is the only place it is the thing
-/// on screen. Ctrl+C is unchanged and still stops the turn from anywhere.
+/// D103: ctrl+k is readline's kill again. D90 spent it on the conversation
+/// switcher and moved the kill to alt+k; the switcher retired with the
+/// conversations it switched between, so the key comes back — and alt+k stays
+/// an alias, because taking a binding back twice is worse than keeping two.
 #[test]
-fn esc_goes_home_before_it_interrupts() {
-    use crate::tui::buffer::BufferId;
-
-    let mut chat = test_chat();
-    chat.session.agents.insert(
-        "scout",
-        crate::agents::AgentKind::Hire,
-        None,
-        "research".into(),
-        chat.session.clone(),
-    );
-    chat.refresh_conversations();
-    chat.busy = true;
-    chat.switch_to(BufferId::Dm("scout".into()));
-
-    assert_eq!(chat.esc_layer(), Some(EscLayer::BackToMain));
-    assert_eq!(
-        chat.esc_busy_hint(),
-        "esc to @main",
-        "the status row says where the key goes"
-    );
-    assert!(chat.on_key(KeyCode::Esc, KeyModifiers::NONE));
-    assert_eq!(
-        *chat.buffers.active(),
-        BufferId::Hub,
-        "one press, one level"
-    );
-    assert!(!chat.interrupted, "and the turn survived it");
-    assert!(chat.busy);
-
-    // Home again, Esc means exactly what it meant before D89.
-    assert_eq!(chat.esc_layer(), Some(EscLayer::Interrupt));
-    assert_eq!(chat.esc_busy_hint(), "esc to interrupt");
-    assert!(chat.on_key(KeyCode::Esc, KeyModifiers::NONE));
-    assert!(chat.interrupted, "the turn is reachable from main");
-}
-
-/// D89: the return home takes its place in the walk rather than shortcutting
-/// it. Transient layers stacked over a conversation still peel first, and only
-/// when nothing is left above it does Esc leave the conversation — one press
-/// per level, all the way down to the turn.
-#[test]
-fn esc_peels_the_conversation_in_its_place_above_the_interrupt() {
-    use crate::tui::buffer::BufferId;
-
-    assert_eq!(
-        EscLayer::ORDER
-            .iter()
-            .position(|layer| *layer == EscLayer::BackToMain)
-            .map(|i| i + 1),
-        EscLayer::ORDER
-            .iter()
-            .position(|layer| *layer == EscLayer::Interrupt),
-        "the way home sits directly above the interrupt"
-    );
-
-    let mut chat = test_chat();
-    chat.session.agents.insert(
-        "scout",
-        crate::agents::AgentKind::Hire,
-        None,
-        "research".into(),
-        chat.session.clone(),
-    );
-    chat.refresh_conversations();
-    chat.busy = true;
-    chat.switch_to(BufferId::Dm("scout".into()));
-    chat.help_visible = true;
-    chat.push_slash_info("session status".to_string());
-
-    let t0 = std::time::Instant::now();
-    let mut order = Vec::new();
-    while let Some(layer) = chat.esc_layer() {
-        order.push(layer);
-        assert!(chat.on_key_at(KeyCode::Esc, KeyModifiers::empty(), t0));
-        if layer == EscLayer::Interrupt {
-            break;
-        }
-        assert!(
-            !chat.interrupted,
-            "a layer above the interrupt closed instead of the turn: {layer:?}"
-        );
-        assert!(chat.busy, "the turn kept running through {layer:?}");
+fn both_kill_keys_kill_to_the_end_of_the_line() {
+    for key in [KeyModifiers::CONTROL, KeyModifiers::ALT] {
+        let mut chat = test_chat();
+        chat.set_input("alpha beta");
+        chat.cursor = 6;
+        assert!(chat.on_key(KeyCode::Char('k'), key));
+        assert_eq!(chat.input, "alpha ", "{key:?} kills to the end of the line");
+        assert!(chat.on_key(KeyCode::Char('y'), KeyModifiers::CONTROL));
+        assert_eq!(chat.input, "alpha beta", "and the kill fed the ring");
     }
-    assert_eq!(
-        order,
-        vec![
-            EscLayer::InfoLines,
-            EscLayer::HelpPanel,
-            EscLayer::BackToMain,
-            EscLayer::Interrupt,
-        ],
-        "the stack is walked top-down, one entry per press"
-    );
-    assert_eq!(*chat.buffers.active(), BufferId::Hub);
-    assert!(chat.interrupted, "the last press reached the turn");
 }
 
-/// D90: the ctrl+k switcher joined the stack in the Menu stratum, and Esc peels
-/// exactly it — the conversation underneath is untouched, the turn keeps
-/// running, and the layers stacked over it still close in their own order.
-#[test]
-fn esc_peels_the_switcher_and_nothing_under_it() {
-    use crate::tui::buffer::BufferId;
-
-    assert_eq!(
-        EscLayer::ORDER
-            .iter()
-            .position(|layer| *layer == EscLayer::Switcher),
-        EscLayer::ORDER
-            .iter()
-            .position(|layer| *layer == EscLayer::Menu)
-            .map(|i| i + 1),
-        "the switcher sits in the picker stratum"
-    );
-
-    let mut chat = test_chat();
-    chat.session.agents.insert(
-        "scout",
-        crate::agents::AgentKind::Hire,
-        None,
-        "research".into(),
-        chat.session.clone(),
-    );
-    chat.refresh_conversations();
-    chat.busy = true;
-    chat.switch_to(BufferId::Dm("scout".into()));
-    chat.help_visible = true;
-    chat.open_switcher();
-    assert!(chat.switcher.is_some(), "ctrl+k opened it");
-
-    let t0 = std::time::Instant::now();
-    let mut order = Vec::new();
-    while let Some(layer) = chat.esc_layer() {
-        order.push(layer);
-        assert!(chat.on_key_at(KeyCode::Esc, KeyModifiers::empty(), t0));
-        if layer == EscLayer::Interrupt {
-            break;
-        }
-        if layer == EscLayer::Switcher {
-            assert!(chat.switcher.is_none(), "the switcher closed");
-            assert_eq!(
-                *chat.buffers.active(),
-                BufferId::Dm("scout".into()),
-                "and one press took only the switcher — the conversation stayed"
-            );
-        }
-        assert!(
-            !chat.interrupted,
-            "a layer above the interrupt closed instead of the turn: {layer:?}"
-        );
-        assert!(chat.busy, "the turn kept running through {layer:?}");
-    }
-    assert_eq!(
-        order,
-        vec![
-            EscLayer::Switcher,
-            EscLayer::HelpPanel,
-            EscLayer::BackToMain,
-            EscLayer::Interrupt,
-        ],
-        "the stack is walked top-down, one entry per press"
-    );
-}
-
-/// D90: ctrl+k is one meaning now. It opens the switcher and never edits the
-/// draft — the kill it used to be answers to alt+k, which still feeds the ring.
-#[test]
-fn ctrl_k_switches_and_alt_k_kills() {
-    let mut chat = test_chat();
-    chat.set_input("alpha beta");
-    chat.cursor = 0;
-
-    assert!(chat.on_key(KeyCode::Char('k'), KeyModifiers::CONTROL));
-    assert_eq!(chat.input, "alpha beta", "ctrl+k left the draft alone");
-    assert!(chat.switcher.is_some(), "and opened the switcher instead");
-    assert!(chat.on_key(KeyCode::Esc, KeyModifiers::NONE));
-
-    // Busy, in a conversation, with a dropdown open — ctrl+k never types a `k`.
-    chat.busy = true;
-    chat.set_input("/");
-    assert!(chat.on_key(KeyCode::Char('k'), KeyModifiers::CONTROL));
-    assert_eq!(chat.input, "/", "not even behind a dropdown");
-    assert!(chat.switcher.is_some(), "it opened there too");
-    assert!(chat.on_key(KeyCode::Esc, KeyModifiers::NONE));
-    chat.busy = false;
-
-    chat.set_input("alpha beta");
-    chat.cursor = 6;
-    assert!(chat.on_key(KeyCode::Char('k'), KeyModifiers::ALT));
-    assert_eq!(chat.input, "alpha ", "alt+k kills to the end of the line");
-    assert!(chat.on_key(KeyCode::Char('y'), KeyModifiers::CONTROL));
-    assert_eq!(chat.input, "alpha beta", "and the kill fed the ring");
-}
-
-/// D89: a permission dialog is the model's turn asking a question, and it has
-/// to reach whoever is at the terminal — including a user reading a DM. The
-/// dialog is modal and sits at the top of D80's stack, so it renders over the
-/// conversation and takes the keys before the conversation's own Esc does.
+/// D103: steering offers the running turn what the composer submitted. A
+/// direct send is addressed to a subagent, so it must not reach the model's
+/// turn — neither as a steer nor as a queued item behind it.
 #[tokio::test]
-async fn a_dialog_reaches_the_user_inside_a_conversation() {
-    use crate::tui::buffer::BufferId;
-
-    let mut chat = test_chat();
-    chat.session.agents.insert(
-        "scout",
-        crate::agents::AgentKind::Hire,
-        None,
-        "research".into(),
-        chat.session.clone(),
-    );
-    chat.refresh_conversations();
-    chat.busy = true;
-    chat.switch_to(BufferId::Dm("scout".into()));
-
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    chat.asks
-        .send((
-            PermissionRequest::new("Allow running Bash", "cargo build", vec!["Allow".into()]),
-            tx,
-        ))
-        .unwrap();
-    assert!(chat.drain_asks(), "the request is accepted from a DM");
-
-    let flow = visible(&mut chat, 100, 40);
-    assert!(
-        flow.contains("── @scout ──"),
-        "the conversation is still what is on screen: {flow}"
-    );
-    assert!(
-        flow.contains("Allow running Bash"),
-        "and the question is on top of it: {flow}"
-    );
-
-    // The dialog outranks the way home: Esc answers the question, and the
-    // conversation is still the one on screen afterwards.
-    assert_eq!(chat.esc_layer(), Some(EscLayer::AskDialog));
-    assert!(chat.on_key(KeyCode::Char('1'), KeyModifiers::NONE));
-    assert!(
-        matches!(rx.await, Ok(crate::ui::DialogAction::Confirm(0))),
-        "the keys work where the user is"
-    );
-    assert_eq!(
-        *chat.buffers.active(),
-        BufferId::Dm("scout".into()),
-        "answering it did not move the user"
-    );
-}
-
-/// D89: steering offers the running turn what `@main`'s composer submitted.
-/// A message typed into a DM is addressed to a subagent, so it must not reach
-/// the model's turn — neither as a steer nor as a queued item behind it.
-#[tokio::test]
-async fn a_dm_submission_never_steers_mains_turn() {
-    use crate::tui::buffer::BufferId;
-
-    let mut chat = chat_with_history("steer-dm");
+async fn a_direct_send_never_steers_mains_turn() {
+    let mut chat = chat_with_history("steer-direct");
     chat.session.agents.insert(
         "scout",
         crate::agents::AgentKind::Hire,
@@ -1662,14 +1434,12 @@ async fn a_dm_submission_never_steers_mains_turn() {
     chat.refresh_conversations();
     chat.busy = true;
 
-    // From main, the same text would be on offer at the next barrier.
-    chat.switch_to(BufferId::Dm("scout".into()));
-    chat.set_input("use tabs");
+    chat.set_input("@scout use tabs");
     chat.submit();
 
     assert!(
         chat.steer.is_empty(),
-        "a DM message is not the turn's to read"
+        "a direct send is not the turn's to read"
     );
     assert!(chat.queued.is_empty(), "and it is not waiting for TurnEnd");
     assert!(chat.busy, "the turn is untouched");
@@ -1683,8 +1453,7 @@ async fn a_dm_submission_never_steers_mains_turn() {
         "it went to the instance instead"
     );
 
-    // Back at main the offer works exactly as D83 left it.
-    chat.switch_to(BufferId::Hub);
+    // The same text without the envelope is on offer at the next barrier.
     chat.set_input("use tabs");
     chat.submit();
     assert_eq!(
@@ -1697,9 +1466,9 @@ async fn a_dm_submission_never_steers_mains_turn() {
     );
 }
 
-/// D91: the rewind selector joined the stack just under the switcher, and Esc
-/// peels its two stages one press at a time before anything under it moves —
-/// the turn keeps running throughout.
+/// D91: the rewind selector is in the stack's Menu stratum, and Esc peels its
+/// two stages one press at a time before anything under it moves — the turn
+/// keeps running throughout.
 #[test]
 fn esc_peels_the_rewind_selector_one_stage_at_a_time() {
     use crate::tui::chat::rewind_ui::Rewind;
@@ -1710,9 +1479,9 @@ fn esc_peels_the_rewind_selector_one_stage_at_a_time() {
             .position(|layer| *layer == EscLayer::Rewind),
         EscLayer::ORDER
             .iter()
-            .position(|layer| *layer == EscLayer::Switcher)
+            .position(|layer| *layer == EscLayer::Menu)
             .map(|i| i + 1),
-        "rewind sits just under the switcher, in the picker stratum"
+        "rewind sits just under the pickers, in the same stratum"
     );
 
     let mut chat = test_chat();
@@ -1757,12 +1526,16 @@ fn esc_peels_the_rewind_selector_one_stage_at_a_time() {
     );
 }
 
-/// D95: the team directory joined the stack in the slot directly above the task
-/// panel it cycles with. Its own layer rather than a second meaning for the task
-/// panel's, so `ORDER` — the single source of Esc's priority — can still answer
-/// which of the two a press closes.
+/// D95's slot, D104's occupant: the ctrl+t cycle's second stop joined the stack
+/// directly above the task panel it cycles with, as its own layer rather than a
+/// second meaning for the task panel's, so `ORDER` — the single source of Esc's
+/// priority — can still answer which of the two a press closes.
+///
+/// Rewritten for D104: the second stop is the agent tree, and the assertion it
+/// makes is the one it always made (adjacency, and that every variant is
+/// reachable) plus the tree's own two-stage peel, which the directory never had.
 #[test]
-fn esc_peels_the_directory_in_the_slot_above_the_task_panel() {
+fn esc_peels_the_agent_tree_in_the_slot_above_the_task_panel() {
     let at = |wanted: EscLayer| {
         EscLayer::ORDER
             .iter()
@@ -1770,22 +1543,26 @@ fn esc_peels_the_directory_in_the_slot_above_the_task_panel() {
             .unwrap_or_else(|| panic!("{wanted:?} is in the stack"))
     };
     assert_eq!(
-        at(EscLayer::Directory) + 1,
+        at(EscLayer::AgentTree) + 1,
         at(EscLayer::TaskPanel),
-        "the two ctrl+t surfaces are adjacent, directory first"
+        "the two ctrl+t surfaces are adjacent, the tree first"
+    );
+    assert!(
+        at(EscLayer::BackgroundDialog) < at(EscLayer::AgentTree),
+        "the modal is dismissed before the panel it is drawn over"
     );
     assert_eq!(
         EscLayer::ORDER.len(),
-        16 + 1,
-        "one layer was added, not two — a variant missing from ORDER is a \
-         layer Esc can never reach"
+        15,
+        "every variant is in ORDER — one missing is a layer Esc can never reach"
     );
 
     let mut chat = test_chat();
+    seed_agent(&chat, "scout");
     chat.busy = true;
     chat.help_visible = true;
-    chat.open_directory();
-    assert!(chat.directory.is_some(), "ctrl+t opened it");
+    chat.open_agent_tree();
+    assert!(chat.tree.is_some(), "ctrl+t opened it");
 
     let t0 = std::time::Instant::now();
     let mut order = Vec::new();
@@ -1795,8 +1572,8 @@ fn esc_peels_the_directory_in_the_slot_above_the_task_panel() {
         if layer == EscLayer::Interrupt {
             break;
         }
-        if layer == EscLayer::Directory {
-            assert!(chat.directory.is_none(), "the directory closed");
+        if layer == EscLayer::AgentTree {
+            assert!(chat.tree.is_none(), "the tree closed");
         }
         assert!(
             !chat.interrupted,
@@ -1808,66 +1585,119 @@ fn esc_peels_the_directory_in_the_slot_above_the_task_panel() {
         order,
         vec![
             EscLayer::HelpPanel,
-            EscLayer::Directory,
+            EscLayer::AgentTree,
             EscLayer::Interrupt,
         ],
         "the stack is walked top-down, one entry per press"
     );
+
+    // With a row selected the layer peels twice: the cursor first, the panel
+    // second. One press, one level, as everywhere else in the stack.
+    let mut chat = test_chat();
+    seed_agent(&chat, "scout");
+    chat.on_key(KeyCode::Down, KeyModifiers::SHIFT);
+    assert!(chat.tree.as_ref().and_then(|tree| tree.selected).is_some());
+    assert!(chat.on_key(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(
+        chat.tree
+            .as_ref()
+            .is_some_and(|tree| tree.selected.is_none()),
+        "the first press cleared the cursor and left the tree open"
+    );
+    assert!(chat.on_key(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(chat.tree.is_none(), "the second press closed the panel");
 }
 
-/// D95: ctrl+t is one key with three stops — the tasks in flight, the team doing
-/// them, then back to the transcript. Two surfaces, never both at once, and the
-/// key that opened each is the key that closes it.
+/// D95's key, D104's cycle: ctrl+t is one key with three stops — the tasks in
+/// flight, the agents doing them, then back to the transcript. Two surfaces,
+/// never both at once, and the key that opened each is the key that closes it.
+///
+/// Rewritten for D104. The second stop was the team directory and is the agent
+/// tree, which is CC's own cycle (`useGlobalKeybindings.tsx:65-86`); the
+/// three-stop shape and the Esc behaviour it asserted are unchanged.
 #[test]
-fn ctrl_t_cycles_the_tasks_then_the_team_then_away() {
+fn ctrl_t_cycles_the_tasks_then_the_agents_then_away() {
     let mut chat = test_chat();
+    seed_agent(&chat, "scout");
     let ctrl_t = |chat: &mut Chat| chat.on_key(KeyCode::Char('t'), KeyModifiers::CONTROL);
 
     assert!(ctrl_t(&mut chat));
     assert!(chat.tasks_visible, "first stop: the task panel");
     assert!(!chat.tasks_auto, "opened by hand, so it stays open");
-    assert!(chat.directory.is_none());
+    assert!(chat.tree.is_none());
 
     assert!(ctrl_t(&mut chat));
-    assert!(chat.directory.is_some(), "second stop: the team directory");
+    assert!(chat.tree.is_some(), "second stop: the agent tree");
+    assert!(
+        chat.tree.as_ref().and_then(|tree| tree.selected).is_none(),
+        "opened, not selecting: the composer still owns every key"
+    );
     assert!(
         !chat.tasks_visible,
         "and only one of the two is on screen at a time"
     );
+    assert!(
+        chat.dialog.is_none(),
+        "the cycle reaches no modal: the dialog is ctrl+b's (D107)"
+    );
 
     assert!(ctrl_t(&mut chat));
-    assert!(
-        chat.directory.is_none(),
-        "third press: back to the transcript"
-    );
+    assert!(chat.tree.is_none(), "third press: back to the transcript");
     assert!(!chat.tasks_visible);
 
     // Esc closes one stop rather than the whole cycle, and the panel underneath
     // is not reopened on the way out.
     assert!(ctrl_t(&mut chat));
     assert!(ctrl_t(&mut chat));
-    assert!(chat.directory.is_some());
+    assert!(chat.tree.is_some());
     assert!(chat.on_key(KeyCode::Esc, KeyModifiers::NONE));
-    assert!(chat.directory.is_none());
+    assert!(chat.tree.is_none());
     assert!(
         !chat.tasks_visible,
         "Esc left the cycle, it did not rewind it"
     );
 }
 
-/// The directory is modal for the keys it uses and transparent to the chords it
-/// does not: `j` joins a room instead of typing a letter, while ctrl+t still
-/// reaches the cycle and ctrl+k still reaches the switcher.
+/// With nobody spawned the cycle has two stops, not three — CC collapses it the
+/// same way, because a tree of one row is a row saying nothing.
 #[test]
-fn the_directory_swallows_its_own_keys_and_passes_the_chords_through() {
+fn an_empty_roster_leaves_ctrl_t_a_two_stop_toggle() {
     let mut chat = test_chat();
-    chat.open_directory();
+    let ctrl_t = |chat: &mut Chat| chat.on_key(KeyCode::Char('t'), KeyModifiers::CONTROL);
+
+    assert!(ctrl_t(&mut chat));
+    assert!(chat.tasks_visible);
+    assert!(ctrl_t(&mut chat));
+    assert!(
+        !chat.tasks_visible && chat.tree.is_none(),
+        "the second press goes straight back to the transcript"
+    );
+}
+
+/// The dialog is modal for the keys it uses and transparent to the chords it
+/// does not: `x` stops a row instead of typing a letter, while a chord still
+/// reaches the application underneath.
+///
+/// Rewritten for D107 from the directory's version of the same claim — the
+/// surface changed and the letter it swallows changed with it; the property is
+/// the one the directory was built to have.
+#[test]
+fn the_dialog_swallows_its_own_keys_and_passes_the_chords_through() {
+    let mut chat = test_chat();
+    chat.open_background_dialog();
 
     chat.set_input("draft");
-    assert!(chat.on_key(KeyCode::Char('j'), KeyModifiers::NONE));
+    assert!(chat.on_key(KeyCode::Char('x'), KeyModifiers::NONE));
     assert_eq!(chat.input, "draft", "a bare key never reached the composer");
 
+    chat.cursor = 2;
     assert!(chat.on_key(KeyCode::Char('k'), KeyModifiers::CONTROL));
-    assert!(chat.switcher.is_some(), "but a chord did");
-    assert_eq!(chat.input, "draft");
+    assert_eq!(chat.input, "dr", "but a chord did");
+    assert!(chat.dialog.is_some(), "and the dialog stayed open");
+
+    // One chord is the exception: the key that opened it closes it, which is
+    // the ctrl+t panels' rule and beats leaving ctrl+b dead while it is up.
+    assert!(chat.on_key(KeyCode::Char('b'), KeyModifiers::CONTROL));
+    assert!(chat.dialog.is_none());
+    assert_eq!(chat.input, "dr", "and it did not edit the draft either");
 }

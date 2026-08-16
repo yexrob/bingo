@@ -158,6 +158,10 @@ pub enum UiEvent {
         duration_ms: u64,
         payload: Option<serde_json::Value>,
         signal: Option<String>,
+        /// This transition put a task notification in **main's** queue (D106):
+        /// the flow prints one line when one arrives, and only the registry can
+        /// answer whether one did.
+        notifies_main: bool,
     },
     /// `/model` secondary selector: a provider's model list finished fetching asynchronously
     /// (appended to the menu).

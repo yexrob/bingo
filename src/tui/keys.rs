@@ -25,7 +25,7 @@ pub const BINDINGS: &[Binding] = &[
     },
     Binding {
         keys: "esc",
-        description: "close dialog/menu/panel · back to @main · interrupt · esc esc clears or rewinds",
+        description: "close dialog/menu/panel · interrupt · esc esc clears or rewinds",
     },
     Binding {
         keys: "ctrl+c",
@@ -60,7 +60,7 @@ pub const BINDINGS: &[Binding] = &[
         description: "delete word forward / back",
     },
     Binding {
-        keys: "ctrl+w/u · alt+k",
+        keys: "ctrl+w/u/k · alt+k",
         description: "delete word / to start / to end",
     },
     Binding {
@@ -101,7 +101,7 @@ pub const BINDINGS: &[Binding] = &[
     },
     Binding {
         keys: "ctrl+t",
-        description: "toggle task list",
+        description: "tasks, then the agent tree, then closed",
     },
     Binding {
         keys: "ctrl+g",
@@ -109,23 +109,23 @@ pub const BINDINGS: &[Binding] = &[
     },
     Binding {
         keys: "ctrl+b",
-        description: "background the running command · manage background agents (tab: perspective)",
+        description: "background the running command · the dialog: agents · shells · rooms",
     },
     Binding {
-        keys: "ctrl+k",
-        description: "switch conversation (type to filter · ctrl+x stops an agent)",
+        keys: "shift+↑/↓",
+        description: "open the agent tree and pick a row (enter views it · k stops it)",
     },
     Binding {
-        keys: "/open",
-        description: "open a conversation: @agent · #room · @main",
+        keys: "esc (viewing)",
+        description: "agent view: stop the run, then return (shift+tab: its mode)",
     },
     Binding {
-        keys: "ctrl+t",
-        description: "tasks, then the team directory (roster · rooms · recent)",
+        keys: "ctrl+shift+o",
+        description: "agent tree: 3-line message preview per agent",
     },
     Binding {
         keys: "@name · #name",
-        description: "from @main, send the rest of the line to that conversation",
+        description: "send the rest of the line straight to that agent or room",
     },
     Binding {
         keys: "ctrl+l",
@@ -245,58 +245,101 @@ mod tests {
         );
     }
 
-    /// D89 retired the workspace modal: a conversation is entered in this
-    /// terminal, not in a screen over it. Nothing in the panel may still send
-    /// the reader looking for a view that no longer exists, and the two doors
-    /// that replaced it — `/open` and the way back — are both named.
+    /// The panel must not advertise a surface that no longer exists: the D89
+    /// workspace modal, the D90 conversation switcher and `/open` that D103
+    /// retired with the buffers they reached, the team directory ctrl+t stopped
+    /// reaching in D104, and — since D108 — the observation page, whose last
+    /// door went with it.
     #[test]
-    fn the_panel_names_the_doors_that_replaced_the_workspace() {
+    fn the_panel_names_no_retired_surface() {
         for binding in BINDINGS {
-            assert!(
-                !binding.description.contains("workspace"),
-                "{} still advertises the retired workspace",
-                binding.keys
-            );
+            for retired in [
+                "workspace",
+                "switch conversation",
+                "/open",
+                "team directory",
+                "the record",
+                "perspective",
+            ] {
+                assert!(
+                    !binding.description.contains(retired) && !binding.keys.contains(retired),
+                    "{} still advertises {retired}",
+                    binding.keys
+                );
+            }
         }
+    }
+
+    /// The status layer is three keys and the panel names all three: the cycle
+    /// that shows it, the arrows that pick a row inside it, and the toggle that
+    /// hangs a preview off each one (D104). The stop key is named where the
+    /// selection is, because it only means anything there.
+    #[test]
+    fn the_panel_names_the_status_layer() {
         let find = |keys: &str| {
             BINDINGS
                 .iter()
                 .find(|binding| binding.keys == keys)
                 .unwrap_or_else(|| panic!("{keys} binding missing"))
         };
-        assert!(find("/open").description.contains("@agent"));
+        let cycle = find("ctrl+t").description;
         assert!(
-            find("esc").description.contains("back to @main"),
-            "and Esc says where it goes from one"
+            cycle.contains("tasks") && cycle.contains("agent tree"),
+            "the cycle names both stops: {cycle}"
+        );
+        let select = find("shift+↑/↓").description;
+        assert!(
+            select.contains("agent tree") && select.contains('k') && select.contains("enter"),
+            "the row's three verbs are all named where the cursor is: {select}"
+        );
+        // D105's view has one key with two meanings, so the panel says both.
+        let viewing = find("esc (viewing)").description;
+        assert!(
+            viewing.contains("stop the run") && viewing.contains("return"),
+            "{viewing}"
+        );
+        assert!(
+            viewing.contains("shift+tab"),
+            "and where the mode being cycled is not main's: {viewing}"
+        );
+        // D107: the dialog's own footer names its verbs (`Enter to view`,
+        // `f to foreground`, `tab to open the record`), because they are
+        // conditional on the row the cursor is on and a fixed help line cannot
+        // be. What the panel owes is the door and what is behind it.
+        let dialog = find("ctrl+b").description;
+        assert!(
+            dialog.contains("agents") && dialog.contains("shells") && dialog.contains("rooms"),
+            "the panel names the dialog's three sections: {dialog}"
+        );
+        assert!(
+            find("ctrl+shift+o").description.contains("preview"),
+            "the preview toggle is undiscoverable otherwise"
+        );
+        assert_eq!(
+            BINDINGS.iter().filter(|b| b.keys == "ctrl+t").count(),
+            1,
+            "one key, one row: the cycle had two entries while it had two owners"
         );
     }
 
-    /// Three spellings of one destination — the switcher, the command and the
-    /// line-leading form — and the panel names all three, because a reader who
-    /// found one of them should be able to find the rest (D90).
+    /// The one composer grammar that reaches somebody other than main is named
+    /// in the panel, because nothing else on screen teaches it (D103).
     #[test]
-    fn the_panel_names_every_door_into_a_conversation() {
+    fn the_panel_names_the_direct_send() {
         let find = |keys: &str| {
             BINDINGS
                 .iter()
                 .find(|binding| binding.keys == keys)
                 .unwrap_or_else(|| panic!("{keys} binding missing"))
         };
-        let switcher = find("ctrl+k").description;
-        assert!(switcher.contains("filter"), "{switcher}");
+        let direct = find("@name · #name").description;
         assert!(
-            switcher.contains("ctrl+x"),
-            "the stop key is only discoverable from here: {switcher}"
+            direct.contains("agent") && direct.contains("room"),
+            "{direct}"
         );
-        assert!(find("@name · #name").description.contains("@main"));
-        // The kill ctrl+k used to be is still documented, under its new key.
-        assert!(find("ctrl+w/u · alt+k").description.contains("to end"));
-        assert!(
-            !BINDINGS
-                .iter()
-                .any(|binding| binding.keys.contains("ctrl+k") && binding.keys.contains('/')),
-            "ctrl+k is one meaning now, not a slash-joined family"
-        );
+        // ctrl+k is readline's kill again, documented with its family.
+        let kills = find("ctrl+w/u/k · alt+k").description;
+        assert!(kills.contains("to end"), "{kills}");
     }
 
     /// The kill/yank family is documented as a family: a ring is only useful
@@ -319,8 +362,9 @@ mod tests {
     }
 
     /// ctrl+b reads the situation: a shell command running in the foreground is
-    /// what it backgrounds, and only when there is none does it open the manager
-    /// (D84). The panel names both, in the order the key tries them.
+    /// what it backgrounds, and only when there is none does it open the
+    /// background dialog (D84, D107). The panel names both, in the order the
+    /// key tries them.
     #[test]
     fn ctrl_b_help_names_both_of_its_meanings() {
         let binding = BINDINGS
@@ -329,7 +373,7 @@ mod tests {
             .unwrap_or_else(|| panic!("ctrl+b binding missing"));
         assert_eq!(
             binding.description,
-            "background the running command · manage background agents (tab: perspective)"
+            "background the running command · the dialog: agents · shells · rooms"
         );
     }
 

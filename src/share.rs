@@ -354,7 +354,8 @@ pub fn open_in_browser(target: &str) -> Result<(), ShareError> {
 /// - `SendMessage` → appends a user message to that agent's history
 /// - `AgentControl stop/delete` → state=stopped
 /// - `Channel create` → ChannelShare metadata (members include main/user)
-/// - `Post` → a channel message (from=main, seq increments)
+/// - `Post` (pre-D98; `SendMessage(to: "#room")` since) → a channel message
+///   (from=main, seq increments)
 pub fn derive_share_doc(session: &str, messages: &[Message]) -> ShareDoc {
     let mut doc = ShareDoc::new(session.to_string());
     let mut agent_index: HashMap<String, usize> = HashMap::new();

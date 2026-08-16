@@ -87,42 +87,6 @@ You are bingo, an agent CLI running on the user's machine.
 - Do not end prose with a colon before a tool call.
 ";
 
-/// The `# Digest turns` heading — the stable marker that finds the silence
-/// contract in an assembled system. A subagent inherits its parent's blocks
-/// wholesale, and this one is the main agent's alone, so the spawn path drops
-/// it by this prefix the way `/model` replaces the capability block by its own.
-pub const DIGEST_HEADING: &str = "# Digest turns";
-
-/// The silence contract (D102), for the main session only.
-///
-/// Main is the one participant that gets woken by something other than a
-/// person: a dispatch finishing, an agent's message, a room going quiet. Those
-/// turns have no reader waiting on a reply, and the screen has already said
-/// what happened — the dispatch row carries the state and the one-line result.
-/// So the turn is given two endings and no third: say the thing the user needs,
-/// or say nothing in the one way the renderer can recognise. A subagent is
-/// never woken this way and never sees this block.
-fn digest_contract() -> String {
-    let marker = crate::query::QUIET_MARKER;
-    format!(
-        "{DIGEST_HEADING}
-- A turn that opens with an injected notification instead of the user's own
-  words is a digest: something finished, arrived, or changed while you were
-  idle. Read it, do whatever acting is yours to do, then end the turn in one
-  of exactly two ways.
-- Speak when the user needs it: a question only they can answer, a blocker, a
-  result that changes what they should do next, or anything they asked to be
-  told about. Say it in the same voice you would use if they had asked.
-- Otherwise reply with exactly `{marker}` — nothing before it, nothing after
-  it, no tool call to round it off. It renders as nothing, and it is how you
-  say \"read, nothing to add\". A finished dispatch whose one-line result is
-  already on the user's screen is the ordinary case for it: narrating what
-  they can see is noise.
-- The marker belongs to digest turns only. In a turn the user typed into,
-  answer them."
-    )
-}
-
 /// Memory layers: user + project CLAUDE.md.
 #[derive(Debug, Default)]
 pub struct Memory {
@@ -205,8 +169,8 @@ fn shell_line() -> String {
 }
 
 /// The main session's system blocks. Subagents are assembled from the parent's
-/// (see `tool::agent`), which is why anything main-only here has to be findable
-/// by a heading the spawn path can drop.
+/// (see `tool::agent`), so anything main-only here has to be findable by a
+/// heading the spawn path can drop.
 pub fn build_system(
     memory: &Memory,
     project_memory: Option<String>,
@@ -217,15 +181,7 @@ pub fn build_system(
         text,
         cache: cache_control,
     };
-    // Second on purpose: the silence contract is turn behaviour and reads as a
-    // continuation of the base prompt's. A separate block rather than more
-    // BASE_PROMPT because it is the one part of that behaviour a subagent must
-    // not inherit, and a block is what the spawn path can drop.
-    let mut blocks = vec![
-        block(BASE_PROMPT.to_string()),
-        block(digest_contract()),
-        block(env_info_block(cwd)),
-    ];
+    let mut blocks = vec![block(BASE_PROMPT.to_string()), block(env_info_block(cwd))];
     if let Some(user) = &memory.user {
         blocks.push(block(format!("User-level memory (CLAUDE.md):\n{user}")));
     }
@@ -331,61 +287,13 @@ mod tests {
             true,
             Path::new("/tmp/project"),
         );
-        assert_eq!(blocks.len(), 6);
-        assert!(blocks[5].text.contains("mem facts"));
+        assert_eq!(blocks.len(), 5);
+        assert!(blocks[4].text.contains("mem facts"));
         assert!(blocks[0].text.starts_with("You are bingo"));
-        assert!(blocks[1].text.starts_with(DIGEST_HEADING));
-        assert!(blocks[2].text.contains("# Environment"));
-        assert!(blocks[3].text.contains("user rules"));
-        assert!(blocks[4].text.contains("project rules"));
+        assert!(blocks[1].text.contains("# Environment"));
+        assert!(blocks[2].text.contains("user rules"));
+        assert!(blocks[3].text.contains("project rules"));
         assert!(blocks.iter().all(|b| b.cache));
-    }
-
-    /// D102: the silence contract has to say all four things, or it teaches a
-    /// marker without teaching when to withhold it — which is worse than
-    /// teaching neither. The marker itself is asserted against the constant, so
-    /// the prompt and the renderer can never drift to two spellings.
-    #[test]
-    fn the_digest_contract_names_both_endings_and_one_marker() {
-        let text = digest_contract();
-        assert!(text.starts_with(DIGEST_HEADING), "{text}");
-        assert!(
-            text.contains(crate::query::QUIET_MARKER),
-            "the marker is the contract's whole mechanism: {text}"
-        );
-        assert!(
-            text.contains("injected notification instead of the user's own"),
-            "must say what makes a turn a digest — the model cannot infer it: {text}"
-        );
-        assert!(
-            text.contains("Speak when the user needs it"),
-            "prose is the first ending, not an exception to the marker: {text}"
-        );
-        assert!(
-            text.contains("nothing before it, nothing after"),
-            "a marker with prose around it is prose, and renders as prose: {text}"
-        );
-        assert!(
-            text.contains("In a turn the user typed into"),
-            "must fence the marker off from ordinary turns, where it is a misfire: {text}"
-        );
-    }
-
-    /// D102: main is the only participant woken by something other than a
-    /// person, so the contract is main's alone — and a subagent assembles from
-    /// the parent's blocks, so "main's alone" has to be enforced by the drop the
-    /// spawn path makes, keyed on this heading.
-    #[test]
-    fn the_digest_contract_is_findable_by_its_heading() {
-        let blocks = build_system(&Memory::default(), None, false, Path::new("/tmp/project"));
-        assert_eq!(
-            blocks
-                .iter()
-                .filter(|b| b.text.starts_with(DIGEST_HEADING))
-                .count(),
-            1,
-            "exactly one block carries it, and it is the one the spawn path drops"
-        );
     }
 
     #[test]
@@ -504,8 +412,8 @@ mod tests {
     fn omits_missing_memory() {
         let memory = Memory::default();
         let blocks = build_system(&memory, None, true, Path::new("/tmp/project"));
-        // base + digest contract + env info, no memory segments.
-        assert_eq!(blocks.len(), 3);
+        // base + env info, no memory segments.
+        assert_eq!(blocks.len(), 2);
         assert_eq!(blocks[0].text, BASE_PROMPT);
     }
 

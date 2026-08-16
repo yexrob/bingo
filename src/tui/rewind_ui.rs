@@ -167,9 +167,9 @@ impl super::Chat {
         self.dirty = true;
     }
 
-    /// Keys, while the selector is open. Modal, like the switcher: an open
-    /// chooser swallows what it does not understand rather than letting it edit
-    /// the draft underneath.
+    /// Keys, while the selector is open. Modal, like the background dialog: an
+    /// open chooser swallows what it does not understand rather than letting it
+    /// edit the draft underneath.
     pub(crate) fn rewind_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> bool {
         if self.pending_ask.is_some() {
             return false;
@@ -388,7 +388,7 @@ impl super::Chat {
 const RESTORE_LIST_MAX: usize = 8;
 
 impl super::Chat {
-    /// The overlay, in the frame the switcher and the agent manager share.
+    /// The overlay, in the frame the background dialog shares.
     pub(crate) fn rewind_rows(&self, width: usize) -> Vec<Row> {
         let Some(state) = &self.rewind else {
             return Vec::new();

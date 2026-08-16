@@ -1,15 +1,17 @@
 //! Chat state-machine tests, part six: what the console does and does not print
 //! (D94's delivery rerouting, D98's quiet console).
 //!
-//! Four parts. The first pins what main *stopped* printing: an agent's spawn
+//! Five parts. The first pins what main *stopped* printing: an agent's spawn
 //! and completion used to hang a `◉ name · task` row off whatever assistant
 //! message happened to be last, and now they do not — while the signal they
-//! carried still lands in the lifecycle log, on the bar, and in the agent's own
-//! DM. The second is the one line that still comes through, and the reason it
-//! does: a failure cannot depend on the main agent choosing to narrate it. The
-//! third is the digest debounce, which turns a burst of mail into one turn. The
-//! fourth is D102's silence contract: what a woken turn is allowed to end in,
-//! and what the flow, the badge and the scrollback do with each ending.
+//! carried still lands on the agent's own row in the background dialog and in
+//! the accounting store. The second is the one line that still comes through,
+//! and the reason it does: a failure cannot depend on the main agent choosing
+//! to narrate it. The third is the digest debounce, which turns a burst of mail
+//! into one turn. The fourth is what a woken turn does when it ends: since D103
+//! retired D102's silence contract, exactly what a typed turn does. The fifth
+//! is the tiering D106 gave the transcript — the dispatch row and its live
+//! progress, the settled cost, the `●` notice and the `@name❯` line.
 
 use super::tests_a::*;
 use super::*;
@@ -54,6 +56,7 @@ fn lifecycle(label: &str, status: WatchState, detail: Option<&str>) -> UiEvent {
         duration_ms: 0,
         payload: None,
         signal: None,
+        notifies_main: false,
     }
 }
 
@@ -121,12 +124,21 @@ fn a_spawn_and_a_completion_add_no_rows_to_an_idle_console() {
     );
 }
 
-/// The signal is rerouted, not dropped. D95 renders this log as the team
-/// directory; until then it is where a main-idle lifecycle event is written down.
+/// The signal is rerouted, not dropped — and D107 is where the reroute ends.
+///
+/// D94 stopped printing a main-idle lifecycle event in the console and D95
+/// filed it in a team feed instead; this pinned the filing. D107 retired that
+/// feed with the directory column that was its only reader, so the surviving
+/// destination is the one the user actually reads: the instance's own row in
+/// the background dialog, where a finished run is what the row says it is.
+/// The console still prints nothing, which is the half of the claim that was
+/// always the point.
 #[test]
-fn the_lifecycle_log_keeps_what_the_console_no_longer_prints() {
+fn the_lifecycle_signal_reaches_the_dialog_and_not_the_console() {
     let mut chat = test_chat();
     chat.messages.push(msg(Role::Assistant, ""));
+    seed_agent(&chat, "scout");
+    chat.refresh_conversations();
 
     chat.apply_event(lifecycle(
         "scout · fix the parser",
@@ -139,18 +151,24 @@ fn the_lifecycle_log_keeps_what_the_console_no_longer_prints() {
         Some("fixed the parser"),
     ));
 
-    let log = chat.buffers.team_log();
-    assert_eq!(log.len(), 2, "both events were kept");
-    assert_eq!(log[0].state, Some(WatchState::Running));
-    assert_eq!(log[1].state, Some(WatchState::Done));
-    assert_eq!(log[1].detail.as_deref(), Some("fixed the parser"));
+    assert!(
+        chat.messages.iter().all(|m| m.activities.is_empty()),
+        "nothing was hung off a reply that had nothing to do with it"
+    );
+    chat.open_background_dialog();
+    let rows: Vec<String> = chat.dialog_rows().iter().map(|row| row.text()).collect();
+    assert!(
+        rows.iter().any(|row| row.contains("@scout")),
+        "the instance is on the dialog's roster: {rows:?}"
+    );
 }
 
-/// The other half of the reroute: a completed agent's report is in its DM, and
-/// the DM says so with an unread badge. Nothing new was built for this — the
-/// badge follows the instance's history, and the lifecycle event's own registry
-/// sweep is what re-reads it — so the test exists to pin that the chain holds
-/// end to end now that main prints nothing.
+/// The other half of the reroute: a completed agent's report is in its own
+/// conversation, and the accounting says so with an unread count (drawn in the
+/// background dialog since D107). Nothing new was built for this — the count
+/// follows the instance's history, and the lifecycle event's own registry sweep
+/// is what re-reads it — so the test exists to pin that the chain holds end to
+/// end now that main prints nothing.
 #[test]
 fn a_completion_bumps_the_dm_instead_of_main() {
     let mut chat = test_chat();
@@ -229,7 +247,7 @@ fn the_running_turn_keeps_the_row_for_its_own_task_call() {
 
     let rows = main_rows(&mut chat);
     assert!(
-        rows.iter().any(|r| r.contains("◉ scout · fix the parser")),
+        rows.iter().any(|r| r.contains("◉ @scout: fix the parser")),
         "the turn's own tool row is not bus noise: {rows:?}"
     );
 }
@@ -251,6 +269,7 @@ fn a_command_watch_still_reaches_the_last_reply() {
         duration_ms: 0,
         payload: None,
         signal: None,
+        notifies_main: false,
     });
 
     let rows = main_rows(&mut chat);
@@ -357,7 +376,9 @@ fn the_alert_line_keeps_its_stamp() {
 #[test]
 fn a_burst_of_room_mail_wakes_once_after_the_quiet_window() {
     let mut chat = test_chat();
-    chat.session.channels.deliver_to_main("scout", "one", false);
+    chat.session
+        .channels
+        .deliver_to_main("scout", "one", None, false);
     assert!(!chat.digest_mail(), "the window has only just opened");
     assert!(
         chat.mail_wake.is_some(),
@@ -370,7 +391,9 @@ fn a_burst_of_room_mail_wakes_once_after_the_quiet_window() {
 
     // A second message inside the window restarts it: the room is still talking.
     chat.tick += super::chat_tail::MAIL_QUIET_TICKS - 1;
-    chat.session.channels.deliver_to_main("zoe", "two", false);
+    chat.session
+        .channels
+        .deliver_to_main("zoe", "two", None, false);
     assert!(
         !chat.digest_mail(),
         "the window restarted with the new message"
@@ -392,14 +415,16 @@ fn a_burst_of_room_mail_wakes_once_after_the_quiet_window() {
 fn a_chatty_room_cannot_starve_the_wake_past_the_deadline() {
     let mut chat = test_chat();
     let step = super::chat_tail::MAIL_QUIET_TICKS - 1;
-    chat.session.channels.deliver_to_main("scout", "0", false);
+    chat.session
+        .channels
+        .deliver_to_main("scout", "0", None, false);
     assert!(!chat.digest_mail());
     let mut fired = false;
     for i in 1..=(super::chat_tail::MAIL_DEADLINE_TICKS / step + 1) {
         chat.tick += step;
         chat.session
             .channels
-            .deliver_to_main("scout", &format!("{i}"), false);
+            .deliver_to_main("scout", &format!("{i}"), None, false);
         if chat.digest_mail() {
             fired = true;
             break;
@@ -423,7 +448,7 @@ fn urgent_direct_mail_rings_and_skips_the_window() {
     let mut chat = chat_with_bell();
     chat.session
         .channels
-        .deliver_to_main("scout", "I need the deploy key", true);
+        .deliver_to_main("scout", "I need the deploy key", None, true);
     assert!(chat.digest_mail(), "urgent does not wait out the window");
     assert!(
         emitted(&mut chat).contains('\x07'),
@@ -438,7 +463,7 @@ fn the_ring_survives_a_turn_that_drained_the_mail_first() {
     let mut chat = chat_with_bell();
     chat.session
         .channels
-        .deliver_to_main("scout", "blocked", true);
+        .deliver_to_main("scout", "blocked", None, true);
     let drained = chat.session.channels.drain_main_mail();
     assert_eq!(
         drained.len(),
@@ -460,7 +485,7 @@ fn a_direct_message_to_main_carries_the_sender_into_the_inbox() {
     let chat = test_chat();
     chat.session
         .channels
-        .deliver_to_main("scout", "the migration is done", false);
+        .deliver_to_main("scout", "the migration is done", None, false);
     let mail = chat.session.channels.drain_main_mail();
     assert_eq!(mail.len(), 1);
     let mut lines = mail[0].lines();
@@ -809,7 +834,11 @@ fn the_console_counts_what_main_says_while_you_are_elsewhere() {
     let mut chat = test_chat();
     seed_agent(&chat, "scout");
     chat.refresh_conversations();
-    chat.switch_to(BufferId::Dm("scout".to_string()));
+    // The console's count is only readable from somewhere else: `observe`
+    // zeroes it outright while @main is the conversation being read. D103 drove
+    // this through `switch_to`; the accounting store is what it was always
+    // about, so it is driven through the store.
+    chat.buffers.set_active(BufferId::Dm("scout".to_string()));
 
     let console = || BufferId::Hub;
     assert_eq!(
@@ -836,7 +865,7 @@ fn the_console_counts_what_main_says_while_you_are_elsewhere() {
         "an alert is the one line nobody chose to say"
     );
 
-    chat.switch_to(BufferId::Hub);
+    chat.buffers.set_active(BufferId::Hub);
     assert_eq!(chat.buffers.get(&console()).map(|b| b.unread()), Some(0));
     assert_eq!(
         chat.buffers.get(&console()).map(|b| b.mention()),
@@ -845,7 +874,7 @@ fn the_console_counts_what_main_says_while_you_are_elsewhere() {
 }
 
 /// D99 review: the console's user-role rows are not all the user's. A failure
-/// alert, a route receipt, an interrupt marker — the runtime reporting — must
+/// alert, an ask receipt, an interrupt marker — the runtime reporting — must
 /// not wear the human's portrait, or the gutter says the human wrote them. They
 /// keep the *indentation*, so the message column does not jog around them, and
 /// they leave the run, so the next thing main says re-leads with main's face:
@@ -932,132 +961,24 @@ fn a_steered_message_still_wears_the_users_face() {
 }
 
 // ---------------------------------------------------------------------------
-// D102 — the silence contract
+// D103 — the woken turn ends like any other
 // ---------------------------------------------------------------------------
 
-/// Open a turn the way `submit_auto` does: nobody typed into it, so it is a
-/// digest and the silence contract applies to how it ends.
-fn digest_turn(chat: &mut Chat) {
-    chat.digest_turn = true;
+/// Open a turn the way `submit_auto` does: an injected notification rather than
+/// the user's words.
+fn woken_turn(chat: &mut Chat) {
     chat.apply_turn_start();
 }
 
-/// Everything the terminal would have written into scrollback since the last
-/// call, flushed as eagerly as the cursor allows.
-///
-/// Production picks a mark by where the window top is; this takes the *last*
-/// settled mark every frame, which is the most that could ever freeze. Rows it
-/// never sees are rows scrollback can never hold.
-fn frozen(chat: &mut Chat, width: usize) -> Vec<String> {
-    chat.build_rows(width);
-    let Some(mark) = chat.doc.settled_marks.last().copied() else {
-        return Vec::new();
-    };
-    let end = mark.row_end.min(chat.doc.rows.len());
-    let rows = if end > chat.tail_start {
-        chat.doc.rows[chat.tail_start..end]
-            .iter()
-            .map(|r| r.line.plain_text())
-            .collect()
-    } else {
-        Vec::new()
-    };
-    chat.advance_flushed_upto(mark);
-    rows
-}
-
-/// The contract's own sentence: a digest turn that ends in the acknowledgement
-/// marker renders as nothing — the dispatch row already said the work was done.
-/// The reply itself is kept verbatim, because the record is complete and only
-/// the flow is quiet.
+/// D102 gave a woken turn a second ending — a marker that rendered as nothing.
+/// D103 takes it back on the parity ruling: CC's leader narrates, and the noise
+/// control is the wake debounce plus the dispatch row's own state. So a digest
+/// turn's prose is main speaking, in main's own flow, like every other turn.
 #[test]
-fn a_quiet_digest_turn_renders_as_nothing() {
-    let mut chat = test_chat();
-    chat.messages.push(msg(Role::User, "keep an eye on scout"));
-    let before = main_rows(&mut chat);
-
-    digest_turn(&mut chat);
-    chat.apply_event(UiEvent::TextDelta(crate::query::QUIET_MARKER.into()));
-    chat.apply_event(UiEvent::TurnEnd);
-
-    assert_eq!(
-        main_rows(&mut chat),
-        before,
-        "the flow is byte-identical the moment the turn ends"
-    );
-    assert!(
-        !chat.settling(),
-        "and no settle blink was armed for it: nothing settled, so holding the \
-         message above it live would only re-accent a row that finished long ago"
-    );
-    past_settle(&mut chat);
-    assert_eq!(
-        main_rows(&mut chat),
-        before,
-        "and still identical once the window the blink would have used has passed"
-    );
-    assert_eq!(
-        chat.messages.last().map(|m| m.text.as_str()),
-        Some(crate::query::QUIET_MARKER),
-        "the reply is kept exactly as it was written — silence is a render rule, not a deletion"
-    );
-}
-
-/// The badge half of the same rule, read from where a badge can be seen: the
-/// user is standing in a DM, so `@main`'s count is live. A quiet digest adds
-/// nothing to it and does not touch the conversation's activity clock either —
-/// `note_console` carries both, so the guard has to be in front of the call.
-#[test]
-fn a_quiet_digest_turn_raises_no_badge() {
-    let mut chat = test_chat();
-    seed_agent(&chat, "scout");
-    chat.refresh_conversations();
-    chat.switch_to(BufferId::Dm("scout".to_string()));
-    let console = BufferId::Hub;
-    let activity_before = chat.buffers.get(&console).map(|b| b.last_activity());
-
-    chat.tick();
-    digest_turn(&mut chat);
-    chat.apply_event(UiEvent::TextDelta(crate::query::QUIET_MARKER.into()));
-    chat.apply_event(UiEvent::TurnEnd);
-
-    assert_eq!(
-        chat.buffers.get(&console).map(|b| b.unread()),
-        Some(0),
-        "a turn that said nothing gives the reader nothing to come back for"
-    );
-    assert_eq!(
-        chat.buffers.get(&console).map(|b| b.mention()),
-        Some(false),
-        "and nothing that wants them"
-    );
-    assert_eq!(
-        chat.buffers.get(&console).map(|b| b.last_activity()),
-        activity_before,
-        "the console did nothing worth sorting the switcher by"
-    );
-
-    // The control, in the same conversation and on the same clock: prose from a
-    // digest turn is main speaking, and D99's count is untouched by D102.
-    digest_turn(&mut chat);
-    chat.apply_event(UiEvent::TextDelta(
-        "scout wants a decision on the schema".into(),
-    ));
-    chat.apply_event(UiEvent::TurnEnd);
-    assert_eq!(
-        chat.buffers.get(&console).map(|b| b.unread()),
-        Some(1),
-        "the other ending still badges"
-    );
-}
-
-/// A digest turn that speaks says it in `@main`. The contract adds an ending, it
-/// does not take one away.
-#[test]
-fn a_digest_turn_that_speaks_still_speaks() {
+fn a_woken_turn_renders_its_prose_as_main_speaking() {
     let mut chat = test_chat();
 
-    digest_turn(&mut chat);
+    woken_turn(&mut chat);
     chat.apply_event(UiEvent::TextDelta(
         "scout wants a decision on the schema".into(),
     ));
@@ -1068,181 +989,521 @@ fn a_digest_turn_that_speaks_still_speaks() {
         main_rows(&mut chat)
             .iter()
             .any(|row| row.contains("scout wants a decision on the schema")),
-        "prose from a digest turn is main speaking, and main speaks in @main"
+        "prose from a woken turn is main speaking, and main speaks in @main"
     );
 }
 
-/// A digest turn long enough to have rung the D79 completion bell rings nothing
-/// when it ends in silence: the user never walked away from a turn they never
-/// started. The prose ending, on the same clock, still rings.
+/// The retired marker has no reader left: it is text on the wire like any other
+/// text, so it renders verbatim wherever it lands. Pinned because "renders as
+/// nothing" was a real rule for one batch and its removal has to be observable.
 #[test]
-fn a_long_digest_turn_that_goes_quiet_rings_nothing() {
-    // The OSC-9 channel rather than the bell one: a title is `OSC 2 … BEL`, so a
-    // bare `\x07` cannot tell a ring from the busy title this turn also sets.
-    const NOTICE: &str = "\x1b]9;";
-    let mut chat = test_chat();
-    chat.set_notifier(Notifier::new(
-        NotifyChannel::Iterm2,
-        &TerminalEnv::default(),
-    ));
-    let _ = chat.notify.take();
-
-    digest_turn(&mut chat);
-    chat.turn_started = Some(std::time::Instant::now() - crate::tui::notify::LONG_TURN);
-    chat.apply_event(UiEvent::TextDelta(crate::query::QUIET_MARKER.into()));
-    chat.apply_event(UiEvent::TurnEnd);
-    assert!(
-        !emitted(&mut chat).contains(NOTICE),
-        "silence does not go looking for the user"
-    );
-
-    digest_turn(&mut chat);
-    chat.turn_started = Some(std::time::Instant::now() - crate::tui::notify::LONG_TURN);
-    chat.apply_event(UiEvent::TextDelta("the migration needs your call".into()));
-    chat.apply_event(UiEvent::TurnEnd);
-    assert!(
-        emitted(&mut chat).contains(NOTICE),
-        "and the same turn ending in prose still does"
-    );
-}
-
-/// The marker is only silence where silence was the alternative. In a turn the
-/// user typed into, the same marker is the model misfiring, and a misfire the
-/// renderer swallows is a bug nobody can see.
-#[test]
-fn the_marker_in_a_turn_the_user_started_renders_literally() {
-    let mut chat = test_chat();
-    chat.apply_turn_start();
-    chat.apply_event(UiEvent::TextDelta(crate::query::QUIET_MARKER.into()));
-    chat.apply_event(UiEvent::TurnEnd);
-    past_settle(&mut chat);
-
-    assert!(
-        main_rows(&mut chat)
-            .iter()
-            .any(|row| row.contains(crate::query::QUIET_MARKER)),
-        "the user asked for something and got this: they must be able to see it"
-    );
-    assert_eq!(
-        chat.buffers.get(&BufferId::Hub).map(|b| b.unread()),
-        Some(0),
-        "the reader is standing in @main, so there is nothing to badge"
-    );
-}
-
-/// The hard invariant. Scrollback is written once and never rewritten, so the
-/// marker must not reach it — not at the end of the turn, and not for one frame
-/// in the middle of it either. The frame is taken after every step a turn can
-/// take, and each one flushes as much as the cursor will allow.
-#[test]
-fn the_marker_never_reaches_flushed_scrollback() {
-    let mut chat = test_chat();
-    let mut scrollback: Vec<String> = Vec::new();
-    // A settled exchange first, so the flush cursor is genuinely moving and the
-    // test is not passing because nothing ever freezes.
-    chat.messages.push(msg(Role::User, "keep an eye on scout"));
-    chat.apply_turn_start();
-    chat.apply_event(UiEvent::TextDelta("watching".into()));
-    chat.apply_event(UiEvent::TurnEnd);
-    past_settle(&mut chat);
-    scrollback.extend(frozen(&mut chat, 80));
-    let settled_before = chat.flushed_segments;
-    assert!(
-        scrollback.iter().any(|row| row.contains("watching")),
-        "the control: an ordinary reply does freeze"
-    );
-
-    digest_turn(&mut chat);
-    scrollback.extend(frozen(&mut chat, 80));
-    // The marker arrives in pieces, as a stream delivers it.
-    for chunk in ["[[qu", "ie", "t]]"] {
-        chat.apply_event(UiEvent::TextDelta(chunk.into()));
-        scrollback.extend(frozen(&mut chat, 80));
-        chat.tick();
-        scrollback.extend(frozen(&mut chat, 80));
-    }
-    chat.apply_event(UiEvent::TurnEnd);
-    scrollback.extend(frozen(&mut chat, 80));
-    past_settle(&mut chat);
-    scrollback.extend(frozen(&mut chat, 80));
-
-    assert!(
-        !scrollback.iter().any(|row| row.contains("[[")),
-        "nothing of the marker was ever frozen, not even a half-streamed prefix: {scrollback:?}"
-    );
-    assert_eq!(
-        chat.flushed_segments, settled_before,
-        "and the cursor did not move for it, so no blank segment was frozen in its place"
-    );
-}
-
-/// A digest turn that did work before going quiet renders as nothing at all —
-/// the work included. The record kept the calls and the dispatch row said the
-/// run was done; repeating that on screen is the narration the contract exists
-/// to stop.
-#[test]
-fn a_quiet_digest_turn_hides_the_work_it_did_too() {
+fn the_retired_quiet_marker_is_ordinary_prose_now() {
     let mut chat = test_chat();
     let before = main_rows(&mut chat);
 
-    digest_turn(&mut chat);
-    chat.apply_event(UiEvent::ToolStart {
-        name: "Bash".into(),
-    });
-    chat.apply_event(UiEvent::ToolReady {
-        tool_call_id: "d102-tool".into(),
-        name: "Bash".into(),
-        input: serde_json::json!({"command": "git log -1"}),
-        standalone: false,
-    });
-    chat.apply_event(UiEvent::TextDelta(crate::query::QUIET_MARKER.into()));
+    woken_turn(&mut chat);
+    chat.apply_event(UiEvent::TextDelta("[[quiet]]".into()));
     chat.apply_event(UiEvent::TurnEnd);
     past_settle(&mut chat);
 
+    let rows = main_rows(&mut chat);
+    assert_ne!(rows, before, "a woken turn that speaks prints rows");
     assert!(
-        chat.messages
-            .last()
-            .is_some_and(|m| !m.activities.is_empty()),
-        "the calls are on the message, which is what makes this the interesting case"
+        rows.iter().any(|row| row.contains("[[quiet]]")),
+        "verbatim, with no render rule reading it: {rows:?}"
     );
+}
+
+/// The badge follows the same reading: a woken turn that says something counts
+/// on the console the way a typed one does. `note_console` carries the unread
+/// *and* the conversation's activity clock, and D102's guard in front of it is
+/// gone.
+#[test]
+fn a_woken_turn_counts_on_the_console_like_any_other() {
+    let mut chat = test_chat();
+    // Somewhere else is where a console badge can be read at all: `observe`
+    // zeroes the count outright while @main is the conversation being read.
+    chat.buffers.set_active(BufferId::Dm("scout".to_string()));
+
+    woken_turn(&mut chat);
+    chat.apply_event(UiEvent::TextDelta("the migration finished".into()));
+    chat.apply_event(UiEvent::TurnEnd);
+
+    assert_eq!(
+        chat.buffers
+            .get(&BufferId::Hub)
+            .map(crate::tui::buffer::Buffer::unread),
+        Some(1),
+        "main spoke, so the console has something to come back for"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// E. the transcript's tiers (D106)
+// ---------------------------------------------------------------------------
+
+/// Put a dispatch row on a running turn and give its instance a run to show.
+fn dispatching(chat: &mut Chat, name: &str, description: &str, activity: &[&str], tokens: u64) {
+    seed_agent(chat, name);
+    chat.session.agents.set_progress_snapshot(
+        name,
+        crate::agents::AgentProgress {
+            started_at: Some(std::time::Instant::now()),
+            output_tokens: tokens,
+            tool_uses: activity.len(),
+            recent_activity: activity.iter().map(|a| a.to_string()).collect(),
+        },
+    );
+    chat.apply_event(lifecycle(
+        &format!("{name} · {description}"),
+        WatchState::Running,
+        None,
+    ));
+}
+
+/// The dispatch row's live half: the last three things the instance did, oldest
+/// first, the first of them on the `⎿` connector. It is drawn from the registry
+/// on the tick, so it says what is true now rather than what was true when the
+/// row was created.
+#[test]
+fn a_dispatch_row_shows_the_last_three_things_the_agent_did() {
+    let mut chat = test_chat();
+    chat.messages.push(msg(Role::Assistant, "hiring scout"));
+    chat.stream_msg = Some(chat.messages.len() - 1);
+    dispatching(
+        &mut chat,
+        "scout",
+        "fix the parser",
+        &[
+            "⏺ Grep(fn main)",
+            "⏺ Read(src/lexer.rs)",
+            "⏺ Bash(cargo test)",
+            "⏺ Edit(src/lexer.rs)",
+        ],
+        8_300,
+    );
+    chat.tick();
+
+    let rows = main_rows(&mut chat);
+    let at = rows
+        .iter()
+        .position(|r| r.contains("◉ @scout: fix the parser"))
+        .unwrap_or_else(|| panic!("dispatch row: {rows:?}"));
+    assert!(rows[at + 1].contains("⎿  ⏺ Read(src/lexer.rs)"), "{rows:?}");
+    assert!(rows[at + 2].trim() == "⏺ Bash(cargo test)", "{rows:?}");
+    assert!(rows[at + 3].trim() == "⏺ Edit(src/lexer.rs)", "{rows:?}");
+    assert!(
+        !rows.iter().any(|r| r.contains("Grep(fn main)")),
+        "only the last three: {rows:?}"
+    );
+    assert!(
+        !chat.message_settled(chat.messages.len() - 1),
+        "a message holding a running dispatch never settles, which is why these \
+         rows can be transient at all"
+    );
+}
+
+/// The window is the budget. CC drops the per-tool rows for one condensed line
+/// when the terminal cannot hold them, and so does this.
+#[test]
+fn a_short_window_condenses_the_dispatch_progress_to_one_line() {
+    let mut chat = crate::tui::test_util::chat_at(80, 8);
+    chat.messages.push(msg(Role::Assistant, "hiring scout"));
+    chat.stream_msg = Some(chat.messages.len() - 1);
+    dispatching(
+        &mut chat,
+        "scout",
+        "fix the parser",
+        &["⏺ Grep(fn main)", "⏺ Read(src/lexer.rs)"],
+        8_300,
+    );
+    chat.tick();
+
+    let rows = main_rows(&mut chat);
+    assert!(
+        rows.iter()
+            .any(|r| r.contains("In progress… · 2 tool uses · 8.3k tokens")),
+        "{rows:?}"
+    );
+    assert!(
+        !rows.iter().any(|r| r.contains("Read(src/lexer.rs)")),
+        "the rows it could not afford are gone, not clipped: {rows:?}"
+    );
+}
+
+/// The dispatch row's settled half, and the only form of it that reaches
+/// scrollback. The numbers survive the run they describe: the registry drops a
+/// run's progress before it reports the end, so the row keeps its own copy.
+#[test]
+fn a_finished_dispatch_settles_into_what_the_run_cost() {
+    let mut chat = test_chat();
+    chat.messages.push(msg(Role::Assistant, "hiring scout"));
+    chat.stream_msg = Some(chat.messages.len() - 1);
+    dispatching(
+        &mut chat,
+        "scout",
+        "fix the parser",
+        &["⏺ Read(src/lexer.rs)", "⏺ Bash(cargo test)"],
+        8_300,
+    );
+    chat.tick();
+    // What the domain does one line before it reports the end.
+    chat.session.agents.set_progress("scout", None);
+    chat.apply_event(UiEvent::WatchEvent {
+        label: "scout · fix the parser".into(),
+        kind: WatchKind::Agent,
+        status: WatchState::Done,
+        detail: Some("done".into()),
+        duration_ms: 64_000,
+        payload: None,
+        signal: None,
+        notifies_main: false,
+    });
+    chat.tick();
+
+    let rows = main_rows(&mut chat);
+    assert!(
+        rows.iter()
+            .any(|r| r.contains("⎿  Done (2 tool uses · 8.3k tokens · 1m 4s)")),
+        "{rows:?}"
+    );
+    assert!(
+        !rows.iter().any(|r| r.contains("Bash(cargo test)")),
+        "the progress rows are not part of what settles: {rows:?}"
+    );
+    chat.stream_msg = None;
+    assert!(
+        chat.message_settled(chat.messages.len() - 1),
+        "and now the message can settle, which is when this row is printed once \
+         and never touched again"
+    );
+}
+
+/// One round, several agents, one block — CC's grouped tree. Opening any of
+/// them takes the group apart, which is how the folded rows keep their content
+/// reachable and how the `ctrl+o` transcript sees the full thing.
+#[test]
+fn several_agents_from_one_round_draw_one_tree() {
+    let mut chat = test_chat();
+    chat.messages.push(msg(Role::Assistant, "hiring two"));
+    chat.stream_msg = Some(chat.messages.len() - 1);
+    dispatching(
+        &mut chat,
+        "scout",
+        "fix the parser",
+        &["⏺ Read(a.rs)"],
+        2_100,
+    );
+    dispatching(&mut chat, "zoe", "run the tests", &[], 0);
+    chat.tick();
+
+    let rows = main_rows(&mut chat);
+    assert!(
+        rows.iter().any(|r| r.contains("⏺ Running 2 agents…")),
+        "{rows:?}"
+    );
+    assert!(
+        rows.iter()
+            .any(|r| r.contains("├─ @scout: fix the parser · 1 tool use · 2.1k tokens")),
+        "{rows:?}"
+    );
+    assert!(
+        rows.iter().any(|r| r.contains("│  ⎿  ⏺ Read(a.rs)")),
+        "{rows:?}"
+    );
+    assert!(
+        rows.iter().any(|r| r.contains("└─ @zoe: run the tests")),
+        "{rows:?}"
+    );
+    assert!(
+        rows.iter().any(|r| r.contains("⎿  Initializing…")),
+        "an agent with nothing behind it yet: {rows:?}"
+    );
+    assert!(
+        !rows.iter().any(|r| r.contains("◉ @scout")),
+        "and neither of them keeps a row of its own: {rows:?}"
+    );
+
+    for label in ["scout · fix the parser", "zoe · run the tests"] {
+        chat.apply_event(lifecycle(label, WatchState::Done, Some("done")));
+    }
+    let rows = main_rows(&mut chat);
+    assert!(
+        rows.iter().any(|r| r.contains("⏺ 2 agents finished")),
+        "{rows:?}"
+    );
+    assert!(
+        rows.iter()
+            .filter(|r| r.trim_end().ends_with("Done"))
+            .count()
+            == 2,
+        "a row inside the group says the one word: {rows:?}"
+    );
+
+    // Opening one of them dissolves the group back into individual rows.
+    let last = chat.messages.len() - 1;
+    chat.messages[last].activities[0].expanded = true;
+    let rows = main_rows(&mut chat);
+    assert!(
+        !rows.iter().any(|r| r.contains("agents finished")),
+        "{rows:?}"
+    );
+    assert!(
+        rows.iter().any(|r| r.contains("◉ @scout: fix the parser")),
+        "{rows:?}"
+    );
+    assert!(
+        rows.iter().any(|r| r.contains("◉ @zoe: run the tests")),
+        "{rows:?}"
+    );
+}
+
+/// The completion's own line: one dim `●` where the task notification landed in
+/// main's context, before main narrates anything. It is gated on the
+/// notification actually being main's — a run the user started inside an
+/// agent's own conversation reports to nobody — and a *failure* keeps D98's
+/// alert instead of getting a second line.
+#[test]
+fn a_completion_notification_leaves_one_dim_line() {
+    let mut chat = test_chat();
+    chat.messages.push(msg(Role::Assistant, "hiring scout"));
+    chat.stream_msg = Some(chat.messages.len() - 1);
+    chat.apply_event(lifecycle(
+        "scout · fix the parser",
+        WatchState::Running,
+        None,
+    ));
+
+    chat.apply_event(UiEvent::WatchEvent {
+        label: "scout · fix the parser".into(),
+        kind: WatchKind::Agent,
+        status: WatchState::Done,
+        detail: Some("done".into()),
+        duration_ms: 1_000,
+        payload: None,
+        signal: None,
+        notifies_main: true,
+    });
+    let rows = main_rows(&mut chat);
+    assert!(
+        rows.iter()
+            .any(|r| r.contains("● @scout completed · fix the parser")),
+        "{rows:?}"
+    );
+    assert_eq!(
+        rows.iter()
+            .filter(|r| r.contains("● @scout completed"))
+            .count(),
+        1,
+        "one line, not one per reader: {rows:?}"
+    );
+
+    // A run that reports to nobody prints nothing.
+    chat.apply_event(lifecycle("zoe · look around", WatchState::Running, None));
+    chat.apply_event(lifecycle(
+        "zoe · look around",
+        WatchState::Done,
+        Some("done"),
+    ));
+    assert!(
+        !main_rows(&mut chat).iter().any(|r| r.contains("● @zoe")),
+        "a run registered with notify_owner: false tells the flow nothing"
+    );
+
+    // A failure keeps the alert and earns no notice of its own.
+    chat.apply_event(UiEvent::WatchEvent {
+        label: "writer · draft the notes".into(),
+        kind: WatchKind::Agent,
+        status: WatchState::Failed,
+        detail: Some("connection reset".into()),
+        duration_ms: 0,
+        payload: None,
+        signal: None,
+        notifies_main: true,
+    });
+    let rows = main_rows(&mut chat);
+    assert!(
+        rows.iter()
+            .any(|r| r.contains("⚠ @writer · connection reset")),
+        "{rows:?}"
+    );
+    assert!(!rows.iter().any(|r| r.contains("● @writer")), "{rows:?}");
+}
+
+/// v3 made an agent's message to main render nothing at all and let the woken
+/// turn speak for it. v4 restores CC's one visible line, in the sender's
+/// colour, with the body kept for `ctrl+o`. The delivery underneath is
+/// untouched: the same inbox, the same debounce, the same envelope.
+#[test]
+fn a_message_from_an_agent_leaves_one_line_and_keeps_its_body() {
+    let mut chat = test_chat();
+    seed_agent(&chat, "scout");
+    let body = "the parser was fine; the lexer drops a token when the input ends mid-string";
+    chat.session
+        .channels
+        .deliver_to_main("scout", body, None, false);
+    chat.tick();
+
+    let rows = main_rows(&mut chat);
+    let line = rows
+        .iter()
+        .find(|r| r.contains("@scout❯"))
+        .unwrap_or_else(|| panic!("the sender's line: {rows:?}"));
+    assert!(
+        line.contains("the parser was fine; the lexer drops a token"),
+        "cut to CC's 50 columns: {line:?}"
+    );
+    assert!(
+        !rows.iter().any(|r| r.contains("mid-string")),
+        "the flow shows a summary, not the message: {rows:?}"
+    );
+    assert!(
+        chat.session.channels.has_main_mail(),
+        "and the message itself is still in main's inbox, unread and unchanged"
+    );
+
+    // ctrl+o is where the body lives.
+    let transcript: Vec<String> = crate::tui::transcript::transcript_rows(&mut chat, 80, false)
+        .iter()
+        .map(|r| r.line.plain_text())
+        .collect();
+    assert!(
+        transcript.iter().any(|r| r.contains("mid-string")),
+        "{transcript:?}"
+    );
+    assert!(
+        !main_rows(&mut chat)
+            .iter()
+            .any(|r| r.contains("mid-string")),
+        "and the flow is what it was on the way out"
+    );
+}
+
+/// D106 named the summary's absence as a limit: bingo's `SendMessage` had no
+/// `summary` field, so the line was always the message's first fifty columns.
+/// D108 adds the field, and the line prefers it — which is CC's own order
+/// (`SendMessageTool.ts:765`, summary first and `truncate(message, 50)` only
+/// as the stand-in).
+#[test]
+fn the_senders_own_summary_is_what_the_line_shows() {
+    let mut chat = test_chat();
+    seed_agent(&chat, "scout");
+    let body = "the parser was fine; the lexer drops a token when the input ends mid-string";
+    chat.session
+        .channels
+        .deliver_to_main("scout", body, Some("lexer drops a token at EOF"), false);
+    chat.tick();
+
+    let rows = main_rows(&mut chat);
+    let line = rows
+        .iter()
+        .find(|r| r.contains("@scout❯"))
+        .unwrap_or_else(|| panic!("the sender's line: {rows:?}"));
+    assert!(
+        line.contains("lexer drops a token at EOF"),
+        "the summary, whole: {line:?}"
+    );
+    assert!(
+        !line.contains("the parser was fine"),
+        "and not the truncation it replaces: {line:?}"
+    );
+
+    // The body is untouched by the preview: `ctrl+o` still has all of it, and
+    // main's inbox still holds exactly what was said.
+    let transcript: Vec<String> = crate::tui::transcript::transcript_rows(&mut chat, 80, false)
+        .iter()
+        .map(|r| r.line.plain_text())
+        .collect();
+    assert!(
+        transcript.iter().any(|r| r.contains("mid-string")),
+        "{transcript:?}"
+    );
+    assert!(
+        chat.session
+            .channels
+            .drain_main_mail()
+            .iter()
+            .any(|mail| mail.contains(body) && !mail.contains("lexer drops a token at EOF")),
+        "the mail is the message, and the summary never entered it"
+    );
+}
+
+/// A summary that is not one cannot overrun the row. CC does not bound its
+/// summary at all, because its schema requires 5-10 words; bingo keeps the
+/// same fifty-column budget over both sources, so the parser reading the line
+/// back still finds one line whatever the sender wrote.
+#[test]
+fn an_oversized_summary_is_cut_to_the_same_budget() {
+    let mut chat = test_chat();
+    seed_agent(&chat, "scout");
+    let long = "a summary that is really the whole message again, said twice over, at length";
+    chat.session
+        .channels
+        .deliver_to_main("scout", "short body", Some(long), false);
+    chat.tick();
+
+    let line = main_rows(&mut chat)
+        .into_iter()
+        .find(|r| r.contains("@scout❯"))
+        .unwrap_or_else(|| panic!("the sender's line"));
+    assert!(!line.contains("at length"), "cut to fit: {line:?}");
+    assert!(line.contains("a summary that is really"), "{line:?}");
+}
+
+/// The bottom row of the tiering table: an instance starting, going idle or
+/// being stopped is the tree's business and the pills', never the flow's.
+#[test]
+fn running_idle_and_stopped_write_no_line() {
+    let mut chat = test_chat();
+    chat.messages.push(msg(Role::User, "have someone look"));
+    chat.messages.push(msg(Role::Assistant, "scout is on it"));
+    seed_agent(&chat, "scout");
+    let before = main_rows(&mut chat);
+
+    chat.apply_event(lifecycle(
+        "scout · fix the parser",
+        WatchState::Running,
+        None,
+    ));
+    chat.apply_event(lifecycle("scout · fix the parser", WatchState::Idle, None));
+    chat.session.agents.mark_idle("scout");
+    chat.session.agents.stop("scout").expect("stopped");
+    chat.refresh_conversations();
+    chat.tick();
+
     assert_eq!(
         main_rows(&mut chat),
         before,
-        "and none of them printed a row"
+        "the roster changed and the transcript did not"
     );
 }
 
-/// Tag, don't infer: the digest fact is stamped at `submit_auto`, the one door a
-/// turn nobody typed into comes through, and the reply carries it from there. An
-/// ordinary turn opened with the same empty prompt is not a digest.
-#[tokio::test]
-async fn submit_auto_stamps_the_turn_a_digest() {
+/// A run's label is `{instance}` first in every shape it takes, so the second
+/// run of the same instance is the same person: same name on the row, same
+/// face in the gutter. Before D106 the face was keyed on everything up to the
+/// first ` · `, which made `scout #3` a stranger.
+#[test]
+fn a_continuation_run_is_the_same_agent_as_the_first() {
     let mut chat = test_chat();
-    chat.submit_auto();
-    assert!(chat.busy, "the turn opened");
-    assert!(chat.digest_turn, "and it was stamped on the way through");
-    chat.apply_turn_start();
-    assert_eq!(
-        chat.messages.last().map(|m| m.digest),
-        Some(true),
-        "the reply carries the fact past the end of the turn"
+    chat.chat_avatars = true;
+    chat.image_cap = Some(crate::tui::gfx::ImageCap::default_cells());
+    chat.messages.push(msg(Role::Assistant, "hiring scout"));
+    chat.stream_msg = Some(chat.messages.len() - 1);
+    seed_agent(&chat, "scout");
+    chat.apply_event(lifecycle(
+        "scout #3 · look again",
+        WatchState::Running,
+        None,
+    ));
+
+    let rows = main_rows(&mut chat);
+    assert!(
+        rows.iter().any(|r| r.contains("@scout: look again")),
+        "the row names the instance, not the run: {rows:?}"
     );
     assert!(
-        !chat.digest_turn,
-        "and the stamp is spent, so it cannot colour the next turn"
-    );
-}
-
-/// The same emptiness, the other origin: `start_turn` with no text is not a
-/// digest, so a marker in it is a misfire like any other. This is the pair of
-/// facts that must not be read off one another.
-#[test]
-fn an_empty_submission_is_not_a_digest() {
-    let mut chat = test_chat();
-    chat.apply_turn_start();
-    assert_eq!(
-        chat.messages.last().map(|m| m.digest),
-        Some(false),
-        "nothing stamped it, so nothing about it is silent"
+        chat.faces.contains(&crate::tui::avatar::index_of("scout")),
+        "and claims scout's own face: {:?}",
+        chat.faces
     );
 }

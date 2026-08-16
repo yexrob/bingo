@@ -1,11 +1,11 @@
-//! The perspective page's projection (D96): one agent's communications, split
-//! into the threads it actually had.
+//! The attribution projection (D96): who said what, recovered from one agent's
+//! own history.
 //!
-//! **What this is.** For any agent X, a read-only dossier: X's direct
-//! conversations grouped by counterpart, the rooms X is in, the intake X was
-//! handed, and a merged timeline of everything. It is the audit layer the
-//! privacy stance names — X's DM with somebody who is not the user is visible
-//! *here*, and only here, while the user's own `@X` pair view stays pure.
+//! **What this is.** For any participant X, a walk over X's transcript that
+//! files each piece of it under the counterpart it belongs to — the user, main,
+//! a room relay, or the intake X was handed. Nothing above it groups any more:
+//! the observation page that did (D96/D100) retired with v4's table in D108,
+//! and what is left is the fact its lanes were built from.
 //!
 //! **Why the split is work rather than a filter.** The sender is not a field.
 //! `InboxItem::Direct` carries a real `from`, but `absorb_inbox` renders the
@@ -14,13 +14,13 @@
 //! single parser for. Recovering who said what is therefore a walk, and [`walk`]
 //! is it.
 //!
-//! **And the walk has two readers (D99).** [`dossier`] keeps every lane the walk
-//! files. [`pair_lane`] keeps exactly one — the user's — and that is what
-//! [`crate::tui::buffer::dm_posts`] renders, so `@X` is the pure pair the model
-//! says it is and this page is where everything else in X's life is read. The
-//! two cannot disagree about attribution, because there is one walk.
+//! **And the walk has two readers.** [`crate::tui::buffer::zoom_posts`] keeps
+//! every lane the walk files — it is one agent's whole record, which is what the
+//! zoomed view shows (D105) — and [`pair_lane`] keeps exactly one, the user's,
+//! which is what the Said-unread accounting measures (D99). Neither can disagree
+//! with the other about attribution, because there is one walk.
 //!
-//! **And two protagonists (D100).** Main has a page too, over its own session
+//! **And two protagonists (D100).** Main has a record too, its own session
 //! transcript, and the unmarked default *flips*: in a subagent's history
 //! unmarked user-role prose is main speaking, because main is the sender
 //! `direct_text` leaves unmarked; in main's own history it is the human at the
@@ -37,115 +37,23 @@
 //! | `[Message from user, sent while you were working]` block | `steer::SteerItem::block_text` | the user |
 //! | `[follow-up instruction] …` | `direct_text`, batched | the protagonist's default counterpart |
 //! | unmarked prose | `direct_text`, single | the default: main in a subagent's record, the user in main's |
-//! | `[#room msg #N] who: …` | `absorb_inbox` | the room (timeline only; the room's own log is authoritative) |
+//! | `[#room msg #N] who: …` | `absorb_inbox` | the room (recorded, attributed to nobody; the room's own log is authoritative) |
 //! | `[follow-up N/M] …` | `absorb_inbox` | intake — a chase, nobody wrote it |
 //! | `[SYSTEM NOTIFICATION - TASK REMINDER]` | `query::maybe_inject_task_reminder` | intake |
 //! | `<task-notifications>` | `query` | intake |
 //! | the first user message | the `Agent` tool's prompt | intake — the task that created X (subagents only: main was not spawned) |
-//! | interrupt / compaction / stop-hook / max-tokens | `query`, `compact` | nobody: timeline only |
+//! | interrupt / compaction / stop-hook / max-tokens | `query`, `compact` | nobody: recorded and unattributed |
 //!
 //! **The one thing the domain cannot express today.** `SendMessage` is
 //! assembled at every depth since D98, but `check_target` narrows by caller:
 //! main reaches any instance, a subagent reaches `main` and the rooms it is in.
 //! So agent→agent *direct* messages still do not exist; agents reach each other
-//! through rooms. The counterpart lane is keyed by name rather than by an enum
+//! through rooms. [`Target::Dm`] is keyed by name rather than by an enum
 //! precisely so that the day the addressing rules open, this projection needs no
-//! change to show it. (The stale half of this paragraph — `SendMessage`
-//! hardcoding `main` at depth 0 — was left behind by D98 and is corrected here.)
-
-use std::collections::BTreeMap;
-
+//! change to show it.
 use crate::api::types::{ContentBlock, Message, Role as ApiRole};
-use crate::channels::{ChannelMessage, MAIN_NAME, USER_NAME};
-use crate::tui::buffer::{
-    LineSource, Post, PostKind, THINKING_ROW, channel_posts, line_source, tool_call_line,
-};
-
-/// Which thread a lane is.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum LaneId {
-    /// Everything, in order — the complete record of X's own transcript.
-    Timeline,
-    /// A pair conversation with one counterpart: `user` and `main` on a
-    /// subagent's page, `user` and every agent that wrote in on main's, and one
-    /// day another agent on a subagent's.
-    Dm(String),
-    /// A room X speaks in. Its posts are the *room's* log, not X's history.
-    Room(String),
-    /// What was handed to X rather than said to it: the task that created it,
-    /// task reminders, notifications, the chases for its silence.
-    Intake,
-}
-
-impl LaneId {
-    /// The lane's name in the index, from X's point of view.
-    pub fn label(&self) -> String {
-        match self {
-            Self::Timeline => "timeline".to_string(),
-            Self::Dm(who) => format!("@{who}"),
-            Self::Room(name) => format!("#{name}"),
-            Self::Intake => "intake".to_string(),
-        }
-    }
-
-    /// The rule a thread opens under. Every one of them says `read-only`, in the
-    /// observer vocabulary D95 established — the page is a dossier, and the
-    /// framing is a fact about the view rather than about the host.
-    pub fn title(&self, agent: &str) -> String {
-        match self {
-            Self::Timeline => format!("@{agent} · timeline · read-only"),
-            Self::Dm(who) => format!("@{agent} ↔ @{who} · read-only"),
-            Self::Room(name) => format!("#{name} · @{agent}'s view · read-only"),
-            Self::Intake => format!("@{agent} · intake · read-only"),
-        }
-    }
-}
-
-/// One thread on the page, built at snapshot time.
-#[derive(Debug, Clone)]
-pub struct Lane {
-    pub id: LaneId,
-    /// The thread, in order, including X's process rows (the protagonist rule).
-    pub posts: Vec<Post>,
-    /// Unix seconds of the most recent post that carried a clock; 0 when none
-    /// did (a compaction clears an instance's stamps outright).
-    pub last_at: u64,
-}
-
-impl Lane {
-    /// How many *messages* the lane holds. Process rows are X's work, not
-    /// things anybody said, so they do not count — an index that read
-    /// `@main (47)` because a turn made forty-five tool calls would be
-    /// measuring the wrong thing.
-    pub fn messages(&self) -> usize {
-        self.posts
-            .iter()
-            .filter(|p| p.kind == PostKind::Said)
-            .count()
-    }
-
-    fn new(id: LaneId, posts: Vec<Post>) -> Self {
-        let last_at = posts.iter().map(|p| p.at).max().unwrap_or(0);
-        Self { id, posts, last_at }
-    }
-}
-
-/// One agent's communications, grouped.
-#[derive(Debug, Clone)]
-pub struct Dossier {
-    pub agent: String,
-    /// Timeline first, then DMs and rooms by last activity, then intake. Empty
-    /// lanes are dropped: a page is a record of what happened, and a row that
-    /// says `#parser (0)` is furniture.
-    pub lanes: Vec<Lane>,
-}
-
-impl Dossier {
-    /// Nobody ever wrote to this agent and it never wrote to anybody.
-    pub fn is_empty(&self) -> bool {
-        self.lanes.is_empty()
-    }
-}
+use crate::channels::{MAIN_NAME, USER_NAME};
+use crate::tui::buffer::{LineSource, Post, PostKind, THINKING_ROW, line_source, tool_call_line};
 
 /// Where one piece of a user-role message belongs.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -162,8 +70,8 @@ pub(crate) enum Target {
 /// What one of X's own rows *was*, for a reader that needs more than the line.
 ///
 /// The line ([`tool_call_line`], [`THINKING_ROW`]) is all a thread pager needs.
-/// The pair view (D99) renders X's work the way the console renders main's —
-/// collapsed activity groups — and the classifier that builds those groups
+/// The zoomed view (D105) renders X's work the way the console renders main's
+/// — collapsed activity groups — and the classifier that builds those groups
 /// reads the call, not the sentence it printed.
 #[derive(Debug, Clone)]
 pub(crate) enum Work {
@@ -238,8 +146,8 @@ pub(crate) struct Filed {
 
 /// One agent's history → every post in it, in order, each already filed.
 ///
-/// **The single recognition walk (D99).** The perspective page files every item
-/// into its lane; the user's `@X` pair view keeps the one lane it is in
+/// **The single recognition walk (D99).** The zoomed view keeps every item this
+/// files; the user's `@X` pair lane keeps the one lane it is in
 /// ([`pair_lane`]). Both therefore agree about who said what by construction,
 /// rather than by two parsers that happen to read the same markers today.
 pub(crate) fn walk(who: Protagonist<'_>, history: &[Message], stamps: &[u64]) -> Vec<Filed> {
@@ -275,22 +183,6 @@ pub(crate) fn walk(who: Protagonist<'_>, history: &[Message], stamps: &[u64]) ->
                             work: None,
                         });
                     }
-                }
-                // A digest turn's silent acknowledgement (D102) is scaffolding
-                // wearing an assistant's role: it was written to the record so
-                // the record stays complete, and it renders as nothing in the
-                // flow. Here it keeps its text verbatim and takes the place
-                // every other piece of runtime scaffolding takes — the
-                // timeline, dim, in nobody's lane. Filing it as speech would
-                // put raw protocol in a counterpart's conversation.
-                (ApiRole::Assistant, ContentBlock::Text { text })
-                    if text.trim() == crate::query::QUIET_MARKER =>
-                {
-                    out.push(Filed {
-                        target: Target::TimelineOnly,
-                        post: note(agent, at, text.trim().to_string()),
-                        work: None,
-                    });
                 }
                 (ApiRole::Assistant, ContentBlock::Text { text }) => out.push(turn(
                     &active,
@@ -335,44 +227,24 @@ pub(crate) fn walk(who: Protagonist<'_>, history: &[Message], stamps: &[u64]) ->
     out
 }
 
-/// One post of the user↔agent pair lane, plus the one thing a filter loses.
-pub(crate) struct PairPost {
-    pub post: Post,
-    pub work: Option<Work>,
-    /// Whether the previous item of the *full* walk is the previous item here.
-    ///
-    /// The pair view merges X's consecutive rows into one message, the way the
-    /// console holds a turn. What must not merge is two runs with something
-    /// between them — a room relay, an instruction from main, a chase — because
-    /// that something is exactly what ended the first run, even though it
-    /// renders nowhere in this lane.
-    pub contiguous: bool,
-}
-
 /// The user's side of an agent's record: what the user said, what X answered
 /// them, and the work X did for those turns (D99).
 ///
 /// Everything else — main's instructions, room relays, `[message from @X]`
 /// mail, chases, reminders, and the task that created the instance — belongs to
-/// a lane that is not this one, and lives on the observation page.
-pub(crate) fn pair_lane(agent: &str, history: &[Message], stamps: &[u64]) -> Vec<PairPost> {
-    let mut out: Vec<PairPost> = Vec::new();
-    let mut previous: Option<usize> = None;
-    for (i, filed) in walk(Protagonist::of(agent), history, stamps)
+/// a lane that is not this one, and lives in the zoomed view
+/// ([`crate::tui::buffer::zoom_posts`]).
+///
+/// D99 carried a `contiguous` flag out of here so the pair view could merge X's
+/// consecutive rows across the items this filter drops. D105 retired that
+/// reader: the zoom folds over the *full* walk, where whatever ended a run is a
+/// row you can see, so the break needs no flag to survive the filter.
+pub(crate) fn pair_lane(agent: &str, history: &[Message], stamps: &[u64]) -> Vec<Post> {
+    walk(Protagonist::of(agent), history, stamps)
         .into_iter()
-        .enumerate()
-    {
-        if !matches!(&filed.target, Target::Dm(name) if name == USER_NAME) {
-            continue;
-        }
-        out.push(PairPost {
-            post: filed.post,
-            work: filed.work,
-            contiguous: previous == Some(i.wrapping_sub(1)),
-        });
-        previous = Some(i);
-    }
-    out
+        .filter(|filed| matches!(&filed.target, Target::Dm(name) if name == USER_NAME))
+        .map(|filed| filed.post)
+        .collect()
 }
 
 /// Scaffolding that no counterpart wrote: the runtime talking to itself.
@@ -549,81 +421,9 @@ fn one_line_summary(text: &str) -> String {
     }
 }
 
-/// Build one agent's dossier.
-///
-/// `agent` is any participant, `main` included (D100): the projection reads
-/// [`Protagonist::of`] to decide what its unmarked shapes mean, and everything
-/// downstream — lanes, ordering, counts, titles — is the same page for both.
-///
-/// `rooms` is the room name plus that room's whole log, which the caller reads
-/// from the channel registry — the projection stays pure, so a test can hand it
-/// a history and a log and get a page back.
-///
-/// **Snapshot, not a feed.** Everything is built once, at the moment the page
-/// opens (the D82 transcript precedent); a message that arrives afterwards does
-/// not mutate the view, and reopening is how you refresh.
-pub fn dossier(
-    agent: &str,
-    history: &[Message],
-    stamps: &[u64],
-    rooms: &[(String, Vec<ChannelMessage>)],
-) -> Dossier {
-    let mut timeline: Vec<Post> = Vec::new();
-    let mut dms: BTreeMap<String, Vec<Post>> = BTreeMap::new();
-    let mut intake: Vec<Post> = Vec::new();
-
-    for filed in walk(Protagonist::of(agent), history, stamps) {
-        timeline.push(filed.post.clone());
-        match filed.target {
-            Target::Dm(name) => dms.entry(name).or_default().push(filed.post),
-            Target::Intake => intake.push(filed.post),
-            Target::TimelineOnly => {}
-        }
-    }
-
-    let mut lanes = vec![Lane::new(LaneId::Timeline, timeline)];
-    let mut pairs: Vec<Lane> = dms
-        .into_iter()
-        .filter(|(_, posts)| !posts.is_empty())
-        .map(|(name, posts)| Lane::new(LaneId::Dm(name), posts))
-        .collect();
-    pairs.sort_by(|a, b| {
-        b.last_at
-            .cmp(&a.last_at)
-            .then_with(|| a.id.label().cmp(&b.id.label()))
-    });
-    lanes.extend(pairs);
-
-    let mut room_lanes: Vec<Lane> = rooms
-        .iter()
-        .map(|(name, log)| Lane::new(LaneId::Room(name.clone()), channel_posts(log, agent)))
-        .filter(|lane| !lane.posts.is_empty())
-        .collect();
-    room_lanes.sort_by(|a, b| {
-        b.last_at
-            .cmp(&a.last_at)
-            .then_with(|| a.id.label().cmp(&b.id.label()))
-    });
-    lanes.extend(room_lanes);
-
-    if !intake.is_empty() {
-        lanes.push(Lane::new(LaneId::Intake, intake));
-    }
-    // The timeline is dropped when it is the only thing there is: a page whose
-    // single row is "timeline (0)" says nothing an empty page does not.
-    if lanes.len() == 1 && lanes[0].posts.is_empty() {
-        lanes.clear();
-    }
-    Dossier {
-        agent: agent.to_string(),
-        lanes,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::channels::MessageKind;
 
     fn user(text: &str) -> Message {
         Message::user_text(text)
@@ -650,24 +450,46 @@ mod tests {
         }
     }
 
-    /// The lane with this identity. Tests ask for one by name; production
-    /// walks the list it just built, so this stays where its readers are.
-    fn lane_of<'a>(page: &'a Dossier, id: &LaneId) -> Option<&'a Lane> {
-        page.lanes.iter().find(|lane| &lane.id == id)
+    /// Everything the walk filed under one counterpart, said-only. The dossier
+    /// used to build these groups eagerly and hand the tests a lane; the walk
+    /// is where the grouping was always decided, so the tests read it there.
+    fn said_to<'a>(filed: &'a [Filed], target: &Target) -> Vec<&'a str> {
+        filed
+            .iter()
+            .filter(|item| &item.target == target && item.post.kind == PostKind::Said)
+            .map(|item| item.post.text.as_str())
+            .collect()
     }
 
-    fn said_texts(lane: &Lane) -> Vec<&str> {
-        lane.posts
+    /// Everything the walk filed under one counterpart, whatever its kind —
+    /// intake rows are notes rather than speech, so they are read this way.
+    fn filed_to<'a>(filed: &'a [Filed], target: &Target) -> Vec<&'a str> {
+        filed
             .iter()
-            .filter(|p| p.kind == PostKind::Said)
-            .map(|p| p.text.as_str())
+            .filter(|item| &item.target == target)
+            .map(|item| item.post.text.as_str())
             .collect()
+    }
+
+    fn dm(who: &str) -> Target {
+        Target::Dm(who.to_string())
+    }
+
+    fn walked(agent: &str, history: &[Message], stamps: &[u64]) -> Vec<Filed> {
+        walk(Protagonist::of(agent), history, stamps)
     }
 
     /// The attribution catalog, pinned: every shape the runtime can put in an
     /// agent's history, filed where it belongs.
+    ///
+    /// Rewritten for D108 from `a_page_groups_every_counterpart_the_markers_
+    /// can_name`. The observation page retired with v4's table and `dossier`
+    /// went with it, but the claim was never the page's — it is the walk's
+    /// attribution, which the zoom (D105) and the Said-unread accounting both
+    /// read. Every marker it asserted is asserted here, against the same
+    /// history, one layer down.
     #[test]
-    fn a_page_groups_every_counterpart_the_markers_can_name() {
+    fn the_walk_names_every_counterpart_the_markers_can_name() {
         let history = vec![
             // The task that created it: unmarked prose, and still not main
             // making conversation.
@@ -696,27 +518,22 @@ mod tests {
             )),
         ];
         let stamps = vec![10, 20, 30, 40, 50, 60, 70, 80, 90];
-        let page = dossier("scout", &history, &stamps, &[]);
+        let filed = walked("scout", &history, &stamps);
 
-        let main_lane =
-            lane_of(&page, &LaneId::Dm(MAIN_NAME.to_string())).expect("a main_lane lane");
         assert_eq!(
-            said_texts(main_lane),
+            said_to(&filed, &dm(MAIN_NAME)),
             vec!["also check the lexer", "will do", "and the printer"],
-            "the main_lane's unmarked single and its labelled batch line, plus the reply it drew"
+            "main's unmarked single and its labelled batch line, plus the reply it drew"
         );
 
-        let human = lane_of(&page, &LaneId::Dm(USER_NAME.to_string())).expect("a user lane");
         assert_eq!(
-            said_texts(human),
+            said_to(&filed, &dm(USER_NAME)),
             vec!["are you nearly done?", "nearly", "ping"],
             "only what the user actually wrote, plus the reply it drew"
         );
 
-        let intake = lane_of(&page, &LaneId::Intake).expect("an intake lane");
-        let intake_text: Vec<&str> = intake.posts.iter().map(|p| p.text.as_str()).collect();
         assert_eq!(
-            intake_text,
+            filed_to(&filed, &Target::Intake),
             vec![
                 "map the parser module",
                 "follow-up · waiting for a reply",
@@ -725,27 +542,29 @@ mod tests {
             "the task that created it, the chase, and the reminder"
         );
 
-        // The room relay is in the timeline and in no thread: the room's own log
-        // is the authoritative copy.
-        let timeline = lane_of(&page, &LaneId::Timeline).expect("a timeline");
-        assert!(
-            timeline
-                .posts
-                .iter()
-                .any(|p| p.text == "#parser · scout: found it"),
-            "the relay is recorded"
-        );
-        assert!(
-            lane_of(&page, &LaneId::Room("parser".to_string())).is_none(),
-            "a relay line does not invent a room lane"
+        // Attributable to nobody: the reply the spawn task drew (intake is not
+        // a counterpart, so nothing was said back to it), the room relay (the
+        // room's own log is the authoritative copy) and the interrupt.
+        assert_eq!(
+            filed_to(&filed, &Target::TimelineOnly),
+            vec![
+                "on it",
+                "#parser · scout: found it",
+                crate::query::INTERRUPT_MARKER
+            ],
+            "recorded, and attributed to nobody"
         );
     }
 
     /// The interrupt marker, the compaction summary and the rest of the
-    /// runtime's own talk reach the timeline and stop there — a thread that
-    /// showed them would be putting words in somebody's mouth.
+    /// runtime's own talk are attributable to nobody — a thread that showed
+    /// them would be putting words in somebody's mouth.
+    ///
+    /// Rewritten for D108 from `scaffolding_nobody_wrote_stays_out_of_every_
+    /// thread`: the lanes it walked were the dossier's, and `Target::
+    /// TimelineOnly` is the fact underneath them.
     #[test]
-    fn scaffolding_nobody_wrote_stays_out_of_every_thread() {
+    fn scaffolding_nobody_wrote_is_attributed_to_nobody() {
         let history = vec![
             user("start"),
             user(crate::query::INTERRUPT_MARKER),
@@ -755,34 +574,37 @@ mod tests {
             )),
             user(crate::query::MAX_TOKENS_RESUME_PROMPT),
         ];
-        let page = dossier("scout", &history, &[1, 2, 3, 4], &[]);
-        for lane in &page.lanes {
-            if lane.id == LaneId::Timeline {
+        let filed = walked("scout", &history, &[1, 2, 3, 4]);
+        assert_eq!(filed.len(), 4, "the record keeps all four, complete");
+        for item in &filed {
+            if matches!(item.target, Target::TimelineOnly) {
                 continue;
             }
-            for post in &lane.posts {
-                assert!(
-                    !post.text.contains("interrupted by user")
-                        && !post.text.contains("summary of the earlier")
-                        && !post.text.contains("Output token limit"),
-                    "{:?} leaked runtime scaffolding: {:?}",
-                    lane.id,
-                    post.text
-                );
-            }
+            assert!(
+                !item.post.text.contains("interrupted by user")
+                    && !item.post.text.contains("summary of the earlier")
+                    && !item.post.text.contains("Output token limit"),
+                "{:?} took the runtime's own words: {:?}",
+                item.target,
+                item.post.text
+            );
         }
-        let timeline = lane_of(&page, &LaneId::Timeline).expect("a timeline");
         assert_eq!(
-            timeline.posts.len(),
-            4,
-            "the timeline keeps all four, complete"
+            filed_to(&filed, &Target::TimelineOnly).len(),
+            3,
+            "the interrupt, the compaction and the token limit, all three"
         );
     }
 
-    /// The protagonist rule: X's thinking and tool calls show in the thread it
-    /// was working in, whoever the counterpart is.
+    /// The protagonist rule: X's thinking and tool calls are filed with the
+    /// counterpart it was working for, whoever that is.
+    ///
+    /// Rewritten for D108 from `a_thread_shows_the_agent_s_own_process`. The
+    /// lane's `messages()` count went with `Lane`; what it was counting —
+    /// process rows are work, not speech — is asserted here as the kinds the
+    /// walk files, which is the fact the count was derived from.
     #[test]
-    fn a_thread_shows_the_agent_s_own_process() {
+    fn a_turn_carries_the_agents_own_process_to_its_counterpart() {
         let history = vec![
             user("task"),
             user(&format!(
@@ -798,9 +620,12 @@ mod tests {
                 text("it tokenizes"),
             ]),
         ];
-        let page = dossier("scout", &history, &[1, 2, 3], &[]);
-        let human = lane_of(&page, &LaneId::Dm(USER_NAME.to_string())).expect("a user lane");
-        let kinds: Vec<PostKind> = human.posts.iter().map(|p| p.kind).collect();
+        let filed = walked("scout", &history, &[1, 2, 3]);
+        let human: Vec<&Filed> = filed
+            .iter()
+            .filter(|item| item.target == dm(USER_NAME))
+            .collect();
+        let kinds: Vec<PostKind> = human.iter().map(|item| item.post.kind).collect();
         assert_eq!(
             kinds,
             vec![
@@ -812,22 +637,25 @@ mod tests {
             "the question, the reasoning, the tool call, the answer"
         );
         assert_eq!(
-            human.messages(),
+            kinds.iter().filter(|k| **k == PostKind::Said).count(),
             2,
-            "process rows are work, not messages, so the count says 2"
+            "process rows are work, not messages"
         );
         assert!(
-            human.posts.iter().any(|p| p.text == THINKING_ROW),
-            "the same collapsed reasoning row the DM view shows"
+            human.iter().any(|item| item.post.text == THINKING_ROW),
+            "the same collapsed reasoning row every reader shows"
         );
     }
 
     /// D98: an agent writing to main arrives under a marker that names it, and
-    /// that is what lets main's own page file the message in the sender's lane
-    /// rather than dropping the whole inbox block into the timeline as one note.
+    /// that is what lets main's own record file the message under the sender
+    /// rather than dropping the whole inbox block in as one unattributed note.
     /// The envelope is scaffolding; what is inside it was said by someone.
+    ///
+    /// Rewritten for D108 from `a_direct_message_to_main_lands_in_its_sender_s_
+    /// lane`: same history, same claim, read off the walk.
     #[test]
-    fn a_direct_message_to_main_lands_in_its_sender_s_lane() {
+    fn a_direct_message_to_main_is_filed_under_its_sender() {
         let inbox = format!(
             "{}\n{}\n[#build msg #4] zoe: the tests pass\n{}",
             crate::query::MAIL_BLOCK_OPEN,
@@ -835,63 +663,28 @@ mod tests {
             crate::query::MAIL_BLOCK_CLOSE
         );
         let history = vec![user("run the release"), user(&inbox)];
-        let page = dossier(MAIN_NAME, &history, &[1, 2], &[]);
-        let lane = lane_of(&page, &LaneId::Dm("scout".to_string())).expect("a lane for the sender");
-        assert_eq!(said_texts(lane), vec!["the migration is done"]);
-        let timeline = lane_of(&page, &LaneId::Timeline).expect("a timeline");
-        assert!(
-            timeline
-                .posts
-                .iter()
-                .any(|p| p.text == "#build · zoe: the tests pass"),
+        let filed = walked(MAIN_NAME, &history, &[1, 2]);
+        assert_eq!(
+            said_to(&filed, &dm("scout")),
+            vec!["the migration is done"],
+            "the mail is the sender's"
+        );
+        assert_eq!(
+            filed_to(&filed, &Target::TimelineOnly),
+            vec!["#build · zoe: the tests pass"],
             "and a room relay in the same block is still the room's, recorded once"
         );
     }
 
-    /// D102: a digest turn's silent acknowledgement is scaffolding wearing an
-    /// assistant's role. It was written to the record so the record stays
-    /// complete, and it renders as nothing in the flow — so on the page it takes
-    /// the place every other piece of scaffolding takes: the timeline, verbatim,
-    /// in nobody's lane. Filed as speech it would put raw protocol into the
-    /// conversation of whichever agent happened to have woken main.
+    /// Main's own record (D100). The unmarked default flips: the prose in it is
+    /// the human at the keyboard, not main talking to itself. Nothing
+    /// dispatched main either, so the first message is the first thing the user
+    /// ever said — a message, not intake.
+    ///
+    /// Rewritten for D108 from `mains_page_reads_unmarked_prose_as_the_user`.
+    /// The protagonist flip is `walk`'s, and this is where it is now asserted.
     #[test]
-    fn a_silent_acknowledgement_is_timeline_scaffolding_not_speech() {
-        let inbox = format!(
-            "{}\n{}\n{}",
-            crate::query::MAIL_BLOCK_OPEN,
-            crate::channels::format_main_message("scout", "the migration is done"),
-            crate::query::MAIL_BLOCK_CLOSE
-        );
-        let history = vec![
-            user(&inbox),
-            assistant(vec![text(crate::query::QUIET_MARKER)]),
-        ];
-        let page = dossier(MAIN_NAME, &history, &[1, 2], &[]);
-
-        let scout =
-            lane_of(&page, &LaneId::Dm("scout".to_string())).expect("a lane for the sender");
-        assert_eq!(
-            said_texts(scout),
-            vec!["the migration is done"],
-            "the message is in the lane and the acknowledgement is not"
-        );
-        let timeline = lane_of(&page, &LaneId::Timeline).expect("a timeline");
-        assert!(
-            timeline
-                .posts
-                .iter()
-                .any(|p| p.text == crate::query::QUIET_MARKER && p.kind == PostKind::Note),
-            "and it is on the timeline, verbatim, as a note: {:?}",
-            timeline.posts.iter().map(|p| &p.text).collect::<Vec<_>>()
-        );
-    }
-
-    /// Main's own page (D100). The record is its session transcript, and the
-    /// unmarked default flips: the prose in it is the human at the keyboard, not
-    /// main talking to itself. Nothing dispatched main either, so the first
-    /// message is the first thing the user ever said — a message, not intake.
-    #[test]
-    fn mains_page_reads_unmarked_prose_as_the_user() {
+    fn mains_record_reads_unmarked_prose_as_the_user() {
         let history = vec![
             // The first thing typed into the console. In a subagent's record
             // this shape is the spawn task; here there is no spawn.
@@ -908,52 +701,41 @@ mod tests {
             // Dispatch notifications are handed to main, not said to it.
             user("<task-notifications>\nscout finished\n</task-notifications>"),
         ];
-        let page = dossier(MAIN_NAME, &history, &[10, 20, 30, 40, 50], &[]);
+        let filed = walked(MAIN_NAME, &history, &[10, 20, 30, 40, 50]);
 
-        let human = lane_of(&page, &LaneId::Dm(USER_NAME.to_string())).expect("a user lane");
         assert_eq!(
-            said_texts(human),
+            said_to(&filed, &dm(USER_NAME)),
             vec!["ship the release", "on it"],
             "unmarked prose in main's record is the user, and the first line is not intake"
         );
         assert!(
-            lane_of(&page, &LaneId::Dm(MAIN_NAME.to_string())).is_none(),
+            filed_to(&filed, &dm(MAIN_NAME)).is_empty(),
             "and main is never its own counterpart"
         );
 
-        let scout =
-            lane_of(&page, &LaneId::Dm("scout".to_string())).expect("a lane for the sender");
         assert_eq!(
-            said_texts(scout),
+            said_to(&filed, &dm("scout")),
             vec!["the migration is done", "thanks"],
-            "mail lands in its sender's lane, and the reply it drew with it"
+            "mail is filed under its sender, and the reply it drew with it"
         );
 
-        let intake = lane_of(&page, &LaneId::Intake).expect("an intake lane");
         assert_eq!(
-            intake
-                .posts
-                .iter()
-                .map(|p| p.text.as_str())
-                .collect::<Vec<_>>(),
+            filed_to(&filed, &Target::Intake),
             vec!["system note · task notifications"],
             "the notifications are intake and nothing else is"
         );
 
-        let timeline = lane_of(&page, &LaneId::Timeline).expect("a timeline");
-        assert!(
-            timeline
-                .posts
-                .iter()
-                .any(|p| p.text == "#build · zoe: the tests pass"),
+        assert_eq!(
+            filed_to(&filed, &Target::TimelineOnly),
+            vec!["#build · zoe: the tests pass"],
             "a room relay in the same block stays the room's, recorded once"
         );
     }
 
-    /// The flip is a property of the protagonist, not of the shapes: main's page
-    /// still reads every marker the way a subagent's does, the legacy envelope
-    /// included, and a subagent's page still files unmarked prose to main
-    /// (which is what every test above this one asserts, unchanged).
+    /// The flip is a property of the protagonist, not of the shapes: main's
+    /// record still reads every marker the way a subagent's does, the legacy
+    /// envelope included, and a subagent's record still files unmarked prose to
+    /// main (which is what every test above this one asserts, unchanged).
     #[test]
     fn the_flipped_default_does_not_move_any_marker() {
         let history = vec![
@@ -968,36 +750,28 @@ mod tests {
             )),
             user(crate::query::INTERRUPT_MARKER),
         ];
-        let page = dossier(MAIN_NAME, &history, &[1, 2, 3, 4], &[]);
-        let timeline = lane_of(&page, &LaneId::Timeline).expect("a timeline");
+        let filed = walked(MAIN_NAME, &history, &[1, 2, 3, 4]);
         assert!(
-            timeline
-                .posts
-                .iter()
-                .any(|p| p.text == "#build · zoe: still failing"),
-            "the pre-D98 envelope is unwrapped on main's page too"
+            filed_to(&filed, &Target::TimelineOnly).contains(&"#build · zoe: still failing"),
+            "the pre-D98 envelope is unwrapped on main's record too"
         );
         assert_eq!(
-            said_texts(lane_of(&page, &LaneId::Dm(USER_NAME.to_string())).expect("a user lane")),
+            said_to(&filed, &dm(USER_NAME)),
             vec!["not main"],
             "an explicit user marker files where it always did"
         );
         assert!(
-            lane_of(&page, &LaneId::Intake)
-                .expect("an intake lane")
-                .posts
-                .iter()
-                .any(|p| p.text == "system note · task tools"),
+            filed_to(&filed, &Target::Intake).contains(&"system note · task tools"),
             "the reminder is intake for main as well"
         );
-        for lane in &page.lanes {
-            if lane.id == LaneId::Timeline {
+        for item in &filed {
+            if matches!(item.target, Target::TimelineOnly) {
                 continue;
             }
             assert!(
-                !lane.posts.iter().any(|p| p.text.contains("interrupted")),
+                !item.post.text.contains("interrupted"),
                 "{:?} took the runtime's own words",
-                lane.id
+                item.target
             );
         }
     }
@@ -1010,84 +784,27 @@ mod tests {
     fn the_pre_d98_envelope_is_still_read() {
         let inbox = "<channel-messages>\n[#build msg #2] zoe: still failing\n</channel-messages>";
         let history = vec![user("task"), user(inbox)];
-        let page = dossier("scout", &history, &[1, 2], &[]);
-        let timeline = lane_of(&page, &LaneId::Timeline).expect("a timeline");
-        assert!(
-            timeline
-                .posts
-                .iter()
-                .any(|p| p.text == "#build · zoe: still failing"),
+        let filed = walked("scout", &history, &[1, 2]);
+        assert_eq!(
+            filed_to(&filed, &Target::TimelineOnly),
+            vec!["#build · zoe: still failing"],
             "the relay inside is attributed, not misfiled as main prose"
         );
         assert!(
-            lane_of(&page, &LaneId::Dm(MAIN_NAME.to_string())).is_none(),
+            filed_to(&filed, &dm(MAIN_NAME)).is_empty(),
             "and nothing in the legacy block reads as main speaking"
         );
     }
 
-    /// A room thread is the room's conversation with X in it — not X's
-    /// monologue. A thread that showed only the protagonist would not be a
-    /// thread.
+    /// Everything the walk files is in the record, once and in order — the
+    /// property the dossier's timeline used to state by being a superset of the
+    /// threads it split.
+    ///
+    /// Rewritten for D108 from `the_timeline_is_a_superset_of_the_threads_it_
+    /// split`. There is one list now rather than a list and its projections, so
+    /// the claim is that the targeted subsets partition it in order.
     #[test]
-    fn a_room_thread_is_the_whole_room_with_the_agent_in_it() {
-        let log = vec![
-            ChannelMessage {
-                seq: 1,
-                from: "ui".to_string(),
-                text: "who owns the lexer?".to_string(),
-                at: 100,
-                kind: MessageKind::Said,
-            },
-            ChannelMessage {
-                seq: 2,
-                from: "scout".to_string(),
-                text: "I do".to_string(),
-                at: 110,
-                kind: MessageKind::Said,
-            },
-            ChannelMessage {
-                seq: 3,
-                from: "qa".to_string(),
-                text: "joined".to_string(),
-                at: 120,
-                kind: MessageKind::Membership,
-            },
-        ];
-        let page = dossier(
-            "scout",
-            &[user("task")],
-            &[1],
-            &[("parser".to_string(), log)],
-        );
-        let room = lane_of(&page, &LaneId::Room("parser".to_string())).expect("a room lane");
-        assert_eq!(
-            said_texts(&room.clone()),
-            vec!["who owns the lexer?", "I do"],
-            "everybody's speech, not only the protagonist's"
-        );
-        let mine: Vec<bool> = room
-            .posts
-            .iter()
-            .filter(|p| p.kind == PostKind::Said)
-            .map(|p| p.you)
-            .collect();
-        assert_eq!(
-            mine,
-            vec![false, true],
-            "the agent's own rows are the ones marked, so the renderer can emphasize them"
-        );
-        assert!(
-            room.posts.iter().any(|p| p.kind == PostKind::Note),
-            "the membership line is part of the room's record"
-        );
-        assert_eq!(room.last_at, 120);
-    }
-
-    /// Everything in a history-derived thread is in the timeline, in the same
-    /// order. (Room lanes are the room's own log and are deliberately not
-    /// contained in it — X's page is complete about X, not about rooms.)
-    #[test]
-    fn the_timeline_is_a_superset_of_the_threads_it_split() {
+    fn the_record_holds_every_filed_post_once_and_in_order() {
         let history = vec![
             user("task"),
             user("main says hi"),
@@ -1098,85 +815,33 @@ mod tests {
             )),
             assistant(vec![text("hi there")]),
         ];
-        let page = dossier("scout", &history, &[1, 2, 3, 4, 5], &[]);
-        let timeline: Vec<&str> = lane_of(&page, &LaneId::Timeline)
-            .expect("a timeline")
-            .posts
-            .iter()
-            .map(|p| p.text.as_str())
-            .collect();
-        for lane in &page.lanes {
-            if matches!(lane.id, LaneId::Timeline | LaneId::Room(_)) {
-                continue;
-            }
+        let filed = walked("scout", &history, &[1, 2, 3, 4, 5]);
+        let whole: Vec<&str> = filed.iter().map(|i| i.post.text.as_str()).collect();
+        for target in [dm(MAIN_NAME), dm(USER_NAME), Target::Intake] {
             let mut at = 0;
-            for post in &lane.posts {
-                let found = timeline[at..]
-                    .iter()
-                    .position(|t| *t == post.text.as_str())
-                    .map(|p| p + at);
+            for text in filed_to(&filed, &target) {
+                let found = whole[at..].iter().position(|t| *t == text).map(|p| p + at);
                 let Some(found) = found else {
-                    panic!("{:?} has {:?}, the timeline does not", lane.id, post.text);
+                    panic!("{target:?} has {text:?}, the record does not");
                 };
                 at = found + 1;
             }
         }
-    }
-
-    /// The index leads with what happened last.
-    #[test]
-    fn lanes_are_ordered_by_last_activity() {
-        let history = vec![
-            user("task"),
-            user("main early"),
-            user(&format!(
-                "{}\nuser late",
-                crate::tool::agent::DM_FROM_USER_MARKER
-            )),
-        ];
-        let page = dossier("scout", &history, &[1, 2, 900], &[]);
-        let order: Vec<String> = page.lanes.iter().map(|l| l.id.label()).collect();
         assert_eq!(
-            order,
-            vec!["timeline", "@user", "@main", "intake"],
-            "timeline first, counterparts by recency, intake last"
+            whole.len(),
+            filed_to(&filed, &dm(MAIN_NAME)).len()
+                + filed_to(&filed, &dm(USER_NAME)).len()
+                + filed_to(&filed, &Target::Intake).len()
+                + filed_to(&filed, &Target::TimelineOnly).len(),
+            "every post is filed exactly once"
         );
     }
 
-    /// A lane's count is what the index prints beside it, and it counts the
-    /// same posts the thread renders as messages.
+    /// An agent nobody ever wrote to has nothing to show.
     #[test]
-    fn a_lane_s_count_is_its_thread_s_messages() {
-        let history = vec![
-            user("task"),
-            user("one"),
-            assistant(vec![
-                tool("Bash", serde_json::json!({"command": "ls"})),
-                text("two"),
-            ]),
-        ];
-        let page = dossier("scout", &history, &[1, 2, 3], &[]);
-        for lane in &page.lanes {
-            assert_eq!(
-                lane.messages(),
-                lane.posts
-                    .iter()
-                    .filter(|p| p.kind == PostKind::Said)
-                    .count(),
-                "{:?}",
-                lane.id
-            );
-        }
+    fn an_agent_with_no_history_files_nothing() {
+        assert!(walked("scout", &[], &[]).is_empty());
     }
-
-    /// An agent nobody ever wrote to has nothing to show, and says so by being
-    /// empty rather than by listing empty lanes.
-    #[test]
-    fn an_agent_with_no_history_has_an_empty_page() {
-        let page = dossier("scout", &[], &[], &[]);
-        assert!(page.is_empty());
-    }
-
     // ---- the pair lane (D99) ---------------------------------------------
 
     fn from_user(text: &str) -> Message {
@@ -1189,7 +854,7 @@ mod tests {
     fn pair_texts(history: &[Message]) -> Vec<String> {
         pair_lane("scout", history, &[])
             .into_iter()
-            .map(|item| item.post.text)
+            .map(|item| item.text)
             .collect()
     }
 
@@ -1220,11 +885,11 @@ mod tests {
             pair_texts(&history),
             vec!["what did you find?", "a missing case"],
             "the spawn prompt, the room relay, main's instruction, the chase, \
-             the mail and the reminder all live on the page"
+             the mail and the reminder all belong to another lane"
         );
     }
 
-    /// Attribution is the perspective's own rule: a turn attaches to the
+    /// Attribution is the walk's own rule: a turn attaches to the
     /// counterpart it last heard from. So a reply main drew stays out of the
     /// user's lane and a reply the user drew stays in — the same walk answers
     /// both, which is why they cannot disagree.
@@ -1245,10 +910,15 @@ mod tests {
     }
 
     /// The agent's work rides with the turn it belongs to (the protagonist
-    /// rule), and the walk keeps the call itself so the pair view can hand it
-    /// to the console's collapse classifier.
+    /// rule), and the walk keeps the **call** and not only the line it printed
+    /// — which is what lets the zoom hand it to the console's collapse
+    /// classifier (D105).
+    ///
+    /// Rewritten for D105: `pair_lane` used to carry the call out with the
+    /// post, for the pair replay that retired. The claim it was making is a
+    /// claim about the walk, so it is asserted where it lives.
     #[test]
-    fn the_pair_lane_carries_the_work_of_its_own_turns() {
+    fn the_walk_carries_the_call_and_not_only_the_line() {
         let history = vec![
             from_user("find the leak"),
             assistant(vec![
@@ -1256,26 +926,28 @@ mod tests {
                 tool("Grep", serde_json::json!({"pattern": "leak"})),
             ]),
         ];
-        let lane = pair_lane("scout", &history, &[]);
-        let work: Vec<&Post> = lane
-            .iter()
-            .map(|item| &item.post)
+        let work = pair_lane("scout", &history, &[])
+            .into_iter()
             .filter(|p| p.kind == PostKind::Process)
-            .collect();
-        assert_eq!(work.len(), 1, "{lane:?}", lane = pair_texts(&history));
+            .count();
+        assert_eq!(work, 1, "the lane keeps its own turn's work");
+        let filed = walk(Protagonist::of("scout"), &history, &[]);
         assert!(
             matches!(
-                lane.iter().find_map(|item| item.work.as_ref()),
+                filed.iter().find_map(|item| item.work.as_ref()),
                 Some(Work::Tool { name, .. }) if name == "Grep"
             ),
             "the call survives the projection, not only the line it printed"
         );
     }
 
-    /// Contiguity is measured in the *full* walk, so anything that stood
-    /// between two of the agent's rows breaks the run even where this lane
-    /// never shows it. That is what keeps a replay append-only: every
-    /// continuation is triggered by something, and that something is a break.
+    /// The pair lane drops what it is not about, and the walk keeps it — which
+    /// is what makes the zoom's fold able to see the thing that ended a run.
+    ///
+    /// Rewritten for D105: the old assertion read the `contiguous` flag the
+    /// lane carried so the pair replay could break a run across an item it
+    /// could not show. The zoom folds over the whole walk, where that item is a
+    /// row, so the flag retired and the fact it protected is asserted directly.
     #[test]
     fn a_run_breaks_on_what_the_lane_does_not_show() {
         let history = vec![
@@ -1284,12 +956,25 @@ mod tests {
             user("[follow-up 2/3] still waiting"),
             assistant(vec![text("second")]),
         ];
-        let lane = pair_lane("scout", &history, &[]);
-        let contiguous: Vec<bool> = lane.iter().map(|item| item.contiguous).collect();
         assert_eq!(
-            contiguous,
-            vec![false, true, false],
-            "the chase is invisible here and still ends the run"
+            pair_texts(&history),
+            vec!["go", "first", "second"],
+            "the chase is not the user's conversation and does not render here"
+        );
+        let filed = walk(Protagonist::of("scout"), &history, &[]);
+        let between: Vec<(&Target, &str)> = filed
+            .iter()
+            .map(|item| (&item.target, item.post.text.as_str()))
+            .collect();
+        assert_eq!(
+            between,
+            vec![
+                (&Target::Dm(USER_NAME.to_string()), "go"),
+                (&Target::Dm(USER_NAME.to_string()), "first"),
+                (&Target::Intake, "follow-up · waiting for a reply"),
+                (&Target::Dm(USER_NAME.to_string()), "second"),
+            ],
+            "the chase stands between the two turns in the record the zoom reads"
         );
     }
 }

@@ -231,18 +231,34 @@ pub struct WatchEvent {
     pub signal: Option<String>,
     /// Milliseconds the watchable has been running (since registration).
     pub elapsed_ms: u64,
+    /// Whether this transition put a notification in the **main** agent's queue
+    /// (D106). The flow prints one line when a task notification reaches main's
+    /// context, and only the registry knows whether one did: a run registered
+    /// with `notify_owner: false` — the D98 rule for a turn the user started in
+    /// an agent's own conversation — reports its end to nobody, and a run owned
+    /// by a subagent reports it to that subagent.
+    pub notifies_main: bool,
 }
 
-/// Snapshot: for TUI initial render / state queries (the current display layer is driven
-/// by label; the API is reserved).
-#[allow(dead_code)]
+/// Snapshot: what the registry currently holds, for a surface that lists it
+/// rather than watching the broadcast go by.
+///
+/// The transcript is driven by [`WatchEvent`]s as they arrive; the background
+/// dialog's Shells section (D107) is the first reader that needs the *state of
+/// the world* instead — which commands are still running, which have finished
+/// and what they cost — so `kind` and `elapsed_ms` are carried here as well.
 #[derive(Debug, Clone)]
 pub struct WatchSnapshot {
     pub id: WatchId,
     pub label: String,
+    pub kind: WatchKind,
     pub state: WatchState,
     pub detail: Option<String>,
+    /// What a finished command printed — the shell detail's `Output:` tail.
     pub payload: Option<serde_json::Value>,
+    /// Milliseconds since registration — wall clock, unlike the host's frame
+    /// counter, so a row can say how long a command has been up.
+    pub elapsed_ms: u64,
 }
 
 /// Terminal notification pending injection into the model (adjacent Idle entries with the
@@ -281,9 +297,10 @@ struct Entry {
     /// DM — is a conversation between the two of them: its end owes the main
     /// agent no notification and no woken turn. Everything else (a dispatch, a
     /// `SendMessage` continuation, a background command) does, so `true` is the
-    /// default and the exception has to ask for itself. The lifecycle feed is
-    /// unaffected: it rides the broadcast, which is never suppressed, because
-    /// the team directory is a record of every run.
+    /// default and the exception has to ask for itself. The broadcast is
+    /// unaffected and is never suppressed: the run happened, and the surfaces
+    /// that draw a run — the dispatch row, the tree, the background dialog —
+    /// say so.
     notify_owner: bool,
 }
 
@@ -325,10 +342,10 @@ impl WatchRegistry {
 
     /// Register a watch that may keep its terminal states to itself (D98).
     ///
-    /// `notify_owner: false` means the run exists — it broadcasts, it is drawn,
-    /// the lifecycle feed records it — but its end enqueues nothing for the
-    /// session that owns it, so nothing wakes and nothing is injected. That is
-    /// the shape of a run the user started in an agent's DM.
+    /// `notify_owner: false` means the run exists — it broadcasts and it is
+    /// drawn — but its end enqueues nothing for the session that owns it, so
+    /// nothing wakes and nothing is injected. That is the shape of a run the
+    /// user started by writing to the agent directly.
     pub fn register_addressed(
         self: &Arc<Self>,
         watchable: Box<dyn Watchable>,
@@ -362,7 +379,9 @@ impl WatchRegistry {
             id
         };
         // Initial state is force-broadcast (set_state's idempotency would swallow a state equal to the entry's).
-        if notify_owner && (poll.state.is_terminal() || poll.state == WatchState::Idle) {
+        let notified = notify_owner && (poll.state.is_terminal() || poll.state == WatchState::Idle);
+        let notifies_main = notified && owner.is_none();
+        if notified {
             self.inner
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
@@ -386,6 +405,7 @@ impl WatchRegistry {
             payload: poll.payload.clone(),
             signal: None,
             elapsed_ms: 0,
+            notifies_main,
         });
         let interval = watchable.check_interval();
         if let Some(interval) = interval {
@@ -459,7 +479,7 @@ impl WatchRegistry {
     pub fn emit_signal(&self, id: WatchId, signal: String, detail: Option<String>) {
         // Single-signal cap: any long text fed by callers is cut off here.
         let signal = truncate_chars(&signal, MAX_SIGNAL_CHARS);
-        let (label, kind, state, entry_detail) = {
+        let (label, kind, state, entry_detail, notifies_main) = {
             let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
             let Some(entry) = inner.entries.get_mut(&id) else {
                 return;
@@ -473,6 +493,7 @@ impl WatchRegistry {
             let entry_detail = entry.detail.clone();
             let owner = entry.owner.clone();
             let notify_owner = entry.notify_owner;
+            let notifies_main = notify_owner && owner.is_none();
             if notify_owner {
                 inner.notifications.push_back(Notification {
                     id,
@@ -484,7 +505,7 @@ impl WatchRegistry {
                     owner,
                 });
             }
-            (label, kind, state, entry_detail)
+            (label, kind, state, entry_detail, notifies_main)
         };
         let elapsed_ms = {
             let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
@@ -505,6 +526,7 @@ impl WatchRegistry {
             payload: None,
             signal: Some(signal),
             elapsed_ms,
+            notifies_main,
         });
     }
 
@@ -524,7 +546,7 @@ impl WatchRegistry {
         detail: Option<String>,
         payload: Option<serde_json::Value>,
     ) {
-        let (label, kind) = {
+        let (label, kind, notifies_main) = {
             let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
             let Some(entry) = inner.entries.get_mut(&id) else {
                 return;
@@ -544,6 +566,7 @@ impl WatchRegistry {
             let kind = entry.kind;
             let owner = entry.owner.clone();
             let notify = entry.notify_owner && (state.is_terminal() || state == WatchState::Idle);
+            let notifies_main = notify && owner.is_none();
             if state.is_terminal() {
                 // After terminal, no more content feeding or condition matching: compact
                 // the entry and free the buffers.
@@ -564,7 +587,7 @@ impl WatchRegistry {
             if state.is_terminal() {
                 prune_terminal_entries(&mut inner);
             }
-            (label, kind)
+            (label, kind, notifies_main)
         };
         let elapsed_ms = {
             let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
@@ -583,6 +606,7 @@ impl WatchRegistry {
             payload,
             signal: None,
             elapsed_ms,
+            notifies_main,
         });
     }
 
@@ -590,21 +614,28 @@ impl WatchRegistry {
         self.tx.subscribe()
     }
 
-    /// Snapshot of all current watchables (TUI initial render / state queries).
-    #[allow(dead_code)]
+    /// Snapshot of every watchable the registry still holds, **oldest first**.
+    ///
+    /// The entries live in a map, so the order has to be imposed rather than
+    /// observed: ids are handed out in sequence, so sorting by id is start
+    /// order, which is the order a list of background work reads in.
     pub fn snapshot(&self) -> Vec<WatchSnapshot> {
         let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        inner
+        let mut out: Vec<WatchSnapshot> = inner
             .entries
             .iter()
             .map(|(id, e)| WatchSnapshot {
                 id: *id,
                 label: e.label.clone(),
+                kind: e.kind,
                 state: e.state,
                 detail: e.detail.clone(),
                 payload: e.payload.clone(),
+                elapsed_ms: e.born.elapsed().as_millis() as u64,
             })
-            .collect()
+            .collect();
+        out.sort_by_key(|snapshot| snapshot.id.0);
+        out
     }
 
     /// Whether there are unconsumed wake notifications (terminal or signal) — used to

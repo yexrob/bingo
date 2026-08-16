@@ -23,6 +23,18 @@ const MIN_DIFF_BODY: usize = 16;
 /// a millisecond count on every row is noise.
 pub const SLOW_TOOL_MS: u64 = 2_000;
 
+/// Progress lines shown under a running dispatch row — CC's
+/// `MAX_PROGRESS_MESSAGES_TO_SHOW` (`tools/AgentTool/UI.tsx:33`).
+pub const PROGRESS_LINES: usize = 3;
+
+/// What a dispatch row says before its instance has done anything —
+/// CC `INITIALIZING_TEXT` (`tools/AgentTool/UI.tsx:443`).
+pub const INITIALIZING: &str = "Initializing…";
+
+/// The opening of the condensed progress line CC falls back to when the window
+/// is too short to carry the per-tool rows (`tools/AgentTool/UI.tsx:497`).
+pub const IN_PROGRESS: &str = "In progress…";
+
 /// Tool-call lifecycle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolStatus {
@@ -69,6 +81,19 @@ impl ToolCall {
     }
 }
 
+/// What a dispatched run has cost so far: the two numbers CC's `Done (…)` line
+/// and its condensed progress line are both built from
+/// (`tools/AgentTool/UI.tsx:376`, `:497-499`).
+///
+/// Sampled from the registry while the run is alive and **frozen at the
+/// terminal event**, because the registry drops a run's progress the instant it
+/// finishes (`spawn_agent_loop` clears it one line before it reports `Done`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RunStats {
+    pub tool_uses: usize,
+    pub tokens: u64,
+}
+
 /// A watched entity (command/agent): header + round detail + expandable
 /// content.
 #[derive(Debug, Clone)]
@@ -83,6 +108,19 @@ pub struct WatchCall {
     pub detail: Option<String>,
     /// Milliseconds elapsed.
     pub duration_ms: u64,
+    /// Live progress under a running dispatch row (D106): the last
+    /// [`PROGRESS_LINES`] activity lines of the instance, oldest first, exactly
+    /// as CC shows the last three of a subagent's progress messages
+    /// (`tools/AgentTool/UI.tsx:33`, `:510`).
+    ///
+    /// Transient by construction: a message holding a *running* watch row never
+    /// settles ([`crate::tui::chat::Chat::message_settled`] asks
+    /// `Activity::is_running`), so these rows can never reach scrollback. What
+    /// does reach it is the settled form built from [`WatchCall::run_stats`].
+    pub progress: Vec<String>,
+    /// The run's cost. Live while the run is, frozen at the terminal event —
+    /// which is the row that settles.
+    pub run_stats: Option<RunStats>,
 }
 
 /// Whether a thinking block is still running.
@@ -119,9 +157,10 @@ pub struct Thinking {
 }
 
 /// Task lifecycle (pending → in_progress → completed).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TodoStatus {
     /// Not started.
+    #[default]
     Pending,
     /// In progress.
     InProgress,
@@ -130,12 +169,24 @@ pub enum TodoStatus {
 }
 
 /// A task item.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Carries the store's `id`, `owner` and `blocked_by` since D104: the panel
+/// names an owner who is a live instance and marks what a task is waiting on,
+/// and both are answers the row can only give if the snapshot brought them.
+/// **Display only** — there is no assignment protocol and no claiming here.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TodoItem {
+    /// Store id, which is what `blocked_by` names.
+    pub id: String,
     /// Task text.
     pub text: String,
     /// Lifecycle status.
     pub status: TodoStatus,
+    /// Who the store says is on it. Rendered only when it resolves to an
+    /// instance that is still on the roster.
+    pub owner: Option<String>,
+    /// Ids this task is waiting on. Rendered as those of them that are not done.
+    pub blocked_by: Vec<String>,
 }
 
 /// One line of a unified diff.
@@ -580,9 +631,32 @@ fn tool_result(t: &ToolCall, act: &Activity, theme: &Theme) -> Line {
     line
 }
 
+/// Who a run's watch label addresses. Every shape a dispatch label takes —
+/// `scout · fix the parser`, `scout #3 · look again`, `scout #7 receipt` —
+/// opens with the instance name, and that is the only part of it any surface
+/// needs in order to find the agent's colour, its face or its row.
+pub fn watch_instance(label: &str) -> &str {
+    label.split_whitespace().next().unwrap_or(label)
+}
+
+/// What a run's watch label says the run is *for*: everything after the first
+/// ` · `. A label without one (the ack watchdog's `scout #7 receipt`) has no
+/// description, and the row says nothing rather than repeating the address.
+pub fn watch_description(label: &str) -> &str {
+    label.split_once(" · ").map(|(_, rest)| rest).unwrap_or("")
+}
+
 /// `⏺ watch -n 2 ls` — same shape as a tool, driven by the watch lifecycle.
 /// A subagent's watch row (`WatchKind::Agent`) uses `◉`: a core inside a
 /// ring, a session inside a session.
+///
+/// **A dispatch row is written `@scout: fix the parser`** (D106), which is CC's
+/// own shape for a *named* spawn: `AgentProgressLine`'s `hideType` branch is
+/// `<Text bold>{name}</Text><Text dimColor>: {description}</Text>`
+/// (`components/AgentProgressLine.tsx` sourcesContent, and
+/// `tools/AgentTool/UI.tsx:687` where a named spawn's `agentType` becomes
+/// `@name`). It is also, letter for letter, the shape D104 gave the agent
+/// tree's rows — so the same run reads the same way wherever it is drawn.
 fn watch_header(w: &WatchCall, theme: &Theme, portrait: Option<&Portrait>) -> Line {
     let style = match w.status {
         WatchState::Running | WatchState::Idle => theme.dim(),
@@ -603,41 +677,138 @@ fn watch_header(w: &WatchCall, theme: &Theme, portrait: Option<&Portrait>) -> Li
             Line::styled(glyph, style)
         }
     };
-    line.push_styled(w.label.clone(), theme.text());
+    if w.kind == crate::watch::WatchKind::Agent {
+        line.push_styled(format!("@{}", watch_instance(&w.label)), theme.text());
+        let description = watch_description(&w.label);
+        if !description.is_empty() {
+            line.push_styled(format!(": {description}"), theme.dim());
+        }
+    } else {
+        line.push_styled(w.label.clone(), theme.text());
+    }
     line
 }
 
-fn watch_result(w: &WatchCall, act: &Activity, theme: &Theme, portrait: Option<&Portrait>) -> Line {
-    let mut body = match (&w.detail, w.status) {
-        (Some(detail), _) => detail.clone(),
-        (None, WatchState::Running) => "Running…".to_string(),
-        (None, WatchState::Idle) => "Waiting…".to_string(),
-        (None, WatchState::Done) => "Done".to_string(),
-        (None, WatchState::Failed) => "Failed".to_string(),
-        (None, WatchState::Cancelled) => "Cancelled".to_string(),
+/// `Done (12 tool uses · 8.3k tokens · 1m 4s)` — CC
+/// `tools/AgentTool/UI.tsx:376-377`, whose three parts are joined by ` · ` and
+/// whose duration is `formatDuration`. The stats formatter is D104's, shared
+/// rather than forked; the duration formatter is D104's too.
+pub fn dispatch_done_line(stats: Option<RunStats>, duration_ms: u64) -> String {
+    let stats = stats.unwrap_or_default();
+    format!(
+        "Done ({} · {})",
+        crate::tui::tree::stats_body(stats.tool_uses, stats.tokens),
+        crate::tui::tree::duration_label(std::time::Duration::from_millis(duration_ms))
+    )
+}
+
+/// `In progress… · 3 tool uses · 8.3k tokens` — CC's condensed progress line
+/// (`tools/AgentTool/UI.tsx:495-503`), the one it falls back to when the window
+/// is too short to carry a row per tool.
+pub fn dispatch_condensed_line(stats: Option<RunStats>) -> String {
+    let stats = stats.unwrap_or_default();
+    format!(
+        "{IN_PROGRESS} · {}",
+        crate::tui::tree::stats_body(stats.tool_uses, stats.tokens)
+    )
+}
+
+/// What hangs under a dispatch row (D106). One entry per row, first on the `⎿`
+/// connector and the rest on [`RESULT_INDENT`].
+///
+/// - **running**, room to spare: the instance's last [`PROGRESS_LINES`]
+///   activity lines, oldest first — CC keeps the tail of its progress messages
+///   and renders each in condensed style (`tools/AgentTool/UI.tsx:510`,
+///   `:553-556`); bingo's `recent_activity` entries are already exactly that
+///   line (`⏺ Read(src/lexer.rs)`), built by the same `tool_glyph` /
+///   `display_tool_name` / `summarize_input` the console uses. CC's grouping of
+///   consecutive read/search calls is not ported: its own comment marks it
+///   *ants only* (`:501`), so the shipped renderer prints the rows as they come.
+/// - **running**, short window: one [`dispatch_condensed_line`].
+/// - **finished**: one [`dispatch_done_line`], which is the form that settles.
+fn dispatch_body(w: &WatchCall, narrow: bool) -> Vec<String> {
+    match w.status {
+        WatchState::Done => vec![dispatch_done_line(w.run_stats, w.duration_ms)],
+        WatchState::Running | WatchState::Idle => {
+            if w.progress.is_empty() {
+                return vec![INITIALIZING.to_string()];
+            }
+            if narrow {
+                return vec![dispatch_condensed_line(w.run_stats)];
+            }
+            w.progress
+                .iter()
+                .rev()
+                .take(PROGRESS_LINES)
+                .rev()
+                .cloned()
+                .collect()
+        }
+        // A failure keeps D98's wording and its colour: the reason the run gave
+        // is the only useful thing left to say, and the `⚠` alert line below
+        // repeats the name for a reader who is not looking here.
+        WatchState::Failed => vec![w.detail.clone().unwrap_or_else(|| "Failed".to_string())],
+        WatchState::Cancelled => vec![w.detail.clone().unwrap_or_else(|| "Cancelled".to_string())],
+    }
+}
+
+/// The rows under a watch row's header. Commands and channels keep their single
+/// state line; a dispatch gets [`dispatch_body`], which is one row while it is
+/// finished or the window is short and up to [`PROGRESS_LINES`] while it works.
+fn watch_result(
+    w: &WatchCall,
+    act: &Activity,
+    theme: &Theme,
+    portrait: Option<&Portrait>,
+    narrow: bool,
+) -> Vec<Line> {
+    let agent = w.kind == crate::watch::WatchKind::Agent;
+    let mut bodies = if agent {
+        dispatch_body(w, narrow)
+    } else {
+        let mut body = match (&w.detail, w.status) {
+            (Some(detail), _) => detail.clone(),
+            (None, WatchState::Running) => "Running…".to_string(),
+            (None, WatchState::Idle) => "Waiting…".to_string(),
+            (None, WatchState::Done) => "Done".to_string(),
+            (None, WatchState::Failed) => "Failed".to_string(),
+            (None, WatchState::Cancelled) => "Cancelled".to_string(),
+        };
+        if w.status != WatchState::Running && w.duration_ms > SLOW_TOOL_MS {
+            body.push_str(&format!(" · Ran in {:.1}s", w.duration_ms as f64 / 1000.0));
+        }
+        vec![body]
     };
-    if w.status != WatchState::Running && w.duration_ms > SLOW_TOOL_MS {
-        body.push_str(&format!(" · Ran in {:.1}s", w.duration_ms as f64 / 1000.0));
+    if bodies.is_empty() {
+        bodies.push(INITIALIZING.to_string());
     }
     let style = if w.status == WatchState::Failed {
         theme.tool_error()
     } else {
         theme.dim()
     };
-    // The portrait's second row stands in for the `⎿` connector: it occupies the
-    // same gutter columns, so the body still hangs where the eye expects it.
-    let mut line = match portrait {
-        Some(p) => {
-            let mut line = p.bottom.clone();
-            line.push_styled(body, style);
-            line
+    let mut rows: Vec<Line> = Vec::with_capacity(bodies.len());
+    for (i, body) in bodies.into_iter().enumerate() {
+        // The portrait's second row stands in for the `⎿` connector: it occupies
+        // the same gutter columns, so the body still hangs where the eye expects
+        // it. Only the first row can take it — a face is two cells tall.
+        let mut line = match (i, portrait) {
+            (0, Some(p)) => {
+                let mut line = p.bottom.clone();
+                line.push_styled(body, style);
+                line
+            }
+            (0, None) => Line::styled(format!("{RESULT_CONNECTOR}{body}"), style),
+            _ => Line::styled(format!("{RESULT_INDENT}{body}"), style),
+        };
+        if i == 0
+            && let Some(hint) = expand_hint(act)
+        {
+            line.push_styled(format!(" ({hint})"), theme.muted());
         }
-        None => Line::styled(format!("{RESULT_CONNECTOR}{body}"), style),
-    };
-    if let Some(hint) = expand_hint(act) {
-        line.push_styled(format!(" ({hint})"), theme.muted());
+        rows.push(line);
     }
-    line
+    rows
 }
 
 fn header_for(h: &Activity, theme: &Theme, portrait: Option<&Portrait>) -> Line {
@@ -715,12 +886,17 @@ pub struct ActivityRowRange {
 /// `render_reply` renders a subagent's markdown reply (this module stays
 /// display-independent; bingo presents SubAgent as a Tool, so no recursion is
 /// needed — the parameter is kept to match the original contract).
+///
+/// `narrow` is CC's short-window fallback for dispatch rows
+/// (`tools/AgentTool/UI.tsx:469`): the caller measures the window, this decides
+/// what a row may spend on it.
 pub fn layout_activity(
     act: &Activity,
     path: &[usize],
     base_row: u16,
     theme: &Theme,
     portrait: Option<&Portrait>,
+    narrow: bool,
     render_reply: &mut dyn FnMut(&str) -> Vec<Line>,
 ) -> (Vec<Line>, Vec<ActivityRowRange>) {
     let mut header = header_for(act, theme, portrait);
@@ -733,7 +909,7 @@ pub fn layout_activity(
     match &act.kind {
         ActivityKind::Tool(t) => rows.push(tool_result(t, act, theme)),
         ActivityKind::Diff(d) => rows.push(diff_result(d, theme)),
-        ActivityKind::Watch(w) => rows.push(watch_result(w, act, theme, portrait)),
+        ActivityKind::Watch(w) => rows.extend(watch_result(w, act, theme, portrait, narrow)),
         ActivityKind::Thinking(_) => {}
     }
     let thinking = matches!(act.kind, ActivityKind::Thinking(_));
@@ -804,7 +980,7 @@ mod tests {
 
     fn render_lines_with(h: &Activity, portrait: Option<&Portrait>) -> Vec<Line> {
         let mut render = |_: &str| Vec::new();
-        let (rows, _) = layout_activity(h, &[0], 0, &Theme::dark(), portrait, &mut render);
+        let (rows, _) = layout_activity(h, &[0], 0, &Theme::dark(), portrait, false, &mut render);
         rows
     }
 
@@ -1151,10 +1327,12 @@ mod tests {
             status: WatchState::Running,
             detail: None,
             duration_ms: 0,
+            progress: Vec::new(),
+            run_stats: None,
         }));
         assert_eq!(
             text(&render_lines(&agent_watch)[0]),
-            "◉ reviewer · organizing notes"
+            "◉ @reviewer: organizing notes"
         );
 
         let channel_watch = Activity::new(ActivityKind::Watch(WatchCall {
@@ -1163,6 +1341,8 @@ mod tests {
             status: WatchState::Running,
             detail: Some("3 msgs · latest a: report".into()),
             duration_ms: 0,
+            progress: Vec::new(),
+            run_stats: None,
         }));
         let lines = render_lines(&channel_watch);
         assert_eq!(text(&lines[0]), "◇ #table");
@@ -1177,10 +1357,117 @@ mod tests {
             status: WatchState::Done,
             detail: Some("round 2".into()),
             duration_ms: 9000,
+            progress: Vec::new(),
+            run_stats: None,
         };
         let h = Activity::new(ActivityKind::Watch(w));
         let lines = render_lines(&h);
         assert_eq!(text(&lines[0]), "⏺ watch -n 2 ls");
         assert_eq!(text(&lines[1]), "  ⎿  round 2 · Ran in 9.0s");
+    }
+
+    /// Every shape a run's label takes opens with the instance name, and says
+    /// what the run is for after the first ` · ` — or says nothing, which is
+    /// better than repeating the address.
+    #[test]
+    fn a_label_names_the_instance_and_then_the_task() {
+        for (label, instance, description) in [
+            ("scout · fix the parser", "scout", "fix the parser"),
+            ("scout #3 · look again", "scout", "look again"),
+            ("scout #7 receipt", "scout", ""),
+            ("scout", "scout", ""),
+            ("林夏 · UI review", "林夏", "UI review"),
+            // A description may carry the separator itself; only the first
+            // one divides the label.
+            (
+                "zoe · run tests · then report",
+                "zoe",
+                "run tests · then report",
+            ),
+        ] {
+            assert_eq!(watch_instance(label), instance, "{label:?}");
+            assert_eq!(watch_description(label), description, "{label:?}");
+        }
+    }
+
+    /// D106's dispatch row: the last three activity lines while it works, one
+    /// condensed line when the window is short, and what the run cost once it
+    /// is over — which is the only one of the three that ever settles.
+    #[test]
+    fn a_dispatch_row_says_progress_then_cost() {
+        let mut w = WatchCall {
+            label: "scout · fix the parser".into(),
+            kind: crate::watch::WatchKind::Agent,
+            status: WatchState::Running,
+            detail: Some("produced 200 chars".into()),
+            duration_ms: 0,
+            progress: Vec::new(),
+            run_stats: None,
+        };
+
+        let rows = |w: &WatchCall, narrow: bool| -> Vec<String> {
+            let act = Activity::new(ActivityKind::Watch(w.clone()));
+            let mut render = |_: &str| Vec::new();
+            layout_activity(&act, &[0], 0, &Theme::dark(), None, narrow, &mut render)
+                .0
+                .iter()
+                .map(text)
+                .collect()
+        };
+
+        assert_eq!(
+            rows(&w, false),
+            vec![
+                "◉ @scout: fix the parser".to_string(),
+                format!("  ⎿  {INITIALIZING}"),
+            ],
+            "a run with nothing behind it yet"
+        );
+
+        w.progress = vec![
+            "⏺ Grep(fn main)".into(),
+            "⏺ Read(src/lexer.rs)".into(),
+            "⏺ Bash(cargo test)".into(),
+            "⏺ Edit(src/lexer.rs)".into(),
+        ];
+        w.run_stats = Some(RunStats {
+            tool_uses: 4,
+            tokens: 8_300,
+        });
+        assert_eq!(
+            rows(&w, false),
+            vec![
+                "◉ @scout: fix the parser",
+                "  ⎿  ⏺ Read(src/lexer.rs)",
+                "     ⏺ Bash(cargo test)",
+                "     ⏺ Edit(src/lexer.rs)",
+            ],
+            "the last three, oldest first, the first on the connector"
+        );
+
+        assert_eq!(
+            rows(&w, true),
+            vec![
+                "◉ @scout: fix the parser",
+                "  ⎿  In progress… · 4 tool uses · 8.3k tokens",
+            ],
+            "a short window trades the rows for the numbers"
+        );
+
+        w.status = WatchState::Done;
+        w.duration_ms = 64_000;
+        assert_eq!(
+            rows(&w, false),
+            vec![
+                "◉ @scout: fix the parser",
+                "  ⎿  Done (4 tool uses · 8.3k tokens · 1m 4s)",
+            ],
+            "and the settled form is the one that reaches scrollback"
+        );
+
+        // The `detail` a failure carries is its reason, and it keeps saying it.
+        w.status = WatchState::Failed;
+        w.detail = Some("connection reset".into());
+        assert_eq!(rows(&w, false)[1], "  ⎿  connection reset");
     }
 }

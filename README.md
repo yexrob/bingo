@@ -173,19 +173,21 @@ bingo starts even with no credentials: the welcome card carries onboarding (`/pr
 |---|---|
 | `Esc` | close the topmost dialog/menu/panel first / interrupt while busy / on double-press: clear the input, or open Rewind when it is empty |
 | `Ctrl+C` | interrupt while busy / clear text / exit on two presses with empty input |
-| `Ctrl+T` | toggle the task area |
+| `Ctrl+T` | cycle the status layer: the task area, then the agent tree, then closed |
+| `Shift+↑` / `Shift+↓` | open the agent tree and pick a row (`Enter` views it, `k` stops it) |
+| `Enter` (viewing) | send the draft to the agent on screen; `Esc` stops its run, then returns |
+| `Ctrl+Shift+O` | agent tree: hang a three-line message preview off each row |
 | `Ctrl+O` | open the transcript view: the whole session with every tool output, on its own screen (`ctrl+e` collapse · `/` search · `o` open the image in view · `q` close) |
 | `Ctrl+G` | compose the draft in `$VISUAL`/`$EDITOR` (or the readline chord `Ctrl+X Ctrl+E`); a non-zero exit keeps the draft |
 | `Ctrl+P` / `Ctrl+N` | prompt history — the same keys as `↑`/`↓`, including pulling a queued message back |
 | `Alt+B` / `Alt+F` | move one word, stopping at `/` `-` `_` `.` so a path is walked a segment at a time |
 | `Alt+D` / `Alt+Backspace` | kill one word forward / back (`Ctrl+W` takes the whole whitespace token) |
-| `Alt+K` | kill to the end of the line (this was `Ctrl+K` before the switcher took that key) |
+| `Ctrl+K` / `Alt+K` | kill to the end of the line |
 | `Ctrl+Y` / `Alt+Y` | yank the newest kill; `Alt+Y` right after it cycles the 10-entry kill ring |
 | `Shift+Enter` | insert a newline (wherever the terminal speaks the kitty keyboard protocol) |
-| `Ctrl+K` | switch conversation: every conversation in one list, type to filter, `Enter` opens, `Ctrl+X` stops a running agent |
-| `Ctrl+B` | move the running shell command to the background; with none running, manage background agents |
+| `Ctrl+B` | move the running shell command to the background; with none running, open the background dialog — agents, shells and rooms (`Enter` a detail, `f` foregrounds one, `x` stops one) |
 | `Ctrl+L` | clear and redraw |
-| `@` | mention a project file or a running agent: fuzzy dropdown, `Tab`/`Enter` inserts the relative path (or `@name`) |
+| `@` / `#` | at the start of a line, send the rest straight to that agent or room; mid-line, `@` mentions a project file or a running agent (fuzzy dropdown, `Tab`/`Enter` inserts) |
 | `Tab` | complete the slash command, its argument, the selected mention, or a `!` shell-history prefix |
 | `Shift+Tab` | cycle permission modes (default → acceptEdits → plan); in an approval prompt, take `Yes, and don't ask again this session` |
 | `Ctrl+E` | in an approval prompt, expand the full command/diff preview and the session rule it would install |
@@ -205,8 +207,6 @@ the system viewer),
 `/permissions [allow|deny|ask] [rule]`,
 `/mcp` (status) · `/mcp enable|disable [name|all]` · `/mcp reconnect <name>`,
 `/skills` (listing; `/skill-name` executes directly),
-`/open <@agent|#room|@main>` (enter a conversation; Tab completes from
-the ones that exist — `Ctrl+K` is the same door without typing a name),
 `/context` (usage),
 `/status`, `/config` (effective config with per-key source layer/env, current
 endpoint, unknown-key hints), `/compact` (force compaction), `/resume [name]` (resume a past
@@ -363,29 +363,34 @@ schema from a single source of truth):
   via the Agent tool's `agent` parameter.
 - Instances have names (`name` parameter, defaults to the definition name/
   `agent`, auto `-2`/`-3` on collisions); the turn that spawns one shows
-  `◉ name · task`, while a lifecycle event arriving when no turn is running no
-  longer writes into `@main` at all — the conversation bar, the team lifecycle
-  log and the instance's own DM carry it instead; history is kept after
-  completion.
+  `◉ @name: task` with the last three things the instance did under it (or one
+  `In progress… · 4 tool uses · 8.3k tokens` line in a short window), settling
+  into `Done (12 tool uses · 8.3k tokens · 1m 4s)`. A round that dispatched
+  several draws one `⏺ Running 2 agents…` block with a `├─ @name: task` row per
+  agent. A lifecycle event arriving when no turn is running no
+  longer writes into `@main` at all — the agent tree and the instance's own row
+  in the `Ctrl+B` dialog carry it instead; history is kept after completion.
 - `SendMessage` sends follow-up instructions to an instance (context
   preserved); queued while busy, delivered automatically at the end of the
   current turn. A sub-agent's `SendMessage(to: "main")` lands in the main
-  agent's inbox and wakes it when idle; nothing of the arrival is drawn —
-  what the user sees is only what the main agent then says. `urgent: true`
+  agent's inbox and wakes it when idle, and leaves one line in `@main`:
+  `@scout❯ <summary>` in the sender's identity colour, with the whole body
+  reachable only through the `ctrl+o` transcript. The summary is the send's own
+  optional `summary` field — five to ten words, offered on a sub-agent's schema
+  because a sub-agent's message is the one that gets drawn — falling back to the
+  message's first fifty columns where none was written. A room relay draws
+  nothing. `urgent: true`
   (sub-agent→main only) rings the terminal attention channel on arrival.
 - A run that **fails** draws one `⚠ @name · reason` line in `@main` and rings
-  the attention channel; done and cancelled draw nothing. A run whose trigger
-  was entirely the user's own DM messages produces no notification and no woken
-  turn for the main agent at all.
-- **The silence contract**: a turn the main agent was *woken* into — it is
-  digesting a notification, not answering the user — ends in one of two ways.
-  Either it says the thing the user needs to know or decide, which renders in
-  `@main` as the main agent speaking, or it replies with exactly `[[quiet]]`,
-  which renders as nothing at all: the dispatch row already carries the state
-  and the one-line result, so narrating a completion the user can see is noise.
-  The marker is recorded like any other reply — the record stays complete, only
-  the flow stays quiet — and in a turn the user typed into it renders literally,
-  because there it is a misfire.
+  the attention channel; a run that **completes** leaves one dim
+  `● @name completed · task` line where its notification reaches the main
+  agent's context; a cancellation draws nothing. A run the user triggered
+  themselves, by writing to the instance directly, produces no notification and
+  no woken turn for the main agent at all.
+- A turn the main agent was *woken* into — digesting a notification rather than
+  answering the user — ends like any other turn, in prose that renders in `@main`
+  as the main agent speaking. The noise control is the wake debounce and the
+  dispatch row's own state, not a marker that renders as nothing.
 - `AgentControl` can `list`/`stop`/`delete`.
 - Async by default: returns the instance name and task id immediately;
   completion notification is injected into the next turn's context.
@@ -481,36 +486,33 @@ With `settings.experimental.agentChannels: true`:
   channels allow interleaving.
 - Budget overflows freeze the channel and notify the main agent
   (`channelMessageLimit`/`agentMessageLimit` gates).
-- Channels appear as `◇ #name` rows in the transcript; `/open #name` enters one,
-  where you can post as the user.
+- Channels appear as `◇ #name` rows in the transcript; `#name <message>` in the
+  composer posts to one as the user.
 
-## Conversations
+## The transcript, and the one line that leaves it
 
-One terminal, one flow, one conversation at a time. `@main` — your conversation
-with the model — is one of them; a DM with a running subagent and a room are
-the others, and they all wear the same composer, the
-same keys, the same approval dialogs and the same transcript rendering. There is
-no separate screen to enter and no second set of controls to learn.
+One terminal, one conversation: yours with the main agent. The flow is that
+transcript in order — nothing else is spliced into it, nothing is replayed into
+it, and scrolling back shows one thread rather than a braid of visits.
 
-**Entering one** is `Ctrl+K` — every conversation in one list, most recently
-active first with `@main` pinned on top, filtered as you type, opened with
-Enter — or `/open @agent`, `/open #room`, `/open @main` (Tab completes from the
-conversations that exist); a running agent's DM also opens from the Ctrl+B
-manager with Enter, and a member or a room from the team directory. On the
-window's last row, a **conversation bar** lists the conversations you are *in* — presence
-for DMs (`●` running, `○` idle), an unread count, and the one you are in
-accented — and it appears only once there is more than one to switch between.
+**Saying one thing to somebody else** is a composer line that opens with a name.
+`@scout have a look at the parser` delivers the rest to scout's inbox **as you**,
+bypassing the model entirely: an idle or stopped instance is resumed, a running
+one takes it at its next tool round. `#build tests are green` posts to that room
+as `user`, joining you first — announced in the room's own log — if you are not
+a member. What you get back is a **transient** `Sent to @scout` above the
+composer: never a line in the flow, never in the model's history, gone at your
+next keystroke.
 
-**Saying one thing without going there**: from `@main`, a message that opens
-with a conversation's name delivers the rest to it and leaves you where you
-are — `@scout have a look at the parser` reaches scout, and the flow keeps a
-dim `→ @scout: have a look at the parser` receipt. A name that matches nothing
-is not an error and not magic: it is prose, and it goes to the model as typed.
-Inside a conversation there is no such rule, because the conversation you are
-in already *is* the destination. **Esc goes back to `@main`** —
-navigation before interruption, so a turn running behind you keeps running and
-its Esc-to-interrupt waits for you in `@main`. Ctrl+C is unchanged and stops the
-turn from anywhere.
+**A name that matches nothing is prose.** `@utils explain this code` is not an
+error and not magic — it goes to the model as typed, and opens an ordinary turn.
+
+The typeahead says which is which. At the start of a line, `@` lists every
+instance the send can reach — `@scout · send message · running`, stopped ones
+included, because a message resumes them — with project files under them; `#`
+lists the rooms as `#build · post to room`, adding `· joins you` where you are
+not a member. Mid-line the sigils mean what they always did: `@` is a file or
+agent reference, `#` is a hash in a sentence.
 
 ### Rewind
 
@@ -538,26 +540,6 @@ An option whose half is unavailable is dimmed and says why. **What rewind does
 not cover**: anything a `Bash` command wrote. A shell can change any file in any
 way and there is no pre-image to take before it does, so those changes stay.
 
-**What switching does**: the draft you were writing stays behind in the
-conversation you left and that conversation's own draft comes back; a `── @name ──`
-rule goes into the flow, followed by that conversation's last eight messages. From
-then on only that conversation prints. Everything else keeps accumulating where
-it already lives and counts up an unread badge — nothing is buffered on your
-behalf, so nothing can be lost by not looking at it. Coming back prints a
-`── @main ──` rule and whatever `@main` finished while you were away.
-
-Because scrollback is written once and never rewritten, a couple of excursions
-leave the same conversation on screen more than once. That is deliberate and the
-rules mark it; `Ctrl+O` (the transcript view) remains the complete record of the
-`@main` session.
-
-**Sending**: what you type goes to the conversation you are in — a DM delivers
-to that instance under your name, and a room posts to its log if you are a
-member of it. A room you are only watching refuses and says how to join. None of
-it starts a model turn. Slash
-commands are the exception and act on the application from anywhere, so `/model`
-in a DM is still `/model`.
-
 ## Rooms and the team
 
 A **room** is the only group conversation bingo has, and its members are any
@@ -565,51 +547,74 @@ subset of the team. It does not have to include you: agents form rooms among
 themselves to work something out, and creating one seats the creator and nobody
 else — `user` and `main` join only when named.
 
-A room you are in behaves like every other conversation: it is in the bar, in
-`Ctrl+K`, and you speak in it by typing. A room you are **not** in is not hidden
-— the team directory lists it, marked `you're not in`, and opening it gives you
-the same flow **read-only**, framed `── #parser · observer · read-only ──`, with
-`read-only · /join to speak in this room` standing under the composer. `/join`
-(or `j` on the room in the directory) makes you a member. There is no quiet way
-in: joining and leaving are written into the room as dim `· user joined · 14:32`
-lines that every member sees. `/leave` is the counterpart, and a room you leave
-drops off the bar while staying readable.
+You speak in a room with `#name <message>` from the composer. If you are not a
+member, that posts you in — there is no quiet way in, because joining and leaving
+are written into the room as dim `· user joined · 14:32` lines that every member
+sees. `/join #name` makes you a member without saying anything; `/leave #name` is
+the counterpart, and a room you leave stays readable.
 
-**The team is not a conversation** — you cannot say anything to it, so it is a
-directory rather than a board with a badge. `Ctrl+T` cycles tasks → team →
-closed. The directory shows the roster with presence and each member's rooms,
-every room with its members, and the last ten lifecycle events (spawn, done, and
-`/team` output). **Main is on the roster, first** — it is a participant like the
-rest, with a conversation, rooms and a record of its own — and Enter on its row
-goes to the console rather than to a DM. ↑/↓ move, Enter opens a member's
-conversation or a room, `o` opens a member's record, `j` joins the room under the
-cursor. It navigates and informs only — stopping an agent stays in the Ctrl+B
-manager, and main is not stoppable at all.
+**The status layer** is what says who is working. `Ctrl+T` cycles tasks → the
+agent tree → closed. The tree is `@main` plus one row per instance:
+`@scout: reading src/lib.rs… · 12 tool uses · 8.3k tokens` while it runs,
+`Idle for 14s` while it waits, `[stopped]` once it is stopped — names in their
+own colours, rebuilt from the registry every frame. `Shift+↑/↓` opens it and
+picks a row, `Enter` **views** the instance under the cursor, `k` stops it,
+`Ctrl+Shift+O` hangs a three-line preview of each one's conversation off its
+row, and `Esc` clears the cursor and then closes the panel. With the tree closed and anybody on the
+roster, one footer line names them: `@main @scout @writer · shift + ↓ to
+expand`, dim where they are resting. The task panel names an owner who is still
+here (` (@scout)`, in their colour) and what a task is waiting on
+(`› blocked by #3`) — display only, nothing assigns or claims.
 
-**Every participant has a page of its own, main included.** The perspective page
-is a read-only, two-level dossier of everything one of them has said and been
-told. The index groups its threads — a merged `timeline`, its `direct messages`
-one row per counterpart, its `rooms`, and the `intake` it was handed — with a
-count and a clock on each; Enter opens a thread, Esc walks back, `q` closes. A
-thread reads as a conversation with that participant as the protagonist: its
-thinking and tool calls are shown in *every* thread, whoever it was talking to.
-This is the audit layer — the one place an agent's conversations with someone
-other than you are visible, while your own DM with it stays a pair conversation
-and mixes nothing in. It is a snapshot: reopening is the refresh.
+**The zoomed view** puts one agent's conversation on the screen for as long as
+you want it there. `Enter` on a tree row — or `f` in the `Ctrl+B` dialog — swaps to
+`Viewing @scout · esc to return` over that agent's **whole record**: the task it
+was given, main's instructions, your own messages, its work folded the way
+`@main`'s is, its answers, and whatever it is streaming right now. The composer
+stays live and addresses the agent in its own colour: what you type reaches its
+inbox under your name and appears on the next frame, and a `/` or `!` line is a
+message rather than a command. `Esc` aborts a running turn first and returns on
+the next press; `Shift+Tab` cycles *that agent's* permission mode; `Shift+↑/↓`
+walks the roster and the view follows. Leaving puts the transcript back exactly
+where it was — nothing was spliced into it and nothing reprints.
 
-**Three doors reach it**: `tab` on an empty composer inside a conversation (the
-agent's page in `@agent`, main's in the console; a room has no single
-protagonist, so nothing happens there), `o` on a member in the team directory,
-and `tab` on an agent in the Ctrl+B manager's detail. Main's page is built from
-the session transcript — its console conversation as its `@user` lane, one lane
-per agent that wrote to it, its rooms, its dispatch notifications as intake —
-and the only clock a transcript carries is the turn marker, so times on it are
-turn times and a session recorded before those markers shows none.
+**The background dialog** is `Ctrl+B` with nothing running in the foreground:
+one modal over everything working in the background, in three sections. **Agents**
+is the roster and what each one is doing, with `(3 unread)` where its conversation
+has moved since you read it — in the accent where it said your name. **Shells** is
+the background commands, each with its status. **Rooms** is every room with its
+members and its message count, marked `you're not in` where you are not a member.
+`↑/↓` selects across all three, `Enter` opens a detail, `f` foregrounds an agent or
+a room into the zoomed view, `x` stops a running agent, `←`/`Esc` closes. Rows are
+ordered running-first and then by what moved last, and the cursor follows its row
+rather than a position. The team is not a conversation — you cannot say anything to
+it — so this is where the organization is read; the always-on version of the same
+roster is the agent tree, which leads with `@main`.
 
-**An `@agent` you have never spoken to says so.** An agent main spawned and you
-never wrote to has an empty pair view — its task and its report belong to main —
-so it opens with one dim line, `· no conversation yet · tab opens @scout's
-record ·`, instead of an empty screen under a rule.
+**What the transcript shows of a life it is not living** is four tiers and no
+more. A **dispatch** is `◉ @scout: fix the parser`, carrying the last three
+things the instance did while it runs — or one `In progress… · 4 tool uses ·
+8.3k tokens` line where the window is too short for them — and settling, when
+the run ends, into `Done (12 tool uses · 8.3k tokens · 1m 4s)`, which is what
+reaches scrollback. Several `Agent` calls from one round draw one
+`⏺ Running 2 agents…` block instead, with a `├─ @name: task` row each. A
+**completion** whose notification is the main agent's own adds one dim
+`● @scout completed · fix the parser`. A **message** from an agent adds one
+`@scout❯ <summary>` in the sender's colour. A **failure** adds one
+`⚠ @scout · connection reset` and rings the attention channel. Everything else
+— an instance starting, going idle, being stopped, a room post — writes nothing:
+state belongs to the tree, and a line per room post is the flood the digest
+debounce exists to prevent.
+
+**One walk decides who said what**, because the sender is not a field: an
+absorbed inbox arrives as one flat prompt and only its literal markers survive
+it. The zoomed view keeps every counterpart that walk finds; the unread count
+keeps exactly one, the pair of you and the agent. So the task an instance was
+created with, the main agent's instructions to it, room relays, mail from other
+agents and the chases for its silence are all somebody else's conversation and
+count as nothing of yours — and the default flips with whose record it is: in an
+instance's history unmarked prose is the main agent speaking, in the main
+agent's own history it is you.
 
 **Avatars**: on terminals that can place kitty images — the same capability
 behind inline image rendering (Ghostty/kitty, and tmux with passthrough) — each
@@ -627,8 +632,8 @@ it; work steps and system lines take the indentation and no face. Main has a
 reserved portrait of its own that no teammate can be dealt or pin, so the console
 looks the same in every session. One known degradation: a terminal that purges
 its image store (a resize does) gets the faces still on screen redrawn, but rows
-already in scrollback keep blank columns where the portrait was. In a DM or a
-channel the sender's name also heads each run of messages — with more than two
+already in scrollback keep blank columns where the portrait was. In the zoomed
+view the sender's name also heads each run of messages — with more than two
 speakers in a room, the name is not decoration. `experimental.chatAvatars` (off
 by default) governs one remaining thing: whether a subagent's watch row wears
 that agent's portrait in place of its `◉`.

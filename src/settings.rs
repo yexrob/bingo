@@ -147,7 +147,8 @@ pub struct TeamSettings {
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 pub struct ExperimentalSettings {
     /// Agent channels (`agentChannels`): when enabled, the main session gains
-    /// Channel/Post tools and direct subagents gain the Post tool.
+    /// the Channel tool, and every session may address a room it is in with
+    /// `SendMessage`.
     #[serde(rename = "agentChannels", default)]
     pub agent_channels: bool,
     /// Per-channel total message cap (`channelMessageLimit`, default 500; beyond it the
@@ -160,8 +161,8 @@ pub struct ExperimentalSettings {
     /// Faces in the main transcript (`chatAvatars`): when enabled, every message
     /// gets a sender band (portrait + name) and a subagent watch row wears the
     /// instance's portrait. Off = the transcript carries no portraits at all.
-    /// The workspace views (DM, channel, team) are not governed by this switch —
-    /// there the portrait sits in a gutter the layout already spends.
+    /// The zoomed view is not governed by this switch — there the portrait
+    /// sits in a gutter the layout already spends.
     #[serde(rename = "chatAvatars", default)]
     pub chat_avatars: bool,
 }

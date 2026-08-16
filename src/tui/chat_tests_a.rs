@@ -388,7 +388,6 @@ pub(super) fn msg(role: Role, text: &str) -> UiMessage {
         insert_points: Vec::new(),
         groups: Vec::new(),
         group_of: Vec::new(),
-        digest: false,
     }
 }
 
@@ -501,6 +500,7 @@ fn agent_watch_rows_wear_the_instance_face_only_where_images_place() {
             duration_ms: 0,
             payload: None,
             signal: None,
+            notifies_main: false,
         });
         chat.build_rows(80);
         chat.doc
@@ -514,7 +514,7 @@ fn agent_watch_rows_wear_the_instance_face_only_where_images_place() {
     chip.chat_avatars = true;
     let rows = watch(&mut chip);
     assert!(
-        rows.iter().any(|r| r.contains("◉ 林夏 · UI review")),
+        rows.iter().any(|r| r.contains("◉ @林夏: UI review")),
         "chip terminals keep the glyph: {rows:?}"
     );
     assert!(
@@ -532,7 +532,7 @@ fn agent_watch_rows_wear_the_instance_face_only_where_images_place() {
     let rows = watch(&mut placed);
     let header = rows
         .iter()
-        .find(|r| r.contains("林夏 · UI review"))
+        .find(|r| r.contains("@林夏: UI review"))
         .unwrap_or_else(|| panic!("watch row present: {rows:?}"));
     assert!(
         header.contains(gfx::PLACEHOLDER) && !header.contains('◉'),
@@ -602,6 +602,7 @@ fn without_the_switch_the_transcript_wears_no_band() {
         duration_ms: 0,
         payload: None,
         signal: None,
+        notifies_main: false,
     });
     chat.build_rows(80);
     let rows: Vec<String> = chat
@@ -617,7 +618,7 @@ fn without_the_switch_the_transcript_wears_no_band() {
         "no band names a speaker over a message: {rows:?}"
     );
     assert!(
-        rows.iter().any(|r| r.contains("◉ 林夏 · UI review")),
+        rows.iter().any(|r| r.contains("◉ @林夏: UI review")),
         "the watch row keeps its glyph: {rows:?}"
     );
     // The gutter is a different thing and is always on (D99): the portrait
@@ -937,6 +938,8 @@ fn running_status_verb_priority() {
             status: WatchState::Running,
             detail: Some("produced 43 chars".into()),
             duration_ms: 0,
+            progress: Vec::new(),
+            run_stats: None,
         })));
     let verb = chat.running_status().expect("busy status").verb;
     assert_eq!(
@@ -2851,7 +2854,6 @@ fn slash_dispatch_covers_every_table_entry() {
         ("skills", "skills"),
         ("tasks", "tasks"),
         ("team", "team"),
-        ("open", "open"),
         ("join", "join"),
         ("leave", "leave"),
     ];

@@ -28,7 +28,7 @@
 //! display-row updates are orchestrated by the tool layer (`tool::channel`). The main
 //! agent's member name is always `main`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
@@ -198,8 +198,46 @@ struct Inner {
     /// surface that rings the bell are different readers on different clocks,
     /// and a bell owed must survive the drain that beat it.
     main_mail_urgent: bool,
+    /// What the transcript owes the screen about that inbox (D106), kept beside
+    /// it rather than inside it: [`Inner::main_mail`] is a byte contract with
+    /// the model — the marker on each line is what
+    /// [`crate::tui::buffer::line_source`] reads back — and a renderer that had
+    /// to un-format it would be reading the model's mail over its shoulder.
+    ///
+    /// One entry per direct message that landed for `main`, drained by whatever
+    /// draws the flow. Room relays are deliberately absent: see
+    /// [`ChannelRegistry::drain_main_arrivals`].
+    main_arrivals: VecDeque<MainArrival>,
     limits: ChannelLimits,
 }
+
+/// A message that arrived for the main agent, as the transcript needs it: who
+/// sent it, what they said, and the one-line preview they wrote for it. The
+/// flow prints one line of this and keeps the body for the `ctrl+o` transcript.
+///
+/// **The summary rides the mirror and not the mail** (D108). CC's field travels
+/// in the envelope of its *teammate* runtime, as a `summary="…"` attribute its
+/// renderer parses back out of the recipient's own prompt text
+/// (`utils/teammateMailbox.ts:386`); its **subagent** runtime — the one v4
+/// replicates — passes only the message and drops the summary before the
+/// recipient sees it (`SendMessageTool.ts:810-814`). bingo matches the
+/// subagent: [`Inner::main_mail`] is byte-identical to what it was, so the
+/// model reads exactly what was said to it and the preview is a fact about the
+/// screen alone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MainArrival {
+    pub from: String,
+    pub text: String,
+    /// The sender's own 5-10 word preview, when it wrote one. `None` is the
+    /// ordinary case and the renderer's fallback — the message's first line —
+    /// is CC's own (`SendMessageTool.ts:765`).
+    pub summary: Option<String>,
+}
+
+/// Cap on the undrained arrivals mirror. Nothing drains it outside the TUI —
+/// `-p` runs deliver mail with no flow to print it into — so it is bounded and
+/// drops the oldest, exactly as the feed buffers in [`crate::watch`] do.
+const MAX_MAIN_ARRIVALS: usize = 256;
 
 /// Session-level channel registry (Session holds the Arc; shared by child sessions).
 pub struct ChannelRegistry {
@@ -255,6 +293,7 @@ impl ChannelRegistry {
                 channels: HashMap::new(),
                 main_mail: Vec::new(),
                 main_mail_urgent: false,
+                main_arrivals: VecDeque::new(),
                 limits,
             }),
             share: Mutex::new(None),
@@ -331,8 +370,8 @@ impl ChannelRegistry {
     /// Nobody is seated behind the caller's back. Auto-seating `main` and
     /// `user` made every room the user's room by construction, which is the one
     /// thing the room model says a room is not: agents form rooms among
-    /// themselves, and the user reaches those by finding them in the directory
-    /// and joining. Who *should* be seated on creation is policy, and policy
+    /// themselves, and the user reaches those by finding them in the
+    /// background dialog's Rooms section and joining. Who *should* be seated on creation is policy, and policy
     /// lives at the tool layer, where the creator's identity is known
     /// ([`crate::tool::channel`] stamps it) and where member existence and
     /// depth are already validated.
@@ -396,27 +435,14 @@ impl ChannelRegistry {
     }
 
     /// Is this name currently seated in the room? The one question the display
-    /// side asks: a room the user is in is a conversation of theirs (bar,
-    /// switcher, composer), a room they are not in is a place they can read.
+    /// side asks: a room the user is in is a conversation of theirs (the
+    /// composer's `#room` send, the accounting store), a room they are not in
+    /// is a place they can read.
     pub fn is_member(&self, name: &str, member: &str) -> bool {
         self.lock()
             .channels
             .get(name)
             .is_some_and(|ch| ch.members.iter().any(|m| m == member))
-    }
-
-    /// Every room this member is seated in, by name, sorted. The directory
-    /// prints it beside the member; nothing else needs it.
-    pub fn rooms_of(&self, member: &str) -> Vec<String> {
-        let inner = self.lock();
-        let mut out: Vec<String> = inner
-            .channels
-            .iter()
-            .filter(|(_, ch)| ch.members.iter().any(|m| m == member))
-            .map(|(name, _)| name.clone())
-            .collect();
-        out.sort();
-        out
     }
 
     /// Seat a member and write the join into the room's record.
@@ -682,10 +708,31 @@ impl ChannelRegistry {
     /// It rides the room relays' store because the main agent has one inbox and
     /// one place it is injected from; what tells the two apart is the marker on
     /// the line, which is also what lets a reader attribute it.
-    pub fn deliver_to_main(&self, from: &str, text: &str, urgent: bool) {
+    pub fn deliver_to_main(&self, from: &str, text: &str, summary: Option<&str>, urgent: bool) {
         let mut inner = self.lock();
         inner.main_mail.push(format_main_message(from, text));
         inner.main_mail_urgent |= urgent;
+        inner.main_arrivals.push_back(MainArrival {
+            from: from.to_string(),
+            text: text.to_string(),
+            summary: summary.map(str::to_string),
+        });
+        while inner.main_arrivals.len() > MAX_MAIN_ARRIVALS {
+            inner.main_arrivals.pop_front();
+        }
+    }
+
+    /// Take the direct messages that landed for `main` since the last look, for
+    /// the surface that draws them (D106's `@scout❯ <summary>` line).
+    ///
+    /// **Direct messages only.** A room relay lands in the same inbox and wakes
+    /// main on the same debounce, and it is deliberately not mirrored here: a
+    /// room is a conversation between agents that main happens to overhear, and
+    /// a line per post is exactly the flood D98's debounce exists to prevent.
+    /// The room's own surfaces are its zoom and the digest main writes after
+    /// reading it.
+    pub fn drain_main_arrivals(&self) -> Vec<MainArrival> {
+        self.lock().main_arrivals.drain(..).collect()
     }
 
     /// Take the pending attention request, if any. Reading it clears it: the
@@ -746,10 +793,9 @@ mod tests {
         reg.invite("table", USER_NAME)
             .unwrap_or_else(|e| panic!("{e}"));
         assert!(reg.is_member("table", USER_NAME));
-        assert_eq!(reg.rooms_of(USER_NAME), vec!["table"]);
         reg.kick("table", USER_NAME)
             .unwrap_or_else(|e| panic!("{e}"));
-        assert!(reg.rooms_of(USER_NAME).is_empty());
+        assert!(!reg.is_member("table", USER_NAME));
         reg.remove_member_everywhere("a");
         assert_eq!(reg.list()[0].members, vec!["c"]);
         // Single-room snapshot and full-log accessors. The log is not empty:

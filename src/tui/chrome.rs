@@ -506,24 +506,32 @@ fn caret_cell(chat: &Chat) -> (usize, usize) {
     (row - start, col)
 }
 
+/// The identity colour of whoever the composer is addressing, or `None` for
+/// main — which has the composer's own colour and always did.
+fn addressee_color(chat: &Chat) -> Option<Color> {
+    let name = chat.zoom_subject()?;
+    let palette = crate::tui::avatar::Palette::new(&chat.theme);
+    let gutter = crate::tui::avatar::Gutter::new(false, &palette, &chat.faces_pinned);
+    Some(palette.avatars[gutter.index_for(&name) % palette.avatars.len()])
+}
+
 /// Input box (top border + input rows + bottom border) with the caret attached
 /// to the input line it sits on.
 pub(crate) fn prompt(chat: &Chat, width: usize) -> El {
     let theme = &chat.theme;
-    // While a DM is the conversation, the box wears that teammate's colour
-    // (D90). Bash mode still wins: `!` changes what the box *does*, and what a
-    // surface does outranks who is on the other end of it.
-    let tint = chat.teammate_tint();
+    // Bash mode is the one thing that recolours the box: `!` changes what the
+    // box *does*. D90's teammate tint retired with the DM buffer it belonged
+    // to; D105 gives the colour back — to the *zoom's* composer, where there is
+    // somebody on the other end again. CC tints the same two things there, the
+    // prompt character and the rule around the box
+    // (`PromptInputModeIndicator.tsx:79-82`, `useSwarmBanner.ts:92-100`).
+    let addressee = addressee_color(chat);
     let border_color = if chat.bash_mode {
         theme.bash_border
     } else {
-        tint.unwrap_or(theme.prompt_border)
+        addressee.unwrap_or(theme.prompt_border)
     };
-    // A main turn dims main's own prompt. It does not dim a DM's: a message
-    // to a subagent is a delivery, never a turn (D89), so the composer is live
-    // there whatever the model is doing, and dimming it would promise a wait
-    // that is not happening.
-    let prompt_style = if chat.busy && tint.is_none() {
+    let prompt_style = if chat.busy && addressee.is_none() {
         theme.text_secondary
     } else {
         theme.text
@@ -531,7 +539,7 @@ pub(crate) fn prompt(chat: &Chat, width: usize) -> El {
     let (prefix, prefix_color) = if chat.bash_mode {
         ("! ".to_string(), theme.bash_border)
     } else {
-        ("❯ ".to_string(), tint.unwrap_or(prompt_style))
+        ("❯ ".to_string(), addressee.unwrap_or(prompt_style))
     };
     let bar = "─".repeat(width.saturating_sub(2));
     let mut children = vec![El::Line(Line::styled(
@@ -584,6 +592,9 @@ pub(crate) fn chrome(chat: &Chat, width: usize, fullscreen: bool) -> El {
         )));
     }
     children.push(El::Lines(chat.task_lines()));
+    // The agent tree (D104), the ctrl+t cycle's second stop, in the same slot
+    // the task area occupies — the two are one gesture and never both open.
+    children.push(El::Rows(chat.agent_tree_rows(width)));
     if let Some(warning) = chat.visible_warning() {
         children.push(El::Line(Line::styled(
             format!("  ⚠ {warning}"),
@@ -593,9 +604,7 @@ pub(crate) fn chrome(chat: &Chat, width: usize, fullscreen: bool) -> El {
     for line in chat.help_lines() {
         children.push(El::Row(dim_row(line, theme)));
     }
-    children.push(El::Rows(chat.agent_manager_rows(width)));
-    children.push(El::Rows(chat.switcher_rows(width)));
-    children.push(El::Rows(chat.directory_view_rows(width)));
+    children.push(El::Rows(chat.dialog_view_rows(width)));
     children.push(El::Rows(chat.rewind_rows(width)));
 
     // Pinned panels (login flows, long-operation progress): persistent until
@@ -628,11 +637,6 @@ pub(crate) fn chrome(chat: &Chat, width: usize, fullscreen: bool) -> El {
     if let Some(hint) = chat.queue_hint() {
         children.push(El::Row(dim_row(hint, theme)));
     }
-    // A room the user is only watching says so where the answer is needed —
-    // under the composer, before they type into it (D95).
-    if let Some(hint) = chat.observer_hint() {
-        children.push(El::Row(dim_row(hint, theme)));
-    }
     if let Some(s) = suggestion_area.take() {
         children.push(s);
     }
@@ -643,14 +647,96 @@ pub(crate) fn chrome(chat: &Chat, width: usize, fullscreen: bool) -> El {
     if chat.pending_ask.is_some() {
         children.push(El::Row(dim_row("Waiting for permission…", theme)));
     }
-    // The conversation bar owns the last row of the window (D97). It used to
-    // sit directly on the composer, on the argument that it is *about* the
-    // composer; the bar is better read as this window's status area — where
-    // you are, what is unread — and a status area belongs at the bottom edge,
-    // which is where the eye already goes for it. It still contributes no rows
-    // at all when there is only one conversation (D90).
-    children.push(El::Rows(chat.conversation_bar_rows(width)));
+    // D97 gave the last row of the window to the conversation bar, D103 retired
+    // it with the conversations it listed, and D104's footer pills take the slot
+    // back. They name who exists and the key that expands them, and they are off
+    // while the tree is open — the tree says everything a pill would.
+    if let Some(pills) = chat.pill_row(width) {
+        children.push(El::Row(pills));
+    }
     El::Col(children)
+}
+
+/// Everything under the zoomed view's body (D105): the status layer, the
+/// composer that is addressing the agent, and the hint row.
+///
+/// It is the inline host's own furniture, in the inline host's own order —
+/// tree, warning, composer, footer, pills — because CC's zoom keeps its footer
+/// too: the transcript area is what swaps, not the chrome around it
+/// (`REPL.tsx:4565-4570` replaces `Messages`' source and nothing else). What is
+/// left out is what belongs to a turn this screen is not showing: the running
+/// status row, the task area, the queue lines, the manager and the menus.
+pub(crate) fn zoom_chrome(chat: &Chat, width: usize) -> El {
+    let theme = &chat.theme;
+    // One blank row between the conversation and the furniture under it: the
+    // transcript gets the same breath from its per-message spacing, and without
+    // it the last thing the agent said sits on top of the tree.
+    let mut children: Vec<El> = vec![El::Blank, El::Rows(chat.agent_tree_rows(width))];
+    if let Some(warning) = chat.visible_warning() {
+        children.push(El::Line(Line::styled(
+            format!("  ⚠ {warning}"),
+            SegStyle::fg(theme.warning),
+        )));
+    }
+    children.push(prompt(chat, width));
+    // The transient notice — `Press ctrl-c again to exit` and its neighbours —
+    // rides here for the same reason it rides the inline footer: a key that
+    // arms a window has to say the window is open.
+    if let Some(text) = chat.notice {
+        children.push(El::Row(dim_row(text, theme)));
+    }
+    children.push(El::Row(zoom_footer(chat, width)));
+    if let Some(pills) = chat.pill_row(width) {
+        children.push(El::Row(pills));
+    }
+    El::Col(children)
+}
+
+/// The zoom's hint row: the **viewed agent's** permission mode, then what the
+/// keys mean here.
+///
+/// CC swaps the teammate's mode into exactly this slot while it has the screen
+/// (`PromptInput.tsx:342-351`, rendered at `PromptInputFooterLeftSide.tsx:349-357`),
+/// and replaces `esc to interrupt` with the return hint (`:377-379`). bingo says
+/// both meanings of `esc` because it has both: one press stops the run, the next
+/// one leaves.
+fn zoom_footer(chat: &Chat, width: usize) -> Row {
+    let theme = &chat.theme;
+    let mut line = Line::styled("  ", SegStyle::fg(theme.text));
+    for (text, color) in mode_badge(
+        chat.zoom_permission_mode()
+            .unwrap_or(PermissionMode::Default),
+        theme,
+    ) {
+        line.push_styled(text, SegStyle::fg(color));
+        line.push_styled(" ", SegStyle::fg(theme.text_secondary));
+    }
+    // Two tiers, longest first — the widest that fits whole wins, exactly as
+    // the transcript pager's footer chooses. A room has
+    // neither a permission mode nor a roster position, so its row says the one
+    // thing that is true there rather than advertising two keys that do
+    // nothing.
+    let tiers: [&str; 2] = match (chat.zoomed().is_some(), chat.zoom_stoppable()) {
+        (false, _) => ["esc to return", "esc to return"],
+        (true, true) => [
+            "esc stops the run · shift + tab to cycle mode · shift + ↑/↓ to switch",
+            "esc stops the run · shift + tab · shift + ↑/↓",
+        ],
+        (true, false) => [
+            "esc to return · shift + tab to cycle mode · shift + ↑/↓ to switch",
+            "esc to return · shift + tab · shift + ↑/↓",
+        ],
+    };
+    let room = width.saturating_sub(text_width(&line.plain_text()) + 2);
+    let hint = tiers
+        .iter()
+        .find(|tier| text_width(tier) <= room)
+        .unwrap_or(&tiers[1]);
+    line.push_styled(
+        crate::tui::chat::one_line(hint, room),
+        SegStyle::fg(theme.text_secondary),
+    );
+    Row::new(line)
 }
 
 /// #18 full-flow full-screen error-state skeleton (AC-26/53, ui/ux #68 spec): error title +
@@ -780,6 +866,47 @@ mod tests {
                 + 1
                 + 1
         );
+    }
+
+    /// The status layer takes its two slots in the composition, and only one of
+    /// them at a time (D104): the tree sits where the task area does, the pills
+    /// take the last row the conversation bar vacated, and an open tree turns
+    /// the pills off.
+    #[test]
+    fn the_status_layer_takes_the_task_slot_and_the_last_row() {
+        let mut chat = chat_at(100, 40);
+        let base = rows_of(chrome(&chat, 100, false)).len();
+        chat.session.agents.insert(
+            "scout",
+            crate::agents::AgentKind::Hire,
+            None,
+            "test instance".to_string(),
+            chat.session.clone(),
+        );
+
+        let rows = rows_of(chrome(&chat, 100, false));
+        let text: Vec<String> = rows.iter().map(row_text).collect();
+        assert_eq!(rows.len(), base + 1, "the pills are one row: {text:?}");
+        let pills = text.last().cloned().unwrap_or_default();
+        assert!(
+            pills.contains("@main @scout") && pills.contains("shift + ↓ to expand"),
+            "and they are the last row of the window: {pills}"
+        );
+
+        chat.open_agent_tree();
+        let rows = rows_of(chrome(&chat, 100, false));
+        let text: Vec<String> = rows.iter().map(row_text).collect();
+        assert_eq!(
+            rows.len(),
+            base + 2,
+            "the tree is two rows and the pills went with it: {text:?}"
+        );
+        assert!(
+            !text.iter().any(|line| line.contains("shift + ↓ to expand")),
+            "the tree and the pills never share a frame: {text:?}"
+        );
+        assert!(text.iter().any(|line| line.contains("@main")), "{text:?}");
+        assert!(text.iter().any(|line| line.contains("@scout")), "{text:?}");
     }
 
     /// The suggestion area's row count and content are naturally one source (the old two-branch rules once disagreed,
@@ -1452,137 +1579,19 @@ mod tests {
         );
     }
 
-    /// D90: while a DM is the conversation, the composer wears that teammate's
-    /// colour — the border and the `❯` alike — and main restores the
-    /// default. Checked in both themes, because a tint verified in only one is
-    /// a tint that works in only one.
+    /// Every state that writes near the bottom composes around the composer
+    /// without overlapping it or displacing it: busy status, an open picker, a
+    /// pending permission. Rewritten for D103, which retired the conversation
+    /// bar that used to own the last row — the floor is the footer again.
     #[test]
-    fn a_dm_tints_the_composer_in_its_teammates_colour() {
-        use crate::tui::buffer::BufferId;
-        use crate::tui::theme::{Theme, ThemeSetting};
-
-        for setting in [ThemeSetting::Dark, ThemeSetting::Light] {
-            let mut chat = chat_at(80, 24);
-            chat.theme = Theme::for_terminal(setting, None);
-            chat.session.agents.insert(
-                "scout",
-                crate::agents::AgentKind::Hire,
-                None,
-                "research".into(),
-                chat.session.clone(),
-            );
-            chat.refresh_conversations();
-
-            let main_prompt = rows_of(prompt(&chat, 40));
-            let default = Some(chat.theme.prompt_border);
-            assert_eq!(main_prompt[0].line.segs[0].style.fg, default, "{setting:?}");
-
-            chat.switch_to(BufferId::Dm("scout".into()));
-            let tint = chat.teammate_tint().expect("a DM has a teammate");
-            assert_ne!(
-                Some(tint),
-                default,
-                "the tint is a colour of its own in {setting:?}"
-            );
-            let dm = rows_of(prompt(&chat, 40));
-            assert_eq!(dm[0].line.segs[0].style.fg, Some(tint), "top {setting:?}");
-            assert_eq!(
-                dm[dm.len() - 1].line.segs[0].style.fg,
-                Some(tint),
-                "bottom {setting:?}"
-            );
-            assert!(row_text(&dm[1]).starts_with("❯ "), "{setting:?}");
-            assert_eq!(
-                dm[1].line.segs[0].style.fg,
-                Some(tint),
-                "the prompt glyph too, in {setting:?}"
-            );
-
-            chat.switch_to(BufferId::Hub);
-            let back = rows_of(prompt(&chat, 40));
-            assert_eq!(
-                back[0].line.segs[0].style.fg, default,
-                "main restores the default accent in {setting:?}"
-            );
-        }
-    }
-
-    /// The bar is a chrome tier like every other, so it reaches both hosts from
-    /// the same tree and renders identically in each — and it owns the window's
-    /// last row, which is where a status area belongs (D97).
-    #[test]
-    fn the_conversation_bar_reaches_both_hosts_identically() {
+    fn the_bottom_states_compose_around_the_composer() {
         let mut chat = chat_at(100, 40);
-        assert!(
-            !rows_of(chrome(&chat, 100, false))
-                .iter()
-                .any(|row| row_text(row).contains("@main")),
-            "a lone console spends no row on a bar"
-        );
-
-        chat.session.agents.insert(
-            "scout",
-            crate::agents::AgentKind::Hire,
-            None,
-            "research".into(),
-            chat.session.clone(),
-        );
-        chat.refresh_conversations();
-
-        let find_bar = |fullscreen: bool| {
-            let rows = rows_of(chrome(&chat, 100, fullscreen));
-            let at = rows
-                .iter()
-                .position(|row| row_text(row).contains("@scout"))
-                .expect("the bar is rendered");
-            assert_eq!(
-                at + 1,
-                rows.len(),
-                "the bar is the last chrome row: {:?}",
-                rows.iter().map(row_text).collect::<Vec<_>>()
-            );
-            assert!(
-                rows[..at].iter().any(|row| row_text(row).starts_with('╭')),
-                "and the composer is above it"
-            );
-            row_text(&rows[at])
-        };
-        assert_eq!(
-            find_bar(false),
-            find_bar(true),
-            "both hosts render the same bar"
-        );
-        assert!(find_bar(false).contains("@main"), "and it names main too");
-    }
-
-    /// Every state that writes near the bottom composes around the bar without
-    /// overlapping it or displacing it: busy status, a pending permission, an
-    /// open picker, an observed room's hint. The bar is the floor of the
-    /// window and nothing else may end up under it.
-    #[test]
-    fn the_bottom_states_compose_around_the_bar() {
-        let mut chat = chat_at(100, 40);
-        chat.session.agents.insert(
-            "scout",
-            crate::agents::AgentKind::Hire,
-            None,
-            "research".into(),
-            chat.session.clone(),
-        );
-        chat.refresh_conversations();
         chat.busy = true;
         chat.set_input("/theme");
         chat.run_slash("theme");
 
         for fullscreen in [false, true] {
             let rows = rows_of(chrome(&chat, 100, fullscreen));
-            let last = rows.last().map(row_text).unwrap_or_default();
-            assert!(
-                last.contains("@scout"),
-                "the bar is the last row in {}: {:?}",
-                if fullscreen { "fullscreen" } else { "inline" },
-                rows.iter().map(row_text).collect::<Vec<_>>()
-            );
             let text: Vec<String> = rows.iter().map(row_text).collect();
             assert_eq!(
                 text.iter().filter(|r| r.starts_with('╭')).count(),
@@ -1594,42 +1603,13 @@ mod tests {
                 "the open picker still renders: {text:?}"
             );
             assert!(
-                text.iter()
-                    .take(rows.len() - 1)
-                    .any(|r| r.contains("Working")),
-                "and the busy row is above it all: {text:?}"
+                text.iter().any(|r| r.contains("Working")),
+                "and the busy row renders with it: {text:?}"
+            );
+            assert!(
+                !text.iter().any(|r| r.contains("@main")),
+                "and nothing draws a conversation bar any more: {text:?}"
             );
         }
-    }
-
-    /// The switcher renders where the ctrl+b manager does, in the same frame,
-    /// so the two overlays are one object in one place.
-    #[test]
-    fn the_switcher_renders_as_an_overlay() {
-        let mut chat = chat_at(100, 40);
-        chat.session.agents.insert(
-            "scout",
-            crate::agents::AgentKind::Hire,
-            None,
-            "research".into(),
-            chat.session.clone(),
-        );
-        chat.refresh_conversations();
-        assert!(
-            !rows_of(chrome(&chat, 100, false))
-                .iter()
-                .any(|row| row_text(row).contains("Switch conversation")),
-            "closed, it costs nothing"
-        );
-
-        chat.open_switcher();
-        let text = rows_of(chrome(&chat, 100, false))
-            .iter()
-            .map(row_text)
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(text.contains("Switch conversation"), "{text}");
-        assert!(text.contains("@scout"), "{text}");
-        assert!(text.contains("Esc close"), "{text}");
     }
 }

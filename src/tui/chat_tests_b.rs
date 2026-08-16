@@ -164,6 +164,7 @@ fn agent_tool_start_creates_no_tool_activity() {
         duration_ms: 0,
         payload: None,
         signal: None,
+        notifies_main: false,
     });
     chat.drain_events();
     let watch_rows = chat.messages[0]
@@ -182,6 +183,7 @@ fn agent_tool_start_creates_no_tool_activity() {
         duration_ms: 0,
         payload: None,
         signal: None,
+        notifies_main: false,
     });
     chat.drain_events();
     let watch_rows = chat.messages[0]
@@ -222,6 +224,7 @@ async fn terminal_watch_event_triggers_auto_turn_when_idle() {
         duration_ms: 0,
         payload: None,
         signal: None,
+        notifies_main: false,
     });
     chat.drain_events();
     assert!(!chat.busy);
@@ -234,6 +237,7 @@ async fn terminal_watch_event_triggers_auto_turn_when_idle() {
         duration_ms: 30000,
         payload: Some(serde_json::json!("result")),
         signal: None,
+        notifies_main: false,
     });
     chat.drain_events();
     tokio::task::yield_now().await;
@@ -267,18 +271,24 @@ async fn a_terminal_event_with_no_notification_for_main_wakes_nothing() {
         duration_ms: 900,
         payload: None,
         signal: None,
+        notifies_main: false,
     });
     chat.drain_events();
     tokio::task::yield_now().await;
     chat.drain_events();
     assert!(!chat.busy, "no turn was started");
-    // The record is still complete: the directory feed takes every run.
+    // Nor does the run appear in main's own conversation. D95 filed every
+    // lifecycle event in a team feed and this asserted the filing was
+    // unscoped; D107 retired that feed with the directory column that read it,
+    // so what is left to assert is the rule itself — a run addressed to
+    // nobody wakes nobody and writes nothing where the user is reading.
     assert!(
-        chat.buffers
-            .team_log()
+        !chat
+            .messages
             .iter()
-            .any(|e| e.label == "scout #2 · answer the user"),
-        "the lifecycle feed is a record, and records do not get scoped"
+            .any(|message| message.text.contains("answer the user")),
+        "and it says nothing in @main: {:?}",
+        chat.messages.iter().map(|m| &m.text).collect::<Vec<_>>()
     );
 }
 
@@ -298,6 +308,7 @@ async fn signal_triggers_auto_turn_even_while_typing() {
         duration_ms: 0,
         payload: None,
         signal: None,
+        notifies_main: false,
     });
     chat.drain_events();
     watch.emit_signal(id, "found error: ERROR boom".into(), None);
@@ -309,6 +320,7 @@ async fn signal_triggers_auto_turn_even_while_typing() {
         duration_ms: 12000,
         payload: None,
         signal: Some("found error: ERROR boom".into()),
+        notifies_main: false,
     });
     chat.drain_events();
     tokio::task::yield_now().await;
@@ -391,6 +403,7 @@ async fn draw_with_long_cjk_stream_and_activities_does_not_panic() {
         duration_ms: 5000,
         payload: None,
         signal: None,
+        notifies_main: false,
     });
     chat.drain_events();
     let _ = chat.events.send(UiEvent::TextDelta(
@@ -419,6 +432,7 @@ async fn draw_with_long_cjk_stream_and_activities_does_not_panic() {
         duration_ms: 30000,
         payload: None,
         signal: None,
+        notifies_main: false,
     });
     chat.drain_events();
     visible(&mut chat, 120, 40);
@@ -438,6 +452,7 @@ fn watch_event_updates_across_messages_in_place() {
         duration_ms: 0,
         payload: None,
         signal: None,
+        notifies_main: false,
     });
     chat.drain_events();
     assert_eq!(chat.messages[0].activities.len(), 1);
@@ -453,6 +468,7 @@ fn watch_event_updates_across_messages_in_place() {
         duration_ms: 40000,
         payload: None,
         signal: None,
+        notifies_main: false,
     });
     chat.drain_events();
     assert_eq!(chat.messages[0].activities.len(), 1, "updated in place");
@@ -477,6 +493,7 @@ fn idle_round_notification_does_not_trigger_auto_turn() {
         duration_ms: 5000,
         payload: None,
         signal: None,
+        notifies_main: false,
     });
     chat.drain_events();
     assert!(!chat.busy, "idle round does not wake");
@@ -496,6 +513,7 @@ fn watch_event_renders_inline_and_updates() {
         duration_ms: 0,
         payload: None,
         signal: None,
+        notifies_main: false,
     });
     chat.drain_events();
     assert_eq!(chat.messages[0].activities.len(), 1);
@@ -507,6 +525,7 @@ fn watch_event_renders_inline_and_updates() {
         duration_ms: 4000,
         payload: None,
         signal: None,
+        notifies_main: false,
     });
     let _ = chat.events.send(UiEvent::WatchEvent {
         label: "watch -n 2 ls".into(),
@@ -516,6 +535,7 @@ fn watch_event_renders_inline_and_updates() {
         duration_ms: 9000,
         payload: Some(serde_json::json!("done output")),
         signal: None,
+        notifies_main: false,
     });
     chat.drain_events();
     assert_eq!(chat.messages[0].activities.len(), 1, "updates in place");
@@ -2397,8 +2417,19 @@ async fn queued_slashes_drain_through_run_slash() {
 }
 
 /// D80: running agents no longer claim ↑/↓. With a background agent up and an
-/// empty composer, ↑ recalls the prompt history — the agent's DM is reached
-/// through the ctrl+b manager instead.
+/// empty composer, ↑ recalls the prompt history.
+///
+/// Rewritten for D107: the manager's detail became the background dialog's,
+/// and the doors moved with it — `f` foregrounds the agent (CC's verb for the
+/// zoomed view). `Enter` is what opens the detail now, which is CC's own
+/// meaning for it (`BackgroundTasksDialog.tsx:414`); nothing that was asserted
+/// here is dropped, each claim is made through the key that carries it now.
+///
+/// Rewritten again for D108: the observation page retired with v4's table, so
+/// `tab` names nothing and the arm that walked it is gone. What it was really
+/// about — the arrows belonging to history while an agent runs, and the dialog
+/// closing behind the door it opened — is asserted through `f`, the one door
+/// that survives.
 #[test]
 fn running_agents_leave_the_arrows_to_history() {
     let mut chat = test_chat();
@@ -2418,23 +2449,32 @@ fn running_agents_leave_the_arrows_to_history() {
         chat.input, "earlier prompt",
         "↑ recalls history, not agents"
     );
-    // Ctrl+B → Enter (list) → Enter (detail) opens that agent's DM. Since D89
-    // that switches this terminal onto the conversation instead of raising a
-    // modal over it.
+
     chat.set_input("");
     assert!(chat.on_key(KeyCode::Char('b'), KeyModifiers::CONTROL));
-    assert!(chat.on_key(KeyCode::Enter, KeyModifiers::NONE));
-    assert!(chat.on_key(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(chat.on_key(KeyCode::Char('f'), KeyModifiers::NONE));
     assert_eq!(
-        *chat.buffers.active(),
-        crate::tui::buffer::BufferId::Dm("scout".into())
+        chat.open_zoom,
+        Some(crate::tui::zoom::ZoomTarget::Agent("scout".into())),
+        "f foregrounds the agent under the cursor"
     );
-    assert!(chat.agent_manager.is_none(), "the manager closes with it");
+    assert!(
+        chat.dialog.is_none(),
+        "the dialog closes behind the door it opened"
+    );
 }
 
-/// Ctrl+B owns list/detail navigation and x stops the selected running agent.
+/// Ctrl+B opens the background dialog: it names what is running, the cursor
+/// walks it, `Enter` opens a detail and `x` stops the row it is on.
+///
+/// Rewritten for D107 from `agent_manager_lists_opens_details_and_stops_agents`.
+/// Every question it asked is still asked — the list names the instance and
+/// what its run has cost, `x` stops the selected row rather than the first,
+/// the detail carries prompt and progress, both views stay bounded, and an
+/// open dialog keeps the clock awake — against CC's copy for each of them
+/// (`BackgroundTasksDialog.tsx:425-426`, `InProcessTeammateDetailDialog.tsx:126-209`).
 #[test]
-fn agent_manager_lists_opens_details_and_stops_agents() {
+fn the_background_dialog_lists_opens_details_and_stops_agents() {
     let mut chat = test_chat();
     chat.session.agents.insert(
         "alpha",
@@ -2465,16 +2505,30 @@ fn agent_manager_lists_opens_details_and_stops_agents() {
 
     assert!(chat.on_key(KeyCode::Char('b'), KeyModifiers::CONTROL));
     let list = chat
-        .agent_manager_rows(100)
+        .dialog_view_rows(100)
         .iter()
         .map(|row| row.line.plain_text())
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(list.contains("Background agents · 2 running"), "{list}");
-    assert!(list.contains("scout · inspect the code"), "{list}");
-    assert!(list.contains("123 tokens · 2 tools"), "{list}");
+    assert!(list.contains("Background tasks"), "{list}");
+    assert!(
+        list.contains("2 agents"),
+        "the subtitle counts what runs: {list}"
+    );
+    assert!(list.contains("@scout"), "{list}");
     assert!(list.contains("Read(src/tui/chat.rs)"), "{list}");
+    assert!(
+        list.contains("↑/↓ to select · Enter to view"),
+        "the key row is CC's: {list}"
+    );
+
+    // The cursor lands on the first row and walks; `x` stops the row it is on.
     assert!(chat.on_key(KeyCode::Down, KeyModifiers::NONE));
+    assert_eq!(
+        chat.dialog_selection(),
+        Some(crate::tui::background::DialogTarget::Agent("scout".into())),
+        "↓ walks to the second instance"
+    );
     assert!(chat.on_key(KeyCode::Char('x'), KeyModifiers::NONE));
     let statuses = chat.session.agents.list();
     assert_eq!(
@@ -2493,10 +2547,15 @@ fn agent_manager_lists_opens_details_and_stops_agents() {
         Some(crate::agents::AgentState::Running)
     );
     assert!(
-        chat.agent_manager_rows(100).len() <= AGENT_MANAGER_ROWS_MAX + 4,
-        "manager list stays bounded"
+        chat.dialog.is_some(),
+        "and the dialog stays open: the row saying `[stopped]` is the receipt"
+    );
+    assert!(
+        chat.dialog_view_rows(100).len() <= 16,
+        "the list stays bounded"
     );
 
+    // Enter opens the detail on the selected row.
     chat.session.agents.insert(
         "scout",
         crate::agents::AgentKind::Hire,
@@ -2516,43 +2575,44 @@ fn agent_manager_lists_opens_details_and_stops_agents() {
             recent_activity: vec!["⏺Read(src/tui/chat.rs)".into()],
         },
     );
+    chat.dialog = Some(crate::tui::background::BackgroundDialog {
+        selected: Some(crate::tui::background::DialogTarget::Agent("scout".into())),
+        detail: None,
+    });
     assert!(chat.on_key(KeyCode::Enter, KeyModifiers::NONE));
     assert_eq!(
-        chat.agent_manager,
-        Some(AgentManager::Detail {
-            name: "scout".into()
-        })
+        chat.dialog.as_ref().and_then(|d| d.detail.clone()),
+        Some(crate::tui::background::DialogTarget::Agent("scout".into()))
     );
     let detail = chat
-        .agent_manager_rows(100)
+        .dialog_view_rows(100)
         .iter()
         .map(|row| row.line.plain_text())
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(detail.contains("scout › inspect the code"), "{detail}");
+    assert!(detail.contains("@scout"), "{detail}");
+    assert!(detail.contains("123 tokens"), "{detail}");
     assert!(detail.contains("Prompt"), "{detail}");
     assert!(detail.contains("Find the rendering seam"), "{detail}");
     assert!(detail.contains("Progress"), "{detail}");
     assert!(
-        chat.agent_manager_rows(100).len() <= AGENT_PROMPT_ROWS_MAX + 12,
-        "detail prompt is bounded"
+        detail.contains("← to go back · Esc/Enter/Space to close"),
+        "the detail's key row is CC's: {detail}"
     );
     assert!(
-        chat.has_dynamic_rows(),
-        "an open running detail keeps elapsed live"
+        chat.dialog_view_rows(100).len() <= 24,
+        "the detail is bounded"
     );
+    assert!(chat.has_dynamic_rows(), "an open dialog keeps elapsed live");
 
-    assert!(chat.on_key(KeyCode::Char('x'), KeyModifiers::NONE));
-    assert!(chat.agent_manager.is_none());
-    assert_eq!(
-        chat.session
-            .agents
-            .list()
-            .iter()
-            .find(|status| status.name == "scout")
-            .map(|status| status.state),
-        Some(crate::agents::AgentState::Stopped)
+    // `←` is the way back to the list; Esc closes the modal from either mode.
+    assert!(chat.on_key(KeyCode::Left, KeyModifiers::NONE));
+    assert!(
+        chat.dialog.as_ref().is_some_and(|d| d.detail.is_none()),
+        "← returns to the list"
     );
+    assert!(chat.on_key(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(chat.dialog.is_none(), "Esc closes the dialog");
 }
 
 /// Queues beyond the cap fold into one row (row count feeds chrome, so it must be bounded).
@@ -2923,14 +2983,17 @@ fn task_lines_use_checkbox_glyphs() {
         TodoItem {
             text: "done one".into(),
             status: TodoStatus::Done,
+            ..Default::default()
         },
         TodoItem {
             text: "doing".into(),
             status: TodoStatus::InProgress,
+            ..Default::default()
         },
         TodoItem {
             text: "later".into(),
             status: TodoStatus::Pending,
+            ..Default::default()
         },
     ];
     let lines = chat.task_lines();
@@ -2957,6 +3020,77 @@ fn task_lines_use_checkbox_glyphs() {
         done_text.style.fg,
         Some(chat.theme.text_secondary),
         "and render dimmed"
+    );
+}
+
+/// D104: a task names its owner when the owner is somebody who is still here,
+/// and says what it is waiting on. Display only — nothing here assigns, claims
+/// or unblocks anything.
+#[test]
+fn task_lines_name_a_live_owner_and_what_blocks_the_row() {
+    let mut chat = chat_with_history("todo");
+    chat.session.agents.insert(
+        "scout",
+        crate::agents::AgentKind::Hire,
+        None,
+        "test instance".into(),
+        chat.session.clone(),
+    );
+    chat.tasks_visible = true;
+    chat.tasks_cache = vec![
+        TodoItem {
+            id: "1".into(),
+            text: "land the parser".into(),
+            status: TodoStatus::InProgress,
+            owner: Some("scout".into()),
+            blocked_by: Vec::new(),
+        },
+        TodoItem {
+            id: "2".into(),
+            text: "ship it".into(),
+            status: TodoStatus::Pending,
+            owner: Some("ghost".into()),
+            blocked_by: vec!["1".into(), "3".into()],
+        },
+        TodoItem {
+            id: "3".into(),
+            text: "already done".into(),
+            status: TodoStatus::Done,
+            owner: Some("scout".into()),
+            blocked_by: Vec::new(),
+        },
+    ];
+    let lines = chat.task_lines();
+    let joined: Vec<String> = lines.iter().map(|l| l.plain_text()).collect();
+
+    assert!(
+        joined.iter().any(|l| l == "☐ land the parser (@scout)"),
+        "a live owner is named in parens after the subject: {joined:?}"
+    );
+    let owner_seg = lines
+        .iter()
+        .find(|l| l.plain_text().contains("land the parser"))
+        .and_then(|l| l.segs.iter().find(|seg| seg.text == "@scout"))
+        .expect("owner segment");
+    let palette = crate::tui::avatar::Palette::new(&chat.theme);
+    let gutter = crate::tui::avatar::Gutter::new(false, &palette, &chat.faces_pinned);
+    assert_eq!(
+        owner_seg.style.fg,
+        Some(palette.avatars[gutter.index_for("scout") % palette.avatars.len()]),
+        "in the owner's own identity colour, the same one the tree gives it"
+    );
+
+    assert!(
+        joined.iter().any(|l| l == "☐ ship it › blocked by #1"),
+        "an owner nobody answers to is not named, and only the open blocker is: {joined:?}"
+    );
+
+    // Stopping the owner takes the name off the row: it points at nobody now.
+    chat.session.agents.stop("scout").expect("stopped");
+    let joined: Vec<String> = chat.task_lines().iter().map(|l| l.plain_text()).collect();
+    assert!(
+        joined.iter().any(|l| l == "☐ land the parser"),
+        "{joined:?}"
     );
 }
 
