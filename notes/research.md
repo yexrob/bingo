@@ -3926,3 +3926,177 @@ assertions, new fields on the fixtures). **1421 + 13 before, 1437 + 13 after.**
 5. *No badge anywhere in the status layer.* The unread and mention counts are still measured on every
    poll and read by nothing. That is the honest state, marked as such, and D107 is the surface for it.
 
+### D105. The zoomed view: the screen becomes one agent, and gives itself back
+
+**Problem.** D103 left one transcript and D104 put a status layer around it, and between them they answered
+"who is working" without answering "what is it *saying*". An agent's own conversation had no surface at all:
+its record was two keys away on the observation page, the tree's `ctrl+shift+o` preview showed three
+condensed lines of it, and D103's own limit 1 named the gap as the price of the retirement. This is the batch
+that pays it back — CC's third surface, the one that swaps the screen to one agent and swaps it back.
+
+**In code: 2573 added against 658 removed across 19 files**, one of them new (`src/tui/zoom.rs`, 1553 lines
+including its tests). Everything removed is machinery a shorter road made unnecessary; the list is below.
+
+**Why the alternate screen, and what that buys.** The inline host prints each settled row into the terminal's
+scrollback exactly once and never touches it again (`term.rs`); a view that *replaces the body* cannot exist
+there, and every attempt to build one would be an attempt to un-print. So the zoom takes the road the
+transcript pager (D82) and the perspective page (D96) already take — a self-driving alt-screen loop that owns
+the terminal while it is open, the same guarded enter, the same D77 panic-hook claim — and differs from both
+in the two ways that matter: it is **live** (a ticker, not a blocking `events.next()`) and it has a **live
+composer**.
+
+**The write-once round trip, and precisely how it is guaranteed.** The riskiest seam of the batch was
+inline-vs-alt: whatever the transcript would have printed while the zoom is open must be neither lost nor
+printed twice. The guarantee is not a flush protocol, it is a **restriction on what the loop may write**. The
+loop draws from the domain — `agents.view_of`, `agents.list`, `channels.log_of` — read fresh on every frame,
+through functions that take `&self`. The only `Chat` state it mutates is: the composer draft (through
+`Chat::on_key`, the console's own editor), the tree's cursor, the zoom pointer, the accounting store's active
+conversation, and `chat.tick`. It never calls `build_rows`, never pushes a `UiMessage`, never touches
+`flushed_segments`/`tail_start`/`mark_base`, and — deliberately — **never calls `Chat::tick`**, which drains,
+debounces and polls on behalf of a transcript that is not on screen. So messages that arrive during a zoom
+arrive after it, in one batch, in order, exactly as if the zoom had never happened; that is the same freeze
+the pager and the perspective page already impose, with a redraw clock added on top. Two tests pin it: one
+drives the loop's *whole* write surface (`enter_zoom`, six keys, a paste, a tick bump, `leave_zoom`) with two
+segments already flushed and asserts the document rebuilds identically and the cursor did not move; the other
+appends a message mid-zoom and asserts it prints once on the way out.
+
+**What the body is: the whole record, through one projection and one renderer.** The user's ruling was
+everything the agent saw and did, so the body is `walk(Protagonist::of(name), …)` keeping *every* lane —
+the task that created it, main's instructions, the user's messages, room relays, reminders and chases, its
+process, its answers — where `pair_lane` keeps one. Runs of collapsible tool calls fold through the console's
+own `classify_tool` and `collapse_summary` into `⏺ Searched for 1 pattern, read 2 files`, and a call the
+console does not collapse breaks the run and prints its own line, as it does in `@main`. Everything is drawn
+by `settled_post_rows` and `zoom_post_rows` with `conversation_gutter` — the same builder the observation
+page draws with, so a message looks like itself wherever it is read.
+
+*Intake takes the furniture tier, which is a decision the single-column view forced.* `walk` files a spawn
+prompt as a `Said` post with an empty sender, which the perspective page can afford because it has a lane
+called `intake` around it. Rendered into one column that post arrived wearing an avatar and a `⏺`, as though
+the agent had said the thing it was asked. It is a `Note` here: dim, one line, no face, no name.
+
+**`Replay` and `pair_replay` were not consumed — they were retired, and the fold moved.** D103 kept them for
+this batch on the belief that the zoom would print `UiMessage`s. It cannot: the console's message renderer
+(`assistant_el`) is indexed into `Chat::messages` and threaded through the streaming state, so printing a
+replayed message would mean either pushing it into the transcript's own store — the thing this whole batch
+exists not to do — or a second renderer beside the one D96/D99 spent two batches making singular. So the
+same fold now produces a `Post`, `zoom_posts` replaces `dm_posts` (whose last reader went with the pair view),
+`PairPost` collapses to `Post` and `pair_lane` returns the lane itself. **`dm_posts` (90 lines), `Replay`,
+`pair_replay`, `push_work`, `blank_message`, `interned_tool`, `PairPost` and `conversation_tail_el`'s
+settled-vs-all diff are gone**; the diff went because an alt screen redraws whole and has no printed prefix
+to subtract. `Buffers::active`/`set_active`, `conversation_gutter` and `tail_post_rows` (now `zoom_post_rows`)
+*were* consumed, and their `// D105 consumes this` markers came off.
+
+**CC, key by key.** The header is `TeammateViewHeader.tsx:31-70` verbatim: `Viewing ` plain, `@name` bold in
+the identity colour, ` · esc to return` dim, the task prompt dim on its own line, one blank row under it
+(`marginBottom={1}`). `esc` is `useBackgroundTaskNavigation.ts:151-165` — running aborts the current turn
+only and stays (CC's `currentWorkAbortController`, not its `abortController`; bingo's `registry.stop()` is
+exactly that: turn aborted, history kept, instance on the roster), otherwise it returns. `shift+tab` is
+`PromptInput.tsx:1410-1447`, which cycles the **teammate's** mode through `getNextPermissionMode` and returns
+before any leader-side effect; `PermissionMode`'s ladder was made a free function so both subjects walk one
+ladder. The mode shows where CC shows it, in the footer, swapped for the viewed agent's
+(`PromptInput.tsx:342-351`). `enter` on the tree is `:206-225`: leader → leave the view, hide row → collapse
+the panel, instance → open it; and it is gated on selection mode, which is why `enter` with a merely-open
+tree is still the composer's. Typing routes at `PromptInput.tsx:1086-1097` → `REPL.tsx:3548-3578`, which has
+**no `/` branch at all** — slash and `!` lines go to the teammate as text, and here that is true by
+construction because nothing but the zoom's own submit reads this draft. Auto-return is
+`useTeammateViewAutoExit.ts:35`; `:8-9` says in as many words that a *completed* teammate's view stays open.
+The two `enter to …` strings D104 held back are back with the key that earns them, on CC's gates
+(`TeammateSpinnerLine.tsx:134/151`, `TeammateSpinnerTree.tsx:128/253`): the selected row only, and only where
+it is not already the row on screen.
+
+**Divergences from CC, each with its reason.**
+
+1. *`shift+↑/↓` inside a zoom moves the view.* CC's handler steps the tree and flips back to `selecting-agent`
+   (`:181-189`, `:26-59`), which drops you out of the zoom into selection while the transcript still shows the
+   agent — because CC's tree is on screen underneath. bingo draws the tree in the zoom too, and it does exactly
+   CC's thing **while the tree is open**; with the tree closed there is no cursor to move, so the chord walks
+   the roster and the view follows. Landing on `@main` is not in that ring: `esc` is the way out, and a chord
+   that could fall out of the view by one press would be a trap.
+2. *The body is the whole record, not a 50-message tail.* CC caps `task.messages` at
+   `TEAMMATE_MESSAGES_UI_CAP = 50` for memory (`types.ts:47`, `:88-99`: 36.8 GB in a 292-agent session) and
+   drops the rest with no marker at all. bingo reads the registry's history live rather than mirroring it into
+   UI state, so the cap buys nothing here — and the user's ruling was the full transcript.
+3. *`ctrl+c` is not the kill-everything-and-exit key.* CC binds it to `killAllAgentsAndNotify` + exit while
+   viewing (`useCancelRequest.ts:190-203`). bingo's `ctrl+c` is the interrupt/double-press-to-quit contract
+   the whole app is built on, and rebinding it inside one view is how a quit key becomes unpredictable. What
+   the view owes it instead: the window it arms is announced on this screen too, and the loop breaks on
+   `chat.exit` so the second press quits at once rather than on the way back out.
+4. *Five chords are inert here.* `ctrl+o`, `ctrl+b`, `ctrl+t`, `ctrl+g`, `ctrl+r`. CC leaves them all bound
+   and its `ctrl+o` opens the **leader's** transcript from inside the teammate view; in bingo those keys set
+   flags the *host* consumes, so pressing one would do nothing visible and then spring a modal the moment you
+   pressed `esc`. A key that does nothing beats a key that does something later.
+5. *A room zoom's footer advertises only `esc`.* It has no permission mode and no roster position, so the two
+   other hints would name keys that do nothing there. Same reason D104 left `enter to view` off.
+6. *No swarm banner.* CC replaces the composer's border with two coloured rules carrying an inverse-text
+   `@name` label (`useSwarmBanner.ts:92-100`, `PromptInput.tsx:2250-2268`). bingo tints the border and the `❯`
+   with the same colour instead: the name is already bold in the header two rows up, and a second label for it
+   is the decoration D93 spent a batch removing.
+7. *No `Message @scout…` placeholder* (`usePromptInputPlaceholder.ts:38-44`). bingo's composer placeholder is
+   the `Try "fix a bug"` hint, which is a first-run affordance rather than an addressing cue; the addressing
+   cue is the colour and the header.
+
+**One correction to the record, and it is a real gap.** D103 wrote that D105's typeahead lists stopped
+instances "because a message resumes one (CC `SendMessageTool.ts:808-866`, and already bingo's deliver path)",
+and v4's member model says the same. **It is not bingo's deliver path.** `AgentRegistry::deliver` answers
+`"<name> is stopped and no longer accepts instructions"` for any stopped instance, so the resume half of the
+subagent semantics is unimplemented. That is a domain write path this batch is fenced out of, so nothing was
+changed: the claim is corrected everywhere it was written (`tree.rs`'s status ladder, D103's typeahead test,
+the guide, the README), the zoom reports the refusal on the warning tier rather than swallowing it, and a test
+pins the current truth by name. The fix belongs to whichever batch is allowed to touch `deliver`.
+
+**Tests: twenty-nine added, ten rewritten, one folded away, none weakened. Net +28.**
+
+*Twenty-six new in `zoom.rs`*: the header's copy and its bold name; the body as the whole record; the live
+tail following a run; a room's log; the send reaching the inbox as the user with nothing in main; the echo on
+the next frame and no receipt; a stopped agent's refusal on the warning tier; a slash line arriving as text; a
+room post joining first; `esc`'s two meanings and the tree cursor peeled before both; `shift+tab` scoped to
+the viewed agent with main's and the other instances' modes untouched; `shift+↑/↓` walking the roster and
+wrapping; `enter`'s three tree answers; `enter` belonging to the composer with nothing selected; the five
+held-back chords arming nothing and typing nothing; an ordinary key still editing the draft; entry clearing
+unread and mention and exit restoring the pointer; the auto-return's two halves — gone versus merely done —
+for an agent and for a room; the composer's tint; the hint row's two forms and the room's third; and the round
+trip in two parts; and `ctrl+c` keeping its own contract with the view standing aside. *One in `tree.rs`* (the inline host's `enter`, all four of its cases). *Two in `buffer.rs`*
+(the live tail keeping every sender, and a run the user did not start — the two things the D99 pair filters
+used to remove and a full-record view must not).
+
+*Ten rewritten, each because the thing it was about survives.* Four in `buffer.rs`, the tests D103 wrote to
+keep `pair_replay` honest, moved onto what replaced it — `the_pair_replay_says_who_said_what` and
+`…says_what_dm_posts_says_about_the_same_history` **merge** into
+`the_zoom_keeps_every_lane_and_the_pair_view_keeps_one`, which is a stronger claim than either (it pins the
+*difference* between the two projections rather than their agreement); `the_pair_replays_work_as_activity_groups…`
+→ `the_zoom_folds_work_the_way_the_console_folds_it`; `a_standalone_call_closes_the_group…` → `…_the_fold_…`.
+Two in `perspective.rs`: `the_pair_lane_carries_the_work_of_its_own_turns` →
+`the_walk_carries_the_call_and_not_only_the_line`, and `a_run_breaks_on_what_the_lane_does_not_show`, both
+moved onto `walk` because that is where the claim lives now that `PairPost`'s `work` and `contiguous` are
+gone. One in `chat_tests_b.rs` (`running_agents_leave_the_arrows_to_history`: `Enter` in the `ctrl+b` detail
+opens the zoom, `tab` still opens the record, and the panel closes behind either — it used to assert Enter
+opened *nothing*). One in `tree.rs` (`the_tree_leads_with_main_and_closes_with_hide`, which asserted the two
+`enter to …` strings **absent** and now asserts them present on the selected row and absent everywhere else).
+Two in `keys.rs` (`the_panel_names_the_status_layer` gained Enter and the viewing row;
+`ctrl_b_help_names_both_of_its_meanings` gained its two doors). And one doc-only correction in
+`chat_tests_d.rs`, where the typeahead's rationale said a message resumes a stopped agent — the assertions are
+untouched, the reasoning is now true.
+
+*Nothing was deleted that was not replaced*, and the one that vanished by name
+(`the_pair_replay_says_what_dm_posts_says_about_the_same_history`) was folded into the merge above with its
+question intact. **1437 + 13 before, 1465 + 13 after.**
+
+**Named limits.**
+
+1. *A stopped instance cannot be messaged.* See the correction above. It is the one place the view can be
+   used and answer "no".
+2. *The room zoom has no door.* CC has no rooms anywhere in 2.1.88, so there was no key to copy and no
+   invented global binding was added. The view, its body, its send-with-join and its `esc` are implemented and
+   tested; D107's dialog has a Rooms section and an `f`-to-zoom key (`BackgroundTasksDialog.tsx:290-299`) and
+   is the door. Marked `// D107 opens this`.
+3. *The task prompt shows twice* — once in the header, once as the first (dim, furniture) row of the record.
+   CC has the same duplication for the same reason: the header names the task and the record contains it.
+   Dropping the row would make the record incomplete, which is the one thing the user's ruling forbade.
+4. *There is no zoom-side scrollback search.* `PgUp`/`PgDn` and the wheel, following the tail at the bottom —
+   CC's set exactly (it inherits the global scroll handler and binds nothing of its own). `/` and `g`/`G`
+   belong to the composer here, so the pager's search would have had to steal them.
+5. *A mid-word wrap can still happen in the body.* It is the markdown renderer's, shared with the transcript,
+   and not this batch's to change.
+6. *`README.zh-CN.md` is a batch behind.* It has no status-layer section at all and still names the team
+   directory's retired `o` door — both inherited from D104. Nothing D105 did made it newly false, and D108
+   owns the rewrite.

@@ -28,7 +28,7 @@ use std::sync::Arc;
 use crate::api::types::Message;
 use crate::channels::{ChannelMessage, USER_NAME};
 use crate::query::Session;
-use crate::tui::chat::{Role, UiMessage};
+use crate::tui::chat::CollapseGroup;
 use crate::watch::{WatchKind, WatchState};
 
 /// How many lifecycle events the team feed keeps. Spawn/done/ack are broadcast
@@ -128,32 +128,6 @@ impl Buffer {
     pub fn last_activity(&self) -> u64 {
         self.last_activity
     }
-}
-
-/// One element of a conversation's settled replay.
-///
-/// **Unused between D103 and D105.** It is what [`pair_replay`] produces, and
-/// D105's zoomed view is the surface that prints it: the agent's own messages
-/// as `UiMessage`s the console's row builder already renders, and the runtime's
-/// own lines as notes nobody said. Kept rather than deleted because rebuilding
-/// it would mean re-deriving the run-folding rules below, which are the part
-/// that was hard to get right.
-///
-/// Not comparable: `UiMessage` carries activities and fold state and has never
-/// been an equality type. Tests read the fields they mean.
-#[derive(Debug, Clone)]
-#[allow(dead_code)] // D105 consumes this
-pub enum Replay {
-    /// A message from the source. `message` is the transcript's own unit, so
-    /// the existing row builder renders it with the code the live flow uses;
-    /// `who` carries the sender the transcript's two roles cannot express.
-    Message { who: String, message: UiMessage },
-    /// Something that happened in the conversation that nobody said: a room's
-    /// membership change, a wake-up the runtime wrote into an instance's
-    /// history. One dim line, no name over it and no send stamp beside it,
-    /// because there is no sender and nothing was sent — which is what
-    /// [`PostKind::Note`] always claimed to be.
-    Note(String),
 }
 
 /// Where a direct send belongs. Data only — [`deliver`] performs it.
@@ -449,8 +423,8 @@ impl Buffers {
             entry.history = history.len();
             entry.authors = crate::tui::perspective::pair_lane(name, &history, &stamps)
                 .into_iter()
-                .filter(|item| item.post.kind == PostKind::Said)
-                .map(|item| !item.post.you)
+                .filter(|item| item.kind == PostKind::Said)
+                .map(|item| !item.you)
                 .collect();
         }
         (
@@ -583,7 +557,7 @@ pub fn deliver(session: &Arc<Session>, target: SubmitTarget) -> Delivery {
 // one place a stored conversation becomes displayable messages. The recognition
 // of what a stored line *is* lives in `line_source`, and the attribution walk
 // over it in `tui::perspective`; what stays here is the presentation each view
-// wants — the pair lane and its live-turn tail (`dm_posts`), a room's log
+// wants — one agent's whole record and its live turn (`zoom_posts`), a room's log
 // (`channel_posts`), and the settled elements a replay prints (`pair_replay`).
 // ---------------------------------------------------------------------------
 
@@ -657,7 +631,7 @@ pub fn channel_posts(log: &[ChannelMessage], me: &str) -> Vec<Post> {
 /// **One parser, one walk.** The shapes are recognised here and nowhere else,
 /// and [`crate::tui::perspective::walk`] is the single reader that turns them
 /// into attributed posts. The observation page keeps every lane the walk files;
-/// the user's `@X` pair view ([`dm_posts`]) keeps the one lane it is in and
+/// the user's `@X` pair lane keeps the one lane it is in and
 /// drops the rest, which is why a room relay or a chase no longer renders in a
 /// DM as a dim note (D99) — it is not the user's conversation to read there.
 ///
@@ -743,31 +717,104 @@ pub(crate) fn tool_call_line(name: &str, input: &serde_json::Value) -> String {
     }
 }
 
-/// Subagent history + live turn → the **pair lane**: the user's conversation
-/// with this agent and nothing else (D99).
+/// Which collapse group one of an agent's tool calls belongs in, and what it
+/// adds to it (D99's classifier, applied to a stored record).
 ///
-/// What renders is what the user said (the D64 marker, the steer path), what
-/// the agent answered *them*, and the work the agent did for those turns — the
-/// protagonist rule, borrowed whole from the observation page. Main's
-/// instructions, room relays, `[message from @X]` mail, chases, the task
-/// reminder and the prompt the instance was created with all belong to a lane
-/// that is not this one, and the page ([`crate::tui::perspective`]) is where
-/// they are read.
+/// Split out of the replay builder D103 kept for this batch: the fold is the
+/// only part of that builder the zoom needs, and folding into a [`Post`] rather
+/// than into a `UiMessage` is what lets one row renderer draw the whole view.
+fn tally(group: &mut CollapseGroup, kind: crate::tui::chat::CollapseKind) {
+    use crate::tui::chat::CollapseKind;
+    match kind {
+        CollapseKind::Search => group.search += 1,
+        CollapseKind::Read(Some(path)) => group.read_paths.push(path),
+        CollapseKind::Read(None) => group.read_ops += 1,
+        CollapseKind::List => group.list += 1,
+        CollapseKind::Bash => group.bash += 1,
+        CollapseKind::AgentCheck => group.agent_checks += 1,
+        CollapseKind::AgentStop => group.agent_stops += 1,
+        CollapseKind::AgentDelete => group.agent_deletes += 1,
+    }
+}
+
+/// One agent's **whole record** as posts, in the order the record holds it
+/// (D105): the task that created it, main's instructions, the user's messages,
+/// room relays, reminders and chases, its own prose, and the work it did.
 ///
-/// The lane comes from [`crate::tui::perspective::pair_lane`] rather than from a
-/// splitter of its own: [`line_source`] is the one parser, and the attribution
-/// walk above it is the one walk.
+/// The attribution is [`crate::tui::perspective::walk`]'s and nobody else's —
+/// the same walk the observation page files into lanes — with
+/// `Protagonist::of` deciding what unmarked prose means (D96/D100). The zoom
+/// keeps *every* lane, which is the difference from
+/// [`crate::tui::perspective::pair_lane`]: that is the user's conversation with
+/// the agent, and this is the agent's life.
 ///
-/// `in_flight` is the messages already claimed by the running turn but not yet
-/// landed in history, and `pending` the ones still in the inbox; both are the
-/// user's own — the caller filters by sender — so a message never vanishes
-/// between the send and the turn's end.
-pub fn dm_posts(
+/// **Runs of collapsible tool calls fold into one row.** `⏺ Read(a.rs)`,
+/// `⏺ Read(b.rs)`, `⏺ Grep("fn main")` becomes `⏺ Searched for 1 pattern, read
+/// 2 files`, through [`crate::tui::chat::classify_tool`] and
+/// [`crate::tui::chat::collapse_summary`] — the console's own classifier and
+/// the console's own wording, so a turn folds the same way in an agent's view
+/// as in `@main`'s. A call that does not collapse breaks the run, as it does in
+/// the console, and so does anything anybody says.
+fn record_posts(who: &str, history: &[Message], stamps: &[u64]) -> Vec<Post> {
+    use crate::tui::chat::classify_tool;
+    use crate::tui::perspective::{Protagonist, Target, Work, walk};
+    let mut out: Vec<Post> = Vec::new();
+    let mut group: Option<CollapseGroup> = None;
+    fn flush(group: &mut Option<CollapseGroup>, out: &mut Vec<Post>, who: &str) {
+        let Some(group) = group.take() else {
+            return;
+        };
+        out.push(Post {
+            from: who.to_string(),
+            you: false,
+            at: 0,
+            // Settled, so the summary is past tense: the run is in the record.
+            text: format!("⏺ {}", crate::tui::chat::collapse_summary(&group, false)),
+            kind: PostKind::Process,
+        });
+    }
+    for filed in walk(Protagonist::of(who), history, stamps) {
+        if let Some(Work::Tool { name, input }) = &filed.work
+            && let Some(kind) = classify_tool(name, input)
+        {
+            tally(group.get_or_insert_with(CollapseGroup::default), kind);
+            continue;
+        }
+        flush(&mut group, &mut out, who);
+        let mut post = filed.post;
+        // Intake is what was *handed* to the agent rather than said to it — the
+        // task it was dispatched with, a reminder, a chase. Nobody wrote it, so
+        // it takes the furniture tier: dim, one line, no name over it and no
+        // portrait beside it. The perspective page files intake in a lane of its
+        // own and can afford to render it as a message; a single-column record
+        // cannot, or a spawn prompt would arrive wearing somebody's face.
+        if filed.target == Target::Intake {
+            post.kind = PostKind::Note;
+        }
+        out.push(post);
+    }
+    flush(&mut group, &mut out, who);
+    out
+}
+
+/// The zoomed view's body (D105): one agent's whole record, plus whatever is
+/// happening to it right now.
+///
+/// `in_flight` is what the running turn has already claimed and `pending` what
+/// is still in the inbox — both carrying the sender, because this view has
+/// everybody in it and a message from main must not be drawn as one the user
+/// wrote. `live` is the current run's stream whoever started it: the D99 pair
+/// filters that dropped both are exactly what a full-record view must not
+/// apply.
+///
+/// The live steps stay one row each rather than folding: a fold needs the
+/// call, and the stream carries only the line it printed.
+pub fn zoom_posts(
     history: &[Message],
     stamps: &[u64],
-    in_flight: &[String],
+    in_flight: &[(String, String)],
     live: &[crate::agents::LiveBlock],
-    pending: &[String],
+    pending: &[(String, String)],
     who: &str,
 ) -> Vec<Post> {
     let process = |text: String| Post {
@@ -777,30 +824,16 @@ pub fn dm_posts(
         text,
         kind: PostKind::Process,
     };
-    let mut out: Vec<Post> = crate::tui::perspective::pair_lane(who, history, stamps)
-        .into_iter()
-        .map(|item| item.post)
-        .collect();
-    // Claimed by the running turn, not yet in the record: an ordinary message
-    // (it is one — the run's prompt carries it), just without a landing clock.
-    for text in in_flight {
-        out.push(Post {
-            from: USER_NAME.to_string(),
-            you: true,
-            at: 0,
-            text: text.clone(),
-            kind: PostKind::Said,
-        });
-    }
-    for text in pending {
-        out.push(Post {
-            from: USER_NAME.to_string(),
-            you: true,
-            at: 0,
-            text: text.clone(),
-            kind: PostKind::Queued,
-        });
-    }
+    let sent = |(from, text): &(String, String), kind: PostKind| Post {
+        from: from.clone(),
+        you: from == USER_NAME,
+        at: 0,
+        text: text.clone(),
+        kind,
+    };
+    let mut out = record_posts(who, history, stamps);
+    out.extend(in_flight.iter().map(|item| sent(item, PostKind::Said)));
+    out.extend(pending.iter().map(|item| sent(item, PostKind::Queued)));
     let typing_at = match live.last() {
         Some(crate::agents::LiveBlock::Text(t)) if !t.trim().is_empty() => Some(live.len() - 1),
         _ => None,
@@ -823,10 +856,9 @@ pub fn dm_posts(
             crate::agents::LiveBlock::Text(_) => {}
         }
     }
-    // The indicator spans the whole stretch the agent owes a reply: from the
-    // instant a message is on its way (queued or claimed, before the stream
-    // says anything) through tool waits and round gaps. Without the early leg
-    // the DM sits silent for exactly the send-to-first-delta latency.
+    // The indicator spans the whole stretch a reply is owed, exactly as the
+    // pair view drew it: from the instant something is on its way, through
+    // tool waits and round gaps.
     if typing_at.is_none() && !(live.is_empty() && in_flight.is_empty() && pending.is_empty()) {
         out.push(Post {
             from: who.to_string(),
@@ -836,188 +868,6 @@ pub fn dm_posts(
             kind: PostKind::Typing,
         });
     }
-    out
-}
-
-/// An empty message of one role — the shape every replayed element starts from.
-fn blank_message(role: Role) -> UiMessage {
-    UiMessage {
-        role,
-        text: String::new(),
-        at: 0,
-        activities: Vec::new(),
-        insert_points: Vec::new(),
-        groups: Vec::new(),
-        group_of: Vec::new(),
-    }
-}
-
-/// A replayed tool name as a `&'static str`, interned.
-///
-/// The activity model holds tool names by static reference, and the live path
-/// leaks the streamed name once per call. A replay re-reads the same names on
-/// every switch, so it interns instead: one leak per distinct name for the life
-/// of the process, rather than one per switch.
-fn interned_tool(name: &str) -> &'static str {
-    use std::collections::HashSet;
-    use std::sync::{Mutex, OnceLock};
-    static NAMES: OnceLock<Mutex<HashSet<&'static str>>> = OnceLock::new();
-    let mut seen = NAMES
-        .get_or_init(|| Mutex::new(HashSet::new()))
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    if let Some(found) = seen.get(name) {
-        return found;
-    }
-    let leaked: &'static str = Box::leak(name.to_string().into_boxed_str());
-    seen.insert(leaked);
-    leaked
-}
-
-/// Hang one step of an agent's work on the message it belongs to, exactly the
-/// way the console's tool events hang it on main's (D99).
-///
-/// The grouping rules are not restated here — [`crate::tui::chat::classify_tool`]
-/// decides what collapses and [`crate::tui::chat::collapse_summary`] words it,
-/// so `4 searches, 2 reads` reads the same in an agent's DM as in @main. What a
-/// replay cannot supply is the *output*: a stored history keeps the call, and
-/// the tool's result went to the model, not to the record. So expanding a
-/// replayed group shows the calls it folded and no output rows — the record
-/// (ctrl+o, the observation page) is where the rest is.
-fn push_work(message: &mut UiMessage, work: &crate::tui::perspective::Work) {
-    use crate::tui::activities::{Activity, ActivityKind, Thinking, ThinkingState, ToolCall};
-    use crate::tui::chat::{CollapseGroup, CollapseKind, classify_tool};
-
-    let idx = message.activities.len();
-    let at = message.text.chars().count();
-    match work {
-        crate::tui::perspective::Work::Thinking => {
-            message
-                .activities
-                .push(Activity::new(ActivityKind::Thinking(Thinking {
-                    state: ThinkingState::Done,
-                    duration_ms: 0,
-                    stage: "",
-                    done_verb: None,
-                    start_tick: 0,
-                    segments: 1,
-                })));
-            message.insert_points.push(at);
-            message.group_of.push(None);
-        }
-        crate::tui::perspective::Work::Tool { name, input } => {
-            message
-                .activities
-                .push(Activity::new(ActivityKind::Tool(ToolCall {
-                    name: interned_tool(name),
-                    // Settled: the call is in the record, so it ran to an end.
-                    status: crate::tui::activities::ToolStatus::Done,
-                    summary: crate::query::summarize_input(name, input),
-                    duration_ms: 0,
-                    output: None,
-                    result_summary: None,
-                })));
-            message.insert_points.push(at);
-            message.group_of.push(None);
-            let Some(kind) = classify_tool(name, input) else {
-                // A call that does not collapse ends whatever run was open —
-                // the console's rule, so a `Write` between two reads breaks the
-                // group here too.
-                if let Some(group) = message.groups.last_mut() {
-                    group.active = false;
-                }
-                return;
-            };
-            let open = message
-                .groups
-                .last()
-                .is_some_and(|g| g.active && !g.activities.is_empty());
-            if !open {
-                message.groups.push(CollapseGroup {
-                    active: true,
-                    ..CollapseGroup::default()
-                });
-            }
-            let g = message.groups.len().saturating_sub(1);
-            message.group_of[idx] = Some(g);
-            message.groups[g].activities.push(idx);
-            match kind {
-                CollapseKind::Search => message.groups[g].search += 1,
-                CollapseKind::Read(Some(path)) => message.groups[g].read_paths.push(path),
-                CollapseKind::Read(None) => message.groups[g].read_ops += 1,
-                CollapseKind::List => message.groups[g].list += 1,
-                CollapseKind::Bash => message.groups[g].bash += 1,
-                CollapseKind::AgentCheck => message.groups[g].agent_checks += 1,
-                CollapseKind::AgentStop => message.groups[g].agent_stops += 1,
-                CollapseKind::AgentDelete => message.groups[g].agent_deletes += 1,
-            }
-        }
-    }
-}
-
-/// The pair lane as replay elements (D99).
-///
-/// The user's messages come back one bubble each. The agent's *run* — its prose
-/// and the work it did between sentences — comes back as **one message with
-/// activities**, which is the unit the console holds a turn in, so the same
-/// renderer folds it into `⏺ Searched for 4 patterns, read 2 files`. That is
-/// the whole reason this is not a list of dim `⏺ Tool(…)` lines any more.
-///
-/// A run ends where anything at all stood between two of the agent's rows in
-/// the full record — a message from main, a room relay, a chase — because that
-/// something is what ended it, even though this lane never shows it. The rule
-/// also keeps the replay **append-only**: every continuation is triggered by an
-/// item that breaks the run, so a message already printed never grows.
-#[allow(dead_code)] // D105 consumes this
-fn pair_replay(who: &str, history: &[Message], stamps: &[u64]) -> Vec<Replay> {
-    let mut out: Vec<Replay> = Vec::new();
-    let mut open: Option<UiMessage> = None;
-    fn flush(open: &mut Option<UiMessage>, out: &mut Vec<Replay>, who: &str) {
-        let Some(mut message) = open.take() else {
-            return;
-        };
-        // The turn is over, so nothing in it is still running: the console
-        // closes the last group at `TurnEnd` and a replay is all past tense.
-        if let Some(group) = message.groups.last_mut() {
-            group.active = false;
-        }
-        out.push(Replay::Message {
-            who: who.to_string(),
-            message,
-        });
-    }
-    for item in crate::tui::perspective::pair_lane(who, history, stamps) {
-        if item.post.you {
-            flush(&mut open, &mut out, who);
-            let mut message = blank_message(Role::User);
-            message.text = item.post.text;
-            message.at = item.post.at;
-            out.push(Replay::Message {
-                who: USER_NAME.to_string(),
-                message,
-            });
-            continue;
-        }
-        if !item.contiguous {
-            flush(&mut open, &mut out, who);
-        }
-        let message = open.get_or_insert_with(|| blank_message(Role::Assistant));
-        match &item.work {
-            Some(work) => push_work(message, work),
-            None => {
-                if !message.text.is_empty() {
-                    message.text.push_str("\n\n");
-                }
-                message.text.push_str(&item.post.text);
-                // The reply's clock is when its last piece landed, which is the
-                // rule the console stamps a turn with.
-                if item.post.at != 0 {
-                    message.at = item.post.at;
-                }
-            }
-        }
-    }
-    flush(&mut open, &mut out, who);
     out
 }
 
@@ -1513,91 +1363,86 @@ mod tests {
         );
     }
 
-    // ---- the pair replay -------------------------------------------------
+    // ---- the zoomed view's projection ------------------------------------
     //
-    // Unused between D103 and D105 (see [`Replay`]) and tested anyway: the run
-    // folding below is what the zoomed view will print, and machinery kept
-    // deliberately is machinery that has to keep working. The tests used to
-    // drive it through `Buffers::rehydrate`, which retired with the flow it fed;
-    // they drive [`pair_replay`] itself now, which is what they were about.
+    // D103 kept the pair replay for this batch; D105 found a shorter road and
+    // these are its tests, moved onto what replaced it. The run folding they
+    // were about is still the assertion — over the *whole* record now, which
+    // is more than the pair lane ever held — and it lands in a [`Post`] the one
+    // row renderer already draws instead of in a `UiMessage` only the console
+    // can.
 
-    fn replay_texts(replay: &[Replay]) -> Vec<String> {
-        replay
-            .iter()
-            .map(|item| match item {
-                Replay::Note(text) => text.clone(),
-                Replay::Message { message, .. } => message.text.clone(),
-            })
-            .collect()
+    fn texts(posts: &[Post]) -> Vec<String> {
+        posts.iter().map(|p| p.text.clone()).collect()
     }
 
-    fn pair_of(session: &Arc<Session>, name: &str) -> Vec<Replay> {
+    fn record_of(session: &Arc<Session>, name: &str) -> Vec<Post> {
         let (history, stamps, ..) = session.agents.view_of(name).expect("the instance");
-        pair_replay(name, &history, &stamps)
+        record_posts(name, &history, &stamps)
     }
 
-    /// The pair is the user's own exchange with the instance, in the same
-    /// vocabulary the transcript uses: the D64 marker is transport and does not
-    /// render, and each side keeps its own role and name.
+    /// The zoom keeps every lane, and that is the whole difference from the
+    /// pair view: the task that created the instance, main's instruction, the
+    /// user's own message and the agent's answer all render, each under the
+    /// name the walk attributes it to — while the pair lane over the same
+    /// history keeps the user's two turns and drops the rest (D99).
     #[test]
-    fn the_pair_replay_says_who_said_what() {
+    fn the_zoom_keeps_every_lane_and_the_pair_view_keeps_one() {
         let session = test_session();
         seed_agent(
             &session,
             "scout",
-            vec![from_user("look at the parser"), assistant("found it")],
+            vec![
+                Message::user_text("audit the lexer"),
+                assistant("on it"),
+                Message::user_text("also the parser"),
+                from_user("and say what you find"),
+                assistant("found two"),
+            ],
         );
-        let replay = pair_of(&session, "scout");
+        let record = record_of(&session, "scout");
         assert_eq!(
-            replay_texts(&replay),
-            vec!["look at the parser", "found it"],
-            "the marker line is scaffolding and does not render (D64)"
+            texts(&record),
+            vec![
+                "audit the lexer",
+                "on it",
+                "also the parser",
+                "and say what you find",
+                "found two"
+            ],
+            "the whole record, in the order the record holds it"
         );
-        match &replay[0] {
-            Replay::Message { who, message } => {
-                assert_eq!(who, USER_NAME);
-                assert_eq!(message.role, Role::User);
-            }
-            other => panic!("expected the user's message, got {other:?}"),
-        }
-        match &replay[1] {
-            Replay::Message { who, message } => {
-                assert_eq!(who, "scout");
-                assert_eq!(message.role, Role::Assistant);
-            }
-            other => panic!("expected the agent's message, got {other:?}"),
-        }
-    }
+        let senders: Vec<(&str, bool)> = record.iter().map(|p| (p.from.as_str(), p.you)).collect();
+        assert_eq!(
+            senders,
+            vec![
+                // The spawn prompt is intake: nobody said it, so nobody is
+                // named over it (D96).
+                ("", false),
+                ("scout", false),
+                // Unmarked prose in a subagent's record is main (D100).
+                (crate::channels::MAIN_NAME, false),
+                (USER_NAME, true),
+                ("scout", false),
+            ]
+        );
 
-    /// One extraction, one answer: the replay reads through the same post
-    /// builder every other view reads through, rather than parsing a history a
-    /// second way.
-    #[test]
-    fn the_pair_replay_says_what_dm_posts_says_about_the_same_history() {
-        let session = test_session();
-        let history = vec![
-            Message::user_text(format!(
-                "{}\nfirst\n{}\nsecond",
-                crate::tool::agent::DM_FROM_USER_MARKER,
-                crate::tool::agent::DM_FROM_USER_MARKER
+        let (history, stamps, ..) = session.agents.view_of("scout").expect("the instance");
+        assert_eq!(
+            texts(&crate::tui::perspective::pair_lane(
+                "scout", &history, &stamps
             )),
-            assistant("both noted"),
-        ];
-        seed_agent(&session, "scout", history);
-        let (stored, stamps, ..) = session.agents.view_of("scout").expect("the instance");
-        let posts = dm_posts(&stored, &stamps, &[], &[], &[], "scout");
-
-        let rendered: Vec<String> = posts.iter().map(|p| p.text.clone()).collect();
-        assert_eq!(replay_texts(&pair_of(&session, "scout")), rendered);
-        assert_eq!(rendered, vec!["first", "second", "both noted"]);
+            vec!["and say what you find", "found two"],
+            "the pair view is the user's lane and stays that way"
+        );
     }
 
-    /// D99: an agent's work comes back as activities on its own message, so the
-    /// console's collapse machinery folds it — `⏺ Searched for 1 pattern, read
-    /// 2 files` — instead of the four flat dim lines the DM used to print. The
-    /// grouping rules are not restated here; the point is that they are reached.
+    /// D99: an agent's work folds through the console's own classifier and the
+    /// console's own wording — `⏺ Searched for 1 pattern, read 2 files` — rather
+    /// than printing one dim line per call. The grouping rules are not restated
+    /// here; the point is that they are reached.
     #[test]
-    fn the_pair_replays_work_as_activity_groups_and_never_as_flat_lines() {
+    fn the_zoom_folds_work_the_way_the_console_folds_it() {
         let session = test_session();
         seed_agent(
             &session,
@@ -1620,35 +1465,30 @@ mod tests {
                 },
             ],
         );
-        let replay = pair_of(&session, "scout");
+        let record = record_of(&session, "scout");
         assert_eq!(
-            replay_texts(&replay),
-            vec!["find the leak", "looking\n\nfound it"],
-            "one message for the run, not one per block and none per tool"
+            texts(&record),
+            vec![
+                "find the leak",
+                "looking",
+                "⏺ Searched for 1 pattern, read 2 files",
+                "found it"
+            ],
+            "three calls, one row, between the prose they happened between"
         );
-        let Replay::Message { message, .. } = &replay[1] else {
-            panic!("the agent's turn is a message: {replay:?}")
-        };
-        assert_eq!(message.activities.len(), 3, "every call is an activity");
         assert_eq!(
-            message.groups.len(),
-            1,
-            "and consecutive collapsible calls are one group"
+            record[2].kind,
+            PostKind::Process,
+            "the fold is work, not somebody speaking"
         );
-        assert!(!message.groups[0].active, "a replayed group is past tense");
-        assert_eq!(
-            crate::tui::chat::collapse_summary(&message.groups[0], false),
-            "Searched for 1 pattern, read 2 files",
-            "the console's own wording, reached rather than reimplemented"
-        );
-        // The work sits between the prose it happened between, which is what an
-        // insert point is for.
-        assert_eq!(message.insert_points, vec![7, 7, 7]);
+        assert_eq!(record[2].from, "scout");
     }
 
-    /// A tool call the console does not collapse ends the group, here too.
+    /// A tool call the console does not collapse ends the run, here too — and
+    /// keeps its own call line, because that is the only row that will ever
+    /// name it.
     #[test]
-    fn a_standalone_call_closes_the_group_the_way_the_console_closes_it() {
+    fn a_standalone_call_closes_the_fold_the_way_the_console_closes_it() {
         let session = test_session();
         seed_agent(
             &session,
@@ -1665,12 +1505,72 @@ mod tests {
                 },
             ],
         );
-        let replay = pair_of(&session, "scout");
-        let Replay::Message { message, .. } = &replay[1] else {
-            panic!("{replay:?}")
-        };
-        assert_eq!(message.groups.len(), 2, "the write broke the run");
-        assert_eq!(message.group_of, vec![Some(0), None, Some(1)]);
+        assert_eq!(
+            texts(&record_of(&session, "scout")),
+            vec![
+                "fix it".to_string(),
+                "⏺ Read 1 file".to_string(),
+                tool_call_line("Write", &serde_json::json!({"file_path": "a.rs"})),
+                "⏺ Read 1 file".to_string(),
+            ],
+            "the write broke the run and printed itself"
+        );
+    }
+
+    /// The live states the zoom hangs under the record: what is claimed, what
+    /// is queued, what is streaming — each under the sender it came from, which
+    /// is the part the pair view could filter away and this one cannot.
+    #[test]
+    fn the_zooms_live_tail_keeps_the_sender_of_everything_in_flight() {
+        let session = test_session();
+        seed_agent(&session, "scout", vec![from_user("start"), assistant("ok")]);
+        let (history, stamps, ..) = session.agents.view_of("scout").expect("the instance");
+        let posts = zoom_posts(
+            &history,
+            &stamps,
+            &[(crate::channels::MAIN_NAME.to_string(), "keep going".into())],
+            &[crate::agents::LiveBlock::Text("almost".into())],
+            &[(USER_NAME.to_string(), "and then stop".into())],
+            "scout",
+        );
+        let tail: Vec<(&str, bool, PostKind)> = posts[2..]
+            .iter()
+            .map(|p| (p.from.as_str(), p.you, p.kind))
+            .collect();
+        assert_eq!(
+            tail,
+            vec![
+                // Claimed by the running turn: main's instruction is main's,
+                // and is never drawn as a bubble the user wrote (D64/D99).
+                (crate::channels::MAIN_NAME, false, PostKind::Said),
+                (USER_NAME, true, PostKind::Queued),
+                ("scout", false, PostKind::Typing),
+            ]
+        );
+    }
+
+    /// The run whoever started it: the pair view showed only the user's own
+    /// stream, and a view of the agent's whole life must show the stream it is
+    /// producing for anybody.
+    #[test]
+    fn the_zoom_shows_a_run_it_did_not_start() {
+        let session = test_session();
+        seed_agent(&session, "scout", vec![Message::user_text("audit")]);
+        let (history, stamps, ..) = session.agents.view_of("scout").expect("the instance");
+        let posts = zoom_posts(
+            &history,
+            &stamps,
+            &[],
+            &[crate::agents::LiveBlock::Tool("⏺ Read(a.rs)".into())],
+            &[],
+            "scout",
+        );
+        assert_eq!(
+            texts(&posts),
+            vec!["audit", "⏺ Read(a.rs)", ""],
+            "a live step is one row — the stream carries the line, not the call"
+        );
+        assert_eq!(posts[2].kind, PostKind::Typing, "a reply is still owed");
     }
 
     /// A room's log as posts: what was said, and the roster changes as lines

@@ -109,11 +109,15 @@ pub const BINDINGS: &[Binding] = &[
     },
     Binding {
         keys: "ctrl+b",
-        description: "background the running command · manage background agents (tab: perspective)",
+        description: "background the running command · manage agents (enter view · tab record)",
     },
     Binding {
         keys: "shift+↑/↓",
-        description: "open the agent tree and pick a row (k stops it)",
+        description: "open the agent tree and pick a row (enter views it · k stops it)",
+    },
+    Binding {
+        keys: "esc (viewing)",
+        description: "agent view: stop the run, then return (shift+tab: its mode)",
     },
     Binding {
         keys: "ctrl+shift+o",
@@ -282,8 +286,22 @@ mod tests {
         );
         let select = find("shift+↑/↓").description;
         assert!(
-            select.contains("agent tree") && select.contains('k'),
-            "{select}"
+            select.contains("agent tree") && select.contains('k') && select.contains("enter"),
+            "the row's three verbs are all named where the cursor is: {select}"
+        );
+        // D105's view has one key with two meanings, so the panel says both.
+        let viewing = find("esc (viewing)").description;
+        assert!(
+            viewing.contains("stop the run") && viewing.contains("return"),
+            "{viewing}"
+        );
+        assert!(
+            viewing.contains("shift+tab"),
+            "and where the mode being cycled is not main's: {viewing}"
+        );
+        assert!(
+            find("ctrl+b").description.contains("enter view"),
+            "the manager's detail names its two doors"
         );
         assert!(
             find("ctrl+shift+o").description.contains("preview"),
@@ -346,7 +364,7 @@ mod tests {
             .unwrap_or_else(|| panic!("ctrl+b binding missing"));
         assert_eq!(
             binding.description,
-            "background the running command · manage background agents (tab: perspective)"
+            "background the running command · manage agents (enter view · tab record)"
         );
     }
 

@@ -27,9 +27,8 @@
 use rsmarkdown_core::{MarkdownProcessor, Renderer};
 
 use crate::channels::USER_NAME;
-use crate::tui::buffer::{Delivery, Post, PostKind, SubmitTarget, dm_posts};
+use crate::tui::buffer::{Delivery, Post, PostKind, SubmitTarget};
 use crate::tui::chat::{Chat, Row, one_line, text_rows, user_message_rows};
-use crate::tui::el::El;
 use crate::tui::line::{Line, SegStyle, wrap_words};
 use crate::tui::markdown::MarkdownRenderer;
 
@@ -66,6 +65,16 @@ pub enum DirectTarget {
     Agent(String),
     /// A room's log, posted to as the user (joining first if need be).
     Room(String),
+}
+
+impl DirectTarget {
+    /// The address as it is written: the sigil is part of the name.
+    pub(crate) fn label(&self) -> String {
+        match self {
+            Self::Agent(name) => format!("@{name}"),
+            Self::Room(name) => format!("#{name}"),
+        }
+    }
 }
 
 impl Chat {
@@ -125,105 +134,66 @@ impl Chat {
         Some((target, body.to_string()))
     }
 
-    /// Perform a direct send and leave its receipt.
+    /// Perform a direct send. The delivery and nothing else.
+    ///
+    /// A room the user is not in **joins first**. Speaking is participation and
+    /// participation is announced — the domain writes the membership line into
+    /// the room's own log, so every member sees the same arrival the joiner
+    /// does. That is the v3 ruling, and it is what keeps reading a room free.
+    /// One join path, so a zoom and a `#room` line announce identically.
+    pub(crate) fn deliver_direct(&mut self, target: &DirectTarget, text: String) -> Delivery {
+        let submit = match target {
+            DirectTarget::Agent(name) => SubmitTarget::Dm {
+                agent: name.clone(),
+                text,
+            },
+            DirectTarget::Room(name) => {
+                if !self.session.channels.is_member(name, USER_NAME)
+                    && let Err(why) = self.session.channels.invite(name, USER_NAME)
+                {
+                    return Delivery::Rejected(why);
+                }
+                SubmitTarget::Channel {
+                    channel: name.clone(),
+                    text,
+                }
+            }
+        };
+        let outcome = crate::tui::buffer::deliver(&self.session, submit);
+        if outcome == Delivery::Sent {
+            self.refresh_conversations();
+        }
+        outcome
+    }
+
+    /// A direct send from the transcript, with its receipt.
     ///
     /// The receipt is **transient** and lives on the info tier: nothing was said
     /// to the model, so nothing belongs in main's history, and a flow line
     /// would put an envelope in the user's mouth for the rest of the session.
     /// CC does the same thing with a 3s notification (`Sent to @scout`).
     ///
-    /// A room the user is not in **joins first**. Speaking is participation and
-    /// participation is announced — the domain writes the membership line into
-    /// the room's own log, so every member sees the same arrival the joiner
-    /// does. That is the v3 ruling, and it is what keeps reading a room free.
+    /// It is the *transcript's* receipt and not the delivery's, which is why it
+    /// sits out here: the zoomed view sends down the same path and needs none,
+    /// because the message it just sent is drawn on the screen it was sent from
+    /// (D105).
     pub(crate) fn direct_send(&mut self, target: DirectTarget, text: String) {
-        let (receipt, submit) = match target {
-            DirectTarget::Agent(name) => (
-                format!("Sent to @{name}"),
-                SubmitTarget::Dm { agent: name, text },
-            ),
-            DirectTarget::Room(name) => {
-                if !self.session.channels.is_member(&name, USER_NAME)
-                    && let Err(why) = self.session.channels.invite(&name, USER_NAME)
-                {
-                    self.push_slash_info(why);
-                    return;
-                }
-                (
-                    format!("Sent to #{name}"),
-                    SubmitTarget::Channel {
-                        channel: name,
-                        text,
-                    },
-                )
-            }
-        };
-        match crate::tui::buffer::deliver(&self.session, submit) {
-            Delivery::Sent => {
-                self.refresh_conversations();
-                self.push_slash_info(receipt);
-            }
+        let receipt = format!("Sent to {}", target.label());
+        match self.deliver_direct(&target, text) {
+            Delivery::Sent => self.push_slash_info(receipt),
             // A refusal says what did not happen, on the same tier and never as
             // a receipt — a receipt claims something was delivered.
             Delivery::Rejected(why) => self.push_slash_info(why),
         }
     }
 
-    /// What one agent's conversation is doing right now: the message on its
-    /// way, the work it is doing, the reply as it arrives.
-    ///
-    /// **Unused between D103 and D105.** The surface that drew it — the DM as a
-    /// place the terminal could be pointed at — retired with the conversation
-    /// engine; the zoomed view is what draws it next, over the same registry
-    /// reads and the same two live-only post kinds. Kept rather than deleted
-    /// because rewriting it would mean re-deciding the D99 filters below, and
-    /// they are the part that was hard to get right.
-    ///
-    /// These rows are transient by construction. Everything here is a *state* —
-    /// claimed, queued, mid-stream — and the moment any of it becomes record it
-    /// arrives it becomes a settled message and disappears from here. That is
-    /// why they never reach scrollback: the record is what gets printed, not
-    /// the states on the way to it.
-    #[allow(dead_code)] // D105 consumes this
-    pub(crate) fn conversation_tail_el(
-        &self,
-        name: &str,
-        width: usize,
-        pal: &crate::tui::avatar::Palette,
-    ) -> Option<El> {
-        let (history, stamps, live, in_flight, pending) = self.dm_state(name)?;
-        // The settled prefix is what the flow already shows; `dm_posts` appends
-        // the live states after it, so the difference is exactly the tail.
-        let settled = dm_posts(&history, &stamps, &[], &[], &[], name);
-        let all = dm_posts(&history, &stamps, &in_flight, &live, &pending, name);
-        if all.len() <= settled.len() {
-            return None;
-        }
-        let gutter = self.conversation_gutter(pal);
-        // Run tracking starts fresh at the tail: everything above it has
-        // already settled into the flow, and reaching back across that seam
-        // would mean re-deciding rows that are frozen.
-        let tail = &all[settled.len()..];
-        let runs = sender_runs(tail);
-        let rows: Vec<Row> = tail
-            .iter()
-            .zip(runs)
-            .flat_map(|(post, lead)| self.tail_post_rows(post, name, width, Some(&gutter), lead))
-            .collect();
-        if rows.is_empty() {
-            return None;
-        }
-        Some(El::Rows(rows))
-    }
-
     /// The avatar gutter this view draws.
     ///
     /// Every conversation has one since D99, @main included: main is a
     /// participant like the rest, and a face is how a participant is
-    /// recognised. One value, so the flow, the live tail and the perspective
+    /// recognised. One value, so the flow, the zoomed view and the perspective
     /// page cannot drift on width, on who wears what, or on which skin the
     /// terminal is in.
-    #[allow(dead_code)] // D105 consumes this
     pub(crate) fn conversation_gutter<'a>(
         &'a self,
         pal: &'a crate::tui::avatar::Palette,
@@ -231,61 +201,21 @@ impl Chat {
         crate::tui::avatar::Gutter::new(self.image_cap.is_some(), pal, &self.faces_pinned)
     }
 
-    /// The instance's live state *for the pair view*, or `None` when the
-    /// registry has never heard of it (a DM whose agent was deleted still has a
-    /// conversation to read).
+    /// One post of a zoomed conversation as rows (D105). The vocabulary is the
+    /// transcript's own: a message somebody sent is a bubble or prose under
+    /// their portrait, a step of the agent's work is one dim line, and the wait
+    /// is the same spinner the rest of the app waits with (D87 `pulse`), so a
+    /// reply in flight here and a main turn in flight read alike.
     ///
-    /// Two filters, both D99, both about the same thing — this conversation has
-    /// two participants in it:
-    ///
-    /// - **The messages in flight and queued are the user's own.** An
-    ///   instruction main sent, sitting in the same inbox, is not a bubble the
-    ///   user wrote and must not be drawn as one.
-    /// - **The live tail belongs to the run the user started.** A run triggered
-    ///   by main, by a room or by a chase is that agent working for somebody
-    ///   else; its stream is on its own page, and here it is not even a typing
-    ///   row — the indicator would be a promise of a reply nobody asked for.
-    #[allow(clippy::type_complexity)]
-    #[allow(dead_code)] // D105 consumes this
-    fn dm_state(
-        &self,
-        name: &str,
-    ) -> Option<(
-        Vec<crate::api::types::Message>,
-        Vec<u64>,
-        Vec<crate::agents::LiveBlock>,
-        Vec<String>,
-        Vec<String>,
-    )> {
-        let (history, stamps, live, in_flight, _state) = self.session.agents.view_of(name)?;
-        let mine = |(from, text): (String, String)| (from == USER_NAME).then_some(text);
-        let in_flight: Vec<String> = in_flight.into_iter().filter_map(mine).collect();
-        let pending: Vec<String> = self
-            .session
-            .agents
-            .pending_of(name)
-            .into_iter()
-            .filter_map(mine)
-            .collect();
-        let live = if self.session.agents.run_is_the_users(name) {
-            live
-        } else {
-            Vec::new()
-        };
-        Some((history, stamps, live, in_flight, pending))
-    }
-
-    /// One live post as rows. The vocabulary is the transcript's own: a message
-    /// you sent is your bubble, a step of the agent's work is one dim line, and
-    /// the wait is the same spinner the rest of the app waits with (D87
-    /// `pulse`), so a DM in flight and a main turn in flight read alike.
-    #[allow(dead_code)] // D105 consumes this
-    fn tail_post_rows(
+    /// The two live-only kinds are the reason this is not just
+    /// [`settled_post_rows`]: they need the running instance's clock and its
+    /// colour, which a stored post does not have.
+    pub(crate) fn zoom_post_rows(
         &self,
         post: &Post,
         who: &str,
         width: usize,
-        gutter: Option<&crate::tui::avatar::Gutter<'_>>,
+        gutter: &crate::tui::avatar::Gutter<'_>,
         lead: bool,
     ) -> Vec<Row> {
         let theme = &self.theme;
@@ -293,14 +223,9 @@ impl Chat {
         // indentation so the column does not jog, and no face, because nobody
         // has said anything yet.
         let indent = |rows: &mut Vec<Row>| {
-            if let Some(g) = gutter {
-                g.apply(rows, g.index_for(who), who, false);
-            }
+            gutter.apply(rows, gutter.index_for(who), who, false);
         };
-        let inner = match gutter {
-            Some(g) => width.saturating_sub(g.width()),
-            None => width,
-        };
+        let inner = width.saturating_sub(gutter.width());
         match post.kind {
             // The bare indicator: a reply is owed and nothing has arrived yet.
             // With text it *is* the stream, and renders as the reply it is
@@ -316,12 +241,14 @@ impl Chat {
                     .token_rate_label(who, std::time::Instant::now(), self.motion.off())
                     .map(|rate| format!(" · {rate}"))
                     .unwrap_or_default();
-                // The identity tint the row wore came from the composer's own
-                // (D90), and the composer belongs to main again; D105 gives the
-                // wait the viewed agent's colour back.
+                // The wait wears the agent's own colour: the composer above it
+                // does too while a zoom is open, and one identity should look
+                // like one identity on both rows.
+                let palette = crate::tui::avatar::Palette::new(theme);
+                let identity = palette.avatars[gutter.index_for(who) % palette.avatars.len()];
                 let mut rows = vec![Row::new(Line::styled(
                     one_line(&format!("{glyph} {who} is replying…{rate}"), inner),
-                    SegStyle::fg(theme.claude),
+                    SegStyle::fg(identity),
                 ))];
                 indent(&mut rows);
                 rows
@@ -336,14 +263,16 @@ impl Chat {
                 indent(&mut rows);
                 rows
             }
-            _ => {
-                let sender = gutter.map(|g| Sender {
-                    gutter: *g,
-                    index: g.index_for(&post.from),
+            _ => settled_post_rows(
+                theme,
+                post,
+                width,
+                Some(&Sender {
+                    gutter: *gutter,
+                    index: gutter.index_for(&post.from),
                     lead,
-                });
-                settled_post_rows(theme, post, width, sender.as_ref())
-            }
+                }),
+            ),
         }
     }
 

@@ -174,7 +174,8 @@ bingo starts even with no credentials: the welcome card carries onboarding (`/pr
 | `Esc` | close the topmost dialog/menu/panel first / interrupt while busy / on double-press: clear the input, or open Rewind when it is empty |
 | `Ctrl+C` | interrupt while busy / clear text / exit on two presses with empty input |
 | `Ctrl+T` | cycle the status layer: the task area, then the agent tree, then closed |
-| `Shift+↑` / `Shift+↓` | open the agent tree and pick a row (`k` stops the instance under the cursor) |
+| `Shift+↑` / `Shift+↓` | open the agent tree and pick a row (`Enter` views it, `k` stops it) |
+| `Enter` (viewing) | send the draft to the agent on screen; `Esc` stops its run, then returns |
 | `Ctrl+Shift+O` | agent tree: hang a three-line message preview off each row |
 | `Ctrl+O` | open the transcript view: the whole session with every tool output, on its own screen (`ctrl+e` collapse · `/` search · `o` open the image in view · `q` close) |
 | `Ctrl+G` | compose the draft in `$VISUAL`/`$EDITOR` (or the readline chord `Ctrl+X Ctrl+E`); a non-zero exit keeps the draft |
@@ -184,7 +185,7 @@ bingo starts even with no credentials: the welcome card carries onboarding (`/pr
 | `Ctrl+K` / `Alt+K` | kill to the end of the line |
 | `Ctrl+Y` / `Alt+Y` | yank the newest kill; `Alt+Y` right after it cycles the 10-entry kill ring |
 | `Shift+Enter` | insert a newline (wherever the terminal speaks the kitty keyboard protocol) |
-| `Ctrl+B` | move the running shell command to the background; with none running, manage background agents |
+| `Ctrl+B` | move the running shell command to the background; with none running, manage background agents (`Enter` views one, `tab` opens its record) |
 | `Ctrl+L` | clear and redraw |
 | `@` / `#` | at the start of a line, send the rest straight to that agent or room; mid-line, `@` mentions a project file or a running agent (fuzzy dropdown, `Tab`/`Enter` inserts) |
 | `Tab` | complete the slash command, its argument, the selected mention, or a `!` shell-history prefix |
@@ -547,13 +548,25 @@ agent tree → closed. The tree is `@main` plus one row per instance:
 `@scout: reading src/lib.rs… · 12 tool uses · 8.3k tokens` while it runs,
 `Idle for 14s` while it waits, `[stopped]` once it is stopped — names in their
 own colours, rebuilt from the registry every frame. `Shift+↑/↓` opens it and
-picks a row, `k` stops the instance under the cursor, `Ctrl+Shift+O` hangs a
-three-line preview of each one's conversation off its row, and `Esc` clears the
-cursor and then closes the panel. With the tree closed and anybody on the
+picks a row, `Enter` **views** the instance under the cursor, `k` stops it,
+`Ctrl+Shift+O` hangs a three-line preview of each one's conversation off its
+row, and `Esc` clears the cursor and then closes the panel. With the tree closed and anybody on the
 roster, one footer line names them: `@main @scout @writer · shift + ↓ to
 expand`, dim where they are resting. The task panel names an owner who is still
 here (` (@scout)`, in their colour) and what a task is waiting on
 (`› blocked by #3`) — display only, nothing assigns or claims.
+
+**The zoomed view** puts one agent's conversation on the screen for as long as
+you want it there. `Enter` on a tree row — or in the `Ctrl+B` detail — swaps to
+`Viewing @scout · esc to return` over that agent's **whole record**: the task it
+was given, main's instructions, your own messages, its work folded the way
+`@main`'s is, its answers, and whatever it is streaming right now. The composer
+stays live and addresses the agent in its own colour: what you type reaches its
+inbox under your name and appears on the next frame, and a `/` or `!` line is a
+message rather than a command. `Esc` aborts a running turn first and returns on
+the next press; `Shift+Tab` cycles *that agent's* permission mode; `Shift+↑/↓`
+walks the roster and the view follows. Leaving puts the transcript back exactly
+where it was — nothing was spliced into it and nothing reprints.
 
 **The team is not a conversation** — you cannot say anything to it, so it is a
 directory rather than a board with a badge. It shows the roster with presence and
@@ -574,8 +587,9 @@ This is the audit layer — the one place an agent's conversations with someone
 other than you are visible, while your own DM with it stays a pair conversation
 and mixes nothing in. It is a snapshot: reopening is the refresh.
 
-**One door reaches it** for now: `tab` on an agent in the Ctrl+B manager's
-detail. Main's page is built from
+**One door reaches it**: `tab` on an agent in the Ctrl+B manager's
+detail — where `Enter` opens the zoomed view instead, which is the live
+conversation rather than the record. Main's page is built from
 the session transcript — its console conversation as its `@user` lane, one lane
 per agent that wrote to it, its rooms, its dispatch notifications as intake —
 and the only clock a transcript carries is the turn marker, so times on it are

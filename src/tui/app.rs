@@ -418,6 +418,22 @@ pub async fn run_inline(
             dirty = true;
         }
 
+        // The zoomed view (D105) takes the pager's road too, with one
+        // difference: it is live, so its loop keeps its own clock. It may hand
+        // the screen from one agent to another without leaving the alternate
+        // screen, which is why one call here covers every switch inside it.
+        if let Some(target) = std::mem::take(&mut chat.open_zoom) {
+            crate::tui::zoom::run_zoom_modal(&mut chat, &mut events, target, false).await?;
+            chat.open_zoom = None;
+            if let Ok((w, h)) = crossterm::terminal::size() {
+                pending_resize = Some((Size::new(w, h), Instant::now()));
+            } else {
+                chat.force_redraw = true;
+            }
+            chat.dirty = true;
+            dirty = true;
+        }
+
         // `$EDITOR` compose (ctrl+g / ctrl+x ctrl+e, D86). Unlike the pager
         // this hands the terminal to a foreign process, so the event stream is
         // replaced rather than reused; the return goes through the resize
@@ -673,6 +689,15 @@ pub async fn run_fullscreen(
         if let Some(agent) = std::mem::take(&mut chat.open_perspective) {
             crate::tui::perspective_ui::run_perspective_modal(&mut chat, &mut events, &agent, true)
                 .await?;
+            chat.force_redraw = true;
+            chat.dirty = true;
+            dirty = true;
+        }
+
+        // The zoomed view (D105), already on the alternate screen.
+        if let Some(target) = std::mem::take(&mut chat.open_zoom) {
+            crate::tui::zoom::run_zoom_modal(&mut chat, &mut events, target, true).await?;
+            chat.open_zoom = None;
             chat.force_redraw = true;
             chat.dirty = true;
             dirty = true;

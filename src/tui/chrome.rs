@@ -506,19 +506,32 @@ fn caret_cell(chat: &Chat) -> (usize, usize) {
     (row - start, col)
 }
 
+/// The identity colour of whoever the composer is addressing, or `None` for
+/// main — which has the composer's own colour and always did.
+fn addressee_color(chat: &Chat) -> Option<Color> {
+    let name = chat.zoom_subject()?;
+    let palette = crate::tui::avatar::Palette::new(&chat.theme);
+    let gutter = crate::tui::avatar::Gutter::new(false, &palette, &chat.faces_pinned);
+    Some(palette.avatars[gutter.index_for(&name) % palette.avatars.len()])
+}
+
 /// Input box (top border + input rows + bottom border) with the caret attached
 /// to the input line it sits on.
 pub(crate) fn prompt(chat: &Chat, width: usize) -> El {
     let theme = &chat.theme;
     // Bash mode is the one thing that recolours the box: `!` changes what the
     // box *does*. D90's teammate tint retired with the DM buffer it belonged
-    // to; D105 gives the colour back to the composer while a zoom is open.
+    // to; D105 gives the colour back — to the *zoom's* composer, where there is
+    // somebody on the other end again. CC tints the same two things there, the
+    // prompt character and the rule around the box
+    // (`PromptInputModeIndicator.tsx:79-82`, `useSwarmBanner.ts:92-100`).
+    let addressee = addressee_color(chat);
     let border_color = if chat.bash_mode {
         theme.bash_border
     } else {
-        theme.prompt_border
+        addressee.unwrap_or(theme.prompt_border)
     };
-    let prompt_style = if chat.busy {
+    let prompt_style = if chat.busy && addressee.is_none() {
         theme.text_secondary
     } else {
         theme.text
@@ -526,7 +539,7 @@ pub(crate) fn prompt(chat: &Chat, width: usize) -> El {
     let (prefix, prefix_color) = if chat.bash_mode {
         ("! ".to_string(), theme.bash_border)
     } else {
-        ("❯ ".to_string(), prompt_style)
+        ("❯ ".to_string(), addressee.unwrap_or(prompt_style))
     };
     let bar = "─".repeat(width.saturating_sub(2));
     let mut children = vec![El::Line(Line::styled(
@@ -643,6 +656,88 @@ pub(crate) fn chrome(chat: &Chat, width: usize, fullscreen: bool) -> El {
         children.push(El::Row(pills));
     }
     El::Col(children)
+}
+
+/// Everything under the zoomed view's body (D105): the status layer, the
+/// composer that is addressing the agent, and the hint row.
+///
+/// It is the inline host's own furniture, in the inline host's own order —
+/// tree, warning, composer, footer, pills — because CC's zoom keeps its footer
+/// too: the transcript area is what swaps, not the chrome around it
+/// (`REPL.tsx:4565-4570` replaces `Messages`' source and nothing else). What is
+/// left out is what belongs to a turn this screen is not showing: the running
+/// status row, the task area, the queue lines, the manager and the menus.
+pub(crate) fn zoom_chrome(chat: &Chat, width: usize) -> El {
+    let theme = &chat.theme;
+    // One blank row between the conversation and the furniture under it: the
+    // transcript gets the same breath from its per-message spacing, and without
+    // it the last thing the agent said sits on top of the tree.
+    let mut children: Vec<El> = vec![El::Blank, El::Rows(chat.agent_tree_rows(width))];
+    if let Some(warning) = chat.visible_warning() {
+        children.push(El::Line(Line::styled(
+            format!("  ⚠ {warning}"),
+            SegStyle::fg(theme.warning),
+        )));
+    }
+    children.push(prompt(chat, width));
+    // The transient notice — `Press ctrl-c again to exit` and its neighbours —
+    // rides here for the same reason it rides the inline footer: a key that
+    // arms a window has to say the window is open.
+    if let Some(text) = chat.notice {
+        children.push(El::Row(dim_row(text, theme)));
+    }
+    children.push(El::Row(zoom_footer(chat, width)));
+    if let Some(pills) = chat.pill_row(width) {
+        children.push(El::Row(pills));
+    }
+    El::Col(children)
+}
+
+/// The zoom's hint row: the **viewed agent's** permission mode, then what the
+/// keys mean here.
+///
+/// CC swaps the teammate's mode into exactly this slot while it has the screen
+/// (`PromptInput.tsx:342-351`, rendered at `PromptInputFooterLeftSide.tsx:349-357`),
+/// and replaces `esc to interrupt` with the return hint (`:377-379`). bingo says
+/// both meanings of `esc` because it has both: one press stops the run, the next
+/// one leaves.
+fn zoom_footer(chat: &Chat, width: usize) -> Row {
+    let theme = &chat.theme;
+    let mut line = Line::styled("  ", SegStyle::fg(theme.text));
+    for (text, color) in mode_badge(
+        chat.zoom_permission_mode()
+            .unwrap_or(PermissionMode::Default),
+        theme,
+    ) {
+        line.push_styled(text, SegStyle::fg(color));
+        line.push_styled(" ", SegStyle::fg(theme.text_secondary));
+    }
+    // Two tiers, longest first — the widest that fits whole wins, exactly as
+    // the transcript's and the perspective page's footers choose. A room has
+    // neither a permission mode nor a roster position, so its row says the one
+    // thing that is true there rather than advertising two keys that do
+    // nothing.
+    let tiers: [&str; 2] = match (chat.zoomed().is_some(), chat.zoom_stoppable()) {
+        (false, _) => ["esc to return", "esc to return"],
+        (true, true) => [
+            "esc stops the run · shift + tab to cycle mode · shift + ↑/↓ to switch",
+            "esc stops the run · shift + tab · shift + ↑/↓",
+        ],
+        (true, false) => [
+            "esc to return · shift + tab to cycle mode · shift + ↑/↓ to switch",
+            "esc to return · shift + tab · shift + ↑/↓",
+        ],
+    };
+    let room = width.saturating_sub(text_width(&line.plain_text()) + 2);
+    let hint = tiers
+        .iter()
+        .find(|tier| text_width(tier) <= room)
+        .unwrap_or(&tiers[1]);
+    line.push_styled(
+        crate::tui::chat::one_line(hint, room),
+        SegStyle::fg(theme.text_secondary),
+    );
+    Row::new(line)
 }
 
 /// #18 full-flow full-screen error-state skeleton (AC-26/53, ui/ux #68 spec): error title +

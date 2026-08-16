@@ -1736,22 +1736,10 @@ impl super::Chat {
     /// bypassPermissions / dontAsk stay in the cycle only when the session started in that mode
     /// (dangerous modes must not be reachable by one mispress).
     fn cycle_permission_mode(&mut self) {
-        self.permission_mode = match self.permission_mode {
-            PermissionMode::Default => PermissionMode::AcceptEdits,
-            PermissionMode::AcceptEdits => PermissionMode::Plan,
-            PermissionMode::Plan => PermissionMode::Default,
-            // Started in bypass/dontAsk: toggle between it and default, never introducing a new dangerous mode.
-            PermissionMode::BypassPermissions | PermissionMode::DontAsk => PermissionMode::Default,
-        };
-        // From default, switch back to the startup mode (an edge that only bypass/dontAsk sessions have).
-        if self.permission_mode == PermissionMode::AcceptEdits
-            && matches!(
-                self.session.permission_mode,
-                PermissionMode::BypassPermissions | PermissionMode::DontAsk
-            )
-        {
-            self.permission_mode = self.session.permission_mode;
-        }
+        self.permission_mode = crate::tui::chat::next_permission_mode(
+            self.permission_mode,
+            self.session.permission_mode,
+        );
         self.dirty = true;
     }
 
@@ -2386,12 +2374,18 @@ impl super::Chat {
                     manager = AgentManager::List { selected: 0 };
                     true
                 }
+                // Enter zooms this agent (D105): the live view over its whole
+                // conversation, with the composer routed to it. Unbound between
+                // D103 and here — the DM it used to open retired with the
+                // buffers, and the promise was kept until there was something
+                // to keep it with.
+                KeyCode::Enter => {
+                    self.open_zoom = Some(crate::tui::zoom::ZoomTarget::Agent(name.clone()));
+                    self.dirty = true;
+                    false
+                }
                 // tab opens this agent's perspective page (D96): the read-only
                 // dossier of every conversation it has had.
-                //
-                // Enter used to open the agent's DM beside it and is unbound
-                // since D103: there is one transcript now, so there is nowhere
-                // to be taken. D105's zoomed view is what Enter means next.
                 KeyCode::Tab => {
                     self.open_perspective = Some(name.clone());
                     self.dirty = true;

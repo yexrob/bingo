@@ -858,6 +858,40 @@ impl AgentRegistry {
         self.lock().get(name).map(|e| e.session.depth)
     }
 
+    /// The permission mode this instance runs under (D105).
+    ///
+    /// Inherited from the parent at spawn (`tool::agent`) and cycled per
+    /// instance from its zoomed view, the way CC cycles a viewed teammate's own
+    /// mode and leaves the leader's alone (`PromptInput.tsx:1410-1447`; the
+    /// field is declared "cycled independently via Shift+Tab when viewing",
+    /// `InProcessTeammateTask/types.ts:44`).
+    pub fn permission_mode_of(&self, name: &str) -> Option<crate::permission::PermissionMode> {
+        self.lock().get(name).map(|e| e.session.permission_mode)
+    }
+
+    /// Point an instance at a session carrying `mode`, and say whether that
+    /// changed anything.
+    ///
+    /// `Session` is immutable inside its `Arc`, so this is the same derive-a-copy
+    /// move the console makes for its own turns (`Chat::session_for_turn`): every
+    /// other field is a shared handle, so the registries, the watch board and the
+    /// task store still point at the same state. The run **in flight** captured
+    /// the old `Arc` and keeps its mode; the next one — a wake, a resume, a
+    /// follow-up — reads this.
+    pub fn set_permission_mode(&self, name: &str, mode: crate::permission::PermissionMode) -> bool {
+        let mut inner = self.lock();
+        let Some(entry) = inner.get_mut(name) else {
+            return false;
+        };
+        if entry.session.permission_mode == mode {
+            return false;
+        }
+        let mut session = (*entry.session).clone();
+        session.permission_mode = mode;
+        entry.session = Arc::new(session);
+        true
+    }
+
     /// The session an instance runs on. Test-only: everything in production reaches a
     /// session through the entry that already holds it, and handing the whole session out
     /// would be a wider door than any caller needs.
@@ -933,6 +967,14 @@ impl AgentRegistry {
 
     /// Whether the run in flight was started by the user's own message. False
     /// when nothing is running — there is no tail to claim.
+    ///
+    /// **Unused since D105.** D99's pair view filtered the live tail by it: an
+    /// agent working for main was not the user's stream to watch. The zoomed
+    /// view shows the agent's whole life, whoever started the run, so the
+    /// filter went — and this is the fact it stood on. Kept rather than
+    /// deleted because the field behind it is a domain write path, and because
+    /// "whose run is this" is a question a roster row can still be asked.
+    #[allow(dead_code)] // D107 absorbs this
     pub fn run_is_the_users(&self, name: &str) -> bool {
         self.lock()
             .get(name)

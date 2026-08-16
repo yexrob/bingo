@@ -2417,22 +2417,37 @@ fn running_agents_leave_the_arrows_to_history() {
         chat.input, "earlier prompt",
         "↑ recalls history, not agents"
     );
-    // Ctrl+B → Enter (list) → tab (detail) opens that agent's record. Enter in
-    // the detail used to open its DM and is unbound since D103: there is one
-    // transcript, so there is nowhere to be taken.
+    // Ctrl+B → Enter (list) opens the detail; from there the two doors are
+    // `tab` for the record (D96) and Enter for the zoom (D105). Enter was left
+    // unbound by D103 precisely so that this batch could give it the meaning it
+    // was reserved for.
     chat.set_input("");
     assert!(chat.on_key(KeyCode::Char('b'), KeyModifiers::CONTROL));
     assert!(chat.on_key(KeyCode::Enter, KeyModifiers::NONE));
-    chat.on_key(KeyCode::Enter, KeyModifiers::NONE);
-    assert!(
-        chat.open_perspective.is_none(),
-        "Enter in the detail opens nothing"
-    );
     assert!(chat.on_key(KeyCode::Tab, KeyModifiers::NONE));
     assert_eq!(
         chat.open_perspective.as_deref(),
         Some("scout"),
         "tab is the door to the record"
+    );
+    assert!(chat.open_zoom.is_none(), "and the record is not the zoom");
+
+    chat.open_perspective = None;
+    assert!(chat.on_key(KeyCode::Char('b'), KeyModifiers::CONTROL));
+    assert!(chat.on_key(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(chat.on_key(KeyCode::Enter, KeyModifiers::NONE));
+    assert_eq!(
+        chat.open_zoom,
+        Some(crate::tui::zoom::ZoomTarget::Agent("scout".into())),
+        "Enter in the detail zooms the agent it is about"
+    );
+    assert!(
+        chat.open_perspective.is_none(),
+        "and the zoom is not the record"
+    );
+    assert!(
+        chat.agent_manager.is_none(),
+        "the panel closes behind the door it opened"
     );
 }
 

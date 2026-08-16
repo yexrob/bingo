@@ -22,11 +22,12 @@
 //! agent would be a second place for "stop" to mean something slightly
 //! different.
 //!
-//! **Enter opens nothing, for now (D103).** It used to point the terminal at
-//! the member's conversation, and there is no longer anywhere to point it: one
-//! transcript, and the only door into an agent's own record is `o`. D105's
-//! zoomed view is what Enter means next, which is why the key is left unbound
-//! rather than given a second meaning that would have to be taken back.
+//! **Enter opens nothing (D103), and this whole panel has no door (D104).** The
+//! key used to point the terminal at the member's conversation; there is one
+//! transcript now, and `o` is the way to an agent's record. D105 gave Enter its
+//! meaning — the zoomed view — on the surfaces that are reachable, and left this
+//! one alone: D107 absorbs the directory into the background dialog, and wiring
+//! a key into a panel that is about to be rebuilt is work done twice.
 //!
 //! Three sources, no copies: the agent registry is the roster, the channel
 //! registry is the room list, and [`crate::tui::buffer::Buffers::team_log`] —

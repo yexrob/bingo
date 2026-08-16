@@ -142,9 +142,13 @@ fn mention_selection_inserts_a_relative_path_and_closes() {
 ///
 /// Rewritten for D103, which gave the sigil two readings by position. **At the
 /// start of a line** `@name ` bypasses the model, so the list is every instance
-/// the send can reach — stopped ones included, because a message resumes one —
-/// and each row says what Enter will do. **Mid-line** it is D85's live
-/// reference, unchanged: running instances only, with no note.
+/// the send can reach, and each row says what Enter will do. **Mid-line** it is
+/// D85's live reference, unchanged: running instances only, with no note.
+///
+/// *Stopped instances are still listed*, which is what D103 decided and what
+/// D105 found to be half true: the composer offers them and the domain then
+/// refuses (`AgentRegistry::deliver`). The listing is left exactly as it is —
+/// the gap is in the domain, and it is named where it lives (D105's record).
 #[test]
 fn mention_lists_agents_by_what_the_position_can_reach() {
     let (mut chat, root) = project_chat("agents");
@@ -185,7 +189,7 @@ fn mention_lists_agents_by_what_the_position_can_reach() {
         "mid-line it is a reference, and a reference does nothing on its own"
     );
 
-    // A stopped agent is still a direct-send target — the message resumes it —
+    // A stopped agent is still offered by the typeahead (D103's ruling) —
     // but it is not a live reference.
     let _ = chat.session.agents.stop("scout");
     chat.set_input("x");

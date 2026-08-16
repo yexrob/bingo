@@ -611,6 +611,36 @@ fn auth_hint_for(oauth: bool, provider: &str, code: &str, msg: String) -> String
 
 /// Collapse-group summary text: `Searched for 2 patterns, read 3 files`;
 /// uses the -ing form plus a trailing … while in progress.
+/// The next permission mode in the shift+tab ladder (CC `app:cycleMode`).
+///
+/// `startup` is the mode the process was launched in, and it is what makes the
+/// dangerous modes reachable without being *introduced*: a session that never
+/// started in bypass/dontAsk can never cycle into one.
+///
+/// Pure since D105, because the zoom cycles a *different* subject's mode — the
+/// viewed agent's — and CC does exactly that, calling its own
+/// `getNextPermissionMode` on the teammate's context and leaving the leader's
+/// alone (`PromptInput.tsx:1410-1447`).
+pub fn next_permission_mode(mode: PermissionMode, startup: PermissionMode) -> PermissionMode {
+    let next = match mode {
+        PermissionMode::Default => PermissionMode::AcceptEdits,
+        PermissionMode::AcceptEdits => PermissionMode::Plan,
+        PermissionMode::Plan => PermissionMode::Default,
+        // Started in bypass/dontAsk: toggle between it and default, never introducing a new dangerous mode.
+        PermissionMode::BypassPermissions | PermissionMode::DontAsk => PermissionMode::Default,
+    };
+    // From default, switch back to the startup mode (an edge that only bypass/dontAsk sessions have).
+    if next == PermissionMode::AcceptEdits
+        && matches!(
+            startup,
+            PermissionMode::BypassPermissions | PermissionMode::DontAsk
+        )
+    {
+        return startup;
+    }
+    next
+}
+
 pub fn collapse_summary(g: &CollapseGroup, in_progress: bool) -> String {
     let active = in_progress;
     let mut parts: Vec<String> = Vec::new();
@@ -936,6 +966,18 @@ pub struct Chat {
     /// hands the terminal over and puts the edited draft back (cleared after
     /// consumption, D86).
     pub open_editor: bool,
+    /// `enter` on a tree row (or in the ctrl+b detail) requests the zoomed view
+    /// (D105): the host opens the alternate-screen live view over that
+    /// conversation. Cleared after consumption — and read *inside* the zoom
+    /// too, where it means "point the same screen somewhere else".
+    pub open_zoom: Option<crate::tui::zoom::ZoomTarget>,
+    /// `enter` on the tree's `@main` row asked the zoom to close (CC's
+    /// `exitTeammateView`). Only the zoom's own loop consumes it; in the inline
+    /// host there is nothing open and it is dropped on the next read.
+    pub close_zoom: bool,
+    /// The conversation the zoomed view is on, while it has the screen. `None`
+    /// is the transcript, which is every frame the inline host draws.
+    pub(crate) zoom: Option<crate::tui::zoom::ZoomTarget>,
     /// bash mode (`!` prefix): input executes directly, bypassing the model.
     pub bash_mode: bool,
     pub busy: bool,
@@ -1351,6 +1393,9 @@ impl Chat {
             open_transcript: false,
             open_perspective: None,
             open_editor: false,
+            open_zoom: None,
+            close_zoom: false,
+            zoom: None,
             bash_mode: false,
             busy: false,
             stream_msg: None,
@@ -2579,7 +2624,7 @@ impl Chat {
     }
 
     /// Swaps placeholders back to their real content (at submit time).
-    fn expand_pastes(&self, text: &str) -> String {
+    pub(crate) fn expand_pastes(&self, text: &str) -> String {
         let mut out = text.to_string();
         for (token, body) in &self.pastes {
             out = out.replace(token.as_str(), body);
@@ -2589,7 +2634,7 @@ impl Chat {
 
     /// An image path in the input (a standalone path line, or a whole `![alt](path)` line) → read the file
     /// → compress and register → replace with the `#[image N]` placeholder. Unrecognized/unreadable lines stay as-is.
-    fn expand_image_paths(&mut self, text: &str) -> String {
+    pub(crate) fn expand_image_paths(&mut self, text: &str) -> String {
         let cwd = self.cwd.clone();
         let mut out: Vec<String> = Vec::new();
         for line in text.lines() {

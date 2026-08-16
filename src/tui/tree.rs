@@ -19,9 +19,11 @@
 //! with nothing selected the tree is a readout and every key still belongs to
 //! the composer. Only a selected row makes `k` mean stop.
 //!
-//! **Enter is unbound until D105**, so no row promises it. CC's ` · enter to
-//! view` and ` · enter to collapse` are the two strings left out; everything
-//! else is copied as it stands.
+//! **Enter zooms** (D105): an instance row opens
+//! [`crate::tui::zoom`] over that agent, the `@main` row leaves a zoom that is
+//! open, and the hide row closes the panel — CC's three answers in CC's order
+//! (`useBackgroundTaskNavigation.ts:206-225`). The two hint strings D104 held
+//! back because the key did nothing are back with it.
 
 use crossterm::event::{KeyCode, KeyModifiers};
 use ratatui::style::Color;
@@ -66,6 +68,17 @@ const SELECT_HINT: &str = " · shift + ↑/↓ to select";
 /// The pills' own affordance (`BackgroundTaskStatus.tsx`, the tail after the
 /// last pill). Same wording, one arrow.
 const EXPAND_HINT: &str = " · shift + ↓ to expand";
+
+/// ` · enter to view` — `TeammateSpinnerLine.tsx:134`, and the leader row's own
+/// copy of it at `TeammateSpinnerTree.tsx:128`. Shown on the **selected** row
+/// and only while that row is not the one already on screen
+/// (`isSelected && !isForegrounded`), so the key is never advertised where it
+/// would do nothing. D104 left it out because Enter was unbound; D105 binds it.
+const VIEW_HINT: &str = " · enter to view";
+
+/// ` · enter to collapse` — `TeammateSpinnerTree.tsx:253`, on the hide row while
+/// the cursor is on it.
+const COLLAPSE_HINT: &str = " · enter to collapse";
 
 /// Preview lines per instance, and the width one is cut to
 /// (`TeammateSpinnerLine.tsx:32`, `:43`).
@@ -134,8 +147,11 @@ fn status_label(status: &AgentStatus, now: std::time::Instant) -> String {
     match status.state {
         // CC's `[stopping]` slot. bingo's stop is synchronous, so the state
         // this row can be in is *stopped*, not stopping — and a stopped
-        // instance stays on the roster because it stays addressable: a message
-        // resumes it (D103's typeahead lists them for the same reason).
+        // instance stays on the roster because the registry keeps it: its
+        // history is intact and its record is still readable. It is **not**
+        // addressable, though: `AgentRegistry::deliver` refuses a stopped
+        // instance, so v4's resume-if-stopped semantics are unimplemented
+        // (D105's finding, and the correction to what D103 recorded here).
         AgentState::Stopped => "[stopped]".to_string(),
         AgentState::Idle => format!(
             "Idle for {}",
@@ -206,13 +222,6 @@ pub fn preview_lines(history: &[crate::api::types::Message]) -> Vec<String> {
 }
 
 impl Chat {
-    /// The agent whose transcript has the screen. Always `None` until D105 puts
-    /// a zoom on it; the tree's tree-glyph and the pills' bold state already
-    /// read it, so the batch that adds the zoom has one place to fill in.
-    pub(crate) fn zoomed(&self) -> Option<&str> {
-        None // D105 consumes this
-    }
-
     /// Everyone the tree lists, in the order it lists them. The registry sorts
     /// by name, which is CC's order too (`getRunningTeammatesSorted`).
     ///
@@ -236,7 +245,7 @@ impl Chat {
     /// The selection, clamped to what is on screen right now. Instances come
     /// and go under an open tree, and CC clamps the same way in an effect
     /// (`useBackgroundTaskNavigation.ts:112-124`).
-    fn tree_selection(&self) -> Option<Sel> {
+    pub(crate) fn tree_selection(&self) -> Option<Sel> {
         let max = self.tree_instances().len() as Sel;
         self.tree
             .as_ref()
@@ -295,6 +304,16 @@ impl Chat {
             self.tree_step(if code == KeyCode::Down { 1 } else { -1 });
             return true;
         }
+        // `enter` on a selected row (D105). It is CC's whole handler, gated on
+        // CC's own condition (`useBackgroundTaskNavigation.ts:206`): with
+        // nothing selected the key belongs to the composer, which is what makes
+        // a tree safe to leave open while typing.
+        if code == KeyCode::Enter
+            && !modifiers.intersects(KeyModifiers::SHIFT | KeyModifiers::ALT)
+            && self.tree_enter()
+        {
+            return true;
+        }
         // `k` stops the selected instance — CC's key, CC's guard: only in
         // selection mode, only on an instance row (`@main` is index -1 and the
         // hide row indexes past the end), and only through the one stop path
@@ -348,7 +367,10 @@ impl Chat {
         // says so otherwise (`Spinner.tsx:231-237`); bingo has no such row when
         // idle, so main's state lives here unconditionally.
         let main_selected = selected == Some(MAIN_SEL);
-        let main_lit = main_selected || self.zoomed().is_none();
+        // Main is lit while it is what the screen is on. A room zoom answers
+        // `zoomed()` with `None` — no row on this tree is its subject — so the
+        // test is the zoom itself, not the agent behind it.
+        let main_lit = main_selected || self.zoom_subject().is_none();
         let mut budget = width;
         let mut line = Line::empty();
         push_fit(&mut line, &mut budget, PAD, dim);
@@ -408,6 +430,11 @@ impl Chat {
         if main_lit {
             push_fit(&mut line, &mut budget, SELECT_HINT, dim);
         }
+        // The leader row offers the view only while something else has the
+        // screen — going to `@main` from `@main` is not a destination.
+        if main_selected && self.zoomed().is_some() {
+            push_fit(&mut line, &mut budget, VIEW_HINT, dim);
+        }
         rows.push(Row::new(line));
 
         for (index, status) in agents.iter().enumerate() {
@@ -426,18 +453,24 @@ impl Chat {
             let state = status_label(status, now);
             let stats = stats_label(status.tool_uses, status.output_tokens);
 
-            // CC's fit arithmetic, and CC's drop order: the select hint goes
-            // before the stats do (`TeammateSpinnerLine.tsx:151-153`).
+            // CC's fit arithmetic, and CC's drop order: the view hint goes
+            // first, then the select hint, then the stats
+            // (`TeammateSpinnerLine.tsx:151-153`).
             let head = text_width(PAD) + 1 + 3 + text_width(&name) + 2;
             let room = width.saturating_sub(head);
             let show_stats = room > text_width(&stats) + MIN_ACTIVITY + FIT_SLACK;
+            let stats_cost = if show_stats { text_width(&stats) } else { 0 };
+            // `isSelected && !isForegrounded`: the cursor is here, and here is
+            // not what is already on screen.
+            let show_view = here
+                && self.zoomed() != Some(status.name.as_str())
+                && room > text_width(VIEW_HINT) + stats_cost + MIN_ACTIVITY + FIT_SLACK;
+            let view_cost = if show_view { text_width(VIEW_HINT) } else { 0 };
             let show_hint = lit
                 && room
-                    > text_width(SELECT_HINT)
-                        + if show_stats { text_width(&stats) } else { 0 }
-                        + MIN_ACTIVITY
-                        + FIT_SLACK;
-            let spent = if show_stats { text_width(&stats) } else { 0 }
+                    > text_width(SELECT_HINT) + view_cost + stats_cost + MIN_ACTIVITY + FIT_SLACK;
+            let spent = stats_cost
+                + view_cost
                 + if show_hint {
                     text_width(SELECT_HINT)
                 } else {
@@ -482,6 +515,9 @@ impl Chat {
             if show_hint {
                 push_fit(&mut line, &mut budget, SELECT_HINT, dim);
             }
+            if show_view {
+                push_fit(&mut line, &mut budget, VIEW_HINT, dim);
+            }
             rows.push(Row::new(line));
 
             if self.tree_preview {
@@ -499,9 +535,8 @@ impl Chat {
         }
 
         // The hide row closes the tree, and only while the cursor is in it
-        // (`TeammateSpinnerTree.tsx:180`). CC's ` · enter to collapse` is left
-        // off: Enter is unbound until D105, and a row must not promise a key
-        // that does nothing.
+        // (`TeammateSpinnerTree.tsx:180`); it says what Enter will do to it
+        // while the cursor is on it (`:253`).
         if selecting {
             let here = selected == Some(agents.len() as Sel);
             let mut budget = width;
@@ -537,6 +572,9 @@ impl Chat {
                     dim
                 },
             );
+            if here {
+                push_fit(&mut line, &mut budget, COLLAPSE_HINT, dim);
+            }
             rows.push(Row::new(line));
         }
         rows
@@ -573,11 +611,8 @@ impl Chat {
         let gutter = Gutter::new(false, &palette, &self.faces_pinned);
         let dim = SegStyle::fg(theme.text_secondary);
 
-        let mut pills: Vec<(String, bool, bool)> = vec![(
-            MAIN_NAME.to_string(),
-            self.busy,
-            self.zoomed().is_none(), // D105 consumes this
-        )];
+        let mut pills: Vec<(String, bool, bool)> =
+            vec![(MAIN_NAME.to_string(), self.busy, self.zoomed().is_none())];
         let mut resting: Vec<(String, bool, bool)> = Vec::new();
         for status in &agents {
             let zoomed = self.zoomed() == Some(status.name.as_str());
@@ -688,15 +723,72 @@ mod tests {
             4,
             "the hide row joins in selection mode: {rows:?}"
         );
-        assert!(rows[3].trim_end().ends_with("hide"), "{rows:?}");
+        assert!(rows[3].contains("hide"), "{rows:?}");
         assert!(
             rows[2].starts_with("    ├─"),
             "and takes the closing corner off the last instance: {rows:?}"
         );
+        // D104 left CC's two `enter to …` strings off because the key did
+        // nothing; D105 binds it, so the promise is made — and only on the row
+        // the cursor is on, which is CC's own gate.
         assert!(
-            !rows.iter().any(|row| row.contains("enter to")),
-            "no row promises a key D104 leaves unbound: {rows:?}"
+            rows[1].ends_with(" · enter to view"),
+            "the selected instance row says what Enter will do: {rows:?}"
         );
+        assert!(
+            !rows[2].contains("enter to"),
+            "and no other row does: {rows:?}"
+        );
+        assert!(!rows[3].contains("enter to"), "{rows:?}");
+
+        // The hide row's own hint, once the cursor reaches it.
+        shift(&mut chat, KeyCode::Down);
+        shift(&mut chat, KeyCode::Down);
+        let rows = texts(&chat);
+        assert!(rows[3].ends_with("hide · enter to collapse"), "{rows:?}");
+    }
+
+    /// `enter` in the inline host is CC's whole handler
+    /// (`useBackgroundTaskNavigation.ts:206-225`): an instance row asks the host
+    /// for the zoom, the hide row collapses the panel, the leader row leaves
+    /// selection mode, and with nothing selected the key is the composer's.
+    #[test]
+    fn enter_zooms_collapses_or_belongs_to_the_composer() {
+        let mut chat = test_chat();
+        seed(&chat, "scout");
+        seed(&chat, "writer");
+        chat.open_agent_tree();
+
+        // Not selecting: the key falls through, and the draft keeps it.
+        assert!(
+            !chat.agent_tree_key(KeyCode::Enter, KeyModifiers::NONE),
+            "an open tree is a readout, not a modal"
+        );
+        assert!(chat.open_zoom.is_none());
+
+        // The first instance row.
+        shift(&mut chat, KeyCode::Down);
+        assert!(chat.agent_tree_key(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(
+            chat.open_zoom,
+            Some(crate::tui::zoom::ZoomTarget::Agent("scout".into())),
+            "the row that names an agent opens that agent"
+        );
+
+        // The leader row leaves selection mode and opens nothing: there is no
+        // view to leave from the transcript.
+        chat.open_zoom = None;
+        shift(&mut chat, KeyCode::Up);
+        assert!(chat.agent_tree_key(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(chat.open_zoom.is_none());
+        assert!(chat.tree_selection().is_none(), "the cursor stepped out");
+        assert!(chat.tree.is_some(), "and the tree stayed, as CC's does");
+
+        // The hide row hides.
+        shift(&mut chat, KeyCode::Up);
+        assert!(chat.agent_tree_key(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(chat.tree.is_none());
+        assert!(chat.open_zoom.is_none());
     }
 
     /// A running row says what it is doing and what that has cost; an idle one
@@ -736,7 +828,8 @@ mod tests {
         chat.session.agents.stop("scout").expect("stopped");
         assert!(
             texts(&chat)[1].contains("@scout: [stopped]"),
-            "a stopped instance stays on the roster, because a message resumes it"
+            "a stopped instance stays on the roster: its history is intact and its \
+             record is still readable"
         );
     }
 

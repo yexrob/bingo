@@ -15,10 +15,11 @@
 //! is it.
 //!
 //! **And the walk has two readers (D99).** [`dossier`] keeps every lane the walk
-//! files. [`pair_lane`] keeps exactly one — the user's — and that is what
-//! [`crate::tui::buffer::dm_posts`] renders, so `@X` is the pure pair the model
-//! says it is and this page is where everything else in X's life is read. The
-//! two cannot disagree about attribution, because there is one walk.
+//! files. [`crate::tui::buffer::zoom_posts`] keeps every lane too — it is one
+//! agent's whole record, which is what the zoomed view shows (D105) — and
+//! [`pair_lane`] keeps exactly one, the user's, which is what the Said-unread
+//! accounting measures. None of the three can disagree about attribution,
+//! because there is one walk.
 //!
 //! **And two protagonists (D100).** Main has a page too, over its own session
 //! transcript, and the unmarked default *flips*: in a subagent's history
@@ -319,44 +320,24 @@ pub(crate) fn walk(who: Protagonist<'_>, history: &[Message], stamps: &[u64]) ->
     out
 }
 
-/// One post of the user↔agent pair lane, plus the one thing a filter loses.
-pub(crate) struct PairPost {
-    pub post: Post,
-    pub work: Option<Work>,
-    /// Whether the previous item of the *full* walk is the previous item here.
-    ///
-    /// The pair view merges X's consecutive rows into one message, the way the
-    /// console holds a turn. What must not merge is two runs with something
-    /// between them — a room relay, an instruction from main, a chase — because
-    /// that something is exactly what ended the first run, even though it
-    /// renders nowhere in this lane.
-    pub contiguous: bool,
-}
-
 /// The user's side of an agent's record: what the user said, what X answered
 /// them, and the work X did for those turns (D99).
 ///
 /// Everything else — main's instructions, room relays, `[message from @X]`
 /// mail, chases, reminders, and the task that created the instance — belongs to
-/// a lane that is not this one, and lives on the observation page.
-pub(crate) fn pair_lane(agent: &str, history: &[Message], stamps: &[u64]) -> Vec<PairPost> {
-    let mut out: Vec<PairPost> = Vec::new();
-    let mut previous: Option<usize> = None;
-    for (i, filed) in walk(Protagonist::of(agent), history, stamps)
+/// a lane that is not this one, and lives in the zoomed view
+/// ([`crate::tui::buffer::zoom_posts`]) and on the observation page.
+///
+/// D99 carried a `contiguous` flag out of here so the pair view could merge X's
+/// consecutive rows across the items this filter drops. D105 retired that
+/// reader: the zoom folds over the *full* walk, where whatever ended a run is a
+/// row you can see, so the break needs no flag to survive the filter.
+pub(crate) fn pair_lane(agent: &str, history: &[Message], stamps: &[u64]) -> Vec<Post> {
+    walk(Protagonist::of(agent), history, stamps)
         .into_iter()
-        .enumerate()
-    {
-        if !matches!(&filed.target, Target::Dm(name) if name == USER_NAME) {
-            continue;
-        }
-        out.push(PairPost {
-            post: filed.post,
-            work: filed.work,
-            contiguous: previous == Some(i.wrapping_sub(1)),
-        });
-        previous = Some(i);
-    }
-    out
+        .filter(|filed| matches!(&filed.target, Target::Dm(name) if name == USER_NAME))
+        .map(|filed| filed.post)
+        .collect()
 }
 
 /// Scaffolding that no counterpart wrote: the runtime talking to itself.
@@ -1135,7 +1116,7 @@ mod tests {
     fn pair_texts(history: &[Message]) -> Vec<String> {
         pair_lane("scout", history, &[])
             .into_iter()
-            .map(|item| item.post.text)
+            .map(|item| item.text)
             .collect()
     }
 
@@ -1191,10 +1172,15 @@ mod tests {
     }
 
     /// The agent's work rides with the turn it belongs to (the protagonist
-    /// rule), and the walk keeps the call itself so the pair view can hand it
-    /// to the console's collapse classifier.
+    /// rule), and the walk keeps the **call** and not only the line it printed
+    /// — which is what lets the zoom hand it to the console's collapse
+    /// classifier (D105).
+    ///
+    /// Rewritten for D105: `pair_lane` used to carry the call out with the
+    /// post, for the pair replay that retired. The claim it was making is a
+    /// claim about the walk, so it is asserted where it lives.
     #[test]
-    fn the_pair_lane_carries_the_work_of_its_own_turns() {
+    fn the_walk_carries_the_call_and_not_only_the_line() {
         let history = vec![
             from_user("find the leak"),
             assistant(vec![
@@ -1202,26 +1188,28 @@ mod tests {
                 tool("Grep", serde_json::json!({"pattern": "leak"})),
             ]),
         ];
-        let lane = pair_lane("scout", &history, &[]);
-        let work: Vec<&Post> = lane
-            .iter()
-            .map(|item| &item.post)
+        let work = pair_lane("scout", &history, &[])
+            .into_iter()
             .filter(|p| p.kind == PostKind::Process)
-            .collect();
-        assert_eq!(work.len(), 1, "{lane:?}", lane = pair_texts(&history));
+            .count();
+        assert_eq!(work, 1, "the lane keeps its own turn's work");
+        let filed = walk(Protagonist::of("scout"), &history, &[]);
         assert!(
             matches!(
-                lane.iter().find_map(|item| item.work.as_ref()),
+                filed.iter().find_map(|item| item.work.as_ref()),
                 Some(Work::Tool { name, .. }) if name == "Grep"
             ),
             "the call survives the projection, not only the line it printed"
         );
     }
 
-    /// Contiguity is measured in the *full* walk, so anything that stood
-    /// between two of the agent's rows breaks the run even where this lane
-    /// never shows it. That is what keeps a replay append-only: every
-    /// continuation is triggered by something, and that something is a break.
+    /// The pair lane drops what it is not about, and the walk keeps it — which
+    /// is what makes the zoom's fold able to see the thing that ended a run.
+    ///
+    /// Rewritten for D105: the old assertion read the `contiguous` flag the
+    /// lane carried so the pair replay could break a run across an item it
+    /// could not show. The zoom folds over the whole walk, where that item is a
+    /// row, so the flag retired and the fact it protected is asserted directly.
     #[test]
     fn a_run_breaks_on_what_the_lane_does_not_show() {
         let history = vec![
@@ -1230,12 +1218,25 @@ mod tests {
             user("[follow-up 2/3] still waiting"),
             assistant(vec![text("second")]),
         ];
-        let lane = pair_lane("scout", &history, &[]);
-        let contiguous: Vec<bool> = lane.iter().map(|item| item.contiguous).collect();
         assert_eq!(
-            contiguous,
-            vec![false, true, false],
-            "the chase is invisible here and still ends the run"
+            pair_texts(&history),
+            vec!["go", "first", "second"],
+            "the chase is not the user's conversation and does not render here"
+        );
+        let filed = walk(Protagonist::of("scout"), &history, &[]);
+        let between: Vec<(&Target, &str)> = filed
+            .iter()
+            .map(|item| (&item.target, item.post.text.as_str()))
+            .collect();
+        assert_eq!(
+            between,
+            vec![
+                (&Target::Dm(USER_NAME.to_string()), "go"),
+                (&Target::Dm(USER_NAME.to_string()), "first"),
+                (&Target::Intake, "follow-up · waiting for a reply"),
+                (&Target::Dm(USER_NAME.to_string()), "second"),
+            ],
+            "the chase stands between the two turns in the record the zoom reads"
         );
     }
 }

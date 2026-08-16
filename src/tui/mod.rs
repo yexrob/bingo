@@ -68,6 +68,7 @@ pub mod theme;
 pub(crate) mod transcript;
 pub mod tree;
 mod view;
+pub mod zoom;
 
 use std::io::{Write as IoWrite, stdout};
 use std::sync::Arc;
