@@ -30,6 +30,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
@@ -41,6 +42,25 @@ pub const MAIN_NAME: &str = "main";
 /// every other respect: not seated automatically, and free to leave a room they
 /// joined — a roster the user could never leave was a roster, not a membership.
 pub const USER_NAME: &str = "user";
+/// Reserved mention token that reaches every member of a room at once
+/// (`@all`); never handed out as an instance name, or the token would be
+/// ambiguous.
+pub const ALL_NAME: &str = "all";
+
+/// Unread room lines that pile up to this count wake their holder even
+/// unmentioned (v6): enough context to be worth a look, few enough that a
+/// busy room is read in slices rather than as an avalanche.
+pub const ROOM_UNREAD_WAKE: usize = 5;
+/// How long the oldest unread, unmentioned room line may wait before its
+/// holder is woken to look anyway. Well above main's 15s digest deadline
+/// (that is a delivery-smoothing clock, not an attention clock) and well
+/// under the 300s ack default, so an unmentioned question is still read
+/// before its sender's watchdog starts chasing. The clock is born with the
+/// first unread line and dies with the drain — an empty inbox never wakes.
+pub const ROOM_UNREAD_MAX_AGE: Duration = Duration::from_secs(120);
+/// Cadence of the sweep enforcing [`ROOM_UNREAD_MAX_AGE`] (worst-case
+/// lateness is their sum). One registry lock scan per tick, no model calls.
+pub const ROOM_WAKE_SWEEP: Duration = Duration::from_secs(15);
 
 /// Channel speaking mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -122,7 +142,6 @@ pub fn now_unix() -> u64 {
 pub fn names(text: &str, name: &str) -> bool {
     let haystack = text.to_lowercase();
     let needle = format!("@{}", name.to_lowercase());
-    let part_of_a_word = |c: char| c.is_alphanumeric() || c == '_' || c == '-';
     let mut from = 0;
     while let Some(offset) = haystack.get(from..).and_then(|rest| rest.find(&needle)) {
         let start = from + offset;
@@ -141,6 +160,35 @@ pub fn names(text: &str, name: &str) -> bool {
         from = end;
     }
     false
+}
+
+/// What counts as the inside of a name for mention purposes — one predicate
+/// shared by [`names`] and [`mention_tokens`], so a text that names a member
+/// by one reading always names them by the other.
+fn part_of_a_word(c: char) -> bool {
+    c.is_alphanumeric() || c == '_' || c == '-'
+}
+
+/// Every `@token` in a post, lowercased and deduplicated, with [`names`]'s
+/// word boundaries: the sender's mention list, which the room resolves
+/// against its roster (and `@all`).
+pub fn mention_tokens(text: &str) -> Vec<String> {
+    let lower = text.to_lowercase();
+    let mut tokens: Vec<String> = Vec::new();
+    let mut prev: Option<char> = None;
+    for (i, c) in lower.char_indices() {
+        if c == '@' && prev.is_none_or(|p| !part_of_a_word(p)) {
+            let token: String = lower[i + c.len_utf8()..]
+                .chars()
+                .take_while(|c| part_of_a_word(*c))
+                .collect();
+            if !token.is_empty() && !tokens.contains(&token) {
+                tokens.push(token);
+            }
+        }
+        prev = Some(c);
+    }
+    tokens
 }
 
 /// Budgets: freeze on overrun (read from settings.experimental; defaults 500/50).
@@ -177,13 +225,28 @@ impl ChannelLimits {
     }
 }
 
+/// One member's copy of a committed post, with whether the post named them.
+#[derive(Debug)]
+pub struct RoomDelivery {
+    pub member: String,
+    pub msg: ChannelMessage,
+    /// `@member` or `@all` appeared in the text — the needs-you-now bit (v6):
+    /// a mentioned copy wakes its holder at once, an unmentioned one keeps to
+    /// the batch clock.
+    pub mentioned: bool,
+}
+
 /// Result of post.
 #[derive(Debug)]
 pub enum PostOutcome {
     /// Committed: deliver to these members (excluding the sender and main — main goes through main_mail).
     Sent {
         seq: u64,
-        deliveries: Vec<(String, ChannelMessage)>,
+        deliveries: Vec<RoomDelivery>,
+        /// `@tokens` that resolved to nobody in this room (not a member, not
+        /// `all`): surfaced to the sender in the tool result rather than
+        /// failing the post, so a typo is caught in the same turn.
+        unknown_mentions: Vec<String>,
     },
     /// serial behind: not sent; attaches the missed messages (already counted as read by
     /// the sender — they reach its context via the tool result, and it decides whether
@@ -614,13 +677,23 @@ impl ChannelRegistry {
             self.sync_channel_message(name, &msg);
             ch.seen.insert(from.to_string(), ch.seq);
             *ch.sent.entry(from.to_string()).or_insert(0) += 1;
-            let deliveries: Vec<(String, ChannelMessage)> = ch
+            let tokens = mention_tokens(text);
+            let at_all = tokens.iter().any(|t| t == ALL_NAME);
+            let deliveries: Vec<RoomDelivery> = ch
                 .members
                 .iter()
                 .filter(|m| {
                     m.as_str() != from && m.as_str() != MAIN_NAME && m.as_str() != USER_NAME
                 })
-                .map(|m| (m.clone(), msg.clone()))
+                .map(|m| RoomDelivery {
+                    member: m.clone(),
+                    msg: msg.clone(),
+                    mentioned: at_all || tokens.iter().any(|t| *t == m.to_lowercase()),
+                })
+                .collect();
+            let unknown_mentions: Vec<String> = tokens
+                .into_iter()
+                .filter(|t| t != ALL_NAME && !ch.members.iter().any(|m| m.to_lowercase() == *t))
                 .collect();
             main_line = if from != MAIN_NAME && ch.members.iter().any(|m| m == MAIN_NAME) {
                 Some(format_main_line(name, &msg))
@@ -630,6 +703,7 @@ impl ChannelRegistry {
             PostOutcome::Sent {
                 seq: msg.seq,
                 deliveries,
+                unknown_mentions,
             }
         };
         if let Some(line) = main_line {
@@ -781,9 +855,11 @@ mod tests {
         ChannelRegistry::new(ChannelLimits::default())
     }
 
-    fn sent(outcome: PostOutcome) -> (u64, Vec<(String, ChannelMessage)>) {
+    fn sent(outcome: PostOutcome) -> (u64, Vec<RoomDelivery>) {
         match outcome {
-            PostOutcome::Sent { seq, deliveries } => (seq, deliveries),
+            PostOutcome::Sent {
+                seq, deliveries, ..
+            } => (seq, deliveries),
             PostOutcome::Stale { .. } => panic!("should land"),
         }
     }
@@ -861,12 +937,16 @@ mod tests {
                 .unwrap_or_else(|e| panic!("{e}")),
         );
         assert_eq!(seq, 1);
-        let names: Vec<&str> = deliveries.iter().map(|(m, _)| m.as_str()).collect();
+        let names: Vec<&str> = deliveries.iter().map(|d| d.member.as_str()).collect();
         assert_eq!(names, vec!["b", "c"], "not delivered to the sender or main");
         assert!(
             deliveries
                 .iter()
-                .all(|(_, m)| m.from == "a" && m.text == "hello everyone")
+                .all(|d| d.msg.from == "a" && d.msg.text == "hello everyone")
+        );
+        assert!(
+            deliveries.iter().all(|d| !d.mentioned),
+            "a post naming nobody carries no needs-you-now bit"
         );
         // Main is a member: messages go to main_mail; main's own posts don't.
         assert!(reg.has_main_mail());
@@ -885,15 +965,79 @@ mod tests {
         assert_eq!(
             deliveries
                 .iter()
-                .map(|(m, _)| m.as_str())
+                .map(|d| d.member.as_str())
                 .collect::<Vec<_>>(),
             vec!["a", "b", "c"],
-            "user's post wakes all agent members"
+            "user's post reaches every agent member's inbox"
         );
         assert!(reg.drain_main_mail()[0].contains("user: everyone stop"));
         // Non-member / unknown channel error.
         assert!(reg.post("ghost", "t", "x").is_err());
         assert!(reg.post("a", "nope", "x").is_err());
+    }
+
+    /// The mention scanner and the badge matcher read a text the same way:
+    /// any name one finds, the other finds too, whatever the case or the
+    /// punctuation around it — one word-boundary predicate, two readers.
+    #[test]
+    fn mention_tokens_share_names_word_boundaries() {
+        let text = "@Zoe, look — @all: @zoe-2 too (mail@zoe.dev and @zoe again are old news)";
+        assert_eq!(
+            mention_tokens(text),
+            vec!["zoe", "all", "zoe-2"],
+            "lowercased, deduplicated, in order of first appearance"
+        );
+        assert!(mention_tokens("no sigils here").is_empty());
+        for member in ["zoe", "zoe-2", "all", "dev", "ghost"] {
+            assert_eq!(
+                names(text, member),
+                mention_tokens(text).iter().any(|t| t == member),
+                "{member}: the two readings must agree"
+            );
+        }
+    }
+
+    /// Mentions resolve against the roster at commit time (v6): named members
+    /// carry the needs-you-now bit, `@all` names everyone, and a token that
+    /// reaches nobody comes back to the sender instead of vanishing.
+    #[test]
+    fn post_resolves_mentions_against_the_roster() {
+        let reg = registry();
+        reg.create(
+            "t",
+            vec!["a".into(), "b".into(), "c".into()],
+            ChannelMode::Free,
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        let (_, deliveries) = sent(
+            reg.post("a", "t", "@B take over; @ghost fyi")
+                .unwrap_or_else(|e| panic!("{e}")),
+        );
+        let bit = |name: &str| {
+            deliveries
+                .iter()
+                .find(|d| d.member == name)
+                .map(|d| d.mentioned)
+        };
+        assert_eq!(bit("b"), Some(true), "named, case-insensitively");
+        assert_eq!(bit("c"), Some(false), "present but not named");
+        match reg
+            .post("a", "t", "@ghost still around?")
+            .unwrap_or_else(|e| panic!("{e}"))
+        {
+            PostOutcome::Sent {
+                unknown_mentions, ..
+            } => assert_eq!(unknown_mentions, vec!["ghost"], "told, not swallowed"),
+            PostOutcome::Stale { .. } => panic!("should land"),
+        }
+        let (_, deliveries) = sent(
+            reg.post("a", "t", "@all stand-up in five")
+                .unwrap_or_else(|e| panic!("{e}")),
+        );
+        assert!(
+            deliveries.iter().all(|d| d.mentioned),
+            "@all names everyone"
+        );
     }
 
     #[test]

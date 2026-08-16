@@ -4981,3 +4981,61 @@ README/zh, guide.md. Tests:
 `a_room_post_naming_the_user_leaves_one_flag_line` (once per turn-on,
 re-armed by reading, ordinary posts never),
 `a_pending_subagent_ask_marks_the_row_waiting`. 1480 + 13 green.
+
+### D117. The wake gate — delivery and waking come apart
+
+v6's first engine batch (design: notes/design/conversation-model-v6.md, the
+@-mention system the user ruled). The old room contract woke every idle
+member on every post — one "Hi" was N model calls — and v5 explicitly left
+member-side debounce unbuilt. The @ decides now: delivery is untouched
+(every member's inbox still receives every line, in total order, budgets
+and serial checks byte-identical), but *waking* is earned.
+
+- **Mentions resolve at commit.** `channels::post` scans the text with
+  `mention_tokens` — same `part_of_a_word` boundaries as `names`, one
+  predicate, two readers — against the roster plus `@all` (`ALL_NAME`,
+  now reserved in `claim_name`). `PostOutcome::Sent` carries
+  `Vec<RoomDelivery { member, msg, mentioned }>` and the
+  `unknown_mentions` that resolved to nobody; the sender's tool result
+  names those, and names a mentioned member whose copy a stop dropped —
+  a needs-you-now promise silently unkept is worse than a bounce.
+- **One gate, three doors.** `inbox_wakes(entry, now)` is the single
+  predicate: Direct/FollowUp always pass; a mentioned Channel line passes;
+  unmentioned lines pass in bulk (`ROOM_UNREAD_WAKE` = 5) or on age
+  (`ROOM_UNREAD_MAX_AGE` = 120s — above main's 15s digest deadline, below
+  the 300s ack default). `flush_pending` consults it (and drains whole:
+  once woken, read everything), `finish` consults it before continuing (a
+  lone unmentioned line no longer chains runs), and `take_direct_inbox`
+  became `take_interrupting_inbox`: a mention releases *all* queued room
+  lines in order, because injecting msg #7 while #5–6 stay queued would
+  push the seen cursor past lines the context never held.
+- **A mention pulses; a batch waits.** `deposit` now signals `inbox_tx`
+  for mentioned items only, so a running member absorbs a mention at its
+  next tool boundary; unmentioned traffic never interrupts a turn. The
+  age half is enforced by one per-registry sweeper (`ensure_room_sweeper`,
+  CAS-armed on first delivery, `Weak<Session>`, 15s cadence): it re-runs
+  the boundary flush and wakes nobody whose inbox does not pass — an
+  empty inbox never wakes, so a quiet room costs one lock scan and zero
+  model calls. The user's ruling, verbatim: no new messages, no read.
+- **Prompt patched for the mechanics only.** CHANNEL_NOTE gained one
+  paragraph — named lines reach you at once, unnamed lines in batches,
+  `@` what needs someone now — so the note stops implying a timeliness
+  the engine no longer grants. The who-spoke reply doctrine itself is
+  rewritten in D119; between the two batches the machine is honest even
+  where the etiquette is dated.
+- Deliberate non-changes: a mention does not revive a Stopped member
+  (D105a's one door stands, the tool result says so instead); `@all` has
+  no rate limiter (the 50/500 budgets and the fire-alarm prompt rule in
+  D119 govern it); the sweeper's wake attribution keeps the recovery-flush
+  owner quirk (query.rs's per-round flush has always had it).
+- Prerequisite commit: the address grammar (`Address`/`parse_address`/
+  `check_target`/`rooms_allowed`) moved out of `tool/agent.rs` into
+  `tool/address.rs` (the file sat at 3936/4000), and `names` moved from
+  `tui/buffer.rs` into `channels.rs` where the mention engine lives.
+
+Docs: guide.md (channel section states the gate), tool descriptions.
+Tests: `unmentioned_room_lines_wake_in_bulk_or_on_age`,
+`mention_tokens_share_names_word_boundaries`,
+`post_resolves_mentions_against_the_roster`,
+`a_mention_interrupts_and_a_misfire_is_reported`; the accumulate/stamp
+tests updated to the gate with their v6 reasons inline. 1484 + 13 green.

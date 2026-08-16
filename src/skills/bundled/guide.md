@@ -346,10 +346,13 @@ Example (.bingo/settings.json):
   inheriting. Invalid `thinking` values are rejected with the allowed list.
   **Channel messaging** (experimental, `experimental.agentChannels`): the main agent uses the Channel tool
   to create channels and manage members (members limited to direct subagents; the main agent is auto-seated as `main`), members speak
-  with `SendMessage(to: "#room")` — messages enter every member's context (same order), the sender is stamped by the runtime; in serial channels, a stale
+  with `SendMessage(to: "#room")` — messages enter every member's inbox (same order), the sender is stamped by the runtime; in serial channels, a stale
   post is bounced back with the new messages attached (the agent reads them, then re-decides/abandons; count-based ordering emerges this way);
   free channels allow interleaving. Channels show in the transcript as `◇ #name` rows (expandable to the full group chat);
-  over-budget channels auto-freeze and notify the main agent. **Who spoke decides whether a reply is owed**: because delivery wakes every member, each
+  over-budget channels auto-freeze and notify the main agent. **Waking is @-gated (v6)**: a message that names a member (`@name`) or everyone (`@all`)
+  reaches them at once — an idle member wakes on the spot, a running one absorbs it at its next tool round — while unnamed traffic waits and is read in
+  batches (five unread lines, or the oldest sitting two minutes; an empty inbox never wakes, so a quiet room costs nothing). Mentions that resolve to
+  nobody, or name a stopped member, are reported back in the sender's tool result. **Who spoke decides whether a reply is owed**: each
   spawned member carries a system-prompt rule (only when the flag is on) — answer `user`/`main` once and briefly when they address
   the room, owe another member nothing unless named or unblocked, and never answer an answer (replies to replies are what turn one
   message into a room-wide storm). The rule also states the mechanism the model cannot infer: a turn woken by a channel message

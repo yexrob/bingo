@@ -578,6 +578,7 @@ pub(crate) fn absorb_inbox(
                     from,
                     text,
                     seq,
+                    ..
                 } => format!("[#{channel} msg #{seq}] {from}: {text}"),
                 InboxItem::FollowUp {
                     original,
@@ -1444,11 +1445,28 @@ impl SendMessageTool {
         match crate::tool::channel::deliver_post(&self.session, &ctx.watch, &from, room, message)
             .map_err(ToolError::failed)?
         {
-            crate::tool::channel::PostDelivery::Sent { seq } => Ok(ToolResult {
-                content: serde_json::Value::String(format!("sent (#{room} msg #{seq})")),
-                is_error: false,
-                diff: None,
-            }),
+            crate::tool::channel::PostDelivery::Sent {
+                seq,
+                unknown_mentions,
+                undelivered_mentions,
+            } => {
+                let mut note = format!("sent (#{room} msg #{seq})");
+                for name in &unknown_mentions {
+                    note.push_str(&format!(
+                        "\n@{name} is not in #{room}; that mention reached nobody"
+                    ));
+                }
+                for name in &undelivered_mentions {
+                    note.push_str(&format!(
+                        "\n@{name} is stopped; the line is in the room log but was not delivered"
+                    ));
+                }
+                Ok(ToolResult {
+                    content: serde_json::Value::String(note),
+                    is_error: false,
+                    diff: None,
+                })
+            }
             crate::tool::channel::PostDelivery::Stale { missed } => {
                 let lines: Vec<String> = missed
                     .iter()
@@ -2917,6 +2935,8 @@ mod tests {
             from: "zoe".into(),
             text: "the tests pass".into(),
             seq: 3,
+            mentioned: false,
+            arrived_at: std::time::Instant::now(),
         }]));
     }
 
@@ -3337,6 +3357,12 @@ mod tests {
             CHANNEL_NOTE.contains("stays in your turn text"),
             "must keep member status out of the room — without this second half the venue rule \
              reopens the reply storm through a new door (D67)"
+        );
+        assert!(
+            CHANNEL_NOTE.contains("reaches you at once")
+                && CHANNEL_NOTE.contains("reaches you in batches"),
+            "must state the @-gated wake mechanics (v6) — the model cannot infer that unnamed \
+             room traffic arrives late, and would promise timeliness it does not have"
         );
     }
 

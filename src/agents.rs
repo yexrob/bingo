@@ -339,6 +339,11 @@ pub enum InboxItem {
         from: String,
         text: String,
         seq: u64,
+        /// `@member` or `@all` named this member (v6): wake now rather than on
+        /// the batch clock.
+        mentioned: bool,
+        /// When the deposit landed; drives the age half of the wake gate.
+        arrived_at: Instant,
     },
     /// Automatic chase for a direct message main never got an answer to. It carries no new
     /// instruction — only the fact that the sender is still waiting.
@@ -527,6 +532,10 @@ pub struct AgentRegistry {
     /// Inbox generation: every accepted item advances this watch channel. Receivers wait on it
     /// between tool rounds so a busy agent does not depend on the sender reaching a boundary.
     inbox_tx: tokio::sync::watch::Sender<u64>,
+    /// One age sweeper per registry (armed by the first room delivery, CAS so
+    /// concurrent posts spawn exactly one); it enforces the age half of the
+    /// wake gate and dies with the session.
+    room_sweeper_armed: std::sync::atomic::AtomicBool,
 }
 
 impl AgentRegistry {
@@ -538,7 +547,15 @@ impl AgentRegistry {
             ask: Mutex::new(None),
             next_msg: std::sync::atomic::AtomicU64::new(1),
             inbox_tx,
+            room_sweeper_armed: std::sync::atomic::AtomicBool::new(false),
         })
+    }
+
+    /// Claim the right to spawn the room age sweeper: true exactly once.
+    pub fn try_arm_room_sweeper(&self) -> bool {
+        !self
+            .room_sweeper_armed
+            .swap(true, std::sync::atomic::Ordering::SeqCst)
     }
 
     pub fn subscribe_inbox(&self) -> tokio::sync::watch::Receiver<u64> {
@@ -607,8 +624,8 @@ impl AgentRegistry {
 
     /// Claim an instance name: use the base name when free, otherwise append `-2`/`-3`…
     /// (so parallel same-name instances stay distinguishable).
-    /// `main`/`user` are reserved for main and the user (channel member names) and
-    /// are never handed out.
+    /// `main`/`user` are reserved for main and the user (channel member names),
+    /// `all` for the broadcast mention token, and none are ever handed out.
     pub fn claim_name(&self, base: &str) -> String {
         let base = if base.trim().is_empty() {
             "agent"
@@ -618,6 +635,7 @@ impl AgentRegistry {
         let taken = |inner: &HashMap<String, Entry>, name: &str| {
             name == crate::channels::MAIN_NAME
                 || name == crate::channels::USER_NAME
+                || name == crate::channels::ALL_NAME
                 || inner.contains_key(name)
         };
         let inner = self.lock();
@@ -982,7 +1000,10 @@ impl AgentRegistry {
             answer_acks(entry, output_chars);
             if entry.state == AgentState::Stopped {
                 None
-            } else if entry.inbox.is_empty() {
+            } else if !inbox_wakes(entry, Instant::now()) {
+                // Unmentioned room lines below the batch gate keep waiting in
+                // the inbox (v6): a turn that just ended is not owed a
+                // continuation by traffic that would not have woken it.
                 entry.state = AgentState::Idle;
                 None
             } else {
@@ -1000,14 +1021,17 @@ impl AgentRegistry {
         result
     }
 
-    /// Claim every idle instance with waiting mail. The caller starts each returned run; draining
-    /// the inbox in one pass makes the batch boundary the receiver's actual claim point.
+    /// Claim every idle instance whose waiting mail passes the wake gate (v6):
+    /// direct commands and mentions at once, unmentioned room lines only in
+    /// bulk or on age. The caller starts each returned run; draining the inbox
+    /// in one pass makes the batch boundary the receiver's actual claim point.
     pub fn flush_pending(&self) -> Vec<Wake> {
         let mut woken = Vec::new();
         {
+            let now = Instant::now();
             let mut inner = self.lock();
             for (name, entry) in inner.iter_mut() {
-                if entry.state != AgentState::Idle || entry.inbox.is_empty() {
+                if entry.state != AgentState::Idle || !inbox_wakes(entry, now) {
                     continue;
                 }
                 entry.runs += 1;
@@ -1040,7 +1064,7 @@ impl AgentRegistry {
             if entry.state != AgentState::Running || entry.inbox.is_empty() {
                 return Vec::new();
             }
-            let items = take_direct_inbox(entry, entry.runs, output_chars);
+            let items = take_interrupting_inbox(entry, entry.runs, output_chars);
             if items.is_empty() {
                 return Vec::new();
             }
@@ -1207,15 +1231,30 @@ impl AgentRegistry {
     /// Queue a channel message. A stopped member is silently skipped — a broadcast doesn't fail
     /// because one member stopped. Returns whether it was accepted.
     pub fn deposit(&self, name: &str, item: InboxItem) -> bool {
-        let mut inner = self.lock();
-        let Some(entry) = inner.get_mut(name) else {
-            return false;
-        };
-        if entry.state == AgentState::Stopped {
-            return false;
+        let mentioned = matches!(
+            item,
+            InboxItem::Channel {
+                mentioned: true,
+                ..
+            }
+        );
+        {
+            let mut inner = self.lock();
+            let Some(entry) = inner.get_mut(name) else {
+                return false;
+            };
+            if entry.state == AgentState::Stopped {
+                return false;
+            }
+            entry.last_active = Instant::now();
+            entry.inbox.push(item);
         }
-        entry.last_active = Instant::now();
-        entry.inbox.push(item);
+        if mentioned {
+            // A mention interrupts the receiver's waits the way a direct
+            // message does; unmentioned room lines keep to the batch clock and
+            // must not pulse a running member awake.
+            self.notify_inbox();
+        }
         true
     }
 
@@ -1378,19 +1417,65 @@ fn drain_inbox(entry: &mut Entry, run: u64, output_chars: usize) -> Vec<InboxIte
     items
 }
 
-fn take_direct_inbox(entry: &mut Entry, run: u64, output_chars: usize) -> Vec<InboxItem> {
-    let mut direct = Vec::new();
-    let mut other = Vec::new();
-    for item in std::mem::take(&mut entry.inbox) {
-        if matches!(item, InboxItem::Direct { .. } | InboxItem::FollowUp { .. }) {
-            direct.push(item);
-        } else {
-            other.push(item);
+/// The v6 wake gate: whether what is waiting justifies a turn right now.
+/// Direct commands and chases always do; a room line does when it names the
+/// member, and otherwise only in bulk ([`crate::channels::ROOM_UNREAD_WAKE`])
+/// or on age ([`crate::channels::ROOM_UNREAD_MAX_AGE`]). An empty inbox never
+/// passes, so there is no polling: the age clock is born with the first
+/// unread line and dies with the drain.
+fn inbox_wakes(entry: &Entry, now: Instant) -> bool {
+    let mut room_lines = 0usize;
+    for item in &entry.inbox {
+        match item {
+            InboxItem::Direct { .. } | InboxItem::FollowUp { .. } => return true,
+            InboxItem::Channel {
+                mentioned: true, ..
+            } => return true,
+            InboxItem::Channel { arrived_at, .. } => {
+                room_lines += 1;
+                if room_lines >= crate::channels::ROOM_UNREAD_WAKE
+                    || now.saturating_duration_since(*arrived_at)
+                        >= crate::channels::ROOM_UNREAD_MAX_AGE
+                {
+                    return true;
+                }
+            }
         }
     }
-    entry.inbox = other;
-    mark_delivered(entry, &direct, run, output_chars);
-    direct
+    false
+}
+
+/// What a running turn may be interrupted with at its next tool boundary:
+/// direct messages and chases always; room lines only when the batch holds a
+/// mention — and then *all* of them, in order, because injecting msg #7 while
+/// #5–6 stay queued would advance the member's seen cursor past lines its
+/// context never held.
+fn take_interrupting_inbox(entry: &mut Entry, run: u64, output_chars: usize) -> Vec<InboxItem> {
+    let mentioned = entry.inbox.iter().any(|item| {
+        matches!(
+            item,
+            InboxItem::Channel {
+                mentioned: true,
+                ..
+            }
+        )
+    });
+    let mut taken = Vec::new();
+    let mut left = Vec::new();
+    for item in std::mem::take(&mut entry.inbox) {
+        let interrupts = match &item {
+            InboxItem::Direct { .. } | InboxItem::FollowUp { .. } => true,
+            InboxItem::Channel { .. } => mentioned,
+        };
+        if interrupts {
+            taken.push(item);
+        } else {
+            left.push(item);
+        }
+    }
+    entry.inbox = left;
+    mark_delivered(entry, &taken, run, output_chars);
+    taken
 }
 
 /// Record every still-queued inbox message as dropped; returns how many.
@@ -2099,6 +2184,17 @@ mod tests {
         );
     }
 
+    fn room_line(from: &str, seq: u64, mentioned: bool) -> InboxItem {
+        InboxItem::Channel {
+            channel: "t".into(),
+            from: from.into(),
+            text: "report".into(),
+            seq,
+            mentioned,
+            arrived_at: Instant::now(),
+        }
+    }
+
     #[test]
     fn inbox_accumulates_direct_and_channel_items_in_order() {
         let reg = AgentRegistry::new();
@@ -2110,15 +2206,7 @@ mod tests {
             Vec::new(),
             None,
         );
-        assert!(reg.deposit(
-            "w",
-            InboxItem::Channel {
-                channel: "t".into(),
-                from: "a".into(),
-                text: "report".into(),
-                seq: 3,
-            },
-        ));
+        assert!(reg.deposit("w", room_line("a", 3, false)));
         let items = reg
             .finish("w", Vec::new(), 1)
             .unwrap_or_else(|| panic!("continue"))
@@ -2132,27 +2220,25 @@ mod tests {
             matches!(&items[1], InboxItem::Channel { seq: 3, from, .. } if from == "a"),
             "channel entries carry seq/from"
         );
-        // Idle: deposit wakes it; Stopped/unknown silently dropped.
+        // v6: an unmentioned room line neither continues a finishing turn nor
+        // wakes an idle member on its own — it waits for the batch gate. A
+        // mention releases the whole backlog in order.
         assert!(reg.finish("w", Vec::new(), 1).is_none());
-        assert!(reg.deposit(
-            "w",
-            InboxItem::Channel {
-                channel: "t".into(),
-                from: "b".into(),
-                text: "x".into(),
-                seq: 4,
-            },
-        ));
+        assert!(reg.deposit("w", room_line("b", 4, false)));
+        assert!(
+            reg.flush_pending().is_empty(),
+            "one unmentioned line stays below the wake gate"
+        );
+        assert!(reg.deposit("w", room_line("b", 5, true)));
         let woken = reg.flush_pending();
         assert_eq!(woken.len(), 1);
-        assert_eq!(woken[0].items.len(), 1);
+        assert_eq!(
+            woken[0].items.len(),
+            2,
+            "the mention wakes, and the waiting line rides along in order"
+        );
         let _ = reg.stop("w");
-        let dropped = InboxItem::Channel {
-            channel: "t".into(),
-            from: "c".into(),
-            text: "y".into(),
-            seq: 5,
-        };
+        let dropped = room_line("c", 6, false);
         assert!(
             !reg.deposit("w", dropped.clone()),
             "stopped members do not receive"
@@ -2160,6 +2246,58 @@ mod tests {
         assert!(
             !reg.deposit("ghost", dropped),
             "unknown instances are silently dropped"
+        );
+    }
+
+    /// The batch half of the wake gate (v6): unmentioned room lines wake their
+    /// holder in bulk at ROOM_UNREAD_WAKE, or singly once the oldest passes
+    /// ROOM_UNREAD_MAX_AGE — and an inbox below both thresholds stays asleep.
+    #[test]
+    fn unmentioned_room_lines_wake_in_bulk_or_on_age() {
+        let reg = AgentRegistry::new();
+        reg.insert("w", AgentKind::Hire, None, "w".into(), test_session());
+        assert!(reg.finish("w", Vec::new(), 0).is_none(), "start idle");
+        for seq in 1..crate::channels::ROOM_UNREAD_WAKE as u64 {
+            assert!(reg.deposit("w", room_line("a", seq, false)));
+        }
+        assert!(
+            reg.flush_pending().is_empty(),
+            "below the count and below the age, nothing wakes"
+        );
+        assert!(reg.deposit(
+            "w",
+            room_line("a", crate::channels::ROOM_UNREAD_WAKE as u64, false)
+        ));
+        let woken = reg.flush_pending();
+        assert_eq!(woken.len(), 1, "the fifth line crosses the count gate");
+        assert_eq!(
+            woken[0].items.len(),
+            crate::channels::ROOM_UNREAD_WAKE,
+            "the whole backlog drains at once"
+        );
+
+        // Age: a single stale line wakes on its own once it has sat long enough.
+        // (checked_sub: on a machine booted more recently than the age gate the
+        // backdated instant does not exist; the count half above still ran.)
+        let Some(stale) = Instant::now().checked_sub(crate::channels::ROOM_UNREAD_MAX_AGE) else {
+            return;
+        };
+        assert!(reg.finish("w", Vec::new(), 0).is_none());
+        assert!(reg.deposit(
+            "w",
+            InboxItem::Channel {
+                channel: "t".into(),
+                from: "a".into(),
+                text: "old".into(),
+                seq: 9,
+                mentioned: false,
+                arrived_at: stale,
+            }
+        ));
+        assert_eq!(
+            reg.flush_pending().len(),
+            1,
+            "the age gate releases a lone stale line"
         );
     }
 

@@ -65,6 +65,10 @@ by a channel message goes back to main as your result — nobody in the channel 
 private note to your manager, and from the room it is indistinguishable from ignoring the message.
 If you decide to answer, send it to the room.
 
+A room message that names you — `@yourname` or `@all` — reaches you at once; room traffic
+that does not name you reaches you in batches, later. Address someone as `@name` when you
+need them to see it now; leave the `@` off what can wait.
+
 **Who spoke decides whether you owe a reply** — not how the message is worded.
 
 - **`user` or `main` addressed the room**: answer once, briefly, to the room. When the person
