@@ -2687,7 +2687,28 @@ impl super::Chat {
                 // blank cell on every row of the block.
                 None => Vec::new(),
             };
-            let block = El::col(vec![El::Blank, El::gutter(cells, gutter.blank(), body)]);
+            // Consecutive arrivals read as one batch (the user's ruling, with
+            // the tool groups' own argument): three agents reporting in are one
+            // event to the reader, not three blocks with a blank row each. Only
+            // the arrival tiers coalesce — the `●` notice and the `@name❯` line
+            // — and only with each other; the `⚠` alert keeps its own block,
+            // because bad news does not queue politely. The decision reads
+            // nothing but the previous message's settled text, so a block
+            // renders the same on every frame (write-once).
+            let arrival = |text: &str| {
+                crate::tui::bufferview::is_agent_notice(text)
+                    || crate::tui::bufferview::is_teammate_line(text)
+            };
+            let in_streak = i > 0
+                && role == Role::User
+                && arrival(&self.messages[i].text)
+                && self.messages[i - 1].role == Role::User
+                && arrival(&self.messages[i - 1].text);
+            let block = if in_streak {
+                El::col(vec![El::gutter(cells, gutter.blank(), body)])
+            } else {
+                El::col(vec![El::Blank, El::gutter(cells, gutter.blank(), body)])
+            };
             blocks.push(Block::settled(block, settled));
         }
         if let Some(ask) = self.ask_el(&theme) {

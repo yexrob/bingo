@@ -621,6 +621,10 @@ fn tally(group: &mut CollapseGroup, kind: crate::tui::chat::CollapseKind) {
         CollapseKind::AgentCheck => group.agent_checks += 1,
         CollapseKind::AgentStop => group.agent_stops += 1,
         CollapseKind::AgentDelete => group.agent_deletes += 1,
+        CollapseKind::Send(target) => group.send_targets.push(target),
+        CollapseKind::RoomCheck => group.room_checks += 1,
+        CollapseKind::RoomCreate => group.room_creates += 1,
+        CollapseKind::RoomRoster => group.room_rosters += 1,
     }
 }
 

@@ -69,51 +69,10 @@ pub struct UiMessage {
     pub group_of: Vec<Option<usize>>,
 }
 
-/// Collapse group for consecutive Read/Search operations: collapses into a one-line rule summary (`Read 3 files`).
-#[derive(Debug, Clone, Default)]
-pub struct CollapseGroup {
-    /// Activity indices in the group (in order).
-    pub activities: Vec<usize>,
-    /// Number of search operations.
-    pub search: usize,
-    /// Read file paths (deduplicated count).
-    pub read_paths: Vec<String>,
-    /// Number of read operations without a path.
-    pub read_ops: usize,
-    /// Number of list operations (ls/tree/du).
-    pub list: usize,
-    /// Number of plain Bash operations.
-    pub bash: usize,
-    /// Number of read-only subagent inspections (AgentControl list/messages).
-    pub agent_checks: usize,
-    /// Number of subagents stopped (AgentControl stop).
-    pub agent_stops: usize,
-    /// Number of subagents deleted (AgentControl delete).
-    pub agent_deletes: usize,
-    /// Group still open (in progress → summary uses the -ing form + …).
-    pub active: bool,
-    /// ctrl+o / click expands the group into individual tools.
-    pub expanded: bool,
-    /// Input hint of the group's most recent tool (shown on the ⎿ line while running).
-    pub last_hint: Option<String>,
-}
-
-/// Collapsible classification of a tool (isSearchOrReadCommand).
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub enum CollapseKind {
-    Search,
-    /// Read or read-like Bash: carries a file path (None for Bash).
-    Read(Option<String>),
-    List,
-    /// Plain Bash that is neither search, read, nor list.
-    Bash,
-    /// Looking a subagent up (AgentControl list/messages).
-    AgentCheck,
-    /// Stopping a subagent (AgentControl stop).
-    AgentStop,
-    /// Deleting a subagent (AgentControl delete).
-    AgentDelete,
-}
+// moved to [`crate::tui::collapse`] with the rest of the fold machinery
+// (D111, the 4000-line cap); re-exported because a group is part of a
+// message's own state and every consumer already speaks this path.
+pub use crate::tui::collapse::{CollapseGroup, CollapseKind, classify_tool, collapse_summary};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
@@ -445,129 +404,6 @@ pub(crate) fn is_steer_line(text: &str) -> bool {
     text.starts_with(crate::steer::STEER_FLOW_PREFIX)
 }
 
-/// Read/Search-style tool classification.
-pub fn classify_tool(name: &str, input: &serde_json::Value) -> Option<CollapseKind> {
-    match name {
-        "Read" => input
-            .get("file_path")
-            .and_then(|p| p.as_str())
-            .map(|p| CollapseKind::Read(Some(p.to_string()))),
-        "Grep" | "Glob" => Some(CollapseKind::Search),
-        // Managing subagents runs in streaks (check three, stop one), and every row used to be
-        // its own two-line block that also closed whatever group was open. Fold the whole
-        // streak, but count a stop apart from a look so the summary never reports a
-        // deletion as a glance. An action-less call stays standalone (it is a malformed call).
-        "AgentControl" => match input.get("action").and_then(|a| a.as_str()) {
-            Some("stop") => Some(CollapseKind::AgentStop),
-            Some("delete") => Some(CollapseKind::AgentDelete),
-            Some(_) => Some(CollapseKind::AgentCheck),
-            None => None,
-        },
-        "Bash" => {
-            let kind = input
-                .get("command")
-                .and_then(|c| c.as_str())
-                .and_then(classify_bash_command);
-            if kind.is_some() {
-                kind
-            } else if input
-                .get("command")
-                .and_then(|c| c.as_str())
-                .is_some_and(bash_has_work)
-            {
-                Some(CollapseKind::Bash)
-            } else {
-                None
-            }
-        }
-        _ => None,
-    }
-}
-
-/// Whether the command contains a non-neutral segment (pure echo/printf etc. do not collapse).
-fn bash_has_work(command: &str) -> bool {
-    const NEUTRAL: &[&str] = &["echo", "printf", "true", "false", ":"];
-    let mut skip_next = false;
-    for part in command.split(['&', '|', ';']) {
-        let part = part.trim();
-        if part.is_empty() {
-            continue;
-        }
-        if skip_next {
-            skip_next = false;
-            continue;
-        }
-        if part.starts_with('>') {
-            skip_next = true;
-            continue;
-        }
-        let base = part.split_whitespace().next().unwrap_or("");
-        if !NEUTRAL.contains(&base) {
-            return true;
-        }
-    }
-    false
-}
-
-/// Bash command classification (split on && / || / | / ;, skipping quantifiers, redirection targets,
-/// and neutral commands; every segment must belong to the search/read/list sets; when mixed, place by list > search > read).
-pub fn classify_bash_command(command: &str) -> Option<CollapseKind> {
-    const SEARCH: &[&str] = &[
-        "find", "grep", "rg", "ag", "ack", "locate", "which", "whereis",
-    ];
-    const READ: &[&str] = &[
-        "cat", "head", "tail", "less", "more", "wc", "stat", "file", "strings", "jq", "awk", "cut",
-        "sort", "uniq", "tr",
-    ];
-    const LIST: &[&str] = &["ls", "tree", "du"];
-    const NEUTRAL: &[&str] = &["echo", "printf", "true", "false", ":"];
-    let mut seen = false;
-    let mut list = false;
-    let mut search = false;
-    let mut read = false;
-    let mut skip_next = false;
-    for part in command.split(['&', '|', ';']) {
-        let part = part.trim();
-        if part.is_empty() {
-            continue;
-        }
-        if skip_next {
-            skip_next = false;
-            continue;
-        }
-        if part.starts_with('>') {
-            skip_next = true;
-            continue;
-        }
-        let base = part.split_whitespace().next().unwrap_or("");
-        if NEUTRAL.contains(&base) {
-            continue;
-        }
-        seen = true;
-        if LIST.contains(&base) {
-            list = true;
-        } else if SEARCH.contains(&base) {
-            search = true;
-        } else if READ.contains(&base) {
-            read = true;
-        } else {
-            return None;
-        }
-    }
-    if !seen {
-        return None;
-    }
-    if list {
-        Some(CollapseKind::List)
-    } else if search {
-        Some(CollapseKind::Search)
-    } else if read {
-        Some(CollapseKind::Read(None))
-    } else {
-        None
-    }
-}
-
 /// Hint shown while a collapse group runs: the input of the group's most recent tool.
 fn hint_for(name: &str, input: &serde_json::Value) -> String {
     let map = input.as_object();
@@ -636,113 +472,6 @@ pub fn next_permission_mode(mode: PermissionMode, startup: PermissionMode) -> Pe
         return startup;
     }
     next
-}
-
-pub fn collapse_summary(g: &CollapseGroup, in_progress: bool) -> String {
-    let active = in_progress;
-    let mut parts: Vec<String> = Vec::new();
-    let mut push = |verb_done: &str, verb_ing: &str, body: String| {
-        if parts.is_empty() {
-            let v = if active { verb_ing } else { verb_done };
-            parts.push(format!("{}{body}", capitalize(v)));
-        } else {
-            let v = if active { verb_ing } else { verb_done };
-            parts.push(format!("{v}{body}"));
-        }
-    };
-    if g.search > 0 {
-        push(
-            "searched for",
-            "searching for",
-            format!(
-                " {} {}",
-                g.search,
-                if g.search == 1 { "pattern" } else { "patterns" }
-            ),
-        );
-    }
-    let read_count = if g.read_paths.is_empty() {
-        g.read_ops
-    } else {
-        g.read_paths
-            .iter()
-            .collect::<std::collections::HashSet<_>>()
-            .len()
-    };
-    if read_count > 0 {
-        push(
-            "read",
-            "reading",
-            format!(
-                " {} {}",
-                read_count,
-                if read_count == 1 { "file" } else { "files" }
-            ),
-        );
-    }
-    if g.list > 0 {
-        push(
-            "listed",
-            "listing",
-            format!(
-                " {} {}",
-                g.list,
-                if g.list == 1 {
-                    "directory"
-                } else {
-                    "directories"
-                }
-            ),
-        );
-    }
-    if g.agent_checks > 0 {
-        push(
-            "checked",
-            "checking",
-            format!(" {} {}", g.agent_checks, subagents(g.agent_checks)),
-        );
-    }
-    // A stop and a delete are counted (and worded) apart from a look: folding them into
-    // "checked 4 subagents" would report a run being killed as a glance.
-    if g.agent_stops > 0 {
-        push(
-            "stopped",
-            "stopping",
-            format!(" {} {}", g.agent_stops, subagents(g.agent_stops)),
-        );
-    }
-    if g.agent_deletes > 0 {
-        push(
-            "deleted",
-            "deleting",
-            format!(" {} {}", g.agent_deletes, subagents(g.agent_deletes)),
-        );
-    }
-    if g.bash > 0 {
-        push(
-            "ran",
-            "running",
-            format!(
-                " {} bash {}",
-                g.bash,
-                if g.bash == 1 { "command" } else { "commands" }
-            ),
-        );
-    }
-    let text = parts.join(", ");
-    if active { format!("{text}…") } else { text }
-}
-
-fn subagents(n: usize) -> &'static str {
-    if n == 1 { "subagent" } else { "subagents" }
-}
-
-fn capitalize(s: &str) -> String {
-    let mut c = s.chars();
-    match c.next() {
-        Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
-        None => String::new(),
-    }
 }
 
 /// One-line result summary for the expanded state (CC renderToolResultMessage).
@@ -1865,6 +1594,12 @@ impl Chat {
                     CollapseKind::AgentCheck => self.messages[i].groups[g].agent_checks += 1,
                     CollapseKind::AgentStop => self.messages[i].groups[g].agent_stops += 1,
                     CollapseKind::AgentDelete => self.messages[i].groups[g].agent_deletes += 1,
+                    CollapseKind::Send(target) => {
+                        self.messages[i].groups[g].send_targets.push(target)
+                    }
+                    CollapseKind::RoomCheck => self.messages[i].groups[g].room_checks += 1,
+                    CollapseKind::RoomCreate => self.messages[i].groups[g].room_creates += 1,
+                    CollapseKind::RoomRoster => self.messages[i].groups[g].room_rosters += 1,
                 }
             }
             UiEvent::WatchEvent {

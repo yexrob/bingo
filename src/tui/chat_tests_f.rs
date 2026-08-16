@@ -1337,6 +1337,53 @@ fn a_completion_notification_leaves_one_dim_line() {
 /// colour, with the body kept for `ctrl+o`. The delivery underneath is
 /// untouched: the same inbox, the same debounce, the same envelope.
 #[test]
+fn a_streak_of_arrivals_reads_as_one_batch() {
+    let mut chat = test_chat();
+    seed_agent(&chat, "scout");
+    seed_agent(&chat, "writer");
+    chat.messages
+        .push(msg(Role::Assistant, "dispatching them now."));
+    chat.session
+        .channels
+        .deliver_to_main("scout", "lexer done", None, false);
+    chat.tick();
+    chat.session
+        .channels
+        .deliver_to_main("writer", "draft ready", None, false);
+    chat.tick();
+
+    let rows = main_rows(&mut chat);
+    let at = |needle: &str| -> usize {
+        rows.iter()
+            .position(|r| r.contains(needle))
+            .unwrap_or_else(|| panic!("no row contains {needle:?}: {rows:?}"))
+    };
+    // Two arrivals, adjacent: the second joins the first's block instead of
+    // opening its own with a blank row (D111 — consecutive arrivals are one
+    // batch to the reader, the tool groups' own argument).
+    assert_eq!(
+        at("@writer❯"),
+        at("@scout❯") + 1,
+        "no blank row inside the streak: {rows:?}"
+    );
+    // The streak itself still opens like any message: a blank above the first.
+    assert_eq!(rows[at("@scout❯") - 1], "", "{rows:?}");
+
+    // An alert never joins the batch — bad news keeps its own block.
+    chat.push_agent_alert("scout · fix the lexer", Some("connection reset"));
+    let rows = main_rows(&mut chat);
+    let alert = rows
+        .iter()
+        .position(|r| r.contains("⚠ @scout"))
+        .unwrap_or_else(|| panic!("{rows:?}"));
+    assert_eq!(
+        rows[alert - 1],
+        "",
+        "the alert opens its own block: {rows:?}"
+    );
+}
+
+#[test]
 fn a_message_from_an_agent_leaves_one_line_and_keeps_its_body() {
     let mut chat = test_chat();
     seed_agent(&chat, "scout");

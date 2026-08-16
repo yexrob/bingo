@@ -41,6 +41,7 @@ pub mod buffer;
 pub mod bufferview;
 pub mod chat;
 mod chrome;
+pub mod collapse;
 pub mod complete;
 pub mod composer;
 pub mod el;

@@ -4809,3 +4809,36 @@ whose subject is the gutter itself opted in with one line each. D108a's pad
 row rides along untouched: with faces off there are no cells to pad for.
 
 D109 remains reserved for pane mode.
+
+### D111. The orchestration verbs fold, and arrivals queue up
+
+The user's ruling, same real-terminal day: the coordination tools —
+AgentControl, SendMessage, Channel — and the arrival lines should group the
+way everything else in the flow does, instead of each claiming a standalone
+block. AgentControl already folded; this batch brings the other two verbs and
+the arrival tier level with it.
+
+**The verbs.** `classify_tool` gained `Send(target)` (sigil normalised, so a
+lone send can say who it reached) and the three Channel counters — creates,
+roster changes and list-looks counted apart, on the same argument that keeps
+a stopped subagent out of "checked": a summary must never report a change as
+a glance. `collapse_summary` words them as `Messaged @scout` / `Messaged
+@scout 3 times` / `Messaged 2 recipients`, `Created 1 room`, `Changed 2
+rosters`, `Looked at the rooms`. Malformed calls (no `to`, no `action`) stay
+standalone. The zoom's `tally` folds through the same classifier, so both
+surfaces read one ruling.
+
+**The arrivals.** Consecutive `●` notices and `@name❯` lines now share one
+block — the blank row between messages is skipped when this message and the
+one before are both arrival-tier — so three agents reporting in read as one
+batch, which is the tool groups' own argument applied to the other direction
+of traffic. The `⚠` alert deliberately never joins: bad news keeps its own
+block. The decision reads nothing but the previous message's settled text,
+so a block renders the same on every frame and write-once holds.
+
+**The split.** The fold machinery left `chat.rs` for a new `tui::collapse`
+module when the file hit the 4000-line cap mid-batch (D108 predicted the
+next addition would have to split something; it was this one), re-exported
+from `chat` so every consumer keeps its path. The pure classifier tests
+moved with it — `chat_tests_a.rs` had crossed the cap too, and a test should
+live beside what it pins.
