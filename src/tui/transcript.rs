@@ -619,6 +619,11 @@ pub fn transcript_rows(chat: &mut Chat, width: usize, show_all: bool) -> Vec<Row
     chat.flushed_segments = 0;
     chat.tail_start = 0;
     chat.mark_base = 0;
+    // CC's `isTranscriptMode`: a row that keeps a body out of the flow may show
+    // it here. Restored below with the fold state, so the inline document is
+    // built without it and nothing it already flushed can disagree.
+    let saved_transcript_mode = chat.transcript_mode;
+    chat.transcript_mode = true;
     if show_all {
         for message in &mut chat.messages {
             for act in &mut message.activities {
@@ -644,6 +649,7 @@ pub fn transcript_rows(chat: &mut Chat, width: usize, show_all: bool) -> Vec<Row
     chat.flushed_segments = saved.flushed_segments;
     chat.tail_start = saved.tail_start;
     chat.mark_base = saved.mark_base;
+    chat.transcript_mode = saved_transcript_mode;
     chat.dirty = true;
     rows
 }

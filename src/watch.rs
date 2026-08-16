@@ -231,6 +231,13 @@ pub struct WatchEvent {
     pub signal: Option<String>,
     /// Milliseconds the watchable has been running (since registration).
     pub elapsed_ms: u64,
+    /// Whether this transition put a notification in the **main** agent's queue
+    /// (D106). The flow prints one line when a task notification reaches main's
+    /// context, and only the registry knows whether one did: a run registered
+    /// with `notify_owner: false` — the D98 rule for a turn the user started in
+    /// an agent's own conversation — reports its end to nobody, and a run owned
+    /// by a subagent reports it to that subagent.
+    pub notifies_main: bool,
 }
 
 /// Snapshot: for TUI initial render / state queries (the current display layer is driven
@@ -362,7 +369,9 @@ impl WatchRegistry {
             id
         };
         // Initial state is force-broadcast (set_state's idempotency would swallow a state equal to the entry's).
-        if notify_owner && (poll.state.is_terminal() || poll.state == WatchState::Idle) {
+        let notified = notify_owner && (poll.state.is_terminal() || poll.state == WatchState::Idle);
+        let notifies_main = notified && owner.is_none();
+        if notified {
             self.inner
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
@@ -386,6 +395,7 @@ impl WatchRegistry {
             payload: poll.payload.clone(),
             signal: None,
             elapsed_ms: 0,
+            notifies_main,
         });
         let interval = watchable.check_interval();
         if let Some(interval) = interval {
@@ -459,7 +469,7 @@ impl WatchRegistry {
     pub fn emit_signal(&self, id: WatchId, signal: String, detail: Option<String>) {
         // Single-signal cap: any long text fed by callers is cut off here.
         let signal = truncate_chars(&signal, MAX_SIGNAL_CHARS);
-        let (label, kind, state, entry_detail) = {
+        let (label, kind, state, entry_detail, notifies_main) = {
             let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
             let Some(entry) = inner.entries.get_mut(&id) else {
                 return;
@@ -473,6 +483,7 @@ impl WatchRegistry {
             let entry_detail = entry.detail.clone();
             let owner = entry.owner.clone();
             let notify_owner = entry.notify_owner;
+            let notifies_main = notify_owner && owner.is_none();
             if notify_owner {
                 inner.notifications.push_back(Notification {
                     id,
@@ -484,7 +495,7 @@ impl WatchRegistry {
                     owner,
                 });
             }
-            (label, kind, state, entry_detail)
+            (label, kind, state, entry_detail, notifies_main)
         };
         let elapsed_ms = {
             let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
@@ -505,6 +516,7 @@ impl WatchRegistry {
             payload: None,
             signal: Some(signal),
             elapsed_ms,
+            notifies_main,
         });
     }
 
@@ -524,7 +536,7 @@ impl WatchRegistry {
         detail: Option<String>,
         payload: Option<serde_json::Value>,
     ) {
-        let (label, kind) = {
+        let (label, kind, notifies_main) = {
             let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
             let Some(entry) = inner.entries.get_mut(&id) else {
                 return;
@@ -544,6 +556,7 @@ impl WatchRegistry {
             let kind = entry.kind;
             let owner = entry.owner.clone();
             let notify = entry.notify_owner && (state.is_terminal() || state == WatchState::Idle);
+            let notifies_main = notify && owner.is_none();
             if state.is_terminal() {
                 // After terminal, no more content feeding or condition matching: compact
                 // the entry and free the buffers.
@@ -564,7 +577,7 @@ impl WatchRegistry {
             if state.is_terminal() {
                 prune_terminal_entries(&mut inner);
             }
-            (label, kind)
+            (label, kind, notifies_main)
         };
         let elapsed_ms = {
             let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
@@ -583,6 +596,7 @@ impl WatchRegistry {
             payload,
             signal: None,
             elapsed_ms,
+            notifies_main,
         });
     }
 

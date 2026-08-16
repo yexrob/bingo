@@ -28,7 +28,7 @@
 //! display-row updates are orchestrated by the tool layer (`tool::channel`). The main
 //! agent's member name is always `main`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
@@ -198,8 +198,32 @@ struct Inner {
     /// surface that rings the bell are different readers on different clocks,
     /// and a bell owed must survive the drain that beat it.
     main_mail_urgent: bool,
+    /// What the transcript owes the screen about that inbox (D106), kept beside
+    /// it rather than inside it: [`Inner::main_mail`] is a byte contract with
+    /// the model — the marker on each line is what
+    /// [`crate::tui::buffer::line_source`] reads back — and a renderer that had
+    /// to un-format it would be reading the model's mail over its shoulder.
+    ///
+    /// One entry per direct message that landed for `main`, drained by whatever
+    /// draws the flow. Room relays are deliberately absent: see
+    /// [`ChannelRegistry::drain_main_arrivals`].
+    main_arrivals: VecDeque<MainArrival>,
     limits: ChannelLimits,
 }
+
+/// A message that arrived for the main agent, as the transcript needs it: who
+/// sent it and what they said. The flow prints one line of this and keeps the
+/// body for the `ctrl+o` transcript.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MainArrival {
+    pub from: String,
+    pub text: String,
+}
+
+/// Cap on the undrained arrivals mirror. Nothing drains it outside the TUI —
+/// `-p` runs deliver mail with no flow to print it into — so it is bounded and
+/// drops the oldest, exactly as the feed buffers in [`crate::watch`] do.
+const MAX_MAIN_ARRIVALS: usize = 256;
 
 /// Session-level channel registry (Session holds the Arc; shared by child sessions).
 pub struct ChannelRegistry {
@@ -255,6 +279,7 @@ impl ChannelRegistry {
                 channels: HashMap::new(),
                 main_mail: Vec::new(),
                 main_mail_urgent: false,
+                main_arrivals: VecDeque::new(),
                 limits,
             }),
             share: Mutex::new(None),
@@ -686,6 +711,26 @@ impl ChannelRegistry {
         let mut inner = self.lock();
         inner.main_mail.push(format_main_message(from, text));
         inner.main_mail_urgent |= urgent;
+        inner.main_arrivals.push_back(MainArrival {
+            from: from.to_string(),
+            text: text.to_string(),
+        });
+        while inner.main_arrivals.len() > MAX_MAIN_ARRIVALS {
+            inner.main_arrivals.pop_front();
+        }
+    }
+
+    /// Take the direct messages that landed for `main` since the last look, for
+    /// the surface that draws them (D106's `@scout❯ <summary>` line).
+    ///
+    /// **Direct messages only.** A room relay lands in the same inbox and wakes
+    /// main on the same debounce, and it is deliberately not mirrored here: a
+    /// room is a conversation between agents that main happens to overhear, and
+    /// a line per post is exactly the flood D98's debounce exists to prevent.
+    /// The room's own surfaces are its zoom and the digest main writes after
+    /// reading it.
+    pub fn drain_main_arrivals(&self) -> Vec<MainArrival> {
+        self.lock().main_arrivals.drain(..).collect()
     }
 
     /// Take the pending attention request, if any. Reading it clears it: the

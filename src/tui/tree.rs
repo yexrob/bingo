@@ -129,9 +129,18 @@ pub fn stats_label(tool_uses: usize, tokens: u64) -> String {
     if tool_uses == 0 && tokens == 0 {
         return String::new();
     }
+    format!(" · {}", stats_body(tool_uses, tokens))
+}
+
+/// `12 tool uses · 8.3k tokens` — the segment itself, ungated. The tree hangs
+/// it off a row with a leading ` · ` and drops it at zero; D106's `Done (…)`
+/// and `In progress…` lines print it whatever it says, because CC's own
+/// completion line does (`tools/AgentTool/UI.tsx:376`). One formatter, two
+/// gates.
+pub fn stats_body(tool_uses: usize, tokens: u64) -> String {
     let uses = if tool_uses == 1 { "use" } else { "uses" };
     format!(
-        " · {tool_uses} tool {uses} · {} tokens",
+        "{tool_uses} tool {uses} · {} tokens",
         crate::context_usage::compact_tokens(tokens, 1_000)
     )
 }
@@ -231,6 +240,15 @@ impl Chat {
     /// row below.
     pub(crate) fn tree_instances(&self) -> Vec<AgentStatus> {
         self.session.agents.list()
+    }
+
+    /// One stable colour per name, main's reserved slot included — the palette
+    /// the avatar gutter draws from, so a name and its face never disagree.
+    /// The pills, the tree's rows and D106's `@name❯` lines all ask here.
+    pub(crate) fn identity_color(&self, name: &str) -> Color {
+        let palette = Palette::new(&self.theme);
+        let gutter = Gutter::new(false, &palette, &self.faces_pinned);
+        palette.avatars[gutter.index_for(name) % palette.avatars.len()]
     }
 
     /// Open the tree with nothing selected — what `ctrl+t` does. The panels of
@@ -607,8 +625,6 @@ impl Chat {
             return None;
         }
         let theme = &self.theme;
-        let palette = Palette::new(theme);
-        let gutter = Gutter::new(false, &palette, &self.faces_pinned);
         let dim = SegStyle::fg(theme.text_secondary);
 
         let mut pills: Vec<(String, bool, bool)> =
@@ -643,7 +659,7 @@ impl Chat {
             }
             budget -= text_width(&text);
             let mut style = SegStyle::fg(if *live {
-                palette.avatars[gutter.index_for(name) % palette.avatars.len()]
+                self.identity_color(name)
             } else {
                 theme.text_secondary
             });

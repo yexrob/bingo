@@ -4124,3 +4124,189 @@ not_happen` becomes `a_message_to_a_stopped_agent_resumes_it`, the same pin
 facing the other way. Both READMEs already claimed the resume worked (the
 D103-era text was written to the design, not the code) and are true now
 without an edit.
+
+### D106. What the transcript shows of agent life
+
+**Problem.** D103 left one transcript, D104 put a status layer around it and D105 gave one agent the
+whole screen for a while. Between them they answered who is working and what it is saying — but the
+*transcript*, the surface a user actually reads, still showed agent life the way v3 left it: one
+watch row per dispatch reading `◉ scout · fix the parser` with `⎿ produced 1234 chars` under it, and
+then nothing at all. A message an agent sent main rendered **zero rows** (D98's ruling: the wake was
+invisible, main narrated). A completion rendered zero rows. The design's tiering table is CC's answer
+to the same question, row by row, and this batch is that table. **In code: 1362 added against 59
+removed across 12 files**, none new — every tier lands in the module that already owned its
+neighbour.
+
+**The dispatch row is a name and a task, because CC's named spawns are.** The brief said
+`⏺ Agent(<description>)`, which is CC's row for an *anonymous* subagent
+(`AssistantToolUseMessage.tsx:200-210` composing `userFacingName` with the parenthesised
+`renderToolUseMessage`, and `AgentTool/UI.tsx:411-421` returning the description). bingo has no
+anonymous subagents: every instance is named and addressable, which is the whole of v4's member
+model. CC has a row for that case too — `AgentTool/UI.tsx:687` makes a named spawn's `agentType`
+`@name`, and `AgentProgressLine`'s `hideType` branch renders `<Text bold>{name}</Text><Text
+dimColor>: {description}</Text>`. So the row is **`◉ @scout: fix the parser`**, which is also, letter
+for letter, the shape D104 gave the tree — the same run now reads the same way in the flow, in the
+panel and in the zoom header. The `◉` stays: it is D97's subagent glyph and the avatar gutter's
+connector arithmetic is built on it, and CC's own dot is platform-dependent anyway
+(`constants/figures.ts:4`).
+
+*One bug fell out of the parse.* The face a dispatch row wears was keyed on everything before the
+first ` · `, so a continuation run labelled `scout #3 · look again` wore **a different face** from
+`scout · fix the parser`. `watch_instance` — the first whitespace token, which is what every label
+shape opens with — is now the single answer for the row's text, the row's face and the notice line,
+and a test walks the four label shapes and the gutter consequence.
+
+**Live progress is the last three things the agent did, and it is not stored anywhere it could
+settle.** CC keeps the tail of a subagent's progress messages (`MAX_PROGRESS_MESSAGES_TO_SHOW = 3`,
+`UI.tsx:33`, `:510`) and renders each in condensed style. bingo's `recent_activity` entries already
+*are* that line — `⏺ Read(src/lexer.rs)`, built by the same `tool_glyph` / `display_tool_name` /
+`summarize_input` the console builds its own tool headers with — so the port is the tail, not a new
+renderer. **CC's grouping of consecutive read/search calls is deliberately not ported**: its own
+comment at `UI.tsx:501` marks that path *ants only*, so the shipped renderer prints the rows as they
+come, and so does this one.
+
+The short-window fallback is CC's too (`UI.tsx:469`, `:495-503`): when the terminal cannot hold the
+rows, one `In progress… · 4 tool uses · 8.3k tokens` takes their place. The arithmetic is CC's —
+in-progress dispatches × lines-per-dispatch + `TERMINAL_BUFFER_LINES`, the buffer verbatim at 7
+(`:182`) — and the per-dispatch figure is bingo's own 4, because a dispatch row here is a header plus
+at most three progress lines rather than a full tool rendering.
+
+**Where the write-once line falls, and why it falls there by construction.** `message_static_settled`
+asks `Activity::is_running`, and a dispatch row answers yes for as long as its run does. So a message
+holding a running dispatch **cannot settle**, its rows stay in the redrawn tail, and the live progress
+is therefore transient whatever it is stored in. That is the licence to keep it in the `WatchCall`
+itself and refresh it on the tick — beside the thinking clock, which has updated a stored
+`duration_ms` per frame since D87 for exactly the same reason. What reaches scrollback is the row the
+terminal event leaves behind: `Done (12 tool uses · 8.3k tokens · 1m 4s)`, CC's completion line
+(`UI.tsx:376-377`) built from D104's `stats_body` and `duration_label` rather than a second pair of
+formatters. Two tests pin the pair: the running message does not settle and shows the three rows; the
+finished one settles, shows the cost, and shows none of the rows it used to.
+
+*The numbers had to be kept because the domain throws them away.* `spawn_agent_loop` calls
+`set_progress(&name, None)` **one line before** it reports `Done`, so a renderer that read the
+registry at the terminal event would read zeroes. The row keeps its own copy, sampled per tick and
+merged with `max` — within one run the counts are monotone, so the merge is exact and immune to the
+frame in which the cell went empty, and a new run gets a new label and therefore a new row. No domain
+write was needed, which was the constraint: the `Done` detail string is model-facing (it is the body
+of the task notification, `watch.rs`'s `notification_body`) and was not touched.
+
+**Several agents from one round draw one tree.** CC groups the `Agent` calls of one assistant message
+into a single block (`renderGroupedAgentToolUse`, `UI.tsx:649-762`); the analogue here is a run of
+adjacent watch rows sharing an insert point, which is what "the model made these calls in one round"
+looks like once the rows are hung off the message's text.
+
+```
+   ⏺ Running 2 agents…
+      ├─ @scout: fix the parser · 1 tool use · 2.1k tokens
+      │  ⎿  ⏺ Read(a.rs)
+      └─ @zoe: run the tests
+         ⎿  Initializing…
+```
+
+Every glyph is CC's `AgentProgressLine`: `paddingLeft={3}`, the stem `├─ ` / `└─ `, the status row
+`│  ⎿  ` / `   ⎿  `, the stats appended with ` · `, and one word — `Done` — where the ungrouped row
+prints the whole cost. The headings are `UI.tsx:745-752`: `Running N agents…` while any is
+unresolved, `N agents finished` when none is; `commonType` never fills in, because named instances
+are never all one type. **A group anybody has opened is not a group**: an expanded member falls back
+to the individual rows, which is how the folded content stays reachable by click and how the `ctrl+o`
+pager (which opens every activity before it builds) sees the full thing. Rows inside a group wear no
+portrait and claim no face — `Chat::faces` is what the transmit sweep sends, and sending a picture
+nothing draws is paying for a hole that never appears.
+
+**The completion's own line, and the one place it is gated.** CC renders a task notification arriving
+in the leader's context as `<BLACK_CIRCLE> <summary>`, the glyph coloured by status and the summary
+plain (`UserAgentNotificationMessage.tsx:55-81`, over the `<summary>` its `LocalAgentTask` writes at
+`:246`: `Agent "<description>" completed`). bingo's is `● @scout completed · fix the parser`, glyph in
+the done colour, text on the furniture tier. Three departures: `BLACK_CIRCLE` is `⏺` on macOS and `●`
+elsewhere (`constants/figures.ts:4`) and bingo already spends `⏺` on tool rows *and* on main's prose,
+so the other of CC's two glyphs is the one that does not collide; the summary names the **instance**,
+because bingo's agents are addressable and `@scout` is what a reader would type next; and the text is
+dim, which is the tier every line nobody said has settled into since D98 and what the design asked
+for in as many words.
+
+*It fires only when a notification really is main's.* The registry is the only thing that knows: a run
+the user started inside an agent's own conversation registers with `notify_owner: false` and reports
+its end to nobody (D98), and a run owned by a subagent reports it to that subagent. So `WatchEvent`
+gained one field, `notifies_main`, set where the registry already decides whether to enqueue —
+`has_wake_notifications(None)` would have answered "somebody's notification is pending", which is a
+different question and would have printed a line for the wrong run. **Failure keeps its alert and gets
+no second line** (`⚠ @scout · connection reset`, D98, untouched), and **cancellation prints nothing**,
+which is D94's ruling and still right: the user just did it.
+
+**A message from an agent is one visible line again.** This is the one row where v4 reverses v3. D98
+made an agent→main message render nothing at all and let the woken turn speak for it; CC renders
+`@name❯ <summary>` in the sender's colour and keeps the body for transcript mode
+(`UserTeammateMessage.tsx:150-204`, the glyph `figures.pointer`). The wake, the debounce, the marker
+and the `<messages>` envelope are **byte-identical** — only the screen changed.
+
+*The summary is CC's own fallback.* CC's `SendMessage` requires a 5-10 word `summary` field
+(`SendMessageTool.ts:76-80`) and falls back to `truncate(input.message, 50)` when it is missing
+(`:765`). bingo's `SendMessage` has no such field, so the fallback is always the path taken: the first
+line, fifty columns, through the house's `one_line`. Adding a `summary` parameter would have been a
+tool-schema change in a rendering batch, and the fallback is CC's answer for exactly the case where
+one is absent.
+
+*The body lives in `ctrl+o`, through CC's own gate.* `Chat::transcript_mode` is `isTranscriptMode`
+(`UserTeammateMessage.tsx:139`, `:186`): `transcript_rows` sets it for one build and restores it with
+the fold state it already saves and restores, so the inline document is never built with it true and
+nothing it flushed can disagree with what it flushes next. The `@name❯` line therefore occupies one
+row in scrollback, forever, and three in a pager that rebuilds from zero.
+
+*The arrival is read from a mirror, not from the mail.* `main_mail` is a byte contract with the
+model — the marker on each line is what `buffer::line_source` parses back — so the renderer does not
+un-format it. `ChannelRegistry` gained `main_arrivals`, a bounded queue (256, oldest dropped) that
+`deliver_to_main` fills and the tick drains, which also means a `-p` run with no flow cannot grow it.
+**Room relays are deliberately not mirrored.** The design's rooms paragraph offers a `#room❯` line and
+the tiering table does not, and the table wins here for the reason the debounce exists: a room is a
+conversation between agents that main overhears, and one flow line per post is exactly the flood D98
+was written to stop. The room's surfaces are its zoom and the digest main writes after reading it.
+
+*Where it lands, and what it wears.* Appended, like the alert, without splitting main's running reply.
+D83 splits a turn for a *steered* message because the user's words demonstrably entered that turn's
+context; mail may be drained by the running turn's next round or may sit until the debounce wakes a
+new one, and a renderer cannot know which at arrival. So the flow states when the message arrived,
+which is the thing it can be sure of — and it keeps a **send stamp** for the reason the alert keeps
+one: it is news, from somebody, at a moment that reads differently at 09:02 and at 17:40. It wears
+**no gutter face**, and that falls out of D99 rather than being decided again: `speaker_of` gives a
+state line nobody, the identity is carried by the colour on `@scout❯` exactly as CC carries it, and a
+portrait is two rows tall where this line is one.
+
+**State changes still write nothing, and there is now a test that says so.** Running, Idle, `mark_idle`
+and `stop` across the registry, plus a `refresh_conversations` and a tick: the flow is byte-identical
+before and after. The roster's surfaces are the tree row and the pill, as D104 left them.
+
+**Tests: twelve added, three rewritten, none deleted and none weakened.** Two in `activities.rs` (the
+four label shapes and what each yields; the dispatch row's three forms — progress, condensed, cost —
+plus a failure keeping its reason). Two in `bufferview.rs` (the teammate line's shape and the six
+strings that are ordinary prose despite looking close; the notice line's two forms and its
+non-overlap with the alert). Eight in `chat_tests_f.rs`'s new part E (the last three activity lines
+and the unsettled message that makes them safe; the short window's condensation; the settled cost and
+the settle itself; the grouped tree, its two headings, its one-word status and its dissolution on
+expand; the notice line, its gate and the failure that gets no second one; the teammate line, its
+50-column summary, its body reachable only through `ctrl+o` and its mail still sitting unread in main's
+inbox; the lifecycle transitions that write nothing; the continuation run wearing the first run's
+face). *The three rewritten* are the label assertions the row shape changed under —
+`agent_watch_rows_wear_the_instance_face_only_where_images_place`,
+`without_the_switch_the_transcript_wears_no_band` and
+`the_running_turn_keeps_the_row_for_its_own_task_call` — each keeping its own question (the face
+replacing the glyph, the absent band, the row belonging to the turn) and changing only the copy it
+looks for. **1466 + 13 before, 1478 + 13 after.**
+
+**Named limits.**
+
+1. *Both new lines are recognised by their text.* `● ` at the start of a line, or `@name❯` with a
+   plain-identifier name — so a user who types either gets the rendering. It is the same textual
+   convention `is_agent_alert` has carried since D98 and the same exposure; the parser is strict about
+   the name charset so that `@src/lexer.rs❯ why` is prose, and a test pins six near-misses.
+2. *The teammate line's summary cannot be better than the message's first fifty columns.* CC's is,
+   because its sender writes one. Giving bingo's `SendMessage` a `summary` field is a domain change
+   and belongs to whichever batch is allowed to touch the tool schema.
+3. *A room post still renders nothing in the flow.* Stated above as a decision rather than an
+   oversight; if D108 finds the design's `#room❯` line is wanted after all, the mirror is where it
+   goes and the debounce is the argument it has to beat.
+4. *The grouped tree has no `ctrl+o to expand` hint of its own.* CC prints one on the group header;
+   here the affordance is a click on the member row, and a hint promising a key that opens *one* of
+   several rows would be a half-truth. The pager's `a` opens all of them.
+5. *`In progress…` is decided per message, from the dispatches in that message.* CC counts every
+   in-progress tool call in the session. One turn's dispatches all live in one message, so the two
+   agree wherever it matters and differ only when two turns are somehow in flight at once.

@@ -363,18 +363,26 @@ schema from a single source of truth):
   via the Agent tool's `agent` parameter.
 - Instances have names (`name` parameter, defaults to the definition name/
   `agent`, auto `-2`/`-3` on collisions); the turn that spawns one shows
-  `◉ name · task`, while a lifecycle event arriving when no turn is running no
+  `◉ @name: task` with the last three things the instance did under it (or one
+  `In progress… · 4 tool uses · 8.3k tokens` line in a short window), settling
+  into `Done (12 tool uses · 8.3k tokens · 1m 4s)`. A round that dispatched
+  several draws one `⏺ Running 2 agents…` block with a `├─ @name: task` row per
+  agent. A lifecycle event arriving when no turn is running no
   longer writes into `@main` at all — the team lifecycle log, the agent tree and
   the instance's own record carry it instead; history is kept after
   completion.
 - `SendMessage` sends follow-up instructions to an instance (context
   preserved); queued while busy, delivered automatically at the end of the
   current turn. A sub-agent's `SendMessage(to: "main")` lands in the main
-  agent's inbox and wakes it when idle; nothing of the arrival is drawn —
-  what the user sees is only what the main agent then says. `urgent: true`
+  agent's inbox and wakes it when idle, and leaves one line in `@main`:
+  `@scout❯ <the message's first fifty columns>` in the sender's identity colour,
+  with the whole body reachable only through the `ctrl+o` transcript. A room
+  relay draws nothing. `urgent: true`
   (sub-agent→main only) rings the terminal attention channel on arrival.
 - A run that **fails** draws one `⚠ @name · reason` line in `@main` and rings
-  the attention channel; done and cancelled draw nothing. A run whose trigger
+  the attention channel; a run that **completes** leaves one dim
+  `● @name completed · task` line where its notification reaches the main
+  agent's context; a cancellation draws nothing. A run whose trigger
   was entirely the user's own DM messages produces no notification and no woken
   turn for the main agent at all.
 - A turn the main agent was *woken* into — digesting a notification rather than

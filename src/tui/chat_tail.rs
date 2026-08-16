@@ -142,6 +142,11 @@ pub(crate) const MAIL_QUIET_TICKS: u64 = 2_000 / crate::tui::motion::TICK_MS;
 /// batch starts its own window.
 pub(crate) const MAIL_DEADLINE_TICKS: u64 = 15_000 / crate::tui::motion::TICK_MS;
 
+/// Rows a window must keep free of dispatch progress before the rows condense
+/// into one line — CC's `TERMINAL_BUFFER_LINES` (`tools/AgentTool/UI.tsx:182`),
+/// verbatim.
+pub(crate) const DISPATCH_BUFFER_LINES: usize = 7;
+
 /// The debounce's state for one batch of waiting mail.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct MailWake {
@@ -456,6 +461,44 @@ impl super::Chat {
         self.buffers.note_console(true, self.tick);
         self.notify
             .attention(crate::tui::notify::Attention::AgentNotice);
+        self.dirty = true;
+    }
+
+    /// One dim line for the task notification a finished run just put in main's
+    /// context (D106), before main says anything about it.
+    ///
+    /// No bell and no badge: the run ended the way it was supposed to, and the
+    /// dispatch row two lines up already settled into `Done (…)`. The alert
+    /// above is what bad news costs; this is what good news costs.
+    pub(crate) fn push_agent_notice(&mut self, label: &str) {
+        self.push_flow_line(crate::tui::bufferview::agent_notice_line(label));
+    }
+
+    /// One line for a message an agent sent main (D106): `@scout❯ found it` in
+    /// the sender's colour, the body kept for the `ctrl+o` transcript.
+    ///
+    /// It lands where the alert lands — appended, without splitting main's
+    /// running reply. D83 splits a turn for a *steered* message because the
+    /// user's words demonstrably entered that turn's context; mail may be drained
+    /// by the running turn's next round or may sit until the debounce wakes a new
+    /// one, and a renderer cannot know which at arrival time. So the flow states
+    /// when the message arrived, which is the thing it can be sure of.
+    pub(crate) fn push_teammate_line(&mut self, from: &str, text: &str) {
+        self.push_flow_line(crate::tui::bufferview::teammate_line(from, text));
+        self.buffers.note_console(false, self.tick);
+    }
+
+    /// A user-role line the harness wrote about somebody else's life.
+    fn push_flow_line(&mut self, text: String) {
+        self.messages.push(UiMessage {
+            role: Role::User,
+            text,
+            at: crate::channels::now_unix(),
+            activities: Vec::new(),
+            insert_points: Vec::new(),
+            groups: Vec::new(),
+            group_of: Vec::new(),
+        });
         self.dirty = true;
     }
 
@@ -1922,6 +1965,70 @@ impl super::Chat {
                 }
             }
         }
+        self.sample_dispatches();
+        self.absorb_arrivals();
+    }
+
+    /// Refresh what every running dispatch row shows of its instance (D106).
+    ///
+    /// The registry is the only place the numbers live and it **drops them the
+    /// instant a run ends** — `spawn_agent_loop` clears the progress cell one
+    /// line before it reports `Done` — so the row has to keep its own copy, and
+    /// the copy has to survive the frame in which the cell went empty. It does
+    /// because the copy only ever grows: within one run the counts are monotone
+    /// and a `max` is therefore exact, and a new run gets a new label and
+    /// therefore a new row.
+    ///
+    /// Sampled in the tick beside the thinking clock, for the same reason and
+    /// with the same safety: a message holding a running activity never settles,
+    /// so nothing written here can reach scrollback.
+    fn sample_dispatches(&mut self) {
+        let running = self
+            .messages
+            .iter()
+            .any(|m| m.activities.iter().any(is_running_dispatch));
+        if !running {
+            return;
+        }
+        let roster = self.session.agents.list();
+        for msg in &mut self.messages {
+            for act in &mut msg.activities {
+                let ActivityKind::Watch(w) = &mut act.kind else {
+                    continue;
+                };
+                if w.kind != crate::watch::WatchKind::Agent || w.status.is_terminal() {
+                    continue;
+                }
+                let name = crate::tui::activities::watch_instance(&w.label);
+                let Some(status) = roster.iter().find(|s| s.name == name) else {
+                    continue;
+                };
+                if !status.recent_activity.is_empty() {
+                    w.progress = status
+                        .recent_activity
+                        .iter()
+                        .rev()
+                        .take(crate::tui::activities::PROGRESS_LINES)
+                        .rev()
+                        .cloned()
+                        .collect();
+                }
+                let seen = w.run_stats.unwrap_or_default();
+                w.run_stats = Some(crate::tui::activities::RunStats {
+                    tool_uses: seen.tool_uses.max(status.tool_uses),
+                    tokens: seen.tokens.max(status.output_tokens),
+                });
+            }
+        }
+    }
+
+    /// Turn the direct messages that landed for main into one transcript line
+    /// each (D106). The wake and its debounce are untouched: this reads a
+    /// mirror of the inbox, never the inbox itself.
+    fn absorb_arrivals(&mut self) {
+        for arrival in self.session.channels.drain_main_arrivals() {
+            self.push_teammate_line(&arrival.from, &arrival.text);
+        }
     }
 
     /// Frame number within the update-banner breathing window (animation running → Some; no banner / motion off /
@@ -2782,8 +2889,16 @@ impl super::Chat {
             let inner = width.saturating_sub(gutter.width());
             let body = match role {
                 Role::User => {
-                    let mut rows =
-                        El::Rows(user_message_rows(&self.messages[i].text, inner, &theme));
+                    // D106's two arrivals — a message from an agent, and the
+                    // task notification that reaches main when a run ends —
+                    // need the identity palette and the transcript-mode gate,
+                    // neither of which the plain user renderer has.
+                    let mut rows = El::Rows(
+                        self.agent_flow_rows(&self.messages[i].text, inner)
+                            .unwrap_or_else(|| {
+                                user_message_rows(&self.messages[i].text, inner, &theme)
+                            }),
+                    );
                     // Send time beside the bubble's first row (D93). A state line
                     // gets none: nothing was sent, and the line is a state, not a
                     // message.
@@ -2791,8 +2906,14 @@ impl super::Chat {
                     // lines: it *is* news, about someone, at a moment that
                     // matters — "the build broke" reads differently at 09:02 and
                     // at 17:40. The others describe now and have nothing to stamp.
+                    // The teammate line joins the alert as the second
+                    // exception: it *is* a message, sent by somebody, at a
+                    // moment worth knowing. The notification line is not — it
+                    // reports the end of a run whose own row already carries
+                    // how long that run took.
                     let time = if crate::tui::chat::is_state_line(&self.messages[i].text)
                         && !crate::tui::bufferview::is_agent_alert(&self.messages[i].text)
+                        && !crate::tui::bufferview::is_teammate_line(&self.messages[i].text)
                     {
                         String::new()
                     } else {
@@ -2895,6 +3016,7 @@ impl super::Chat {
         &mut self,
         i: usize,
         pal: &crate::tui::avatar::Palette,
+        grouped: &[Option<Vec<usize>>],
     ) -> Vec<Option<Portrait>> {
         if !self.chat_avatars || self.image_cap.is_none() {
             return Vec::new();
@@ -2902,10 +3024,18 @@ impl super::Chat {
         let named: Vec<Option<String>> = self.messages[i]
             .activities
             .iter()
-            .map(|act| match &act.kind {
-                ActivityKind::Watch(w) if w.kind == crate::watch::WatchKind::Agent => {
-                    // `{instance} · {description}` — the address is the prefix.
-                    let name = w.label.split(" · ").next().unwrap_or_default().trim();
+            .enumerate()
+            .map(|(idx, act)| match &act.kind {
+                // A row inside a grouped dispatch draws no face — the stem and
+                // the name in its identity colour are what CC's tree carries —
+                // so no picture is claimed for one either: `Chat::faces` is what
+                // the transmit sweep sends, and sending an image nothing draws
+                // is paying for a hole that never appears.
+                ActivityKind::Watch(w)
+                    if w.kind == crate::watch::WatchKind::Agent
+                        && grouped.get(idx).and_then(Option::as_ref).is_none() =>
+                {
+                    let name = crate::tui::activities::watch_instance(&w.label).trim();
                     (!name.is_empty()).then(|| name.to_string())
                 }
                 _ => None,
@@ -2929,6 +3059,155 @@ impl super::Chat {
             .collect()
     }
 
+    /// The runs of adjacent dispatch rows one round opened, as a per-activity
+    /// map: `Some(members)` on the first of a run of two or more,
+    /// `Some(vec![])` on the rest of it, `None` everywhere else.
+    ///
+    /// CC groups the `Agent` tool calls of *one assistant message* into a
+    /// single block (`renderGroupedAgentToolUse`, `tools/AgentTool/UI.tsx:649`);
+    /// the analogue here is a run of watch rows sharing an insert point, which
+    /// is what "the model made these calls in one round" looks like once the
+    /// rows are hung off the message's text.
+    ///
+    /// **A group that anybody has opened is not a group.** The folded form has
+    /// one status row per agent and no room for content, so an expanded member
+    /// falls back to the individual rows — which is also what the `ctrl+o`
+    /// transcript gets, since it opens every activity before it builds.
+    fn dispatch_groups(&self, i: usize) -> Vec<Option<Vec<usize>>> {
+        let msg = &self.messages[i];
+        let is_dispatch = |idx: usize| -> bool {
+            msg.group_of.get(idx).copied().flatten().is_none()
+                && matches!(&msg.activities[idx].kind,
+                    ActivityKind::Watch(w) if w.kind == crate::watch::WatchKind::Agent)
+        };
+        let mut out: Vec<Option<Vec<usize>>> = vec![None; msg.activities.len()];
+        let mut start = 0usize;
+        while start < msg.activities.len() {
+            if !is_dispatch(start) {
+                start += 1;
+                continue;
+            }
+            let at = msg.insert_points.get(start).copied();
+            let mut end = start + 1;
+            while end < msg.activities.len()
+                && is_dispatch(end)
+                && msg.insert_points.get(end).copied() == at
+            {
+                end += 1;
+            }
+            let members: Vec<usize> = (start..end).collect();
+            if members.len() > 1 && !members.iter().any(|&m| msg.activities[m].expanded) {
+                out[start] = Some(members);
+                for slot in out.iter_mut().take(end).skip(start + 1) {
+                    *slot = Some(Vec::new());
+                }
+            }
+            start = end;
+        }
+        out
+    }
+
+    /// One block for the several agents a round dispatched — CC's grouped tree
+    /// (`tools/AgentTool/UI.tsx:740-762` for the header,
+    /// `components/AgentProgressLine.tsx` for the rows).
+    ///
+    /// ```text
+    /// ⏺ Running 2 agents…
+    ///    ├─ @scout: fix the parser · 4 tool uses · 2.1k tokens
+    ///    │  ⎿  ⏺ Read(src/lexer.rs)
+    ///    └─ @zoe: run the tests · 7 tool uses · 3.1k tokens
+    ///       ⎿  Done
+    /// ```
+    fn dispatch_group_el(&self, i: usize, members: &[usize], theme: &Theme) -> El {
+        let colors: Vec<Color> = members
+            .iter()
+            .map(|&m| match &self.messages[i].activities[m].kind {
+                ActivityKind::Watch(w) => {
+                    self.identity_color(crate::tui::activities::watch_instance(&w.label))
+                }
+                _ => theme.text,
+            })
+            .collect();
+        let msg = &self.messages[i];
+        let calls: Vec<&crate::tui::activities::WatchCall> = members
+            .iter()
+            .filter_map(|&m| match &msg.activities[m].kind {
+                ActivityKind::Watch(w) => Some(w),
+                _ => None,
+            })
+            .collect();
+        let unresolved = calls.iter().any(|w| !w.status.is_terminal());
+        // CC's two headings, and its `agents` plural: `commonType` only fills in
+        // when every spawn is of one custom type, which named instances never are.
+        let mut header = Line::styled(
+            "⏺ ",
+            if unresolved {
+                theme.dim()
+            } else {
+                theme.tool_done()
+            },
+        );
+        header.push_styled(
+            if unresolved {
+                format!("Running {} agents…", calls.len())
+            } else {
+                format!("{} agents finished", calls.len())
+            },
+            SegStyle::fg(theme.text),
+        );
+        let mut rows = vec![Row::new(header)];
+        let mut clicks: Vec<LocalClick> = Vec::new();
+        for (n, w) in calls.iter().enumerate() {
+            let last = n + 1 == calls.len();
+            let start = rows.len();
+            let mut line = Line::styled(if last { "   └─ " } else { "   ├─ " }, theme.dim());
+            line.push_styled(
+                format!("@{}", crate::tui::activities::watch_instance(&w.label)),
+                SegStyle::fg(colors[n]),
+            );
+            let description = crate::tui::activities::watch_description(&w.label);
+            if !description.is_empty() {
+                line.push_styled(format!(": {description}"), theme.dim());
+            }
+            let stats = w.run_stats.unwrap_or_default();
+            line.push_styled(
+                crate::tui::tree::stats_label(stats.tool_uses, stats.tokens),
+                theme.dim(),
+            );
+            rows.push(Row::new(line));
+            // CC's status text for a row inside the group is one word once the
+            // agent is resolved (`AgentProgressLine` `getStatusText`): the full
+            // `Done (…)` belongs to the ungrouped row, which is where the run's
+            // cost is the point rather than the fact that it ended.
+            let (status, style) = match w.status {
+                WatchState::Done => ("Done".to_string(), theme.dim()),
+                WatchState::Failed => (
+                    w.detail.clone().unwrap_or_else(|| "Failed".to_string()),
+                    theme.tool_error(),
+                ),
+                WatchState::Cancelled => ("Cancelled".to_string(), theme.dim()),
+                _ => (
+                    w.progress
+                        .last()
+                        .cloned()
+                        .unwrap_or_else(|| crate::tui::activities::INITIALIZING.to_string()),
+                    theme.dim(),
+                ),
+            };
+            let stem = if last { "      ⎿  " } else { "   │  ⎿  " };
+            rows.push(Row::new(Line::styled(format!("{stem}{status}"), style)));
+            clicks.push(LocalClick {
+                start,
+                end: rows.len(),
+                target: ClickTarget::Activity {
+                    message: i,
+                    path: vec![members[n]],
+                },
+            });
+        }
+        El::Annotated { rows, clicks }
+    }
+
     fn assistant_el(
         &mut self,
         i: usize,
@@ -2937,7 +3216,37 @@ impl super::Chat {
         settled: bool,
         pal: &crate::tui::avatar::Palette,
     ) -> El {
-        let portraits = self.watch_portraits(i, pal);
+        let groups = self.dispatch_groups(i);
+        let portraits = self.watch_portraits(i, pal, &groups);
+        // CC drops a dispatch's per-tool rows for one condensed line when the
+        // window cannot hold them (`tools/AgentTool/UI.tsx:469`): its estimate is
+        // `in-progress calls × lines-per-call + buffer`. The arithmetic is CC's;
+        // the per-call figure is bingo's own, because a dispatch row here is a
+        // header plus at most `PROGRESS_LINES`, not a full tool rendering.
+        let running_dispatches = self.messages[i]
+            .activities
+            .iter()
+            .filter(|a| {
+                matches!(&a.kind,
+                    ActivityKind::Watch(w)
+                        if w.kind == crate::watch::WatchKind::Agent && !w.status.is_terminal())
+            })
+            .count();
+        let narrow = running_dispatches > 0
+            && self.height
+                < running_dispatches * (1 + crate::tui::activities::PROGRESS_LINES)
+                    + DISPATCH_BUFFER_LINES;
+        // Built before the render closure takes its field borrows, and in index
+        // order, so the block lands exactly where the first of its run would.
+        let mut group_els: Vec<Option<El>> = groups
+            .iter()
+            .map(|members| match members {
+                Some(members) if !members.is_empty() => {
+                    Some(self.dispatch_group_el(i, members, theme))
+                }
+                _ => None,
+            })
+            .collect();
         // Thinking completion row (CC SystemTextMessage `✻ Churned for 40s`):
         // rendered at the end of the message (after text and all tools), from the last completed
         // real thinking block (empty placeholder blocks produce no completion row).
@@ -3005,6 +3314,17 @@ impl super::Chat {
                 parts.push(text_el(theme, reply));
                 rendered_chars = pos_chars;
                 rendered_bytes = seg_end;
+            }
+            // A round that dispatched several agents draws one block for all of
+            // them (D106), on the first of the run; the rest of the run draws
+            // nothing of its own.
+            if let Some(members) = groups.get(idx).and_then(Option::as_ref) {
+                if !members.is_empty()
+                    && let Some(block) = group_els[idx].take()
+                {
+                    parts.push(block);
+                }
+                continue;
             }
             let group_idx = msg.group_of.get(idx).copied().flatten();
             let group_collapsed = group_idx.is_some_and(|g| !msg.groups[g].expanded);
@@ -3097,6 +3417,7 @@ impl super::Chat {
                 0,
                 theme,
                 portraits.get(idx).and_then(|p| p.as_ref()),
+                narrow,
                 &mut |reply: &str| render(reply),
             );
             let activity = El::Annotated {
@@ -3464,4 +3785,12 @@ pub fn banner_line(v: &str, width: usize) -> Option<String> {
 /// activity can answer yes at a time, which is why one tail slot is enough.
 fn is_running_bash(act: &Activity) -> bool {
     matches!(&act.kind, ActivityKind::Tool(t) if t.status == ToolStatus::Running && t.name == "Bash")
+}
+
+/// Whether this activity is a dispatch row whose run is still going — the rows
+/// D106 keeps sampling from the registry.
+fn is_running_dispatch(act: &Activity) -> bool {
+    matches!(&act.kind,
+        ActivityKind::Watch(w)
+            if w.kind == crate::watch::WatchKind::Agent && !w.status.is_terminal())
 }

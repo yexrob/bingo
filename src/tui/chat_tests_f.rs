@@ -54,6 +54,7 @@ fn lifecycle(label: &str, status: WatchState, detail: Option<&str>) -> UiEvent {
         duration_ms: 0,
         payload: None,
         signal: None,
+        notifies_main: false,
     }
 }
 
@@ -229,7 +230,7 @@ fn the_running_turn_keeps_the_row_for_its_own_task_call() {
 
     let rows = main_rows(&mut chat);
     assert!(
-        rows.iter().any(|r| r.contains("◉ scout · fix the parser")),
+        rows.iter().any(|r| r.contains("◉ @scout: fix the parser")),
         "the turn's own tool row is not bus noise: {rows:?}"
     );
 }
@@ -251,6 +252,7 @@ fn a_command_watch_still_reaches_the_last_reply() {
         duration_ms: 0,
         payload: None,
         signal: None,
+        notifies_main: false,
     });
 
     let rows = main_rows(&mut chat);
@@ -1010,5 +1012,402 @@ fn a_woken_turn_counts_on_the_console_like_any_other() {
             .map(crate::tui::buffer::Buffer::unread),
         Some(1),
         "main spoke, so the console has something to come back for"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// E. the transcript's tiers (D106)
+// ---------------------------------------------------------------------------
+
+/// Put a dispatch row on a running turn and give its instance a run to show.
+fn dispatching(chat: &mut Chat, name: &str, description: &str, activity: &[&str], tokens: u64) {
+    seed_agent(chat, name);
+    chat.session.agents.set_progress_snapshot(
+        name,
+        crate::agents::AgentProgress {
+            started_at: Some(std::time::Instant::now()),
+            output_tokens: tokens,
+            tool_uses: activity.len(),
+            recent_activity: activity.iter().map(|a| a.to_string()).collect(),
+        },
+    );
+    chat.apply_event(lifecycle(
+        &format!("{name} · {description}"),
+        WatchState::Running,
+        None,
+    ));
+}
+
+/// The dispatch row's live half: the last three things the instance did, oldest
+/// first, the first of them on the `⎿` connector. It is drawn from the registry
+/// on the tick, so it says what is true now rather than what was true when the
+/// row was created.
+#[test]
+fn a_dispatch_row_shows_the_last_three_things_the_agent_did() {
+    let mut chat = test_chat();
+    chat.messages.push(msg(Role::Assistant, "hiring scout"));
+    chat.stream_msg = Some(chat.messages.len() - 1);
+    dispatching(
+        &mut chat,
+        "scout",
+        "fix the parser",
+        &[
+            "⏺ Grep(fn main)",
+            "⏺ Read(src/lexer.rs)",
+            "⏺ Bash(cargo test)",
+            "⏺ Edit(src/lexer.rs)",
+        ],
+        8_300,
+    );
+    chat.tick();
+
+    let rows = main_rows(&mut chat);
+    let at = rows
+        .iter()
+        .position(|r| r.contains("◉ @scout: fix the parser"))
+        .unwrap_or_else(|| panic!("dispatch row: {rows:?}"));
+    assert!(rows[at + 1].contains("⎿  ⏺ Read(src/lexer.rs)"), "{rows:?}");
+    assert!(rows[at + 2].trim() == "⏺ Bash(cargo test)", "{rows:?}");
+    assert!(rows[at + 3].trim() == "⏺ Edit(src/lexer.rs)", "{rows:?}");
+    assert!(
+        !rows.iter().any(|r| r.contains("Grep(fn main)")),
+        "only the last three: {rows:?}"
+    );
+    assert!(
+        !chat.message_settled(chat.messages.len() - 1),
+        "a message holding a running dispatch never settles, which is why these \
+         rows can be transient at all"
+    );
+}
+
+/// The window is the budget. CC drops the per-tool rows for one condensed line
+/// when the terminal cannot hold them, and so does this.
+#[test]
+fn a_short_window_condenses_the_dispatch_progress_to_one_line() {
+    let mut chat = crate::tui::test_util::chat_at(80, 8);
+    chat.messages.push(msg(Role::Assistant, "hiring scout"));
+    chat.stream_msg = Some(chat.messages.len() - 1);
+    dispatching(
+        &mut chat,
+        "scout",
+        "fix the parser",
+        &["⏺ Grep(fn main)", "⏺ Read(src/lexer.rs)"],
+        8_300,
+    );
+    chat.tick();
+
+    let rows = main_rows(&mut chat);
+    assert!(
+        rows.iter()
+            .any(|r| r.contains("In progress… · 2 tool uses · 8.3k tokens")),
+        "{rows:?}"
+    );
+    assert!(
+        !rows.iter().any(|r| r.contains("Read(src/lexer.rs)")),
+        "the rows it could not afford are gone, not clipped: {rows:?}"
+    );
+}
+
+/// The dispatch row's settled half, and the only form of it that reaches
+/// scrollback. The numbers survive the run they describe: the registry drops a
+/// run's progress before it reports the end, so the row keeps its own copy.
+#[test]
+fn a_finished_dispatch_settles_into_what_the_run_cost() {
+    let mut chat = test_chat();
+    chat.messages.push(msg(Role::Assistant, "hiring scout"));
+    chat.stream_msg = Some(chat.messages.len() - 1);
+    dispatching(
+        &mut chat,
+        "scout",
+        "fix the parser",
+        &["⏺ Read(src/lexer.rs)", "⏺ Bash(cargo test)"],
+        8_300,
+    );
+    chat.tick();
+    // What the domain does one line before it reports the end.
+    chat.session.agents.set_progress("scout", None);
+    chat.apply_event(UiEvent::WatchEvent {
+        label: "scout · fix the parser".into(),
+        kind: WatchKind::Agent,
+        status: WatchState::Done,
+        detail: Some("done".into()),
+        duration_ms: 64_000,
+        payload: None,
+        signal: None,
+        notifies_main: false,
+    });
+    chat.tick();
+
+    let rows = main_rows(&mut chat);
+    assert!(
+        rows.iter()
+            .any(|r| r.contains("⎿  Done (2 tool uses · 8.3k tokens · 1m 4s)")),
+        "{rows:?}"
+    );
+    assert!(
+        !rows.iter().any(|r| r.contains("Bash(cargo test)")),
+        "the progress rows are not part of what settles: {rows:?}"
+    );
+    chat.stream_msg = None;
+    assert!(
+        chat.message_settled(chat.messages.len() - 1),
+        "and now the message can settle, which is when this row is printed once \
+         and never touched again"
+    );
+}
+
+/// One round, several agents, one block — CC's grouped tree. Opening any of
+/// them takes the group apart, which is how the folded rows keep their content
+/// reachable and how the `ctrl+o` transcript sees the full thing.
+#[test]
+fn several_agents_from_one_round_draw_one_tree() {
+    let mut chat = test_chat();
+    chat.messages.push(msg(Role::Assistant, "hiring two"));
+    chat.stream_msg = Some(chat.messages.len() - 1);
+    dispatching(
+        &mut chat,
+        "scout",
+        "fix the parser",
+        &["⏺ Read(a.rs)"],
+        2_100,
+    );
+    dispatching(&mut chat, "zoe", "run the tests", &[], 0);
+    chat.tick();
+
+    let rows = main_rows(&mut chat);
+    assert!(
+        rows.iter().any(|r| r.contains("⏺ Running 2 agents…")),
+        "{rows:?}"
+    );
+    assert!(
+        rows.iter()
+            .any(|r| r.contains("├─ @scout: fix the parser · 1 tool use · 2.1k tokens")),
+        "{rows:?}"
+    );
+    assert!(
+        rows.iter().any(|r| r.contains("│  ⎿  ⏺ Read(a.rs)")),
+        "{rows:?}"
+    );
+    assert!(
+        rows.iter().any(|r| r.contains("└─ @zoe: run the tests")),
+        "{rows:?}"
+    );
+    assert!(
+        rows.iter().any(|r| r.contains("⎿  Initializing…")),
+        "an agent with nothing behind it yet: {rows:?}"
+    );
+    assert!(
+        !rows.iter().any(|r| r.contains("◉ @scout")),
+        "and neither of them keeps a row of its own: {rows:?}"
+    );
+
+    for label in ["scout · fix the parser", "zoe · run the tests"] {
+        chat.apply_event(lifecycle(label, WatchState::Done, Some("done")));
+    }
+    let rows = main_rows(&mut chat);
+    assert!(
+        rows.iter().any(|r| r.contains("⏺ 2 agents finished")),
+        "{rows:?}"
+    );
+    assert!(
+        rows.iter()
+            .filter(|r| r.trim_end().ends_with("Done"))
+            .count()
+            == 2,
+        "a row inside the group says the one word: {rows:?}"
+    );
+
+    // Opening one of them dissolves the group back into individual rows.
+    let last = chat.messages.len() - 1;
+    chat.messages[last].activities[0].expanded = true;
+    let rows = main_rows(&mut chat);
+    assert!(
+        !rows.iter().any(|r| r.contains("agents finished")),
+        "{rows:?}"
+    );
+    assert!(
+        rows.iter().any(|r| r.contains("◉ @scout: fix the parser")),
+        "{rows:?}"
+    );
+    assert!(
+        rows.iter().any(|r| r.contains("◉ @zoe: run the tests")),
+        "{rows:?}"
+    );
+}
+
+/// The completion's own line: one dim `●` where the task notification landed in
+/// main's context, before main narrates anything. It is gated on the
+/// notification actually being main's — a run the user started inside an
+/// agent's own conversation reports to nobody — and a *failure* keeps D98's
+/// alert instead of getting a second line.
+#[test]
+fn a_completion_notification_leaves_one_dim_line() {
+    let mut chat = test_chat();
+    chat.messages.push(msg(Role::Assistant, "hiring scout"));
+    chat.stream_msg = Some(chat.messages.len() - 1);
+    chat.apply_event(lifecycle(
+        "scout · fix the parser",
+        WatchState::Running,
+        None,
+    ));
+
+    chat.apply_event(UiEvent::WatchEvent {
+        label: "scout · fix the parser".into(),
+        kind: WatchKind::Agent,
+        status: WatchState::Done,
+        detail: Some("done".into()),
+        duration_ms: 1_000,
+        payload: None,
+        signal: None,
+        notifies_main: true,
+    });
+    let rows = main_rows(&mut chat);
+    assert!(
+        rows.iter()
+            .any(|r| r.contains("● @scout completed · fix the parser")),
+        "{rows:?}"
+    );
+    assert_eq!(
+        rows.iter()
+            .filter(|r| r.contains("● @scout completed"))
+            .count(),
+        1,
+        "one line, not one per reader: {rows:?}"
+    );
+
+    // A run that reports to nobody prints nothing.
+    chat.apply_event(lifecycle("zoe · look around", WatchState::Running, None));
+    chat.apply_event(lifecycle(
+        "zoe · look around",
+        WatchState::Done,
+        Some("done"),
+    ));
+    assert!(
+        !main_rows(&mut chat).iter().any(|r| r.contains("● @zoe")),
+        "a run registered with notify_owner: false tells the flow nothing"
+    );
+
+    // A failure keeps the alert and earns no notice of its own.
+    chat.apply_event(UiEvent::WatchEvent {
+        label: "writer · draft the notes".into(),
+        kind: WatchKind::Agent,
+        status: WatchState::Failed,
+        detail: Some("connection reset".into()),
+        duration_ms: 0,
+        payload: None,
+        signal: None,
+        notifies_main: true,
+    });
+    let rows = main_rows(&mut chat);
+    assert!(
+        rows.iter()
+            .any(|r| r.contains("⚠ @writer · connection reset")),
+        "{rows:?}"
+    );
+    assert!(!rows.iter().any(|r| r.contains("● @writer")), "{rows:?}");
+}
+
+/// v3 made an agent's message to main render nothing at all and let the woken
+/// turn speak for it. v4 restores CC's one visible line, in the sender's
+/// colour, with the body kept for `ctrl+o`. The delivery underneath is
+/// untouched: the same inbox, the same debounce, the same envelope.
+#[test]
+fn a_message_from_an_agent_leaves_one_line_and_keeps_its_body() {
+    let mut chat = test_chat();
+    seed_agent(&chat, "scout");
+    let body = "the parser was fine; the lexer drops a token when the input ends mid-string";
+    chat.session.channels.deliver_to_main("scout", body, false);
+    chat.tick();
+
+    let rows = main_rows(&mut chat);
+    let line = rows
+        .iter()
+        .find(|r| r.contains("@scout❯"))
+        .unwrap_or_else(|| panic!("the sender's line: {rows:?}"));
+    assert!(
+        line.contains("the parser was fine; the lexer drops a token"),
+        "cut to CC's 50 columns: {line:?}"
+    );
+    assert!(
+        !rows.iter().any(|r| r.contains("mid-string")),
+        "the flow shows a summary, not the message: {rows:?}"
+    );
+    assert!(
+        chat.session.channels.has_main_mail(),
+        "and the message itself is still in main's inbox, unread and unchanged"
+    );
+
+    // ctrl+o is where the body lives.
+    let transcript: Vec<String> = crate::tui::transcript::transcript_rows(&mut chat, 80, false)
+        .iter()
+        .map(|r| r.line.plain_text())
+        .collect();
+    assert!(
+        transcript.iter().any(|r| r.contains("mid-string")),
+        "{transcript:?}"
+    );
+    assert!(
+        !main_rows(&mut chat)
+            .iter()
+            .any(|r| r.contains("mid-string")),
+        "and the flow is what it was on the way out"
+    );
+}
+
+/// The bottom row of the tiering table: an instance starting, going idle or
+/// being stopped is the tree's business and the pills', never the flow's.
+#[test]
+fn running_idle_and_stopped_write_no_line() {
+    let mut chat = test_chat();
+    chat.messages.push(msg(Role::User, "have someone look"));
+    chat.messages.push(msg(Role::Assistant, "scout is on it"));
+    seed_agent(&chat, "scout");
+    let before = main_rows(&mut chat);
+
+    chat.apply_event(lifecycle(
+        "scout · fix the parser",
+        WatchState::Running,
+        None,
+    ));
+    chat.apply_event(lifecycle("scout · fix the parser", WatchState::Idle, None));
+    chat.session.agents.mark_idle("scout");
+    chat.session.agents.stop("scout").expect("stopped");
+    chat.refresh_conversations();
+    chat.tick();
+
+    assert_eq!(
+        main_rows(&mut chat),
+        before,
+        "the roster changed and the transcript did not"
+    );
+}
+
+/// A run's label is `{instance}` first in every shape it takes, so the second
+/// run of the same instance is the same person: same name on the row, same
+/// face in the gutter. Before D106 the face was keyed on everything up to the
+/// first ` · `, which made `scout #3` a stranger.
+#[test]
+fn a_continuation_run_is_the_same_agent_as_the_first() {
+    let mut chat = test_chat();
+    chat.chat_avatars = true;
+    chat.image_cap = Some(crate::tui::gfx::ImageCap::default_cells());
+    chat.messages.push(msg(Role::Assistant, "hiring scout"));
+    chat.stream_msg = Some(chat.messages.len() - 1);
+    seed_agent(&chat, "scout");
+    chat.apply_event(lifecycle(
+        "scout #3 · look again",
+        WatchState::Running,
+        None,
+    ));
+
+    let rows = main_rows(&mut chat);
+    assert!(
+        rows.iter().any(|r| r.contains("@scout: look again")),
+        "the row names the instance, not the run: {rows:?}"
+    );
+    assert!(
+        chat.faces.contains(&crate::tui::avatar::index_of("scout")),
+        "and claims scout's own face: {:?}",
+        chat.faces
     );
 }

@@ -164,6 +164,7 @@ fn agent_tool_start_creates_no_tool_activity() {
         duration_ms: 0,
         payload: None,
         signal: None,
+        notifies_main: false,
     });
     chat.drain_events();
     let watch_rows = chat.messages[0]
@@ -182,6 +183,7 @@ fn agent_tool_start_creates_no_tool_activity() {
         duration_ms: 0,
         payload: None,
         signal: None,
+        notifies_main: false,
     });
     chat.drain_events();
     let watch_rows = chat.messages[0]
@@ -222,6 +224,7 @@ async fn terminal_watch_event_triggers_auto_turn_when_idle() {
         duration_ms: 0,
         payload: None,
         signal: None,
+        notifies_main: false,
     });
     chat.drain_events();
     assert!(!chat.busy);
@@ -234,6 +237,7 @@ async fn terminal_watch_event_triggers_auto_turn_when_idle() {
         duration_ms: 30000,
         payload: Some(serde_json::json!("result")),
         signal: None,
+        notifies_main: false,
     });
     chat.drain_events();
     tokio::task::yield_now().await;
@@ -267,6 +271,7 @@ async fn a_terminal_event_with_no_notification_for_main_wakes_nothing() {
         duration_ms: 900,
         payload: None,
         signal: None,
+        notifies_main: false,
     });
     chat.drain_events();
     tokio::task::yield_now().await;
@@ -298,6 +303,7 @@ async fn signal_triggers_auto_turn_even_while_typing() {
         duration_ms: 0,
         payload: None,
         signal: None,
+        notifies_main: false,
     });
     chat.drain_events();
     watch.emit_signal(id, "found error: ERROR boom".into(), None);
@@ -309,6 +315,7 @@ async fn signal_triggers_auto_turn_even_while_typing() {
         duration_ms: 12000,
         payload: None,
         signal: Some("found error: ERROR boom".into()),
+        notifies_main: false,
     });
     chat.drain_events();
     tokio::task::yield_now().await;
@@ -391,6 +398,7 @@ async fn draw_with_long_cjk_stream_and_activities_does_not_panic() {
         duration_ms: 5000,
         payload: None,
         signal: None,
+        notifies_main: false,
     });
     chat.drain_events();
     let _ = chat.events.send(UiEvent::TextDelta(
@@ -419,6 +427,7 @@ async fn draw_with_long_cjk_stream_and_activities_does_not_panic() {
         duration_ms: 30000,
         payload: None,
         signal: None,
+        notifies_main: false,
     });
     chat.drain_events();
     visible(&mut chat, 120, 40);
@@ -438,6 +447,7 @@ fn watch_event_updates_across_messages_in_place() {
         duration_ms: 0,
         payload: None,
         signal: None,
+        notifies_main: false,
     });
     chat.drain_events();
     assert_eq!(chat.messages[0].activities.len(), 1);
@@ -453,6 +463,7 @@ fn watch_event_updates_across_messages_in_place() {
         duration_ms: 40000,
         payload: None,
         signal: None,
+        notifies_main: false,
     });
     chat.drain_events();
     assert_eq!(chat.messages[0].activities.len(), 1, "updated in place");
@@ -477,6 +488,7 @@ fn idle_round_notification_does_not_trigger_auto_turn() {
         duration_ms: 5000,
         payload: None,
         signal: None,
+        notifies_main: false,
     });
     chat.drain_events();
     assert!(!chat.busy, "idle round does not wake");
@@ -496,6 +508,7 @@ fn watch_event_renders_inline_and_updates() {
         duration_ms: 0,
         payload: None,
         signal: None,
+        notifies_main: false,
     });
     chat.drain_events();
     assert_eq!(chat.messages[0].activities.len(), 1);
@@ -507,6 +520,7 @@ fn watch_event_renders_inline_and_updates() {
         duration_ms: 4000,
         payload: None,
         signal: None,
+        notifies_main: false,
     });
     let _ = chat.events.send(UiEvent::WatchEvent {
         label: "watch -n 2 ls".into(),
@@ -516,6 +530,7 @@ fn watch_event_renders_inline_and_updates() {
         duration_ms: 9000,
         payload: Some(serde_json::json!("done output")),
         signal: None,
+        notifies_main: false,
     });
     chat.drain_events();
     assert_eq!(chat.messages[0].activities.len(), 1, "updates in place");

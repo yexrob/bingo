@@ -438,6 +438,8 @@ pub(crate) fn is_state_line(text: &str) -> bool {
         || text == ASK_CANCELLED_TEXT
         || is_ask_receipt(text)
         || crate::tui::bufferview::is_agent_alert(text)
+        || crate::tui::bufferview::is_agent_notice(text)
+        || crate::tui::bufferview::is_teammate_line(text)
         || rewind_ui::is_rewind_line(text)
 }
 
@@ -1156,6 +1158,13 @@ pub struct Chat {
     /// Baseline that absorbs checkpoint accumulators: prevents double-counting when the
     /// flush cursor advances multiple times within one build (reset by build_rows).
     pub(crate) mark_base: usize,
+    /// CC's `isTranscriptMode` (`components/messages/UserTeammateMessage.tsx:139`):
+    /// the document is being built for the `ctrl+o` pager rather than for the
+    /// flow, so the rows that keep a body folded away may show it. Set and
+    /// restored by [`crate::tui::transcript::transcript_rows`] around one build,
+    /// exactly as the fold state is — the inline document never sees it true, so
+    /// nothing it flushed can disagree with what it flushes next.
+    pub(crate) transcript_mode: bool,
     /// slash dropdown suggestions (non-empty when the input is `/` without arguments; rendered by the component layer).
     pub slash_suggestions: Vec<SlashSuggestion>,
     /// Selected index in the dropdown.
@@ -1304,6 +1313,7 @@ impl Chat {
                             duration_ms: ev.elapsed_ms,
                             payload: ev.payload,
                             signal: ev.signal,
+                            notifies_main: ev.notifies_main,
                         })
                         .is_err()
                     {
@@ -1473,6 +1483,7 @@ impl Chat {
             flushed_segments: 0,
             tail_start: 0,
             mark_base: 0,
+            transcript_mode: false,
             slash_suggestions: Vec::new(),
             slash_selected: 0,
             slash_arg_start: None,
@@ -1884,6 +1895,7 @@ impl Chat {
                 duration_ms,
                 payload,
                 signal,
+                notifies_main,
             } => {
                 // The registry sweep goes first: it is what materializes the
                 // conversation an event is about, so a DM's badge is observed
@@ -1955,6 +1967,8 @@ impl Chat {
                                 status,
                                 detail: detail.clone(),
                                 duration_ms,
+                                progress: Vec::new(),
+                                run_stats: None,
                             }));
                             hint.expand_hint = Some("ctrl+o to expand".to_string());
                             let text_len = self.messages[target].text.chars().count();
@@ -2001,15 +2015,29 @@ impl Chat {
                         self.submit_auto();
                     }
                 }
-                // The one direct line an agent's life still writes into this flow
-                // (D98): a run that failed, named, with its reason. `Done` and
-                // `Cancelled` draw nothing — the dispatch row's own state already
-                // says so — but bad news must not depend on the main agent
-                // choosing to narrate it, because the turn that would have
-                // narrated it may never run.
-                if kind == crate::watch::WatchKind::Agent && status == WatchState::Failed {
-                    let (who, why) = (label.clone(), detail.clone());
-                    self.push_agent_alert(&who, why.as_deref());
+                // The two lines an agent's life writes into this flow.
+                //
+                // A run that **failed**, named, with its reason (D98): bad news
+                // must not depend on the main agent choosing to narrate it,
+                // because the turn that would have narrated it may never run.
+                //
+                // A run that **finished** and reported itself to main (D106):
+                // one dim line for the task notification now sitting in main's
+                // context, which is CC's `UserAgentNotificationMessage`. It is
+                // gated on the notification actually being main's — a run the
+                // user started inside an agent's own conversation registers with
+                // `notify_owner: false` and tells nobody — and on `Done`, because
+                // a failure already has its line above and a cancellation is
+                // something the user just did.
+                if kind == crate::watch::WatchKind::Agent {
+                    match status {
+                        WatchState::Failed => {
+                            let (who, why) = (label.clone(), detail.clone());
+                            self.push_agent_alert(&who, why.as_deref());
+                        }
+                        WatchState::Done if notifies_main => self.push_agent_notice(&label),
+                        _ => {}
+                    }
                 }
             }
             UiEvent::RoundEnd => {
