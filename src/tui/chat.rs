@@ -393,6 +393,7 @@ pub(crate) fn is_state_line(text: &str) -> bool {
         || is_ask_receipt(text)
         || crate::tui::bufferview::is_agent_alert(text)
         || crate::tui::bufferview::is_agent_notice(text)
+        || crate::tui::bufferview::is_mention_line(text)
         || rewind_ui::is_rewind_line(text)
 }
 

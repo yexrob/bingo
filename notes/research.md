@@ -4953,3 +4953,31 @@ Tests: ctrl+t cycle tests rewritten as `ctrl_t_toggles_the_task_panel_alone`;
 keys panel test updated; new pins `member_rooms_join_the_tree_and_enter_zooms
 _one`, `a_rooms_unread_is_a_dot_and_a_mention_counts`,
 `mail_to_main_lights_the_senders_dot_until_its_zoom_is_visited`.
+
+### D116. The needs-you tier
+
+The inbox program's third act: D114 closed the flow, D115 hung the badges,
+and this batch builds the whitelist's interrupts — the three things allowed
+to come to the user.
+
+- **The `⚑` mention line.** A member-room post naming the user (the D99
+  `names` accounting, now `pub(crate)`) draws one
+  `⚑ #dev-team @qa: <excerpt>` flow line — flag and room in the accent,
+  author in their colour, stamped like the alert — and rings D79. The edge
+  detector is `observe_badges`' fingerprint: a Channel buffer's mention bit
+  turning on pushes the line once; further mentions wait behind the lit
+  badge until the room is read, and the active conversation never flags
+  (the store cannot set mention on what is being looked at).
+- **Waiting on you is a state.** `asking_instance` parses the pending ask's
+  `{instance} · ` reason prefix against the roster (the subagent prompt
+  surface's own format; main's asks match nobody): the row turns to
+  `waiting on you (permission)` in the accent, the pill takes the flag
+  tier. The ask dialog already named its source in its question line.
+- The `⚠` alert and the permission dialog were already whitelisted; nothing
+  else interrupts.
+
+Docs: feedback-states v1.83 (+ the Room-relays row's one exception),
+README/zh, guide.md. Tests:
+`a_room_post_naming_the_user_leaves_one_flag_line` (once per turn-on,
+re-armed by reading, ordinary posts never),
+`a_pending_subagent_ask_marks_the_row_waiting`. 1480 + 13 green.

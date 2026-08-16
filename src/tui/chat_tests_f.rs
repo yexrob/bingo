@@ -1420,6 +1420,74 @@ fn a_message_from_an_agent_writes_no_line_and_counts_as_mail() {
     );
 }
 
+/// The whitelist's question tier (D116): a room post that names the user is
+/// the one thing a room may put in the flow — one `⚑` line per mention
+/// turn-on, stamped, ringing D79. Further mentions wait behind the lit badge
+/// until the room is read; reading re-arms the line.
+#[test]
+fn a_room_post_naming_the_user_leaves_one_flag_line() {
+    let mut chat = test_chat();
+    seed_agent(&chat, "scout");
+    chat.session
+        .channels
+        .create(
+            "dev-team",
+            vec!["scout".to_string(), crate::channels::USER_NAME.to_string()],
+            crate::channels::ChannelMode::Free,
+        )
+        .expect("room created");
+    let settle = |chat: &mut Chat| {
+        for _ in 0..16 {
+            chat.tick();
+        }
+    };
+    settle(&mut chat);
+
+    chat.session
+        .channels
+        .post("scout", "dev-team", "@user should I deploy with --force?")
+        .expect("posted");
+    settle(&mut chat);
+    let flags = |chat: &mut Chat| {
+        main_rows(chat)
+            .iter()
+            .filter(|r| r.contains("⚑ #dev-team @scout:"))
+            .count()
+    };
+    assert_eq!(flags(&mut chat), 1, "{:?}", main_rows(&mut chat));
+
+    // A second mention behind the same lit badge is the same event.
+    chat.session
+        .channels
+        .post("scout", "dev-team", "@user still waiting")
+        .expect("posted");
+    settle(&mut chat);
+    assert_eq!(flags(&mut chat), 1, "one turn-on, one line");
+
+    // Reading the room re-arms it.
+    chat.enter_zoom(crate::tui::zoom::ZoomTarget::Room("dev-team".to_string()));
+    chat.leave_zoom(crate::tui::buffer::BufferId::Hub);
+    settle(&mut chat);
+    chat.session
+        .channels
+        .post("scout", "dev-team", "@user it shipped")
+        .expect("posted");
+    settle(&mut chat);
+    assert_eq!(
+        flags(&mut chat),
+        2,
+        "a fresh mention after a read flags again"
+    );
+
+    // An ordinary post never does.
+    chat.session
+        .channels
+        .post("scout", "dev-team", "pushing the branch now")
+        .expect("posted");
+    settle(&mut chat);
+    assert_eq!(flags(&mut chat), 2, "{:?}", main_rows(&mut chat));
+}
+
 /// The other half of the gate: a run main did not dispatch — a room post or a
 /// queued message waking a member — completes without a `●` line, even
 /// though its task notification reaches main's context exactly as before.

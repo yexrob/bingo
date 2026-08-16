@@ -167,7 +167,7 @@ struct SaidCache {
 /// them, while `@username` and `mail@user.example` are not and do not. The
 /// literal-`@user` test this replaced meant a badge that depended on the model
 /// getting the case right.
-fn names(text: &str, name: &str) -> bool {
+pub(crate) fn names(text: &str, name: &str) -> bool {
     let haystack = text.to_lowercase();
     let needle = format!("@{}", name.to_lowercase());
     let part_of_a_word = |c: char| c.is_alphanumeric() || c == '_' || c == '-';

@@ -558,7 +558,12 @@ instance, then the rooms you are a member of: `@scout: reading src/lib.rs… ·
 `[stopped]` once it is stopped, `#dev-team: 3 members` for a room — names in
 their own colours, rebuilt from the registry every frame. Every row wears its
 conversation's **badge**: unread is a bare dot (`•`), words at *you* — a room
-post naming `@user` — are the count in the accent (`•3`). `Shift+↑/↓` picks a
+post naming `@user` — are the count in the accent (`•3`). A room post that
+names you also leaves one `⚑ #dev-team @qa: <excerpt>` line in the flow —
+the one line a room gets, one per mention until you read the room — and an
+agent **waiting on your permission** turns its row to `waiting on you
+(permission)` in the accent, with its pill flagged, until the dialog is
+answered. `Shift+↑/↓` picks a
 row, `Enter` **views** it (an instance's conversation, or the room's log),
 `k` stops a selected instance, `Ctrl+Shift+O` hangs a three-line preview of
 each instance's conversation off its row, and `Esc` clears the cursor and then

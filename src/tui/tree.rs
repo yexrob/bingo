@@ -327,6 +327,19 @@ impl Chat {
         (unread, mention)
     }
 
+    /// The instance whose permission ask is on screen, when the pending ask
+    /// is a subagent's (D116). The subagent prompt surface opens its reason
+    /// with `{instance} · ` (tool/agent.rs, `subagent_hooks`), so the roster
+    /// is the parser; main's own asks carry no such prefix and match nobody.
+    pub(crate) fn asking_instance(&self) -> Option<String> {
+        let (request, _) = self.pending_ask.as_ref()?;
+        let head = request.question.split(" · ").next()?;
+        self.tree_instances()
+            .iter()
+            .find(|s| s.name == head)
+            .map(|s| s.name.clone())
+    }
+
     /// One stable colour per name, main's reserved slot included — the palette
     /// the avatar gutter draws from, so a name and its face never disagree.
     /// The pills, the tree's rows and D106's `@name❯` lines all ask here.
@@ -558,7 +571,15 @@ impl Chat {
                 (false, false) => "├─ ",
             };
             let name = format!("@{}", status.name);
-            let state = status_label(status, now);
+            // Waiting on the user beats what the run was doing (D116): the
+            // one state that cannot wait for the user to come looking is the
+            // one where the user is what it is waiting for.
+            let asking = self.asking_instance().as_deref() == Some(status.name.as_str());
+            let state = if asking {
+                "waiting on you (permission)".to_string()
+            } else {
+                status_label(status, now)
+            };
             let stats = stats_label(status.tool_uses, status.output_tokens);
 
             // CC's fit arithmetic, and CC's drop order: the view hint goes
@@ -616,7 +637,16 @@ impl Chat {
                 }),
             );
             push_fit(&mut line, &mut budget, ": ", dim);
-            push_fit(&mut line, &mut budget, &one_line(&state, state_room), dim);
+            push_fit(
+                &mut line,
+                &mut budget,
+                &one_line(&state, state_room),
+                if asking {
+                    SegStyle::fg(theme.claude).bold()
+                } else {
+                    dim
+                },
+            );
             if show_stats {
                 push_fit(&mut line, &mut budget, &stats, dim);
             }
@@ -806,8 +836,14 @@ impl Chat {
             self.badge_of(&BufferId::Hub),
         )];
         let mut resting: Vec<Pill> = Vec::new();
+        let asking = self.asking_instance();
         for status in &agents {
-            let badge = self.badge_of(&BufferId::Dm(status.name.clone()));
+            let mut badge = self.badge_of(&BufferId::Dm(status.name.clone()));
+            // The asking agent wears the accent flag (D116): waiting on the
+            // user is the about-you tier whatever its unread count says.
+            if asking.as_deref() == Some(status.name.as_str()) {
+                badge = (badge.0.max(1), true);
+            }
             let live = status.state == AgentState::Running || badge.0 > 0;
             let pill = (
                 status.name.clone(),
@@ -1492,6 +1528,47 @@ mod tests {
         assert!(!read.contains('•'), "entering the room read it: {read:?}");
     }
 
+    /// A subagent's pending permission ask is the about-you tier (D116): its
+    /// row says so in the accent, its pill wears the count, and main's own
+    /// asks — no `{instance} · ` prefix — mark nobody.
+    #[test]
+    fn a_pending_subagent_ask_marks_the_row_waiting() {
+        let mut chat = test_chat();
+        seed(&chat, "scout");
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        chat.pending_ask = Some((
+            crate::ui::PermissionRequest::new(
+                "Allow running Bash",
+                "scout · Bash wants to run `rm -rf target`",
+                vec!["Yes".to_string(), "No".to_string()],
+            ),
+            tx,
+        ));
+        assert_eq!(chat.asking_instance().as_deref(), Some("scout"));
+
+        chat.open_agent_tree();
+        let rows = texts(&chat);
+        assert!(
+            rows[1].contains("@scout: waiting on you (permission)"),
+            "{rows:?}"
+        );
+
+        chat.tree = None;
+        let pills = chat.pill_row(120).expect("pills").line.plain_text();
+        assert!(pills.contains("@scout •"), "the flag tier: {pills:?}");
+
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        chat.pending_ask = Some((
+            crate::ui::PermissionRequest::new(
+                "Allow running Bash",
+                "Bash wants to run `cargo test`",
+                vec!["Yes".to_string(), "No".to_string()],
+            ),
+            tx,
+        ));
+        assert_eq!(chat.asking_instance(), None, "main's own ask marks nobody");
+    }
+
     /// The one thing D114 left on screen of a `SendMessage(to: "main")` is the
     /// sender's dot (fed by `Chat::agent_mail`), and visiting the sender's
     /// zoom is what clears it.
@@ -1507,7 +1584,7 @@ mod tests {
         assert!(pills.contains("@scout •"), "{pills:?}");
 
         chat.enter_zoom(crate::tui::zoom::ZoomTarget::Agent("scout".to_string()));
-        chat.zoom = None;
+        chat.leave_zoom(crate::tui::buffer::BufferId::Hub);
         let pills = chat.pill_row(120).expect("pills").line.plain_text();
         assert!(
             !pills.contains("@scout •"),

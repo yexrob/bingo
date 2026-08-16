@@ -2362,10 +2362,43 @@ impl super::Chat {
             .iter()
             .map(|b| (b.id().clone(), b.unread(), b.mention()))
             .collect();
-        if print != self.badge_print {
-            self.badge_print = print;
-            self.dirty = true;
+        if print == self.badge_print {
+            return;
         }
+        // A room's mention bit turning on is the whitelist's question tier
+        // (D116): somebody said words at the user, and the badge alone cannot
+        // say so loudly enough. One `⚑` line per turn-on — further mentions
+        // land behind the same lit badge until the room is read, so one event
+        // interrupts once — and none while the user is standing in the room,
+        // because the store never sets mention on the active conversation.
+        let flips: Vec<String> = print
+            .iter()
+            .filter_map(|(id, _, mention)| match id {
+                crate::tui::buffer::BufferId::Channel(name) if *mention => {
+                    let was = self.badge_print.iter().any(|(old, _, m)| old == id && *m);
+                    (!was).then(|| name.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        for room in flips {
+            let post = self
+                .session
+                .channels
+                .log_of(&room)
+                .into_iter()
+                .rev()
+                .find(|m| crate::tui::buffer::names(&m.text, crate::channels::USER_NAME));
+            if let Some(post) = post {
+                self.push_flow_line(crate::tui::bufferview::mention_line(
+                    &room, &post.from, &post.text,
+                ));
+                self.notify
+                    .attention(crate::tui::notify::Attention::AgentNotice);
+            }
+        }
+        self.badge_print = print;
+        self.dirty = true;
     }
 
     /// The running command's output so far: dim, indented under the `⎿` row it
@@ -2651,11 +2684,14 @@ impl super::Chat {
                     // A failed-agent alert (D98) is the exception among state
                     // lines: it *is* news, about someone, at a moment that
                     // matters — "the build broke" reads differently at 09:02 and
-                    // at 17:40. The others describe now and have nothing to
+                    // at 17:40. The `⚑` mention line (D116) is the second
+                    // exception for the same reason — somebody asked for you,
+                    // then. The others describe now and have nothing to
                     // stamp; the notification line reports the end of a run
                     // whose own row already carries how long that run took.
                     let time = if crate::tui::chat::is_state_line(&self.messages[i].text)
                         && !crate::tui::bufferview::is_agent_alert(&self.messages[i].text)
+                        && !crate::tui::bufferview::is_mention_line(&self.messages[i].text)
                     {
                         String::new()
                     } else {
