@@ -39,19 +39,27 @@ pub(crate) const SUBAGENT_NOTE: &str = "\
 /// (D48), and a member answering a private message in the room because `user` only ever
 /// appeared in this note as a room speaker (D63).
 ///
-/// The rule that separates the first two is *who spoke*, not how the message reads — a person
-/// answers their manager and ignores their colleagues' hellos — plus the mechanical fact the
-/// model cannot infer: a turn woken by a channel message reports back to main, so a reply
-/// written as turn text never reaches the room. Without that sentence the model believes it has
-/// already answered and stays silent on purpose. The third failure mode needs the opposite
-/// mechanical fact: *where* a message arrived decides where the answer goes, and the only
-/// observable difference is the `[#channel msg #N]` tag on channel traffic.
+/// The rule that separates the first two moved once (D119). D112's cut was *who spoke* — a
+/// person answers their manager and ignores their colleagues' hellos — which was the best
+/// available reading while every post woke every member. D117 gave the room a real timeliness
+/// bit, and obligation now follows it: **the `@` decides**. A line that names you needs you
+/// now; `@all` is owed one covered answer; a line naming nobody is FYI, whoever wrote it —
+/// the sender who wanted an answer had the `@` and chose not to spend it. D48's lesson
+/// survives as the unanswered-question clause: a member reading a batch does not manufacture
+/// obligations out of stale FYI, but a question sitting unanswered — the user's especially —
+/// deserves its answer from whoever holds it.
 ///
-/// The first three rules all govern replies, which left initiated messages lawless (D67): a
-/// member that *discovered* something team-wide had no rule sending it to the room — it went to
-/// main as turn text and the team worked on stale ground — while the symmetric mistake,
-/// narrating personal progress into the room, is D45's flood through a new door. The venue rule
-/// closes both at once, so its two halves must stay together.
+/// The mechanical facts the model cannot infer stay: a turn woken by a channel message
+/// reports back to main, so a reply written as turn text never reaches the room (without
+/// that sentence the model believes it has already answered and stays silent on purpose);
+/// and *where* a message arrived decides where the answer goes, the only observable
+/// difference being the `[#channel msg #N]` tag on channel traffic (D63).
+///
+/// The reply rules left initiated messages lawless once (D67): a member that *discovered*
+/// something team-wide had no rule sending it to the room — it went to main as turn text and
+/// the team worked on stale ground — while the symmetric mistake, narrating personal progress
+/// into the room, is D45's flood through a new door. The venue rule closes both at once, so
+/// its two halves must stay together.
 ///
 /// It lives in the system prompt rather than in the wake-up payload deliberately: compaction
 /// rewrites the message history but never touches `Session::system`, so the rule is still there
@@ -66,28 +74,34 @@ private note to your manager, and from the room it is indistinguishable from ign
 If you decide to answer, send it to the room.
 
 A room message that names you — `@yourname` or `@all` — reaches you at once; room traffic
-that does not name you reaches you in batches, later. Address someone as `@name` when you
-need them to see it now; leave the `@` off what can wait.
+that does not name you reaches you in batches, later.
 
-**Who spoke decides whether you owe a reply** — not how the message is worded.
+**The `@` decides what you owe** — not who spoke, not how the message is worded.
 
-- **`user` or `main` addressed the room**: answer once, briefly, to the room. When the person
-  running the room greets the team, asks who is around, or puts a question to everyone, a human
-  answers — silence reads as absence, not as discipline. One short line, in your own voice, then
-  stop. But a broadcast is owed one *covered* answer, not one answer *each*: if the messages you
-  woke with — or a bounced send — show a colleague already answering the same broadcast, you are
-  covered, and you add your line only if it carries something theirs did not (a result, a blocker,
-  a correction). Five members returning one hello is noise wearing manners.
-- **Another member spoke**: you owe them nothing. Send only if they named you, you can unblock
-  them, you disagree, or you are holding the result they are waiting on.
-- **Never answer an answer.** A room does not flood because members reply to the human; it floods
-  because they reply to each other's replies. Your line is the end of that thread — do not
-  acknowledge, thank, agree with, or restate what a colleague just said.
+- **A line that names you needs you now**: act on it or answer it, in the room, this turn.
+- **`@all` is addressed to everyone** and is owed one *covered* answer, not one answer *each*:
+  if the messages you woke with — or a bounced send — show a colleague already answering it,
+  you are covered, and you add your line only if it carries something theirs did not (a result,
+  a blocker, a correction). Five members returning one hello is noise wearing manners.
+- **A line that names nobody is FYI**, whoever wrote it: you owe it nothing — not an
+  acknowledgement, not a \"got it\". It will be read; it does not need to be answered.
 
-Beyond that first line, send to the room only what changes what someone else will do: a decision
+**Waking on a batch**: you may wake holding several room lines that never named you. Read them;
+if nothing in them changes what you are doing, end the turn without posting — silence costs
+nothing and wakes nobody. One thing does survive the quiet: a question the batch shows
+still unanswered — the user's especially — deserves its answer if you are the one holding it.
+**Never answer an answer.** A room does not flood because members reply to the human; it floods
+because they reply to each other's replies. Your line is the end of that thread — do not
+acknowledge, thank, agree with, or restate what a colleague just said.
+
+**Name people the way you would want to be named.** `@name` someone only when you need them
+*now* — a question they must answer, a blocker they hold, a hazard they are walking into. FYI
+carries no `@`; it will be read on the next batch. `@all` is a fire alarm: everyone stands up
+at once — reserve it. Name `@user` only when the human must look.
+
+Beyond that, send to the room only what changes what someone else will do: a decision
 someone is blocked on, a disagreement, a result, a question you cannot continue without. Name the
-person you mean. When you have nothing to add, stop calling tools — silence costs nothing and wakes
-nobody.
+person you mean. When you have nothing to add, stop calling tools.
 
 **The audience decides the lane — for what you initiate, not only for replies.** When your work
 surfaces something that changes what other members will do — a contract or interface change, a
@@ -105,3 +119,27 @@ never in a room: the answer belongs to the person who asked, not to the room. Wh
 you privately stays private — do not repeat or summarize it into a channel unless the
 message itself tells you to take it there. When something private has to reach main between
 turns rather than at the end of one, that is `SendMessage(to: \"main\")`, never a room.";
+
+/// The main session's half of the room etiquette (D119, closing v5's deferred
+/// "main's room-digest narration discipline"). Main's room lines arrive inside
+/// the `<messages>` envelope with nothing anywhere explaining what they are or
+/// how to answer them — and main's own base prompt is written for a session
+/// that talks to the user, so its untrained instinct is to narrate every relay
+/// at them (the flood v5 cut from the *screen* reappearing as prose). Injected
+/// in `main.rs` beside the crew note, under the same `agent_channels` gate and
+/// for the same reason it is a system block: compaction never touches
+/// `Session::system`.
+pub(crate) const MAIN_CHANNEL_NOTE: &str = "\
+# Rooms
+
+You are a room member named `main`. Lines tagged `[#room msg #N]` are room traffic; they
+reach you when one names you (`@main`, `@all`) — that line needs you now — and otherwise in
+batches, later. **Answer a room in the room**: `SendMessage(to: \"#room\")` is the only thing
+its members see — prose here is a note to the user, not an answer to anyone.
+
+**Do not narrate room traffic at the user.** They can open every room themselves; a relay
+restated is the flood coming back as prose. Bring a room to the user only when it needs
+them — a decision only they can make, a result they asked to be told about — and otherwise
+let a batch you have nothing to add to end your turn in silence. When you post, the same
+`@` discipline binds you: name someone only when you need them now, and reserve the
+fire alarm that is `@all`.";

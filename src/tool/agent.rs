@@ -1524,7 +1524,10 @@ impl Tool for SendMessageTool {
     fn description(&self) -> String {
         let me = self.sender();
         let rooms = if address::rooms_allowed(&self.session) {
-            "; `#room` for a room you are a member of (every member's context gets it, in one order; in a serial room a stale send bounces back with what you missed attached)"
+            "; `#room` for a room you are a member of (every member's inbox gets it, in one order; \
+`@name` inside the text wakes that member now and `@all` wakes everyone, while unnamed lines are \
+read in batches — so `@` what needs someone now and leave FYI unnamed; in a serial room a stale \
+send bounces back with what you missed attached)"
         } else {
             ""
         };
@@ -3333,8 +3336,23 @@ mod tests {
             "must state that the turn body never reaches the channel — otherwise members think they already answered"
         );
         assert!(
-            CHANNEL_NOTE.contains("`user` or `main` addressed the room"),
-            "must spell out \"answer when a human speaks\", otherwise the silence rule overshoots"
+            CHANNEL_NOTE.contains("The `@` decides what you owe"),
+            "the owing rule is the @ (D119) — without it the D112 who-spoke doctrine \
+             resurfaces and every unnamed user line demands a chorus again"
+        );
+        assert!(
+            CHANNEL_NOTE.contains("one *covered* answer"),
+            "@all keeps the covered-answer clause — the anti-chorus half of D112 survives \
+             on the one broadcast form left"
+        );
+        assert!(
+            CHANNEL_NOTE.contains("still unanswered"),
+            "D48's lesson: a question sitting unanswered — the user's especially — is the one \
+             thing that survives the batch quiet (and the anchor phrase must sit on one line)"
+        );
+        assert!(
+            CHANNEL_NOTE.contains("fire alarm"),
+            "@all needs a cost the model can feel, or every FYI wears it"
         );
         assert!(
             CHANNEL_NOTE.contains("never in a room"),
@@ -3363,6 +3381,26 @@ mod tests {
                 && CHANNEL_NOTE.contains("reaches you in batches"),
             "must state the @-gated wake mechanics (v6) — the model cannot infer that unnamed \
              room traffic arrives late, and would promise timeliness it does not have"
+        );
+
+        // Main's half (D119): injected by main.rs under the same gate; the
+        // anchors keep the digest from drifting back into narration.
+        let main_note = crate::tool::agent_notes::MAIN_CHANNEL_NOTE;
+        assert!(
+            main_note.contains("needs you now"),
+            "main must know a line naming it is the timely tier"
+        );
+        assert!(
+            main_note.contains("Do not narrate room traffic"),
+            "the flood v5 cut from the screen must not come back as prose"
+        );
+        assert!(
+            main_note.contains("SendMessage(to: \"#room\")"),
+            "main answers a room in the room — prose is a note to the user"
+        );
+        assert!(
+            main_note.contains("fire alarm"),
+            "the @ discipline binds main too (and the anchor sits on one line)"
         );
     }
 

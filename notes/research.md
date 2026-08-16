@@ -5080,3 +5080,54 @@ Tests: `main_hears_a_room_through_the_gate` (mention releases in order,
 (no quiet window on penned mail; the clock starts at release);
 `post_fans_out…` and `post_stamps…` updated to the gate with reasons
 inline. 1486 + 13 green.
+
+### D119. The @ decides what you owe
+
+The doctrine catches up with the machine. D112's reply rule — *who spoke
+decides* — was the best available reading while every post woke every
+member: obligation had to be inferred from rank because timeliness was
+uniform. D117 made timeliness a bit the sender spends, so obligation now
+follows the same bit, and the pair of prompts is rewritten around it.
+
+- **CHANNEL_NOTE, the member half.** "Who spoke decides" is replaced by
+  "**The `@` decides what you owe**": a line naming you needs you now
+  (act or answer, in the room, this turn); `@all` keeps D112's *covered*
+  answer clause — the anti-chorus rule survives on the one broadcast form
+  left; a line naming nobody is FYI whoever wrote it — the sender who
+  wanted an answer had the `@` and chose not to spend it. The batch rule
+  says what waking on unnamed backlog means: read, and if nothing changes
+  what you are doing, end the turn without posting. D48's lesson survives
+  as the one exception — a question the batch shows still unanswered, the
+  user's especially, deserves its answer from whoever holds it. Sender
+  discipline is now explicit: `@` what needs someone *now*, leave FYI
+  unnamed, `@all` is a fire alarm. "Never answer an answer", the venue
+  rule (D67) and the DM privacy lane (D63) stand verbatim.
+- **MAIN_CHANNEL_NOTE, the new half.** v5 deferred "main's room-digest
+  narration discipline (prompt layer, extends D112) — observe D112
+  first"; this is its due date, with D118 the forcing function: main's
+  room lines arrive inside the `<messages>` envelope with nothing
+  anywhere explaining them, and the base prompt's instinct — talk to the
+  user — is exactly the narration flood v5 cut from the screen. The note
+  names main a member, states its two wake tiers, points its answers at
+  `SendMessage(to: "#room")`, forbids narrating room traffic at the user,
+  and binds it to the same sender discipline. Injected in `main.rs`
+  beside the crew note, same `agent_channels` gate, same system-block
+  reasoning (compaction never touches `Session::system`).
+- **SUBAGENT_NOTE untouched, deliberately**: nothing in it is about
+  rooms, and its one adjacent claim — background tasks do not wake you —
+  stays true: a room wake is a delivery, not a background task.
+- Anchor churn: the retired `` `user` or `main` addressed the room ``
+  assert is replaced by "The `@` decides what you owe" / "one *covered*
+  answer" / "still unanswered" / "fire alarm", plus the MAIN_CHANNEL_NOTE
+  set ("needs you now", "Do not narrate room traffic",
+  `SendMessage(to: "#room")`, "fire alarm"). Two anchor phrases were
+  caught straddling a hard line break while writing this batch — the
+  exact failure the anchor tests exist for — and rewrapped.
+- Known limit: the MAIN_CHANNEL_NOTE injection point lives in `main.rs`'s
+  binary assembly, which no unit test exercises (the crew note has the
+  same shape); the anchor tests pin the words, the gate is one `if` beside
+  a proven one.
+
+Docs: guide.md (doctrine paragraph rewritten, main's half added),
+SendMessage room description states the send-side discipline.
+Tests: anchor set reworked as above. 1486 + 13 green.
