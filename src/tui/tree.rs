@@ -1025,31 +1025,32 @@ mod tests {
             !chat.agent_tree_key(KeyCode::Enter, KeyModifiers::NONE),
             "an open tree is a readout, not a modal"
         );
-        assert!(chat.open_zoom.is_none());
+        assert!(chat.zoom.is_none());
 
-        // The first instance row.
+        // The first instance row switches to that agent's page (v6).
         shift(&mut chat, KeyCode::Down);
         assert!(chat.agent_tree_key(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(
-            chat.open_zoom,
+            chat.zoom,
             Some(crate::tui::zoom::ZoomTarget::Agent("scout".into())),
             "the row that names an agent opens that agent"
         );
 
-        // The leader row leaves selection mode and opens nothing: there is no
-        // view to leave from the transcript.
-        chat.open_zoom = None;
+        // The leader row comes home and leaves selection mode.
+        shift(&mut chat, KeyCode::Down);
+        shift(&mut chat, KeyCode::Up);
         shift(&mut chat, KeyCode::Up);
         assert!(chat.agent_tree_key(KeyCode::Enter, KeyModifiers::NONE));
-        assert!(chat.open_zoom.is_none());
+        assert!(chat.zoom.is_none(), "the leader row comes home");
         assert!(chat.tree_selection().is_none(), "the cursor stepped out");
         assert!(chat.tree.is_some(), "and the tree stayed, as CC's does");
 
-        // The hide row hides.
+        // The hide row hides. (Coming home deselected the cursor; an upward
+        // press from unselected wraps straight onto the hide row.)
         shift(&mut chat, KeyCode::Up);
         assert!(chat.agent_tree_key(KeyCode::Enter, KeyModifiers::NONE));
         assert!(chat.tree.is_none());
-        assert!(chat.open_zoom.is_none());
+        assert!(chat.zoom.is_none());
     }
 
     /// A running row says what it is doing and what that has cost; an idle one
@@ -1470,9 +1471,9 @@ mod tests {
         assert_eq!(chat.tree_selection(), Some(1));
         assert!(chat.agent_tree_key(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(
-            chat.open_zoom,
+            chat.zoom,
             Some(crate::tui::zoom::ZoomTarget::Room("dev-team".to_string())),
-            "enter on the room row zooms the room"
+            "enter on the room row opens the room's page"
         );
     }
 

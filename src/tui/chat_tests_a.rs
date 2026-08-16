@@ -381,6 +381,7 @@ pub(super) fn tool_activity() -> Activity {
 
 pub(super) fn msg(role: Role, text: &str) -> UiMessage {
     UiMessage {
+        speaker: None,
         role,
         text: text.to_string(),
         at: 0,
@@ -873,6 +874,7 @@ async fn slash_tasks_shows_done_list() {
 fn click_toggles_tool_activity() {
     let mut chat = test_chat();
     chat.messages.push(UiMessage {
+        speaker: None,
         activities: vec![tool_activity()],
         ..msg(Role::Assistant, "reply")
     });
@@ -900,6 +902,7 @@ fn click_toggles_tool_activity() {
 fn click_outside_ranges_is_noop() {
     let mut chat = test_chat();
     chat.messages.push(UiMessage {
+        speaker: None,
         activities: vec![tool_activity()],
         ..msg(Role::Assistant, "reply")
     });
@@ -924,6 +927,7 @@ fn running_status_verb_priority() {
         t.summary = "$ cargo test".to_string();
     }
     chat.messages.push(UiMessage {
+        speaker: None,
         activities: vec![tool],
         ..msg(Role::Assistant, "")
     });
@@ -1310,10 +1314,12 @@ fn messages_trail_their_send_time() {
     let want = crate::tui::buffer::stamp(at);
     let mut chat = test_chat();
     chat.messages.push(UiMessage {
+        speaker: None,
         at,
         ..msg(Role::User, "hello there")
     });
     chat.messages.push(UiMessage {
+        speaker: None,
         at,
         ..msg(Role::Assistant, "the reply")
     });
@@ -1339,6 +1345,7 @@ fn messages_trail_their_send_time() {
     // Turn end restamps the streaming reply: the shown time is when the
     // reply landed, exactly as the workspace DM stamps it.
     chat.messages.push(UiMessage {
+        speaker: None,
         at: 5,
         ..msg(Role::Assistant, "late reply")
     });
@@ -1356,10 +1363,12 @@ fn a_stamp_sits_beside_its_message_not_under_it() {
     let want = crate::tui::buffer::stamp(at);
     let mut chat = test_chat();
     chat.messages.push(UiMessage {
+        speaker: None,
         at,
         ..msg(Role::User, "hello there")
     });
     chat.messages.push(UiMessage {
+        speaker: None,
         at,
         ..msg(Role::Assistant, "the reply")
     });
@@ -1396,6 +1405,7 @@ fn a_stamp_too_wide_for_its_row_is_dropped_not_squeezed() {
     let want = crate::tui::buffer::stamp(at);
     let mut chat = test_chat();
     chat.messages.push(UiMessage {
+        speaker: None,
         at,
         ..msg(Role::User, "a message with no room to spare")
     });
@@ -1430,6 +1440,7 @@ fn a_cjk_body_aligns_its_stamp_by_width() {
     let want = crate::tui::buffer::stamp(at);
     let mut chat = test_chat();
     chat.messages.push(UiMessage {
+        speaker: None,
         at,
         ..msg(Role::User, "宽字符测试")
     });
@@ -1452,6 +1463,7 @@ fn a_cjk_body_aligns_its_stamp_by_width() {
 fn interleaves_text_and_activities_in_order() {
     let mut chat = test_chat();
     chat.messages.push(UiMessage {
+        speaker: None,
         text: "hello world".to_string(),
         activities: vec![tool_activity()],
         insert_points: vec![5],

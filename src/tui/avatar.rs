@@ -388,6 +388,7 @@ impl<'a> Gutter<'a> {
     /// one-line message cuts the portrait in half at the waist. The chip skin
     /// never pads — its face is one row — so the two skins still keep identical
     /// heights everywhere the portrait fits.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn apply(&self, rows: &mut Vec<crate::tui::el::Row>, index: usize, name: &str, lead: bool) {
         let cells = self.cells(index, name, lead);
         while rows.len() < cells.len() {

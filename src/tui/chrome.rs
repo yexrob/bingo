@@ -146,7 +146,18 @@ fn mode_badge(mode: PermissionMode, theme: &Theme) -> Vec<(String, Color)> {
 /// is omitted when it is default (keeps it terse); think off omits the level (P1-D).
 fn footer_row(chat: &Chat, width: usize) -> Row {
     let theme = &chat.theme;
-    let hints = if chat.busy {
+    let away = chat.away.is_some();
+    let hints = if away {
+        // The page's own ladder, said out loud (D39: a key with two meanings
+        // declares which one is armed). A room has no run and no mode.
+        if chat.zoom_stoppable() {
+            "esc stops the run · shift+tab to cycle mode".to_string()
+        } else if chat.zoomed().is_some() {
+            "esc to return · shift+tab to cycle mode".to_string()
+        } else {
+            "esc to return".to_string()
+        }
+    } else if chat.busy {
         crate::tui::keys::FOOTER_EXPAND_HINT.to_string()
     } else {
         format!(
@@ -155,7 +166,17 @@ fn footer_row(chat: &Chat, width: usize) -> Row {
             crate::tui::keys::FOOTER_EXPAND_HINT
         )
     };
-    let mut left = mode_badge(chat.permission_mode, theme);
+    // On a page the badge is the **viewed agent's** permission mode — the one
+    // shift+tab cycles there; showing main's would misdescribe the key (CC
+    // swaps the teammate's mode into this slot, `PromptInput.tsx:342-351`).
+    let mut left = if away {
+        match chat.zoom_permission_mode() {
+            Some(mode) => mode_badge(mode, theme),
+            None => Vec::new(),
+        }
+    } else {
+        mode_badge(chat.permission_mode, theme)
+    };
     if chat.bash_mode {
         left.push(("! for shell mode".to_string(), theme.bash_border));
     }
@@ -577,11 +598,22 @@ pub(crate) fn prompt(chat: &Chat, width: usize) -> El {
 
 /// Every row outside the transcript, top to bottom. `fullscreen` only moves the suggestion area
 /// (fullscreen: above the input; inline: below, aligned with slash output).
+/// Chrome height, measured by rendering it — the same source the frame
+/// assembler draws from, shared with the page engine's rehydrate budget (v6).
+pub(crate) fn chrome_height_of(chat: &Chat, width: usize, fullscreen: bool) -> usize {
+    crate::tui::el::height(chrome(chat, width, fullscreen))
+}
+
 pub(crate) fn chrome(chat: &Chat, width: usize, fullscreen: bool) -> El {
     let theme = &chat.theme;
     let mut children: Vec<El> = Vec::new();
 
-    if let Some(status) = chat.running_status() {
+    // Main's running status stays home (v6): on a page it would describe a
+    // turn the screen is not showing, and the page's own run is visible as
+    // its live tail.
+    if chat.away.is_none()
+        && let Some(status) = chat.running_status()
+    {
         children.push(El::Row(status_row(
             &status,
             chat.motion,
@@ -631,11 +663,15 @@ pub(crate) fn chrome(chat: &Chat, width: usize, fullscreen: bool) -> El {
     if let Some(line) = chat.search_line() {
         children.push(El::Row(dim_row(line, theme)));
     }
-    for line in chat.queue_lines() {
-        children.push(El::Row(dim_row(line, theme)));
-    }
-    if let Some(hint) = chat.queue_hint() {
-        children.push(El::Row(dim_row(hint, theme)));
+    // The queue is main's turn state; a page's own sends never queue (the
+    // domain absorbs them), so its rows stay home with the turn they describe.
+    if chat.away.is_none() {
+        for line in chat.queue_lines() {
+            children.push(El::Row(dim_row(line, theme)));
+        }
+        if let Some(hint) = chat.queue_hint() {
+            children.push(El::Row(dim_row(hint, theme)));
+        }
     }
     if let Some(s) = suggestion_area.take() {
         children.push(s);
@@ -657,90 +693,6 @@ pub(crate) fn chrome(chat: &Chat, width: usize, fullscreen: bool) -> El {
     El::Col(children)
 }
 
-/// Everything under the zoomed view's body (D105): the status layer, the
-/// composer that is addressing the agent, and the hint row.
-///
-/// It is the inline host's own furniture, in the inline host's own order —
-/// tree, warning, composer, footer, pills — because CC's zoom keeps its footer
-/// too: the transcript area is what swaps, not the chrome around it
-/// (`REPL.tsx:4565-4570` replaces `Messages`' source and nothing else). What is
-/// left out is what belongs to a turn this screen is not showing: the running
-/// status row, the task area, the queue lines, the manager and the menus.
-pub(crate) fn zoom_chrome(chat: &Chat, width: usize) -> El {
-    let theme = &chat.theme;
-    // One blank row between the conversation and the furniture under it: the
-    // transcript gets the same breath from its per-message spacing, and without
-    // it the last thing the agent said sits on top of the tree.
-    let mut children: Vec<El> = vec![El::Blank, El::Rows(chat.agent_tree_rows(width))];
-    if let Some(warning) = chat.visible_warning() {
-        children.push(El::Line(Line::styled(
-            format!("  ⚠ {warning}"),
-            SegStyle::fg(theme.warning),
-        )));
-    }
-    children.push(prompt(chat, width));
-    // The transient notice — `Press ctrl-c again to exit` and its neighbours —
-    // rides here for the same reason it rides the inline footer: a key that
-    // arms a window has to say the window is open.
-    if let Some(text) = chat.notice {
-        children.push(El::Row(dim_row(text, theme)));
-    }
-    children.push(El::Row(zoom_footer(chat, width)));
-    if let Some(pills) = chat.pill_row(width) {
-        children.push(El::Row(pills));
-    }
-    El::Col(children)
-}
-
-/// The zoom's hint row: the **viewed agent's** permission mode, then what the
-/// keys mean here.
-///
-/// CC swaps the teammate's mode into exactly this slot while it has the screen
-/// (`PromptInput.tsx:342-351`, rendered at `PromptInputFooterLeftSide.tsx:349-357`),
-/// and replaces `esc to interrupt` with the return hint (`:377-379`). bingo says
-/// both meanings of `esc` because it has both: one press stops the run, the next
-/// one leaves.
-fn zoom_footer(chat: &Chat, width: usize) -> Row {
-    let theme = &chat.theme;
-    let mut line = Line::styled("  ", SegStyle::fg(theme.text));
-    for (text, color) in mode_badge(
-        chat.zoom_permission_mode()
-            .unwrap_or(PermissionMode::Default),
-        theme,
-    ) {
-        line.push_styled(text, SegStyle::fg(color));
-        line.push_styled(" ", SegStyle::fg(theme.text_secondary));
-    }
-    // Two tiers, longest first — the widest that fits whole wins, exactly as
-    // the transcript pager's footer chooses. A room has
-    // neither a permission mode nor a roster position, so its row says the one
-    // thing that is true there rather than advertising two keys that do
-    // nothing.
-    let tiers: [&str; 2] = match (chat.zoomed().is_some(), chat.zoom_stoppable()) {
-        (false, _) => ["esc to return", "esc to return"],
-        (true, true) => [
-            "esc stops the run · shift + tab to cycle mode · shift + ↑/↓ to switch",
-            "esc stops the run · shift + tab · shift + ↑/↓",
-        ],
-        (true, false) => [
-            "esc to return · shift + tab to cycle mode · shift + ↑/↓ to switch",
-            "esc to return · shift + tab · shift + ↑/↓",
-        ],
-    };
-    let room = width.saturating_sub(text_width(&line.plain_text()) + 2);
-    let hint = tiers
-        .iter()
-        .find(|tier| text_width(tier) <= room)
-        .unwrap_or(&tiers[1]);
-    line.push_styled(
-        crate::tui::chat::one_line(hint, room),
-        SegStyle::fg(theme.text_secondary),
-    );
-    Row::new(line)
-}
-
-/// #18 full-flow full-screen error-state skeleton (AC-26/53, ui/ux #68 spec): error title +
-/// stable code + description (what happened + what you can do) + primary action (retry/back) + exit hint.
 /// Actions are bound at the key layer (chat.rs: Enter=retry, Esc=back on the full-screen state); this function only draws.
 pub(crate) fn error_screen(err: &crate::tui::chat::ErrorState, theme: &Theme) -> El {
     El::Lines(vec![

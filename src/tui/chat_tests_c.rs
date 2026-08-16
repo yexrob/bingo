@@ -1553,8 +1553,17 @@ fn esc_peels_the_agent_tree_in_the_slot_above_the_task_panel() {
     );
     assert_eq!(
         EscLayer::ORDER.len(),
-        15,
+        17,
         "every variant is in ORDER — one missing is a layer Esc can never reach"
+    );
+    assert!(
+        at(EscLayer::AwayStop) < at(EscLayer::Interrupt),
+        "the page's run is stopped before main's would even be considered"
+    );
+    assert_eq!(
+        at(EscLayer::AwayHome),
+        EscLayer::ORDER.len() - 1,
+        "leaving the page is the last thing Esc does (v6)"
     );
 
     let mut chat = test_chat();

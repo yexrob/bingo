@@ -9,10 +9,6 @@
 //! What survives is what a conversation *is* to a reader who is not standing in
 //! it:
 //!
-//! - **A post as rows** ([`settled_post_rows`], [`sender_runs`]). One renderer,
-//!   so a message in the zoomed view (D105) is drawn by the code that draws it
-//!   in `@main` — the markdown, the bubbles, the gutter and the CJK wrapping
-//!   are the same by construction rather than by imitation.
 //! - **The failure alert** ([`agent_alert_line`]). A crash cannot wait for a
 //!   narration that may never run.
 //! - **The completion notice** ([`agent_notice_line`], D106). One dim `●` line
@@ -23,16 +19,14 @@
 //!   goes straight to that inbox or that room, under the user's own name, with
 //!   a transient receipt and nothing in main's history.
 //!
-//! The live tail of one agent's turn is here too: D105's zoomed view is the
-//! surface that draws it, and it is the same machinery, not a second one.
-
-use rsmarkdown_core::{MarkdownProcessor, Renderer};
+//! The post-row renderer that used to live here retired with the alt-screen
+//! zoom (v6): a conversation you are standing in is an away page now, drawn
+//! by the transcript's own pipeline ([`crate::tui::conv`]).
 
 use crate::channels::USER_NAME;
-use crate::tui::buffer::{Delivery, Post, PostKind, SubmitTarget};
-use crate::tui::chat::{Chat, Row, one_line, text_rows, user_message_rows};
-use crate::tui::line::{Line, SegStyle, wrap_words};
-use crate::tui::markdown::MarkdownRenderer;
+use crate::tui::buffer::{Delivery, SubmitTarget};
+use crate::tui::chat::{Chat, Row, one_line};
+use crate::tui::line::{Line, SegStyle};
 
 /// The one line an agent's life still writes into the @main flow (D98):
 /// `⚠ @scout · subagent failed: connection reset`.
@@ -273,101 +267,6 @@ impl Chat {
             Delivery::Rejected(why) => self.push_slash_info(why),
         }
     }
-
-    /// The avatar gutter this view draws.
-    ///
-    /// Every conversation has one since D99, @main included: main is a
-    /// participant like the rest, and a face is how a participant is
-    /// recognised. One value, so the flow, the zoomed view and the perspective
-    /// page cannot drift on width, on who wears what, or on which skin the
-    /// terminal is in.
-    pub(crate) fn conversation_gutter<'a>(
-        &'a self,
-        pal: &'a crate::tui::avatar::Palette,
-    ) -> crate::tui::avatar::Gutter<'a> {
-        crate::tui::avatar::Gutter::new(
-            self.chat_avatars,
-            self.image_cap.is_some(),
-            pal,
-            &self.faces_pinned,
-        )
-    }
-
-    /// One post of a zoomed conversation as rows (D105). The vocabulary is the
-    /// transcript's own: a message somebody sent is a bubble or prose under
-    /// their portrait, a step of the agent's work is one dim line, and the wait
-    /// is the same spinner the rest of the app waits with (D87 `pulse`), so a
-    /// reply in flight here and a main turn in flight read alike.
-    ///
-    /// The two live-only kinds are the reason this is not just
-    /// [`settled_post_rows`]: they need the running instance's clock and its
-    /// colour, which a stored post does not have.
-    pub(crate) fn zoom_post_rows(
-        &self,
-        post: &Post,
-        who: &str,
-        width: usize,
-        gutter: &crate::tui::avatar::Gutter<'_>,
-        lead: bool,
-    ) -> Vec<Row> {
-        let theme = &self.theme;
-        // The two live-only kinds are states, not messages: they get the
-        // indentation so the column does not jog, and no face, because nobody
-        // has said anything yet.
-        let indent = |rows: &mut Vec<Row>| {
-            gutter.apply(rows, gutter.index_for(who), who, false);
-        };
-        let inner = width.saturating_sub(gutter.width());
-        match post.kind {
-            // The bare indicator: a reply is owed and nothing has arrived yet.
-            // With text it *is* the stream, and renders as the reply it is
-            // becoming.
-            PostKind::Typing if post.text.trim().is_empty() => {
-                let glyph = self.motion.pulse(self.tick);
-                // The instance's live output rate, where the workspace's DM
-                // composer used to carry it: the same fact at the same moment,
-                // on the row that already says the agent owes a reply.
-                let rate = self
-                    .session
-                    .agents
-                    .token_rate_label(who, std::time::Instant::now(), self.motion.off())
-                    .map(|rate| format!(" · {rate}"))
-                    .unwrap_or_default();
-                // The wait wears the agent's own colour: the composer above it
-                // does too while a zoom is open, and one identity should look
-                // like one identity on both rows.
-                let palette = crate::tui::avatar::Palette::new(theme);
-                let identity = palette.avatars[gutter.index_for(who) % palette.avatars.len()];
-                let mut rows = vec![Row::new(Line::styled(
-                    one_line(&format!("{glyph} {who} is replying…{rate}"), inner),
-                    SegStyle::fg(identity),
-                ))];
-                indent(&mut rows);
-                rows
-            }
-            // Sent, not yet claimed by a run: the agent has it, the turn has
-            // not started. Dim, so it reads as in transit rather than answered.
-            PostKind::Queued => {
-                let mut rows: Vec<Row> = wrap_words(&post.text, inner)
-                    .into_iter()
-                    .map(|line| Row::new(Line::styled(line, SegStyle::fg(theme.text_secondary))))
-                    .collect();
-                indent(&mut rows);
-                rows
-            }
-            _ => settled_post_rows(
-                theme,
-                post,
-                width,
-                Some(&Sender {
-                    gutter: *gutter,
-                    index: gutter.index_for(&post.from),
-                    lead,
-                }),
-            ),
-        }
-    }
-
     /// Which room a `/join` or `/leave` is about. Named outright since D103:
     /// there is no room to be standing in any more, so the argument that used
     /// to be optional is the only thing that can say which one.
@@ -412,111 +311,6 @@ impl Chat {
             Err(why) => self.push_slash_info(why),
         }
     }
-}
-
-/// A *settled* post as rows — the shapes any stored conversation can contain:
-/// a message somebody sent, a line nobody said, a step of an agent's work.
-///
-/// Split out of the live tail for D96: the zoomed view renders the same
-/// posts with no instance behind them, and a second renderer beside this one is
-/// exactly the thing the flow has avoided since D89. The two live-only kinds
-/// stay with the host, because they need the running instance's clock and
-/// colour: [`PostKind::Typing`] and [`PostKind::Queued`].
-pub(crate) fn settled_post_rows(
-    theme: &crate::tui::theme::Theme,
-    post: &Post,
-    width: usize,
-    sender: Option<&Sender<'_>>,
-) -> Vec<Row> {
-    let width = match sender {
-        Some(s) => width.saturating_sub(s.gutter.width()),
-        None => width,
-    };
-    let mut rows = match post.kind {
-        // One dim line per work step, like the transcript's tool rows: cut,
-        // not wrapped, so a long command stays one row.
-        PostKind::Process => vec![Row::new(Line::styled(
-            one_line(&post.text, width),
-            SegStyle::fg(theme.text_secondary),
-        ))],
-        // Nobody said it, so it is furniture: the muted tier, one line, no name
-        // over it and no stamp beside it (the source puts its own clock in the
-        // text where it has one).
-        PostKind::Note => vec![Row::new(Line::styled(
-            one_line(&post.text, width),
-            SegStyle::fg(theme.text_muted),
-        ))],
-        _ if post.you => user_message_rows(&post.text, width, theme),
-        _ => agent_text_rows(theme, &post.text, width),
-    };
-    if let Some(s) = sender {
-        // Process and note rows take the indentation and none of the face: the
-        // message column stays one straight edge, and only somebody who spoke
-        // gets a portrait beside what they said.
-        let lead = s.lead && wears_a_face(post);
-        // A run of somebody else's messages opens with their name (the user's
-        // ruling: an agent is identified by avatar + name, and by name alone
-        // when avatars are off — a room where nobody is named is a wall of
-        // anonymous prose). The user's own bubble keeps its `❯`: that glyph
-        // already says *you*, and a label over it would name the one person
-        // who never needs one. With avatars on, the portrait's first cell
-        // rides this row — the geometry D97 designed the face for.
-        if lead && !post.you {
-            let identity = s.gutter.pal.avatars[s.index % s.gutter.pal.avatars.len()];
-            rows.insert(
-                0,
-                Row::new(Line::styled(
-                    one_line(&format!("@{}", post.from), width),
-                    SegStyle::fg(identity).bold(),
-                )),
-            );
-        }
-        s.gutter.apply(&mut rows, s.index, &post.from, lead);
-    }
-    rows
-}
-
-/// Whether a post is somebody speaking — the only kind that wears a portrait.
-/// Work steps and runtime notes are furniture: nobody said them.
-fn wears_a_face(post: &Post) -> bool {
-    !matches!(post.kind, PostKind::Process | PostKind::Note)
-}
-
-/// Who a post is drawn as in a view that has an avatar gutter (D97): the
-/// sender's portrait, and whether this post opens their run.
-pub(crate) struct Sender<'a> {
-    pub gutter: crate::tui::avatar::Gutter<'a>,
-    pub index: usize,
-    pub lead: bool,
-}
-
-/// Which posts open a sender's run, in order.
-///
-/// A run is broken by somebody else speaking and by nothing else: an agent's
-/// tool rows sit inside its own turn, so a reply that resumes after them is
-/// still the same person talking and does not earn a second portrait.
-pub(crate) fn sender_runs(posts: &[Post]) -> Vec<bool> {
-    let mut out = Vec::with_capacity(posts.len());
-    let mut previous: Option<(bool, String)> = None;
-    for post in posts {
-        if !wears_a_face(post) {
-            out.push(false);
-            continue;
-        }
-        let key = (post.you, post.from.clone());
-        out.push(previous.as_ref() != Some(&key));
-        previous = Some(key);
-    }
-    out
-}
-
-/// An agent's prose, rendered the way main renders the model's.
-fn agent_text_rows(theme: &crate::tui::theme::Theme, text: &str, width: usize) -> Vec<Row> {
-    let mut processor = MarkdownProcessor::default();
-    let mut renderer = MarkdownRenderer::with_theme(width.saturating_sub(2), theme.clone());
-    let doc = processor.process_streaming(text);
-    renderer.render(&doc);
-    text_rows(theme, renderer.lines().to_vec())
 }
 
 #[cfg(test)]
@@ -598,6 +392,7 @@ mod tests {
 
     fn main_message(chat: &mut Chat, role: Role, text: &str) {
         chat.messages.push(UiMessage {
+            speaker: None,
             role,
             text: text.to_string(),
             at: 0,
@@ -986,102 +781,7 @@ mod tests {
         }
     }
 
-    /// A tool row and a membership line take the indent and no face: the column
-    /// stays one straight edge, and only somebody who spoke gets a portrait.
-    #[test]
-    fn process_and_note_rows_take_the_indent_and_no_face() {
-        let theme = crate::tui::theme::Theme::dark();
-        let pal = crate::tui::avatar::Palette::new(&theme);
-        let pinned = std::collections::HashMap::new();
-        let gutter = crate::tui::avatar::Gutter::new(true, false, &pal, &pinned);
-        let width = gutter.width();
-        for kind in [PostKind::Process, PostKind::Note] {
-            let post = Post {
-                from: "scout".to_string(),
-                you: false,
-                at: 0,
-                text: "ran the tests".to_string(),
-                kind,
-            };
-            let sender = Sender {
-                gutter,
-                index: gutter.index_for("scout"),
-                lead: true,
-            };
-            let rows = settled_post_rows(&theme, &post, 60, Some(&sender));
-            let text = rows[0].line.plain_text();
-            assert_eq!(
-                text.chars().take(width).collect::<String>(),
-                " ".repeat(width),
-                "{kind:?} takes the indent and no face: {text:?}"
-            );
-        }
-    }
-
-    /// A run is broken by somebody else speaking, and by nothing else — an
-    /// agent's own tool rows are inside its turn.
-    #[test]
-    fn a_tool_row_does_not_break_a_senders_run() {
-        let said = |from: &str, you: bool, kind: PostKind| Post {
-            from: from.to_string(),
-            you,
-            at: 0,
-            text: "x".to_string(),
-            kind,
-        };
-        let posts = vec![
-            said("scout", false, PostKind::Said),
-            said("scout", false, PostKind::Process),
-            said("scout", false, PostKind::Said),
-            said("user", true, PostKind::Said),
-            said("scout", false, PostKind::Said),
-        ];
-        assert_eq!(
-            sender_runs(&posts),
-            vec![true, false, false, true, true],
-            "one face per run, and a work step is not a speaker"
-        );
-    }
-
-    /// The gutter comes out of the width before anything wraps. A body wrapped
-    /// at the full width and then indented would overrun the terminal by
-    /// exactly the gutter — and CJK, being two cells a character, is where that
-    /// shows up first.
-    #[test]
-    fn the_gutter_comes_out_of_the_width_before_cjk_wraps() {
-        let theme = crate::tui::theme::Theme::dark();
-        let pal = crate::tui::avatar::Palette::new(&theme);
-        let pinned = std::collections::HashMap::new();
-        let gutter = crate::tui::avatar::Gutter::new(true, false, &pal, &pinned);
-        let post = Post {
-            from: crate::channels::USER_NAME.to_string(),
-            you: true,
-            at: 0,
-            text: "他在解析器里找到了一个真正的问题".repeat(6),
-            kind: PostKind::Said,
-        };
-        let sender = Sender {
-            gutter,
-            index: gutter.index_for(crate::channels::USER_NAME),
-            lead: true,
-        };
-        let width = 40;
-        let rows = settled_post_rows(&theme, &post, width, Some(&sender));
-        assert!(
-            rows.len() > 1,
-            "the text has to wrap for this to mean anything"
-        );
-        for row in &rows {
-            let text = row.line.plain_text();
-            assert!(
-                crate::tui::line::text_width(&text) <= width,
-                "a gutter row must still fit the terminal: {} cells in {width}: {text:?}",
-                crate::tui::line::text_width(&text)
-            );
-        }
-    }
-
-    /// Where the terminal can place images the gutter cells are the portrait's
+    /// The image skin sends each portrait's gutter cells as the terminal's
     /// own — the kitty placeholder run, with the image id in the foreground.
     /// Asserted at the sequence level, the way `avatar.rs` asserts its own.
     #[test]

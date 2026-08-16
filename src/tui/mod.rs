@@ -44,6 +44,7 @@ mod chrome;
 pub mod collapse;
 pub mod complete;
 pub mod composer;
+pub(crate) mod conv;
 pub mod el;
 pub mod gfx;
 pub mod highlight;

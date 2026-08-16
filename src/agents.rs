@@ -856,16 +856,6 @@ impl AgentRegistry {
             .is_some_and(|entry| entry.session.cwd() == cwd)
     }
 
-    pub fn token_rate_label(
-        &self,
-        name: &str,
-        now: std::time::Instant,
-        motion_off: bool,
-    ) -> Option<String> {
-        let rate = self.lock().get(name)?.token_rate.clone()?;
-        rate.lock().ok()?.label(now, motion_off)
-    }
-
     /// Instance depth (channel cohort check: only direct subagents with depth==1 may join a channel).
     pub fn depth_of(&self, name: &str) -> Option<usize> {
         self.lock().get(name).map(|e| e.session.depth)

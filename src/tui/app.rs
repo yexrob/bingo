@@ -248,7 +248,7 @@ fn avatar_transmits(
 /// Chrome height, measured by rendering the tree (never predicted — the same
 /// source the frame assembler draws from).
 fn chrome_height(chat: &Chat, width: usize, fullscreen: bool) -> usize {
-    el::height(chrome::chrome(chat, width, fullscreen))
+    crate::tui::chrome::chrome_height_of(chat, width, fullscreen)
 }
 
 /// Key dispatch. Every key (including Ctrl+C's interrupt/clear/quit three
@@ -398,18 +398,11 @@ pub async fn run_inline(
             dirty = true;
         }
 
-        // The zoomed view (D105) takes the pager's road too, with one
-        // difference: it is live, so its loop keeps its own clock. It may hand
-        // the screen from one agent to another without leaving the alternate
-        // screen, which is why one call here covers every switch inside it.
-        if let Some(target) = std::mem::take(&mut chat.open_zoom) {
-            crate::tui::zoom::run_zoom_modal(&mut chat, &mut events, target, false).await?;
-            chat.open_zoom = None;
-            if let Ok((w, h)) = crossterm::terminal::size() {
-                pending_resize = Some((Size::new(w, h), Instant::now()));
-            } else {
-                chat.force_redraw = true;
-            }
+        // A page turn (v6): the page being left banks its printed rows into
+        // the terminal's own scrollback and the next page starts at the top
+        // of a clean screen — the D98 primitive, revived.
+        if std::mem::take(&mut chat.page_turn) {
+            term.page_break()?;
             chat.dirty = true;
             dirty = true;
         }
@@ -665,10 +658,9 @@ pub async fn run_fullscreen(
             dirty = true;
         }
 
-        // The zoomed view (D105), already on the alternate screen.
-        if let Some(target) = std::mem::take(&mut chat.open_zoom) {
-            crate::tui::zoom::run_zoom_modal(&mut chat, &mut events, target, true).await?;
-            chat.open_zoom = None;
+        // A page turn (v6): fullscreen redraws whole every frame, so the swap
+        // is the doc's — the flag only forces the repaint.
+        if std::mem::take(&mut chat.page_turn) {
             chat.force_redraw = true;
             chat.dirty = true;
             dirty = true;
@@ -806,6 +798,7 @@ mod tests {
         let mut chat = chat_at(80, 24);
         for i in 0..80 {
             chat.messages.push(crate::tui::chat::UiMessage {
+                speaker: None,
                 role: crate::tui::chat::Role::User,
                 text: format!("line {i}"),
                 at: 0,
@@ -828,6 +821,7 @@ mod tests {
         // document, not of the one that was there when the frame started.
         for i in 0..20 {
             chat.messages.push(crate::tui::chat::UiMessage {
+                speaker: None,
                 role: crate::tui::chat::Role::User,
                 text: format!("arrived {i}"),
                 at: 0,
@@ -1106,6 +1100,7 @@ mod tests {
     fn flush_cursor_survives_a_width_change() {
         let mut chat = chat_at(80, 24);
         chat.messages.push(crate::tui::chat::UiMessage {
+            speaker: None,
             role: crate::tui::chat::Role::User,
             text: "a long-enough user message whose wrap count changes with the width".repeat(2),
             at: 0,

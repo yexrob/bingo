@@ -479,8 +479,8 @@ impl Chat {
         let Some(target) = self.dialog_selection().and_then(|t| t.zoom()) else {
             return false;
         };
-        self.open_zoom = Some(target);
-        self.dirty = true;
+        self.close_menus();
+        self.switch_to(Some(target));
         true
     }
 
@@ -1389,18 +1389,18 @@ mod tests {
         chat.open_background_dialog();
         assert!(chat.background_dialog_key(KeyCode::Char('f'), KeyModifiers::NONE));
         assert_eq!(
-            chat.open_zoom,
+            chat.zoom,
             Some(ZoomTarget::Agent("scout".into())),
             "the agent under the cursor"
         );
         assert!(chat.dialog.is_none(), "and the dialog closes behind it");
 
-        chat.open_zoom = None;
+        chat.switch_to(None);
         chat.open_background_dialog();
         chat.background_dialog_key(KeyCode::Down, KeyModifiers::NONE);
         assert!(chat.background_dialog_key(KeyCode::Char('f'), KeyModifiers::NONE));
         assert_eq!(
-            chat.open_zoom,
+            chat.zoom,
             Some(ZoomTarget::Room("build".into())),
             "and the room, which had no door at all until now"
         );
@@ -1414,7 +1414,7 @@ mod tests {
         seed_shell(&chat, "cargo build");
         chat.open_background_dialog();
         assert!(chat.background_dialog_key(KeyCode::Char('f'), KeyModifiers::NONE));
-        assert!(chat.open_zoom.is_none());
+        assert!(chat.zoom.is_none());
         assert!(chat.dialog.is_some(), "and nothing was closed");
         let text = view(&chat);
         assert!(!text.contains("f to foreground"), "{text}");
@@ -1538,9 +1538,8 @@ mod tests {
         );
 
         chat.background_dialog_key(KeyCode::Char('f'), KeyModifiers::NONE);
-        let target = chat.open_zoom.clone().expect("the zoom was armed");
-        chat.enter_zoom(target);
-        chat.leave_zoom(BufferId::Hub);
+        assert!(chat.away.is_some(), "f entered the page directly");
+        chat.switch_to(None);
         chat.open_background_dialog();
         assert_eq!(
             chat.dialog_rows()
