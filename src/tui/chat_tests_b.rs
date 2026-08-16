@@ -2471,7 +2471,7 @@ fn running_agents_leave_the_arrows_to_history() {
     assert!(chat.on_key(KeyCode::Char('b'), KeyModifiers::CONTROL));
     assert!(chat.on_key(KeyCode::Char('f'), KeyModifiers::NONE));
     assert_eq!(
-        chat.open_zoom,
+        chat.zoom,
         Some(crate::tui::zoom::ZoomTarget::Agent("scout".into())),
         "f foregrounds the agent under the cursor"
     );

@@ -14,9 +14,9 @@
 //! single parser for. Recovering who said what is therefore a walk, and [`walk`]
 //! is it.
 //!
-//! **And the walk has two readers.** [`crate::tui::buffer::zoom_posts`] keeps
-//! every lane the walk files — it is one agent's whole record, which is what the
-//! zoomed view shows (D105) — and [`pair_lane`] keeps exactly one, the user's,
+//! **And the walk has two readers.** The away page (v6, [`crate::tui::conv`])
+//! keeps every lane the walk files — it is one agent's whole record, which is
+//! what its page shows — and [`pair_lane`] keeps exactly one, the user's,
 //! which is what the Said-unread accounting measures (D99). Neither can disagree
 //! with the other about attribution, because there is one walk.
 //!
@@ -232,8 +232,8 @@ pub(crate) fn walk(who: Protagonist<'_>, history: &[Message], stamps: &[u64]) ->
 ///
 /// Everything else — main's instructions, room relays, `[message from @X]`
 /// mail, chases, reminders, and the task that created the instance — belongs to
-/// a lane that is not this one, and lives in the zoomed view
-/// ([`crate::tui::buffer::zoom_posts`]).
+/// a lane that is not this one, and lives on the agent's own page
+/// ([`crate::tui::conv`], v6).
 ///
 /// D99 carried a `contiguous` flag out of here so the pair view could merge X's
 /// consecutive rows across the items this filter drops. D105 retired that

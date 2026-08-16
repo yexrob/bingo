@@ -295,6 +295,7 @@ impl super::Chat {
     /// verdict from the gate instead.
     pub(super) fn push_user_line(&mut self, text: String) {
         self.messages.push(UiMessage {
+            speaker: None,
             role: Role::User,
             text,
             at: crate::channels::now_unix(),

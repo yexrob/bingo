@@ -60,6 +60,12 @@ pub struct UiMessage {
     /// User messages stamp at submit; assistant messages restamp at turn end,
     /// so the shown time is when the reply landed, as in the workspace views.
     pub at: u64,
+    /// Who said it, when the marker walk cannot tell (v6): an away page's
+    /// messages carry their speaker explicitly, because a room's or an agent's
+    /// counterparts are not derivable from the text the way main's two
+    /// participants are. `None` falls back to the transcript's own reading
+    /// (`speaker_of`), so main's flow is byte-identical.
+    pub speaker: Option<String>,
     pub activities: Vec<Activity>,
     /// Char count of text at activities[i] creation: rendering interleaves text and activities in model output order.
     pub insert_points: Vec<usize>,
@@ -393,7 +399,6 @@ pub(crate) fn is_state_line(text: &str) -> bool {
         || is_ask_receipt(text)
         || crate::tui::bufferview::is_agent_alert(text)
         || crate::tui::bufferview::is_agent_notice(text)
-        || crate::tui::bufferview::is_mention_line(text)
         || rewind_ui::is_rewind_line(text)
 }
 
@@ -405,7 +410,58 @@ pub(crate) fn is_steer_line(text: &str) -> bool {
 }
 
 /// Hint shown while a collapse group runs: the input of the group's most recent tool.
-fn hint_for(name: &str, input: &serde_json::Value) -> String {
+/// File a just-readied tool into its message's collapse machinery: the shared
+/// half of the live `ToolReady` path and the away page's rehydrate (v6). The
+/// activity at `idx` is already pushed; this decides whether it joins the open
+/// group, opens a new one, or breaks the fold.
+pub(crate) fn group_ready_tool(
+    msg: &mut UiMessage,
+    idx: usize,
+    name: &str,
+    input: &serde_json::Value,
+) {
+    let kind = classify_tool(name, input);
+    let Some(kind) = kind else {
+        if let Some(g) = msg.groups.last_mut() {
+            g.active = false;
+        }
+        return;
+    };
+    let open = msg
+        .groups
+        .last()
+        .is_some_and(|g| g.active && !g.activities.is_empty());
+    let g = if open {
+        msg.groups.len() - 1
+    } else {
+        msg.groups.push(CollapseGroup {
+            active: true,
+            ..CollapseGroup::default()
+        });
+        msg.groups.len() - 1
+    };
+    msg.group_of[idx] = Some(g);
+    msg.groups[g].activities.push(idx);
+    msg.groups[g].last_hint = Some(hint_for(name, input));
+    match kind {
+        CollapseKind::Search => msg.groups[g].search += 1,
+        CollapseKind::Read(path) => match path {
+            Some(p) => msg.groups[g].read_paths.push(p),
+            None => msg.groups[g].read_ops += 1,
+        },
+        CollapseKind::List => msg.groups[g].list += 1,
+        CollapseKind::Bash => msg.groups[g].bash += 1,
+        CollapseKind::AgentCheck => msg.groups[g].agent_checks += 1,
+        CollapseKind::AgentStop => msg.groups[g].agent_stops += 1,
+        CollapseKind::AgentDelete => msg.groups[g].agent_deletes += 1,
+        CollapseKind::Send(target) => msg.groups[g].send_targets.push(target),
+        CollapseKind::RoomCheck => msg.groups[g].room_checks += 1,
+        CollapseKind::RoomCreate => msg.groups[g].room_creates += 1,
+        CollapseKind::RoomRoster => msg.groups[g].room_rosters += 1,
+    }
+}
+
+pub(crate) fn hint_for(name: &str, input: &serde_json::Value) -> String {
     let map = input.as_object();
     match name {
         "Bash" => map
@@ -688,18 +744,22 @@ pub struct Chat {
     /// hands the terminal over and puts the edited draft back (cleared after
     /// consumption, D86).
     pub open_editor: bool,
-    /// `enter` on a tree row (or in the ctrl+b detail) requests the zoomed view
-    /// (D105): the host opens the alternate-screen live view over that
-    /// conversation. Cleared after consumption — and read *inside* the zoom
-    /// too, where it means "point the same screen somewhere else".
-    pub open_zoom: Option<crate::tui::zoom::ZoomTarget>,
-    /// `enter` on the tree's `@main` row asked the zoom to close (CC's
-    /// `exitTeammateView`). Only the zoom's own loop consumes it; in the inline
-    /// host there is nothing open and it is dropped on the next read.
-    pub close_zoom: bool,
     /// The conversation the zoomed view is on, while it has the screen. `None`
     /// is the transcript, which is every frame the inline host draws.
     pub(crate) zoom: Option<crate::tui::zoom::ZoomTarget>,
+    /// The open away page (v6): the screen is this conversation, drawn by the
+    /// transcript's own pipeline; `None` is main. Set with
+    /// [`Chat::switch_to`], which also points `zoom` — the accounting and the
+    /// chrome read that, the build reads this.
+    pub(crate) away: Option<crate::tui::conv::AwayPage>,
+    /// Transient context of the away build in flight, set and cleared inside
+    /// [`Chat::build_rows`]: what the shared core differs on for a page (the
+    /// header, the settled boundary, the streaming run).
+    pub(crate) away_build: Option<crate::tui::conv::AwayBuild>,
+    /// A page was just turned: the inline host owes the terminal one
+    /// [`crate::tui::term::InlineTerm::page_break`] before the next frame
+    /// (the fullscreen host redraws whole and only clears the flag).
+    pub page_turn: bool,
     /// bash mode (`!` prefix): input executes directly, bypassing the model.
     pub bash_mode: bool,
     pub busy: bool,
@@ -930,14 +990,10 @@ pub struct Chat {
     /// a detail pointer and nothing else — every row is rebuilt from the
     /// registries at draw time.
     pub(crate) dialog: Option<crate::tui::background::BackgroundDialog>,
-    /// The agent tree (D104), second stop of the `ctrl+t` cycle; `None` means
-    /// it is closed. Its rows are built from the registry at draw time, so this
-    /// holds nothing but the cursor.
-    pub(crate) tree: Option<crate::tui::tree::AgentTree>,
-    /// Whether the tree hangs a three-line message preview off each instance
-    /// (`ctrl+shift+o`). A session-wide toggle rather than tree state, which is
-    /// where CC keeps it too — it survives the tree closing and reopening.
-    pub(crate) tree_preview: bool,
+    /// The roster's cursor (v6): `None` is the composer, `Some(i)` a row of
+    /// the conversation list under it. Entered by `↓` at the bottom of
+    /// history (the CC fallthrough), never by a chord.
+    pub(crate) roster_sel: Option<usize>,
     /// The badge fingerprint the slow poll last painted (D115): one entry per
     /// conversation, its unread and its mention bit. See `observe_badges`.
     pub(crate) badge_print: Vec<(crate::tui::buffer::BufferId, u64, bool)>,
@@ -981,6 +1037,7 @@ impl Chat {
         // call then finds nothing to do).
         self.drop_empty_stream_message();
         self.messages.push(UiMessage {
+            speaker: None,
             role: Role::User,
             text: marker.to_string(),
             at: crate::channels::now_unix(),
@@ -1123,9 +1180,10 @@ impl Chat {
             force_redraw: false,
             open_transcript: false,
             open_editor: false,
-            open_zoom: None,
-            close_zoom: false,
             zoom: None,
+            away: None,
+            away_build: None,
+            page_turn: false,
             bash_mode: false,
             busy: false,
             stream_msg: None,
@@ -1221,8 +1279,7 @@ impl Chat {
             tasks_visible: false,
             tasks_auto: false,
             dialog: None,
-            tree: None,
-            tree_preview: false,
+            roster_sel: None,
             badge_print: Vec::new(),
             agent_mail: std::collections::HashMap::new(),
             rewind: None,
@@ -1340,6 +1397,7 @@ impl Chat {
                 self.notify
                     .set_title(Title::Busy(self.motion.title_glyph(self.tick)));
                 self.messages.push(UiMessage {
+                    speaker: None,
                     role: Role::Assistant,
                     text: String::new(),
                     at: crate::channels::now_unix(),
@@ -1572,47 +1630,7 @@ impl Chat {
                 if standalone {
                     return;
                 }
-                let kind = classify_tool(&name, &input);
-                let Some(kind) = kind else {
-                    if let Some(g) = self.messages[i].groups.last_mut() {
-                        g.active = false;
-                    }
-                    return;
-                };
-                let open = self.messages[i]
-                    .groups
-                    .last()
-                    .is_some_and(|g| g.active && !g.activities.is_empty());
-                let g = if open {
-                    self.messages[i].groups.len() - 1
-                } else {
-                    self.messages[i].groups.push(CollapseGroup {
-                        active: true,
-                        ..CollapseGroup::default()
-                    });
-                    self.messages[i].groups.len() - 1
-                };
-                self.messages[i].group_of[idx] = Some(g);
-                self.messages[i].groups[g].activities.push(idx);
-                self.messages[i].groups[g].last_hint = Some(hint_for(&name, &input));
-                match kind {
-                    CollapseKind::Search => self.messages[i].groups[g].search += 1,
-                    CollapseKind::Read(path) => match path {
-                        Some(p) => self.messages[i].groups[g].read_paths.push(p),
-                        None => self.messages[i].groups[g].read_ops += 1,
-                    },
-                    CollapseKind::List => self.messages[i].groups[g].list += 1,
-                    CollapseKind::Bash => self.messages[i].groups[g].bash += 1,
-                    CollapseKind::AgentCheck => self.messages[i].groups[g].agent_checks += 1,
-                    CollapseKind::AgentStop => self.messages[i].groups[g].agent_stops += 1,
-                    CollapseKind::AgentDelete => self.messages[i].groups[g].agent_deletes += 1,
-                    CollapseKind::Send(target) => {
-                        self.messages[i].groups[g].send_targets.push(target)
-                    }
-                    CollapseKind::RoomCheck => self.messages[i].groups[g].room_checks += 1,
-                    CollapseKind::RoomCreate => self.messages[i].groups[g].room_creates += 1,
-                    CollapseKind::RoomRoster => self.messages[i].groups[g].room_rosters += 1,
-                }
+                group_ready_tool(&mut self.messages[i], idx, &name, &input);
             }
             UiEvent::WatchEvent {
                 label,
@@ -2229,6 +2247,14 @@ impl Chat {
     }
 
     pub fn submit(&mut self) {
+        // The away page (v6): the whole line is prose to the conversation on
+        // screen — no slash, no bash, no direct-send grammar, no queue; the
+        // domain's own delivery already handles a busy receiver (the zoom's
+        // rule, which is CC's teammate rule).
+        if self.away.is_some() {
+            self.submit_to_zoom();
+            return;
+        }
         let text = std::mem::take(&mut self.input);
         self.cursor = 0;
         self.undo.clear();

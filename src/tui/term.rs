@@ -398,6 +398,48 @@ impl<B: Backend + RawWrite> InlineTerm<B> {
         })
     }
 
+    /// End the page on screen and begin a new one at the top (D98, revived for
+    /// v6's page switch).
+    ///
+    /// The screen is two things at this moment, and they end differently.
+    /// *Above* the viewport are the page's own rows, written once by
+    /// [`Self::insert_history`] and still on screen only because the viewport
+    /// has not migrated to the bottom yet; they go up into the terminal's own
+    /// history, because they are record. *Inside* the viewport are the live tail
+    /// and the chrome — states and furniture, which have never belonged in
+    /// scrollback — and they are simply erased, the way `clear` erases a
+    /// screenful.
+    ///
+    /// Getting that division wrong is how a page turn breaks write-once in
+    /// either direction: erase the whole screen and the rows a flush just
+    /// printed are lost before the terminal ever kept them; scroll the whole
+    /// screen and the composer box lands in the scrollback for good.
+    ///
+    /// That division is also the whole difference from [`Self::clear_visible`],
+    /// which discards a garbled screen entire because none of it can be trusted.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn page_break(&mut self) -> Result<(), B::Error> {
+        // The page region: everything above the viewport. Scrollback pushes are
+        // counted from the screen top, so the region and the distance are the
+        // same number.
+        let printed = self.viewport.top();
+        let height = self.viewport.height.clamp(0, self.max_viewport_height());
+        self.gap_above = 0;
+        self.viewport = Rect::new(0, 0, self.size.width, height);
+        let area = Rect::new(0, 0, self.size.width, height);
+        self.buffers = [Buffer::empty(area), Buffer::empty(area)];
+        self.batch(|this| {
+            this.backend.scroll_into_scrollback(printed, printed)?;
+            let home = Position::new(0, 0);
+            this.backend.set_cursor_position(home)?;
+            this.backend.clear_region(ClearType::All)?;
+            this.backend.set_cursor_position(home)?;
+            this.parked = home;
+            this.cursor_synced = true;
+            Ok(())
+        })
+    }
+
     /// Leave the viewport contents on screen and hand the backend back.
     ///
     /// The cursor ends up at column 0 of the row below the viewport, scrolling one line when the
@@ -1114,6 +1156,88 @@ mod tests {
             Position::new(0, 4),
             "cursor restored to the parked position"
         );
+    }
+
+    /// The page turn (D98, revived for v6). The page's rows go up into the
+    /// terminal's own history — including the ones a flush had printed but the
+    /// viewport had not yet migrated past — and the viewport's own contents,
+    /// the tail and the chrome, are erased with the screen. One
+    /// synchronized-update batch, and the viewport re-anchored at the top ready
+    /// for the next page.
+    #[test]
+    fn page_break_banks_the_page_and_erases_the_tail() {
+        let mut term = term(6, 8, 3);
+        // The viewport: the live tail and the chrome, on screen and nowhere else.
+        term.draw(2, paint(&["a", "b"]), None).unwrap();
+        // The page's record: settled rows, flushed the only way they ever are.
+        // The viewport is not at the bottom yet, so these are still on screen.
+        let texts: Vec<String> = (0..2).map(|i| format!("h{i}")).collect();
+        term.insert_history(lines(&texts)).unwrap();
+        assert!(
+            term.backend().scrollback().is_empty(),
+            "precondition: the flushed rows have not reached scrollback yet"
+        );
+        term.backend_mut().reset_counters();
+
+        term.page_break().unwrap();
+
+        let scrollback = term.backend().scrollback();
+        for kept in ["h0", "h1"] {
+            assert_eq!(
+                scrollback.iter().filter(|row| *row == kept).count(),
+                1,
+                "{kept:?} reached scrollback exactly once: {scrollback:?}"
+            );
+        }
+        for dropped in ["a", "b"] {
+            assert!(
+                !scrollback.iter().any(|row| row == dropped),
+                "{dropped:?} was a state, not record: {scrollback:?}"
+            );
+        }
+        assert!(
+            term.backend().screen().iter().all(String::is_empty),
+            "and the screen is clear for the next page: {:?}",
+            term.backend().screen()
+        );
+        assert_eq!(term.viewport(), Rect::new(0, 0, 6, 2));
+        let raw = term.backend().raw.clone();
+        assert!(raw.starts_with(SYNC_BEGIN), "one batch: {raw:?}");
+        assert!(raw.ends_with(SYNC_END), "one batch: {raw:?}");
+
+        // The new page paints from the top of the screen.
+        term.draw(2, paint(&["c", "d"]), None).unwrap();
+        assert_eq!(term.backend().screen()[0], "c");
+        assert_eq!(term.backend().screen()[1], "d");
+    }
+
+    /// The bytes the other half of a page turn is made of: finishing the page
+    /// means pushing its settled rows into scrollback, and a push is a
+    /// top-anchored DECSTBM region, the cursor on its last row, one line feed
+    /// per row, and the region released. Line feeds rather than `CSI S` because
+    /// kitty-family terminals send `CSI S` scrolls to the bit bucket instead of
+    /// to scrollback.
+    #[test]
+    fn a_scrollback_push_is_line_feeds_inside_a_top_anchored_region() {
+        let mut out: Vec<u8> = Vec::new();
+        CrosstermBackend::new(&mut out)
+            .scroll_into_scrollback(5, 3)
+            .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&out),
+            "\x1b[1;5r\x1b[5;1H\n\n\n\x1b[r"
+        );
+
+        // A region of fewer than two rows is silently ignored by DECSTBM, and
+        // the scroll that followed would hit the whole screen: nothing is
+        // written at all rather than corrupting the viewport.
+        let mut out: Vec<u8> = Vec::new();
+        {
+            let mut backend = CrosstermBackend::new(&mut out);
+            backend.scroll_into_scrollback(1, 3).unwrap();
+            backend.scroll_into_scrollback(5, 0).unwrap();
+        }
+        assert!(out.is_empty(), "{out:?}");
     }
 
     #[test]

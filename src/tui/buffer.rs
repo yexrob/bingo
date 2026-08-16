@@ -18,17 +18,15 @@
 //!
 //! D89 built a view layer on top of this — buffers you could switch to, spliced
 //! into one flow — and D103 retired it whole. What is left is the **book-keeping
-//! half**, which is what D104's footer pills and agent tree read. The extraction
-//! rules that turn a domain store into displayable posts live at the bottom of
-//! this file, where the workspace skin left them (D89); D105's zoom reads
-//! them.
+//! half**, which is what D104's footer pills and agent tree read. The post
+//! extraction rules that used to live at the bottom of this file retired with
+//! the alt-screen zoom (v6): a page's content is built by
+//! [`crate::tui::conv`] from the domain directly.
 
 use std::sync::Arc;
 
-use crate::api::types::Message;
-use crate::channels::{ChannelMessage, USER_NAME};
+use crate::channels::{USER_NAME, names};
 use crate::query::Session;
-use crate::tui::chat::CollapseGroup;
 
 /// Which conversation a buffer is.
 ///
@@ -160,37 +158,6 @@ struct SaidCache {
     authors: Vec<bool>,
 }
 
-/// Whether a room post says a name at somebody (D99).
-///
-/// Case-insensitive with word boundaries on both sides of the token: an agent
-/// writing `@User`, `@USER,` or `(@user)` is addressing the person and reaches
-/// them, while `@username` and `mail@user.example` are not and do not. The
-/// literal-`@user` test this replaced meant a badge that depended on the model
-/// getting the case right.
-pub(crate) fn names(text: &str, name: &str) -> bool {
-    let haystack = text.to_lowercase();
-    let needle = format!("@{}", name.to_lowercase());
-    let part_of_a_word = |c: char| c.is_alphanumeric() || c == '_' || c == '-';
-    let mut from = 0;
-    while let Some(offset) = haystack.get(from..).and_then(|rest| rest.find(&needle)) {
-        let start = from + offset;
-        let end = start + needle.len();
-        let before_ok = haystack[..start]
-            .chars()
-            .next_back()
-            .is_none_or(|c| !part_of_a_word(c));
-        let after_ok = haystack[end..]
-            .chars()
-            .next()
-            .is_none_or(|c| !part_of_a_word(c));
-        if before_ok && after_ok {
-            return true;
-        }
-        from = end;
-    }
-    false
-}
-
 /// The registry: main plus whatever the domain currently has.
 #[derive(Debug, Clone)]
 pub struct Buffers {
@@ -222,6 +189,7 @@ impl Buffers {
         }
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn active(&self) -> &BufferId {
         &self.active
     }
@@ -453,10 +421,6 @@ pub fn deliver(session: &Arc<Session>, target: SubmitTarget) -> Delivery {
 pub enum PostKind {
     /// An ordinary message.
     Said,
-    /// Sent but still in the inbox — delivery happens at the next turn boundary.
-    Queued,
-    /// The streaming tail of a running turn (Slack's "…is typing").
-    Typing,
     /// Wake-up scaffolding the runtime wrote into the instance's history — a
     /// relayed channel message, a follow-up chase, the task reminder. Nobody
     /// typed it, so it gets one dim line instead of a quoted block with a name
@@ -479,37 +443,6 @@ pub struct Post {
     pub at: u64,
     pub text: String,
     pub kind: PostKind,
-}
-
-/// Room log → posts. Speech becomes a message; a roster change becomes one dim
-/// line that carries its own clock, because the row it renders as has nowhere
-/// to hang a stamp (D93's convention, stated inside the text instead of beside
-/// it).
-pub fn channel_posts(log: &[ChannelMessage], me: &str) -> Vec<Post> {
-    log.iter()
-        .map(|m| match m.kind {
-            crate::channels::MessageKind::Said => Post {
-                from: m.from.clone(),
-                you: m.from == me,
-                at: m.at,
-                text: m.text.clone(),
-                kind: PostKind::Said,
-            },
-            crate::channels::MessageKind::Membership => {
-                let when = match stamp(m.at) {
-                    at if at.is_empty() => String::new(),
-                    at => format!(" {at}"),
-                };
-                Post {
-                    from: m.from.clone(),
-                    you: false,
-                    at: m.at,
-                    text: format!("· {} {} ·{when}", m.from, m.text),
-                    kind: PostKind::Note,
-                }
-            }
-        })
-        .collect()
 }
 
 /// What one line of a stored user-role message *is*, by the shape the runtime
@@ -602,165 +535,6 @@ pub(crate) fn tool_call_line(name: &str, input: &serde_json::Value) -> String {
     } else {
         format!("{glyph}{shown}({summary})")
     }
-}
-
-/// Which collapse group one of an agent's tool calls belongs in, and what it
-/// adds to it (D99's classifier, applied to a stored record).
-///
-/// Split out of the replay builder D103 kept for this batch: the fold is the
-/// only part of that builder the zoom needs, and folding into a [`Post`] rather
-/// than into a `UiMessage` is what lets one row renderer draw the whole view.
-fn tally(group: &mut CollapseGroup, kind: crate::tui::chat::CollapseKind) {
-    use crate::tui::chat::CollapseKind;
-    match kind {
-        CollapseKind::Search => group.search += 1,
-        CollapseKind::Read(Some(path)) => group.read_paths.push(path),
-        CollapseKind::Read(None) => group.read_ops += 1,
-        CollapseKind::List => group.list += 1,
-        CollapseKind::Bash => group.bash += 1,
-        CollapseKind::AgentCheck => group.agent_checks += 1,
-        CollapseKind::AgentStop => group.agent_stops += 1,
-        CollapseKind::AgentDelete => group.agent_deletes += 1,
-        CollapseKind::Send(target) => group.send_targets.push(target),
-        CollapseKind::RoomCheck => group.room_checks += 1,
-        CollapseKind::RoomCreate => group.room_creates += 1,
-        CollapseKind::RoomRoster => group.room_rosters += 1,
-    }
-}
-
-/// One agent's **whole record** as posts, in the order the record holds it
-/// (D105): the task that created it, main's instructions, the user's messages,
-/// room relays, reminders and chases, its own prose, and the work it did.
-///
-/// The attribution is [`crate::tui::perspective::walk`]'s and nobody else's —
-/// the same walk [`crate::tui::perspective::pair_lane`] narrows — with
-/// `Protagonist::of` deciding what unmarked prose means (D96/D100). The zoom
-/// keeps *every* lane, which is the difference from
-/// [`crate::tui::perspective::pair_lane`]: that is the user's conversation with
-/// the agent, and this is the agent's life.
-///
-/// **Runs of collapsible tool calls fold into one row.** `⏺ Read(a.rs)`,
-/// `⏺ Read(b.rs)`, `⏺ Grep("fn main")` becomes `⏺ Searched for 1 pattern, read
-/// 2 files`, through [`crate::tui::chat::classify_tool`] and
-/// [`crate::tui::chat::collapse_summary`] — the console's own classifier and
-/// the console's own wording, so a turn folds the same way in an agent's view
-/// as in `@main`'s. A call that does not collapse breaks the run, as it does in
-/// the console, and so does anything anybody says.
-fn record_posts(who: &str, history: &[Message], stamps: &[u64]) -> Vec<Post> {
-    use crate::tui::chat::classify_tool;
-    use crate::tui::perspective::{Protagonist, Target, Work, walk};
-    let mut out: Vec<Post> = Vec::new();
-    let mut group: Option<CollapseGroup> = None;
-    fn flush(group: &mut Option<CollapseGroup>, out: &mut Vec<Post>, who: &str) {
-        let Some(group) = group.take() else {
-            return;
-        };
-        out.push(Post {
-            from: who.to_string(),
-            you: false,
-            at: 0,
-            // Settled, so the summary is past tense: the run is in the record.
-            text: format!("⏺ {}", crate::tui::chat::collapse_summary(&group, false)),
-            kind: PostKind::Process,
-        });
-    }
-    for filed in walk(Protagonist::of(who), history, stamps) {
-        if let Some(Work::Tool { name, input }) = &filed.work
-            && let Some(kind) = classify_tool(name, input)
-        {
-            tally(group.get_or_insert_with(CollapseGroup::default), kind);
-            continue;
-        }
-        flush(&mut group, &mut out, who);
-        let mut post = filed.post;
-        // Intake is what was *handed* to the agent rather than said to it — the
-        // task it was dispatched with, a reminder, a chase. Nobody wrote it, so
-        // it takes the furniture tier: dim, one line, no name over it and no
-        // portrait beside it. The walk files it under its own target, which a
-        // grouped view could afford to render as a message; a single-column
-        // record cannot, or a spawn prompt would arrive wearing somebody's
-        // face.
-        if filed.target == Target::Intake {
-            post.kind = PostKind::Note;
-        }
-        out.push(post);
-    }
-    flush(&mut group, &mut out, who);
-    out
-}
-
-/// The zoomed view's body (D105): one agent's whole record, plus whatever is
-/// happening to it right now.
-///
-/// `in_flight` is what the running turn has already claimed and `pending` what
-/// is still in the inbox — both carrying the sender, because this view has
-/// everybody in it and a message from main must not be drawn as one the user
-/// wrote. `live` is the current run's stream whoever started it: the D99 pair
-/// filters that dropped both are exactly what a full-record view must not
-/// apply.
-///
-/// The live steps stay one row each rather than folding: a fold needs the
-/// call, and the stream carries only the line it printed.
-pub fn zoom_posts(
-    history: &[Message],
-    stamps: &[u64],
-    in_flight: &[(String, String)],
-    live: &[crate::agents::LiveBlock],
-    pending: &[(String, String)],
-    who: &str,
-) -> Vec<Post> {
-    let process = |text: String| Post {
-        from: who.to_string(),
-        you: false,
-        at: 0,
-        text,
-        kind: PostKind::Process,
-    };
-    let sent = |(from, text): &(String, String), kind: PostKind| Post {
-        from: from.clone(),
-        you: from == USER_NAME,
-        at: 0,
-        text: text.clone(),
-        kind,
-    };
-    let mut out = record_posts(who, history, stamps);
-    out.extend(in_flight.iter().map(|item| sent(item, PostKind::Said)));
-    out.extend(pending.iter().map(|item| sent(item, PostKind::Queued)));
-    let typing_at = match live.last() {
-        Some(crate::agents::LiveBlock::Text(t)) if !t.trim().is_empty() => Some(live.len() - 1),
-        _ => None,
-    };
-    for (i, block) in live.iter().enumerate() {
-        match block {
-            crate::agents::LiveBlock::Text(text) if !text.trim().is_empty() => out.push(Post {
-                from: who.to_string(),
-                you: false,
-                at: 0,
-                text: text.clone(),
-                kind: if Some(i) == typing_at {
-                    PostKind::Typing
-                } else {
-                    PostKind::Said
-                },
-            }),
-            crate::agents::LiveBlock::Tool(text) => out.push(process(text.clone())),
-            crate::agents::LiveBlock::Thinking(_) => out.push(process(THINKING_ROW.to_string())),
-            crate::agents::LiveBlock::Text(_) => {}
-        }
-    }
-    // The indicator spans the whole stretch a reply is owed, exactly as the
-    // pair view drew it: from the instant something is on its way, through
-    // tool waits and round gaps.
-    if typing_at.is_none() && !(live.is_empty() && in_flight.is_empty() && pending.is_empty()) {
-        out.push(Post {
-            from: who.to_string(),
-            you: false,
-            at: 0,
-            text: String::new(),
-            kind: PostKind::Typing,
-        });
-    }
-    out
 }
 
 /// Send-time stamp trailing a message body (issue #41), the same in every view:
@@ -1203,250 +977,6 @@ mod tests {
     // is more than the pair lane ever held — and it lands in a [`Post`] the one
     // row renderer already draws instead of in a `UiMessage` only the console
     // can.
-
-    fn texts(posts: &[Post]) -> Vec<String> {
-        posts.iter().map(|p| p.text.clone()).collect()
-    }
-
-    fn record_of(session: &Arc<Session>, name: &str) -> Vec<Post> {
-        let (history, stamps, ..) = session.agents.view_of(name).expect("the instance");
-        record_posts(name, &history, &stamps)
-    }
-
-    /// The zoom keeps every lane, and that is the whole difference from the
-    /// pair lane: the task that created the instance, main's instruction, the
-    /// user's own message and the agent's answer all render, each under the
-    /// name the walk attributes it to — while the pair lane over the same
-    /// history keeps the user's two turns and drops the rest (D99).
-    #[test]
-    fn the_zoom_keeps_every_lane_and_the_pair_view_keeps_one() {
-        let session = test_session();
-        seed_agent(
-            &session,
-            "scout",
-            vec![
-                Message::user_text("audit the lexer"),
-                assistant("on it"),
-                Message::user_text("also the parser"),
-                from_user("and say what you find"),
-                assistant("found two"),
-            ],
-        );
-        let record = record_of(&session, "scout");
-        assert_eq!(
-            texts(&record),
-            vec![
-                "audit the lexer",
-                "on it",
-                "also the parser",
-                "and say what you find",
-                "found two"
-            ],
-            "the whole record, in the order the record holds it"
-        );
-        let senders: Vec<(&str, bool)> = record.iter().map(|p| (p.from.as_str(), p.you)).collect();
-        assert_eq!(
-            senders,
-            vec![
-                // The spawn prompt is intake: nobody said it, so nobody is
-                // named over it (D96).
-                ("", false),
-                ("scout", false),
-                // Unmarked prose in a subagent's record is main (D100).
-                (crate::channels::MAIN_NAME, false),
-                (USER_NAME, true),
-                ("scout", false),
-            ]
-        );
-
-        let (history, stamps, ..) = session.agents.view_of("scout").expect("the instance");
-        assert_eq!(
-            texts(&crate::tui::perspective::pair_lane(
-                "scout", &history, &stamps
-            )),
-            vec!["and say what you find", "found two"],
-            "the pair lane is the user's lane and stays that way"
-        );
-    }
-
-    /// D99: an agent's work folds through the console's own classifier and the
-    /// console's own wording — `⏺ Searched for 1 pattern, read 2 files` — rather
-    /// than printing one dim line per call. The grouping rules are not restated
-    /// here; the point is that they are reached.
-    #[test]
-    fn the_zoom_folds_work_the_way_the_console_folds_it() {
-        let session = test_session();
-        seed_agent(
-            &session,
-            "scout",
-            vec![
-                from_user("find the leak"),
-                Message {
-                    role: crate::api::types::Role::Assistant,
-                    content: vec![
-                        ContentBlock::Text {
-                            text: "looking".to_string(),
-                        },
-                        tool_use("Grep", serde_json::json!({"pattern": "leak"})),
-                        tool_use("Read", serde_json::json!({"file_path": "a.rs"})),
-                        tool_use("Read", serde_json::json!({"file_path": "b.rs"})),
-                        ContentBlock::Text {
-                            text: "found it".to_string(),
-                        },
-                    ],
-                },
-            ],
-        );
-        let record = record_of(&session, "scout");
-        assert_eq!(
-            texts(&record),
-            vec![
-                "find the leak",
-                "looking",
-                "⏺ Searched for 1 pattern, read 2 files",
-                "found it"
-            ],
-            "three calls, one row, between the prose they happened between"
-        );
-        assert_eq!(
-            record[2].kind,
-            PostKind::Process,
-            "the fold is work, not somebody speaking"
-        );
-        assert_eq!(record[2].from, "scout");
-    }
-
-    /// A tool call the console does not collapse ends the run, here too — and
-    /// keeps its own call line, because that is the only row that will ever
-    /// name it.
-    #[test]
-    fn a_standalone_call_closes_the_fold_the_way_the_console_closes_it() {
-        let session = test_session();
-        seed_agent(
-            &session,
-            "scout",
-            vec![
-                from_user("fix it"),
-                Message {
-                    role: crate::api::types::Role::Assistant,
-                    content: vec![
-                        tool_use("Read", serde_json::json!({"file_path": "a.rs"})),
-                        tool_use("Write", serde_json::json!({"file_path": "a.rs"})),
-                        tool_use("Read", serde_json::json!({"file_path": "b.rs"})),
-                    ],
-                },
-            ],
-        );
-        assert_eq!(
-            texts(&record_of(&session, "scout")),
-            vec![
-                "fix it".to_string(),
-                "⏺ Read 1 file".to_string(),
-                tool_call_line("Write", &serde_json::json!({"file_path": "a.rs"})),
-                "⏺ Read 1 file".to_string(),
-            ],
-            "the write broke the run and printed itself"
-        );
-    }
-
-    /// The live states the zoom hangs under the record: what is claimed, what
-    /// is queued, what is streaming — each under the sender it came from, which
-    /// is the part the pair view could filter away and this one cannot.
-    #[test]
-    fn the_zooms_live_tail_keeps_the_sender_of_everything_in_flight() {
-        let session = test_session();
-        seed_agent(&session, "scout", vec![from_user("start"), assistant("ok")]);
-        let (history, stamps, ..) = session.agents.view_of("scout").expect("the instance");
-        let posts = zoom_posts(
-            &history,
-            &stamps,
-            &[(crate::channels::MAIN_NAME.to_string(), "keep going".into())],
-            &[crate::agents::LiveBlock::Text("almost".into())],
-            &[(USER_NAME.to_string(), "and then stop".into())],
-            "scout",
-        );
-        let tail: Vec<(&str, bool, PostKind)> = posts[2..]
-            .iter()
-            .map(|p| (p.from.as_str(), p.you, p.kind))
-            .collect();
-        assert_eq!(
-            tail,
-            vec![
-                // Claimed by the running turn: main's instruction is main's,
-                // and is never drawn as a bubble the user wrote (D64/D99).
-                (crate::channels::MAIN_NAME, false, PostKind::Said),
-                (USER_NAME, true, PostKind::Queued),
-                ("scout", false, PostKind::Typing),
-            ]
-        );
-    }
-
-    /// The run whoever started it: the pair view showed only the user's own
-    /// stream, and a view of the agent's whole life must show the stream it is
-    /// producing for anybody.
-    #[test]
-    fn the_zoom_shows_a_run_it_did_not_start() {
-        let session = test_session();
-        seed_agent(&session, "scout", vec![Message::user_text("audit")]);
-        let (history, stamps, ..) = session.agents.view_of("scout").expect("the instance");
-        let posts = zoom_posts(
-            &history,
-            &stamps,
-            &[],
-            &[crate::agents::LiveBlock::Tool("⏺ Read(a.rs)".into())],
-            &[],
-            "scout",
-        );
-        assert_eq!(
-            texts(&posts),
-            vec!["audit", "⏺ Read(a.rs)", ""],
-            "a live step is one row — the stream carries the line, not the call"
-        );
-        assert_eq!(posts[2].kind, PostKind::Typing, "a reply is still owed");
-    }
-
-    /// A room's log as posts: what was said, the roster changes as lines
-    /// nobody said, and whose rows are the reader's own. `channel_posts` is the
-    /// one extraction, read by the room zoom (D105) and by the background
-    /// dialog's room detail (D107) alike.
-    ///
-    /// The `you` half was inherited for D108 from the perspective projection's
-    /// room-lane test, which went with the observation page: the claim is
-    /// `channel_posts`' and belongs beside its other assertions.
-    #[test]
-    fn a_rooms_log_reads_as_messages_with_membership_changes_as_notes() {
-        let session = test_session();
-        seed_room(&session, "build", &["scout"]);
-        session
-            .channels
-            .post("scout", "build", "starting")
-            .expect("posted");
-        session.channels.invite("build", "coder").expect("joined");
-        session.channels.kick("build", "scout").expect("left");
-
-        let posts = channel_posts(&session.channels.log_of("build"), USER_NAME);
-        let said: Vec<&Post> = posts
-            .iter()
-            .filter(|p| matches!(p.kind, PostKind::Said | PostKind::Note))
-            .collect();
-        assert_eq!(said[0].kind, PostKind::Said);
-        assert_eq!(said[0].text, "starting");
-        assert_eq!(said[1].kind, PostKind::Note, "{:?}", said[1]);
-        assert!(
-            said[1].text.starts_with("· coder joined ·"),
-            "{:?}",
-            said[1]
-        );
-        assert_eq!(said[2].kind, PostKind::Note);
-        assert!(said[2].text.starts_with("· scout left ·"), "{:?}", said[2]);
-
-        assert!(!said[0].you, "the user did not say it");
-        let mine = channel_posts(&session.channels.log_of("build"), "scout");
-        assert!(
-            mine[0].you,
-            "and the same line is the reader's own when the reader is scout"
-        );
-    }
 
     /// A name reaches the person whatever case it is written in, and a longer
     /// word that merely starts with it does not (D99). The literal-`@user` test

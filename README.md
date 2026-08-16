@@ -174,9 +174,8 @@ bingo starts even with no credentials: the welcome card carries onboarding (`/pr
 | `Esc` | close the topmost dialog/menu/panel first / interrupt while busy / on double-press: clear the input, or open Rewind when it is empty |
 | `Ctrl+C` | interrupt while busy / clear text / exit on two presses with empty input |
 | `Ctrl+T` | toggle the task area |
-| `Shift+↑` / `Shift+↓` | open the agent tree and pick a row (`Enter` views it, `k` stops it) |
+| `↓` (at history end) | onto the conversation rows (`Enter` opens · `k` stops · `↑`/`Esc` back) |
 | `Enter` (viewing) | send the draft to the agent on screen; `Esc` stops its run, then returns |
-| `Ctrl+Shift+O` | agent tree: hang a three-line message preview off each row |
 | `Ctrl+O` | open the transcript view: the whole session with every tool output, on its own screen (`ctrl+e` collapse · `/` search · `o` open the image in view · `q` close) |
 | `Ctrl+G` | compose the draft in `$VISUAL`/`$EDITOR` (or the readline chord `Ctrl+X Ctrl+E`); a non-zero exit keeps the draft |
 | `Ctrl+P` / `Ctrl+N` | prompt history — the same keys as `↑`/`↓`, including pulling a queued message back |
@@ -550,55 +549,44 @@ are written into the room as dim `· user joined · 14:32` lines that every memb
 sees. `/join #name` makes you a member without saying anything; `/leave #name` is
 the counterpart, and a room you leave stays readable.
 
-**The status layer** is what says who is working — and, since D115, what has
-been said while you were not looking. `Ctrl+T` toggles the task area and
-nothing else; the tree's door is `Shift+↑/↓`. The tree is `@main`, one row per
-instance, then the rooms you are a member of: `@scout: reading src/lib.rs… ·
-12 tool uses · 8.3k tokens` while it runs, `Idle for 14s` while it waits,
-`[stopped]` once it is stopped, `#dev-team: 3 members` for a room — names in
-their own colours, rebuilt from the registry every frame. Every row wears its
-conversation's **badge**: unread is a bare dot (`•`), words at *you* — a room
-post naming `@user` — are the count in the accent (`•3`). A room post that
-names you also leaves one `⚑ #dev-team @qa: <excerpt>` line in the flow —
-the one line a room gets, one per mention until you read the room — and an
-agent **waiting on your permission** turns its row to `waiting on you
-(permission)` in the accent, with its pill flagged, until the dialog is
-answered. `Shift+↑/↓` picks a
-row, `Enter` **views** it (an instance's conversation, or the room's log),
-`k` stops a selected instance, `Ctrl+Shift+O` hangs a three-line preview of
-each instance's conversation off its row, and `Esc` clears the cursor and then
-closes the panel. With the tree closed and anybody to show, one footer line
-names them: `@main @scout •2 #dev-team •5 · shift + ↓ to expand` — bright
-where someone is running or something is unread, dim where all is read and
-resting, the accent count where you were named. Entering a conversation reads
-it, and reading clears its badge. The task panel names an owner who is still
-here (` (@scout)`, in their colour) and what a task is waiting on
-(`› blocked by #3`) — display only, nothing assigns or claims.
+**The conversation rows** are what say who is working — and, since D115's
+badges, what has been said while you were not looking. They line up under the
+composer, constant once anybody exists: `● main` first — filled while main
+works — then every instance (`● @scout: reading src/lib.rs… · 12 tool uses ·
+8.3k tokens` while it runs, `Idle for 14s`, `[stopped]`), then the rooms you
+are in (`#dev-team: 3 members`), names in their own colours, at most three
+rows with the cursor scrolling the window (`↓ 2 more` on the edge). Every row
+wears its conversation's **badge**: unread is a bare dot (`•`), words at *you*
+— a room post naming `@user` — are the count in the accent (`•3`) and ring
+once per mention until you read the room; an agent **waiting on your
+permission** turns its row to `waiting on you (permission)` in the accent.
+There is no key to learn: `↓` at the end of your prompt history drops onto
+the rows, `↓/↑` walk them, `Enter` opens the row's conversation as the page
+on screen, `k` stops a selected running instance, `↑` off the top or `Esc`
+returns to the draft, and any letter just keeps typing. Entering a
+conversation reads it, and reading clears its badge. The task panel
+(`Ctrl+T`) names an owner who is still here (` (@scout)`, in their colour)
+and what a task is waiting on (`› blocked by #3`) — display only, nothing
+assigns or claims.
 
-**The zoomed view** puts one agent's conversation on the screen for as long as
-you want it there. `Enter` on a tree row — or `f` in the `Ctrl+B` dialog — swaps to
-`Viewing @scout · esc to return` over that agent's **whole record**: the task it
-was given, main's instructions, your own messages, its work folded the way
-`@main`'s is, its answers, and whatever it is streaming right now. The composer
-stays live and addresses the agent in its own colour: what you type reaches its
-inbox under your name and appears on the next frame, and a `/` or `!` line is a
-message rather than a command. `Esc` aborts a running turn first and returns on
-the next press; `Shift+Tab` cycles *that agent's* permission mode; `Shift+↑/↓`
-walks the roster and the view follows. Leaving puts the transcript back exactly
-where it was — nothing was spliced into it and nothing reprints.
-
-**The background dialog** is `Ctrl+B` with nothing running in the foreground:
-one modal over everything working in the background, in three sections. **Agents**
-is the roster and what each one is doing, with `(3 unread)` where its conversation
-has moved since you read it — in the accent where it said your name. **Shells** is
-the background commands, each with its status. **Rooms** is every room with its
-members and its message count, marked `you're not in` where you are not a member.
-`↑/↓` selects across all three, `Enter` opens a detail, `f` foregrounds an agent or
-a room into the zoomed view, `x` stops a running agent, `←`/`Esc` closes. Rows are
-ordered running-first and then by what moved last, and the cursor follows its row
-rather than a position. The team is not a conversation — you cannot say anything to
-it — so this is where the organization is read; the always-on version of the same
-roster is the agent tree, which leads with `@main`.
+**The pages** put any conversation on the screen for as long as you want it
+there — drawn by the very pipeline `@main` is drawn by, flushed into the
+terminal's own scrollback as it settles. `Enter` on a row — or `f` in the
+`Ctrl+B` dialog — turns the page: `── @scout ──`, then that agent's **whole
+record** in order — the task it was given, main's instructions, your own
+messages, its work folded the way `@main`'s is, its answers, and whatever it
+is streaming right now. Switching banks the page you leave into scrollback
+and starts the next at the top; coming home reprints a recent tail of main's.
+The composer stays live and addresses the agent in its own colour: what you
+type reaches its inbox under your name and appears as the queued message it
+is, and a `/` or `!` line is a message rather than a command. A **room's page
+is speech only** — what members sent to the room, each post under its
+sender's name; typing posts to the room and joins you first. `Esc` stops a
+running subject first and comes home on the next press (main's own turn is
+out of its reach; `Ctrl+C` keeps the override); `Shift+Tab` cycles *that
+agent's* permission mode and the footer badge follows it. A page closes
+itself when its subject leaves the registry; a *finished* agent's page stays,
+because reading it is the point.
 
 **What the transcript shows of a life it is not living** is four tiers and no
 more. A **dispatch** is `◉ @scout: fix the parser`, carrying the last three
@@ -619,7 +607,7 @@ the flood the digest debounce exists to prevent.
 
 **One walk decides who said what**, because the sender is not a field: an
 absorbed inbox arrives as one flat prompt and only its literal markers survive
-it. The zoomed view keeps every counterpart that walk finds; the unread count
+it. An agent's page keeps every counterpart that walk finds; the unread count
 keeps exactly one, the pair of you and the agent. So the task an instance was
 created with, the main agent's instructions to it, room relays, mail from other
 agents and the chases for its silence are all somebody else's conversation and
@@ -648,7 +636,7 @@ face. Main has a reserved portrait of its own that no teammate can be dealt or
 pin, so the console looks the same in every session. One known degradation: a
 terminal that purges its image store (a resize does) gets the faces still on
 screen redrawn, but rows already in scrollback keep blank columns where the
-portrait was. In the zoomed view the sender's name also heads each run of
+portrait was. On a page the sender's name also heads each run of
 messages — with more than two speakers in a room, the name is not decoration.
 
 ## Skills

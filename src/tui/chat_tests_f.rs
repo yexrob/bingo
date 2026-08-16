@@ -411,6 +411,46 @@ fn a_burst_of_room_mail_wakes_once_after_the_quiet_window() {
     );
 }
 
+/// v6 (D118): a room line naming nobody is penned, not mailed — it keeps the
+/// frame loop ticking toward the age pump but opens no quiet window; the
+/// mention releases the pen and only then does the debounce clock start.
+#[test]
+fn an_unnamed_room_line_waits_in_the_pen_and_release_starts_the_clock() {
+    let mut chat = test_chat();
+    chat.session
+        .channels
+        .create(
+            "crew",
+            vec![crate::channels::MAIN_NAME.into(), "scout".into()],
+            crate::channels::ChannelMode::Free,
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+    let _ = chat.session.channels.post("scout", "crew", "fyi: started");
+    assert!(!chat.session.channels.has_main_mail(), "penned, not mailed");
+    assert!(
+        chat.needs_tick(),
+        "a pen holds the frame loop open for the age pump"
+    );
+    chat.tick += super::chat_tail::MAIL_QUIET_TICKS + 1;
+    assert!(!chat.digest_mail(), "no quiet window opens on penned mail");
+    assert!(chat.mail_wake.is_none(), "the clock only starts at release");
+
+    let _ = chat.session.channels.post("scout", "crew", "@main look");
+    assert!(
+        chat.session.channels.has_main_mail(),
+        "the mention released the pen"
+    );
+    assert!(
+        !chat.digest_mail(),
+        "released mail still waits out the ordinary window"
+    );
+    chat.tick += super::chat_tail::MAIL_QUIET_TICKS;
+    assert!(
+        chat.digest_mail(),
+        "then digests once, backlog and mention together"
+    );
+}
+
 /// A room that never stops talking would restart the window forever. The
 /// deadline is the floor under that: the digest runs on whatever has arrived.
 #[test]
@@ -1420,13 +1460,13 @@ fn a_message_from_an_agent_writes_no_line_and_counts_as_mail() {
     );
 }
 
-/// The whitelist's question tier (D116): a room post that names the user is
-/// the one thing a room may put in the flow — one `⚑` line per mention
-/// turn-on, stamped, ringing D79. Further mentions wait behind the lit badge
-/// until the room is read; reading re-arms the line.
+/// A room post naming the user rings once per mention turn-on (D116's edge
+/// detector under v6's ruling): the roster's accent badge is the message and
+/// the bell is the interrupt — no flow line. Further mentions wait behind the
+/// lit badge; reading the room re-arms it; ordinary posts never ring.
 #[test]
-fn a_room_post_naming_the_user_leaves_one_flag_line() {
-    let mut chat = test_chat();
+fn a_room_post_naming_the_user_rings_once_and_writes_nothing() {
+    let mut chat = chat_with_bell();
     seed_agent(&chat, "scout");
     chat.session
         .channels
@@ -1442,19 +1482,25 @@ fn a_room_post_naming_the_user_leaves_one_flag_line() {
         }
     };
     settle(&mut chat);
+    let _ = emitted(&mut chat);
+    let before = main_rows(&mut chat);
 
     chat.session
         .channels
         .post("scout", "dev-team", "@user should I deploy with --force?")
         .expect("posted");
     settle(&mut chat);
-    let flags = |chat: &mut Chat| {
-        main_rows(chat)
-            .iter()
-            .filter(|r| r.contains("⚑ #dev-team @scout:"))
-            .count()
-    };
-    assert_eq!(flags(&mut chat), 1, "{:?}", main_rows(&mut chat));
+    assert!(
+        emitted(&mut chat).contains('\x07'),
+        "the mention turn-on rings"
+    );
+    assert_eq!(
+        main_rows(&mut chat),
+        before,
+        "and writes nothing into the flow (v6: the badge is the message)"
+    );
+    let badge = chat.badge_of(&crate::tui::buffer::BufferId::Channel("dev-team".into()));
+    assert!(badge.1, "the roster badge wears the mention accent");
 
     // A second mention behind the same lit badge is the same event.
     chat.session
@@ -1462,7 +1508,10 @@ fn a_room_post_naming_the_user_leaves_one_flag_line() {
         .post("scout", "dev-team", "@user still waiting")
         .expect("posted");
     settle(&mut chat);
-    assert_eq!(flags(&mut chat), 1, "one turn-on, one line");
+    assert!(
+        !emitted(&mut chat).contains('\x07'),
+        "one turn-on, one ring"
+    );
 
     // Reading the room re-arms it.
     chat.enter_zoom(crate::tui::zoom::ZoomTarget::Room("dev-team".to_string()));
@@ -1473,19 +1522,21 @@ fn a_room_post_naming_the_user_leaves_one_flag_line() {
         .post("scout", "dev-team", "@user it shipped")
         .expect("posted");
     settle(&mut chat);
-    assert_eq!(
-        flags(&mut chat),
-        2,
-        "a fresh mention after a read flags again"
+    assert!(
+        emitted(&mut chat).contains('\x07'),
+        "a fresh mention after a read rings again"
     );
 
-    // An ordinary post never does.
+    // An ordinary post never rings.
     chat.session
         .channels
         .post("scout", "dev-team", "pushing the branch now")
         .expect("posted");
     settle(&mut chat);
-    assert_eq!(flags(&mut chat), 2, "{:?}", main_rows(&mut chat));
+    assert!(
+        !emitted(&mut chat).contains('\x07'),
+        "unnamed posts are quiet"
+    );
 }
 
 /// The other half of the gate: a run main did not dispatch — a room post or a

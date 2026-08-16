@@ -4981,3 +4981,297 @@ README/zh, guide.md. Tests:
 `a_room_post_naming_the_user_leaves_one_flag_line` (once per turn-on,
 re-armed by reading, ordinary posts never),
 `a_pending_subagent_ask_marks_the_row_waiting`. 1480 + 13 green.
+
+### D117. The wake gate — delivery and waking come apart
+
+v6's first engine batch (design: notes/design/conversation-model-v6.md, the
+@-mention system the user ruled). The old room contract woke every idle
+member on every post — one "Hi" was N model calls — and v5 explicitly left
+member-side debounce unbuilt. The @ decides now: delivery is untouched
+(every member's inbox still receives every line, in total order, budgets
+and serial checks byte-identical), but *waking* is earned.
+
+- **Mentions resolve at commit.** `channels::post` scans the text with
+  `mention_tokens` — same `part_of_a_word` boundaries as `names`, one
+  predicate, two readers — against the roster plus `@all` (`ALL_NAME`,
+  now reserved in `claim_name`). `PostOutcome::Sent` carries
+  `Vec<RoomDelivery { member, msg, mentioned }>` and the
+  `unknown_mentions` that resolved to nobody; the sender's tool result
+  names those, and names a mentioned member whose copy a stop dropped —
+  a needs-you-now promise silently unkept is worse than a bounce.
+- **One gate, three doors.** `inbox_wakes(entry, now)` is the single
+  predicate: Direct/FollowUp always pass; a mentioned Channel line passes;
+  unmentioned lines pass in bulk (`ROOM_UNREAD_WAKE` = 5) or on age
+  (`ROOM_UNREAD_MAX_AGE` = 120s — above main's 15s digest deadline, below
+  the 300s ack default). `flush_pending` consults it (and drains whole:
+  once woken, read everything), `finish` consults it before continuing (a
+  lone unmentioned line no longer chains runs), and `take_direct_inbox`
+  became `take_interrupting_inbox`: a mention releases *all* queued room
+  lines in order, because injecting msg #7 while #5–6 stay queued would
+  push the seen cursor past lines the context never held.
+- **A mention pulses; a batch waits.** `deposit` now signals `inbox_tx`
+  for mentioned items only, so a running member absorbs a mention at its
+  next tool boundary; unmentioned traffic never interrupts a turn. The
+  age half is enforced by one per-registry sweeper (`ensure_room_sweeper`,
+  CAS-armed on first delivery, `Weak<Session>`, 15s cadence): it re-runs
+  the boundary flush and wakes nobody whose inbox does not pass — an
+  empty inbox never wakes, so a quiet room costs one lock scan and zero
+  model calls. The user's ruling, verbatim: no new messages, no read.
+- **Prompt patched for the mechanics only.** CHANNEL_NOTE gained one
+  paragraph — named lines reach you at once, unnamed lines in batches,
+  `@` what needs someone now — so the note stops implying a timeliness
+  the engine no longer grants. The who-spoke reply doctrine itself is
+  rewritten in D119; between the two batches the machine is honest even
+  where the etiquette is dated.
+- Deliberate non-changes: a mention does not revive a Stopped member
+  (D105a's one door stands, the tool result says so instead); `@all` has
+  no rate limiter (the 50/500 budgets and the fire-alarm prompt rule in
+  D119 govern it); the sweeper's wake attribution keeps the recovery-flush
+  owner quirk (query.rs's per-round flush has always had it).
+- Prerequisite commit: the address grammar (`Address`/`parse_address`/
+  `check_target`/`rooms_allowed`) moved out of `tool/agent.rs` into
+  `tool/address.rs` (the file sat at 3936/4000), and `names` moved from
+  `tui/buffer.rs` into `channels.rs` where the mention engine lives.
+
+Docs: guide.md (channel section states the gate), tool descriptions.
+Tests: `unmentioned_room_lines_wake_in_bulk_or_on_age`,
+`mention_tokens_share_names_word_boundaries`,
+`post_resolves_mentions_against_the_roster`,
+`a_mention_interrupts_and_a_misfire_is_reported`; the accumulate/stamp
+tests updated to the gate with their v6 reasons inline. 1484 + 13 green.
+
+### D118. Main joins its own team — the pen
+
+The user's ruling closed the gap D117 left open: the wake gate governed
+every member except the one with no registry entry. `channels::post` had
+relayed every room line into `main_mail` unconditionally since D29, which
+after D117 made main the one member a room could still spam awake — and
+v5's law 5 ("perception is not presentation") said so proudly. Reversed,
+deliberately: main is a member under the same @-rules as everyone else.
+
+- **The pen.** `Inner::main_pen` holds unnamed room lines per room
+  (`MainPen { lines, first_at }`). `post` routes through
+  `pen_or_release`: a line naming main (`@main`, `@all`) releases the
+  room's pen ahead of itself — order within a room is preserved — and
+  goes straight to `main_mail`; an unnamed line pens up and bulk-releases
+  at `ROOM_UNREAD_WAKE`. The age half is `pump_main_gate(max_age)`
+  (parameterized so tests can force expiry), called from `digest_mail` on
+  the frame clock and from the query loop's main-guarded drain — so a
+  running main picks up aged lines at its own turn boundary, exactly
+  where a member absorbs its batch. `main_gate_waiting` keeps
+  `needs_tick` honest: a held pen keeps the frame loop ticking toward
+  the release; an empty pen keeps main asleep, same as an empty inbox.
+- **What was never a relay is never penned.** The frozen-budget `⚠`
+  lands directly (a runtime warning, not room speech); DM mail
+  (`deliver_to_main`, arrivals mirror, `urgent`) is byte-untouched; the
+  2s/15s digest debounce still shapes delivery — of what the gate has
+  released. Main's serial `seen` cursor keeps its old semantics (a pen
+  release is not a read; the stale bounce remains main's catch-up).
+- v5's delivery table row "room post → member deposit, debounced digest"
+  is now "room post → member deposit behind the wake gate; main_mail
+  behind the pen". The screen side of that row (badges, no flow lines)
+  is untouched until the view batches.
+
+Docs: guide.md (digest paragraph), feedback-states v1.84 (+ header
+desync v1.80→v1.84 repaired — v1.81..83 shipped without bumping it).
+Tests: `main_hears_a_room_through_the_gate` (mention releases in order,
+@all passes, bulk at five, own posts never relay),
+`an_unnamed_room_line_waits_in_the_pen_and_release_starts_the_clock`
+(no quiet window on penned mail; the clock starts at release);
+`post_fans_out…` and `post_stamps…` updated to the gate with reasons
+inline. 1486 + 13 green.
+
+### D119. The @ decides what you owe
+
+The doctrine catches up with the machine. D112's reply rule — *who spoke
+decides* — was the best available reading while every post woke every
+member: obligation had to be inferred from rank because timeliness was
+uniform. D117 made timeliness a bit the sender spends, so obligation now
+follows the same bit, and the pair of prompts is rewritten around it.
+
+- **CHANNEL_NOTE, the member half.** "Who spoke decides" is replaced by
+  "**The `@` decides what you owe**": a line naming you needs you now
+  (act or answer, in the room, this turn); `@all` keeps D112's *covered*
+  answer clause — the anti-chorus rule survives on the one broadcast form
+  left; a line naming nobody is FYI whoever wrote it — the sender who
+  wanted an answer had the `@` and chose not to spend it. The batch rule
+  says what waking on unnamed backlog means: read, and if nothing changes
+  what you are doing, end the turn without posting. D48's lesson survives
+  as the one exception — a question the batch shows still unanswered, the
+  user's especially, deserves its answer from whoever holds it. Sender
+  discipline is now explicit: `@` what needs someone *now*, leave FYI
+  unnamed, `@all` is a fire alarm. "Never answer an answer", the venue
+  rule (D67) and the DM privacy lane (D63) stand verbatim.
+- **MAIN_CHANNEL_NOTE, the new half.** v5 deferred "main's room-digest
+  narration discipline (prompt layer, extends D112) — observe D112
+  first"; this is its due date, with D118 the forcing function: main's
+  room lines arrive inside the `<messages>` envelope with nothing
+  anywhere explaining them, and the base prompt's instinct — talk to the
+  user — is exactly the narration flood v5 cut from the screen. The note
+  names main a member, states its two wake tiers, points its answers at
+  `SendMessage(to: "#room")`, forbids narrating room traffic at the user,
+  and binds it to the same sender discipline. Injected in `main.rs`
+  beside the crew note, same `agent_channels` gate, same system-block
+  reasoning (compaction never touches `Session::system`).
+- **SUBAGENT_NOTE untouched, deliberately**: nothing in it is about
+  rooms, and its one adjacent claim — background tasks do not wake you —
+  stays true: a room wake is a delivery, not a background task.
+- Anchor churn: the retired `` `user` or `main` addressed the room ``
+  assert is replaced by "The `@` decides what you owe" / "one *covered*
+  answer" / "still unanswered" / "fire alarm", plus the MAIN_CHANNEL_NOTE
+  set ("needs you now", "Do not narrate room traffic",
+  `SendMessage(to: "#room")`, "fire alarm"). Two anchor phrases were
+  caught straddling a hard line break while writing this batch — the
+  exact failure the anchor tests exist for — and rewrapped.
+- Known limit: the MAIN_CHANNEL_NOTE injection point lives in `main.rs`'s
+  binary assembly, which no unit test exercises (the crew note has the
+  same shape); the anchor tests pin the words, the gate is one `if` beside
+  a proven one.
+
+Docs: guide.md (doctrine paragraph rewritten, main's half added),
+SendMessage room description states the send-side discipline.
+Tests: anchor set reworked as above. 1486 + 13 green.
+
+### D120. An agent's page is main's page
+
+The v6 headline, and the batch the wake gate was built for. The user's
+ruling, verbatim: enter an agent and it is *exactly like main* — same
+rendering, same conversation logic; main is just a slightly specialized
+agent. v4/v5's answer was the alt-screen zoom: a second renderer over
+flat post rows, no scrollback, no trace. Retired whole.
+
+- **One pipeline.** `conv.rs` builds an away page's messages from the
+  domain — `perspective::walk` for attribution (the same single walk the
+  pair lane uses), `group_ready_tool` (extracted from the live ToolReady
+  path) for collapse groups, so an agent's settled record folds exactly
+  the way the console folds its own work. The build swaps the page's
+  messages into `Chat::messages` for the duration of one `build_rows`
+  call: main's fields always describe main, main's events land in main's
+  store while any page is up, and the render/flush/scroll/click layers
+  needed no changes at all — the doc and its cursors simply describe
+  whichever page is active. A `speaker` field on `UiMessage` carries what
+  the marker walk cannot (a room's members); `None` falls back to
+  `speaker_of`, so main's flow is byte-identical.
+- **Switching is a page turn.** `term::page_break()` returns from
+  fix/page-switch@cf22b59 (D98's primitive, ported with its tests): rows
+  above the viewport bank into the terminal's own scrollback, the
+  viewport is erased, the next page starts at the top. Coming home parks
+  the flush cursor at the end and `rehydrate`s a windowful — the resize
+  machinery, D27's accepted duplicate. Fullscreen just swaps the doc.
+- **The page is live.** A fingerprint over the domain (history length,
+  live block sizes, in-flight, pending, state) rebuilds the page on
+  change; the streaming run rides after the settled messages as a
+  volatile block (prose as markdown, one dim row per tool call), never
+  flushed. The stable prefix is a pure function of append-only history,
+  which is what lets the flush cursor trust it.
+- **Same conversation logic.** Typing on a page is prose to its subject
+  through the `@name` grammar's own delivery (a `/` line is a message, a
+  stopped agent resumes, a room seats you before it speaks). Esc grew
+  two rungs on the one ladder: `AwayStop` (stop the page's run — main's
+  turn is out of reach while a page is up; ctrl+c keeps the override)
+  and `AwayHome` last. shift+tab cycles the viewed agent's mode and the
+  footer badge follows it. The room page is **speech only** — the v6
+  ruling — membership lines stay in the log and off the page.
+- **Deleted:** the zoom modal loop and its keys, `zoom_posts`/
+  `record_posts`/`channel_posts`/`settled_post_rows`/`sender_runs` (the
+  whole second renderer), `PostKind::{Queued,Typing}`, the
+  `open_zoom`/`close_zoom` signal fields, `zoom_chrome`/`zoom_footer`.
+  Net −1,200 lines while gaining full-parity pages.
+- Known limits, recorded honestly: history-derived Done rows carry no
+  per-call duration or token counts (the record never had them — D99's
+  limit, unchanged); the live tail is flat rows rather than the activity
+  tree (the registry publishes strings); ctrl+o's pager follows the
+  active page via `build_rows` but its fold toggles act on main's
+  messages while away. guide.md's zoom/keys sections are rewritten in
+  the next batch together with the roster's key changes — the two
+  batches rewrite the same sections and land adjacent.
+
+Docs: this record (guide/feedback-states fold into D121's sync).
+Tests: the zoom's modal suite retired with the modal; the page suite
+replaces it (`a_page_is_the_transcripts_own_pipeline`,
+`a_room_page_is_speech_only`,
+`typing_on_a_page_reaches_the_agent_as_the_user`,
+`a_message_to_a_stopped_agent_resumes_it`,
+`a_room_page_joins_before_it_speaks`,
+`esc_stops_the_run_first_and_comes_home_second`,
+`shift_tab_cycles_the_viewed_agents_mode_and_not_mains`,
+`entering_reads_the_conversation_and_leaving_gives_it_back`,
+`the_page_closes_when_its_subject_is_gone_and_stays_when_done`,
+`a_switch_owes_a_page_turn_and_home_reprints_the_tail`,
+`enter_on_a_tree_row_switches_comes_home_or_collapses`), plus
+`page_break_banks_the_page_and_erases_the_tail` in term.rs.
+1463 + 13 green.
+
+### D121. The roster — the rows under the composer
+
+The v6 view's second half, and the user's screenshot made literal: the
+conversations line up under the composer the way Claude Code's own agent
+list does — `● main` first, then every agent and every room you are in,
+at most three rows with the cursor scrolling the window — and there is
+no key to learn.
+
+- **`roster.rs`.** Rows are resolved from the stores each frame (the
+  registry for state, `status_label` for the wording, `badge_of` for the
+  two tiers, `asking_instance` for the waiting-on-you accent) and drawn
+  flat: presence dot (`●` running / `○` idle / `·` stopped), the name in
+  its identity colour (bold where the page is open or the cursor is),
+  the badge, the status copy, `↑/↓ N more` on the window's edges. Zero
+  conversations, zero furniture.
+- **The fallthrough is the door** (the user's ruling: no new chord).
+  `↓` in the composer walks the draft, then history, and at history's
+  end falls onto the rows — CC's own three-level fallthrough. `↓/↑`
+  move, `↑` off the top returns to the draft, `Enter` opens the row's
+  page (main's row comes home), `Esc` drops the cursor, `k` stops a
+  selected running instance through the one stop path, and any printable
+  character gives the keyboard straight back to the draft (CC's
+  type-to-exit). The cursor is one `EscLayer::Roster` rung — the rows
+  themselves are furniture and never close.
+- **Retired with it:** the agent tree (shift+↑/↓, the `-1..hide` index
+  space, the panel), the footer pills, ctrl+shift+o's per-row preview,
+  and — the user's second ruling — D116's `⚑` flow line: a mention now
+  lights the badge in constant view and rings once per turn-on
+  (`observe_badges` keeps the edge detector and the bell, drops the
+  line), re-armed by reading the room, silent for the room you are
+  standing in. `tree.rs` shrinks to the shared helpers every surface
+  reads.
+- ctrl+t loses its last coupling (the tree no longer yields a slot);
+  keys.rs's panel rows say the new grammar; guide.md's status-layer,
+  zoom and quick-start sections are rewritten for pages + roster (the
+  D120 sync folded in here, as recorded there).
+
+Docs: guide.md (quick start, conversation rows, pages, dialog, team
+paragraphs), feedback-states v1.85 (+ rows: room relays lose their one
+exception, page send/round-trip, lifecycle surfaces). Tests:
+`the_rows_lead_with_main_and_wear_the_status_copy`,
+`the_window_is_three_rows_and_follows_the_cursor`,
+`down_falls_in_up_comes_back_and_typing_leaves`,
+`k_stops_only_the_running_row_under_the_cursor`,
+`enter_on_a_roster_row_switches_and_main_comes_home`,
+`a_room_post_naming_the_user_rings_once_and_writes_nothing`; the tree's
+suite reduces to the helpers'. 1453 + 13 green.
+
+### D122. The v6 file, and the shelf cleared
+
+The documentation batch the user authorized in the same breath as the
+refactor: "过时的 Decision, 也可以删掉" — outdated decisions may go.
+
+- **`notes/design/conversation-model-v6.md` is the authority**: the model
+  (user / main / rooms), the laws (delivery ≠ waking; main is a member;
+  the @ decides what you owe; a page is main's page; the roster; @user is
+  a badge), the byte-contract inventory (v6 added none), the per-batch
+  global rules migrated verbatim from the interaction blueprint (their
+  only other home), the batch table with commit hashes, and the
+  deliberate non-builds.
+- **Deleted**: conversation-model-v2/v3/v4/v5.md and
+  interaction-blueprint.md. Each declared its successor in prose; none
+  had a machine-readable header; all of it is git history and D-records.
+  `notes/research.md` stays append-only — the records are the history the
+  design files never were.
+- **Synced**: AGENTS.md's decision-record range ("D1-D75" had been stale
+  since August 12) now points at the v6 file for the model and the global
+  rules; both READMEs' status-layer and zoomed-view chapters rewritten
+  for the roster and the pages (keys tables included); the one dead link
+  in feedback-states' v1.81 changelog entry annotated rather than
+  rewritten — a changelog is history too.
+
+Docs: this record. Tests: unchanged — 1453 + 13 green.

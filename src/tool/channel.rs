@@ -17,9 +17,12 @@
 //! `Channel`: room management (create/invite/kick/list), available to the
 //! main agent and to direct sub-agents alike, because a team that can only be
 //! grouped from the top is not a team that can organize itself.
-//! Delivery wake-up: messages land in every member's inbox; idle members are woken
-//! immediately, busy members get batched injection at turn boundaries; the main
-//! agent's copy lands in main_mail and is digested on a debounce (D98).
+//! Delivery wake-up is @-gated (v6): messages land in every member's inbox,
+//! but only a mention (`@name`, `@all`) wakes its holder at once — idle
+//! members immediately, running members at their next tool boundary.
+//! Unmentioned lines wait for bulk (ROOM_UNREAD_WAKE) or age
+//! (ROOM_UNREAD_MAX_AGE, enforced by a per-session sweep); the main agent's
+//! copy lands in main_mail and is digested on a debounce (D98).
 //! Silence = not sending.
 
 use std::sync::Arc;
@@ -72,20 +75,48 @@ fn refresh_channel_row(session: &Arc<Session>, name: &str) {
 
 /// This session's member name in a channel: sub-agents = instance name, main session = main.
 fn sender_of(session: &Arc<Session>) -> String {
-    session
-        .instance
-        .clone()
-        .unwrap_or_else(|| MAIN_NAME.to_string())
+    crate::tool::address::sender_of(session)
 }
 
 /// Post outcome (the two exit paths of deliver_post).
 pub(crate) enum PostDelivery {
     Sent {
         seq: u64,
+        /// `@tokens` that resolved to nobody in the room: told to the sender
+        /// so a typo is caught in the sending turn.
+        unknown_mentions: Vec<String>,
+        /// Members a mention named whose copy could not be delivered (stopped):
+        /// the needs-you-now promise silently not kept unless the sender hears it.
+        undelivered_mentions: Vec<String>,
     },
     Stale {
         missed: Vec<crate::channels::ChannelMessage>,
     },
+}
+
+/// Arm the one background sweep that enforces the age half of the wake gate
+/// (v6). It never wakes an empty inbox — `flush_pending` skips those — so a
+/// quiet registry costs one lock scan per tick and no model calls; it dies
+/// with the session (the weak upgrade fails) rather than by bookkeeping.
+fn ensure_room_sweeper(session: &Arc<Session>, watch: &Arc<crate::watch::WatchRegistry>) {
+    if tokio::runtime::Handle::try_current().is_err() {
+        // No runtime here (some tests post without one); the next post retries.
+        return;
+    }
+    if !session.agents.try_arm_room_sweeper() {
+        return;
+    }
+    let session = Arc::downgrade(session);
+    let watch = watch.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(crate::channels::ROOM_WAKE_SWEEP).await;
+            let Some(session) = session.upgrade() else {
+                break;
+            };
+            flush_agent_inbox(&session, &watch);
+        }
+    });
 }
 
 /// Post + delivery wake-up + display row refresh — `SendMessage(to: "#room")`
@@ -99,23 +130,41 @@ pub(crate) fn deliver_post(
     text: &str,
 ) -> Result<PostDelivery, String> {
     match session.channels.post(from, channel, text)? {
-        PostOutcome::Sent { seq, deliveries } => {
+        PostOutcome::Sent {
+            seq,
+            deliveries,
+            unknown_mentions,
+        } => {
             refresh_channel_row(session, channel);
-            // Deposit first, then claim idle members in one pass. Running members observe the
-            // inbox signal and absorb everything waiting at their next tool round.
-            for (member, msg) in deliveries {
-                session.agents.deposit(
-                    &member,
+            // Deposit first, then claim wakeable members in one pass. A
+            // mentioned deposit pulses the inbox signal so a running member
+            // absorbs it at its next tool round; unmentioned lines wait for
+            // the batch gate.
+            let arrived_at = std::time::Instant::now();
+            let mut undelivered_mentions = Vec::new();
+            for delivery in deliveries {
+                let accepted = session.agents.deposit(
+                    &delivery.member,
                     crate::agents::InboxItem::Channel {
                         channel: channel.to_string(),
-                        from: msg.from.clone(),
-                        text: msg.text.clone(),
-                        seq: msg.seq,
+                        from: delivery.msg.from.clone(),
+                        text: delivery.msg.text.clone(),
+                        seq: delivery.msg.seq,
+                        mentioned: delivery.mentioned,
+                        arrived_at,
                     },
                 );
+                if !accepted && delivery.mentioned {
+                    undelivered_mentions.push(delivery.member);
+                }
             }
+            ensure_room_sweeper(session, watch);
             flush_agent_inbox(session, watch);
-            Ok(PostDelivery::Sent { seq })
+            Ok(PostDelivery::Sent {
+                seq,
+                unknown_mentions,
+                undelivered_mentions,
+            })
         }
         PostOutcome::Stale { missed } => Ok(PostDelivery::Stale { missed }),
     }
@@ -468,11 +517,13 @@ mod tests {
             )
             .await
             .unwrap();
-        // Speaking from a's (Running) perspective: stamped a; b is Running → accumulates in its inbox.
+        // Speaking from a's (Running) perspective: stamped a; b is Running →
+        // accumulates in its inbox. The post names @b so the line passes the
+        // v6 wake gate and b's finish turns it into a continuation.
         let post_a = crate::tool::agent::SendMessageTool::new(sub_session(&main, "a"));
         let out = post_a
             .call(
-                serde_json::json!({"to": "#t", "message": "hello everyone"}),
+                serde_json::json!({"to": "#t", "message": "@b hello"}),
                 &ctx(&main),
             )
             .await
@@ -484,9 +535,9 @@ mod tests {
             .unwrap_or_else(|| panic!("b's inbox should have a message"))
             .items;
         assert!(
-            matches!(&items[..], [crate::agents::InboxItem::Channel { from, text, .. }]
-                if from == "a" && text == "hello everyone"),
-            "stamped as a"
+            matches!(&items[..], [crate::agents::InboxItem::Channel { from, text, mentioned: true, .. }]
+                if from == "a" && text == "@b hello"),
+            "stamped as a, and naming b set the needs-you-now bit"
         );
         // Main posts: stamped main; its own inbox only receives others' posts.
         let post_main = crate::tool::agent::SendMessageTool::new(main.clone());
@@ -497,9 +548,12 @@ mod tests {
             )
             .await
             .unwrap();
+        // The line named b, not main, so it waits in main's pen (v6); force
+        // the age release to read it.
+        main.channels.pump_main_gate(std::time::Duration::ZERO);
         let mail = main.channels.drain_main_mail();
         assert_eq!(mail.len(), 1, "{mail:?}");
-        assert!(mail[0].contains("a: hello everyone"));
+        assert!(mail[0].contains("a: @b hello"));
         // Non-member posts error out — refused by the addressing rules before
         // the room's own membership check is ever reached.
         let post_c = crate::tool::agent::SendMessageTool::new(sub_session(&main, "c"));
@@ -508,6 +562,113 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("not a member of #t"), "{err}");
+    }
+
+    /// The @-gate at the delivery layer (v6): a mention rides into a running
+    /// member's turn at its next tool round, unnamed traffic stays queued for
+    /// the batch clock, and mentions that reach nobody — unknown or stopped —
+    /// come back in the sender's tool result.
+    #[tokio::test]
+    async fn a_mention_interrupts_and_a_misfire_is_reported() {
+        let main = main_session();
+        for name in ["a", "b"] {
+            main.agents.insert(
+                name,
+                crate::agents::AgentKind::Hire,
+                None,
+                name.into(),
+                sub_session(&main, name),
+            );
+        }
+        let mgmt = ChannelTool::new(main.clone());
+        let _ = mgmt
+            .call(
+                serde_json::json!({"action": "create", "channel": "t", "members": ["a", "b"], "mode": "free"}),
+                &ctx(&main),
+            )
+            .await
+            .unwrap();
+        let post_a = crate::tool::agent::SendMessageTool::new(sub_session(&main, "a"));
+
+        // Unnamed: b (Running) keeps it queued past the tool boundary.
+        let _ = post_a
+            .call(
+                serde_json::json!({"to": "#t", "message": "fyi: still digging"}),
+                &ctx(&main),
+            )
+            .await
+            .unwrap();
+        assert!(
+            main.agents.take_running("b", 0).is_empty(),
+            "an unnamed line does not interrupt a running member"
+        );
+
+        // Named: the mention releases the whole backlog, in room order.
+        let _ = post_a
+            .call(
+                serde_json::json!({"to": "#t", "message": "@b your turn"}),
+                &ctx(&main),
+            )
+            .await
+            .unwrap();
+        let items = main.agents.take_running("b", 0);
+        assert_eq!(items.len(), 2, "the waiting line rides along");
+        assert!(
+            matches!(
+                &items[0],
+                crate::agents::InboxItem::Channel {
+                    seq: 1,
+                    mentioned: false,
+                    ..
+                }
+            ),
+            "room order first, so the seen cursor never skips a line"
+        );
+        assert!(matches!(
+            &items[1],
+            crate::agents::InboxItem::Channel {
+                seq: 2,
+                mentioned: true,
+                ..
+            }
+        ));
+
+        // The first delivery armed the one age sweeper for this registry.
+        assert!(
+            !main.agents.try_arm_room_sweeper(),
+            "the sweeper is armed exactly once"
+        );
+
+        // Misfires: an unknown token, then a stopped member, both named to the sender.
+        let out = post_a
+            .call(
+                serde_json::json!({"to": "#t", "message": "@ghost see above"}),
+                &ctx(&main),
+            )
+            .await
+            .unwrap();
+        assert!(
+            out.content
+                .as_str()
+                .unwrap_or_default()
+                .contains("@ghost is not in #t"),
+            "{out:?}"
+        );
+        let _ = main.agents.stop("b");
+        let out = post_a
+            .call(
+                serde_json::json!({"to": "#t", "message": "@b are you there?"}),
+                &ctx(&main),
+            )
+            .await
+            .unwrap();
+        assert!(
+            out.content
+                .as_str()
+                .unwrap_or_default()
+                .contains("@b is stopped"),
+            "{out:?}"
+        );
     }
 
     #[tokio::test]

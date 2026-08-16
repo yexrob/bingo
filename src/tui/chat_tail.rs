@@ -55,24 +55,17 @@ pub enum EscLayer {
     InfoLines,
     /// The `?` shortcut panel.
     HelpPanel,
-    /// The agent tree (D104), the second stop of the ctrl+t cycle.
-    ///
-    /// Its own layer, immediately above the task panel it cycles with, rather
-    /// than a second meaning for the
-    /// [`EscLayer::TaskPanel`] slot. The two are one *gesture* but not one
-    /// surface — different state, different dismissal, and both can be reached
-    /// from the same key — and `ORDER` is the single place that says which one
-    /// Esc closes.
-    ///
-    /// **It peels twice.** The tree with a row selected is a different state
-    /// from the tree merely open, so the first press clears the selection and
-    /// the second closes the panel — CC's own semantics for the first half
-    /// (`useBackgroundTaskNavigation.ts:166-175`: Esc leaves selection mode and
-    /// leaves the tree expanded), and D80's one-press-one-level rule for the
-    /// second.
-    AgentTree,
+    /// The roster's cursor (v6). The rows themselves are constant furniture
+    /// under the composer — what Esc takes is the selection on them, exactly
+    /// CC's escape in `selecting-agent` (`useBackgroundTaskNavigation.ts:
+    /// 166-175`): the list stays, the cursor leaves.
+    Roster,
     /// The task panel, when the user opened it themselves with ctrl+t.
     TaskPanel,
+    /// The away page's running turn (v6): Esc stops the agent on screen, the
+    /// way it interrupts main's turn at home — and only that agent's; main's
+    /// own turn is out of reach until the page comes home.
+    AwayStop,
     /// The running turn.
     Interrupt,
     /// Bash mode on an empty input. Below the interrupt, unlike every other
@@ -82,11 +75,15 @@ pub enum EscLayer {
     BashMode,
     /// A non-empty input: esc-esc clears it into history.
     ClearInput,
+    /// The away page itself (v6): the last thing Esc peels is the page,
+    /// which is CC's `exitTeammateView` — everything above it got its press
+    /// first, so leaving is deliberate.
+    AwayHome,
 }
 
 impl EscLayer {
     /// The stack, top first. The single source for Esc's priority.
-    pub const ORDER: [EscLayer; 15] = [
+    pub const ORDER: [EscLayer; 17] = [
         EscLayer::AskDialog,
         EscLayer::Menu,
         EscLayer::Rewind,
@@ -97,11 +94,13 @@ impl EscLayer {
         EscLayer::ErrorRow,
         EscLayer::InfoLines,
         EscLayer::HelpPanel,
-        EscLayer::AgentTree,
+        EscLayer::Roster,
         EscLayer::TaskPanel,
+        EscLayer::AwayStop,
         EscLayer::Interrupt,
         EscLayer::BashMode,
         EscLayer::ClearInput,
+        EscLayer::AwayHome,
     ];
 }
 
@@ -424,6 +423,7 @@ impl super::Chat {
     /// `↪` marker, rendered as a single dim line rather than a `❯` bubble.
     fn push_steered_line(&mut self, text: &str) {
         self.messages.push(UiMessage {
+            speaker: None,
             role: Role::User,
             text: format!("{}{text}", crate::steer::STEER_FLOW_PREFIX),
             at: crate::channels::now_unix(),
@@ -442,6 +442,7 @@ impl super::Chat {
     pub(crate) fn push_agent_alert(&mut self, label: &str, reason: Option<&str>) {
         let instance = label.split_whitespace().next().unwrap_or(label);
         self.messages.push(UiMessage {
+            speaker: None,
             role: Role::User,
             text: crate::tui::bufferview::agent_alert_line(instance, reason),
             at: crate::channels::now_unix(),
@@ -473,6 +474,7 @@ impl super::Chat {
     /// A user-role line the harness wrote about somebody else's life.
     fn push_flow_line(&mut self, text: String) {
         self.messages.push(UiMessage {
+            speaker: None,
             role: Role::User,
             text,
             at: crate::channels::now_unix(),
@@ -498,6 +500,14 @@ impl super::Chat {
     ///
     /// Returns whether it asked for a digest turn this frame.
     pub(crate) fn digest_mail(&mut self) -> bool {
+        // v6: room relays wait in per-room pens until a mention, bulk, or age
+        // releases them — main is a member under the same @-rules as everyone
+        // else. The age half runs on this frame clock; once released, the
+        // quiet/deadline windows below still shape delivery. DM mail was
+        // never penned.
+        self.session
+            .channels
+            .pump_main_gate(crate::channels::ROOM_UNREAD_MAX_AGE);
         // Checked before the emptiness test: the drain and the bell are separate
         // readers, and a turn already running can absorb the message before this
         // ever sees the mail that asked for the ring.
@@ -630,6 +640,7 @@ impl super::Chat {
     pub(crate) fn start_turn(&mut self, text: String, show_user: bool) {
         if show_user {
             self.messages.push(UiMessage {
+                speaker: None,
                 role: Role::User,
                 text: text.clone(),
                 at: crate::channels::now_unix(),
@@ -706,6 +717,7 @@ impl super::Chat {
     /// output shown as a tool activity; with respondToBashCommands on, the model replies afterwards.
     pub(crate) fn start_bash_turn(&mut self, command: String) {
         self.messages.push(UiMessage {
+            speaker: None,
             role: Role::User,
             text: format!("!{command}"),
             at: crate::channels::now_unix(),
@@ -781,6 +793,7 @@ impl super::Chat {
         self.thinking_buf.clear();
         self.thinking_seg_open = false;
         self.messages.push(UiMessage {
+            speaker: None,
             role: Role::Assistant,
             text: String::new(),
             at: crate::channels::now_unix(),
@@ -950,12 +963,11 @@ impl super::Chat {
         if self.rewind_key(code, modifiers) {
             return true;
         }
-        // The agent tree (D104) is the opposite of modal: it claims shift+↑/↓
-        // wherever it is, and `k` only while a row is selected. Everything else
-        // — every plain character, `k` included when nothing is selected —
-        // falls through to the composer, which is what makes a status panel
-        // safe to leave open while typing.
-        if self.agent_tree_key(code, modifiers) {
+        // The roster (v6) is the opposite of modal: it claims keys only while
+        // a row is selected, and any printable character gives the keyboard
+        // straight back to the draft (type-to-exit) — which is what makes a
+        // constant list safe to live under the composer.
+        if self.roster_key(code, modifiers) {
             return true;
         }
         // Interrupt (busy) and quit (idle) both live on Ctrl+C, judged before editing keys.
@@ -974,19 +986,6 @@ impl super::Chat {
         if !self.bash_mode && self.slash_menu_key(code, modifiers) {
             return true;
         }
-        // ctrl+shift+O toggles the tree's message preview (CC
-        // `defaultBindings.ts:48`, `app:toggleTeammatePreview`). Judged before
-        // the plain control keys because ctrl+O is the transcript view and the
-        // two must not collide; terminals without the enhanced keyboard
-        // protocol report both as 0x0F and only get the transcript.
-        if modifiers.contains(KeyModifiers::CONTROL)
-            && matches!(code, KeyCode::Char('o' | 'O'))
-            && (modifiers.contains(KeyModifiers::SHIFT) || code == KeyCode::Char('O'))
-        {
-            self.tree_preview = !self.tree_preview;
-            self.dirty = true;
-            return true;
-        }
         if modifiers.contains(KeyModifiers::CONTROL)
             && let KeyCode::Char(c) = code
         {
@@ -1000,7 +999,14 @@ impl super::Chat {
         match code {
             // Shift+Tab: cycle the permission mode (CC app:cyclePermissionMode).
             KeyCode::BackTab => {
-                self.cycle_permission_mode();
+                // On an away page, shift+tab cycles the **viewed agent's**
+                // permission mode and leaves the console's alone (the zoom's
+                // rule, which is CC's).
+                if self.away.is_some() {
+                    self.cycle_zoom_permission_mode();
+                } else {
+                    self.cycle_permission_mode();
+                }
                 true
             }
             KeyCode::Left => {
@@ -1226,11 +1232,16 @@ impl super::Chat {
                 .is_some_and(|e| e.level != crate::error::ErrorLevel::Full),
             EscLayer::InfoLines => !self.slash_info_lines.is_empty(),
             EscLayer::HelpPanel => self.help_visible,
-            EscLayer::AgentTree => self.tree.is_some(),
+            EscLayer::Roster => self.roster_selection().is_some(),
             EscLayer::TaskPanel => self.tasks_visible && !self.tasks_auto,
-            EscLayer::Interrupt => self.busy,
-            EscLayer::BashMode => self.bash_mode && self.input.is_empty(),
+            EscLayer::AwayStop => self.away.is_some() && self.zoom_is_running(),
+            // Main's turn is out of Esc's reach while a page is up (v6): the
+            // key on an agent's page must not interrupt a turn the user is
+            // not even looking at. Ctrl+C keeps the unconditional interrupt.
+            EscLayer::Interrupt => self.busy && self.away.is_none(),
+            EscLayer::BashMode => self.bash_mode && self.input.is_empty() && self.away.is_none(),
             EscLayer::ClearInput => !self.input.is_empty(),
+            EscLayer::AwayHome => self.away.is_some(),
         }
     }
 
@@ -1271,18 +1282,11 @@ impl super::Chat {
                 self.help_visible = false;
                 true
             }
-            // Selection first, then the panel: a cursor in the tree is a state
-            // the user can be in, and taking the whole panel away to get out of
-            // it would be two levels for one press.
-            EscLayer::AgentTree => {
-                if let Some(tree) = self.tree.as_mut() {
-                    if tree.selected.is_some() {
-                        tree.selected = None;
-                    } else {
-                        self.tree = None;
-                    }
-                    self.dirty = true;
-                }
+            // The roster's rows are constant furniture (v6); the one state Esc
+            // can take is the cursor on them.
+            EscLayer::Roster => {
+                self.roster_sel = None;
+                self.dirty = true;
                 true
             }
             // The tasks panel opened with ctrl+t closes with Esc (it used to have
@@ -1290,6 +1294,14 @@ impl super::Chat {
             EscLayer::TaskPanel => {
                 self.tasks_visible = false;
                 self.dirty = true;
+                true
+            }
+            // The page's own turn first, the page second — the zoom's ladder,
+            // now on the ORDER like everything else.
+            EscLayer::AwayStop => {
+                if let Some(name) = self.zoomed().map(str::to_string) {
+                    self.stop_agent(&name);
+                }
                 true
             }
             EscLayer::Interrupt => {
@@ -1301,6 +1313,10 @@ impl super::Chat {
                 true
             }
             EscLayer::ClearInput => self.esc_clear_input(now),
+            EscLayer::AwayHome => {
+                self.switch_to(None);
+                true
+            }
         }
     }
 
@@ -1469,8 +1485,6 @@ impl super::Chat {
                     self.tasks_visible = false;
                     self.tasks_auto = false;
                 } else {
-                    // The panels stay exclusive: the tree yields the slot.
-                    self.tree = None;
                     self.tasks_visible = true;
                     // Manually opened: keep the panel even when everything is done (the user explicitly wants to see it).
                     self.tasks_auto = false;
@@ -1605,7 +1619,15 @@ impl super::Chat {
                 self.update_slash_suggestions();
                 true
             }
-            None => true,
+            None => {
+                // v6: at the bottom of history, `↓` falls into the roster —
+                // CC's three-level fallthrough (cursor → history → rows), so
+                // the list needs no key of its own.
+                if down {
+                    self.roster_enter_selection();
+                }
+                true
+            }
         }
     }
 
@@ -1871,6 +1893,10 @@ impl super::Chat {
         if self.has_dynamic_rows() {
             self.dirty = true;
         }
+        // The away page follows the domain (v6): rebuilt when its conversation
+        // moved, closed when its subject left. A no-change tick costs one
+        // fingerprint.
+        self.sync_away();
         // `meter` (D87): aim the status row's token readout at the live count;
         // a repeat target is a no-op, so this costs one comparison per frame.
         let tokens = self.output_tokens;
@@ -2037,10 +2063,11 @@ impl super::Chat {
             || (self.dialog.is_some()
                 && (!self.session.agents.list().is_empty()
                     || !self.session.watch.snapshot().is_empty()))
-            // An open tree counts seconds — a running row's activity and an
+            // The roster counts seconds — a running row's activity and an
             // idle row's `Idle for 14s` both move without an event arriving —
-            // so it keeps the clock awake while anybody is on it (D104).
-            || (self.tree.is_some() && !self.session.agents.list().is_empty())
+            // so it keeps the clock awake while anybody exists to be shown
+            // (v6: the rows are constant furniture).
+            || self.roster_len() > 0
             || self.update_anim_active()
             || self.settling()
     }
@@ -2058,6 +2085,7 @@ impl super::Chat {
             // wake the clock rather than ride an event: nothing else is
             // happening, and the digest window has to be able to expire (D98).
             || self.session.channels.has_main_mail()
+            || self.session.channels.main_gate_waiting()
             || self.mail_wake.is_some()
     }
 
@@ -2365,37 +2393,21 @@ impl super::Chat {
         if print == self.badge_print {
             return;
         }
-        // A room's mention bit turning on is the whitelist's question tier
-        // (D116): somebody said words at the user, and the badge alone cannot
-        // say so loudly enough. One `⚑` line per turn-on — further mentions
-        // land behind the same lit badge until the room is read, so one event
-        // interrupts once — and none while the user is standing in the room,
-        // because the store never sets mention on the active conversation.
-        let flips: Vec<String> = print
-            .iter()
-            .filter_map(|(id, _, mention)| match id {
-                crate::tui::buffer::BufferId::Channel(name) if *mention => {
-                    let was = self.badge_print.iter().any(|(old, _, m)| old == id && *m);
-                    (!was).then(|| name.clone())
-                }
-                _ => None,
-            })
-            .collect();
-        for room in flips {
-            let post = self
-                .session
-                .channels
-                .log_of(&room)
-                .into_iter()
-                .rev()
-                .find(|m| crate::tui::buffer::names(&m.text, crate::channels::USER_NAME));
-            if let Some(post) = post {
-                self.push_flow_line(crate::tui::bufferview::mention_line(
-                    &room, &post.from, &post.text,
-                ));
-                self.notify
-                    .attention(crate::tui::notify::Attention::AgentNotice);
-            }
+        // A mention bit turning on rings once (D116's edge detector, v6's
+        // ruling on the body): the roster's accent badge is in constant view
+        // under the composer, so the bell is the interrupt and the badge is
+        // the message — no flow line. Further mentions land behind the same
+        // lit badge until the room is read, and none ring while the user is
+        // standing in the room, because the store never sets mention on the
+        // active conversation.
+        let flipped = print.iter().any(|(id, _, mention)| {
+            matches!(id, crate::tui::buffer::BufferId::Channel(_))
+                && *mention
+                && !self.badge_print.iter().any(|(old, _, m)| old == id && *m)
+        });
+        if flipped {
+            self.notify
+                .attention(crate::tui::notify::Attention::AgentNotice);
         }
         self.badge_print = print;
         self.dirty = true;
@@ -2585,6 +2597,30 @@ impl super::Chat {
             self.prev_build_width = width;
             self.reply_cache.clear();
         }
+        // The away page (v6): same pipeline, the page's own messages swapped in
+        // for the duration of this one build. `away_build` carries what the
+        // core needs to differ on — the header instead of the welcome card,
+        // the page's own settled boundary, no slash furniture.
+        if let Some(mut away) = self.away.take() {
+            std::mem::swap(&mut self.messages, &mut away.messages);
+            self.away_build = Some(crate::tui::conv::AwayBuild {
+                label: away.target.label(),
+                stable: away.stable,
+                live: matches!(away.target, crate::tui::zoom::ZoomTarget::Agent(_))
+                    .then(|| self.away_live_blocks(away.target.name()))
+                    .unwrap_or_default(),
+            });
+            self.build_rows_core(width);
+            self.away_build = None;
+            std::mem::swap(&mut self.messages, &mut away.messages);
+            self.away = Some(away);
+            return &self.doc;
+        }
+        self.build_rows_core(width);
+        &self.doc
+    }
+
+    fn build_rows_core(&mut self, width: usize) {
         let theme = self.theme.clone();
         // The transcript *is* the message store, in order (D103). Segment
         // numbering counts message positions, because those are what the reader
@@ -2599,22 +2635,46 @@ impl super::Chat {
         self.mark_base = 0;
 
         // Prefix-monotone settlement, precomputed in one pass (recursing per
-        // message inside the loop would be quadratic on the hot path).
+        // message inside the loop would be quadratic on the hot path). An away
+        // page brings its own boundary: everything derived from committed
+        // history is settled, the volatile tail (queued echoes, the live run)
+        // never is.
         let mut settled_flags: Vec<bool> = Vec::with_capacity(count);
-        let mut prefix_settled = true;
-        let settling = self.settling();
-        for i in 0..count {
-            // A message inside the `settle` blink is not final yet: its
-            // completion row is still wearing the accent, and freezing it now
-            // would print that accent into scrollback for good (D87).
-            prefix_settled =
-                prefix_settled && self.message_static_settled(i) && !(settling && i + 1 == count);
-            settled_flags.push(prefix_settled);
+        if let Some(page) = &self.away_build {
+            for i in 0..count {
+                settled_flags.push(i < page.stable);
+            }
+        } else {
+            let mut prefix_settled = true;
+            let settling = self.settling();
+            for i in 0..count {
+                // A message inside the `settle` blink is not final yet: its
+                // completion row is still wearing the accent, and freezing it now
+                // would print that accent into scrollback for good (D87).
+                prefix_settled = prefix_settled
+                    && self.message_static_settled(i)
+                    && !(settling && i + 1 == count);
+                settled_flags.push(prefix_settled);
+            }
         }
 
         let mut blocks: Vec<Block> = Vec::new();
         if skip == 0 {
-            blocks.push(Block::settled(self.welcome_el(width, &theme), true));
+            // An away page opens with its name as a rule, not the console's
+            // welcome card — the one row that says whose page this became.
+            if let Some(page) = self.away_build.clone() {
+                let color = self.identity_color(page.label.trim_start_matches(['@', '#']));
+                blocks.push(Block::settled(
+                    El::Rows(vec![crate::tui::conv::page_header(
+                        &page.label,
+                        width,
+                        color,
+                    )]),
+                    true,
+                ));
+            } else {
+                blocks.push(Block::settled(self.welcome_el(width, &theme), true));
+            }
         }
         let pal = crate::tui::avatar::Palette::new(&theme);
         // The avatar gutter (D97). The pinned table is copied out because the
@@ -2651,7 +2711,15 @@ impl super::Chat {
             // Who the last row belonged to, tracked across the whole flow so a
             // portrait is not repeated over every message in a run — and is
             // spent again the moment the other participant speaks.
-            let previous = std::mem::replace(&mut spoke, speaker_of(role, &self.messages[i].text));
+            // An away page's messages carry their speaker explicitly (v6) —
+            // a room's members are not derivable from the text the way the
+            // transcript's two participants are; `None` falls back to the
+            // marker walk, so main's flow reads exactly as before.
+            let named = self.messages[i]
+                .speaker
+                .clone()
+                .or_else(|| speaker_of(role, &self.messages[i].text));
+            let previous = std::mem::replace(&mut spoke, named);
             if i + 1 < skip {
                 continue;
             }
@@ -2691,7 +2759,6 @@ impl super::Chat {
                     // whose own row already carries how long that run took.
                     let time = if crate::tui::chat::is_state_line(&self.messages[i].text)
                         && !crate::tui::bufferview::is_agent_alert(&self.messages[i].text)
-                        && !crate::tui::bufferview::is_mention_line(&self.messages[i].text)
                     {
                         String::new()
                     } else {
@@ -2740,12 +2807,28 @@ impl super::Chat {
             };
             blocks.push(Block::settled(block, settled));
         }
+        // The away page's streaming run, drawn the way the zoom drew it: a dim
+        // process row per tool call and reasoning phase, prose as markdown.
+        // Volatile by construction — after every settled message, never
+        // flushed, replaced wholesale on the next domain change.
+        if let Some(page) = self.away_build.take() {
+            if !page.live.is_empty() {
+                let mut rows: Vec<Row> = Vec::new();
+                for block in &page.live {
+                    rows.extend(self.live_block_rows(block, width, &theme));
+                }
+                if !rows.is_empty() {
+                    blocks.push(Block::live(El::col(vec![El::Blank, El::Rows(rows)])));
+                }
+            }
+            self.away_build = Some(page);
+        }
         if let Some(ask) = self.ask_el(&theme) {
             blocks.push(Block::live(ask));
         }
         // Slash command output (/help /status /compact etc.): transient hints — rendered after messages and
         // above the input, **never settled or flushed**, auto-dismissed after the tick timeout (SLASH_OUTPUT_TTL).
-        if !self.slash_lines.is_empty() {
+        if self.away_build.is_none() && !self.slash_lines.is_empty() {
             blocks.push(Block::transient(El::Lines(
                 self.slash_lines
                     .iter()
@@ -2754,7 +2837,7 @@ impl super::Chat {
             )));
         }
         // Error/usage rows (G12/G13): longer TTL, error color, clear on the next input.
-        if !self.slash_error_lines.is_empty() {
+        if self.away_build.is_none() && !self.slash_error_lines.is_empty() {
             blocks.push(Block::transient(El::Lines(
                 self.slash_error_lines
                     .iter()
@@ -2764,7 +2847,7 @@ impl super::Chat {
         }
         // Informational output (/help /status …): persists until the next
         // input/Esc; never settles into scrollback.
-        if !self.slash_info_lines.is_empty() {
+        if self.away_build.is_none() && !self.slash_info_lines.is_empty() {
             blocks.push(Block::transient(El::Lines(
                 self.slash_info_lines
                     .iter()
@@ -2774,7 +2857,6 @@ impl super::Chat {
         }
 
         self.doc = crate::tui::statics::layout(blocks);
-        &self.doc
     }
 
     /// Welcome-card block. It settles at birth but stays in the live doc

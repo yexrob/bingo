@@ -775,6 +775,7 @@ mod tests {
 
     fn message(role: Role, text: &str) -> UiMessage {
         UiMessage {
+            speaker: None,
             role,
             text: text.to_string(),
             at: 0,

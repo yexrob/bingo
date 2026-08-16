@@ -281,6 +281,17 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             cache: settings.cache_control.unwrap_or(false),
         });
     }
+    // Main's half of the room etiquette (D119): its room lines arrive inside
+    // the <messages> envelope with nothing else explaining them, and the base
+    // prompt's instinct — talk to the user — is exactly the narration flood
+    // the note forbids. Same gate and same system-block reasoning as the
+    // member-side CHANNEL_NOTE.
+    if settings.experimental.agent_channels {
+        system.push(crate::api::contract::SystemBlock {
+            text: crate::tool::agent_notes::MAIN_CHANNEL_NOTE.to_string(),
+            cache: settings.cache_control.unwrap_or(false),
+        });
+    }
     // Inject this project's active experience index at session start (≤10 lines;
     // full entries via ExperienceQuery and applied-use feedback via ExperienceOutcome).
     let experience_index = crate::tool::experience::session_index(&home, &project_dir);
