@@ -112,6 +112,37 @@ pub fn now_unix() -> u64 {
         .unwrap_or(0)
 }
 
+/// Whether a room post says a name at somebody (D99).
+///
+/// Case-insensitive with word boundaries on both sides of the token: an agent
+/// writing `@User`, `@USER,` or `(@user)` is addressing the person and reaches
+/// them, while `@username` and `mail@user.example` are not and do not. The
+/// literal-`@user` test this replaced meant a badge that depended on the model
+/// getting the case right.
+pub fn names(text: &str, name: &str) -> bool {
+    let haystack = text.to_lowercase();
+    let needle = format!("@{}", name.to_lowercase());
+    let part_of_a_word = |c: char| c.is_alphanumeric() || c == '_' || c == '-';
+    let mut from = 0;
+    while let Some(offset) = haystack.get(from..).and_then(|rest| rest.find(&needle)) {
+        let start = from + offset;
+        let end = start + needle.len();
+        let before_ok = haystack[..start]
+            .chars()
+            .next_back()
+            .is_none_or(|c| !part_of_a_word(c));
+        let after_ok = haystack[end..]
+            .chars()
+            .next()
+            .is_none_or(|c| !part_of_a_word(c));
+        if before_ok && after_ok {
+            return true;
+        }
+        from = end;
+    }
+    false
+}
+
 /// Budgets: freeze on overrun (read from settings.experimental; defaults 500/50).
 #[derive(Debug, Clone, Copy)]
 pub struct ChannelLimits {

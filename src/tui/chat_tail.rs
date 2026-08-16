@@ -2388,7 +2388,7 @@ impl super::Chat {
                 .log_of(&room)
                 .into_iter()
                 .rev()
-                .find(|m| crate::tui::buffer::names(&m.text, crate::channels::USER_NAME));
+                .find(|m| crate::channels::names(&m.text, crate::channels::USER_NAME));
             if let Some(post) = post {
                 self.push_flow_line(crate::tui::bufferview::mention_line(
                     &room, &post.from, &post.text,

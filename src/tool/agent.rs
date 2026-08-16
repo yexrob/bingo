@@ -13,6 +13,7 @@ use crate::query::{Session, UiHooks};
 use crate::tool::{Tool, ToolContext, ToolError, ToolResult, parse_input};
 use crate::watch::{NotifyCondition, WatchId, WatchKind, WatchRegistry, WatchState};
 
+use crate::tool::address::{self, Address};
 use crate::tool::agent_notes::{CHANNEL_NOTE, SUBAGENT_NOTE};
 
 const MAX_AGENT_DEPTH: usize = 3;
@@ -1415,39 +1416,6 @@ const ACK_TIMEOUT_RANGE: std::ops::RangeInclusive<u64> = 5..=3600;
 /// quiet, and short enough that a hang is not discovered by the user an hour later.
 const DEFAULT_ACK_TIMEOUT_SECS: u64 = 300;
 
-/// A resolved `to`: one of the two kinds of conversation there are.
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) enum Address {
-    /// An agent instance, `main` included.
-    Agent(String),
-    /// A room, named without its `#`.
-    Room(String),
-}
-
-/// Read the `to` field as the conversation namespace the interface already uses:
-/// `#name` is a room, anything else is an agent and may wear a leading `@`.
-///
-/// One address language for the tool layer and the display layer, so an agent
-/// naming a target says what the user's own composer says (D90's `@name ` /
-/// `#name ` routing).
-pub(crate) fn parse_address(to: &str) -> Result<Address, ToolError> {
-    let to = to.trim();
-    if let Some(room) = to.strip_prefix('#') {
-        let room = room.trim();
-        if room.is_empty() {
-            return Err(ToolError::failed("`to` is `#` with no room name after it"));
-        }
-        return Ok(Address::Room(room.to_string()));
-    }
-    let agent = to.strip_prefix('@').unwrap_or(to).trim();
-    if agent.is_empty() {
-        return Err(ToolError::failed(
-            "`to` is empty; name an agent instance (or @name), or a room as #name",
-        ));
-    }
-    Ok(Address::Agent(agent.to_string()))
-}
-
 /// The one way any participant speaks to any conversation (D98).
 ///
 /// Two semantics, one verb: deliver and wake. Who may be addressed narrows by
@@ -1467,54 +1435,7 @@ impl SendMessageTool {
     /// This session's name in a conversation: a subagent's instance name, or
     /// `main`. Stamped by the runtime; the model cannot state it for itself.
     fn sender(&self) -> String {
-        self.session
-            .instance
-            .clone()
-            .unwrap_or_else(|| crate::channels::MAIN_NAME.to_string())
-    }
-
-    /// Whether this caller may address rooms at all. Rooms are still behind the
-    /// `experimental.agentChannels` gate, and the cohort that could hold a room
-    /// membership is the same one the retired `Post` was assembled for: the main
-    /// session, and named direct subagents.
-    fn rooms_allowed(&self) -> bool {
-        self.session.settings.experimental.agent_channels
-            && (self.session.depth == 0
-                || (self.session.depth == 1 && self.session.instance.is_some()))
-    }
-
-    /// Refuse a target this caller has no business addressing, in words that say
-    /// what it may address instead.
-    fn check_target(&self, address: &Address) -> Result<(), ToolError> {
-        let me = self.sender();
-        match address {
-            Address::Agent(name) if *name == me => Err(ToolError::failed(format!(
-                "{name} is you — a message to yourself is a note, not a message"
-            ))),
-            Address::Agent(name) => {
-                if self.session.depth == 0 || name == crate::channels::MAIN_NAME {
-                    Ok(())
-                } else {
-                    Err(ToolError::failed(format!(
-                        "you may not message {name}: as a subagent you can write to main, and to rooms you are a member of. \
-Work that concerns another agent goes through main, or into a room you are both in."
-                    )))
-                }
-            }
-            Address::Room(room) => {
-                if !self.rooms_allowed() {
-                    return Err(ToolError::failed(format!(
-                        "rooms are not available to you; #{room} cannot be addressed from here"
-                    )));
-                }
-                if !self.session.channels.is_member(room, &me) {
-                    return Err(ToolError::failed(format!(
-                        "you are not a member of #{room} — join the room before speaking in it"
-                    )));
-                }
-                Ok(())
-            }
-        }
+        address::sender_of(&self.session)
     }
 
     /// Speak in a room: the retired `Post`'s path, unchanged.
@@ -1584,7 +1505,7 @@ impl Tool for SendMessageTool {
     }
     fn description(&self) -> String {
         let me = self.sender();
-        let rooms = if self.rooms_allowed() {
+        let rooms = if address::rooms_allowed(&self.session) {
             "; `#room` for a room you are a member of (every member's context gets it, in one order; in a serial room a stale send bounces back with what you missed attached)"
         } else {
             ""
@@ -1639,8 +1560,8 @@ Set urgent only for something blocking that cannot wait for the user to look: it
         ctx: &ToolContext,
     ) -> Result<ToolResult, ToolError> {
         let params: SendMessageInput = parse_input(&input)?;
-        let address = parse_address(&params.to)?;
-        self.check_target(&address)?;
+        let address = address::parse_address(&params.to)?;
+        address::check_target(&self.session, &address)?;
         // The bell is the harness's and it has exactly one meaning: an agent
         // needs the user. Main speaking to a subagent, or anyone speaking to a
         // room, has no user on the other end to interrupt — refused rather than
@@ -2743,28 +2664,6 @@ mod tests {
             settings,
             ..(**parent).clone()
         })
-    }
-
-    /// The address grammar is the conversation namespace: `#name` is a room,
-    /// anything else is an agent and may wear a leading `@`.
-    #[test]
-    fn to_is_read_as_the_conversation_namespace() {
-        assert_eq!(
-            parse_address("scout").unwrap_or_else(|e| panic!("{e}")),
-            Address::Agent("scout".into())
-        );
-        assert_eq!(
-            parse_address(" @scout ").unwrap_or_else(|e| panic!("{e}")),
-            Address::Agent("scout".into()),
-            "the sigil the composer writes is accepted, not required"
-        );
-        assert_eq!(
-            parse_address("#build").unwrap_or_else(|e| panic!("{e}")),
-            Address::Room("build".into())
-        );
-        for bad in ["", "   ", "@", "#"] {
-            assert!(parse_address(bad).is_err(), "{bad:?} is not an address");
-        }
     }
 
     /// Hub-and-spoke survives the merge of the two speech tools, but as an
