@@ -624,9 +624,6 @@ pub(crate) fn chrome(chat: &Chat, width: usize, fullscreen: bool) -> El {
         )));
     }
     children.push(El::Lines(chat.task_lines()));
-    // The agent tree (D104), the ctrl+t cycle's second stop, in the same slot
-    // the task area occupies — the two are one gesture and never both open.
-    children.push(El::Rows(chat.agent_tree_rows(width)));
     if let Some(warning) = chat.visible_warning() {
         children.push(El::Line(Line::styled(
             format!("  ⚠ {warning}"),
@@ -683,13 +680,11 @@ pub(crate) fn chrome(chat: &Chat, width: usize, fullscreen: bool) -> El {
     if chat.pending_ask.is_some() {
         children.push(El::Row(dim_row("Waiting for permission…", theme)));
     }
-    // D97 gave the last row of the window to the conversation bar, D103 retired
-    // it with the conversations it listed, and D104's footer pills take the slot
-    // back. They name who exists and the key that expands them, and they are off
-    // while the tree is open — the tree says everything a pill would.
-    if let Some(pills) = chat.pill_row(width) {
-        children.push(El::Row(pills));
-    }
+    // The roster (v6): the conversation list under everything else, the way
+    // the user's own CC screenshot has it — constant rows, the `↓`
+    // fallthrough their only door. It takes the slot the pills held (D104),
+    // which took it from the conversation bar (D97).
+    children.push(El::Rows(chat.roster_rows(width)));
     El::Col(children)
 }
 
@@ -820,13 +815,11 @@ mod tests {
         );
     }
 
-    /// The status layer takes its two slots in the composition, and only one of
-    /// them at a time (D104): the tree sits where the task area does, the pills
-    /// take the last row the conversation bar vacated, and an open tree turns
-    /// the pills off.
+    /// The roster (v6) takes the last rows of the window — constant furniture
+    /// once a conversation exists, nothing at all before one does.
     #[test]
-    fn the_status_layer_takes_the_task_slot_and_the_last_row() {
-        let mut chat = chat_at(100, 40);
+    fn the_roster_takes_the_last_rows() {
+        let chat = chat_at(100, 40);
         let base = rows_of(chrome(&chat, 100, false)).len();
         chat.session.agents.insert(
             "scout",
@@ -838,27 +831,10 @@ mod tests {
 
         let rows = rows_of(chrome(&chat, 100, false));
         let text: Vec<String> = rows.iter().map(row_text).collect();
-        assert_eq!(rows.len(), base + 1, "the pills are one row: {text:?}");
-        let pills = text.last().cloned().unwrap_or_default();
-        assert!(
-            pills.contains("@main @scout") && pills.contains("shift + ↓ to expand"),
-            "and they are the last row of the window: {pills}"
-        );
-
-        chat.open_agent_tree();
-        let rows = rows_of(chrome(&chat, 100, false));
-        let text: Vec<String> = rows.iter().map(row_text).collect();
-        assert_eq!(
-            rows.len(),
-            base + 2,
-            "the tree is two rows and the pills went with it: {text:?}"
-        );
-        assert!(
-            !text.iter().any(|line| line.contains("shift + ↓ to expand")),
-            "the tree and the pills never share a frame: {text:?}"
-        );
-        assert!(text.iter().any(|line| line.contains("@main")), "{text:?}");
-        assert!(text.iter().any(|line| line.contains("@scout")), "{text:?}");
+        assert_eq!(rows.len(), base + 2, "main's row and the agent's: {text:?}");
+        let tail = &text[text.len() - 2..];
+        assert!(tail[0].contains("@main"), "{text:?}");
+        assert!(tail[1].contains("@scout"), "{text:?}");
     }
 
     /// The suggestion area's row count and content are naturally one source (the old two-branch rules once disagreed,

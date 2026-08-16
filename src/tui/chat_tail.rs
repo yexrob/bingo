@@ -55,22 +55,11 @@ pub enum EscLayer {
     InfoLines,
     /// The `?` shortcut panel.
     HelpPanel,
-    /// The agent tree (D104), the second stop of the ctrl+t cycle.
-    ///
-    /// Its own layer, immediately above the task panel it cycles with, rather
-    /// than a second meaning for the
-    /// [`EscLayer::TaskPanel`] slot. The two are one *gesture* but not one
-    /// surface — different state, different dismissal, and both can be reached
-    /// from the same key — and `ORDER` is the single place that says which one
-    /// Esc closes.
-    ///
-    /// **It peels twice.** The tree with a row selected is a different state
-    /// from the tree merely open, so the first press clears the selection and
-    /// the second closes the panel — CC's own semantics for the first half
-    /// (`useBackgroundTaskNavigation.ts:166-175`: Esc leaves selection mode and
-    /// leaves the tree expanded), and D80's one-press-one-level rule for the
-    /// second.
-    AgentTree,
+    /// The roster's cursor (v6). The rows themselves are constant furniture
+    /// under the composer — what Esc takes is the selection on them, exactly
+    /// CC's escape in `selecting-agent` (`useBackgroundTaskNavigation.ts:
+    /// 166-175`): the list stays, the cursor leaves.
+    Roster,
     /// The task panel, when the user opened it themselves with ctrl+t.
     TaskPanel,
     /// The away page's running turn (v6): Esc stops the agent on screen, the
@@ -105,7 +94,7 @@ impl EscLayer {
         EscLayer::ErrorRow,
         EscLayer::InfoLines,
         EscLayer::HelpPanel,
-        EscLayer::AgentTree,
+        EscLayer::Roster,
         EscLayer::TaskPanel,
         EscLayer::AwayStop,
         EscLayer::Interrupt,
@@ -974,12 +963,11 @@ impl super::Chat {
         if self.rewind_key(code, modifiers) {
             return true;
         }
-        // The agent tree (D104) is the opposite of modal: it claims shift+↑/↓
-        // wherever it is, and `k` only while a row is selected. Everything else
-        // — every plain character, `k` included when nothing is selected —
-        // falls through to the composer, which is what makes a status panel
-        // safe to leave open while typing.
-        if self.agent_tree_key(code, modifiers) {
+        // The roster (v6) is the opposite of modal: it claims keys only while
+        // a row is selected, and any printable character gives the keyboard
+        // straight back to the draft (type-to-exit) — which is what makes a
+        // constant list safe to live under the composer.
+        if self.roster_key(code, modifiers) {
             return true;
         }
         // Interrupt (busy) and quit (idle) both live on Ctrl+C, judged before editing keys.
@@ -996,19 +984,6 @@ impl super::Chat {
         }
         // Slash dropdown keys (Tab completes / Esc closes / ↑↓ navigate) take priority over input.
         if !self.bash_mode && self.slash_menu_key(code, modifiers) {
-            return true;
-        }
-        // ctrl+shift+O toggles the tree's message preview (CC
-        // `defaultBindings.ts:48`, `app:toggleTeammatePreview`). Judged before
-        // the plain control keys because ctrl+O is the transcript view and the
-        // two must not collide; terminals without the enhanced keyboard
-        // protocol report both as 0x0F and only get the transcript.
-        if modifiers.contains(KeyModifiers::CONTROL)
-            && matches!(code, KeyCode::Char('o' | 'O'))
-            && (modifiers.contains(KeyModifiers::SHIFT) || code == KeyCode::Char('O'))
-        {
-            self.tree_preview = !self.tree_preview;
-            self.dirty = true;
             return true;
         }
         if modifiers.contains(KeyModifiers::CONTROL)
@@ -1257,7 +1232,7 @@ impl super::Chat {
                 .is_some_and(|e| e.level != crate::error::ErrorLevel::Full),
             EscLayer::InfoLines => !self.slash_info_lines.is_empty(),
             EscLayer::HelpPanel => self.help_visible,
-            EscLayer::AgentTree => self.tree.is_some(),
+            EscLayer::Roster => self.roster_selection().is_some(),
             EscLayer::TaskPanel => self.tasks_visible && !self.tasks_auto,
             EscLayer::AwayStop => self.away.is_some() && self.zoom_is_running(),
             // Main's turn is out of Esc's reach while a page is up (v6): the
@@ -1307,18 +1282,11 @@ impl super::Chat {
                 self.help_visible = false;
                 true
             }
-            // Selection first, then the panel: a cursor in the tree is a state
-            // the user can be in, and taking the whole panel away to get out of
-            // it would be two levels for one press.
-            EscLayer::AgentTree => {
-                if let Some(tree) = self.tree.as_mut() {
-                    if tree.selected.is_some() {
-                        tree.selected = None;
-                    } else {
-                        self.tree = None;
-                    }
-                    self.dirty = true;
-                }
+            // The roster's rows are constant furniture (v6); the one state Esc
+            // can take is the cursor on them.
+            EscLayer::Roster => {
+                self.roster_sel = None;
+                self.dirty = true;
                 true
             }
             // The tasks panel opened with ctrl+t closes with Esc (it used to have
@@ -1517,8 +1485,6 @@ impl super::Chat {
                     self.tasks_visible = false;
                     self.tasks_auto = false;
                 } else {
-                    // The panels stay exclusive: the tree yields the slot.
-                    self.tree = None;
                     self.tasks_visible = true;
                     // Manually opened: keep the panel even when everything is done (the user explicitly wants to see it).
                     self.tasks_auto = false;
@@ -1653,7 +1619,15 @@ impl super::Chat {
                 self.update_slash_suggestions();
                 true
             }
-            None => true,
+            None => {
+                // v6: at the bottom of history, `↓` falls into the roster —
+                // CC's three-level fallthrough (cursor → history → rows), so
+                // the list needs no key of its own.
+                if down {
+                    self.roster_enter_selection();
+                }
+                true
+            }
         }
     }
 
@@ -2089,10 +2063,11 @@ impl super::Chat {
             || (self.dialog.is_some()
                 && (!self.session.agents.list().is_empty()
                     || !self.session.watch.snapshot().is_empty()))
-            // An open tree counts seconds — a running row's activity and an
+            // The roster counts seconds — a running row's activity and an
             // idle row's `Idle for 14s` both move without an event arriving —
-            // so it keeps the clock awake while anybody is on it (D104).
-            || (self.tree.is_some() && !self.session.agents.list().is_empty())
+            // so it keeps the clock awake while anybody exists to be shown
+            // (v6: the rows are constant furniture).
+            || self.roster_len() > 0
             || self.update_anim_active()
             || self.settling()
     }
@@ -2418,37 +2393,21 @@ impl super::Chat {
         if print == self.badge_print {
             return;
         }
-        // A room's mention bit turning on is the whitelist's question tier
-        // (D116): somebody said words at the user, and the badge alone cannot
-        // say so loudly enough. One `⚑` line per turn-on — further mentions
-        // land behind the same lit badge until the room is read, so one event
-        // interrupts once — and none while the user is standing in the room,
-        // because the store never sets mention on the active conversation.
-        let flips: Vec<String> = print
-            .iter()
-            .filter_map(|(id, _, mention)| match id {
-                crate::tui::buffer::BufferId::Channel(name) if *mention => {
-                    let was = self.badge_print.iter().any(|(old, _, m)| old == id && *m);
-                    (!was).then(|| name.clone())
-                }
-                _ => None,
-            })
-            .collect();
-        for room in flips {
-            let post = self
-                .session
-                .channels
-                .log_of(&room)
-                .into_iter()
-                .rev()
-                .find(|m| crate::channels::names(&m.text, crate::channels::USER_NAME));
-            if let Some(post) = post {
-                self.push_flow_line(crate::tui::bufferview::mention_line(
-                    &room, &post.from, &post.text,
-                ));
-                self.notify
-                    .attention(crate::tui::notify::Attention::AgentNotice);
-            }
+        // A mention bit turning on rings once (D116's edge detector, v6's
+        // ruling on the body): the roster's accent badge is in constant view
+        // under the composer, so the bell is the interrupt and the badge is
+        // the message — no flow line. Further mentions land behind the same
+        // lit badge until the room is read, and none ring while the user is
+        // standing in the room, because the store never sets mention on the
+        // active conversation.
+        let flipped = print.iter().any(|(id, _, mention)| {
+            matches!(id, crate::tui::buffer::BufferId::Channel(_))
+                && *mention
+                && !self.badge_print.iter().any(|(old, _, m)| old == id && *m)
+        });
+        if flipped {
+            self.notify
+                .attention(crate::tui::notify::Attention::AgentNotice);
         }
         self.badge_print = print;
         self.dirty = true;
@@ -2800,7 +2759,6 @@ impl super::Chat {
                     // whose own row already carries how long that run took.
                     let time = if crate::tui::chat::is_state_line(&self.messages[i].text)
                         && !crate::tui::bufferview::is_agent_alert(&self.messages[i].text)
-                        && !crate::tui::bufferview::is_mention_line(&self.messages[i].text)
                     {
                         String::new()
                     } else {

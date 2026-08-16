@@ -112,16 +112,12 @@ pub const BINDINGS: &[Binding] = &[
         description: "background the running command · the dialog: agents · shells · rooms",
     },
     Binding {
-        keys: "shift+↑/↓",
-        description: "open the agent tree and pick a row (enter views it · k stops it)",
+        keys: "↓ (at history end)",
+        description: "into the conversation rows (enter opens · k stops · ↑/esc back)",
     },
     Binding {
-        keys: "esc (viewing)",
-        description: "agent view: stop the run, then return (shift+tab: its mode)",
-    },
-    Binding {
-        keys: "ctrl+shift+o",
-        description: "agent tree: 3-line message preview per agent",
+        keys: "esc (on a page)",
+        description: "agent page: stop the run, then return home (shift+tab: its mode)",
     },
     Binding {
         keys: "@name · #name",
@@ -270,11 +266,10 @@ mod tests {
         }
     }
 
-    /// The status layer is three keys and the panel names all three: the task
-    /// toggle, the arrows that open the tree and pick a row inside it, and the
-    /// toggle that hangs a preview off each one (D104, narrowed by D115: the
-    /// tree left the ctrl+t cycle). The stop key is named where the selection
-    /// is, because it only means anything there.
+    /// The status layer's keys (v6): the task toggle, the fallthrough into
+    /// the roster's rows — no chord, the user's ruling — and the page's own
+    /// Esc. The stop key is named where the cursor is, because it only means
+    /// anything there.
     #[test]
     fn the_panel_names_the_status_layer() {
         let find = |keys: &str| {
@@ -288,13 +283,13 @@ mod tests {
             tasks.contains("task") && !tasks.contains("tree"),
             "ctrl+t is the task panel's key and only its (D115): {tasks}"
         );
-        let select = find("shift+↑/↓").description;
+        let rows = find("↓ (at history end)").description;
         assert!(
-            select.contains("agent tree") && select.contains('k') && select.contains("enter"),
-            "the row's three verbs are all named where the cursor is: {select}"
+            rows.contains("conversation rows") && rows.contains('k') && rows.contains("enter"),
+            "the rows' verbs are all named where the cursor goes: {rows}"
         );
-        // D105's view has one key with two meanings, so the panel says both.
-        let viewing = find("esc (viewing)").description;
+        // The page has one key with two meanings, so the panel says both.
+        let viewing = find("esc (on a page)").description;
         assert!(
             viewing.contains("stop the run") && viewing.contains("return"),
             "{viewing}"
@@ -311,10 +306,6 @@ mod tests {
         assert!(
             dialog.contains("agents") && dialog.contains("shells") && dialog.contains("rooms"),
             "the panel names the dialog's three sections: {dialog}"
-        );
-        assert!(
-            find("ctrl+shift+o").description.contains("preview"),
-            "the preview toggle is undiscoverable otherwise"
         );
         assert_eq!(
             BINDINGS.iter().filter(|b| b.keys == "ctrl+t").count(),

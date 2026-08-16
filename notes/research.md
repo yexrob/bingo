@@ -5201,3 +5201,51 @@ replaces it (`a_page_is_the_transcripts_own_pipeline`,
 `enter_on_a_tree_row_switches_comes_home_or_collapses`), plus
 `page_break_banks_the_page_and_erases_the_tail` in term.rs.
 1463 + 13 green.
+
+### D121. The roster — the rows under the composer
+
+The v6 view's second half, and the user's screenshot made literal: the
+conversations line up under the composer the way Claude Code's own agent
+list does — `● main` first, then every agent and every room you are in,
+at most three rows with the cursor scrolling the window — and there is
+no key to learn.
+
+- **`roster.rs`.** Rows are resolved from the stores each frame (the
+  registry for state, `status_label` for the wording, `badge_of` for the
+  two tiers, `asking_instance` for the waiting-on-you accent) and drawn
+  flat: presence dot (`●` running / `○` idle / `·` stopped), the name in
+  its identity colour (bold where the page is open or the cursor is),
+  the badge, the status copy, `↑/↓ N more` on the window's edges. Zero
+  conversations, zero furniture.
+- **The fallthrough is the door** (the user's ruling: no new chord).
+  `↓` in the composer walks the draft, then history, and at history's
+  end falls onto the rows — CC's own three-level fallthrough. `↓/↑`
+  move, `↑` off the top returns to the draft, `Enter` opens the row's
+  page (main's row comes home), `Esc` drops the cursor, `k` stops a
+  selected running instance through the one stop path, and any printable
+  character gives the keyboard straight back to the draft (CC's
+  type-to-exit). The cursor is one `EscLayer::Roster` rung — the rows
+  themselves are furniture and never close.
+- **Retired with it:** the agent tree (shift+↑/↓, the `-1..hide` index
+  space, the panel), the footer pills, ctrl+shift+o's per-row preview,
+  and — the user's second ruling — D116's `⚑` flow line: a mention now
+  lights the badge in constant view and rings once per turn-on
+  (`observe_badges` keeps the edge detector and the bell, drops the
+  line), re-armed by reading the room, silent for the room you are
+  standing in. `tree.rs` shrinks to the shared helpers every surface
+  reads.
+- ctrl+t loses its last coupling (the tree no longer yields a slot);
+  keys.rs's panel rows say the new grammar; guide.md's status-layer,
+  zoom and quick-start sections are rewritten for pages + roster (the
+  D120 sync folded in here, as recorded there).
+
+Docs: guide.md (quick start, conversation rows, pages, dialog, team
+paragraphs), feedback-states v1.85 (+ rows: room relays lose their one
+exception, page send/round-trip, lifecycle surfaces). Tests:
+`the_rows_lead_with_main_and_wear_the_status_copy`,
+`the_window_is_three_rows_and_follows_the_cursor`,
+`down_falls_in_up_comes_back_and_typing_leaves`,
+`k_stops_only_the_running_row_under_the_cursor`,
+`enter_on_a_roster_row_switches_and_main_comes_home`,
+`a_room_post_naming_the_user_rings_once_and_writes_nothing`; the tree's
+suite reduces to the helpers'. 1453 + 13 green.

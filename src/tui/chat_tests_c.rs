@@ -1543,13 +1543,13 @@ fn esc_peels_the_agent_tree_in_the_slot_above_the_task_panel() {
             .unwrap_or_else(|| panic!("{wanted:?} is in the stack"))
     };
     assert_eq!(
-        at(EscLayer::AgentTree) + 1,
+        at(EscLayer::Roster) + 1,
         at(EscLayer::TaskPanel),
-        "the two ctrl+t surfaces are adjacent, the tree first"
+        "the roster's cursor peels before the task panel"
     );
     assert!(
-        at(EscLayer::BackgroundDialog) < at(EscLayer::AgentTree),
-        "the modal is dismissed before the panel it is drawn over"
+        at(EscLayer::BackgroundDialog) < at(EscLayer::Roster),
+        "the modal is dismissed before the furniture it is drawn over"
     );
     assert_eq!(
         EscLayer::ORDER.len(),
@@ -1570,8 +1570,7 @@ fn esc_peels_the_agent_tree_in_the_slot_above_the_task_panel() {
     seed_agent(&chat, "scout");
     chat.busy = true;
     chat.help_visible = true;
-    chat.open_agent_tree();
-    assert!(chat.tree.is_some(), "ctrl+t opened it");
+    assert!(chat.roster_enter_selection(), "a cursor on the roster");
 
     let t0 = std::time::Instant::now();
     let mut order = Vec::new();
@@ -1581,8 +1580,8 @@ fn esc_peels_the_agent_tree_in_the_slot_above_the_task_panel() {
         if layer == EscLayer::Interrupt {
             break;
         }
-        if layer == EscLayer::AgentTree {
-            assert!(chat.tree.is_none(), "the tree closed");
+        if layer == EscLayer::Roster {
+            assert!(chat.roster_selection().is_none(), "the cursor left");
         }
         assert!(
             !chat.interrupted,
@@ -1592,36 +1591,30 @@ fn esc_peels_the_agent_tree_in_the_slot_above_the_task_panel() {
     }
     assert_eq!(
         order,
-        vec![
-            EscLayer::HelpPanel,
-            EscLayer::AgentTree,
-            EscLayer::Interrupt,
-        ],
+        vec![EscLayer::HelpPanel, EscLayer::Roster, EscLayer::Interrupt,],
         "the stack is walked top-down, one entry per press"
     );
 
-    // With a row selected the layer peels twice: the cursor first, the panel
-    // second. One press, one level, as everywhere else in the stack.
+    // The roster's rows are constant furniture (v6): the one state Esc can
+    // take is the cursor on them, and the rows stay.
     let mut chat = test_chat();
     seed_agent(&chat, "scout");
-    chat.on_key(KeyCode::Down, KeyModifiers::SHIFT);
-    assert!(chat.tree.as_ref().and_then(|tree| tree.selected).is_some());
+    assert!(chat.roster_enter_selection());
+    assert!(chat.roster_selection().is_some());
     assert!(chat.on_key(KeyCode::Esc, KeyModifiers::NONE));
     assert!(
-        chat.tree
-            .as_ref()
-            .is_some_and(|tree| tree.selected.is_none()),
-        "the first press cleared the cursor and left the tree open"
+        chat.roster_selection().is_none(),
+        "the press cleared the cursor"
     );
-    assert!(chat.on_key(KeyCode::Esc, KeyModifiers::NONE));
-    assert!(chat.tree.is_none(), "the second press closed the panel");
+    assert!(
+        chat.roster_len() > 0,
+        "and the rows stay — they are furniture"
+    );
 }
 
 /// D95's key, D104's cycle, D115's toggle: ctrl+t belongs to the task panel
-/// and to nothing else (user ruling: "ctrl+t 只和 task 展示有关"). The agent
-/// tree keeps its own door — `shift+↑/↓` — and the two panels stay exclusive:
-/// opening the tasks closes an open tree, and neither press reopens the other
-/// on the way out.
+/// and to nothing else (user ruling: "ctrl+t 只和 task 展示有关"). The roster
+/// is constant furniture (v6) and neither opens nor closes with it.
 #[test]
 fn ctrl_t_toggles_the_task_panel_alone() {
     let mut chat = test_chat();
@@ -1632,33 +1625,13 @@ fn ctrl_t_toggles_the_task_panel_alone() {
     assert!(chat.tasks_visible, "on: the task panel");
     assert!(!chat.tasks_auto, "opened by hand, so it stays open");
     assert!(
-        chat.tree.is_none(),
-        "the tree is not a stop any more (D115)"
-    );
-    assert!(
         chat.dialog.is_none(),
         "and no modal: the dialog is ctrl+b's (D107)"
     );
 
     assert!(ctrl_t(&mut chat));
     assert!(!chat.tasks_visible, "off: back to the transcript");
-    assert!(chat.tree.is_none());
-
-    // The panels are exclusive in both directions: the tree yields the slot
-    // to a task panel opened over it, and closing the tasks does not bring
-    // the tree back.
-    chat.open_agent_tree();
-    assert!(chat.tree.is_some());
-    assert!(ctrl_t(&mut chat));
-    assert!(
-        chat.tasks_visible && chat.tree.is_none(),
-        "the tree yielded"
-    );
-    assert!(ctrl_t(&mut chat));
-    assert!(
-        !chat.tasks_visible && chat.tree.is_none(),
-        "off is off, not a rewind"
-    );
+    assert!(chat.roster_len() > 0, "the roster never moved");
 
     // Esc closes the open panel rather than toggling anything.
     assert!(ctrl_t(&mut chat));

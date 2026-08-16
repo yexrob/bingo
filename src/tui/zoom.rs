@@ -81,62 +81,6 @@ impl Chat {
         }
     }
 
-    /// The room whose log has the screen — the other half of [`Chat::zoomed`],
-    /// read by the tree's room rows and their pills (D115).
-    pub(crate) fn zoomed_room(&self) -> Option<&str> {
-        match self.zoom.as_ref()? {
-            ZoomTarget::Room(name) => Some(name.as_str()),
-            ZoomTarget::Agent(_) => None,
-        }
-    }
-
-    /// `enter` on a tree row, in either host (CC
-    /// `useBackgroundTaskNavigation.ts:206-225`).
-    ///
-    /// The leader row leaves the view (`exitTeammateView`), the hide row
-    /// collapses the tree, an instance row zooms it. Nothing at all with no row
-    /// selected, which is what makes `enter` the composer's key while the tree
-    /// is merely *open* — CC gates the whole handler on `selecting-agent` and
-    /// so does this.
-    pub(crate) fn tree_enter(&mut self) -> bool {
-        let Some(selected) = self.tree_selection() else {
-            return false;
-        };
-        let agents = self.tree_instances();
-        self.dirty = true;
-        if selected < 0 {
-            // The leader row: come home if a page is open, and leave
-            // selection mode either way. The tree stays expanded, as CC's does.
-            self.deselect_tree();
-            if self.away.is_some() {
-                self.switch_to(None);
-            }
-            return true;
-        }
-        let index = selected as usize;
-        if let Some(status) = agents.get(index) {
-            let name = status.name.clone();
-            self.switch_to(Some(ZoomTarget::Agent(name)));
-        } else if let Some(room) = self.tree_rooms().get(index - agents.len()) {
-            // A room row opens the room's page (D115 → v6): same composer
-            // routing, the badge cleared by the entering.
-            self.switch_to(Some(ZoomTarget::Room(room.name.clone())));
-        } else {
-            // Past the end is the hide row: it closes the panel it closes.
-            self.tree = None;
-        }
-        true
-    }
-
-    /// Leave selection mode without closing the tree — CC's escape in
-    /// `selecting-agent` (`useBackgroundTaskNavigation.ts:168-176`).
-    pub(crate) fn deselect_tree(&mut self) {
-        if let Some(tree) = self.tree.as_mut() {
-            tree.selected = None;
-        }
-        self.dirty = true;
-    }
-
     /// `shift+tab` while zoomed: cycle the **viewed agent's** permission mode
     /// and leave the console's alone (CC `PromptInput.tsx:1410-1447`).
     ///
@@ -213,7 +157,6 @@ impl Chat {
     pub(crate) fn leave_zoom(&mut self, home: BufferId) {
         self.zoom = None;
         self.buffers.set_active(home);
-        self.deselect_tree();
         self.dirty = true;
     }
 
@@ -572,27 +515,31 @@ mod tests {
         );
     }
 
-    /// The tree's enter opens pages now: an instance row switches to it, the
-    /// leader row comes home, the hide row closes the panel.
+    /// The roster's enter opens pages (v6): an agent row switches to it and
+    /// the main row comes home — the CC footer's `openSelected`, one flat
+    /// list instead of a tree.
     #[test]
-    fn enter_on_a_tree_row_switches_comes_home_or_collapses() {
+    fn enter_on_a_roster_row_switches_and_main_comes_home() {
         let mut chat = test_chat();
         seed(&chat, "scout");
         chat.refresh_conversations();
-        chat.agent_tree_key(KeyCode::Down, KeyModifiers::SHIFT);
-        chat.agent_tree_key(KeyCode::Down, KeyModifiers::SHIFT);
-        assert_eq!(chat.tree_selection(), Some(0), "on the instance row");
-        assert!(chat.tree_enter());
+        assert!(chat.roster_enter_selection(), "↓ fell into the rows");
+        chat.roster_key(KeyCode::Down, KeyModifiers::NONE);
+        assert_eq!(chat.roster_selection(), Some(1), "on the agent's row");
+        assert!(chat.roster_key(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(
             chat.zoom,
             Some(ZoomTarget::Agent("scout".to_string())),
             "enter switched to the page"
         );
         assert!(chat.away.is_some());
-        // Walk back to the leader row: enter comes home.
-        chat.agent_tree_key(KeyCode::Up, KeyModifiers::SHIFT);
-        assert_eq!(chat.tree_selection(), Some(-1), "on the leader row");
-        assert!(chat.tree_enter());
-        assert!(chat.away.is_none(), "the leader row comes home");
+        assert!(
+            chat.roster_selection().is_none(),
+            "the cursor is spent by the switch"
+        );
+        // Main's row comes home.
+        assert!(chat.roster_enter_selection());
+        assert!(chat.roster_key(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(chat.away.is_none(), "the main row comes home");
     }
 }

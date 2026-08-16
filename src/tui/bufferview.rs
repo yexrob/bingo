@@ -26,7 +26,7 @@
 use crate::channels::USER_NAME;
 use crate::tui::buffer::{Delivery, SubmitTarget};
 use crate::tui::chat::{Chat, Row, one_line};
-use crate::tui::line::{Line, SegStyle};
+use crate::tui::line::Line;
 
 /// The one line an agent's life still writes into the @main flow (D98):
 /// `⚠ @scout · subagent failed: connection reset`.
@@ -48,22 +48,6 @@ pub(crate) fn agent_alert_line(instance: &str, reason: Option<&str>) -> String {
         Some(reason) => format!("{AGENT_ALERT_PREFIX}{instance} · {reason}"),
         None => format!("{AGENT_ALERT_PREFIX}{instance} · failed"),
     }
-}
-
-/// The one line a room is allowed to put in the flow (D116): a post that
-/// names the user. `⚑ #dev-team @qa: should I deploy?` — the whitelist's
-/// question tier. Everything else a room says stays behind its badge; words
-/// at *you* are the thing the badge cannot say loudly enough, and the line
-/// carries the reply grammar because the composer is the answer's door.
-pub(crate) const MENTION_PREFIX: &str = "⚑ #";
-
-pub(crate) fn is_mention_line(text: &str) -> bool {
-    text.starts_with(MENTION_PREFIX)
-}
-
-/// `⚑ #dev-team @qa: <first fifty columns>` — room, author, excerpt.
-pub(crate) fn mention_line(room: &str, from: &str, text: &str) -> String {
-    format!("⚑ #{room} @{from}: {}", one_line(text, 50))
 }
 
 /// The line a task notification leaves when it reaches main's context (D106):
@@ -128,26 +112,6 @@ impl Chat {
     /// shown as the sender's dot in the status layer, not as a flow row.
     pub(crate) fn agent_flow_rows(&self, text: &str, width: usize) -> Option<Vec<Row>> {
         let theme = &self.theme;
-        if let Some(rest) = text.strip_prefix(MENTION_PREFIX) {
-            // `⚑ #room @from: excerpt` — the flag and the room in the accent,
-            // the author in their colour, the words in the text colour: loud
-            // enough to be the one line a room gets, quiet enough to be one.
-            let mut line = Line::styled("⚑ ".to_string(), SegStyle::fg(theme.claude).bold());
-            let (room, tail) = rest.split_once(' ').unwrap_or((rest, ""));
-            line.push_styled(format!("#{room} "), SegStyle::fg(self.identity_color(room)));
-            let (author, body) = tail.split_once(' ').unwrap_or((tail, ""));
-            line.push_styled(
-                author.to_string(),
-                SegStyle::fg(
-                    self.identity_color(author.trim_start_matches('@').trim_end_matches(':')),
-                ),
-            );
-            line.push_styled(
-                format!(" {}", one_line(body, width)),
-                SegStyle::fg(theme.text),
-            );
-            return Some(vec![Row::new(line)]);
-        }
         if !is_agent_notice(text) {
             return None;
         }

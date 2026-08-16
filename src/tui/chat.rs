@@ -399,7 +399,6 @@ pub(crate) fn is_state_line(text: &str) -> bool {
         || is_ask_receipt(text)
         || crate::tui::bufferview::is_agent_alert(text)
         || crate::tui::bufferview::is_agent_notice(text)
-        || crate::tui::bufferview::is_mention_line(text)
         || rewind_ui::is_rewind_line(text)
 }
 
@@ -991,14 +990,10 @@ pub struct Chat {
     /// a detail pointer and nothing else — every row is rebuilt from the
     /// registries at draw time.
     pub(crate) dialog: Option<crate::tui::background::BackgroundDialog>,
-    /// The agent tree (D104), second stop of the `ctrl+t` cycle; `None` means
-    /// it is closed. Its rows are built from the registry at draw time, so this
-    /// holds nothing but the cursor.
-    pub(crate) tree: Option<crate::tui::tree::AgentTree>,
-    /// Whether the tree hangs a three-line message preview off each instance
-    /// (`ctrl+shift+o`). A session-wide toggle rather than tree state, which is
-    /// where CC keeps it too — it survives the tree closing and reopening.
-    pub(crate) tree_preview: bool,
+    /// The roster's cursor (v6): `None` is the composer, `Some(i)` a row of
+    /// the conversation list under it. Entered by `↓` at the bottom of
+    /// history (the CC fallthrough), never by a chord.
+    pub(crate) roster_sel: Option<usize>,
     /// The badge fingerprint the slow poll last painted (D115): one entry per
     /// conversation, its unread and its mention bit. See `observe_badges`.
     pub(crate) badge_print: Vec<(crate::tui::buffer::BufferId, u64, bool)>,
@@ -1284,8 +1279,7 @@ impl Chat {
             tasks_visible: false,
             tasks_auto: false,
             dialog: None,
-            tree: None,
-            tree_preview: false,
+            roster_sel: None,
             badge_print: Vec::new(),
             agent_mail: std::collections::HashMap::new(),
             rewind: None,
