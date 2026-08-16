@@ -872,6 +872,46 @@ mod tests {
         );
     }
 
+    /// A speaker's run opens with their name (D112, user ruling): an agent is
+    /// identified by avatar + name, and by name alone when avatars are off —
+    /// without it, a room with the switch off is a wall of anonymous prose.
+    /// The user's own bubble keeps its `❯` and gets no label; furniture
+    /// (membership lines) names nobody; a run is named once, not per message.
+    #[test]
+    fn a_speakers_run_opens_with_their_name() {
+        let chat = test_chat();
+        seed_room(&chat, "build", &["scout", USER_NAME]);
+        chat.session
+            .channels
+            .post("scout", "build", "tests are green")
+            .expect("posted");
+        chat.session
+            .channels
+            .post("scout", "build", "and clippy too")
+            .expect("posted");
+        chat.session
+            .channels
+            .post(USER_NAME, "build", "good, ship it")
+            .expect("posted");
+
+        let body = rows(&chat, &ZoomTarget::Room("build".into()));
+        let names: Vec<usize> = body
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.trim() == "@scout")
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(names.len(), 1, "one run, one name: {body:?}");
+        assert!(
+            body[names[0] + 1].contains("tests are green"),
+            "the name heads the run: {body:?}"
+        );
+        assert!(
+            !body.iter().any(|r| r.trim() == format!("@{USER_NAME}")),
+            "the user's bubble is its own label: {body:?}"
+        );
+    }
+
     /// A room's log, membership lines included. Reading one is free, so this is
     /// the same log every member sees.
     #[test]

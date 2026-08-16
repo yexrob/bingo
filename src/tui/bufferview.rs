@@ -491,6 +491,23 @@ pub(crate) fn settled_post_rows(
         // message column stays one straight edge, and only somebody who spoke
         // gets a portrait beside what they said.
         let lead = s.lead && wears_a_face(post);
+        // A run of somebody else's messages opens with their name (the user's
+        // ruling: an agent is identified by avatar + name, and by name alone
+        // when avatars are off — a room where nobody is named is a wall of
+        // anonymous prose). The user's own bubble keeps its `❯`: that glyph
+        // already says *you*, and a label over it would name the one person
+        // who never needs one. With avatars on, the portrait's first cell
+        // rides this row — the geometry D97 designed the face for.
+        if lead && !post.you {
+            let identity = s.gutter.pal.avatars[s.index % s.gutter.pal.avatars.len()];
+            rows.insert(
+                0,
+                Row::new(Line::styled(
+                    one_line(&format!("@{}", post.from), width),
+                    SegStyle::fg(identity).bold(),
+                )),
+            );
+        }
         s.gutter.apply(&mut rows, s.index, &post.from, lead);
     }
     rows
