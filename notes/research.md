@@ -4545,3 +4545,219 @@ in `buffer.rs` for the lifecycle feed (what it hears, what it bounds, what it re
    applied three times. A user with nine agents and a stopped one to find has to stop one first.
 6. *The lifecycle feed is gone rather than moved.* If a "what just happened" column turns out to be
    wanted, it is a new store: nothing keeps that history now except the flow itself.
+
+### D108. The last surface closes, the sender writes its own line, and the prose catches up
+
+**Problem.** Five batches built v4 and each one left something for the last. D107 owned the
+observation page's retirement and descoped it with an inventory. D106 named the `@scout❯` line's
+summary as a limit it could not fix without touching a tool schema. D105 named `README.zh-CN.md` as a
+batch behind, and D104 and D107 named their own copy debts. And the prose everywhere — module docs,
+test names, assertion messages, both READMEs, the bundled guide — still described surfaces that had
+been gone for up to five batches. This is the closing batch: no new mechanism except one tool field.
+**In code: 729 added against 1851 removed across 26 files**, one deleted whole.
+
+**The observation page is gone, and the split was exactly where D107 said it was.**
+`src/tui/perspective_ui.rs` (933 lines, 12 tests), `dossier`, `Dossier`, `Lane` and `LaneId` (~150
+lines), `Chat::open_perspective` and its two `app.rs` call sites, the dialog's `tab` arm and the
+`tab to open the record` hint in its detail footer. What the zoom reads survives untouched: `walk`,
+`Protagonist`, `Filed`/`Target`/`Work`, `pair_lane`. The sweep after the cut found one more thing
+reachable only from the page — `ChannelRegistry::rooms_of`, whose doc said in as many words that "the
+directory prints it beside the member; nothing else needs it", and whose two assertions were replaced
+with the `is_member` ones on either side of them so the membership round trip stays pinned.
+
+*Nine of the twelve dossier tests were rewritten onto `walk` rather than deleted with it, which is
+six more than D107 budgeted for.* Its inventory named three that pin marker handling *through* the
+lanes; reading them showed the same is true of four more — the scaffolding rule, the protagonist's
+own process, mail filed under its sender, the pre-D98 envelope — and of the timeline's superset
+property, which is the statement that the targets *partition* the walk in order. All of those are
+claims about `walk`, so they are asserted about `walk`: `said_to`/`filed_to` over `Vec<Filed>` where
+the tests used to ask a `Dossier` for a lane by name. **Three were genuinely the machinery's and went
+with it** — `lanes_are_ordered_by_last_activity` and `a_lane_s_count_is_its_thread_s_messages` are
+`Lane`'s, and `a_room_thread_is_the_whole_room_with_the_agent_in_it` is `channel_posts`', which has
+its own test in `buffer.rs`; the one thing that test said and the `buffer.rs` one did not — the `you`
+flag flipping with the reader — was added there rather than lost.
+
+*One rewritten assertion got a fact right that the lane grouping had hidden.* `a_page_groups_…`
+became `the_walk_names_every_counterpart_the_markers_can_name`, and stating the `TimelineOnly` set
+directly showed that the reply a spawn prompt draws is filed there too — intake is not a counterpart,
+so nothing was said back to it. The dossier put that post in the timeline and in no lane, which is
+the same fact; the lane view just never had to name it.
+
+**`SendMessage` gains `summary`, and the interesting half is where it does *not* go.** CC's field is
+`'A 5-10 word summary shown as a preview in the UI (required when message is a string)'`
+(`SendMessageTool.ts:76-81`) and its readers prefer it over `truncate(input.message, 50)` (`:765`,
+`:782`). The brief asked whether the envelope carries it. **CC's two runtimes disagree, and v4
+replicates the one that does not.** Its *teammate* path writes `summary="…"` as an attribute on the
+`<teammate-message>` tag (`utils/teammateMailbox.ts:386`), which becomes the recipient's own prompt
+text and which `UserTeammateMessage.tsx:25` then regex-parses back out — one string doing double duty
+as context and as UI. Its *subagent* path calls `queuePendingMessage(agentId, input.message, …)`
+(`SendMessageTool.ts:810-814`) and drops the summary before the recipient sees it. v4's member model
+is the subagent, so `main_mail` is **byte-identical**: the model reads exactly what was said to it,
+`buffer::line_source` parses what it always parsed, and the preview rides `MainArrival`, the mirror
+D106 built beside the mail for exactly this reason.
+
+*The field is left off main's own schema.* `summary` is drawn in two places and both read a
+subagent's send — the `@name❯` line (D106) and the tree's `ctrl+shift+o` preview (D104). Main's sends
+have no such surface, so `input_schema` removes the property at depth 0 rather than advertising a
+parameter the model cannot use. `SendMessageInput` still *accepts* it at every depth, because
+`deny_unknown_fields` would otherwise turn a harmless word into an error — the standard shape:
+the schema advertises what is useful, the parser tolerates.
+
+*Both sources go through the same fifty-column cut.* CC does not bound its summary, because its
+schema requires 5-10 words; bingo's is optional and a model can write a paragraph into it, and the
+`@name❯` line is one row that `parse_teammate_line` has to read back. A real summary passes through
+`one_line` untouched, and one that is not a summary cannot overrun the row.
+
+*The tree preview gets `summary` at the head of CC's key list.* `["description", "prompt", "command",
+"query", "pattern"]` matched nothing on a `SendMessage` call, so a send fell all the way to
+`Using SendMessage…`; `summary` is the one input field whose whole purpose is to be a preview, so it
+goes first. Without one the fallback is exactly what it was.
+
+**The sweep, and the shape of what was stale.** Retired vocabulary was still asserted as current in
+eleven source files, both READMEs and the bundled guide. Three clusters:
+
+| Where | What it still claimed |
+|---|---|
+| `perspective.rs` (header + 5 doc sites), `buffer.rs` (9), `bufferview.rs` (3), `avatar.rs`, `chrome.rs`, `zoom.rs` | the observation page / the pair view as live readers, "the bar" as the thing an accounting rule serves |
+| `channels.rs` (3), `watch.rs` (2), `settings.rs` (2), `rewind_ui.rs` (2), `chat_tail.rs` (2), `chat_tests_f.rs` (2) | the team directory, the lifecycle feed, the switcher, the agent manager, the `Post` tool, "the workspace views (DM, channel, team)" |
+| `tool/agent.rs` (5, three of them **model-facing**) | "your private direct-message window" in `SUBAGENT_NOTE` and `CHANNEL_NOTE`, "a channel Post", "what the bar shows" |
+
+The model-facing ones mattered most: a subagent's system prompt named a surface that has not existed
+since D103, and the note's own test asserted the phrase. The claim underneath survives whole — the
+user has a private line to every instance and reads its turns — so the note says that instead, and
+`subagent_note_knows_the_dm_window_exists` became
+`subagent_note_knows_the_user_can_write_to_it`, asserting the sentence that carries the claim now.
+`keys.rs`'s retired-surface guard, which is the standing defence against this, gained `the record`
+and `perspective` to its list.
+
+*Two things that looked stale were left alone, each for a reason.* "hub-and-spoke" is a topology, not
+a surface, and describes the addressing rules exactly. `BufferId::Hub`'s spelling is D101's explicit
+ruling and its comment already says why. And `share.rs`'s legacy-derivation table keeps `Post`,
+because it reads transcripts written before D98 — it just says `(pre-D98)` now.
+
+**The guide's duplication was an accident, and deleting it removed the worst copy in the tree.**
+`guide.md`'s capability map appeared **twice**: bullets 224-440 and a strict-subset copy at 441-583,
+introduced by a parallel-entry merge (`a4b4d51`, "guide.md oauth detail merge"). Later batches patched
+only the first, so the second still explained **D102's silence contract to the model as a live rule**
+— the single most harmful line in the tree, since D103 removed the marker and a model told to emit it
+would be writing `[[quiet]]` into prose. The duplication is not structural: there is no heading
+between them and no bullet in the second that is not in the first, except two paragraphs — **Sharing**
+and **Updates** — that describe `bingo share` and `bingo update` and exist nowhere else. Those moved
+into the surviving `Sessions` bullet and the copy went. **178 lines out of one file.**
+
+*The surviving copy's interaction story was then rewritten as one voice, in one order*: the transcript
+and its grammar → the status layer → what the transcript shows of an agent's life → the zoomed view →
+the background dialog → rooms → the team → attribution → unread → avatars. Two paragraphs were new
+rather than edited: **the D106 tiering**, which the guide had never described (the dispatch row, its
+live progress, the settled cost, the grouped tree, the `●` notice, the `@name❯` line, the `⚠` alert,
+and the list of what writes nothing), and **attribution**, which replaces the perspective page's own
+paragraph with the walk it was a view of. A stray fragment that opened `↑/↓ belong to the composer's
+prompt history` and then repeated the background dialog verbatim was folded into its neighbours.
+
+**Both READMEs describe v4 whole, and zh-CN is a peer again.** English lost the perspective-page
+section and the `tab` door and gained the same two paragraphs the guide did. zh-CN was two batches
+behind and is now section-for-section with English: `**状态层**` (D104) and `**放大视图**` (D105) are
+new, the background dialog is expanded to the full key row and detail, and the tiering and attribution
+paragraphs are translated rather than summarised. The `## 会话（Conversations）` heading — a v3 name,
+plural — became `## 一条 transcript，以及能离开它的那一行`, which is what the English heading says.
+
+**The line cap, and how close it came.** `src/tool/agent.rs` was at 3899 of its 4000 and the batch's
+own additions took it to 4021 — the discipline gate caught it. Nothing unrelated was touched to make
+room: the new test was tightened (the same five claims, driven through one fewer registry insert —
+the "main may still pass one" half is a `serde_json::from_value` on the input type, which is what that
+claim is actually about) and two doc comments were compressed. **3994.** The file is a standing debt
+this batch did not create and did not pay.
+
+**Tests: three added, nine rewritten onto `walk`, four strengthened in place, sixteen deleted with
+their machinery, none weakened.** Added: two in `chat_tests_f.rs` (the line prefers the sender's
+summary and the body and the mail are untouched by it; an oversized summary is cut to the same
+budget) and one in `tool/agent.rs` (the schema offers it to a subagent and omits it for main, the
+arrival carries it, `main_mail` does not, and the parser still accepts it at depth 0). Strengthened
+without renaming: `a_rooms_log_reads_as_messages_with_membership_changes_as_notes` (the `you` flag,
+inherited from the deleted room-lane test), `the_preview_shows_the_last_three_lines_of_the_record`
+(the `summary` key and the unchanged fallback), `the_panel_names_no_retired_surface` (two more
+retired words), and `the_agent_detail_says_what_it_is_doing_and_what_it_was_asked` (which now asserts
+`tab` is **absent** where it used to assert it present). Deleted: the twelve in `perspective_ui.rs`,
+three `Lane`/`Dossier` tests whose subject is gone, and
+`tab_opens_the_record_of_the_instance_under_the_cursor`. `running_agents_leave_the_arrows_to_history`
+lost its `tab` arm and keeps every other claim through `f`, the one door that survives.
+**1484 + 13 before, 1471 + 13 after.**
+
+**Deviations from the brief, each with its reason.**
+
+1. *Nine dossier tests rewritten, not three.* D107's inventory named three; four more and the
+   timeline-superset property turned out to be claims about `walk` as well. Rewriting them is
+   strictly stronger than deleting them.
+2. *`summary` is off main's schema.* The brief said "the subagent-assembled variant at minimum". It
+   is exactly that, and the gate is in `input_schema` rather than in a second input type, because a
+   second type would be two things to keep in step for one absent field.
+3. *`guide.md`'s duplicate block was deleted rather than kept consistent.* The brief said to
+   understand the duplication before touching it and keep it consistent if it is structural. It is
+   not: it is a merge artifact with no heading, no unique bullet, and a five-batch-stale copy of the
+   worst kind of content. Its two genuinely unique paragraphs were moved before it went.
+
+---
+
+**The program's remaining limits, gathered.** Everything v4 (D103–D108) leaves open, in one place.
+D109 (pane mode) is the only batch still to come and owns none of these.
+
+*Exposure, and the one thing deliberately not built:*
+
+1. **The transcript's own line shapes are recognised by their text.** A user who types `● something`
+   or `@scout❯ something` gets the rendering, because `is_agent_notice` and `parse_teammate_line` are
+   textual conventions — the same exposure class `is_agent_alert` has carried since D98. The parsers
+   are strict about the name charset (`@src/lexer.rs❯ why` is prose, and six near-misses are pinned),
+   but they cannot tell a user's keystrokes from the harness's. **No escaping mechanism was built**,
+   on purpose: an escape would be a second grammar in the composer for a case nobody has hit, and the
+   worst outcome today is a line that looks like news.
+
+*Things bingo cannot do, where the fix is a domain change:*
+
+2. **A background shell cannot be stopped.** `tool/bash.rs` hands a promoted command's child to a
+   spawned waiter and keeps no handle, so there is nothing to kill. `x` on a running shell answers on
+   the warning tier rather than appearing dead, and the dialog's key row does not offer `x` there.
+3. **A running shell's detail shows no output.** The registry holds the completion payload and
+   nothing before it; the tail the user watched belonged to the foreground surface, which has already
+   scrolled. Reading it live needs a store nothing has asked for yet.
+
+*Chords and doors:*
+
+4. **`ctrl+shift+o` needs the kitty keyboard protocol.** Elsewhere the chord arrives as `ctrl+o` and
+   opens the transcript, so the tree's message preview is unreachable there. No second binding was
+   invented.
+5. **Five chords are inert inside a zoom** (`ctrl+o`, `ctrl+b`, `ctrl+t`, `ctrl+g`, `ctrl+r`): they
+   set flags the *host* consumes, so binding them would spring a modal on the way out.
+6. **The room zoom's only door is the background dialog's `f`.** CC has no rooms in 2.1.88, so there
+   was no key to copy and none was invented.
+7. **`@main` has no row in the background dialog.** It lists what can be managed in the background,
+   and main is neither stoppable nor foregroundable. The tree is where "who is here" is answered in
+   full.
+
+*Bounds and shapes a reader might expect otherwise:*
+
+8. **The dialog's sections are windowed at eight rows each.** Past that a section counts the rest
+   (`… 3 more agents`) and the cursor cannot reach what is not drawn.
+9. **A room post renders nothing in the flow.** The design's `#room❯` line lost to the tiering table:
+   a room is a conversation main overhears, and a line per post is the flood the D98 debounce exists
+   to stop. If it is ever wanted, `MainArrival` is where it goes and the debounce is the argument it
+   has to beat.
+10. **The grouped dispatch tree has no expand hint of its own.** A hint naming a key that opens *one*
+    of several rows would be a half-truth; the pager's `a` opens all of them.
+11. **`In progress…` counts one message's dispatches**, not the session's in-flight calls. The two
+    agree wherever it matters and differ only if two turns are somehow in flight at once.
+12. **The zoom has no scrollback search.** `/` and `g`/`G` belong to the composer there, so the
+    pager's search would have had to steal them.
+13. **The task prompt shows twice in a zoom** — the header names the task, the record contains it.
+    CC has the same duplication for the same reason.
+14. **A mid-word wrap can still happen in a zoom body.** It is the markdown renderer's, shared with
+    the transcript.
+15. **The pill window is left-anchored.** CC scrolls it to keep a selected pill in view; bingo's
+    pills have no selection, and at index 0 CC's own window starts at the left.
+16. **`@main` is not addressable and the name match is exact.** `@main hello` opens an ordinary turn,
+    which is what talking to main already is; `@Scout` is prose, because the typeahead is where
+    discovery belongs and a case-insensitive parser would be guessing.
+
+*Debts this batch touched but did not clear:*
+
+17. **`src/tool/agent.rs` is 3994 of its 4000-line cap.** Pre-existing, and now six lines from the
+    gate. The next thing to add there has to split the file.

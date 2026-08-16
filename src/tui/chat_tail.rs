@@ -479,8 +479,10 @@ impl super::Chat {
     /// by the running turn's next round or may sit until the debounce wakes a new
     /// one, and a renderer cannot know which at arrival time. So the flow states
     /// when the message arrived, which is the thing it can be sure of.
-    pub(crate) fn push_teammate_line(&mut self, from: &str, text: &str) {
-        self.push_flow_line(crate::tui::bufferview::teammate_line(from, text));
+    ///
+    /// `summary` is the sender's own preview when it wrote one (D108).
+    pub(crate) fn push_teammate_line(&mut self, from: &str, text: &str, summary: Option<&str>) {
+        self.push_flow_line(crate::tui::bufferview::teammate_line(from, text, summary));
         self.buffers.note_console(false, self.tick);
     }
 
@@ -1443,8 +1445,8 @@ impl super::Chat {
                 true
             }
             // Ctrl+G composes the draft in `$EDITOR` (D86). It used to open
-            // the agents/channels workspace, which D89 retires and which the
-            // ctrl+b manager already reaches (Enter on an agent).
+            // the agents/channels workspace, which D89 retired and whose
+            // question the ctrl+b background dialog answers now.
             'g' => {
                 self.compose_in_editor();
                 true
@@ -1908,7 +1910,7 @@ impl super::Chat {
                 .set_title(crate::tui::notify::Title::Busy(glyph));
         }
         // The registry (agent states, channel counts) follows on a slow poll;
-        // repainting only when the bar's own entries change.
+        // repainting only when the store's own entries change.
         if self.tick.is_multiple_of(15) {
             self.refresh_conversations();
         }
@@ -2015,7 +2017,7 @@ impl super::Chat {
     /// mirror of the inbox, never the inbox itself.
     fn absorb_arrivals(&mut self) {
         for arrival in self.session.channels.drain_main_arrivals() {
-            self.push_teammate_line(&arrival.from, &arrival.text);
+            self.push_teammate_line(&arrival.from, &arrival.text, arrival.summary.as_deref());
         }
     }
 

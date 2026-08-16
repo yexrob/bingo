@@ -583,16 +583,6 @@ impl Chat {
                 }
             }
             KeyCode::Char('x') => self.dialog_stop(),
-            // `tab` opens the selected instance's record (D96). The one door
-            // left on that page: v4 retires it as a surface and D108 owns the
-            // sweep, so the key stays until then rather than being taken away
-            // in the batch that rebuilt the panel around it.
-            KeyCode::Tab => {
-                if let Some(DialogTarget::Agent(name)) = self.dialog_selection() {
-                    self.open_perspective = Some(name);
-                    self.dialog = None;
-                }
-            }
             _ => {}
         }
         true
@@ -817,8 +807,8 @@ impl Chat {
     }
 
     /// The detail's bottom row — CC's
-    /// (`InProcessTeammateDetailDialog.tsx:198`), plus the one door bingo has
-    /// that CC does not.
+    /// (`InProcessTeammateDetailDialog.tsx:198`), conditional on what the row
+    /// can actually do.
     fn dialog_hint_detail(&self, status: Option<&AgentStatus>) -> String {
         let mut parts = vec![
             "← to go back".to_string(),
@@ -829,7 +819,6 @@ impl Chat {
         }
         if status.is_some() {
             parts.push("f to foreground".to_string());
-            parts.push("tab to open the record".to_string());
         }
         parts.join(" · ")
     }
@@ -1647,36 +1636,9 @@ mod tests {
             "CC's detail row, in CC's order: {text}"
         );
         assert!(
-            text.contains("tab to open the record"),
-            "and the one door bingo has that CC does not: {text}"
+            !text.contains("tab"),
+            "and the record page's door retired with the page (D108): {text}"
         );
-    }
-
-    /// `tab` still reaches the observation page. v4 retires that page as a
-    /// surface and D108 owns the sweep, so the door stays named until then
-    /// rather than disappearing in the batch that rebuilt the panel round it.
-    #[test]
-    fn tab_opens_the_record_of_the_instance_under_the_cursor() {
-        let mut chat = test_chat();
-        seed_agent(&chat, "scout");
-        seed_room(&chat, "build", &[USER_NAME]);
-        chat.refresh_conversations();
-        chat.open_background_dialog();
-
-        assert!(chat.background_dialog_key(KeyCode::Tab, KeyModifiers::NONE));
-        assert_eq!(chat.open_perspective.as_deref(), Some("scout"));
-        assert!(chat.dialog.is_none(), "the page takes the screen");
-
-        // A room has no protagonist, so it has no record.
-        chat.open_perspective = None;
-        chat.open_background_dialog();
-        chat.dialog = Some(BackgroundDialog {
-            selected: Some(DialogTarget::Room("build".into())),
-            detail: None,
-        });
-        assert!(chat.background_dialog_key(KeyCode::Tab, KeyModifiers::NONE));
-        assert!(chat.open_perspective.is_none());
-        assert!(chat.dialog.is_some());
     }
 
     /// A shell's detail: CC's labels, and the tail of what the command printed.

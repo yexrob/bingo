@@ -955,15 +955,6 @@ pub struct Chat {
     /// ctrl+o requests the transcript view: the host opens the alternate-screen
     /// pager over the whole session (cleared after consumption, D82).
     pub open_transcript: bool,
-    /// `tab` in the background dialog requests that agent's perspective page:
-    /// the host opens the read-only two-level dossier over a snapshot of the
-    /// agent's communications (cleared after consumption, D96).
-    ///
-    /// **The page's one remaining door.** v4 retires it as a surface — the
-    /// zoom is the live full-transcript view now — and D108 owns the sweep;
-    /// D107 kept the key rather than half-retiring the page in the batch that
-    /// rebuilt the panel around it.
-    pub open_perspective: Option<String>,
     /// ctrl+g (or `ctrl+x ctrl+e`) requests the `$EDITOR` compose: the host
     /// hands the terminal over and puts the edited draft back (cleared after
     /// consumption, D86).
@@ -1392,7 +1383,6 @@ impl Chat {
             permission_mode,
             force_redraw: false,
             open_transcript: false,
-            open_perspective: None,
             open_editor: false,
             open_zoom: None,
             close_zoom: false,

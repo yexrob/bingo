@@ -203,13 +203,25 @@ pub fn preview_lines(history: &[crate::api::types::Message]) -> Vec<String> {
             }
             match block {
                 ContentBlock::ToolUse { name, input, .. } => {
-                    let described = ["description", "prompt", "command", "query", "pattern"]
-                        .iter()
-                        .find_map(|key| input.get(key).and_then(|v| v.as_str()))
-                        .and_then(|text| text.lines().next())
-                        .filter(|line| !line.trim().is_empty())
-                        .map(str::to_string)
-                        .unwrap_or_else(|| format!("Using {name}…"));
+                    // CC's keys (`TeammateSpinnerLine.tsx:40-48`), with
+                    // `summary` ahead of them: it is the one input field whose
+                    // whole purpose is to be a preview (D108), so a call that
+                    // wrote one has already answered this question. Without it
+                    // a `SendMessage` row fell all the way to `Using …`.
+                    let described = [
+                        "summary",
+                        "description",
+                        "prompt",
+                        "command",
+                        "query",
+                        "pattern",
+                    ]
+                    .iter()
+                    .find_map(|key| input.get(key).and_then(|v| v.as_str()))
+                    .and_then(|text| text.lines().next())
+                    .filter(|line| !line.trim().is_empty())
+                    .map(str::to_string)
+                    .unwrap_or_else(|| format!("Using {name}…"));
                     out.push(one_line(&described, PREVIEW_WIDTH));
                 }
                 ContentBlock::Text { text } => {
@@ -1018,6 +1030,32 @@ mod tests {
             }],
         }];
         assert_eq!(preview_lines(&bare), vec!["Using Glob…".to_string()]);
+
+        // D108: a `SendMessage` wrote its own preview, so the row reads it
+        // rather than falling all the way to the tool's name.
+        let sent = vec![Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::ToolUse {
+                id: "1".to_string(),
+                name: "SendMessage".to_string(),
+                input: serde_json::json!({"to": "main", "message": "long body", "summary": "migration done"}),
+            }],
+        }];
+        assert_eq!(preview_lines(&sent), vec!["migration done".to_string()]);
+
+        // Without one the fallback is unchanged.
+        let unsummarised = vec![Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::ToolUse {
+                id: "1".to_string(),
+                name: "SendMessage".to_string(),
+                input: serde_json::json!({"to": "main", "message": "long body"}),
+            }],
+        }];
+        assert_eq!(
+            preview_lines(&unsummarised),
+            vec!["Using SendMessage…".to_string()]
+        );
     }
 
     /// The preview rows hang off the instance row under the tree's stem.

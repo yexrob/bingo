@@ -10,9 +10,9 @@
 //! it:
 //!
 //! - **A post as rows** ([`settled_post_rows`], [`sender_runs`]). One renderer,
-//!   so a message on the observation page (D96/D100) is drawn by the code that
-//!   drew it in the pair view — the markdown, the bubbles, the gutter and the
-//!   CJK wrapping are the same by construction rather than by imitation.
+//!   so a message in the zoomed view (D105) is drawn by the code that draws it
+//!   in `@main` — the markdown, the bubbles, the gutter and the CJK wrapping
+//!   are the same by construction rather than by imitation.
 //! - **The failure alert** ([`agent_alert_line`]). A crash cannot wait for a
 //!   narration that may never run.
 //! - **The completion notice** ([`agent_notice_line`], D106). One dim `●` line
@@ -25,8 +25,8 @@
 //!   goes straight to that inbox or that room, under the user's own name, with
 //!   a transient receipt and nothing in main's history.
 //!
-//! The live tail of one agent's turn is kept here unused: D105's zoomed view is
-//! the surface that draws it, and it is the same machinery, not a second one.
+//! The live tail of one agent's turn is here too: D105's zoomed view is the
+//! surface that draws it, and it is the same machinery, not a second one.
 
 use rsmarkdown_core::{MarkdownProcessor, Renderer};
 
@@ -87,11 +87,11 @@ pub(crate) fn agent_notice_line(label: &str) -> String {
     }
 }
 
-/// How much of a message the transcript's one-line form shows — CC's own
-/// fallback when a sender left the `summary` field off
+/// How wide the transcript's one-line form of a message is. It bounds both
+/// sources: the sender's own `summary` (D108), and — when there is none — CC's
+/// own fallback of the message itself
 /// (`tools/SendMessageTool/SendMessageTool.ts:765`: `truncate(input.message,
-/// 50)`). bingo's `SendMessage` has no `summary` field to prefer, so this is
-/// always the path taken.
+/// 50)`).
 pub(crate) const TEAMMATE_SUMMARY_WIDTH: usize = 50;
 
 /// The pointer that closes the address on a teammate's transcript line —
@@ -107,11 +107,16 @@ pub(crate) const TEAMMATE_POINTER: char = '❯';
 /// v3 (D98) rendered nothing at all here and let the wake speak for itself.
 /// v4 restores CC's line: the wake and its debounce are unchanged, only the
 /// screen is.
-pub(crate) fn teammate_line(from: &str, text: &str) -> String {
-    format!(
-        "@{from}{TEAMMATE_POINTER} {}\n{text}",
-        one_line(text, TEAMMATE_SUMMARY_WIDTH)
-    )
+///
+/// **The sender's own summary wins** (D108). `SendMessage` carries an optional
+/// 5-10 word `summary`, which is what CC's readers prefer and what its
+/// `truncate(input.message, 50)` stands in for when there is none
+/// (`SendMessageTool.ts:765`). Both go through [`one_line`] at the same width:
+/// a summary inside its budget passes through untouched, and one that is not a
+/// summary at all cannot overrun the row the parser has to read back.
+pub(crate) fn teammate_line(from: &str, text: &str, summary: Option<&str>) -> String {
+    let preview = one_line(summary.unwrap_or(text), TEAMMATE_SUMMARY_WIDTH);
+    format!("@{from}{TEAMMATE_POINTER} {preview}\n{text}")
 }
 
 /// Who a teammate line addresses, and what it summarises — `None` for anything
@@ -444,7 +449,7 @@ impl Chat {
 /// A *settled* post as rows — the shapes any stored conversation can contain:
 /// a message somebody sent, a line nobody said, a step of an agent's work.
 ///
-/// Split out of the live tail for D96: the perspective page renders the same
+/// Split out of the live tail for D96: the zoomed view renders the same
 /// posts with no instance behind them, and a second renderer beside this one is
 /// exactly the thing the flow has avoided since D89. The two live-only kinds
 /// stay with the host, because they need the running instance's clock and
@@ -562,7 +567,7 @@ mod tests {
     /// the same textual convention `is_agent_alert` has carried since D98.
     #[test]
     fn a_teammate_line_is_recognised_by_its_shape_alone() {
-        let line = teammate_line("scout", "found it in the lexer\nsecond paragraph");
+        let line = teammate_line("scout", "found it in the lexer\nsecond paragraph", None);
         assert_eq!(
             parse_teammate_line(&line),
             Some((

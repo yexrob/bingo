@@ -712,7 +712,7 @@ fn zoom_footer(chat: &Chat, width: usize) -> Row {
         line.push_styled(" ", SegStyle::fg(theme.text_secondary));
     }
     // Two tiers, longest first — the widest that fits whole wins, exactly as
-    // the transcript's and the perspective page's footers choose. A room has
+    // the transcript pager's footer chooses. A room has
     // neither a permission mode nor a roster position, so its row says the one
     // thing that is true there rather than advertising two keys that do
     // nothing.

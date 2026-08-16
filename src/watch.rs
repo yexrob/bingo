@@ -297,9 +297,10 @@ struct Entry {
     /// DM — is a conversation between the two of them: its end owes the main
     /// agent no notification and no woken turn. Everything else (a dispatch, a
     /// `SendMessage` continuation, a background command) does, so `true` is the
-    /// default and the exception has to ask for itself. The lifecycle feed is
-    /// unaffected: it rides the broadcast, which is never suppressed, because
-    /// the team directory is a record of every run.
+    /// default and the exception has to ask for itself. The broadcast is
+    /// unaffected and is never suppressed: the run happened, and the surfaces
+    /// that draw a run — the dispatch row, the tree, the background dialog —
+    /// say so.
     notify_owner: bool,
 }
 
@@ -341,10 +342,10 @@ impl WatchRegistry {
 
     /// Register a watch that may keep its terminal states to itself (D98).
     ///
-    /// `notify_owner: false` means the run exists — it broadcasts, it is drawn,
-    /// the lifecycle feed records it — but its end enqueues nothing for the
-    /// session that owns it, so nothing wakes and nothing is injected. That is
-    /// the shape of a run the user started in an agent's DM.
+    /// `notify_owner: false` means the run exists — it broadcasts and it is
+    /// drawn — but its end enqueues nothing for the session that owns it, so
+    /// nothing wakes and nothing is injected. That is the shape of a run the
+    /// user started by writing to the agent directly.
     pub fn register_addressed(
         self: &Arc<Self>,
         watchable: Box<dyn Watchable>,

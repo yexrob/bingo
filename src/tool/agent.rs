@@ -20,28 +20,28 @@ const MAX_AGENT_DEPTH: usize = 3;
 /// and being woken by background-task notifications. Say so rather than letting the model plan
 /// against a surface it does not have.
 ///
-/// The DM bullet exists because the user has a real private line to every instance (D57's
-/// workspace and the main-chat selector), and its messages arrive indistinguishable from
-/// main's. A note that claims the user never sees the turn text leaves exactly one imaginable
-/// way to reach them — a channel Post — which is how a private question ends up answered in
-/// front of the whole room (D63).
+/// The direct-message bullet exists because the user has a real private line to every
+/// instance — `@name <message>` in the composer, and the zoomed view's own composer (D103,
+/// D105) — and its messages arrive indistinguishable from main's. A note that claims the user
+/// never sees the turn text leaves exactly one imaginable way to reach them — a room message —
+/// which is how a private question ends up answered in front of the whole room (D63).
 const SUBAGENT_NOTE: &str = "\
 # You are a subagent
 
 - The main agent spawned you for one task. Your final text is returned to main
   as its tool result; it does not appear in the user's main transcript, and markdown image
   blocks are not rendered for anyone. Put conclusions in the text itself.
-- The user has a private direct-message window with you. A message they send there arrives
-  under a `[DM from user]` line; a direct instruction without that line is from main.
-  Either way the prose of your turns is exactly what the sender reads back — a direct
-  message is answered where it arrived, in your turn text.
+- The user can write to you directly. A message they send arrives under a `[DM from user]`
+  line; a direct instruction without that line is from main. Either way the prose of your
+  turns is exactly what the sender reads back — a direct message is answered where it
+  arrived, in your turn text.
 - You cannot question the user: AskUserQuestion is not available here. Permission prompts do
   reach the user, but anything else you need must be reported back to main.
 - `SendMessage(to: \"main\")` is your one deliberate way to reach main *between* turns —
   for the overall task being finished, for being blocked on a decision, for a finding that
   changes what is being coordinated. It is not for progress, acknowledgements, or anything
-  already in your reply: your work is visible in your DM and your final text is returned to
-  whoever started you. `urgent: true` interrupts the user wherever they are; reserve it.
+  already in your reply: your turns are readable by whoever is watching your conversation,
+  and your final text is returned to whoever started you. `urgent: true` interrupts the user wherever they are; reserve it.
 - Your turn ends when you stop calling tools, and background tasks you started will NOT wake
   you afterwards. Finish what needs finishing within this turn, or state what is still
   pending — main can resume you with a follow-up message.";
@@ -49,7 +49,7 @@ const SUBAGENT_NOTE: &str = "\
 /// Appended when agent channels are on. Three failure modes pull against each other and the
 /// note has to hold all of them: a room of polite agents acknowledging each other's
 /// acknowledgements (D45), a room so afraid of chatter that nobody answers the human at all
-/// (D48), and a member answering a private DM with a channel Post because `user` only ever
+/// (D48), and a member answering a private message in the room because `user` only ever
 /// appeared in this note as a room speaker (D63).
 ///
 /// The rule that separates the first two is *who spoke*, not how the message reads — a person
@@ -105,7 +105,7 @@ answer — stays in your turn text: the room's attention is the scarcest thing i
 
 **A direct message is a different lane, and a private one.** Channel traffic arrives tagged
 `[#channel msg #N]`; text without that tag was sent to you alone — under a `[DM from user]`
-line when the user wrote it in your direct-message window, unmarked when it is main. Your
+line when the user wrote it, unmarked when it is main. Your
 turn text is exactly what the sender reads. Answer a direct message in your turn text —
 never in a room: the answer belongs to the person who asked, not to the room. What reaches
 you privately stays private — do not repeat or summarize it into a channel unless the
@@ -1460,6 +1460,16 @@ pub struct SendMessageInput {
     to: String,
     #[schemars(description = "What to say")]
     message: String,
+    /// One-line preview for the surface that draws the message (D108). CC's
+    /// own field (`SendMessageTool.ts:76-81`), whose readers prefer it over
+    /// truncating the body (`:765`). Optional here where CC's team path makes
+    /// it mandatory, because bingo keeps CC's *fallback* too: a message without
+    /// one still renders, as the first fifty columns of what it says.
+    #[serde(default)]
+    #[schemars(
+        description = "A 5-10 word summary shown as a preview in the UI. Optional: without one the preview is the message's own first line, cut to fit."
+    )]
+    summary: Option<String>,
     /// Reply wait: arms the follow-up watchdog (see `spawn_ack_watchdog`).
     #[serde(default)]
     #[schemars(
@@ -1499,7 +1509,7 @@ pub(crate) enum Address {
 ///
 /// One address language for the tool layer and the display layer, so an agent
 /// naming a target says what the user's own composer says (D90's `@name ` /
-/// `#name ` routing) and what the bar shows.
+/// `#name ` routing).
 pub(crate) fn parse_address(to: &str) -> Result<Address, ToolError> {
     let to = to.trim();
     if let Some(room) = to.strip_prefix('#') {
@@ -1622,11 +1632,11 @@ Decide again from the latest content: resend as-is (call again unchanged), edit 
     /// in the registry — it is the host turn loop. What answers a message here is
     /// main saying something, which the user reads in the conversation they are
     /// already in.
-    fn to_main(&self, message: &str, urgent: bool) -> ToolResult {
+    fn to_main(&self, message: &str, summary: Option<&str>, urgent: bool) -> ToolResult {
         let from = self.sender();
         self.session
             .channels
-            .deliver_to_main(&from, message, urgent);
+            .deliver_to_main(&from, message, summary, urgent);
         ToolResult {
             content: serde_json::json!({
                 "status": "queued",
@@ -1665,7 +1675,8 @@ impl Tool for SendMessageTool {
             "This is the private lane: right for what concerns the receiver alone — an assignment, a follow-up, a correction. Something every member of a room should act on belongs in one room message, not in per-member private copies that drift apart. \
 An idle receiver starts immediately; a running one drains everything waiting at its next tool round, batched into one prompt. Neither queued nor delivered is an acknowledgement — a receiver can read a message and end its turn saying nothing — so the harness re-checks five minutes after sending (tune with ack_timeout) and follows up, up to 3 rounds, reporting back if no answer ever comes; AgentControl(action=messages) shows the same record on demand."
         } else {
-            "Writing to main is deliberate, not routine: your ordinary work is already visible in your DM with the user, and your final text is returned to whoever started you. Send when the overall task is finished, when you are blocked and need a decision, or when you found something that changes what is being coordinated — not for progress, acknowledgements, or anything already in your reply. \
+            "Writing to main is deliberate, not routine: your ordinary work is already visible to whoever is watching your conversation, and your final text is returned to whoever started you. Send when the overall task is finished, when you are blocked and need a decision, or when you found something that changes what is being coordinated — not for progress, acknowledgements, or anything already in your reply. \
+Write a summary: it is the single line the user's transcript shows for your message, and without one they read the first fifty columns of the message itself. \
 Set urgent only for something blocking that cannot wait for the user to look: it rings the terminal's attention channel, which interrupts them wherever they are."
         };
         format!(
@@ -1675,8 +1686,23 @@ Set urgent only for something blocking that cannot wait for the user to look: it
 {lane}"
         )
     }
+    /// The schema, minus what this caller's message would not be previewed by.
+    ///
+    /// `summary` is drawn only for a message *from* an agent — the `@name❯`
+    /// line (D106) and the tree preview (D104) — so main's own sends have no
+    /// surface for it and it is left off the schema main assembles rather than
+    /// advertised and ignored. [`SendMessageInput`] still accepts it at every
+    /// depth: `deny_unknown_fields` would turn a harmless word into an error.
     fn input_schema(&self) -> serde_json::Value {
-        super::schema_for::<SendMessageInput>()
+        let mut schema = super::schema_for::<SendMessageInput>();
+        if self.session.depth == 0
+            && let Some(props) = schema
+                .get_mut("properties")
+                .and_then(serde_json::Value::as_object_mut)
+        {
+            props.remove("summary");
+        }
+        schema
     }
     fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
         false
@@ -1706,7 +1732,7 @@ Set urgent only for something blocking that cannot wait for the user to look: it
         let room = match address {
             Address::Room(room) => room,
             Address::Agent(_) if sub_to_main => {
-                return Ok(self.to_main(&params.message, params.urgent));
+                return Ok(self.to_main(&params.message, params.summary.as_deref(), params.urgent));
             }
             Address::Agent(agent) => return self.to_agent(ctx, &agent, &params).await,
         };
@@ -2807,7 +2833,7 @@ mod tests {
         assert_eq!(
             parse_address(" @scout ").unwrap_or_else(|e| panic!("{e}")),
             Address::Agent("scout".into()),
-            "the sigil the bar shows is accepted, not required"
+            "the sigil the composer writes is accepted, not required"
         );
         assert_eq!(
             parse_address("#build").unwrap_or_else(|e| panic!("{e}")),
@@ -2890,6 +2916,70 @@ mod tests {
             mail,
             vec!["[message from @scout]\nthe migration is done".to_string()],
             "the marker names who, and the text follows it"
+        );
+    }
+
+    /// The `summary` field (D108): offered where it is drawn, accepted when
+    /// written, omitted when it is not, and never in the envelope.
+    ///
+    /// The last is the load-bearing one. CC's *teammate* runtime carries the
+    /// summary to the recipient as a `summary="…"` attribute
+    /// (`utils/teammateMailbox.ts:386`); its *subagent* runtime — the one v4
+    /// replicates — passes only the message (`SendMessageTool.ts:810-814`). So
+    /// `main_mail` stays byte-identical and the preview is a fact about the
+    /// screen alone.
+    #[tokio::test]
+    async fn a_summary_previews_the_message_without_entering_it() {
+        let (session, _client) = parent_session();
+        let ctx = main_ctx(&session);
+        let sub = SendMessageTool::new(sub_of(&session, "scout", false));
+
+        let schema = sub.input_schema();
+        assert_eq!(
+            schema["properties"]["summary"]["type"],
+            serde_json::json!(["string", "null"]),
+            "offered to a subagent, and optional: {schema}"
+        );
+        assert_eq!(schema["required"], serde_json::json!(["message", "to"]));
+        let mains = SendMessageTool::new(session.clone()).input_schema();
+        assert!(
+            mains["properties"].get("summary").is_none(),
+            "and left off main's own schema, where nothing would draw it: {mains}"
+        );
+
+        sub.call(
+            serde_json::json!({"to": "main", "message": "the migration is done", "summary": "migration done"}),
+            &ctx,
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(
+            session.channels.drain_main_arrivals()[0].summary.as_deref(),
+            Some("migration done")
+        );
+        assert_eq!(
+            session.channels.drain_main_mail(),
+            vec!["[message from @scout]\nthe migration is done".to_string()],
+            "the model reads what was said to it, and nothing about the screen"
+        );
+
+        // Omitted: no preview on the arrival, and the renderer's fallback is
+        // what it always was.
+        sub.call(
+            serde_json::json!({"to": "main", "message": "and the indexes"}),
+            &ctx,
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(session.channels.drain_main_arrivals()[0].summary, None);
+
+        // Main may still pass one: the field is off its schema, not out of the
+        // parser — `deny_unknown_fields` would make a harmless word an error.
+        assert!(
+            serde_json::from_value::<SendMessageInput>(
+                serde_json::json!({"to": "worker", "message": "look again", "summary": "recheck"})
+            )
+            .is_ok()
         );
     }
 
@@ -3428,18 +3518,23 @@ mod tests {
         );
     }
 
-    /// The user reads a member's turn text in the DM window (D57), so the subagent note may
-    /// not claim the user never sees it. That claim is what made a DM'd member believe the
-    /// only way to reach the human was a room message (D63).
+    /// The user reads a member's turn text (D57, and since D105 in the zoomed view), so the
+    /// subagent note may not claim the user never sees it. That claim is what made a member
+    /// written to privately believe the only way to reach the human was a room message (D63).
+    ///
+    /// Reworded for D108: the note named "your direct-message window", a v3 surface that
+    /// retired with the buffers. The claim it was making — that the user has a private line
+    /// to this instance and reads its turns — is what is asserted, through the marker that
+    /// identifies such a message and the sentence that says the user can write one.
     #[test]
-    fn subagent_note_knows_the_dm_window_exists() {
+    fn subagent_note_knows_the_user_can_write_to_it() {
         assert!(
-            SUBAGENT_NOTE.contains("direct-message window"),
-            "must name the private surface the user reaches an instance through"
+            SUBAGENT_NOTE.contains("The user can write to you directly"),
+            "must name the private line the user reaches an instance through"
         );
         assert!(
             !SUBAGENT_NOTE.contains("not displayed to the user"),
-            "the old claim was false once the DM window existed, and it routed private answers into channels"
+            "the old claim was false once the private line existed, and it routed private answers into channels"
         );
         assert!(
             SUBAGENT_NOTE.contains(DM_FROM_USER_MARKER),

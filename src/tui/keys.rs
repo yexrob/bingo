@@ -247,8 +247,9 @@ mod tests {
 
     /// The panel must not advertise a surface that no longer exists: the D89
     /// workspace modal, the D90 conversation switcher and `/open` that D103
-    /// retired with the buffers they reached, and — since D104 — the team
-    /// directory, which ctrl+t no longer reaches.
+    /// retired with the buffers they reached, the team directory ctrl+t stopped
+    /// reaching in D104, and — since D108 — the observation page, whose last
+    /// door went with it.
     #[test]
     fn the_panel_names_no_retired_surface() {
         for binding in BINDINGS {
@@ -257,6 +258,8 @@ mod tests {
                 "switch conversation",
                 "/open",
                 "team directory",
+                "the record",
+                "perspective",
             ] {
                 assert!(
                     !binding.description.contains(retired) && !binding.keys.contains(retired),

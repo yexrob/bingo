@@ -288,9 +288,9 @@ pub fn gutter_cell(index: usize, name: &str, row: usize, images: bool, pal: &Pal
 /// The message gutter of a conversation view (D97): how wide it is, which
 /// portrait a sender wears, and the cells that portrait occupies.
 ///
-/// One value threaded through every conversation row builder — @main, the DM and
-/// room flow, the live tail, the perspective page — so the surfaces cannot drift
-/// on width, on who gets a face, or on which skin the terminal is in.
+/// One value threaded through every conversation row builder — @main and the
+/// zoomed view's body and live tail — so the surfaces cannot drift on width, on
+/// who gets a face, or on which skin the terminal is in.
 ///
 /// **@main has one too, since D99.** A conversation is a conversation: main is a
 /// participant like the rest, its portrait is [`MAIN_INDEX`], and the console

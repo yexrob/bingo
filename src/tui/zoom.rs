@@ -11,9 +11,9 @@
 //! **Why the alternate screen.** The inline host writes each settled row into
 //! the terminal's scrollback once and never touches it again
 //! ([`crate::tui::term`]); a view that replaces the body cannot exist there.
-//! So the zoom takes the road the transcript pager (D82) and the perspective
-//! page (D96) take: a self-driving alt-screen loop that owns the terminal while
-//! it is open, with the same guarded enter and the same D77 panic-hook claim.
+//! So the zoom takes the road the transcript pager (D82) takes: a self-driving
+//! alt-screen loop that owns the terminal while it is open, with the same
+//! guarded enter and the same D77 panic-hook claim.
 //! Leaving the alternate screen restores the primary one — with its scrollback
 //! — byte for byte.
 //!

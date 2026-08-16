@@ -1,15 +1,17 @@
 //! Chat state-machine tests, part six: what the console does and does not print
 //! (D94's delivery rerouting, D98's quiet console).
 //!
-//! Four parts. The first pins what main *stopped* printing: an agent's spawn
+//! Five parts. The first pins what main *stopped* printing: an agent's spawn
 //! and completion used to hang a `◉ name · task` row off whatever assistant
 //! message happened to be last, and now they do not — while the signal they
-//! carried still lands in the lifecycle log, on the bar, and in the agent's own
-//! DM. The second is the one line that still comes through, and the reason it
-//! does: a failure cannot depend on the main agent choosing to narrate it. The
-//! third is the digest debounce, which turns a burst of mail into one turn. The
-//! fourth is what a woken turn does when it ends: since D103 retired D102's
-//! silence contract, exactly what a typed turn does.
+//! carried still lands on the agent's own row in the background dialog and in
+//! the accounting store. The second is the one line that still comes through,
+//! and the reason it does: a failure cannot depend on the main agent choosing
+//! to narrate it. The third is the digest debounce, which turns a burst of mail
+//! into one turn. The fourth is what a woken turn does when it ends: since D103
+//! retired D102's silence contract, exactly what a typed turn does. The fifth
+//! is the tiering D106 gave the transcript — the dispatch row and its live
+//! progress, the settled cost, the `●` notice and the `@name❯` line.
 
 use super::tests_a::*;
 use super::*;
@@ -161,11 +163,12 @@ fn the_lifecycle_signal_reaches_the_dialog_and_not_the_console() {
     );
 }
 
-/// The other half of the reroute: a completed agent's report is in its DM, and
-/// the DM says so with an unread badge. Nothing new was built for this — the
-/// badge follows the instance's history, and the lifecycle event's own registry
-/// sweep is what re-reads it — so the test exists to pin that the chain holds
-/// end to end now that main prints nothing.
+/// The other half of the reroute: a completed agent's report is in its own
+/// conversation, and the accounting says so with an unread count (drawn in the
+/// background dialog since D107). Nothing new was built for this — the count
+/// follows the instance's history, and the lifecycle event's own registry sweep
+/// is what re-reads it — so the test exists to pin that the chain holds end to
+/// end now that main prints nothing.
 #[test]
 fn a_completion_bumps_the_dm_instead_of_main() {
     let mut chat = test_chat();
@@ -373,7 +376,9 @@ fn the_alert_line_keeps_its_stamp() {
 #[test]
 fn a_burst_of_room_mail_wakes_once_after_the_quiet_window() {
     let mut chat = test_chat();
-    chat.session.channels.deliver_to_main("scout", "one", false);
+    chat.session
+        .channels
+        .deliver_to_main("scout", "one", None, false);
     assert!(!chat.digest_mail(), "the window has only just opened");
     assert!(
         chat.mail_wake.is_some(),
@@ -386,7 +391,9 @@ fn a_burst_of_room_mail_wakes_once_after_the_quiet_window() {
 
     // A second message inside the window restarts it: the room is still talking.
     chat.tick += super::chat_tail::MAIL_QUIET_TICKS - 1;
-    chat.session.channels.deliver_to_main("zoe", "two", false);
+    chat.session
+        .channels
+        .deliver_to_main("zoe", "two", None, false);
     assert!(
         !chat.digest_mail(),
         "the window restarted with the new message"
@@ -408,14 +415,16 @@ fn a_burst_of_room_mail_wakes_once_after_the_quiet_window() {
 fn a_chatty_room_cannot_starve_the_wake_past_the_deadline() {
     let mut chat = test_chat();
     let step = super::chat_tail::MAIL_QUIET_TICKS - 1;
-    chat.session.channels.deliver_to_main("scout", "0", false);
+    chat.session
+        .channels
+        .deliver_to_main("scout", "0", None, false);
     assert!(!chat.digest_mail());
     let mut fired = false;
     for i in 1..=(super::chat_tail::MAIL_DEADLINE_TICKS / step + 1) {
         chat.tick += step;
         chat.session
             .channels
-            .deliver_to_main("scout", &format!("{i}"), false);
+            .deliver_to_main("scout", &format!("{i}"), None, false);
         if chat.digest_mail() {
             fired = true;
             break;
@@ -439,7 +448,7 @@ fn urgent_direct_mail_rings_and_skips_the_window() {
     let mut chat = chat_with_bell();
     chat.session
         .channels
-        .deliver_to_main("scout", "I need the deploy key", true);
+        .deliver_to_main("scout", "I need the deploy key", None, true);
     assert!(chat.digest_mail(), "urgent does not wait out the window");
     assert!(
         emitted(&mut chat).contains('\x07'),
@@ -454,7 +463,7 @@ fn the_ring_survives_a_turn_that_drained_the_mail_first() {
     let mut chat = chat_with_bell();
     chat.session
         .channels
-        .deliver_to_main("scout", "blocked", true);
+        .deliver_to_main("scout", "blocked", None, true);
     let drained = chat.session.channels.drain_main_mail();
     assert_eq!(
         drained.len(),
@@ -476,7 +485,7 @@ fn a_direct_message_to_main_carries_the_sender_into_the_inbox() {
     let chat = test_chat();
     chat.session
         .channels
-        .deliver_to_main("scout", "the migration is done", false);
+        .deliver_to_main("scout", "the migration is done", None, false);
     let mail = chat.session.channels.drain_main_mail();
     assert_eq!(mail.len(), 1);
     let mut lines = mail[0].lines();
@@ -1330,7 +1339,9 @@ fn a_message_from_an_agent_leaves_one_line_and_keeps_its_body() {
     let mut chat = test_chat();
     seed_agent(&chat, "scout");
     let body = "the parser was fine; the lexer drops a token when the input ends mid-string";
-    chat.session.channels.deliver_to_main("scout", body, false);
+    chat.session
+        .channels
+        .deliver_to_main("scout", body, None, false);
     chat.tick();
 
     let rows = main_rows(&mut chat);
@@ -1366,6 +1377,77 @@ fn a_message_from_an_agent_leaves_one_line_and_keeps_its_body() {
             .any(|r| r.contains("mid-string")),
         "and the flow is what it was on the way out"
     );
+}
+
+/// D106 named the summary's absence as a limit: bingo's `SendMessage` had no
+/// `summary` field, so the line was always the message's first fifty columns.
+/// D108 adds the field, and the line prefers it — which is CC's own order
+/// (`SendMessageTool.ts:765`, summary first and `truncate(message, 50)` only
+/// as the stand-in).
+#[test]
+fn the_senders_own_summary_is_what_the_line_shows() {
+    let mut chat = test_chat();
+    seed_agent(&chat, "scout");
+    let body = "the parser was fine; the lexer drops a token when the input ends mid-string";
+    chat.session
+        .channels
+        .deliver_to_main("scout", body, Some("lexer drops a token at EOF"), false);
+    chat.tick();
+
+    let rows = main_rows(&mut chat);
+    let line = rows
+        .iter()
+        .find(|r| r.contains("@scout❯"))
+        .unwrap_or_else(|| panic!("the sender's line: {rows:?}"));
+    assert!(
+        line.contains("lexer drops a token at EOF"),
+        "the summary, whole: {line:?}"
+    );
+    assert!(
+        !line.contains("the parser was fine"),
+        "and not the truncation it replaces: {line:?}"
+    );
+
+    // The body is untouched by the preview: `ctrl+o` still has all of it, and
+    // main's inbox still holds exactly what was said.
+    let transcript: Vec<String> = crate::tui::transcript::transcript_rows(&mut chat, 80, false)
+        .iter()
+        .map(|r| r.line.plain_text())
+        .collect();
+    assert!(
+        transcript.iter().any(|r| r.contains("mid-string")),
+        "{transcript:?}"
+    );
+    assert!(
+        chat.session
+            .channels
+            .drain_main_mail()
+            .iter()
+            .any(|mail| mail.contains(body) && !mail.contains("lexer drops a token at EOF")),
+        "the mail is the message, and the summary never entered it"
+    );
+}
+
+/// A summary that is not one cannot overrun the row. CC does not bound its
+/// summary at all, because its schema requires 5-10 words; bingo keeps the
+/// same fifty-column budget over both sources, so the parser reading the line
+/// back still finds one line whatever the sender wrote.
+#[test]
+fn an_oversized_summary_is_cut_to_the_same_budget() {
+    let mut chat = test_chat();
+    seed_agent(&chat, "scout");
+    let long = "a summary that is really the whole message again, said twice over, at length";
+    chat.session
+        .channels
+        .deliver_to_main("scout", "short body", Some(long), false);
+    chat.tick();
+
+    let line = main_rows(&mut chat)
+        .into_iter()
+        .find(|r| r.contains("@scout❯"))
+        .unwrap_or_else(|| panic!("the sender's line"));
+    assert!(!line.contains("at length"), "cut to fit: {line:?}");
+    assert!(line.contains("a summary that is really"), "{line:?}");
 }
 
 /// The bottom row of the tiering table: an instance starting, going idle or

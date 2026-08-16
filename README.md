@@ -185,7 +185,7 @@ bingo starts even with no credentials: the welcome card carries onboarding (`/pr
 | `Ctrl+K` / `Alt+K` | kill to the end of the line |
 | `Ctrl+Y` / `Alt+Y` | yank the newest kill; `Alt+Y` right after it cycles the 10-entry kill ring |
 | `Shift+Enter` | insert a newline (wherever the terminal speaks the kitty keyboard protocol) |
-| `Ctrl+B` | move the running shell command to the background; with none running, open the background dialog — agents, shells and rooms (`Enter` a detail, `f` foregrounds one, `x` stops one, `tab` opens an agent's record) |
+| `Ctrl+B` | move the running shell command to the background; with none running, open the background dialog — agents, shells and rooms (`Enter` a detail, `f` foregrounds one, `x` stops one) |
 | `Ctrl+L` | clear and redraw |
 | `@` / `#` | at the start of a line, send the rest straight to that agent or room; mid-line, `@` mentions a project file or a running agent (fuzzy dropdown, `Tab`/`Enter` inserts) |
 | `Tab` | complete the slash command, its argument, the selected mention, or a `!` shell-history prefix |
@@ -368,23 +368,25 @@ schema from a single source of truth):
   into `Done (12 tool uses · 8.3k tokens · 1m 4s)`. A round that dispatched
   several draws one `⏺ Running 2 agents…` block with a `├─ @name: task` row per
   agent. A lifecycle event arriving when no turn is running no
-  longer writes into `@main` at all — the team lifecycle log, the agent tree and
-  the instance's own record carry it instead; history is kept after
-  completion.
+  longer writes into `@main` at all — the agent tree and the instance's own row
+  in the `Ctrl+B` dialog carry it instead; history is kept after completion.
 - `SendMessage` sends follow-up instructions to an instance (context
   preserved); queued while busy, delivered automatically at the end of the
   current turn. A sub-agent's `SendMessage(to: "main")` lands in the main
   agent's inbox and wakes it when idle, and leaves one line in `@main`:
-  `@scout❯ <the message's first fifty columns>` in the sender's identity colour,
-  with the whole body reachable only through the `ctrl+o` transcript. A room
-  relay draws nothing. `urgent: true`
+  `@scout❯ <summary>` in the sender's identity colour, with the whole body
+  reachable only through the `ctrl+o` transcript. The summary is the send's own
+  optional `summary` field — five to ten words, offered on a sub-agent's schema
+  because a sub-agent's message is the one that gets drawn — falling back to the
+  message's first fifty columns where none was written. A room relay draws
+  nothing. `urgent: true`
   (sub-agent→main only) rings the terminal attention channel on arrival.
 - A run that **fails** draws one `⚠ @name · reason` line in `@main` and rings
   the attention channel; a run that **completes** leaves one dim
   `● @name completed · task` line where its notification reaches the main
-  agent's context; a cancellation draws nothing. A run whose trigger
-  was entirely the user's own DM messages produces no notification and no woken
-  turn for the main agent at all.
+  agent's context; a cancellation draws nothing. A run the user triggered
+  themselves, by writing to the instance directly, produces no notification and
+  no woken turn for the main agent at all.
 - A turn the main agent was *woken* into — digesting a notification rather than
   answering the user — ends like any other turn, in prose that renders in `@main`
   as the main agent speaking. The noise control is the wake debounce and the
@@ -589,24 +591,30 @@ rather than a position. The team is not a conversation — you cannot say anythi
 it — so this is where the organization is read; the always-on version of the same
 roster is the agent tree, which leads with `@main`.
 
-**Every participant has a page of its own, main included.** The perspective page
-is a read-only, two-level dossier of everything one of them has said and been
-told. The index groups its threads — a merged `timeline`, its `direct messages`
-one row per counterpart, its `rooms`, and the `intake` it was handed — with a
-count and a clock on each; Enter opens a thread, Esc walks back, `q` closes. A
-thread reads as a conversation with that participant as the protagonist: its
-thinking and tool calls are shown in *every* thread, whoever it was talking to.
-This is the audit layer — the one place an agent's conversations with someone
-other than you are visible, while your own DM with it stays a pair conversation
-and mixes nothing in. It is a snapshot: reopening is the refresh.
+**What the transcript shows of a life it is not living** is four tiers and no
+more. A **dispatch** is `◉ @scout: fix the parser`, carrying the last three
+things the instance did while it runs — or one `In progress… · 4 tool uses ·
+8.3k tokens` line where the window is too short for them — and settling, when
+the run ends, into `Done (12 tool uses · 8.3k tokens · 1m 4s)`, which is what
+reaches scrollback. Several `Agent` calls from one round draw one
+`⏺ Running 2 agents…` block instead, with a `├─ @name: task` row each. A
+**completion** whose notification is the main agent's own adds one dim
+`● @scout completed · fix the parser`. A **message** from an agent adds one
+`@scout❯ <summary>` in the sender's colour. A **failure** adds one
+`⚠ @scout · connection reset` and rings the attention channel. Everything else
+— an instance starting, going idle, being stopped, a room post — writes nothing:
+state belongs to the tree, and a line per room post is the flood the digest
+debounce exists to prevent.
 
-**One door reaches it**: `tab` on an agent in the `Ctrl+B` dialog — where `f`
-opens the zoomed view instead, which is the live conversation rather than the
-record. Main's page is built from
-the session transcript — its console conversation as its `@user` lane, one lane
-per agent that wrote to it, its rooms, its dispatch notifications as intake —
-and the only clock a transcript carries is the turn marker, so times on it are
-turn times and a session recorded before those markers shows none.
+**One walk decides who said what**, because the sender is not a field: an
+absorbed inbox arrives as one flat prompt and only its literal markers survive
+it. The zoomed view keeps every counterpart that walk finds; the unread count
+keeps exactly one, the pair of you and the agent. So the task an instance was
+created with, the main agent's instructions to it, room relays, mail from other
+agents and the chases for its silence are all somebody else's conversation and
+count as nothing of yours — and the default flips with whose record it is: in an
+instance's history unmarked prose is the main agent speaking, in the main
+agent's own history it is you.
 
 **Avatars**: on terminals that can place kitty images — the same capability
 behind inline image rendering (Ghostty/kitty, and tmux with passthrough) — each
@@ -624,8 +632,8 @@ it; work steps and system lines take the indentation and no face. Main has a
 reserved portrait of its own that no teammate can be dealt or pin, so the console
 looks the same in every session. One known degradation: a terminal that purges
 its image store (a resize does) gets the faces still on screen redrawn, but rows
-already in scrollback keep blank columns where the portrait was. In a DM or a
-channel the sender's name also heads each run of messages — with more than two
+already in scrollback keep blank columns where the portrait was. In the zoomed
+view the sender's name also heads each run of messages — with more than two
 speakers in a room, the name is not decoration. `experimental.chatAvatars` (off
 by default) governs one remaining thing: whether a subagent's watch row wears
 that agent's portrait in place of its `◉`.

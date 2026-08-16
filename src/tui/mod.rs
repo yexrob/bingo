@@ -57,7 +57,6 @@ pub mod model_menu;
 pub mod motion;
 pub mod notify;
 pub mod perspective;
-pub mod perspective_ui;
 pub mod picker;
 pub mod slash;
 pub mod statics;

@@ -20,8 +20,8 @@
 //! into one flow — and D103 retired it whole. What is left is the **book-keeping
 //! half**, which is what D104's footer pills and agent tree read. The extraction
 //! rules that turn a domain store into displayable posts live at the bottom of
-//! this file, where the workspace skin left them (D89); the observation page
-//! reads them, and D105's zoom will too.
+//! this file, where the workspace skin left them (D89); D105's zoom reads
+//! them.
 
 use std::sync::Arc;
 
@@ -309,7 +309,7 @@ impl Buffers {
     /// in was never yours to begin with — it is somebody else's conversation,
     /// findable in the dialog and readable there. So a room is listed while
     /// the user is a member of it and drops out of the registry when they
-    /// leave, which is what makes the bar mean "conversations I am in".
+    /// leave, which is what makes the store mean "conversations I am in".
     pub fn refresh(&mut self, session: &Arc<Session>, tick: u64) {
         let mut mine: Vec<String> = Vec::new();
         for status in session.channels.list() {
@@ -355,8 +355,8 @@ impl Buffers {
     ///
     /// **Said, not history length.** The old measure counted every row the
     /// record grew, so a turn that made forty tool calls read as forty unread
-    /// messages; the measure the observation page already states — "process rows
-    /// are work, not messages" — is the one the bar wants. **And a mention
+    /// messages; the measure a reader wants is "process rows are work, not
+    /// messages". **And a mention
     /// means it answered you**: marking every change was badge blindness by
     /// construction, because a DM was then always accented and the accent said
     /// nothing.
@@ -517,10 +517,10 @@ pub fn channel_posts(log: &[ChannelMessage], me: &str) -> Vec<Post> {
 ///
 /// **One parser, one walk.** The shapes are recognised here and nowhere else,
 /// and [`crate::tui::perspective::walk`] is the single reader that turns them
-/// into attributed posts. The observation page keeps every lane the walk files;
-/// the user's `@X` pair lane keeps the one lane it is in and
-/// drops the rest, which is why a room relay or a chase no longer renders in a
-/// DM as a dim note (D99) — it is not the user's conversation to read there.
+/// into attributed posts. The zoom keeps every lane the walk files; the user's
+/// `@X` pair lane keeps the one lane it is in and drops the rest, which is why
+/// a room relay or a chase does not count as something the agent said to the
+/// user (D99) — it is not the user's conversation to read there.
 ///
 /// Anything the runtime wraps in its own brackets is not a message somebody
 /// typed; `None` is prose, which is main's default voice (main is the one
@@ -629,7 +629,7 @@ fn tally(group: &mut CollapseGroup, kind: crate::tui::chat::CollapseKind) {
 /// room relays, reminders and chases, its own prose, and the work it did.
 ///
 /// The attribution is [`crate::tui::perspective::walk`]'s and nobody else's —
-/// the same walk the observation page files into lanes — with
+/// the same walk [`crate::tui::perspective::pair_lane`] narrows — with
 /// `Protagonist::of` deciding what unmarked prose means (D96/D100). The zoom
 /// keeps *every* lane, which is the difference from
 /// [`crate::tui::perspective::pair_lane`]: that is the user's conversation with
@@ -672,9 +672,10 @@ fn record_posts(who: &str, history: &[Message], stamps: &[u64]) -> Vec<Post> {
         // Intake is what was *handed* to the agent rather than said to it — the
         // task it was dispatched with, a reminder, a chase. Nobody wrote it, so
         // it takes the furniture tier: dim, one line, no name over it and no
-        // portrait beside it. The perspective page files intake in a lane of its
-        // own and can afford to render it as a message; a single-column record
-        // cannot, or a spawn prompt would arrive wearing somebody's face.
+        // portrait beside it. The walk files it under its own target, which a
+        // grouped view could afford to render as a message; a single-column
+        // record cannot, or a spawn prompt would arrive wearing somebody's
+        // face.
         if filed.target == Target::Intake {
             post.kind = PostKind::Note;
         }
@@ -812,7 +813,7 @@ mod tests {
 
     /// A message the *user* sent, in the shape `absorb_inbox` records it: the
     /// D64 marker heading the text. Unmarked prose is the main agent talking,
-    /// which is exactly what the pair view has to tell apart (D99).
+    /// which is exactly what the pair lane has to tell apart (D99).
     fn from_user(text: &str) -> Message {
         Message::user_text(format!(
             "{}\n{text}",
@@ -854,7 +855,8 @@ mod tests {
         );
     }
 
-    /// A room the user is in — the ordinary case for anything the bar shows.
+    /// A room the user is in — the ordinary case for anything the store
+    /// lists.
     fn seed_room(session: &Arc<Session>, name: &str, members: &[&str]) {
         let mut roster = vec![USER_NAME.to_string()];
         roster.extend(members.iter().map(|m| m.to_string()));
@@ -920,7 +922,7 @@ mod tests {
         );
     }
 
-    /// The bar is "conversations I am in". A room formed by two agents is real,
+    /// The store is "conversations I am in". A room formed by two agents is real,
     /// findable in the dialog and readable — but it is not one of the user's
     /// conversations, so it is not listed, and joining is what lists it.
     #[test]
@@ -1208,7 +1210,7 @@ mod tests {
     }
 
     /// The zoom keeps every lane, and that is the whole difference from the
-    /// pair view: the task that created the instance, main's instruction, the
+    /// pair lane: the task that created the instance, main's instruction, the
     /// user's own message and the agent's answer all render, each under the
     /// name the walk attributes it to — while the pair lane over the same
     /// history keeps the user's two turns and drops the rest (D99).
@@ -1259,7 +1261,7 @@ mod tests {
                 "scout", &history, &stamps
             )),
             vec!["and say what you find", "found two"],
-            "the pair view is the user's lane and stays that way"
+            "the pair lane is the user's lane and stays that way"
         );
     }
 
@@ -1399,9 +1401,14 @@ mod tests {
         assert_eq!(posts[2].kind, PostKind::Typing, "a reply is still owed");
     }
 
-    /// A room's log as posts: what was said, and the roster changes as lines
-    /// nobody said. `channel_posts` is the one extraction, read by the
-    /// observation page and by the direct send's destination alike.
+    /// A room's log as posts: what was said, the roster changes as lines
+    /// nobody said, and whose rows are the reader's own. `channel_posts` is the
+    /// one extraction, read by the room zoom (D105) and by the background
+    /// dialog's room detail (D107) alike.
+    ///
+    /// The `you` half was inherited for D108 from the perspective projection's
+    /// room-lane test, which went with the observation page: the claim is
+    /// `channel_posts`' and belongs beside its other assertions.
     #[test]
     fn a_rooms_log_reads_as_messages_with_membership_changes_as_notes() {
         let session = test_session();
@@ -1428,6 +1435,13 @@ mod tests {
         );
         assert_eq!(said[2].kind, PostKind::Note);
         assert!(said[2].text.starts_with("· scout left ·"), "{:?}", said[2]);
+
+        assert!(!said[0].you, "the user did not say it");
+        let mine = channel_posts(&session.channels.log_of("build"), "scout");
+        assert!(
+            mine[0].you,
+            "and the same line is the reader's own when the reader is scout"
+        );
     }
 
     /// A name reaches the person whatever case it is written in, and a longer

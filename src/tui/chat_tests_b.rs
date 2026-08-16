@@ -2420,11 +2420,16 @@ async fn queued_slashes_drain_through_run_slash() {
 /// empty composer, ↑ recalls the prompt history.
 ///
 /// Rewritten for D107: the manager's detail became the background dialog's,
-/// and the two doors moved with it — `f` foregrounds the agent (CC's verb for
-/// the zoomed view) and `tab` still opens its record. `Enter` is what opens the
-/// detail now, which is CC's own meaning for it
-/// (`BackgroundTasksDialog.tsx:414`); nothing that was asserted here is
-/// dropped, each claim is made through the key that carries it now.
+/// and the doors moved with it — `f` foregrounds the agent (CC's verb for the
+/// zoomed view). `Enter` is what opens the detail now, which is CC's own
+/// meaning for it (`BackgroundTasksDialog.tsx:414`); nothing that was asserted
+/// here is dropped, each claim is made through the key that carries it now.
+///
+/// Rewritten again for D108: the observation page retired with v4's table, so
+/// `tab` names nothing and the arm that walked it is gone. What it was really
+/// about — the arrows belonging to history while an agent runs, and the dialog
+/// closing behind the door it opened — is asserted through `f`, the one door
+/// that survives.
 #[test]
 fn running_agents_leave_the_arrows_to_history() {
     let mut chat = test_chat();
@@ -2447,25 +2452,11 @@ fn running_agents_leave_the_arrows_to_history() {
 
     chat.set_input("");
     assert!(chat.on_key(KeyCode::Char('b'), KeyModifiers::CONTROL));
-    assert!(chat.on_key(KeyCode::Tab, KeyModifiers::NONE));
-    assert_eq!(
-        chat.open_perspective.as_deref(),
-        Some("scout"),
-        "tab is the door to the record"
-    );
-    assert!(chat.open_zoom.is_none(), "and the record is not the zoom");
-
-    chat.open_perspective = None;
-    assert!(chat.on_key(KeyCode::Char('b'), KeyModifiers::CONTROL));
     assert!(chat.on_key(KeyCode::Char('f'), KeyModifiers::NONE));
     assert_eq!(
         chat.open_zoom,
         Some(crate::tui::zoom::ZoomTarget::Agent("scout".into())),
         "f foregrounds the agent under the cursor"
-    );
-    assert!(
-        chat.open_perspective.is_none(),
-        "and the zoom is not the record"
     );
     assert!(
         chat.dialog.is_none(),
