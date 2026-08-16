@@ -322,7 +322,12 @@ impl Chat {
         &'a self,
         pal: &'a crate::tui::avatar::Palette,
     ) -> crate::tui::avatar::Gutter<'a> {
-        crate::tui::avatar::Gutter::new(self.image_cap.is_some(), pal, &self.faces_pinned)
+        crate::tui::avatar::Gutter::new(
+            self.chat_avatars,
+            self.image_cap.is_some(),
+            pal,
+            &self.faces_pinned,
+        )
     }
 
     /// One post of a zoomed conversation as rows (D105). The vocabulary is the
@@ -945,6 +950,7 @@ mod tests {
     #[test]
     fn the_console_wears_the_same_gutter_every_conversation_does() {
         let mut chat = test_chat();
+        chat.chat_avatars = true; // the gutter under test follows the one avatar switch (D110)
         main_message(&mut chat, Role::User, "a question");
         main_message(&mut chat, Role::Assistant, "main prose");
         let rows = raw_rows(&mut chat);
@@ -962,6 +968,7 @@ mod tests {
         );
         assert_eq!(
             crate::tui::avatar::Gutter::new(
+                false,
                 false,
                 &crate::tui::avatar::Palette::new(&chat.theme),
                 &chat.faces_pinned
@@ -989,6 +996,9 @@ mod tests {
         let mut chip = test_chat();
         let mut placed = test_chat();
         placed.image_cap = Some(crate::tui::gfx::ImageCap::default_cells());
+        for chat in [&mut chip, &mut placed] {
+            chat.chat_avatars = true; // the skins under test follow the one avatar switch (D110)
+        }
         for chat in [&mut chip, &mut placed] {
             main_message(chat, Role::User, "a question");
             main_message(chat, Role::Assistant, "main prose that runs on a while");
@@ -1035,7 +1045,7 @@ mod tests {
         let theme = crate::tui::theme::Theme::dark();
         let pal = crate::tui::avatar::Palette::new(&theme);
         let pinned = std::collections::HashMap::new();
-        let gutter = crate::tui::avatar::Gutter::new(false, &pal, &pinned);
+        let gutter = crate::tui::avatar::Gutter::new(true, false, &pal, &pinned);
         let width = gutter.width();
         for kind in [PostKind::Process, PostKind::Note] {
             let post = Post {
@@ -1094,7 +1104,7 @@ mod tests {
         let theme = crate::tui::theme::Theme::dark();
         let pal = crate::tui::avatar::Palette::new(&theme);
         let pinned = std::collections::HashMap::new();
-        let gutter = crate::tui::avatar::Gutter::new(false, &pal, &pinned);
+        let gutter = crate::tui::avatar::Gutter::new(true, false, &pal, &pinned);
         let post = Post {
             from: crate::channels::USER_NAME.to_string(),
             you: true,
@@ -1131,7 +1141,7 @@ mod tests {
         let theme = crate::tui::theme::Theme::dark();
         let pal = crate::tui::avatar::Palette::new(&theme);
         let pinned = std::collections::HashMap::new();
-        let gutter = crate::tui::avatar::Gutter::new(true, &pal, &pinned);
+        let gutter = crate::tui::avatar::Gutter::new(true, true, &pal, &pinned);
         let index = gutter.index_for("scout");
         let cells = gutter.cells(index, "scout", true);
         assert_eq!(

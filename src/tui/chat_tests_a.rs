@@ -579,11 +579,11 @@ fn the_console_names_its_speakers_in_the_gutter_and_not_above_them() {
     assert_eq!(chat.faces, expected, "both faces recorded for transmission");
 }
 
-/// Rewritten for D99: the switch governs the *band* and the watch row's
-/// portrait, and nothing else. The console's own gutter is not experimental any
-/// more — main and the user wear their faces beside every message the way they
-/// do in a DM — so what "off" now means is no band over a message and no
-/// portrait replacing a watch row's `◉`, with the gutter untouched underneath.
+/// Rewritten twice, honestly both times. D99 narrowed the switch to the band
+/// and the watch row's portrait and let the gutter run unconditionally; D110
+/// is the user's ruling the other way — **every** avatar follows
+/// `experimental.chatAvatars` — so "off" (the default) now means what it says:
+/// no band, no watch-row portrait, and no gutter, faces or chips, anywhere.
 #[test]
 fn without_the_switch_the_transcript_wears_no_band() {
     let mut chat = test_chat();
@@ -621,14 +621,15 @@ fn without_the_switch_the_transcript_wears_no_band() {
         rows.iter().any(|r| r.contains("◉ @林夏: UI review")),
         "the watch row keeps its glyph: {rows:?}"
     );
-    // The gutter is a different thing and is always on (D99): the portrait
-    // cells are on the rows they opened, and main's face is claimed for
-    // transmission before any of them is built.
+    // The gutter follows the same switch (D110, user ruling: every avatar
+    // does): off means no portrait cells anywhere, no face claimed for
+    // transmission, and the message column opening at the left edge — the
+    // transcript reads as if the avatar machinery did not exist.
     assert!(
-        rows.iter().any(|r| r.contains(gfx::PLACEHOLDER)),
-        "{rows:?}"
+        !rows.iter().any(|r| r.contains(gfx::PLACEHOLDER)),
+        "no placeholder cells with the switch off: {rows:?}"
     );
-    assert!(chat.faces.contains(&avatar::MAIN_INDEX), "{:?}", chat.faces);
+    assert!(chat.faces.is_empty(), "{:?}", chat.faces);
 }
 
 /// Task-family / AskUserQuestion calls are not shown in the transcript

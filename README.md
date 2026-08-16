@@ -279,7 +279,7 @@ otherwise the user layer — no `.bingo/` is conjured in arbitrary directories
 | `mcpServers` | object | see MCP below |
 | `disabledMcpServers` | string[] | disabled MCP servers (written by `/mcp disable`) |
 | `permissions` | object | `{allow[], deny[], ask[]}`, rule syntax under Permission system below |
-| `experimental` | object | experimental features: `agentChannels`, `channelMessageLimit` (default 500), `agentMessageLimit` (default 50), `chatAvatars` (default false = a subagent's watch row keeps its `◉` instead of wearing that agent's portrait) |
+| `experimental` | object | experimental features: `agentChannels`, `channelMessageLimit` (default 500), `agentMessageLimit` (default 50), `chatAvatars` (default false; the one switch every avatar follows — off = no avatar gutter, chips or watch-row portraits anywhere, on = faces everywhere the terminal can draw them) |
 | `team` | object | team startup behavior: `{"autoStart": true}` (default true = auto-pull the project team at startup; `--no-team` or false disables) |
 | `hooks` | object | per-event hooks, see Hooks below |
 
@@ -616,27 +616,29 @@ count as nothing of yours — and the default flips with whose record it is: in 
 instance's history unmarked prose is the main agent speaking, in the main
 agent's own history it is you.
 
-**Avatars**: on terminals that can place kitty images — the same capability
-behind inline image rendering (Ghostty/kitty, and tmux with passthrough) — each
-sender wears one of eight bundled [anime-style portraits](assets/avatars/), 4×2
-cells beside the name, transmitted once per portrait and placed by Unicode
-placeholder cells. A team member's portrait is pinned in `.bingo/team.json`
-(`"avatar": "sora"`) so a crew keeps a fixed cast; everyone else gets a face
-derived from their name. Terminals without that capability keep the sender's initial
-on a colour; the row count is identical either way, so only the gutter changes.
+**Avatars** (`experimental.chatAvatars`, off by default — the one switch every
+avatar follows): with it on, terminals that can place kitty images — the same
+capability behind inline image rendering (Ghostty/kitty, and tmux with
+passthrough) — draw each sender as one of eight bundled
+[anime-style portraits](assets/avatars/), 4×2 cells beside the name,
+transmitted once per portrait and placed by Unicode placeholder cells. A team
+member's portrait is pinned in `.bingo/team.json` (`"avatar": "sora"`) so a
+crew keeps a fixed cast; everyone else gets a face derived from their name.
+Terminals without that capability keep the sender's initial on a colour, and a
+subagent's watch row wears that agent's portrait in place of its `◉`. With the
+switch off there is no avatar gutter, no chips and no watch-row portrait
+anywhere — identity colours stay, because a colour is not an avatar.
 
-**Every conversation wears them, `@main` included.** The face sits in a left
-gutter — four or five cells taken out of the width before the body wraps — with
-the portrait on the first row of each speaker's run and blank on every row after
-it; work steps and system lines take the indentation and no face. Main has a
-reserved portrait of its own that no teammate can be dealt or pin, so the console
-looks the same in every session. One known degradation: a terminal that purges
-its image store (a resize does) gets the faces still on screen redrawn, but rows
-already in scrollback keep blank columns where the portrait was. In the zoomed
-view the sender's name also heads each run of messages — with more than two
-speakers in a room, the name is not decoration. `experimental.chatAvatars` (off
-by default) governs one remaining thing: whether a subagent's watch row wears
-that agent's portrait in place of its `◉`.
+**With avatars on, every conversation wears them, `@main` included.** The face
+sits in a left gutter — four or five cells taken out of the width before the
+body wraps — with the portrait on the first row of each speaker's run and blank
+on every row after it; work steps and system lines take the indentation and no
+face. Main has a reserved portrait of its own that no teammate can be dealt or
+pin, so the console looks the same in every session. One known degradation: a
+terminal that purges its image store (a resize does) gets the faces still on
+screen redrawn, but rows already in scrollback keep blank columns where the
+portrait was. In the zoomed view the sender's name also heads each run of
+messages — with more than two speakers in a room, the name is not decoration.
 
 ## Skills
 

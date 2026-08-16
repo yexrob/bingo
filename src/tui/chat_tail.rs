@@ -2194,7 +2194,7 @@ impl super::Chat {
             .map(|item| item.id.as_str())
             .collect();
         let palette = crate::tui::avatar::Palette::new(theme);
-        let gutter = crate::tui::avatar::Gutter::new(false, &palette, &self.faces_pinned);
+        let gutter = crate::tui::avatar::Gutter::new(false, false, &palette, &self.faces_pinned);
         let active: Vec<&TodoItem> = t.iter().filter(|i| i.status != TodoStatus::Done).collect();
         for item in active.iter().take(Self::TODO_SHOWN) {
             let blockers: Vec<String> = item
@@ -2591,12 +2591,16 @@ impl super::Chat {
         // The transcript wears the same gutter every view wears (D99): a
         // portrait for main and one for the user. One machinery, one more call
         // site — the console is not a second kind of surface.
-        let conversation_gutter =
-            crate::tui::avatar::Gutter::new(self.image_cap.is_some(), &pal, &pinned);
+        let conversation_gutter = crate::tui::avatar::Gutter::new(
+            self.chat_avatars,
+            self.image_cap.is_some(),
+            &pal,
+            &pinned,
+        );
         // The faces recorded before the rows are built: the transmit sweep
         // reads `Chat::faces`, and a portrait whose placeholder cells reached
         // the screen without its data is a hole.
-        {
+        if conversation_gutter.faces {
             let g = &conversation_gutter;
             for index in [
                 g.index_for(crate::channels::USER_NAME),
@@ -2672,11 +2676,12 @@ impl super::Chat {
             // message — stays outside it, so a portrait never sits beside
             // nothing.
             let cells = match &said {
-                Some(who) => {
+                Some(who) if gutter.faces => {
                     let index = gutter.index_for(who);
                     self.faces.insert(index);
                     gutter.cells(index, who, spoke != previous)
                 }
+                Some(_) => Vec::new(),
                 // Nobody said it, so there is nothing to draw and no face is
                 // claimed for transmission: `gutter_rows` falls back to the
                 // blank cell on every row of the block.

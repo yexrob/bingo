@@ -511,7 +511,7 @@ fn caret_cell(chat: &Chat) -> (usize, usize) {
 fn addressee_color(chat: &Chat) -> Option<Color> {
     let name = chat.zoom_subject()?;
     let palette = crate::tui::avatar::Palette::new(&chat.theme);
-    let gutter = crate::tui::avatar::Gutter::new(false, &palette, &chat.faces_pinned);
+    let gutter = crate::tui::avatar::Gutter::new(false, false, &palette, &chat.faces_pinned);
     Some(palette.avatars[gutter.index_for(&name) % palette.avatars.len()])
 }
 

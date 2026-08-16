@@ -158,13 +158,14 @@ pub struct ExperimentalSettings {
     /// Per-agent per-channel message cap (`agentMessageLimit`, default 50).
     #[serde(rename = "agentMessageLimit")]
     pub agent_message_limit: Option<u64>,
-    /// A subagent's portrait on its dispatch row (`chatAvatars`): with it on,
-    /// `◉ scout · task` wears scout's face instead of the glyph (image-capable
-    /// terminals only; a row inside a grouped dispatch never wears one). It
-    /// governs nothing else: the avatar gutter every conversation wears —
-    /// the console, the zoomed view — is not a setting, and its skin follows
-    /// the terminal's image capability. The sender band this switch once
-    /// controlled retired with D99.
+    /// Every avatar in the interface (`chatAvatars`, the one switch — D110,
+    /// user ruling). Off (the default): no avatar gutter anywhere — console,
+    /// zoomed view, room view — no chips, and no portrait on a dispatch row;
+    /// the transcript reads as if the machinery did not exist. On: every
+    /// conversation wears the gutter (portraits where the terminal places
+    /// images, initial-on-colour chips elsewhere) and `◉ scout · task` wears
+    /// scout's face on image-capable terminals. Identity *colours* are not
+    /// avatars and ignore this switch.
     #[serde(rename = "chatAvatars", default)]
     pub chat_avatars: bool,
 }

@@ -821,6 +821,7 @@ fn collapse_after_expand_then_expand_again() {
 #[test]
 fn user_message_has_bubble_background() {
     let mut chat = test_chat();
+    chat.chat_avatars = true; // this test's subject predates the one avatar switch (D110)
     chat.messages.push(msg(Role::User, "hello"));
     chat.build_rows(100);
     let row = chat
@@ -837,6 +838,7 @@ fn user_message_has_bubble_background() {
 #[test]
 fn multiline_user_message_wraps_into_single_line_rows() {
     let mut chat = test_chat();
+    chat.chat_avatars = true; // this test's subject predates the one avatar switch (D110)
     chat.messages
         .push(msg(Role::User, "first line\nsecond line\nthird"));
     chat.build_rows(40);
@@ -3073,7 +3075,7 @@ fn task_lines_name_a_live_owner_and_what_blocks_the_row() {
         .and_then(|l| l.segs.iter().find(|seg| seg.text == "@scout"))
         .expect("owner segment");
     let palette = crate::tui::avatar::Palette::new(&chat.theme);
-    let gutter = crate::tui::avatar::Gutter::new(false, &palette, &chat.faces_pinned);
+    let gutter = crate::tui::avatar::Gutter::new(false, false, &palette, &chat.faces_pinned);
     assert_eq!(
         owner_seg.style.fg,
         Some(palette.avatars[gutter.index_for("scout") % palette.avatars.len()]),
@@ -3725,6 +3727,7 @@ fn notice_expires_after_its_window() {
 #[test]
 fn interrupted_tool_row_reads_interrupted_in_the_warning_color() {
     let mut chat = test_chat();
+    chat.chat_avatars = true; // this test's subject predates the one avatar switch (D110)
     chat.messages.push(msg(Role::Assistant, ""));
     chat.stream_msg = Some(0);
     let _ = chat.events.send(UiEvent::ToolStart {
@@ -3860,6 +3863,7 @@ fn tool_use_interrupt_marker_renders_the_same_way() {
 #[test]
 fn the_completion_row_blinks_accent_before_it_freezes() {
     let mut chat = test_chat();
+    chat.chat_avatars = true; // this test's subject predates the one avatar switch (D110)
     chat.messages.push(msg(Role::User, "hi"));
     chat.handle(UiEvent::TurnStart);
     chat.handle(UiEvent::ThinkingDelta("weighing it up".into()));

@@ -4778,3 +4778,34 @@ name — so only the image skin ever pads and the chip skin keeps its heights.
 That amends the D97 doctrine "the row count is identical either way" to
 "identical everywhere but a lead message shorter than the portrait", and the
 cross-skin layout test now pins the difference at exactly the pad row.
+
+### D110. One switch for every avatar
+
+The user's ruling, delivered on the first real-terminal day of v4:
+**`experimental.chatAvatars` governs every avatar in the interface.** D99 had
+narrowed the switch to the watch row and let the conversation gutter run
+unconditionally; that inversion is now reversed — off (the default) means no
+gutter, no chips, no watch-row portrait, no face transmissions, anywhere. On
+means everything D97/D99 built, unchanged. The default therefore *is* CC's own
+look — no avatars — and the switch is where bingo's flavor lives, which reads
+as the arrangement this program should have arrived at itself.
+
+Mechanically: `Gutter` gained a `faces` dimension ahead of `images`. With it
+off, `width()` is zero, `cells()` is empty, and every consumer — the console's
+`El::Gutter` blocks, the zoom's `settled_post_rows`, the wrap arithmetic that
+subtracts the gutter from the body width — degrades through the one value it
+already read. The two drawing sites (the console's `conversation_gutter` and
+`Chat::conversation_gutter`) pass `chat_avatars`; the five colour-only
+constructions (tree, pills' addressee tint, zoom header, task owners) pass
+`false` and lose nothing, because `index_for` answers regardless — identity
+colours are not avatars, by the ruling's own line. Face recording and the two
+transmit sweeps (inline and the zoom's alt-screen) are gated at the same
+switch, so an off session sends no image bytes at all.
+
+Tests: the off-state pin (`without_the_switch_the_transcript_wears_no_band`)
+rewrote its claim for the second time, honestly both times, and now asserts
+the full absence — no placeholder cells, `Chat::faces` empty. Seven tests
+whose subject is the gutter itself opted in with one line each. D108a's pad
+row rides along untouched: with faces off there are no cells to pad for.
+
+D109 remains reserved for pane mode.

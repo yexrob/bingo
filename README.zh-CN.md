@@ -237,7 +237,7 @@ tmux 下仍显示 `#[image]` 占位（tmux 内的活动视口同样保持占位�
 | `mcpServers` | object | 见下「MCP」 |
 | `disabledMcpServers` | string[] | 禁用的 MCP 服务器名单（`/mcp disable` 写入） |
 | `permissions` | object | `{allow[], deny[], ask[]}`，规则语法见「权限系统」 |
-| `experimental` | object | 实验特性：`agentChannels`、`channelMessageLimit`（默认 500）、`agentMessageLimit`（默认 50）、`chatAvatars`（默认 false = subagent 的 watch 行保留 `◉` 而不换成它的头像） |
+| `experimental` | object | 实验特性：`agentChannels`、`channelMessageLimit`（默认 500）、`agentMessageLimit`（默认 50）、`chatAvatars`（默认 false；所有头像的唯一开关——关 = 任何地方都没有头像装订线、色块与 watch 行头像，开 = 终端能画的地方都画） |
 | `team` | object | 团队启动行为：`{"autoStart": true}`（缺省 true = 项目绑定 team 时启动自动拉起；`--no-team` 或 false 关闭） |
 | `hooks` | object | 各事件 hook，见「Hooks」 |
 
@@ -544,21 +544,21 @@ agent 离开名册时视图自己关闭；而一个*已完成*的 agent 的视�
 ——而默认归属会随记录属于谁而翻转：在实例的历史里，没有标记的散文是主 agent 在说
 话；在主 agent 自己的历史里，那就是你。
 
-**头像**：能放置 kitty 图片的终端（与内联图片同一能力：Ghostty/kitty，以及开了
-passthrough 的 tmux）为每位发言者分配八张内置
-[动漫风格头像](assets/avatars/)之一，名字左侧 4×2 格——每张图只传输一次，靠
-Unicode 占位符格子定位。team 成员的头像钉在 `.bingo/team.json`（`"avatar": "sora"`），
-一支队伍就有固定班底；其余实例按名字取脸。不支持的终端保留首字母色块；两种皮肤行数一致，只有装订线
-不同。
+**头像**（`experimental.chatAvatars`，默认关——所有头像的唯一开关）：开启后，能放置
+kitty 图片的终端（与内联图片同一能力：Ghostty/kitty，以及开了 passthrough 的 tmux）
+为每位发言者分配八张内置[动漫风格头像](assets/avatars/)之一，名字左侧 4×2 格——每张
+图只传输一次，靠 Unicode 占位符格子定位。team 成员的头像钉在 `.bingo/team.json`
+（`"avatar": "sora"`），一支队伍就有固定班底；其余实例按名字取脸。不支持图片的终端
+保留首字母色块，subagent 的 watch 行用它的头像替换 `◉`。开关关着（默认）则任何地方
+都没有装订线、色块与 watch 行头像——身份色不受影响，因为颜色不是头像。
 
-**每个会话都戴，`@main` 也不例外**：脸放在左侧装订线里——正文换行之前先从宽度里
+**开启后每个会话都戴，`@main` 也不例外**：脸放在左侧装订线里——正文换行之前先从宽度里
 扣掉 4 到 5 格——同一个人连续说话时只有第一行带头像，之后各行留空；工具步骤与系统行
 只取缩进、不带脸。main 有一张专属头像，任何队友既分不到也钉不上，所以每次开机的
 控制台都是同一张脸。一处已知退化：终端清空图片存储时（resize 会），还在屏幕上的脸
-会重画，已经滚进 scrollback 的行则留下空白列。`experimental.chatAvatars`（默认关）
-现在只管一件事：subagent 的 watch 行是否用它的头像替换 `◉`——被合成一块的派发里的
-行两样都不戴，因为树枝加上身份色的名字已经说清了是谁。agent 发来的消息留下的
-`@名字❯` 行同样不戴脸：它只有一行高，而头像要两行，身份由名字上的颜色承载。
+会重画，已经滚进 scrollback 的行则留下空白列。被合成一块的派发里的行不戴头像,
+因为树枝加上身份色的名字已经说清了是谁；agent 发来的消息留下的 `@名字❯` 行同样
+不戴脸：它只有一行高，而头像要两行，身份由名字上的颜色承载。
 
 ## 技能（Skills）
 

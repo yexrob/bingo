@@ -884,6 +884,7 @@ fn the_console_counts_what_main_says_while_you_are_elsewhere() {
 fn a_state_line_takes_the_indentation_and_nobodys_face() {
     for images in [false, true] {
         let mut chat = chat_at(78, 40);
+        chat.chat_avatars = true; // the gutter under test follows the one avatar switch (D110)
         if images {
             chat.image_cap = Some(crate::tui::gfx::ImageCap::default_cells());
         }
@@ -941,6 +942,7 @@ fn a_state_line_takes_the_indentation_and_nobodys_face() {
 #[test]
 fn a_steered_message_still_wears_the_users_face() {
     let mut chat = chat_at(78, 40);
+    chat.chat_avatars = true; // this test's subject predates the one avatar switch (D110)
     chat.messages.push(msg(Role::Assistant, "working on it"));
     chat.absorb_steered(&[crate::steer::SteerItem {
         id: 1,

@@ -397,7 +397,7 @@ impl Chat {
     pub(crate) fn zoom_header(&self, target: &ZoomTarget, width: usize) -> Vec<Row> {
         let theme = &self.theme;
         let palette = crate::tui::avatar::Palette::new(theme);
-        let gutter = crate::tui::avatar::Gutter::new(false, &palette, &self.faces_pinned);
+        let gutter = crate::tui::avatar::Gutter::new(false, false, &palette, &self.faces_pinned);
         let identity = palette.avatars[gutter.index_for(target.name()) % palette.avatars.len()];
         let mut line = Line::styled("Viewing ", SegStyle::fg(theme.text));
         line.push_styled(target.label(), SegStyle::fg(identity).bold());
@@ -534,7 +534,9 @@ async fn modal_loop(
         }
         let size = terminal.size()?;
         let width = size.width as usize;
-        if let Some(cap) = chat.image_cap {
+        if let Some(cap) = chat.image_cap
+            && chat.chat_avatars
+        {
             let faces: Vec<usize> = (0..crate::tui::avatar::COUNT).collect();
             let bytes = crate::tui::avatar::transmits(&faces, &cap, &mut transmits);
             crate::tui::term::write_transmits(terminal.backend_mut(), &bytes)?;

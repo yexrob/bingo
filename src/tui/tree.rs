@@ -260,7 +260,7 @@ impl Chat {
     /// The pills, the tree's rows and D106's `@name❯` lines all ask here.
     pub(crate) fn identity_color(&self, name: &str) -> Color {
         let palette = Palette::new(&self.theme);
-        let gutter = Gutter::new(false, &palette, &self.faces_pinned);
+        let gutter = Gutter::new(false, false, &palette, &self.faces_pinned);
         palette.avatars[gutter.index_for(name) % palette.avatars.len()]
     }
 
@@ -384,7 +384,7 @@ impl Chat {
         let selecting = selected.is_some();
         let theme = &self.theme;
         let palette = Palette::new(theme);
-        let gutter = Gutter::new(false, &palette, &self.faces_pinned);
+        let gutter = Gutter::new(false, false, &palette, &self.faces_pinned);
         let identity = |name: &str| -> Color {
             palette.avatars[gutter.index_for(name) % palette.avatars.len()]
         };

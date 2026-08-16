@@ -301,6 +301,13 @@ pub fn gutter_cell(index: usize, name: &str, row: usize, images: bool, pal: &Pal
 /// convention of its own.
 #[derive(Clone, Copy)]
 pub struct Gutter<'a> {
+    /// Whether this surface draws avatars at all (`experimental.chatAvatars`,
+    /// off by default — the user's ruling: every avatar follows the one
+    /// switch). Off = no gutter: zero width, no cells, nothing to transmit.
+    /// Identity *colours* are not avatars and [`Gutter::index_for`] answers
+    /// regardless, which is why the colour-only constructions pass `false`
+    /// here and lose nothing.
+    pub faces: bool,
     /// Whether the terminal can place images (chip fallback when it cannot).
     pub images: bool,
     pub pal: &'a Palette,
@@ -310,20 +317,27 @@ pub struct Gutter<'a> {
 
 impl<'a> Gutter<'a> {
     pub fn new(
+        faces: bool,
         images: bool,
         pal: &'a Palette,
         pinned: &'a std::collections::HashMap<String, usize>,
     ) -> Self {
         Self {
+            faces,
             images,
             pal,
             pinned,
         }
     }
 
-    /// Cells the body has to give up on every row.
+    /// Cells the body has to give up on every row. Zero with faces off: the
+    /// transcript reads exactly as it would with no avatar machinery at all.
     pub fn width(&self) -> usize {
-        gutter_width(self.images)
+        if self.faces {
+            gutter_width(self.images)
+        } else {
+            0
+        }
     }
 
     /// The empty gutter: continuation rows, and every row of a message that is
@@ -356,7 +370,7 @@ impl<'a> Gutter<'a> {
     /// like it owed a row it does not). The length of this Vec is therefore
     /// the number of rows the message must have — see [`Gutter::apply`].
     pub fn cells(&self, index: usize, name: &str, lead: bool) -> Vec<Line> {
-        if !lead {
+        if !self.faces || !lead {
             return Vec::new();
         }
         let rows = if self.images { ROWS } else { 1 };
@@ -445,7 +459,7 @@ mod tests {
         // even one that tries to repin main itself, does not move it.
         pinned.insert("scout".to_string(), MAIN_INDEX);
         pinned.insert(crate::channels::MAIN_NAME.to_string(), 5);
-        let gutter = Gutter::new(false, &pal, &pinned);
+        let gutter = Gutter::new(false, false, &pal, &pinned);
         assert_eq!(gutter.index_for(crate::channels::MAIN_NAME), MAIN_INDEX);
         assert_eq!(index_of(crate::channels::MAIN_NAME), MAIN_INDEX);
 
@@ -496,7 +510,7 @@ mod tests {
         let pal = Palette::new(&Theme::dark());
         let pinned = std::collections::HashMap::new();
 
-        let images = Gutter::new(true, &pal, &pinned);
+        let images = Gutter::new(true, true, &pal, &pinned);
         assert_eq!(images.cells(1, "scout", true).len(), ROWS);
         let mut rows = vec![crate::tui::el::Row::new(Line::styled(
             "hi",
@@ -505,7 +519,7 @@ mod tests {
         images.apply(&mut rows, 1, "scout", true);
         assert_eq!(rows.len(), ROWS, "the second face cell got a row to ride");
 
-        let chips = Gutter::new(false, &pal, &pinned);
+        let chips = Gutter::new(true, false, &pal, &pinned);
         assert_eq!(
             chips.cells(1, "scout", true).len(),
             1,

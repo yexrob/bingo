@@ -55,10 +55,12 @@ pub fn test_session() -> Arc<Session> {
 /// One document row with its avatar gutter taken off — the message column
 /// alone.
 ///
-/// Every conversation row wears a gutter since D99, @main's included, and the
-/// gutter is spliced in as whole segments after the body was built. So a test
-/// that asserts what a row *says*, or what colour the first thing on it is,
-/// drops the leading segments the gutter occupies and reads what is left.
+/// A conversation row wears a gutter when `experimental.chatAvatars` is on
+/// (D110: the one switch every avatar follows), spliced in as whole segments
+/// after the body was built. A test that enables the switch and asserts what
+/// a row *says*, or what colour the first thing on it is, drops the leading
+/// segments the gutter occupies and reads what is left. With the switch off
+/// there is nothing to strip and this helper must not be used.
 pub fn body(line: &crate::tui::line::Line, images: bool) -> crate::tui::line::Line {
     let want = crate::tui::avatar::gutter_width(images);
     let mut taken = 0;
