@@ -1608,70 +1608,53 @@ fn esc_peels_the_agent_tree_in_the_slot_above_the_task_panel() {
     assert!(chat.tree.is_none(), "the second press closed the panel");
 }
 
-/// D95's key, D104's cycle: ctrl+t is one key with three stops — the tasks in
-/// flight, the agents doing them, then back to the transcript. Two surfaces,
-/// never both at once, and the key that opened each is the key that closes it.
-///
-/// Rewritten for D104. The second stop was the team directory and is the agent
-/// tree, which is CC's own cycle (`useGlobalKeybindings.tsx:65-86`); the
-/// three-stop shape and the Esc behaviour it asserted are unchanged.
+/// D95's key, D104's cycle, D115's toggle: ctrl+t belongs to the task panel
+/// and to nothing else (user ruling: "ctrl+t 只和 task 展示有关"). The agent
+/// tree keeps its own door — `shift+↑/↓` — and the two panels stay exclusive:
+/// opening the tasks closes an open tree, and neither press reopens the other
+/// on the way out.
 #[test]
-fn ctrl_t_cycles_the_tasks_then_the_agents_then_away() {
+fn ctrl_t_toggles_the_task_panel_alone() {
     let mut chat = test_chat();
     seed_agent(&chat, "scout");
     let ctrl_t = |chat: &mut Chat| chat.on_key(KeyCode::Char('t'), KeyModifiers::CONTROL);
 
     assert!(ctrl_t(&mut chat));
-    assert!(chat.tasks_visible, "first stop: the task panel");
+    assert!(chat.tasks_visible, "on: the task panel");
     assert!(!chat.tasks_auto, "opened by hand, so it stays open");
-    assert!(chat.tree.is_none());
-
-    assert!(ctrl_t(&mut chat));
-    assert!(chat.tree.is_some(), "second stop: the agent tree");
     assert!(
-        chat.tree.as_ref().and_then(|tree| tree.selected).is_none(),
-        "opened, not selecting: the composer still owns every key"
-    );
-    assert!(
-        !chat.tasks_visible,
-        "and only one of the two is on screen at a time"
+        chat.tree.is_none(),
+        "the tree is not a stop any more (D115)"
     );
     assert!(
         chat.dialog.is_none(),
-        "the cycle reaches no modal: the dialog is ctrl+b's (D107)"
+        "and no modal: the dialog is ctrl+b's (D107)"
     );
 
     assert!(ctrl_t(&mut chat));
-    assert!(chat.tree.is_none(), "third press: back to the transcript");
-    assert!(!chat.tasks_visible);
-
-    // Esc closes one stop rather than the whole cycle, and the panel underneath
-    // is not reopened on the way out.
-    assert!(ctrl_t(&mut chat));
-    assert!(ctrl_t(&mut chat));
-    assert!(chat.tree.is_some());
-    assert!(chat.on_key(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(!chat.tasks_visible, "off: back to the transcript");
     assert!(chat.tree.is_none());
-    assert!(
-        !chat.tasks_visible,
-        "Esc left the cycle, it did not rewind it"
-    );
-}
 
-/// With nobody spawned the cycle has two stops, not three — CC collapses it the
-/// same way, because a tree of one row is a row saying nothing.
-#[test]
-fn an_empty_roster_leaves_ctrl_t_a_two_stop_toggle() {
-    let mut chat = test_chat();
-    let ctrl_t = |chat: &mut Chat| chat.on_key(KeyCode::Char('t'), KeyModifiers::CONTROL);
-
+    // The panels are exclusive in both directions: the tree yields the slot
+    // to a task panel opened over it, and closing the tasks does not bring
+    // the tree back.
+    chat.open_agent_tree();
+    assert!(chat.tree.is_some());
     assert!(ctrl_t(&mut chat));
-    assert!(chat.tasks_visible);
+    assert!(
+        chat.tasks_visible && chat.tree.is_none(),
+        "the tree yielded"
+    );
     assert!(ctrl_t(&mut chat));
     assert!(
         !chat.tasks_visible && chat.tree.is_none(),
-        "the second press goes straight back to the transcript"
+        "off is off, not a rewind"
     );
+
+    // Esc closes the open panel rather than toggling anything.
+    assert!(ctrl_t(&mut chat));
+    assert!(chat.on_key(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(!chat.tasks_visible);
 }
 
 /// The dialog is modal for the keys it uses and transparent to the chords it

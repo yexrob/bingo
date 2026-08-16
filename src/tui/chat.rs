@@ -937,6 +937,9 @@ pub struct Chat {
     /// (`ctrl+shift+o`). A session-wide toggle rather than tree state, which is
     /// where CC keeps it too — it survives the tree closing and reopening.
     pub(crate) tree_preview: bool,
+    /// The badge fingerprint the slow poll last painted (D115): one entry per
+    /// conversation, its unread and its mention bit. See `observe_badges`.
+    pub(crate) badge_print: Vec<(crate::tui::buffer::BufferId, u64, bool)>,
     /// Direct messages to main since the sender's zoom was last visited,
     /// per sender (D114). The flow no longer prints an arrival line — the
     /// delivery underneath is untouched, main reads its inbox exactly as
@@ -1219,6 +1222,7 @@ impl Chat {
             dialog: None,
             tree: None,
             tree_preview: false,
+            badge_print: Vec::new(),
             agent_mail: std::collections::HashMap::new(),
             rewind: None,
             interrupted: false,

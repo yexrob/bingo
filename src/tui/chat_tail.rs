@@ -1458,28 +1458,19 @@ impl super::Chat {
                 self.toggle_stash();
                 true
             }
-            // ctrl+t cycles the two things a key that means "show me the work"
-            // can mean (D95, D104): the tasks in flight, then the agents doing
-            // them, then back to the transcript. One key rather than two
-            // because they are the same question asked at two altitudes.
-            //
-            // The second stop was the team directory and is the agent tree
-            // since D104 — CC's own cycle, `none → tasks → teammates → none`
-            // (`useGlobalKeybindings.tsx:65-86`), collapsing to `none ↔ tasks`
-            // when there is nobody to show. The directory did not shrink to fit
-            // that shape; it is a different question (who exists, what rooms,
-            // what happened) and D107's background dialog is where it goes.
+            // ctrl+t is the task panel's key and only its (D115, user
+            // ruling: "ctrl+t 只和 task 展示有关"): the tasks in flight,
+            // toggled. D104's second stop — the agent tree — retired from the
+            // cycle because the tree already had a better door, `shift+↑/↓`,
+            // and the pills name it on every frame; a stop that duplicated a
+            // named door was a stop spent on nothing.
             't' => {
-                let anybody = !self.session.agents.list().is_empty();
-                if self.tree.is_some() {
-                    self.tree = None;
-                } else if self.tasks_visible {
+                if self.tasks_visible {
                     self.tasks_visible = false;
                     self.tasks_auto = false;
-                    if anybody {
-                        self.open_agent_tree();
-                    }
                 } else {
+                    // The panels stay exclusive: the tree yields the slot.
+                    self.tree = None;
                     self.tasks_visible = true;
                     // Manually opened: keep the panel even when everything is done (the user explicitly wants to see it).
                     self.tasks_auto = false;
@@ -1897,6 +1888,7 @@ impl super::Chat {
         // repainting only when the store's own entries change.
         if self.tick.is_multiple_of(15) {
             self.refresh_conversations();
+            self.observe_badges();
         }
         // The digest debounce (D98) runs every frame: it is two integer
         // comparisons against a length the domain already keeps, and the thing it
@@ -2356,6 +2348,24 @@ impl super::Chat {
     pub fn refresh_conversations(&mut self) {
         let session = self.session.clone();
         self.buffers.refresh(&session, self.tick);
+    }
+
+    /// Repaint when a badge moved (D115). The pills and the tree are chrome,
+    /// rebuilt only on a dirty frame, and the store's slow poll does not know
+    /// what the chrome shows — so the poll keeps the badge fingerprint and
+    /// dirties the frame the moment it changes. The fingerprint is exactly
+    /// what the badge grammar reads: per conversation, its unread and whether
+    /// it names you.
+    fn observe_badges(&mut self) {
+        let print: Vec<(crate::tui::buffer::BufferId, u64, bool)> = self
+            .buffers
+            .iter()
+            .map(|b| (b.id().clone(), b.unread(), b.mention()))
+            .collect();
+        if print != self.badge_print {
+            self.badge_print = print;
+            self.dirty = true;
+        }
     }
 
     /// The running command's output so far: dim, indented under the `⎿` row it

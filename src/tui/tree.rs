@@ -14,8 +14,10 @@
 //! is built from live sources, so nothing here can go stale.
 //!
 //! **The index space is CC's** (`useBackgroundTaskNavigation.ts:26-58`): `-1`
-//! is `@main`, `0..n-1` are the instances in the order they are drawn, and `n`
-//! is the hide row. Selection wraps at both ends, and it is *explicit state* —
+//! is `@main`, `0..n-1` are the instances in the order they are drawn, the
+//! member rooms follow them (D115 — a room is a conversation with a badge,
+//! and the tree is the conversation switcher), and the last index is the hide
+//! row. Selection wraps at both ends, and it is *explicit state* —
 //! with nothing selected the tree is a readout and every key still belongs to
 //! the composer. Only a selected row makes `k` mean stop.
 //!
@@ -32,6 +34,7 @@ use crate::agents::{AgentState, AgentStatus};
 use crate::api::types::ContentBlock;
 use crate::channels::MAIN_NAME;
 use crate::tui::avatar::{Gutter, Palette};
+use crate::tui::buffer::BufferId;
 use crate::tui::chat::{Chat, Row, one_line};
 use crate::tui::line::{Line, SegStyle, text_width};
 
@@ -99,6 +102,33 @@ fn push_fit(line: &mut Line, budget: &mut usize, text: &str, style: SegStyle) {
     let fitted = one_line(text, *budget);
     *budget = budget.saturating_sub(text_width(&fitted));
     line.push_styled(fitted, style);
+}
+
+/// The two-tier badge, appended to a row or a pill (D115): activity is a bare
+/// dot in the text colour — brighter than the dim around it, no number —
+/// and a mention (words at *you*) is the count in the accent, bold. The
+/// grammar is the ctrl+b dialog's `Tone::Unread`, worn where the pull model
+/// rings: nothing else of a conversation's life reaches the flow any more
+/// (D114), so the badge is the summons.
+fn push_badge(
+    line: &mut Line,
+    budget: &mut usize,
+    (unread, mention): (u64, bool),
+    theme: &crate::tui::theme::Theme,
+) {
+    if unread == 0 {
+        return;
+    }
+    if mention {
+        push_fit(
+            line,
+            budget,
+            &format!(" •{unread}"),
+            SegStyle::fg(theme.claude).bold(),
+        );
+    } else {
+        push_fit(line, budget, " •", SegStyle::fg(theme.text));
+    }
 }
 
 /// `14s` · `2m 5s` · `1h 2m 3s` — CC `utils/format.ts:34-70` without the
@@ -255,6 +285,48 @@ impl Chat {
         self.session.agents.list()
     }
 
+    /// The rooms the tree lists under the instances (D115): the ones the user
+    /// is a member of, which is the accounting store's own rule (D95 — a room
+    /// you are not in is somebody else's conversation, findable in the ctrl+b
+    /// dialog). Joining is one post away, and the join is what starts the
+    /// badge.
+    pub(crate) fn tree_rooms(&self) -> Vec<crate::channels::ChannelStatus> {
+        self.session
+            .channels
+            .list()
+            .into_iter()
+            .filter(|status| {
+                status
+                    .members
+                    .iter()
+                    .any(|m| m == crate::channels::USER_NAME)
+            })
+            .collect()
+    }
+
+    /// Every row below `@main`: the instances, then the member rooms. The hide
+    /// row indexes one past the end of this.
+    fn tree_total(&self) -> Sel {
+        (self.tree_instances().len() + self.tree_rooms().len()) as Sel
+    }
+
+    /// One conversation's badge, in the pull model's two tiers (D115):
+    /// `(unread, mention)`. Unread brightens; a mention — words at *you* —
+    /// counts. An agent's unread folds in the mail it sent main
+    /// ([`crate::tui::chat::Chat::agent_mail`]), because the sender's dot is
+    /// the one thing D114 left on screen of an arrival.
+    pub(crate) fn badge_of(&self, id: &BufferId) -> (u64, bool) {
+        let (mut unread, mention) = self
+            .buffers
+            .get(id)
+            .map(|b| (b.unread(), b.mention()))
+            .unwrap_or((0, false));
+        if let BufferId::Dm(name) = id {
+            unread += self.agent_mail.get(name.as_str()).copied().unwrap_or(0);
+        }
+        (unread, mention)
+    }
+
     /// One stable colour per name, main's reserved slot included — the palette
     /// the avatar gutter draws from, so a name and its face never disagree.
     /// The pills, the tree's rows and D106's `@name❯` lines all ask here.
@@ -264,8 +336,11 @@ impl Chat {
         palette.avatars[gutter.index_for(name) % palette.avatars.len()]
     }
 
-    /// Open the tree with nothing selected — what `ctrl+t` does. The panels of
-    /// the cycle are exclusive, so the task area closes with the same press.
+    /// Open the tree with nothing selected. `ctrl+t` was its caller until the
+    /// key narrowed to the task panel (D115); the live door is `shift+↑/↓`,
+    /// which opens *selecting* — so an unselected open is now something only
+    /// tests ask for, to pin the readout state the door used to leave behind.
+    #[cfg(test)]
     pub(crate) fn open_agent_tree(&mut self) {
         self.tasks_visible = false;
         self.tasks_auto = false;
@@ -277,7 +352,7 @@ impl Chat {
     /// and go under an open tree, and CC clamps the same way in an effect
     /// (`useBackgroundTaskNavigation.ts:112-124`).
     pub(crate) fn tree_selection(&self) -> Option<Sel> {
-        let max = self.tree_instances().len() as Sel;
+        let max = self.tree_total();
         self.tree
             .as_ref()
             .and_then(|tree| tree.selected)
@@ -288,7 +363,7 @@ impl Chat {
     /// parks on `@main`; with it open the cursor steps and wraps
     /// (`useBackgroundTaskNavigation.ts:26-58`).
     fn tree_step(&mut self, delta: Sel) {
-        let count = self.tree_instances().len() as Sel;
+        let count = self.tree_total();
         if count == 0 {
             return;
         }
@@ -330,7 +405,7 @@ impl Chat {
         // that does what it always did.
         if modifiers.contains(KeyModifiers::SHIFT)
             && matches!(code, KeyCode::Up | KeyCode::Down)
-            && !self.tree_instances().is_empty()
+            && self.tree_total() > 0
         {
             self.tree_step(if code == KeyCode::Down { 1 } else { -1 });
             return true;
@@ -377,7 +452,8 @@ impl Chat {
             return Vec::new();
         }
         let agents = self.tree_instances();
-        if agents.is_empty() {
+        let rooms = self.tree_rooms();
+        if agents.is_empty() && rooms.is_empty() {
             return Vec::new();
         }
         let selected = self.tree_selection();
@@ -472,8 +548,9 @@ impl Chat {
             let here = selected == Some(index as Sel);
             let lit = here || self.zoomed() == Some(status.name.as_str());
             // The closing corner belongs to the hide row while the tree is
-            // being walked, so no instance takes it (`TeammateSpinnerTree.tsx:149`).
-            let last = !selecting && index + 1 == agents.len();
+            // being walked, so no instance takes it (`TeammateSpinnerTree.tsx:149`)
+            // — and to the last room, when there are rooms (D115).
+            let last = !selecting && rooms.is_empty() && index + 1 == agents.len();
             let glyph = match (lit, last) {
                 (true, true) => "╘═ ",
                 (true, false) => "╞═ ",
@@ -543,6 +620,12 @@ impl Chat {
             if show_stats {
                 push_fit(&mut line, &mut budget, &stats, dim);
             }
+            push_badge(
+                &mut line,
+                &mut budget,
+                self.badge_of(&BufferId::Dm(status.name.clone())),
+                theme,
+            );
             if show_hint {
                 push_fit(&mut line, &mut budget, SELECT_HINT, dim);
             }
@@ -565,11 +648,72 @@ impl Chat {
             }
         }
 
+        // The member rooms follow the instances (D115): a room is a
+        // conversation with a badge, and this is the conversation switcher.
+        // The row is quiet — a name, its size, its badge — because a room has
+        // no run to narrate; what it has is unread, and enter answers it.
+        for (r, room) in rooms.iter().enumerate() {
+            let index = (agents.len() + r) as Sel;
+            let here = selected == Some(index);
+            let lit = here || self.zoomed_room() == Some(room.name.as_str());
+            let last = !selecting && r + 1 == rooms.len();
+            let glyph = match (lit, last) {
+                (true, true) => "╘═ ",
+                (true, false) => "╞═ ",
+                (false, true) => "└─ ",
+                (false, false) => "├─ ",
+            };
+            let name = format!("#{}", room.name);
+            let members = room.members.len();
+            let state = format!("{members} member{}", if members == 1 { "" } else { "s" });
+            let mut budget = width;
+            let mut line = Line::empty();
+            push_fit(&mut line, &mut budget, PAD, dim);
+            push_fit(
+                &mut line,
+                &mut budget,
+                if here { "❯" } else { " " },
+                SegStyle::fg(if here {
+                    theme.permission
+                } else {
+                    theme.text_secondary
+                }),
+            );
+            push_fit(
+                &mut line,
+                &mut budget,
+                glyph,
+                if lit { SegStyle::fg(theme.text) } else { dim },
+            );
+            push_fit(
+                &mut line,
+                &mut budget,
+                &name,
+                SegStyle::fg(if here {
+                    theme.permission
+                } else {
+                    identity(&room.name)
+                }),
+            );
+            push_fit(&mut line, &mut budget, ": ", dim);
+            push_fit(&mut line, &mut budget, &state, dim);
+            push_badge(
+                &mut line,
+                &mut budget,
+                self.badge_of(&BufferId::Channel(room.name.clone())),
+                theme,
+            );
+            if here && self.zoomed_room() != Some(room.name.as_str()) {
+                push_fit(&mut line, &mut budget, VIEW_HINT, dim);
+            }
+            rows.push(Row::new(line));
+        }
+
         // The hide row closes the tree, and only while the cursor is in it
         // (`TeammateSpinnerTree.tsx:180`); it says what Enter will do to it
         // while the cursor is on it (`:253`).
         if selecting {
-            let here = selected == Some(agents.len() as Sel);
+            let here = selected == Some(self.tree_total());
             let mut budget = width;
             let mut line = Line::empty();
             push_fit(&mut line, &mut budget, PAD, dim);
@@ -619,58 +763,91 @@ impl Chat {
         preview_lines(&history)
     }
 
-    /// The footer pills: `@main @scout @writer · shift + ↓ to expand`.
+    /// The footer pills: `@main @scout •2 #dev-team •5 · shift + ↓ to expand`.
     ///
     /// Off while the tree is open — CC makes them exclusive, because the tree
     /// says everything a pill would (`BackgroundTaskStatus.tsx`, the
-    /// `showSpinnerTree` gate) — and off with an empty registry, because a row
+    /// `showSpinnerTree` gate) — and off with nobody to show, because a row
     /// reading `@main` alone is furniture.
     ///
     /// `@main` is always first and never sorted; the instances follow with the
     /// idle and stopped ones pushed to the end, which is CC's ordering when
-    /// nothing is being arrowed through.
+    /// nothing is being arrowed through; the member rooms close the line
+    /// (D115). A pill brightens for a running agent **or** an unread
+    /// conversation — activity is a style change — and wears the accent count
+    /// only for a mention, which is the badge's two tiers verbatim.
     pub fn pill_row(&self, width: usize) -> Option<Row> {
         if self.tree.is_some() {
             return None;
         }
         let agents = self.tree_instances();
-        if agents.is_empty() {
+        let rooms = self.tree_rooms();
+        if agents.is_empty() && rooms.is_empty() {
             return None;
         }
         let theme = &self.theme;
         let dim = SegStyle::fg(theme.text_secondary);
 
-        let mut pills: Vec<(String, bool, bool)> =
-            vec![(MAIN_NAME.to_string(), self.busy, self.zoomed().is_none())];
-        let mut resting: Vec<(String, bool, bool)> = Vec::new();
+        type Pill = (String, String, bool, bool, (u64, bool));
+        let badge_text = |(unread, mention): (u64, bool)| -> String {
+            if unread == 0 {
+                String::new()
+            } else if mention {
+                format!(" •{unread}")
+            } else {
+                " •".to_string()
+            }
+        };
+        let mut pills: Vec<Pill> = vec![(
+            MAIN_NAME.to_string(),
+            format!("@{MAIN_NAME}"),
+            self.busy,
+            self.zoomed().is_none(),
+            self.badge_of(&BufferId::Hub),
+        )];
+        let mut resting: Vec<Pill> = Vec::new();
         for status in &agents {
-            let zoomed = self.zoomed() == Some(status.name.as_str());
+            let badge = self.badge_of(&BufferId::Dm(status.name.clone()));
+            let live = status.state == AgentState::Running || badge.0 > 0;
             let pill = (
                 status.name.clone(),
-                status.state == AgentState::Running,
-                zoomed,
+                format!("@{}", status.name),
+                live,
+                self.zoomed() == Some(status.name.as_str()),
+                badge,
             );
-            if pill.1 {
+            if pill.2 {
                 pills.push(pill);
             } else {
                 resting.push(pill);
             }
         }
         pills.append(&mut resting);
+        for room in &rooms {
+            let badge = self.badge_of(&BufferId::Channel(room.name.clone()));
+            pills.push((
+                room.name.clone(),
+                format!("#{}", room.name),
+                badge.0 > 0,
+                self.zoomed_room() == Some(room.name.as_str()),
+                badge,
+            ));
+        }
 
         let mut budget = width.saturating_sub(text_width(EXPAND_HINT) + 2);
         let mut line = Line::styled("  ", dim);
         let mut shown = 0usize;
-        for (name, live, zoomed) in &pills {
+        for (name, label, live, zoomed, badge) in &pills {
             let text = if shown == 0 {
-                format!("@{name}")
+                label.clone()
             } else {
-                format!(" @{name}")
+                format!(" {label}")
             };
-            if text_width(&text) > budget {
+            let badge_str = badge_text(*badge);
+            if text_width(&text) + text_width(&badge_str) > budget {
                 break;
             }
-            budget -= text_width(&text);
+            budget -= text_width(&text) + text_width(&badge_str);
             let mut style = SegStyle::fg(if *live {
                 self.identity_color(name)
             } else {
@@ -680,6 +857,14 @@ impl Chat {
                 style = style.bold();
             }
             line.push_styled(text, style);
+            if !badge_str.is_empty() {
+                let style = if badge.1 {
+                    SegStyle::fg(theme.claude).bold()
+                } else {
+                    SegStyle::fg(theme.text)
+                };
+                line.push_styled(badge_str, style);
+            }
             shown += 1;
         }
         if shown < pills.len() {
@@ -699,6 +884,17 @@ mod tests {
 
     fn test_chat() -> Chat {
         chat_at(120, 40)
+    }
+
+    fn seed_room(chat: &Chat, name: &str, members: &[&str]) {
+        chat.session
+            .channels
+            .create(
+                name,
+                members.iter().map(|m| m.to_string()).collect(),
+                crate::channels::ChannelMode::Free,
+            )
+            .expect("room created");
     }
 
     fn seed(chat: &Chat, name: &str) {
@@ -1197,5 +1393,125 @@ mod tests {
             .collect::<Vec<String>>()
             .join("\n");
         assert!(!narrow.contains("tool uses"), "{narrow}");
+    }
+
+    /// The member rooms follow the instances (D115): a conversation switcher
+    /// that listed only half the conversations was a directory with a badge
+    /// problem. A room the user is not in stays off the tree — the ctrl+b
+    /// dialog is where somebody else's rooms are found — and enter on a room
+    /// row zooms the room.
+    #[test]
+    fn member_rooms_join_the_tree_and_enter_zooms_one() {
+        let mut chat = test_chat();
+        seed(&chat, "scout");
+        seed_room(&chat, "dev-team", &["scout", crate::channels::USER_NAME]);
+        seed_room(&chat, "private", &["scout"]);
+        chat.open_agent_tree();
+
+        let rows = texts(&chat);
+        assert_eq!(rows.len(), 3, "{rows:?}");
+        assert!(
+            rows[2].contains("#dev-team") && rows[2].contains("2 members"),
+            "{rows:?}"
+        );
+        assert!(
+            rows[2].starts_with("    └─"),
+            "the last room takes the closing corner: {rows:?}"
+        );
+        assert!(
+            rows[1].starts_with("    ├─"),
+            "and the last instance gives it up: {rows:?}"
+        );
+        assert!(
+            !rows.iter().any(|r| r.contains("#private")),
+            "a room the user is not in is not their conversation: {rows:?}"
+        );
+
+        // The tree is open unselected, so the walk starts at @scout: one down
+        // parks there, the second on the room, and one more would be hide.
+        shift(&mut chat, KeyCode::Down);
+        shift(&mut chat, KeyCode::Down);
+        assert_eq!(chat.tree_selection(), Some(1));
+        assert!(chat.agent_tree_key(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(
+            chat.open_zoom,
+            Some(crate::tui::zoom::ZoomTarget::Room("dev-team".to_string())),
+            "enter on the room row zooms the room"
+        );
+    }
+
+    /// The badge's two tiers on the rows and the pills (D115): unread is a
+    /// bare dot — activity is a style change — and a mention is the count in
+    /// the accent. Reading the room clears it, because entering is reading.
+    #[test]
+    fn a_rooms_unread_is_a_dot_and_a_mention_counts() {
+        let mut chat = test_chat();
+        seed(&chat, "scout");
+        seed_room(&chat, "dev-team", &["scout", crate::channels::USER_NAME]);
+        chat.refresh_conversations();
+
+        let quiet = chat.pill_row(120).expect("pills").line.plain_text();
+        assert!(quiet.contains("#dev-team"), "{quiet:?}");
+        assert!(
+            !quiet.contains('•'),
+            "a quiet room wears no badge: {quiet:?}"
+        );
+
+        chat.session
+            .channels
+            .post("scout", "dev-team", "making progress")
+            .expect("posted");
+        chat.refresh_conversations();
+        let active = chat.pill_row(120).expect("pills").line.plain_text();
+        assert!(
+            active.contains("#dev-team •") && !active.contains("•1"),
+            "activity is a dot, not a count: {active:?}"
+        );
+
+        chat.session
+            .channels
+            .post("scout", "dev-team", "@user should I deploy?")
+            .expect("posted");
+        chat.refresh_conversations();
+        let named = chat.pill_row(120).expect("pills").line.plain_text();
+        assert!(
+            named.contains("#dev-team •2"),
+            "a mention counts: {named:?}"
+        );
+        chat.open_agent_tree();
+        let rows = texts(&chat);
+        assert!(
+            rows[2].contains("#dev-team") && rows[2].contains("•2"),
+            "the tree row wears the same badge: {rows:?}"
+        );
+
+        chat.enter_zoom(crate::tui::zoom::ZoomTarget::Room("dev-team".to_string()));
+        chat.refresh_conversations();
+        chat.tree = None;
+        let read = chat.pill_row(120).expect("pills").line.plain_text();
+        assert!(!read.contains('•'), "entering the room read it: {read:?}");
+    }
+
+    /// The one thing D114 left on screen of a `SendMessage(to: "main")` is the
+    /// sender's dot (fed by `Chat::agent_mail`), and visiting the sender's
+    /// zoom is what clears it.
+    #[test]
+    fn mail_to_main_lights_the_senders_dot_until_its_zoom_is_visited() {
+        let mut chat = test_chat();
+        seed(&chat, "scout");
+        chat.session
+            .channels
+            .deliver_to_main("scout", "found it", None, false);
+        chat.tick();
+        let pills = chat.pill_row(120).expect("pills").line.plain_text();
+        assert!(pills.contains("@scout •"), "{pills:?}");
+
+        chat.enter_zoom(crate::tui::zoom::ZoomTarget::Agent("scout".to_string()));
+        chat.zoom = None;
+        let pills = chat.pill_row(120).expect("pills").line.plain_text();
+        assert!(
+            !pills.contains("@scout •"),
+            "the visit cleared the dot: {pills:?}"
+        );
     }
 }

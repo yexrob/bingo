@@ -145,6 +145,15 @@ impl Chat {
         }
     }
 
+    /// The room whose log has the screen — the other half of [`Chat::zoomed`],
+    /// read by the tree's room rows and their pills (D115).
+    pub(crate) fn zoomed_room(&self) -> Option<&str> {
+        match self.zoom.as_ref()? {
+            ZoomTarget::Room(name) => Some(name.as_str()),
+            ZoomTarget::Agent(_) => None,
+        }
+    }
+
     /// `enter` on a tree row, in either host (CC
     /// `useBackgroundTaskNavigation.ts:206-225`).
     ///
@@ -166,13 +175,17 @@ impl Chat {
             self.close_zoom = self.zoom.is_some();
             return true;
         }
-        match agents.get(selected as usize) {
-            Some(status) => {
-                let name = status.name.clone();
-                self.open_zoom = Some(ZoomTarget::Agent(name));
-            }
+        let index = selected as usize;
+        if let Some(status) = agents.get(index) {
+            let name = status.name.clone();
+            self.open_zoom = Some(ZoomTarget::Agent(name));
+        } else if let Some(room) = self.tree_rooms().get(index - agents.len()) {
+            // A room row zooms the room (D115): same view, same composer
+            // routing, the badge cleared by the entering.
+            self.open_zoom = Some(ZoomTarget::Room(room.name.clone()));
+        } else {
             // Past the end is the hide row: it closes the panel it closes.
-            None => self.tree = None,
+            self.tree = None;
         }
         true
     }
@@ -284,6 +297,12 @@ impl Chat {
     pub(crate) fn enter_zoom(&mut self, target: ZoomTarget) {
         self.refresh_conversations();
         self.buffers.set_active(target.buffer());
+        // The sender's mail dot clears the same way (D115): its whole meaning
+        // is "you have not looked since this agent wrote to main", and this
+        // is the looking.
+        if let ZoomTarget::Agent(name) = &target {
+            self.agent_mail.remove(name.as_str());
+        }
         self.zoom = Some(target);
         self.close_zoom = false;
         self.dirty = true;

@@ -173,7 +173,7 @@ bingo starts even with no credentials: the welcome card carries onboarding (`/pr
 |---|---|
 | `Esc` | close the topmost dialog/menu/panel first / interrupt while busy / on double-press: clear the input, or open Rewind when it is empty |
 | `Ctrl+C` | interrupt while busy / clear text / exit on two presses with empty input |
-| `Ctrl+T` | cycle the status layer: the task area, then the agent tree, then closed |
+| `Ctrl+T` | toggle the task area |
 | `Shift+↑` / `Shift+↓` | open the agent tree and pick a row (`Enter` views it, `k` stops it) |
 | `Enter` (viewing) | send the draft to the agent on screen; `Esc` stops its run, then returns |
 | `Ctrl+Shift+O` | agent tree: hang a three-line message preview off each row |
@@ -550,16 +550,23 @@ are written into the room as dim `· user joined · 14:32` lines that every memb
 sees. `/join #name` makes you a member without saying anything; `/leave #name` is
 the counterpart, and a room you leave stays readable.
 
-**The status layer** is what says who is working. `Ctrl+T` cycles tasks → the
-agent tree → closed. The tree is `@main` plus one row per instance:
-`@scout: reading src/lib.rs… · 12 tool uses · 8.3k tokens` while it runs,
-`Idle for 14s` while it waits, `[stopped]` once it is stopped — names in their
-own colours, rebuilt from the registry every frame. `Shift+↑/↓` opens it and
-picks a row, `Enter` **views** the instance under the cursor, `k` stops it,
-`Ctrl+Shift+O` hangs a three-line preview of each one's conversation off its
-row, and `Esc` clears the cursor and then closes the panel. With the tree closed and anybody on the
-roster, one footer line names them: `@main @scout @writer · shift + ↓ to
-expand`, dim where they are resting. The task panel names an owner who is still
+**The status layer** is what says who is working — and, since D115, what has
+been said while you were not looking. `Ctrl+T` toggles the task area and
+nothing else; the tree's door is `Shift+↑/↓`. The tree is `@main`, one row per
+instance, then the rooms you are a member of: `@scout: reading src/lib.rs… ·
+12 tool uses · 8.3k tokens` while it runs, `Idle for 14s` while it waits,
+`[stopped]` once it is stopped, `#dev-team: 3 members` for a room — names in
+their own colours, rebuilt from the registry every frame. Every row wears its
+conversation's **badge**: unread is a bare dot (`•`), words at *you* — a room
+post naming `@user` — are the count in the accent (`•3`). `Shift+↑/↓` picks a
+row, `Enter` **views** it (an instance's conversation, or the room's log),
+`k` stops a selected instance, `Ctrl+Shift+O` hangs a three-line preview of
+each instance's conversation off its row, and `Esc` clears the cursor and then
+closes the panel. With the tree closed and anybody to show, one footer line
+names them: `@main @scout •2 #dev-team •5 · shift + ↓ to expand` — bright
+where someone is running or something is unread, dim where all is read and
+resting, the accent count where you were named. Entering a conversation reads
+it, and reading clears its badge. The task panel names an owner who is still
 here (` (@scout)`, in their colour) and what a task is waiting on
 (`› blocked by #3`) — display only, nothing assigns or claims.
 

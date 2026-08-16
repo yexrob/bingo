@@ -4923,3 +4923,33 @@ pins rewritten (`a_message_from_an_agent_writes_no_line_and_counts_as_mail`,
 `a_streak_of_notices_reads_as_one_batch`) plus two new gate pins
 (`a_delivery_triggered_run_completes_without_a_notice`,
 `a_streaming_turn_staples_only_its_own_dispatches`).
+
+### D115. The status layer is the summons
+
+The user's ruling narrowed ctrl+t — "ctrl+t 只和 task 展示有关" — and the
+pull model needed its bell; one batch, because both are the same layer.
+
+- **ctrl+t toggles the task panel, full stop.** D104's second stop retired:
+  the tree's real door was always `shift+↑/↓` (which opens selecting), the
+  pills name it every frame, and a cycle stop that duplicated a named door
+  was spent on nothing. The panels stay exclusive both ways.
+  `open_agent_tree` is `#[cfg(test)]` now — only tests want an unselected
+  open.
+- **Member rooms join the tree and the pills** (index space: `-1` main,
+  instances, rooms, hide). A room row is `#dev-team: 3 members`; enter zooms
+  the room; non-member rooms stay in the ctrl+b dialog (D95's membership
+  rule worn by the switcher, and Slack's own: no badges for rooms you never
+  joined — one post joins you, and the join starts the badge).
+- **Two-tier badges everywhere the store counts** (`badge_of` +
+  `push_badge`): unread = bare dot in text colour; mention (D99's `names`
+  accounting) = `•N` in the accent, bold — the ctrl+b dialog's `Tone`
+  grammar spread to rows and pills. Agent unread folds in `agent_mail`
+  (D114's mirror). Entering reads: `enter_zoom`'s `set_active` clears the
+  buffer and the mail dot. A badge fingerprint on the slow poll
+  (`observe_badges`) dirties the frame when one moves.
+
+Docs: feedback-states v1.82, README/zh status-layer sections, guide.md.
+Tests: ctrl+t cycle tests rewritten as `ctrl_t_toggles_the_task_panel_alone`;
+keys panel test updated; new pins `member_rooms_join_the_tree_and_enter_zooms
+_one`, `a_rooms_unread_is_a_dot_and_a_mention_counts`,
+`mail_to_main_lights_the_senders_dot_until_its_zoom_is_visited`.

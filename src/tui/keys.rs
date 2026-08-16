@@ -101,7 +101,7 @@ pub const BINDINGS: &[Binding] = &[
     },
     Binding {
         keys: "ctrl+t",
-        description: "tasks, then the agent tree, then closed",
+        description: "toggle the task list",
     },
     Binding {
         keys: "ctrl+g",
@@ -270,10 +270,11 @@ mod tests {
         }
     }
 
-    /// The status layer is three keys and the panel names all three: the cycle
-    /// that shows it, the arrows that pick a row inside it, and the toggle that
-    /// hangs a preview off each one (D104). The stop key is named where the
-    /// selection is, because it only means anything there.
+    /// The status layer is three keys and the panel names all three: the task
+    /// toggle, the arrows that open the tree and pick a row inside it, and the
+    /// toggle that hangs a preview off each one (D104, narrowed by D115: the
+    /// tree left the ctrl+t cycle). The stop key is named where the selection
+    /// is, because it only means anything there.
     #[test]
     fn the_panel_names_the_status_layer() {
         let find = |keys: &str| {
@@ -282,10 +283,10 @@ mod tests {
                 .find(|binding| binding.keys == keys)
                 .unwrap_or_else(|| panic!("{keys} binding missing"))
         };
-        let cycle = find("ctrl+t").description;
+        let tasks = find("ctrl+t").description;
         assert!(
-            cycle.contains("tasks") && cycle.contains("agent tree"),
-            "the cycle names both stops: {cycle}"
+            tasks.contains("task") && !tasks.contains("tree"),
+            "ctrl+t is the task panel's key and only its (D115): {tasks}"
         );
         let select = find("shift+↑/↓").description;
         assert!(
