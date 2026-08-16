@@ -5249,3 +5249,29 @@ exception, page send/round-trip, lifecycle surfaces). Tests:
 `enter_on_a_roster_row_switches_and_main_comes_home`,
 `a_room_post_naming_the_user_rings_once_and_writes_nothing`; the tree's
 suite reduces to the helpers'. 1453 + 13 green.
+
+### D122. The v6 file, and the shelf cleared
+
+The documentation batch the user authorized in the same breath as the
+refactor: "过时的 Decision, 也可以删掉" — outdated decisions may go.
+
+- **`notes/design/conversation-model-v6.md` is the authority**: the model
+  (user / main / rooms), the laws (delivery ≠ waking; main is a member;
+  the @ decides what you owe; a page is main's page; the roster; @user is
+  a badge), the byte-contract inventory (v6 added none), the per-batch
+  global rules migrated verbatim from the interaction blueprint (their
+  only other home), the batch table with commit hashes, and the
+  deliberate non-builds.
+- **Deleted**: conversation-model-v2/v3/v4/v5.md and
+  interaction-blueprint.md. Each declared its successor in prose; none
+  had a machine-readable header; all of it is git history and D-records.
+  `notes/research.md` stays append-only — the records are the history the
+  design files never were.
+- **Synced**: AGENTS.md's decision-record range ("D1-D75" had been stale
+  since August 12) now points at the v6 file for the model and the global
+  rules; both READMEs' status-layer and zoomed-view chapters rewritten
+  for the roster and the pages (keys tables included); the one dead link
+  in feedback-states' v1.81 changelog entry annotated rather than
+  rewritten — a changelog is history too.
+
+Docs: this record. Tests: unchanged — 1453 + 13 green.
