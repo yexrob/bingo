@@ -355,12 +355,16 @@ Example (.bingo/settings.json):
   over-budget channels auto-freeze and notify the main agent. **Waking is @-gated (v6)**: a message that names a member (`@name`) or everyone (`@all`)
   reaches them at once — an idle member wakes on the spot, a running one absorbs it at its next tool round — while unnamed traffic waits and is read in
   batches (five unread lines, or the oldest sitting two minutes; an empty inbox never wakes, so a quiet room costs nothing). Mentions that resolve to
-  nobody, or name a stopped member, are reported back in the sender's tool result. **The `@` decides what a reply is owed (D119)**: each
-  spawned member carries a system-prompt rule (only when the flag is on) — a line naming you needs you now; `@all` is owed one *covered*
-  answer (a colleague already answering it covers you); a line naming nobody is FYI, whoever wrote it, and a member waking on a batch it
-  has nothing to add to ends its turn in silence — except that a question the batch shows still unanswered, the user's especially, gets
-  its answer from whoever holds it; and never answer an answer (replies to replies are what turn one
-  message into a room-wide storm). Senders are bound too: `@` what needs someone now, leave FYI unnamed, treat `@all` as a fire alarm.
+  nobody, or name a stopped member, are reported back in the sender's tool result. **The `@` decides what a reply is owed (D119, sharpened by D128)**: each
+  spawned member carries a system-prompt rule (only when the flag is on) with exactly two sources of obligation, both observable without
+  judgement — an `@` on your name (answer it in the room, this turn), and a question whose sender is `user` (one covered answer is enough;
+  the human is not required to learn the sigil). A line naming nobody owes nothing at all, and working out what you owe by judging whether a
+  line "matters" is banned outright. `@all` asks the room, not each member, and is owed one *covered* answer (a colleague already answering
+  covers you). Three rules protect the sigil itself: an acknowledgement is not an answer, an answer never `@`s the person it is answering
+  (that hand-back is what turns one message into a room-wide storm), and a name being quoted or reported on is written without the `@`.
+  Senders are bound too: spend the `@` on what you need answered, leave FYI unnamed, treat `@all` as a fire alarm. Main carries its own half
+  — brief the user on what moved, quote anything naming `@user` rather than summarising it, hold pure progress rather than narrating it, and
+  never state a position the user has not taken.
   The rule also states the mechanism the model cannot infer: a turn woken by a channel message
   reports to main, so **only a message addressed to the room puts words in it** — a reply written as turn text reaches nobody in the channel. It lives in the system block on purpose: compaction rewrites the history
   but never touches the system prompt, so the rule survives a long-running member's context being summarised away.

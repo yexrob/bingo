@@ -1525,9 +1525,10 @@ impl Tool for SendMessageTool {
         let me = self.sender();
         let rooms = if address::rooms_allowed(&self.session) {
             "; `#room` for a room you are a member of (every member's inbox gets it, in one order; \
-`@name` inside the text wakes that member now and `@all` wakes everyone, while unnamed lines are \
-read in batches — so `@` what needs someone now and leave FYI unnamed; in a serial room a stale \
-send bounces back with what you missed attached)"
+`@name` inside the text asks that member for an answer and wakes them now, `@all` asks the room \
+and wakes everyone, and a line naming nobody owes nothing and is read in batches — so spend the \
+`@` on what you need answered, not on what you want read; in a serial room a stale send bounces \
+back with what you missed attached)"
         } else {
             ""
         };
@@ -3328,8 +3329,28 @@ mod tests {
         // Both failure modes have to survive edits to this text: the storm it was written
         // for, and the over-correction where nobody answers the human at all.
         assert!(
-            CHANNEL_NOTE.contains("Never answer an answer"),
-            "must name the reply-to-replies storm specifically, not just say \"keep it brief\""
+            CHANNEL_NOTE.contains("Never `@` the person you are answering"),
+            "v7 R3: the reply-to-replies storm is closed by a rule about the sigil, not by \
+             an appeal to restraint — a ping-pong needs the `@` to keep going"
+        );
+        assert!(
+            CHANNEL_NOTE.contains("An acknowledgement is not an answer"),
+            "v7 R2: without it a member discharges an `@` with \"got it\""
+        );
+        assert!(
+            CHANNEL_NOTE.contains("A name you are quoting is written without the `@`"),
+            "v7 R5: `@` is a summons — a recap that names people would otherwise put the \
+             whole room on the hook"
+        );
+        assert!(
+            CHANNEL_NOTE.contains("a question from `user`"),
+            "v7 R1's one exception, and D48's lesson in observable form: the obligation \
+             follows who asked, not a judgement about what is still unanswered"
+        );
+        assert!(
+            CHANNEL_NOTE.contains("Never work out what you owe by judging"),
+            "v7 R1: the inference the model has no signal for is banned outright — D124 \
+             is what one of those judgement calls cost"
         );
         assert!(
             CHANNEL_NOTE.contains("puts words in the room"),
@@ -3345,11 +3366,7 @@ mod tests {
             "@all keeps the covered-answer clause — the anti-chorus half of D112 survives \
              on the one broadcast form left"
         );
-        assert!(
-            CHANNEL_NOTE.contains("still unanswered"),
-            "D48's lesson: a question sitting unanswered — the user's especially — is the one \
-             thing that survives the batch quiet (and the anchor phrase must sit on one line)"
-        );
+
         assert!(
             CHANNEL_NOTE.contains("Silence belongs in the room, not in your turn text"),
             "D124: \"end the turn without posting\" alone reads as \"produce nothing at all\", \
@@ -3399,6 +3416,16 @@ mod tests {
         assert!(
             main_note.contains("Keep the user posted on their rooms"),
             "main is the user's eyes on the team (D123) — a digest read in silence is the defect"
+        );
+        assert!(
+            main_note.contains("say nothing, and know it"),
+            "v7: pure progress is held, not narrated — main's value is being current, not \
+             reading the room aloud"
+        );
+        assert!(
+            main_note.contains("Never state a position the user has not taken"),
+            "v7 R7c: main may answer for the user where it knows, and the one thing it must \
+             never do is invent them — the model is at its most fluent exactly here"
         );
         assert!(
             main_note.contains("A briefing is not a transcript"),

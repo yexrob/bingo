@@ -5480,3 +5480,55 @@ the host's mouse mode, not bingo's.
 Docs: conversation-model-v7.md (proposed) records this as batch 0. Tests: a
 room page names both speakers and the name leads its run; main's flow grows no
 speaker rows — 1458 + 13 green.
+
+### D128. The duties: obligation stops being an inference (v7 batch 1)
+
+The user's reading of the room prompt, after watching members get it wrong:
+"感觉模型分不清什么时候该说什么时候不该说". They are right, and the fault is the
+note, not the models. D119's `@` rule was sound; the clauses around it asked for
+a judgement nothing in the model's input can answer — *"if nothing in them
+changes what you are doing, end the turn without posting"* and *"a question the
+batch shows still unanswered"*. A member has no way to know whether a line
+changes what it is doing until it has already decided. D124 is what one of those
+calls cost.
+
+**Obligation now has two sources, both observable.** An `@` on your name, and a
+question whose sender is `user` — the second keeps D48's lesson (a room where
+nobody answers the human is worse than one that chatters) while replacing its
+inference with a `from` field. A line naming nobody owes nothing at all, and the
+note bans the judgement outright: *"Never work out what you owe by judging
+whether a line matters or changes what you are doing. You cannot see enough to
+judge that; the member who wrote it could, and if they needed you they had the
+`@`."*
+
+**Three rules protect the sigil**, each replacing an appeal to restraint with a
+statement about the wire:
+
+- an acknowledgement does not discharge an `@` — *"if the answer is 'already
+  doing it', that sentence is the answer"*;
+- an answer never `@`s the person it is answering. This is "never answer an
+  answer" made mechanical: a ping-pong needs the sigil to keep going, so the
+  rule names the sigil instead of asking for restraint;
+- a name being quoted is written without the `@`, so a recap does not put the
+  whole room on the hook.
+
+**Main's half became four tiers** rather than one duty: quote what names the
+user (a question is not activity to be compressed), one line for a state change,
+**hold pure progress** — *"say nothing, and know it"*, the row that makes main
+worth waking at all — and nothing for discussion. `@user` is main's to carry:
+verbatim to the user, the answer owed back to the *room*, and answering on the
+user's behalf is allowed where main already knows, with one hard stop —
+**never state a position the user has not taken**. That is the sentence guarding
+the place a model is most fluent and most wrong.
+
+**Deliberately prompt-only.** The v6 wake machine is untouched, and every timing
+sentence still describes it truthfully ("names you — reaches you at once; does
+not — in batches, later"). v7's wake rule lands in a later batch; a note
+promising immediacy the runtime does not have would be a lie the model would
+plan against. The batch is ordered this way on purpose: the gates are cheap to
+keep and expensive to restore, so the duties get observed under load before
+anything is deleted.
+
+Docs: conversation-model-v7.md (batch 1 of the table), guide.md's room
+paragraph. Tests: five new `CHANNEL_NOTE` anchors and two `MAIN_CHANNEL_NOTE`
+anchors, replacing D119's two — 1458 + 13 green.
