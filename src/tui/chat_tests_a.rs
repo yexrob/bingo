@@ -665,7 +665,7 @@ fn hidden_tools_produce_no_activities() {
         chat.conv.messages[0].activities
     );
     assert!(
-        chat.pending_tools.is_empty(),
+        chat.conv.pending_tools.is_empty(),
         "the pending FIFO stays matched"
     );
     // Visible tools still render normally.
@@ -3816,7 +3816,7 @@ fn stream_retry_resets_only_current_attempt_and_replaces_progress_warning() {
     let index = chat.conv.stream_msg.unwrap();
     assert_eq!(chat.conv.messages[index].text, "committed");
     assert_eq!(chat.conv.messages[index].activities.len(), 2);
-    assert!(chat.pending_tools.is_empty());
+    assert!(chat.conv.pending_tools.is_empty());
     assert_eq!(chat.visible_warning(), Some("Reconnecting... 3/10"));
     let _ = std::fs::remove_dir_all(home);
 }

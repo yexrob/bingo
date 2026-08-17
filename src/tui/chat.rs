@@ -774,6 +774,11 @@ pub struct Chat {
     pub tick: u64,
     /// The digest debounce's state while mail is waiting (D98). `None` means the
     /// main agent's inbox is empty and there is nothing to wait out.
+    ///
+    /// Console state despite naming an agent (D133): it gates *when the console
+    /// starts a turn*, not what any conversation contains. D136 is where that
+    /// stops being true — once main is an ordinary registry entry its mail is an
+    /// inbox like everyone else's, and this window retires with it.
     pub(crate) mail_wake: Option<chat_tail::MailWake>,
     /// Non-fatal warnings (timestamp + text): entries past `WARNING_TTL` expire
     /// automatically; rendering shows only valid entries (pruned on push).
@@ -856,8 +861,6 @@ pub struct Chat {
     pub auto_scroll: bool,
     /// Document from the last build_rows (click targeting).
     pub doc: Doc,
-    /// Tool activity indices waiting to be classified on ToolReady (full input) (FIFO).
-    pub(crate) pending_tools: Vec<usize>,
     pub theme: Theme,
     /// Detected terminal background color (used by /theme to rebuild the theme).
     detected_background: Option<bool>,
@@ -1137,6 +1140,7 @@ impl Chat {
                 stream_msg: None,
                 stream_attempt_checkpoint: None,
                 continuation_msg: None,
+                pending_tools: Vec::new(),
                 thinking_buf: String::new(),
                 thinking_seg_open: false,
                 output_tokens: 0,
@@ -1221,7 +1225,6 @@ impl Chat {
                 settled_marks: Vec::new(),
                 transient_rows: 0,
             },
-            pending_tools: Vec::new(),
             theme,
             detected_background,
             update_banner,
@@ -2117,15 +2120,15 @@ impl Chat {
     }
 
     fn pending_tools_clear(&mut self) {
-        self.pending_tools.clear();
+        self.conv.pending_tools.clear();
     }
     fn pending_tools_push(&mut self, idx: usize) {
-        self.pending_tools.push(idx);
+        self.conv.pending_tools.push(idx);
     }
     fn pending_tools_pop(&mut self) -> Option<usize> {
-        let first = self.pending_tools.first().copied();
+        let first = self.conv.pending_tools.first().copied();
         if first.is_some() {
-            self.pending_tools.remove(0);
+            self.conv.pending_tools.remove(0);
         }
         first
     }

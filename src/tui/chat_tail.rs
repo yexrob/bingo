@@ -779,7 +779,7 @@ impl super::Chat {
         };
         // Tool rows registered before the answer index into `prev`'s activities
         // (`pending_tools` holds those indices), so a call still in flight pins the stream here.
-        if !self.pending_tools.is_empty() {
+        if !self.conv.pending_tools.is_empty() {
             return;
         }
         // AskUserQuestion is a hidden tool: `ToolStart` returns before closing the running

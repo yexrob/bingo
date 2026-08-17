@@ -40,6 +40,13 @@ pub struct Conversation {
     /// using it can drop it again — inferring that from "empty assistant message" would also catch
     /// messages nobody opened here.
     pub(crate) continuation_msg: Option<usize>,
+    /// Tool activity indices waiting to be classified on ToolReady (full input) (FIFO).
+    ///
+    /// They index into `messages[stream_msg]`, so they belong to the same
+    /// conversation those two do: with a second stream on the channel, a
+    /// `ToolReady` matched against a console-wide queue would classify one
+    /// agent's call into another's transcript.
+    pub(crate) pending_tools: Vec<usize>,
     pub(crate) thinking_buf: String,
     /// Whether the current thinking segment is open for continuation: closed after ToolStart/TextDelta
     /// (segment boundaries); deltas in the same segment continue without paragraph breaks; new segments (fresh reasoning after a tool) are aggregated with \n\n.

@@ -5892,3 +5892,12 @@ beside `conv.rs`, which is the projection D134 deletes.
 
 No file crossed the 4000-line cap and nothing needed splitting; `chat.rs` fell to
 3729. `chat_tests_b.rs` is the one to watch at 3993.
+
+**Completed in a follow-up.** `pending_tools` failed the split's own test and was
+left behind: it is a FIFO of activity indices into `messages[stream_msg]`, so it
+belongs to the same conversation those two do. It moved, and `mail_wake` — the
+one borderline field the record did not rule on — is recorded as console state
+with its reason: it gates *when the console starts a turn*, not what any
+conversation contains, and it retires in D136 when main's mail becomes an
+ordinary inbox. D134 is now purely about event routing.
+
