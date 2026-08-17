@@ -1347,6 +1347,12 @@ impl super::Chat {
     /// joins it only while a foreground shell command is in flight, because that
     /// is the only time it means "background this" (D84).
     pub(crate) fn busy_hint(&self) -> String {
+        // On a page, `esc` stops the agent being watched (EscLayer::AwayStop),
+        // so the row says which of the key's two meanings it has right now —
+        // the D39 rule, applied to the surface D132 gave the row.
+        if self.away.is_some() && self.zoom_is_running() {
+            return "esc stops this agent · ↑ home".to_string();
+        }
         let esc = self.esc_busy_hint();
         if self.live.running() {
             return format!("{esc} · ctrl+b to run in background");
@@ -2263,6 +2269,39 @@ impl super::Chat {
     /// Running status row (ActivityIndicator): when busy, returns the verb + elapsed time + tokens
     /// produced — preferring the running tool (summary/name), then the running
     /// thinking (whimsical word), falling back to "Working". Returns None when idle (row hidden).
+    /// The status row of whatever page is on screen (D132).
+    ///
+    /// Main's row stays main's — on a page it would describe a turn the screen
+    /// is not showing — but the conclusion drawn from that used to be that a
+    /// page gets *no* row, and a page with no row has nothing moving on it at
+    /// all: no spinner, no clock, no token count, no key to stop with. That is
+    /// most of what "main feels live and an agent feels delayed" was, since the
+    /// registry has carried every number this needs all along.
+    pub fn page_running_status(&self) -> Option<RunningStatus> {
+        let Some(away) = &self.away else {
+            return self.running_status();
+        };
+        let crate::tui::zoom::ZoomTarget::Agent(name) = &away.target else {
+            return None;
+        };
+        let status = self
+            .tree_instances()
+            .into_iter()
+            .find(|s| &s.name == name && s.state == crate::agents::AgentState::Running)?;
+        Some(RunningStatus {
+            verb: status
+                .recent_activity
+                .last()
+                .cloned()
+                .unwrap_or_else(|| "Working".to_string()),
+            elapsed: status.elapsed.map(|d| d.as_secs_f64()).unwrap_or(0.0),
+            // The registry's own count, not the animated meter: the meter tracks
+            // main's stream, and borrowing it here would show main's numbers
+            // under somebody else's name.
+            tokens: status.output_tokens,
+        })
+    }
+
     pub fn running_status(&self) -> Option<RunningStatus> {
         if !self.busy {
             return None;
@@ -2600,9 +2639,6 @@ impl super::Chat {
             self.away_build = Some(crate::tui::conv::AwayBuild {
                 label: away.target.label(),
                 stable: away.stable,
-                live: matches!(away.target, crate::tui::zoom::ZoomTarget::Agent(_))
-                    .then(|| self.away_live_blocks(away.target.name()))
-                    .unwrap_or_default(),
             });
             self.build_rows_core(width);
             self.away_build = None;
@@ -2827,22 +2863,6 @@ impl super::Chat {
                 El::col(col)
             };
             blocks.push(Block::settled(block, settled));
-        }
-        // The away page's streaming run, drawn the way the zoom drew it: a dim
-        // process row per tool call and reasoning phase, prose as markdown.
-        // Volatile by construction — after every settled message, never
-        // flushed, replaced wholesale on the next domain change.
-        if let Some(page) = self.away_build.take() {
-            if !page.live.is_empty() {
-                let mut rows: Vec<Row> = Vec::new();
-                for block in &page.live {
-                    rows.extend(self.live_block_rows(block, width, &theme));
-                }
-                if !rows.is_empty() {
-                    blocks.push(Block::live(El::col(vec![El::Blank, El::Rows(rows)])));
-                }
-            }
-            self.away_build = Some(page);
         }
         if let Some(ask) = self.ask_el(&theme) {
             blocks.push(Block::live(ask));

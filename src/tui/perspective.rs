@@ -45,6 +45,9 @@
 //! | the first user message | the `Agent` tool's prompt | intake — the task that created X (subagents only: main was not spawned) |
 //! | interrupt / compaction / stop-hook / max-tokens | `query`, `compact` | nobody: recorded and unattributed |
 //!
+//! Duration is the one fact neither half of a page can recover: it never enters
+//! the record. A rebuilt row shows none rather than a fabricated one.
+//!
 //! **The one thing the domain cannot express today.** `SendMessage` is
 //! assembled at every depth since D98, but `check_target` narrows by caller:
 //! main reaches any instance, a subagent reaches `main` and the rooms it is in.
@@ -52,6 +55,7 @@
 //! through rooms. [`Target::Dm`] is keyed by name rather than by an enum
 //! precisely so that the day the addressing rules open, this projection needs no
 //! change to show it.
+use crate::agents::ToolAnswer;
 use crate::api::types::{ContentBlock, Message, Role as ApiRole};
 use crate::channels::{MAIN_NAME, USER_NAME};
 use crate::tui::buffer::{LineSource, Post, PostKind, THINKING_ROW, line_source, tool_call_line};
@@ -85,24 +89,14 @@ pub(crate) enum Work {
         name: String,
         input: serde_json::Value,
         /// The matching `tool_result`, absent only when the run was cut short
-        /// before one was recorded.
-        result: Option<ToolOutcome>,
+        /// before one was recorded. The same [`ToolAnswer`] a running turn
+        /// reports (D132) — one type, so a page cannot draw the two halves of
+        /// itself differently.
+        result: Option<ToolAnswer>,
     },
     Thinking {
         text: String,
     },
-}
-
-/// What came back from one call: the same two facts `ToolCallDone` carries to
-/// the console, and the only two the protocol keeps.
-///
-/// Duration is not among them — it never enters the history — so an agent's row
-/// shows none rather than a fabricated one, and the `Ran in …s` tail simply does
-/// not appear.
-#[derive(Debug, Clone)]
-pub(crate) struct ToolOutcome {
-    pub output: String,
-    pub is_error: bool,
 }
 
 /// A `tool_result` block's text, as the model received it.
@@ -208,8 +202,7 @@ pub(crate) fn walk(who: Protagonist<'_>, history: &[Message], stamps: &[u64]) ->
     // Results are collected before the walk rather than during it: a call and
     // its answer sit in two different messages, and a forward pass would have to
     // patch a row it already emitted. One pre-pass keeps the walk a walk.
-    let mut results: std::collections::HashMap<&str, ToolOutcome> =
-        std::collections::HashMap::new();
+    let mut results: std::collections::HashMap<&str, ToolAnswer> = std::collections::HashMap::new();
     for msg in history {
         for block in &msg.content {
             if let ContentBlock::ToolResult {
@@ -220,7 +213,7 @@ pub(crate) fn walk(who: Protagonist<'_>, history: &[Message], stamps: &[u64]) ->
             {
                 results.insert(
                     tool_use_id.as_str(),
-                    ToolOutcome {
+                    ToolAnswer {
                         output: result_output(content),
                         is_error: *is_error,
                     },

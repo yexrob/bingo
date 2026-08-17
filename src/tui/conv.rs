@@ -23,26 +23,35 @@
 //!
 //! **The page's content is the domain's, rebuilt on change.** An agent page is
 //! its record ([`crate::tui::perspective::walk`] — one attribution walk, the
-//! same one the pair lane used) plus its queued/claimed messages and its live
-//! tail; a room page is the room's log, **speech only** (the v6 ruling: a room
+//! same one the pair lane used) plus its queued/claimed messages and the run in
+//! flight; a room page is the room's log, **speech only** (the v6 ruling: a room
 //! shows what members said to it, nothing else — membership lines included in
 //! the log stay out of the page). History-derived messages are deterministic
 //! and append-only, so the settled prefix never changes under the flush
-//! cursor; everything volatile (queued echoes, the live tail) stays in the
+//! cursor; everything volatile (queued echoes, the running turn) stays in the
 //! redrawable tail by construction.
+//!
+//! **And one builder for both halves (D132).** The running turn used to arrive
+//! as three opaque strings with a renderer of its own, so a page had two ways to
+//! draw the same call: the settled half through [`RunBuilder`], with results,
+//! folds and status, and the moving half through twenty lines that had none of
+//! them. The switch between the two at the end of a run is what read as lag.
+//! `LiveBlock` now carries the call rather than a rendering of it, and
+//! [`live_message`] runs it through the same builder — so a call looks the same
+//! whether it came back a second ago or a session ago.
 
 use std::sync::Arc;
 
-use crate::agents::LiveBlock;
+use crate::agents::{LiveBlock, ToolAnswer};
 use crate::channels::USER_NAME;
 use crate::query::Session;
-use crate::tui::activities::{Activity, ActivityKind, EXPAND_HINT};
+use crate::tui::activities::{Activity, ActivityKind, EXPAND_HINT, ToolStatus};
 use crate::tui::buffer::PostKind;
 use crate::tui::chat::{
     Chat, Role, UiMessage, group_ready_tool, result_content, result_summary, skill_result_summary,
 };
 use crate::tui::line::Line;
-use crate::tui::perspective::{Filed, Protagonist, Target, ToolOutcome, Work, walk};
+use crate::tui::perspective::{Filed, Protagonist, Target, Work, walk};
 use crate::tui::zoom::ZoomTarget;
 
 /// What one away build differs on from a home build, threaded through the
@@ -55,8 +64,6 @@ pub(crate) struct AwayBuild {
     /// Messages below this index are settled (committed history); at and
     /// above, volatile.
     pub stable: usize,
-    /// The streaming run of an agent page, drawn after the messages.
-    pub live: Vec<LiveBlock>,
 }
 
 /// The open away page: which conversation, its rebuilt messages, and the
@@ -86,9 +93,13 @@ fn fingerprint(session: &Arc<Session>, target: &ZoomTarget) -> u64 {
                 history.len().hash(&mut h);
                 for block in &live {
                     match block {
-                        LiveBlock::Text(t) | LiveBlock::Thinking(t) | LiveBlock::Tool(t) => {
-                            1u8.hash(&mut h);
-                            t.len().hash(&mut h);
+                        LiveBlock::Text(t) | LiveBlock::Thinking(t) => t.len().hash(&mut h),
+                        // A call moves twice — when it starts and when it comes
+                        // back — and both have to move the print, or a result
+                        // would land on a page that never rebuilds to show it.
+                        LiveBlock::Tool(call) => {
+                            call.id.hash(&mut h);
+                            call.answer.is_some().hash(&mut h);
                         }
                     }
                 }
@@ -142,7 +153,13 @@ impl RunBuilder {
         }
     }
 
-    fn tool(&mut self, name: &str, input: &serde_json::Value, result: Option<&ToolOutcome>) {
+    fn tool(
+        &mut self,
+        name: &str,
+        input: &serde_json::Value,
+        result: Option<&ToolAnswer>,
+        pending: ToolStatus,
+    ) {
         // The live path leaks tool names to `'static` too (`UiEvent::ToolStart`);
         // the vocabulary is the tool registry, so the leak is bounded.
         let leaked: &'static str = Box::leak(name.to_string().into_boxed_str());
@@ -179,11 +196,13 @@ impl RunBuilder {
         }
         if let ActivityKind::Tool(call) = &mut act.kind {
             call.status = match result {
-                Some(r) if r.is_error => crate::tui::activities::ToolStatus::Error,
-                Some(_) => crate::tui::activities::ToolStatus::Done,
-                // A committed history is written when the run ends, so a call
-                // with no answer in it never got one: the run was cut short.
-                None => crate::tui::activities::ToolStatus::Interrupted,
+                Some(r) if r.is_error => ToolStatus::Error,
+                Some(_) => ToolStatus::Done,
+                // What no answer means is the caller's to say, and the two
+                // callers mean opposite things: in a committed history — written
+                // when the run ends — the call never got one and the run was cut
+                // short; in a run still going it simply has not come back yet.
+                None => pending,
             };
             call.result_summary = summary;
         }
@@ -250,7 +269,7 @@ fn agent_messages(
     name: &str,
     render: &mut dyn FnMut(&str) -> Vec<Line>,
 ) -> (Vec<UiMessage>, usize) {
-    let Some((history, stamps, _live, in_flight, _state)) = session.agents.view_of(name) else {
+    let Some((history, stamps, live, in_flight, _state)) = session.agents.view_of(name) else {
         return (Vec::new(), 0);
     };
     let mut out: Vec<UiMessage> = Vec::new();
@@ -265,7 +284,7 @@ fn agent_messages(
                     name,
                     input,
                     result,
-                }) => builder.tool(&name, &input, result.as_ref()),
+                }) => builder.tool(&name, &input, result.as_ref(), ToolStatus::Interrupted),
                 Some(Work::Thinking { text }) => builder.thinking(&text, render),
                 None => {
                     if post.kind == PostKind::Said {
@@ -293,7 +312,51 @@ fn agent_messages(
     for (from, text) in session.agents.pending_of(name) {
         out.push(counterpart_message(&from, 0, text));
     }
+    // The run in flight, built by the same builder as every run above it (D132)
+    // and appended past the settled boundary, so it is volatile by construction
+    // — which is the whole reason the tail used to be drawn separately.
+    if let Some(running) = live_message(name, &live, render) {
+        out.push(running);
+    }
     (out, stable)
+}
+
+/// The streaming run as a message.
+///
+/// This is the fix D132 is: the tail used to be three opaque strings and a
+/// twenty-line renderer of its own, so the moving half of a page had no result
+/// rows, no folds and no status while the settled half had all three — and the
+/// switch between them at the end of a run is what read as lag. It is the same
+/// builder now, so a call renders the same whether it came back a second ago or
+/// a session ago.
+fn live_message(
+    name: &str,
+    live: &[LiveBlock],
+    render: &mut dyn FnMut(&str) -> Vec<Line>,
+) -> Option<UiMessage> {
+    if live.is_empty() {
+        return None;
+    }
+    let mut builder = RunBuilder::new(name, 0);
+    for block in live {
+        match block {
+            LiveBlock::Text(text) => {
+                if !text.trim().is_empty() {
+                    builder.prose(text);
+                }
+            }
+            LiveBlock::Thinking(text) => builder.thinking(text, render),
+            // A call with no answer yet is *running*, not interrupted — the one
+            // place the two callers of `tool` mean opposite things by silence.
+            LiveBlock::Tool(call) => builder.tool(
+                &call.name,
+                &call.input,
+                call.answer.as_ref(),
+                ToolStatus::Running,
+            ),
+        }
+    }
+    builder.finish()
 }
 
 /// A room's log → the page's messages: **speech only** (the v6 ruling), each
@@ -421,55 +484,6 @@ impl Chat {
                 .iter()
                 .any(|status| &status.name == name),
             None => false,
-        }
-    }
-
-    /// The streaming run of an agent page, straight from the registry — the
-    /// away build reads it fresh so the tail is as live as the zoom's was.
-    pub(crate) fn away_live_blocks(&self, name: &str) -> Vec<LiveBlock> {
-        self.session
-            .agents
-            .view_of(name)
-            .map(|(_, _, live, _, _)| live)
-            .unwrap_or_default()
-    }
-
-    /// One live block of the away page's streaming run, drawn the way the
-    /// zoom drew it: prose as markdown, one process row per tool call, a
-    /// `✻ Thinking` row per reasoning phase. Volatile by construction — the
-    /// rows live after every settled message and never flush.
-    pub(crate) fn live_block_rows(
-        &mut self,
-        block: &LiveBlock,
-        width: usize,
-        theme: &crate::tui::theme::Theme,
-    ) -> Vec<crate::tui::chat::Row> {
-        use crate::tui::chat::Row;
-        use crate::tui::line::{Line, SegStyle};
-        match block {
-            LiveBlock::Text(text) => {
-                use rsmarkdown_core::Renderer as _;
-                if text.trim().is_empty() {
-                    return Vec::new();
-                }
-                self.renderer.set_width(width.saturating_sub(2));
-                let doc = self.processor.process_streaming(text);
-                self.renderer.render(&doc);
-                self.renderer
-                    .lines()
-                    .to_vec()
-                    .into_iter()
-                    .map(Row::new)
-                    .collect()
-            }
-            LiveBlock::Thinking(_) => vec![Row::new(Line::styled(
-                "✻ Thinking…".to_string(),
-                SegStyle::fg(theme.text_secondary),
-            ))],
-            LiveBlock::Tool(line) => vec![Row::new(Line::styled(
-                format!("⏺ {line}"),
-                SegStyle::fg(theme.text_secondary),
-            ))],
         }
     }
 }

@@ -486,6 +486,30 @@ impl AgentProgress {
     }
 }
 
+/// What one call came back with: the two facts the protocol keeps, and the two
+/// the console shows.
+///
+/// One type for both halves of a page (D132). The committed history reads it out
+/// of the `tool_result` block; a run still going gets it from `ToolCallDone`.
+/// They are the same fact, so a page cannot render them two different ways.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolAnswer {
+    pub output: String,
+    pub is_error: bool,
+}
+
+/// One call of a running turn: what was called, with what, and what came back
+/// when it does.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LiveTool {
+    /// Matches the call to its answer; the id the protocol uses.
+    pub id: String,
+    pub name: String,
+    pub input: serde_json::Value,
+    /// `None` while the call is still running.
+    pub answer: Option<ToolAnswer>,
+}
+
 /// One piece of a running turn, as the instance view sees it while it happens.
 ///
 /// A running turn used to reach the view as one flat string of text deltas, which
@@ -494,14 +518,20 @@ impl AgentProgress {
 /// (`…the current state.Now let me verify…`). The finished history has always
 /// carried both; this is what lets the live view say the same thing before the
 /// turn ends.
+///
+/// **These are facts, not rows (D132).** `Tool` used to hold the finished line —
+/// `⏺ Read(a.rs)`, pre-rendered at the hook — which forced the page to own a
+/// second renderer for the half of itself that was still moving, and the two
+/// drifted exactly as far as you would expect: no result lines, no folds, no
+/// status, and a doubled glyph nobody had a reason to notice. The page now
+/// builds both halves with one builder, so there is nothing left to drift.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LiveBlock {
     /// Assistant prose, one block per round.
     Text(String),
-    /// A tool call, already rendered the way the transcript renders one.
-    Tool(String),
-    /// A reasoning phase. The DM view shows it the way the transcript does —
-    /// a collapsed `✻ Thinking` row, never the raw stream.
+    /// A tool call and, once it returns, its answer.
+    Tool(LiveTool),
+    /// A reasoning phase, accumulated as it streams.
     Thinking(String),
 }
 
@@ -520,6 +550,20 @@ impl LiveBlock {
         match blocks.last_mut() {
             Some(LiveBlock::Thinking(open)) => open.push_str(thinking),
             _ => blocks.push(LiveBlock::Thinking(thinking.to_string())),
+        }
+    }
+
+    /// Hand a returning call its answer. Matched on the protocol's own id
+    /// rather than on position: rounds run tools concurrently, so the order
+    /// they come back in is not the order they were called in.
+    pub fn answer_tool(blocks: &mut [LiveBlock], id: &str, answer: ToolAnswer) {
+        for block in blocks.iter_mut() {
+            if let LiveBlock::Tool(call) = block
+                && call.id == id
+            {
+                call.answer = Some(answer);
+                return;
+            }
         }
     }
 }

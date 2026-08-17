@@ -608,12 +608,13 @@ pub(crate) fn chrome(chat: &Chat, width: usize, fullscreen: bool) -> El {
     let theme = &chat.theme;
     let mut children: Vec<El> = Vec::new();
 
-    // Main's running status stays home (v6): on a page it would describe a
-    // turn the screen is not showing, and the page's own run is visible as
-    // its live tail.
-    if chat.away.is_none()
-        && let Some(status) = chat.running_status()
-    {
+    // The row belongs to whatever page is on screen (D132). Main's own turn
+    // stays home — describing it on somebody else's page would be describing a
+    // turn the screen is not showing — but a page whose agent is running gets
+    // its own: the spinner, the clock and the token count are what tell a reader
+    // that anything is happening at all, and a page without them reads as stalled
+    // however fresh its rows are.
+    if let Some(status) = chat.page_running_status() {
         children.push(El::Row(status_row(
             &status,
             chat.motion,

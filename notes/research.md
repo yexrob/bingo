@@ -5737,3 +5737,80 @@ not to answer it. Both notes now say every line arrives at once and the `@`
 decides only what is owed. A member is also told the debt is recorded and chased:
 that is a fact about the world, not a new rule, and a model that does not know it
 is being watched cannot factor it in.
+
+## D132 — one builder for a page, running or not
+
+The user's correction, and it was the same one from the start of the thread: *an
+agent's page should be exactly main's page, except main talks to the user by
+default.* D130 made the two agree about **history**; they still disagreed about
+**now**, because a page had two renderers and only one of them had been fixed.
+
+- **Settled half** — `walk` → `RunBuilder` → activities: results, folds, status,
+  stamps.
+- **Moving half** — `LiveBlock` → `live_block_rows`, twenty lines with none of
+  them.
+
+Rendered, the moving half read:
+
+```
+✻ Thinking…                 ← no content, no size, no key
+⏺ ⏺ Read(a.rs)              ← glyph applied twice; no result row, ever
+partway through the answer
+```
+
+The doubled glyph is the whole bug in one row: `on_tool_ready` pre-rendered
+`⏺ Read(a.rs)` into a string and `live_block_rows` prefixed `⏺ ` to it again.
+Nobody had a reason to notice, because nothing else looked at that string.
+
+**Why it read as lag rather than as ugliness.** Nothing was late — the
+fingerprint is compared every frame and the deltas land per event. What
+happened is that the *same content* was drawn twice: poorly while it streamed,
+then replaced wholesale by the rich rebuild when `finish` wrote the history. A
+result that had been sitting in `ToolCallDone` for a minute appeared only when
+the run ended. Meanwhile the page had no status row at all — `chrome` read
+`chat.away.is_none()`, correctly refusing to describe main's turn on somebody
+else's page, and then drew nothing in its place. No spinner, no clock, no token
+count, no key to stop with. A screen with nothing moving on it reads as stalled
+however fresh its rows are.
+
+**The fix is a deletion.** `LiveBlock::Tool` carries the call —
+`LiveTool { id, name, input, answer }` — instead of a rendering of it, and
+`live_message` runs the whole tail through the same `RunBuilder` the settled
+half uses. `live_block_rows`, `away_live_blocks` and `AwayBuild::live` delete
+with their drawing branch; the running turn is just another volatile message
+past `stable`, which is what the queued echoes have always been.
+
+Three things fall out of having one builder:
+
+- `on_tool_done` fills the answer **in the round it arrives**, matched on the
+  protocol's own id rather than on position, because a round runs tools
+  concurrently and they do not come back in call order.
+- `RunBuilder::tool` takes what silence *means* from its caller: `Interrupted`
+  in a committed history (written at run end, so a call still unanswered never
+  got one) and `Running` in a live tail (it simply has not come back). The two
+  callers mean opposite things by the same absence, and now they say so.
+- `perspective::ToolOutcome` and the live tail's answer collapse into one
+  `agents::ToolAnswer`. One type for "what a call returned" is what makes
+  drawing the two halves differently impossible rather than merely unintended.
+
+**And the row that says something is happening.** `page_running_status` gives an
+open agent page the status row main gets, from numbers the registry has carried
+all along (`elapsed`, `output_tokens`, `recent_activity`). The token figure is
+the registry's count, not the animated meter — the meter tracks main's stream,
+and borrowing it would show main's numbers under somebody else's name. `esc` says
+which of its two meanings it has here (D39's rule, applied to the new surface).
+
+Same run, after:
+
+```
+✻ Thinking … +2 lines (ctrl+o to expand)
+⏺ WebFetch(url="https://x.dev/a")
+  ⎿  Done (ctrl+o to expand)
+⏺ WebFetch(url="https://x.dev/b")
+  ⎿  Running…
+```
+
+**`agent.rs` split** (same commit, same reason as D130's `query.rs`): 4002 lines
+against a 4000 cap. The tests move to `agent_tests.rs` behind `#[path]`, which is
+what `agent_notes.rs` was carved out for in D114 and what `query_tests.rs` did in
+D130.

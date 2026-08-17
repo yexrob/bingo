@@ -1932,3 +1932,86 @@ fn prose_between_tool_streaks_closes_the_fold() {
         "one fold each side of the sentence, not one fold over it"
     );
 }
+
+/// The run in flight is drawn by the builder that draws every settled run above
+/// it (D132). Before this the page owned a second renderer for its moving half:
+/// no result rows, no folds, no status, and `⏺ ⏺ Read(a.rs)` — a glyph applied
+/// twice because one side pre-rendered the line and the other prefixed it again.
+#[test]
+fn a_running_turn_is_drawn_like_a_finished_one() {
+    use serde_json::json;
+    let mut chat = test_chat();
+    seed_agent(&chat, "scout");
+    let live = std::sync::Arc::new(std::sync::Mutex::new(vec![
+        crate::agents::LiveBlock::Thinking("first thought\nsecond thought".into()),
+        crate::agents::LiveBlock::Tool(crate::agents::LiveTool {
+            id: "t1".into(),
+            name: "WebFetch".into(),
+            input: json!({"url": "https://x.dev/a"}),
+            answer: Some(crate::agents::ToolAnswer {
+                output: "line a\nline b".into(),
+                is_error: false,
+            }),
+        }),
+        crate::agents::LiveBlock::Tool(crate::agents::LiveTool {
+            id: "t2".into(),
+            name: "WebFetch".into(),
+            input: json!({"url": "https://x.dev/b"}),
+            answer: None,
+        }),
+    ]));
+    chat.session.agents.set_live("scout", Some(live), None);
+    let rows = agent_page(&mut chat, "scout");
+
+    assert!(
+        rows.iter()
+            .any(|r| r.contains("✻ Thinking") && r.contains("+2 lines") && r.contains("ctrl+o")),
+        "reasoning folds while it streams, not only after: {rows:?}"
+    );
+    assert!(
+        rows.iter().any(|r| r.contains("⎿") && r.contains("Done")),
+        "a call that came back says so in the same round: {rows:?}"
+    );
+    assert!(
+        rows.iter()
+            .any(|r| r.contains("⎿") && r.contains("Running")),
+        "and one still out reads as running, not interrupted: {rows:?}"
+    );
+    assert!(
+        !rows.iter().any(|r| r.contains("⏺ ⏺")),
+        "no doubled glyph — the row is built once, not rendered twice: {rows:?}"
+    );
+}
+
+/// A page whose agent is working gets the status row main gets. Without it the
+/// page has nothing moving on it at all, which is most of what read as delay —
+/// the rows were fresh, the screen just never said anything was happening.
+#[test]
+fn a_working_agents_page_says_it_is_working() {
+    let mut chat = test_chat();
+    seed_agent(&chat, "scout");
+    assert!(
+        chat.page_running_status().is_none(),
+        "main is idle and no page is open"
+    );
+    chat.switch_to(Some(crate::tui::zoom::ZoomTarget::Agent("scout".into())));
+    let status = chat
+        .page_running_status()
+        .expect("the agent is running, and its page says so");
+    assert!(
+        !status.verb.is_empty(),
+        "the row names what the agent is doing"
+    );
+    assert!(
+        chat.busy_hint().contains("esc stops this agent"),
+        "and `esc` declares which of its two meanings it has here: {}",
+        chat.busy_hint()
+    );
+
+    chat.switch_to(None);
+    assert!(
+        chat.page_running_status().is_none(),
+        "home again: main is idle, so main's row is absent — a page's run is \
+         never described on somebody else's page"
+    );
+}
