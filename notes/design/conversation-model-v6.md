@@ -1,4 +1,4 @@
-# Conversation model v6 — user, main, rooms, and the @ (D117–D122)
+# Conversation model v6 — user, main, rooms, and the @ (D117–D123)
 
 Ruled by the user 2026-08-16, implemented 2026-08-17. **This file supersedes
 every earlier conversation-model document** — v2, v3, v4, v5 and the
@@ -75,7 +75,13 @@ never penned; the frozen-budget `⚠` was never a relay and never waits.
 - Senders are bound too: `@` what needs someone now, leave FYI unnamed,
   `@all` is a fire alarm. `@user` only when the human must look.
 - Main carries its own half (`MAIN_CHANNEL_NOTE`): answer a room in the
-  room, never narrate room traffic at the user.
+  room, and **keep the user posted on what their rooms are doing** — D123
+  reversed D119's narration ban on the user's ruling ("main 应该向我转述
+  房间内的情况"). Main is the user's eyes on the team; the flood guard
+  D119 feared is the pen itself (a batch reaches main at most once per
+  mention/5-lines/120s release), so the surviving discipline is form, not
+  silence: a briefing in main's own words, compressed, attributed, with
+  the verbatim record staying on the room's page.
 
 ### A page is main's page (D120)
 
@@ -147,7 +153,8 @@ the message. `SendMessage`'s address space still has no `to: "user"`.
 | D119 | 7ee9947 | the @ doctrine: CHANNEL_NOTE rewrite, MAIN_CHANNEL_NOTE |
 | D120 | 52c7c15 + 1fe00ba | page_break; pages replace the zoom |
 | D121 | 7af1356 | the roster replaces the tree, the pills and the `⚑` |
-| D122 | this batch | this file; v2–v5 + blueprint deleted; docs synced |
+| D122 | 452e3df | this file; v2–v5 + blueprint deleted; docs synced |
+| D123 | this batch | the briefing duty: D119's narration ban reversed |
 
 ## Not built, deliberately
 

@@ -3383,16 +3383,21 @@ mod tests {
              room traffic arrives late, and would promise timeliness it does not have"
         );
 
-        // Main's half (D119): injected by main.rs under the same gate; the
-        // anchors keep the digest from drifting back into narration.
+        // Main's half (D119; the narration ban reversed by D123 on the user's
+        // ruling): the anchors keep the briefing duty, and its form, in place.
         let main_note = crate::tool::agent_notes::MAIN_CHANNEL_NOTE;
         assert!(
             main_note.contains("needs you now"),
             "main must know a line naming it is the timely tier"
         );
         assert!(
-            main_note.contains("Do not narrate room traffic"),
-            "the flood v5 cut from the screen must not come back as prose"
+            main_note.contains("Keep the user posted on their rooms"),
+            "main is the user's eyes on the team (D123) — a digest read in silence is the defect"
+        );
+        assert!(
+            main_note.contains("A briefing is not a transcript"),
+            "the flood guard is form, not silence: compressed, own words, verbatim stays on \
+             the room's page (and the anchor sits on one line)"
         );
         assert!(
             main_note.contains("SendMessage(to: \"#room\")"),

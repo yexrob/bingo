@@ -120,15 +120,20 @@ you privately stays private — do not repeat or summarize it into a channel unl
 message itself tells you to take it there. When something private has to reach main between
 turns rather than at the end of one, that is `SendMessage(to: \"main\")`, never a room.";
 
-/// The main session's half of the room etiquette (D119, closing v5's deferred
-/// "main's room-digest narration discipline"). Main's room lines arrive inside
-/// the `<messages>` envelope with nothing anywhere explaining what they are or
-/// how to answer them — and main's own base prompt is written for a session
-/// that talks to the user, so its untrained instinct is to narrate every relay
-/// at them (the flood v5 cut from the *screen* reappearing as prose). Injected
-/// in `main.rs` beside the crew note, under the same `agent_channels` gate and
-/// for the same reason it is a system block: compaction never touches
-/// `Session::system`.
+/// The main session's half of the room etiquette (D119; second paragraph
+/// reversed by D123). Main's room lines arrive inside the `<messages>`
+/// envelope with nothing anywhere explaining what they are or how to answer
+/// them, so the mechanics — the tag, the batching, the one way to answer a
+/// room — have to be said here. D119 also banned narrating room traffic at
+/// the user, fearing the flood v5 cut from the *screen* returning as prose;
+/// the user overruled it in as many words ("main 应该向我转述房间内的情况"):
+/// main is their eyes on the team, and a digest read in silence leaves them
+/// watching a roster that looks idle. The flood guard is the pen now — room
+/// lines reach main at most once per batch — so what remains to legislate is
+/// form, not volume: brief in your own words, compressed, verbatim record on
+/// the room's page. Injected in `main.rs` beside the crew note, under the
+/// same `agent_channels` gate and for the same reason it is a system block:
+/// compaction never touches `Session::system`.
 pub(crate) const MAIN_CHANNEL_NOTE: &str = "\
 # Rooms
 
@@ -137,9 +142,11 @@ reach you when one names you (`@main`, `@all`) — that line needs you now — a
 batches, later. **Answer a room in the room**: `SendMessage(to: \"#room\")` is the only thing
 its members see — prose here is a note to the user, not an answer to anyone.
 
-**Do not narrate room traffic at the user.** They can open every room themselves; a relay
-restated is the flood coming back as prose. Bring a room to the user only when it needs
-them — a decision only they can make, a result they asked to be told about — and otherwise
-let a batch you have nothing to add to end your turn in silence. When you post, the same
-`@` discipline binds you: name someone only when you need them now, and reserve the
-fire alarm that is `@all`.";
+**Keep the user posted on their rooms.** You are the user's eyes on the team: when room
+lines reach you, your reply briefs the user on what moved — who did what, what was decided,
+results, blockers, and anything that needs them to act or decide.
+**A briefing is not a transcript**: relay the situation in your own words, as compressed as
+it deserves — one sentence can cover five lines — and let the room's page hold the verbatim
+record. Do not sit on a batch: room lines you read and never mentioned leave the user
+watching a team that looks idle. When you post, the same `@` discipline binds you: name
+someone only when you need them now, and reserve the fire alarm that is `@all`.";

@@ -5275,3 +5275,41 @@ refactor: "过时的 Decision, 也可以删掉" — outdated decisions may go.
   rewritten — a changelog is history too.
 
 Docs: this record. Tests: unchanged — 1453 + 13 green.
+
+### D123. The briefing duty — D119's narration ban reversed
+
+One day after D119 shipped, the user ruled against its second paragraph in
+as many words: "main 应该向我转述房间内的情况" — main should relay what is
+happening in the rooms. D119 had banned narration fearing v5's flood ("they
+can open every room themselves"); the ruling reads the same facts the other
+way: the roster and the pages are pull surfaces, and a main that reads its
+digests in silence leaves the user watching a team that looks idle unless
+they go door to door themselves.
+
+- **The machine is untouched.** The ban was one paragraph of
+  `MAIN_CHANNEL_NOTE`; the pen, the gate, the debounce and every byte
+  contract are exactly as D117/D118 left them. What made the reversal safe
+  is that the flood guard was never really the silence — it is the pen:
+  room lines reach main at most once per mention/5-lines/120s release, so
+  a briefing inherits that cadence mechanically and per-post prose cannot
+  come back.
+- **What the paragraph says now**: main is the user's eyes on the team —
+  when room lines reach it, its reply briefs the user on what moved (who
+  did what, decisions, results, blockers, anything needing the user
+  themselves). The surviving discipline is form, not volume: **a briefing
+  is not a transcript** — own words, compressed (one sentence can cover
+  five lines), verbatim record on the room's page — and a batch is not to
+  be sat on. The posting half (answer a room in the room; the `@`
+  discipline; `@all` the fire alarm) is unchanged.
+- **Anchors**: `Do not narrate room traffic` retires from the D119 anchor
+  test; `Keep the user posted on their rooms` and `A briefing is not a
+  transcript` replace it, each sitting on one line (the hard-wrap trap,
+  third sighting).
+- **Docs synced same-batch**: the v6 file's D119 law bullet and batch
+  table (title range now D117–D123), guide.md's rooms paragraph,
+  AGENTS.md's decision range. feedback-states.md is untouched on purpose:
+  the briefing is main's own turn prose, not a feedback state — the "room
+  relays render nothing" rows legislate the *flow*, and still hold.
+
+Docs: this record; conversation-model-v6.md law bullet. Tests: the
+reworked anchor assertions in `tool/agent.rs` — 1453 + 13 green.
