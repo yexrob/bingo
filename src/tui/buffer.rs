@@ -489,7 +489,7 @@ pub fn line_source(line: &str) -> Option<LineSource> {
     if line == crate::tool::agent::DM_FROM_USER_MARKER {
         return Some(LineSource::User);
     }
-    if let Some(rest) = line.strip_prefix(crate::channels::MAIN_MESSAGE_PREFIX)
+    if let Some(rest) = line.strip_prefix(crate::channels::AGENT_MESSAGE_PREFIX)
         && let Some(name) = rest.strip_suffix(']')
         && !name.is_empty()
     {

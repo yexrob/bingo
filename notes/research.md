@@ -6255,3 +6255,89 @@ compactions shared the pinned-panel id `compact`, so whichever finished first
 unpinned the other's progress line — the silence the pin exists to prevent; the
 agent pin is keyed by name. And `compact_agent` returned silently when
 `session_of` missed, where every other exit speaks.
+
+
+## D137 — an agent stops needing a manager to talk
+
+**The rule that went.** `address::check_target` let a subagent write to `main`
+and to rooms it belonged to, and refused every sibling in as many words: *"work
+that concerns another agent goes through main, or into a room you are both in."*
+That was hub-and-spoke expressed as an addressing rule rather than as a withheld
+tool — the tool was always there — and it made every two-agent exchange a
+three-party one.
+
+It was already half-abandoned. D95 let a member *convene a room* for an arbitrary
+subset of the team, on the reasoning that "two members who need to work something
+out are exactly such a subset". A two-person room is a direct message with
+ceremony: a name, a roster, a log, a `#` in front of every line. What D95 was
+reaching for is a private lane, and the private lane already existed — it was
+just pointed only at main.
+
+**What it cost to open.** Almost nothing structural, and that is the point: every
+mechanism a peer message needs was built for main's and is sender-agnostic
+already. `deliver` has taken a `from` since D44. `spawn_ack_watchdog` owns its
+watch line by `session.instance`, so a chase already reported to whoever sent the
+message rather than to main. `flush_agent_inbox` wakes the receiver from the
+registry's own copy of its session. The console's `Mail` event (D135) carries
+`from` and lands on the receiver's page. `counterpart_message` says "another
+agent's mail" in a comment written before one could be sent.
+
+The gate is four lines now, and it checks the *sender* rather than the target:
+anyone with a name in the registry may write to anyone who has one, because a
+reply is a message back and a session with no name has no inbox to receive one.
+Whether the target exists stays the registry's answer, given at delivery in words
+that list who does.
+
+**Three things did have to change, and all three are about attribution.**
+
+*The receiver could not tell who was writing.* `direct_text` had exactly two
+cases: the user's marker, and everything else verbatim — because everything else
+was main. `SUBAGENT_NOTE` states that as a promise: *"a direct instruction without
+that line is from main"*. Opening the door without touching this would have made
+a colleague's request arrive wearing the manager's authority — D63 with the roles
+swapped, and worse, because the note vouches for the silence. A peer's message is
+headed `[message from @name]`, which is the shape its messages **to main** have
+worn since D98 (`channels::format_agent_message`, renamed here from
+`format_main_message`: it never described the receiver, only that an agent was
+speaking). The display layer needed no work at all — `line_source` has parsed the
+shape since D98, `perspective::walk` files it as `Target::Dm(name)`, and the two
+tests added here confirm the live half and the committed half agree.
+
+*The chase named the wrong sender.* `[follow-up 1/3] Main sent you message #3…`
+is a constant where the sender used to be a constant. `Ack` and
+`InboxItem::FollowUp` carry `from` now, and `AgentControl(action=messages)` names
+it too when it is not main — that record holds messages main never sent, and a
+line that hides it is a line main will misread.
+
+*And the chase's verdict was wrong.* This is the one a reading of the diff would
+have missed. `answer_acks` settles a delivered message when the receiver produced
+any text after it — sound for main, which is handed the run's result, and for the
+user, who is watching the page. **A colleague reads neither.** So an instance
+could read a peer's question, work for a full turn, say nothing to anyone, and
+have its record marked `Answered` — closing the exact mechanism the sender relies
+on to discover it was never answered. Turn text now settles an ack only from a
+sender who reads turn text; a peer's is settled where a message back can actually
+be observed, in `deliver`, under the same precondition `answer_acks` uses (only a
+*delivered* message — you cannot answer what you have not read). The test fails
+without the fix.
+
+**The asymmetry is the whole prompt change.** Everything a model must be told
+here reduces to one fact it cannot observe: *your turn text does not reach a
+colleague*. The user reads it on the page, main gets it as the run's result, a
+peer gets nothing — so an instance that answers a colleague in prose has answered
+nobody while believing it replied, which is D124's silence pointed at a new
+audience. `SUBAGENT_NOTE` now sorts the three voices by marker and states where
+each one's answer goes; `CHANNEL_NOTE`'s DM paragraph does the same and keeps its
+older half intact (never answer a private message in the room, whoever sent it);
+`SendMessage`'s description gains the peer lane with the room's own ping-pong
+rule — answer once, and another round is a new message you should have a reason
+for.
+
+**Not done, and named.** No directory: `AgentControl` stays main's, so an
+instance can write to a name it was given, met in a room, or heard from, and to
+no other. That is a real constraint and a deliberate one — the alternative is
+shipping `list` to every member, which also ships `stop`, and a member that can
+stop its siblings is the loop D95's tool comment already refused. No cap on
+agent-to-agent traffic either: the doctrine here is that the rule goes in the
+note and the runtime stays out of it (`max_awake` was cut for the same reason),
+and `MAX_FOLLOW_UPS` still bounds the one loop the runtime does drive.

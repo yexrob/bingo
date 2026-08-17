@@ -794,11 +794,13 @@ fn sub_of(parent: &Arc<Session>, instance: &str, rooms: bool) -> Arc<Session> {
     })
 }
 
-/// Hub-and-spoke survives the merge of the two speech tools, but as an
-/// addressing rule rather than as a withheld tool: a subagent holds
-/// `SendMessage` and still cannot reach a sibling with it.
+/// Hub-and-spoke was an addressing rule rather than a withheld tool, and D137
+/// retired the rule while leaving the tool exactly where it was: a subagent
+/// reaches a sibling, and the message arrives in that sibling's inbox under the
+/// sender's own name — which is the whole reason the rule could go. A colleague
+/// that could be written to but not identified is the D63 confusion.
 #[tokio::test]
-async fn a_subagent_may_address_main_and_nothing_else_in_the_agent_namespace() {
+async fn a_subagent_reaches_a_sibling_and_the_sibling_learns_who_wrote() {
     let (session, _client) = parent_session();
     session.agents.insert(
         "sibling",
@@ -810,19 +812,29 @@ async fn a_subagent_may_address_main_and_nothing_else_in_the_agent_namespace() {
     let ctx = main_ctx(&session);
     let send = SendMessageTool::new(sub_of(&session, "scout", false));
 
-    let err = send
+    let out = send
         .call(
             serde_json::json!({"to": "sibling", "message": "take this"}),
             &ctx,
         )
         .await
-        .unwrap_err();
-    let text = err.to_string();
-    assert!(text.contains("sibling"), "{text}");
-    assert!(
-        text.contains("main") && text.contains("rooms you are a member of"),
-        "the refusal has to say what it may address instead: {text}"
+        .unwrap_or_else(|e| panic!("{e}"));
+    assert!(!out.is_error, "a peer is addressable now: {out:?}");
+    assert_eq!(
+        session.agents.pending_of("sibling"),
+        vec![("scout".to_string(), "take this".to_string())],
+        "it is in the sibling's inbox, from scout — not from main"
     );
+
+    // A name nobody claimed still fails, and the failure names who exists.
+    let err = send
+        .call(
+            serde_json::json!({"to": "ghost", "message": "hello?"}),
+            &ctx,
+        )
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("no subagent named ghost"), "{err}");
 
     let err = send
         .call(serde_json::json!({"to": "scout", "message": "note"}), &ctx)
@@ -839,6 +851,73 @@ async fn a_subagent_may_address_main_and_nothing_else_in_the_agent_namespace() {
         .await
         .unwrap_or_else(|e| panic!("{e}"));
     assert!(!out.is_error);
+}
+
+/// The receiver's context is where it matters: a colleague's message is headed
+/// with the sender, and main's is not — the one voice "unmarked" is allowed to
+/// mean, because the note promises it does.
+#[test]
+fn a_peer_s_message_arrives_headed_and_main_s_stays_bare() {
+    let (session, _client) = parent_session();
+    let absorb = |from: &str| {
+        crate::tool::agent::absorb_inbox(
+            &session.channels,
+            "qa",
+            &[crate::agents::InboxItem::Direct {
+                id: crate::agents::MsgId(1),
+                from: from.to_string(),
+                text: "look at the parser".into(),
+                images: Vec::new(),
+            }],
+        )
+        .0
+    };
+    assert_eq!(
+        absorb(crate::channels::MAIN_NAME),
+        "look at the parser",
+        "main is the default voice and stays verbatim"
+    );
+    assert_eq!(
+        absorb("dev"),
+        "[message from @dev]\nlook at the parser",
+        "a colleague is named, in the shape main's own messages have always worn"
+    );
+    assert_eq!(
+        absorb(crate::channels::USER_NAME),
+        format!("{DM_FROM_USER_MARKER}\nlook at the parser"),
+        "and the human keeps the marker D64 gave them"
+    );
+}
+
+/// A chase names whoever is waiting, and tells the receiver where the answer
+/// has to go — turn text reaches main and nobody else.
+#[test]
+fn a_chase_names_the_sender_that_is_still_waiting() {
+    let (session, _client) = parent_session();
+    let reg = &session.agents;
+    reg.insert("qa", AgentKind::Hire, None, "w".into(), session.clone());
+    let id = reg
+        .deliver("qa", "dev", "does the parser handle EOF?", Vec::new(), None)
+        .unwrap_or_else(|e| panic!("{e}"));
+    let _ = reg.take_running("qa", 0);
+    assert_eq!(
+        reg.follow_up("qa", id),
+        crate::agents::FollowUp::Sent { round: 1 }
+    );
+    let items = reg.take_running("qa", 0);
+    let prompt = crate::tool::agent::absorb_inbox(&session.channels, "qa", &items).0;
+    assert!(
+        prompt.contains("@dev sent you message"),
+        "the chase says who is waiting: {prompt}"
+    );
+    assert!(
+        !prompt.contains("Main sent you"),
+        "and does not put it on main: {prompt}"
+    );
+    assert!(
+        prompt.contains("SendMessage(to: \"@dev\")"),
+        "turn text does not reach a peer, so the chase says where the answer goes: {prompt}"
+    );
 }
 
 /// The message lands in the store the query layer drains into main's next
@@ -1481,8 +1560,18 @@ fn channel_note_is_gated_by_the_flag() {
         "@all needs a cost the model can feel, or every FYI wears it"
     );
     assert!(
-        CHANNEL_NOTE.contains("never in a room"),
-        "must state that a DM is answered in turn text — otherwise a member takes a private question to the room"
+        CHANNEL_NOTE.contains("Never answer a direct message in the room"),
+        "must keep a private question out of the room, whoever asked it"
+    );
+    assert!(
+        CHANNEL_NOTE.contains("A colleague reads none of it")
+            && CHANNEL_NOTE.contains("SendMessage(to: \"@name\")"),
+        "a peer does not read turn text, so the note must say where its answer goes — \
+         without it a member answers a colleague in prose and believes it has replied (D137)"
+    );
+    assert!(
+        CHANNEL_NOTE.contains(crate::channels::AGENT_MESSAGE_PREFIX),
+        "the lane rule needs the observable tag for a colleague's message too, not just the concept"
     );
     assert!(
         CHANNEL_NOTE.contains("stays private"),
@@ -1563,8 +1652,14 @@ fn channel_note_is_gated_by_the_flag() {
 #[test]
 fn subagent_note_knows_the_user_can_write_to_it() {
     assert!(
-        SUBAGENT_NOTE.contains("The user can write to you directly"),
-        "must name the private line the user reaches an instance through"
+        SUBAGENT_NOTE.contains("Three voices write to you privately"),
+        "must name the private lines an instance is reachable on — the human's above all"
+    );
+    assert!(
+        SUBAGENT_NOTE.contains(crate::channels::AGENT_MESSAGE_PREFIX)
+            && SUBAGENT_NOTE.contains("A colleague does not read it"),
+        "a colleague writes here too now, and the one thing the model cannot observe is that \
+         its prose does not reach them (D137)"
     );
     assert!(
         !SUBAGENT_NOTE.contains("not displayed to the user"),

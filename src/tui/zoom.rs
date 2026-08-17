@@ -659,4 +659,64 @@ mod tests {
         assert!(chat.roster_key(KeyCode::Enter, KeyModifiers::NONE));
         assert!(chat.active.is_main(), "the main row comes home");
     }
+
+    /// D137: a colleague's direct message lands on the receiver's page, named.
+    /// No surface was added for it — `deliver` is the door every sender already
+    /// used, so the page that showed main's mail shows a peer's.
+    #[test]
+    fn a_peers_message_lands_on_the_receivers_page() {
+        let mut chat = test_chat();
+        seed(&chat, "dev");
+        seed(&chat, "qa");
+        chat.session
+            .agents
+            .deliver("qa", "dev", "does the parser handle EOF?", Vec::new(), None)
+            .unwrap_or_else(|e| panic!("{e}"));
+        chat.switch_to(Some(ZoomTarget::Agent("qa".into())));
+        let rows = page_rows(&mut chat);
+        assert!(
+            rows.iter().any(|r| r.contains("@dev")),
+            "the page says who wrote: {rows:?}"
+        );
+        assert!(
+            rows.iter()
+                .any(|r| r.contains("does the parser handle EOF?")),
+            "{rows:?}"
+        );
+    }
+
+    /// And one already in the record is filed the same way by the cold-start
+    /// walk: the marker is the only thing either path reads, so the live half
+    /// and the committed half cannot disagree about who spoke.
+    #[test]
+    fn a_peers_message_in_the_record_is_filed_to_the_peer() {
+        let mut chat = test_chat();
+        seed_with_history(
+            &chat,
+            "qa",
+            vec![
+                ApiMessage {
+                    role: ApiRole::User,
+                    content: vec![ContentBlock::Text {
+                        text: crate::channels::format_agent_message(
+                            "dev",
+                            "does the parser handle EOF?",
+                        ),
+                    }],
+                },
+                assistant("it does"),
+            ],
+        );
+        chat.switch_to(Some(ZoomTarget::Agent("qa".into())));
+        let rows = page_rows(&mut chat);
+        assert!(
+            rows.iter().any(|r| r.contains("@dev")),
+            "the walk names the colleague: {rows:?}"
+        );
+        assert!(
+            rows.iter()
+                .all(|r| !r.contains(crate::channels::AGENT_MESSAGE_PREFIX)),
+            "and drops the scaffolding rather than rendering it as prose: {rows:?}"
+        );
+    }
 }

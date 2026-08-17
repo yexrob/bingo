@@ -725,7 +725,7 @@ mod tests {
         let inbox = format!(
             "{}\n{}\n[#build msg #4] zoe: the tests pass\n{}",
             crate::query::MAIL_BLOCK_OPEN,
-            crate::channels::format_main_message("scout", "the migration is done"),
+            crate::channels::format_agent_message("scout", "the migration is done"),
             crate::query::MAIL_BLOCK_CLOSE
         );
         let history = vec![user("run the release"), user(&inbox)];
@@ -760,7 +760,7 @@ mod tests {
             user(&format!(
                 "{}\n{}\n[#build msg #4] zoe: the tests pass\n{}",
                 crate::query::MAIL_BLOCK_OPEN,
-                crate::channels::format_main_message("scout", "the migration is done"),
+                crate::channels::format_agent_message("scout", "the migration is done"),
                 crate::query::MAIL_BLOCK_CLOSE
             )),
             assistant(vec![text("thanks")]),

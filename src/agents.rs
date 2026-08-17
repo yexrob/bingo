@@ -283,6 +283,12 @@ impl AckState {
 #[derive(Debug, Clone)]
 pub struct Ack {
     pub id: MsgId,
+    /// Who sent it. Recorded since D137, when the answer stopped being obvious:
+    /// every direct message used to come from main, so a chase could name the
+    /// sender from a constant. A peer sends now too, and a follow-up that says
+    /// "Main sent you message #3" about a colleague's message is a lie the
+    /// receiver has no way to check.
+    pub from: String,
     /// First line of the message, for identifying it in a listing.
     pub excerpt: String,
     pub state: AckState,
@@ -344,6 +350,9 @@ pub enum InboxItem {
     /// instruction — only the fact that the sender is still waiting.
     FollowUp {
         original: MsgId,
+        /// Who is still waiting — copied off the [`Ack`] rather than assumed to
+        /// be main (D137).
+        from: String,
         /// 1-based, out of MAX_FOLLOW_UPS.
         round: u8,
         excerpt: String,
@@ -1160,6 +1169,7 @@ impl AgentRegistry {
             entry,
             Ack {
                 id,
+                from: from.to_string(),
                 excerpt: first_line(message),
                 state: AckState::Queued,
                 queued_at: Instant::now(),
@@ -1168,6 +1178,13 @@ impl AgentRegistry {
                 delivered_after_chars: None,
             },
         );
+        // Sending *is* answering, where the sender is a colleague: this is the
+        // one place a message back can be observed, and without it a peer's
+        // request stays outstanding until the chase gives up on an instance
+        // that answered it properly (D137).
+        if let Some(sender) = inner.get_mut(from) {
+            settle_peer_acks(sender, name);
+        }
         drop(inner);
         // The receiver's page shows what it was told, when it was told (D135).
         // A running instance absorbs its mail at its next tool barrier, so
@@ -1204,11 +1221,13 @@ impl AgentRegistry {
         }
         ack.follow_ups += 1;
         let round = ack.follow_ups;
+        let from = ack.from.clone();
         let excerpt = ack.excerpt.clone();
         let waited = ack.queued_at.elapsed();
         let delivered = matches!(ack.state, AckState::Delivered { .. });
         entry.inbox.push(InboxItem::FollowUp {
             original: id,
+            from,
             round,
             excerpt,
             waited,
@@ -1390,11 +1409,27 @@ fn same_definition(a: &Session, b: &Session) -> bool {
         && a.cwd() == b.cwd()
 }
 
+/// Whether this sender reads the receiver's turn text — which decides what
+/// counts as an answer to them (D137).
+///
+/// Main does: a run's result is delivered to whoever started it. The user does:
+/// it is on the page they are watching. **A colleague does neither.** Its
+/// message arrived in an inbox and its answer has to arrive in one too, so
+/// "they produced some text" is evidence of nothing where a peer is concerned —
+/// and treating it as an answer would close the very record the sender relies
+/// on to find out they were never answered.
+fn reads_turn_text(from: &str) -> bool {
+    from == crate::channels::MAIN_NAME || from == crate::channels::USER_NAME
+}
+
 /// A reply answers a delivered message only if text was produced after that message entered the
 /// query. Anything still queued is untouched: it has not been read yet.
 fn answer_acks(entry: &mut Entry, output_chars: usize) {
     let run = entry.runs;
     for ack in entry.acks.iter_mut() {
+        if !reads_turn_text(&ack.from) {
+            continue;
+        }
         if let AckState::Delivered { run: delivered_run } = ack.state
             && (run > delivered_run && output_chars > 0
                 || run == delivered_run
@@ -1402,6 +1437,22 @@ fn answer_acks(entry: &mut Entry, output_chars: usize) {
                         .delivered_after_chars
                         .is_some_and(|before| output_chars > before))
         {
+            ack.state = AckState::Answered { run };
+        }
+    }
+}
+
+/// `sender` just wrote to `recipient`: whatever `recipient` had asked them and
+/// they had already read is answered by it (D137).
+///
+/// The peer half of [`answer_acks`], and deliberately the same precondition —
+/// only a *delivered* message is settled. A message still queued has not been
+/// read, and an unrelated send while it waits is not an answer to something the
+/// sender has not seen.
+fn settle_peer_acks(entry: &mut Entry, recipient: &str) {
+    let run = entry.runs;
+    for ack in entry.acks.iter_mut() {
+        if ack.from == recipient && matches!(ack.state, AckState::Delivered { .. }) {
             ack.state = AckState::Answered { run };
         }
     }
@@ -2683,6 +2734,69 @@ mod tests {
             AckState::Answered { run: 2 },
             "later text does answer the previously delivered message"
         );
+    }
+
+    /// A colleague's message is not answered by the receiver having spoken
+    /// (D137): a peer reads its inbox and nothing else, so turn text — which is
+    /// exactly what settles main's — settles nothing here. What settles it is a
+    /// message going back.
+    #[test]
+    fn a_peer_is_answered_by_a_message_back_not_by_turn_text() {
+        let reg = AgentRegistry::new();
+        reg.insert("qa", AgentKind::Hire, None, "qa".into(), test_session());
+        reg.insert("dev", AgentKind::Hire, None, "dev".into(), test_session());
+        let _ = reg.next_run("qa");
+        reg.deliver("qa", "dev", "does the parser handle EOF?", Vec::new(), None)
+            .unwrap_or_else(|e| panic!("{e}"));
+        let _ = reg.take_running("qa", 0);
+        assert!(matches!(
+            reg.acks_of("qa").unwrap_or_else(|| unreachable!())[0].state,
+            AckState::Delivered { .. }
+        ));
+
+        // A whole turn's worth of prose, and dev has still heard nothing.
+        assert!(reg.finish("qa", Vec::new(), 500).is_none());
+        assert!(
+            matches!(
+                reg.acks_of("qa").unwrap_or_else(|| unreachable!())[0].state,
+                AckState::Delivered { .. }
+            ),
+            "turn text goes to main; the colleague who asked cannot read it"
+        );
+
+        // The message back is the answer.
+        reg.deliver("dev", "qa", "it does, since the rewrite", Vec::new(), None)
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert!(
+            matches!(
+                reg.acks_of("qa").unwrap_or_else(|| unreachable!())[0].state,
+                AckState::Answered { .. }
+            ),
+            "and it settles the record the chase reads"
+        );
+    }
+
+    /// Main's own messages keep the rule they have had since D44 — it reads the
+    /// turn text, so the turn text answers it.
+    #[test]
+    fn mains_message_is_still_answered_by_turn_text() {
+        let reg = AgentRegistry::new();
+        reg.insert("qa", AgentKind::Hire, None, "qa".into(), test_session());
+        let _ = reg.next_run("qa");
+        reg.deliver(
+            "qa",
+            crate::channels::MAIN_NAME,
+            "status?",
+            Vec::new(),
+            None,
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        let _ = reg.take_running("qa", 0);
+        assert!(reg.finish("qa", Vec::new(), 500).is_none());
+        assert!(matches!(
+            reg.acks_of("qa").unwrap_or_else(|| unreachable!())[0].state,
+            AckState::Answered { .. }
+        ));
     }
 
     #[test]

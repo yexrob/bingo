@@ -64,13 +64,29 @@ pub(crate) fn check_target(session: &Session, address: &Address) -> Result<(), T
         Address::Agent(name) if *name == me => Err(ToolError::failed(format!(
             "{name} is you — a message to yourself is a note, not a message"
         ))),
+        // Anyone with a name may write to anyone who has one (D137). The rule
+        // this replaces — a subagent reaches main and nothing else — routed
+        // every two-agent exchange through the manager, which is the shape a
+        // human org uses for authority, not for talking. Two members who need
+        // to work something out are a conversation, and D95 already accepted
+        // that: it let a member convene a room for exactly that subset. A
+        // two-person room is a direct message with ceremony.
+        //
+        // What is still checked is that the *sender* can be answered. A reply
+        // is a message back, so a session with no name in the registry would be
+        // opening a conversation nobody can close; main is the one such session
+        // and it has a name of its own. Whether the *target* exists is the
+        // registry's answer, given at delivery in words that list who does.
         Address::Agent(name) => {
-            if session.depth == 0 || name == crate::channels::MAIN_NAME {
+            if session.depth == 0
+                || session.instance.is_some()
+                || name == crate::channels::MAIN_NAME
+            {
                 Ok(())
             } else {
                 Err(ToolError::failed(format!(
-                    "you may not message {name}: as a subagent you can write to main, and to rooms you are a member of. \
-Work that concerns another agent goes through main, or into a room you are both in."
+                    "you may not message {name}: this session has no name in the agent namespace, \
+so nothing it wrote could be answered. You can write to main."
                 )))
             }
         }

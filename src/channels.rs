@@ -392,18 +392,25 @@ fn format_main_line(channel: &str, msg: &ChannelMessage) -> String {
     format!("[#{channel} msg #{}] {}: {}", msg.seq, msg.from, msg.text)
 }
 
-/// Opening of the line a direct message to the main agent arrives under (D98):
+/// Opening of the line a direct message *from an agent* arrives under (D98):
 /// `[message from @scout]`, on its own line above the text.
 ///
 /// The shape is [`crate::tool::agent::DM_FROM_USER_MARKER`]'s, with the sender
 /// named — the one thing that marker never had to carry, because the human is
-/// the only human. `main` hears from many agents, so its marker names which.
-/// [`crate::tui::buffer::line_source`] is the single parser of this shape.
-pub const MAIN_MESSAGE_PREFIX: &str = "[message from @";
+/// the only human. A receiver hears from many agents, so this marker names
+/// which. [`crate::tui::buffer::line_source`] is the single parser of the shape.
+///
+/// D137 gave it its second producer. It was main's alone while main was the
+/// only thing an agent could write to; now any instance can be written to by
+/// any other, and the receiver has the same question main had — *who is this
+/// from* — answered by the same line, parsed by the same parser, filed by the
+/// same walk. What the marker means is "an agent wrote to you", not "you are
+/// main", which is why it is no longer named for the receiver.
+pub const AGENT_MESSAGE_PREFIX: &str = "[message from @";
 
-/// One direct message as it enters the main agent's context.
-pub fn format_main_message(from: &str, text: &str) -> String {
-    format!("{MAIN_MESSAGE_PREFIX}{from}]\n{text}")
+/// One direct message as it enters an agent's context.
+pub fn format_agent_message(from: &str, text: &str) -> String {
+    format!("{AGENT_MESSAGE_PREFIX}{from}]\n{text}")
 }
 
 /// Write a roster change into the room's record and hand back the entry.
@@ -964,7 +971,7 @@ impl ChannelRegistry {
     /// the line, which is also what lets a reader attribute it.
     pub fn deliver_to_main(&self, from: &str, text: &str, summary: Option<&str>, urgent: bool) {
         let mut inner = self.lock();
-        inner.main_mail.push(format_main_message(from, text));
+        inner.main_mail.push(format_agent_message(from, text));
         inner.main_mail_urgent |= urgent;
         inner.main_arrivals.push_back(MainArrival {
             from: from.to_string(),

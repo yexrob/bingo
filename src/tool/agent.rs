@@ -541,9 +541,20 @@ pub(crate) const DM_FROM_USER_MARKER: &str = "[DM from user]";
 
 /// The user's messages carry the marker in every shape of batch; main's only gain their
 /// `[follow-up instruction]` label when a batch makes the boundaries ambiguous.
+///
+/// **A third voice arrived with D137.** Untagged used to mean main because main
+/// was the only thing that could write here; once a peer can, the same silence
+/// would read as an instruction from the manager — the D63 confusion with the
+/// roles swapped, and worse, because the note *promises* that untagged is main.
+/// A peer's message is headed the way its messages to main have always been
+/// headed ([`crate::channels::format_agent_message`]), in every shape of batch:
+/// the header is its own boundary, so it needs no `[follow-up instruction]`
+/// label on top of a line that already names a sender.
 fn direct_text(from: &str, text: &str, batched: bool) -> String {
     if from == crate::channels::USER_NAME {
         format!("{DM_FROM_USER_MARKER}\n{text}")
+    } else if from != crate::channels::MAIN_NAME {
+        crate::channels::format_agent_message(from, text)
     } else if batched {
         format!("[follow-up instruction] {text}")
     } else {
@@ -597,6 +608,7 @@ pub(crate) fn absorb_inbox(
                 } => format!("[#{channel} msg #{seq}] {from}: {text}"),
                 InboxItem::FollowUp {
                     original,
+                    from,
                     round,
                     excerpt,
                     waited,
@@ -607,12 +619,27 @@ pub(crate) fn absorb_inbox(
                     } else {
                         "it sat in your inbox without being picked up"
                     };
+                    // Whose chase this is decides where the answer goes: main
+                    // reads a turn's text, a peer does not (D137).
+                    let sender = if from == crate::channels::MAIN_NAME {
+                        "Main".to_string()
+                    } else {
+                        format!("@{from}")
+                    };
+                    let where_to = if from == crate::channels::MAIN_NAME {
+                        String::new()
+                    } else {
+                        format!(
+                            " Answer it with SendMessage(to: \"@{from}\") — turn text does not \
+                             reach them."
+                        )
+                    };
                     format!(
-                        "[follow-up {round}/{MAX_FOLLOW_UPS}] Main sent you message \
+                        "[follow-up {round}/{MAX_FOLLOW_UPS}] {sender} sent you message \
                          #{original} (\"{excerpt}\") {}s ago and has had no reply: {silence}. \
                          Answer it now — if you are still working, say what you are doing and \
                          what you have so far; if you have nothing to add, say that. Ending a \
-                         turn in silence reads as a hang from the outside.",
+                         turn in silence reads as a hang from the outside.{where_to}",
                         waited.as_secs()
                     )
                 }
@@ -1560,7 +1587,10 @@ back with what you missed attached)"
         let reach = if self.session.depth == 0 {
             "You may write to any subagent instance (the name the Agent tool returned, or AgentControl list)".to_string()
         } else {
-            "You may write to `main` and to nothing else in the agent namespace: work that concerns another agent goes through main, or into a room you are both in".to_string()
+            "You may write to `main`, and to any instance whose name you know — a colleague you \
+share a room with, one main named to you, one that has written to you. There is no directory \
+here: a name you were never given is not one to guess at"
+                .to_string()
         };
         let lane = if self.session.depth == 0 {
             "This is the private lane: right for what concerns the receiver alone — an assignment, a follow-up, a correction. Something every member of a room should act on belongs in one room message, not in per-member private copies that drift apart. \
@@ -1568,7 +1598,11 @@ An idle receiver starts immediately; a running one drains everything waiting at 
         } else {
             "Writing to main is deliberate, not routine: your ordinary work is already visible to whoever is watching your conversation, and your final text is returned to whoever started you. Send when the overall task is finished, when you are blocked and need a decision, or when you found something that changes what is being coordinated — not for progress, acknowledgements, or anything already in your reply. \
 Write a summary: it is the single line the user's transcript shows for your message, and without one they read the first fifty columns of the message itself. \
-Set urgent only for something blocking that cannot wait for the user to look: it rings the terminal's attention channel, which interrupts them wherever they are."
+Set urgent only for something blocking that cannot wait for the user to look: it rings the terminal's attention channel, which interrupts them wherever they are. \
+Writing to a colleague is the private lane between the two of you: right for what concerns you both and nobody else — a question about their piece, a result they are waiting on, a correction. \
+What every member of a room should act on belongs in one room message, not in private copies that drift apart, and what reaches you privately stays private. \
+**They do not read your turn text.** Your prose goes back to main as your result, so an answer to a colleague is another SendMessage to them, exactly as an answer to a room is another post. \
+An idle receiver starts a turn immediately; a running one takes it at its next tool round. Answer once and stop: a receipt is not an answer, and needing another round from them is a new message you should have a reason for — two agents handing messages back and forth is the room's ping-pong in a smaller room."
         };
         format!(
             "Speak to one conversation. Your name in it is {me} (stamped by the runtime; it cannot be forged). \
@@ -1861,7 +1895,17 @@ impl Tool for AgentControlTool {
                                     format!("dropped ({reason}, never delivered)")
                                 }
                             };
-                            format!("- #{} {detail}: {}", a.id, a.excerpt)
+                            // Whose message it was. Blank for main's own, which
+                            // is most of them and the reader's default reading;
+                            // named for anyone else, because since D137 this
+                            // record holds messages main never sent and a line
+                            // that hides that is a line main will misread.
+                            let who = if a.from == crate::channels::MAIN_NAME {
+                                String::new()
+                            } else {
+                                format!(" from @{}", a.from)
+                            };
+                            format!("- #{}{who} {detail}: {}", a.id, a.excerpt)
                         })
                         .collect::<Vec<_>>()
                         .join("\n")
