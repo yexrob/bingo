@@ -6144,24 +6144,72 @@ healthy case and walking a duplicate in the broken one. `echo_direct` claims its
 store the same way, because a store opened there was the same cold start racing
 the same events.
 
-**Left undone, and named so it is not lost:** main's own sends to an instance are
-still invisible on that instance's page until the run absorbs them at a barrier.
-The user's sends are echoed at send time (`echo_direct`); `Agent` dispatches show
-up as intake the moment the run opens, so the gap is `SendMessage` mail to a
-*running* instance. Closing it means echoing from `AgentRegistry::deliver` — the
-one point every sender passes through — and dropping the absorb-time replay for
-`Target::Dm(MAIN_NAME)` the way `inbound_messages` already drops the user's. That
-is a domain-layer emit and a second dedupe rule, and it belongs with D136, where
-main becomes a registry entry and `deliver` stops having a special sender at all.
+**The invisible send** (the review's other deferral). D134 replaced the away
+page's pending/in-flight echo with one at send time — and covered the *user's*
+sends only. Main's `SendMessage` mail to a **running** instance therefore showed
+up nowhere until the run reached a tool barrier and read it, which is exactly the
+page a user watches to find out what main just asked for. (`Agent` dispatches
+were never part of the gap: the prompt is the run's own, so `Inbound` files it as
+intake the moment the turn opens.)
 
-**Changed assertions.** One: `typing_on_a_page_reaches_the_agent_as_the_user`
-asserted that `/help is not a command here` reached scout's inbox and that the
-console's parser never saw the draft. That is the behaviour this record reverses,
-so the test keeps the half that is still true (prose reaches the subject as the
-user) and the `/` half becomes its own test asserting the opposite. Nothing else
-in 1490 tests moved.
+The echo moves down, to the one point every sender already passes through:
+`AgentRegistry::deliver` emits `UiEvent::Mail { from, text }` to the receiver's
+conversation, and `echo_direct` retires. Three things fall out of that:
+
+- **The dedupe rule gets simpler, not more complicated.** `inbound_messages`
+  dropped `Target::Dm(USER_NAME)`; it now drops the whole DM lane. That is not a
+  bigger exception, it is the same one stated properly: an `InboxItem::Direct` is
+  the only thing `deliver` makes, so every DM has a delivery event and nothing
+  else does. A spawn task, a room relay, a chase, the task reminder — none of
+  them passed through `deliver`, and all of them still land when they are read.
+- **`intake_seen` moves with it.** A crew member's first contact is main's
+  message, not a spawn prompt, so a delivered message marks the intake slot
+  spent — otherwise the run's repeat of it would be filed as the task the
+  instance was created with and drawn a second time under a different face.
+- **The user's own echo stopped being special.** It used to be pushed
+  synchronously and could jump ahead of deltas already queued for that
+  conversation; on the channel it is ordered against them like everything else,
+  and it goes through `absorb_inbound`, so D134a's splice covers it too.
+
+**Changed assertions.** Four, each of them a behaviour this record makes right:
+
+- `typing_on_a_page_reaches_the_agent_as_the_user` asserted that
+  `/help is not a command here` reached scout's inbox and that the console's
+  parser never saw the draft. That is the behaviour reversed here, so the test
+  keeps the half that is still true — prose reaches the subject as the user — and
+  the `/` half becomes its own test asserting the opposite.
+- `a_line_sent_to_an_agent_shows_on_its_page_once` asserted that main's
+  instruction arrives on the `Inbound` the absorb produces. It arrives on the
+  delivery now, and the test says so and then asserts the absorb does *not*
+  repeat it — which is the property the change is for.
+- `an_inbound_prompt_lands_as_the_sender_who_wrote_it` and
+  `mail_absorbed_mid_turn_splits_the_run_around_it` drove main's mail in as
+  `Inbound`; they drive it in as `Mail`. Both keep every assertion they had —
+  the ordering property is unchanged, it is just anchored at the moment the mail
+  was sent rather than the moment it was read.
+
+Nothing else in 1495 tests moved.
 
 **`chat.rs` split.** 4070 against the 4000 cap. `/compact` moved to
 `chat_session.rs`, which already owns `/rename`, `/resume`, `/gc` and `/share` —
 the commands that act on a session's record on disk — rather than to a new file
 for three functions.
+
+**Named, and not done.**
+
+- **`@main` from an agent's page is still prose.** `parse_direct_send` resolves
+  against the registries and main is not in one, so the console cannot address
+  it. That is D136's by construction — main becomes an entry — and faking it
+  here would be a second special case in the very function this record spent its
+  effort removing one from.
+- **`/compact` on a running instance refuses rather than queueing.** The console
+  has one queue and it is main's; a second conversation's turn has no console
+  side to wait on, and inventing one for a single command would be the wrong
+  shape. Esc already stops the run, which is the ladder the refusal points at.
+- **Main's queue rows stay on main's page.** A line queued from elsewhere gets
+  the one info line and nothing more: the rows describe a turn that is not on
+  screen, and drawing somebody else's queue on this page is the class of
+  borrowing D132 ruled against for the status row.
+- **The footer's hint ladder is untouched**, as instructed, and so are
+  `shift+tab` and `esc` — all three are about *which conversation*, which is
+  exactly the axis that survives.
