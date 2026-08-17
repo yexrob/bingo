@@ -562,7 +562,15 @@ impl ResponsesSseMapper {
                     text: text.into(),
                 }])
             }
-            "response.reasoning_summary_text.delta" => {
+            // Two event names, one surface. The API streams a *summary* of reasoning for
+            // models that keep theirs hidden, and the reasoning text itself for models
+            // that do not — same `output_index`, same string `delta`. Reading only the
+            // summary name dropped every token of the second kind, under a thinking block
+            // the `reasoning` item had already opened: the affordance was there, always
+            // empty (D125; observed on a proxy fronting DeepSeek, whose reasoning arrives
+            // as `response.reasoning_text.delta` and is what the anthropic adapter gets
+            // for free as `thinking_delta`).
+            "response.reasoning_summary_text.delta" | "response.reasoning_text.delta" => {
                 let index = output_index(&value)?;
                 let block = self.block(&index)?;
                 let thinking = value
@@ -1381,6 +1389,51 @@ mod tests {
             }
         );
         assert_eq!(out[5], StreamEvent::BlockStop { index: 1 });
+    }
+
+    /// D125: raw reasoning text is the same affordance under a second event name, and
+    /// arrives with the same `content_part.added` noise around it. Verified against the
+    /// wire (a proxy fronting DeepSeek): the `reasoning` item opens the block and every
+    /// token comes as `response.reasoning_text.delta`, so reading only the summary name
+    /// rendered an empty thinking block.
+    #[test]
+    fn sse_maps_raw_reasoning_text_deltas_like_summaries() {
+        let mut mapper = ResponsesSseMapper::new();
+        let mut out = Vec::new();
+        let mut push = |event: &str, data: &str| {
+            for ev in mapper.feed(event, data).unwrap() {
+                out.push(ev);
+            }
+        };
+        push(
+            "response.output_item.added",
+            r#"{"type":"response.output_item.added","output_index":0,"item":{"type":"reasoning","id":"r1","content":[],"summary":[],"status":"in_progress"}}"#,
+        );
+        push(
+            "response.content_part.added",
+            r#"{"type":"response.content_part.added","output_index":0,"content_index":0,"item_id":"r1","part":{"type":"reasoning_text","text":""}}"#,
+        );
+        push(
+            "response.reasoning_text.delta",
+            r#"{"type":"response.reasoning_text.delta","item_id":"r1","output_index":0,"content_index":0,"delta":"We need"}"#,
+        );
+        push(
+            "response.output_item.done",
+            r#"{"type":"response.output_item.done","output_index":0,"item":{"type":"reasoning","id":"r1","status":"completed","content":[{"type":"reasoning_text","text":"We need"}],"summary":[]}}"#,
+        );
+
+        assert_eq!(
+            out,
+            vec![
+                StreamEvent::ThinkingStart { index: 0 },
+                StreamEvent::ThinkingDelta {
+                    index: 0,
+                    thinking: "We need".into()
+                },
+                StreamEvent::BlockStop { index: 0 },
+            ],
+            "the raw-reasoning stream produces a filled thinking block, not an empty one"
+        );
     }
 
     /// incomplete(max_output_tokens) → the query loop's continuation string.

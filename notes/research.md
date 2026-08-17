@@ -5367,3 +5367,35 @@ Docs: this record; conversation-model-v6.md's FYI law; feedback-states v1.86
 (silence completes and records nothing; a thinking-only `max_tokens` turn
 recovers), one new `CHANNEL_NOTE` anchor assertion, and the old
 `SERVER_ERROR` expectation reshaped to the silent outcome — 1455 + 13 green.
+
+### D125. Reasoning has two event names on the Responses wire
+
+User report: the same DeepSeek model shows its thinking through the official
+`api.deepseek.com/anthropic` endpoint and shows nothing through a
+Responses-protocol proxy. Not a capability difference and not a missing
+request parameter — the tokens arrived and the adapter dropped them.
+
+- **The wire, verified against the endpoint**: the `reasoning` output item
+  opens (`output_item.added` → `ThinkingStart`, mapped since D33), a
+  `content_part.added` announces `reasoning_text`, and every token then comes
+  as **`response.reasoning_text.delta`**. D33's mapping reads
+  `response.reasoning_summary_text.delta` — the *summary* stream, which is
+  what models that keep their reasoning hidden emit. Same `output_index`,
+  same string `delta`, different name; the second name fell through to the
+  ignore arm. The result was the worst shape of all: a thinking block opened
+  and never filled, so the affordance rendered empty rather than absent.
+- **The fix is the alias**: one match arm now reads both names. The anthropic
+  adapter never had this problem — `thinking_delta` is parsed unconditionally,
+  which is why the official endpoint always worked.
+- **Not built, on the user's call**: `supports_thinking` stays false for the
+  deepseek family, so bingo still sends neither `reasoning.effort` nor the
+  `include` on the Responses path. The endpoint accepts both (probed: 200 with
+  reasoning either way) and DeepSeek reasons regardless, so the only cost is
+  that `thinkingLevel` cannot move its depth there. The flag answers "may I
+  send the Anthropic-shape thinking parameter?" and the Responses path borrows
+  it for a different question; splitting it per protocol is a real change and
+  waits for a reason beyond this one.
+
+Docs: this record (research.md is append-only — D33's mapping line stands as
+written; this is the amendment). Tests: one new SSE case in
+`api/providers/openai.rs` — 1456 + 13 green.
