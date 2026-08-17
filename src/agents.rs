@@ -339,11 +339,10 @@ pub enum InboxItem {
         from: String,
         text: String,
         seq: u64,
-        /// `@member` or `@all` named this member (v6): wake now rather than on
-        /// the batch clock.
+        /// `@member` or `@all` named this member: v6 read it as "wake now",
+        /// v7 as "an answer is owed" — the wake is unconditional either way,
+        /// and the bit is what the obligation ledger will key on.
         mentioned: bool,
-        /// When the deposit landed; drives the age half of the wake gate.
-        arrived_at: Instant,
     },
     /// Automatic chase for a direct message main never got an answer to. It carries no new
     /// instruction — only the fact that the sender is still waiting.
@@ -532,10 +531,6 @@ pub struct AgentRegistry {
     /// Inbox generation: every accepted item advances this watch channel. Receivers wait on it
     /// between tool rounds so a busy agent does not depend on the sender reaching a boundary.
     inbox_tx: tokio::sync::watch::Sender<u64>,
-    /// One age sweeper per registry (armed by the first room delivery, CAS so
-    /// concurrent posts spawn exactly one); it enforces the age half of the
-    /// wake gate and dies with the session.
-    room_sweeper_armed: std::sync::atomic::AtomicBool,
 }
 
 impl AgentRegistry {
@@ -547,15 +542,7 @@ impl AgentRegistry {
             ask: Mutex::new(None),
             next_msg: std::sync::atomic::AtomicU64::new(1),
             inbox_tx,
-            room_sweeper_armed: std::sync::atomic::AtomicBool::new(false),
         })
-    }
-
-    /// Claim the right to spawn the room age sweeper: true exactly once.
-    pub fn try_arm_room_sweeper(&self) -> bool {
-        !self
-            .room_sweeper_armed
-            .swap(true, std::sync::atomic::Ordering::SeqCst)
     }
 
     pub fn subscribe_inbox(&self) -> tokio::sync::watch::Receiver<u64> {
@@ -990,10 +977,7 @@ impl AgentRegistry {
             answer_acks(entry, output_chars);
             if entry.state == AgentState::Stopped {
                 None
-            } else if !inbox_wakes(entry, Instant::now()) {
-                // Unmentioned room lines below the batch gate keep waiting in
-                // the inbox (v6): a turn that just ended is not owed a
-                // continuation by traffic that would not have woken it.
+            } else if !inbox_wakes(entry) {
                 entry.state = AgentState::Idle;
                 None
             } else {
@@ -1018,10 +1002,9 @@ impl AgentRegistry {
     pub fn flush_pending(&self) -> Vec<Wake> {
         let mut woken = Vec::new();
         {
-            let now = Instant::now();
             let mut inner = self.lock();
             for (name, entry) in inner.iter_mut() {
-                if entry.state != AgentState::Idle || !inbox_wakes(entry, now) {
+                if entry.state != AgentState::Idle || !inbox_wakes(entry) {
                     continue;
                 }
                 entry.runs += 1;
@@ -1054,7 +1037,11 @@ impl AgentRegistry {
             if entry.state != AgentState::Running || entry.inbox.is_empty() {
                 return Vec::new();
             }
-            let items = take_interrupting_inbox(entry, entry.runs, output_chars);
+            // v7: a running member absorbs its whole inbox at the tool
+            // boundary — steering, at input-token cost and no model call.
+            // v6 took only mention-bearing batches, and had to take every
+            // queued line with them anyway to keep the seen cursor honest.
+            let items = drain_inbox(entry, entry.runs, output_chars);
             if items.is_empty() {
                 return Vec::new();
             }
@@ -1407,65 +1394,16 @@ fn drain_inbox(entry: &mut Entry, run: u64, output_chars: usize) -> Vec<InboxIte
     items
 }
 
-/// The v6 wake gate: whether what is waiting justifies a turn right now.
-/// Direct commands and chases always do; a room line does when it names the
-/// member, and otherwise only in bulk ([`crate::channels::ROOM_UNREAD_WAKE`])
-/// or on age ([`crate::channels::ROOM_UNREAD_MAX_AGE`]). An empty inbox never
-/// passes, so there is no polling: the age clock is born with the first
-/// unread line and dies with the drain.
-fn inbox_wakes(entry: &Entry, now: Instant) -> bool {
-    let mut room_lines = 0usize;
-    for item in &entry.inbox {
-        match item {
-            InboxItem::Direct { .. } | InboxItem::FollowUp { .. } => return true,
-            InboxItem::Channel {
-                mentioned: true, ..
-            } => return true,
-            InboxItem::Channel { arrived_at, .. } => {
-                room_lines += 1;
-                if room_lines >= crate::channels::ROOM_UNREAD_WAKE
-                    || now.saturating_duration_since(*arrived_at)
-                        >= crate::channels::ROOM_UNREAD_MAX_AGE
-                {
-                    return true;
-                }
-            }
-        }
-    }
-    false
-}
-
-/// What a running turn may be interrupted with at its next tool boundary:
-/// direct messages and chases always; room lines only when the batch holds a
-/// mention — and then *all* of them, in order, because injecting msg #7 while
-/// #5–6 stay queued would advance the member's seen cursor past lines its
-/// context never held.
-fn take_interrupting_inbox(entry: &mut Entry, run: u64, output_chars: usize) -> Vec<InboxItem> {
-    let mentioned = entry.inbox.iter().any(|item| {
-        matches!(
-            item,
-            InboxItem::Channel {
-                mentioned: true,
-                ..
-            }
-        )
-    });
-    let mut taken = Vec::new();
-    let mut left = Vec::new();
-    for item in std::mem::take(&mut entry.inbox) {
-        let interrupts = match &item {
-            InboxItem::Direct { .. } | InboxItem::FollowUp { .. } => true,
-            InboxItem::Channel { .. } => mentioned,
-        };
-        if interrupts {
-            taken.push(item);
-        } else {
-            left.push(item);
-        }
-    }
-    entry.inbox = left;
-    mark_delivered(entry, &taken, run, output_chars);
-    taken
+/// v7: a non-empty inbox wakes its holder, and that is the whole rule.
+///
+/// v6 gated *reading* on a count and an age because the runtime could not tell
+/// whether a line mattered — but the member who wrote it could, and now says so
+/// with the `@` (`CHANNEL_NOTE`'s R1). The sigil decides what is **owed**;
+/// nothing decides what is read. Two things the gate bought are kept: an empty
+/// inbox never wakes, so a quiet room costs no model call and nothing polls,
+/// and the predicate is still one function consulted by every door.
+fn inbox_wakes(entry: &Entry) -> bool {
+    !entry.inbox.is_empty()
 }
 
 /// Record every still-queued inbox message as dropped; returns how many.
@@ -2181,7 +2119,6 @@ mod tests {
             text: "report".into(),
             seq,
             mentioned,
-            arrived_at: Instant::now(),
         }
     }
 
@@ -2210,22 +2147,26 @@ mod tests {
             matches!(&items[1], InboxItem::Channel { seq: 3, from, .. } if from == "a"),
             "channel entries carry seq/from"
         );
-        // v6: an unmentioned room line neither continues a finishing turn nor
-        // wakes an idle member on its own — it waits for the batch gate. A
-        // mention releases the whole backlog in order.
-        assert!(reg.finish("w", Vec::new(), 1).is_none());
-        assert!(reg.deposit("w", room_line("b", 4, false)));
+        // v7: an unmentioned room line wakes an idle member like any other —
+        // the `@` decides what is owed, never what is read. A finished turn
+        // with an empty inbox still parks idle: nothing polls.
         assert!(
-            reg.flush_pending().is_empty(),
-            "one unmentioned line stays below the wake gate"
+            reg.finish("w", Vec::new(), 1).is_none(),
+            "empty inbox parks"
         );
-        assert!(reg.deposit("w", room_line("b", 5, true)));
+        assert!(reg.deposit("w", room_line("b", 4, false)));
+        let woken = reg.flush_pending();
+        assert_eq!(woken.len(), 1, "one unmentioned line is enough");
+        assert_eq!(woken[0].items.len(), 1);
+        assert!(reg.finish("w", Vec::new(), 1).is_none());
+        assert!(reg.deposit("w", room_line("b", 5, false)));
+        assert!(reg.deposit("w", room_line("b", 6, true)));
         let woken = reg.flush_pending();
         assert_eq!(woken.len(), 1);
         assert_eq!(
             woken[0].items.len(),
             2,
-            "the mention wakes, and the waiting line rides along in order"
+            "whatever is waiting drains together, in order"
         );
         let _ = reg.stop("w");
         let dropped = room_line("c", 6, false);
@@ -2239,56 +2180,38 @@ mod tests {
         );
     }
 
-    /// The batch half of the wake gate (v6): unmentioned room lines wake their
-    /// holder in bulk at ROOM_UNREAD_WAKE, or singly once the oldest passes
-    /// ROOM_UNREAD_MAX_AGE — and an inbox below both thresholds stays asleep.
+    /// v7's wake rule, whole: a non-empty inbox wakes, an empty one never
+    /// does. The count and age gates it replaces were proxies for a question
+    /// the sender now answers with the `@` — and in a room of six the count
+    /// was an amplifier, since one round where everyone speaks leaves five
+    /// unread in every inbox and re-crosses it for all of them.
     #[test]
-    fn unmentioned_room_lines_wake_in_bulk_or_on_age() {
+    fn any_waiting_line_wakes_and_an_empty_inbox_never_does() {
         let reg = AgentRegistry::new();
         reg.insert("w", AgentKind::Hire, None, "w".into(), test_session());
         assert!(reg.finish("w", Vec::new(), 0).is_none(), "start idle");
-        for seq in 1..crate::channels::ROOM_UNREAD_WAKE as u64 {
-            assert!(reg.deposit("w", room_line("a", seq, false)));
-        }
         assert!(
             reg.flush_pending().is_empty(),
-            "below the count and below the age, nothing wakes"
-        );
-        assert!(reg.deposit(
-            "w",
-            room_line("a", crate::channels::ROOM_UNREAD_WAKE as u64, false)
-        ));
-        let woken = reg.flush_pending();
-        assert_eq!(woken.len(), 1, "the fifth line crosses the count gate");
-        assert_eq!(
-            woken[0].items.len(),
-            crate::channels::ROOM_UNREAD_WAKE,
-            "the whole backlog drains at once"
+            "an empty inbox never wakes: no polling, and a quiet room is free"
         );
 
-        // Age: a single stale line wakes on its own once it has sat long enough.
-        // (checked_sub: on a machine booted more recently than the age gate the
-        // backdated instant does not exist; the count half above still ran.)
-        let Some(stale) = Instant::now().checked_sub(crate::channels::ROOM_UNREAD_MAX_AGE) else {
-            return;
-        };
-        assert!(reg.finish("w", Vec::new(), 0).is_none());
-        assert!(reg.deposit(
-            "w",
-            InboxItem::Channel {
-                channel: "t".into(),
-                from: "a".into(),
-                text: "old".into(),
-                seq: 9,
-                mentioned: false,
-                arrived_at: stale,
-            }
-        ));
-        assert_eq!(
-            reg.flush_pending().len(),
-            1,
-            "the age gate releases a lone stale line"
+        assert!(reg.deposit("w", room_line("a", 1, false)));
+        let woken = reg.flush_pending();
+        assert_eq!(woken.len(), 1, "one unmentioned line wakes on its own");
+        assert_eq!(woken[0].items.len(), 1);
+        assert!(
+            reg.flush_pending().is_empty(),
+            "and the drain leaves nothing behind to wake it again"
         );
+
+        // A running member is not woken twice: what lands while it works is
+        // absorbed at its next tool boundary instead (`take_running`).
+        assert!(reg.deposit("w", room_line("a", 2, false)));
+        assert!(
+            reg.flush_pending().is_empty(),
+            "a running member takes its mail at the tool boundary, not by waking"
+        );
+        assert_eq!(reg.take_running("w", 0).len(), 1, "steered mid-turn");
     }
 
     #[test]

@@ -411,11 +411,12 @@ fn a_burst_of_room_mail_wakes_once_after_the_quiet_window() {
     );
 }
 
-/// v6 (D118): a room line naming nobody is penned, not mailed — it keeps the
-/// frame loop ticking toward the age pump but opens no quiet window; the
-/// mention releases the pen and only then does the debounce clock start.
+/// v7: nothing is penned. A room line naming nobody is mailed the moment it is
+/// posted and starts the ordinary debounce clock, exactly like a mention — the
+/// window coalesces a burst into one digest turn, and it is the only thing left
+/// between a post and main reading it.
 #[test]
-fn an_unnamed_room_line_waits_in_the_pen_and_release_starts_the_clock() {
+fn an_unnamed_room_line_mails_at_once_and_starts_the_clock() {
     let mut chat = test_chat();
     chat.session
         .channels
@@ -426,29 +427,21 @@ fn an_unnamed_room_line_waits_in_the_pen_and_release_starts_the_clock() {
         )
         .unwrap_or_else(|e| panic!("{e}"));
     let _ = chat.session.channels.post("scout", "crew", "fyi: started");
-    assert!(!chat.session.channels.has_main_mail(), "penned, not mailed");
-    assert!(
-        chat.needs_tick(),
-        "a pen holds the frame loop open for the age pump"
-    );
-    chat.tick += super::chat_tail::MAIL_QUIET_TICKS + 1;
-    assert!(!chat.digest_mail(), "no quiet window opens on penned mail");
-    assert!(chat.mail_wake.is_none(), "the clock only starts at release");
-
-    let _ = chat.session.channels.post("scout", "crew", "@main look");
     assert!(
         chat.session.channels.has_main_mail(),
-        "the mention released the pen"
+        "mailed at once, named or not"
     );
-    assert!(
-        !chat.digest_mail(),
-        "released mail still waits out the ordinary window"
-    );
+    assert!(chat.needs_tick(), "waiting mail holds the frame loop open");
+    assert!(!chat.digest_mail(), "the quiet window has not elapsed");
+
+    // A second line inside the window restarts it: the question and its answer
+    // are one wake, not two.
+    chat.tick += super::chat_tail::MAIL_QUIET_TICKS - 1;
+    let _ = chat.session.channels.post("scout", "crew", "@main look");
+    assert!(!chat.digest_mail(), "still inside the restarted window");
     chat.tick += super::chat_tail::MAIL_QUIET_TICKS;
-    assert!(
-        chat.digest_mail(),
-        "then digests once, backlog and mention together"
-    );
+    assert!(chat.digest_mail(), "then digests once, both lines together");
+    assert!(!chat.digest_mail(), "and exactly once");
 }
 
 /// A room that never stops talking would restart the window forever. The

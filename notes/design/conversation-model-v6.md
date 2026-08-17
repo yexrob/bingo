@@ -35,7 +35,11 @@ Three parties, one grammar:
 
 ## The laws
 
-### Delivery is not waking (D117)
+### Delivery is not waking (D117) — **superseded by v7/D129**
+
+> The gate below is gone: a non-empty inbox wakes its holder, and the `@` says
+> what is *owed* rather than what is read. Kept here as the reasoning v7 argues
+> against, and because `inbox_wakes` is still one predicate behind three doors.
 
 Every room line still lands in every member's inbox, in total order, under
 the same budgets and serial checks. *Waking* is earned:
@@ -55,7 +59,7 @@ the same budgets and serial checks. *Waking* is earned:
   nobody, or names a stopped member (D105a's one revival door stands), is
   named in the tool result.
 
-### Main is a member (D118)
+### Main is a member (D118) — **the law stands, the pen is gone (v7/D129)**
 
 The unconditional room→main relay retired. Unnamed room lines wait in a
 per-room **pen** and enter `main_mail` on a mention of main (`@main`/`@all`

@@ -2940,7 +2940,6 @@ mod tests {
             text: "the tests pass".into(),
             seq: 3,
             mentioned: false,
-            arrived_at: std::time::Instant::now(),
         }]));
     }
 
@@ -3414,8 +3413,13 @@ mod tests {
             "main must know a line naming it is the timely tier"
         );
         assert!(
-            main_note.contains("Keep the user posted on their rooms"),
+            main_note.contains("Keep the user posted on their team"),
             "main is the user's eyes on the team (D123) — a digest read in silence is the defect"
+        );
+        assert!(
+            main_note.contains("everything that reaches you about somebody else"),
+            "D129: the tiers cover task notifications too — five members each reporting that \
+             they read a greeting is five lines saying nothing happened"
         );
         assert!(
             main_note.contains("say nothing, and know it"),

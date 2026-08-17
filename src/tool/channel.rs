@@ -17,12 +17,12 @@
 //! `Channel`: room management (create/invite/kick/list), available to the
 //! main agent and to direct sub-agents alike, because a team that can only be
 //! grouped from the top is not a team that can organize itself.
-//! Delivery wake-up is @-gated (v6): messages land in every member's inbox,
-//! but only a mention (`@name`, `@all`) wakes its holder at once — idle
-//! members immediately, running members at their next tool boundary.
-//! Unmentioned lines wait for bulk (ROOM_UNREAD_WAKE) or age
-//! (ROOM_UNREAD_MAX_AGE, enforced by a per-session sweep); the main agent's
-//! copy lands in main_mail and is digested on a debounce (D98).
+//! Delivery wakes, and nothing gates it (v7): a message lands in every
+//! member's inbox and whoever is idle starts a run on it — named or not —
+//! while a running member absorbs it at its next tool boundary, which costs
+//! input tokens and no model call. The `@` decides what is *owed*, never what
+//! is read. The main agent's copy lands in main_mail and is digested on a
+//! debounce (D98) — coalescing a burst into one turn, holding nothing back.
 //! Silence = not sending.
 
 use std::sync::Arc;
@@ -94,31 +94,6 @@ pub(crate) enum PostDelivery {
     },
 }
 
-/// Arm the one background sweep that enforces the age half of the wake gate
-/// (v6). It never wakes an empty inbox — `flush_pending` skips those — so a
-/// quiet registry costs one lock scan per tick and no model calls; it dies
-/// with the session (the weak upgrade fails) rather than by bookkeeping.
-fn ensure_room_sweeper(session: &Arc<Session>, watch: &Arc<crate::watch::WatchRegistry>) {
-    if tokio::runtime::Handle::try_current().is_err() {
-        // No runtime here (some tests post without one); the next post retries.
-        return;
-    }
-    if !session.agents.try_arm_room_sweeper() {
-        return;
-    }
-    let session = Arc::downgrade(session);
-    let watch = watch.clone();
-    tokio::spawn(async move {
-        loop {
-            tokio::time::sleep(crate::channels::ROOM_WAKE_SWEEP).await;
-            let Some(session) = session.upgrade() else {
-                break;
-            };
-            flush_agent_inbox(&session, &watch);
-        }
-    });
-}
-
 /// Post + delivery wake-up + display row refresh — `SendMessage(to: "#room")`
 /// and the TUI channel room share the same path (the user's posts as `user` in
 /// the room go through here too).
@@ -136,11 +111,10 @@ pub(crate) fn deliver_post(
             unknown_mentions,
         } => {
             refresh_channel_row(session, channel);
-            // Deposit first, then claim wakeable members in one pass. A
-            // mentioned deposit pulses the inbox signal so a running member
-            // absorbs it at its next tool round; unmentioned lines wait for
-            // the batch gate.
-            let arrived_at = std::time::Instant::now();
+            // Deposit first, then claim every idle member in one pass (v7):
+            // the deposit pulses the inbox signal, so a running member absorbs
+            // it at its next tool round and an idle one is woken here. Nothing
+            // waits on a count or a clock any more.
             let mut undelivered_mentions = Vec::new();
             for delivery in deliveries {
                 let accepted = session.agents.deposit(
@@ -151,14 +125,12 @@ pub(crate) fn deliver_post(
                         text: delivery.msg.text.clone(),
                         seq: delivery.msg.seq,
                         mentioned: delivery.mentioned,
-                        arrived_at,
                     },
                 );
                 if !accepted && delivery.mentioned {
                     undelivered_mentions.push(delivery.member);
                 }
             }
-            ensure_room_sweeper(session, watch);
             flush_agent_inbox(session, watch);
             Ok(PostDelivery::Sent {
                 seq,
@@ -550,7 +522,6 @@ mod tests {
             .unwrap();
         // The line named b, not main, so it waits in main's pen (v6); force
         // the age release to read it.
-        main.channels.pump_main_gate(std::time::Duration::ZERO);
         let mail = main.channels.drain_main_mail();
         assert_eq!(mail.len(), 1, "{mail:?}");
         assert!(mail[0].contains("a: @b hello"));
@@ -590,7 +561,9 @@ mod tests {
             .unwrap();
         let post_a = crate::tool::agent::SendMessageTool::new(sub_session(&main, "a"));
 
-        // Unnamed: b (Running) keeps it queued past the tool boundary.
+        // v7: a running member absorbs whatever is waiting at its next tool
+        // boundary, named or not — that is the steer. Two lines land while b
+        // works and both come out together, in room order.
         let _ = post_a
             .call(
                 serde_json::json!({"to": "#t", "message": "fyi: still digging"}),
@@ -598,12 +571,6 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(
-            main.agents.take_running("b", 0).is_empty(),
-            "an unnamed line does not interrupt a running member"
-        );
-
-        // Named: the mention releases the whole backlog, in room order.
         let _ = post_a
             .call(
                 serde_json::json!({"to": "#t", "message": "@b your turn"}),
@@ -612,7 +579,7 @@ mod tests {
             .await
             .unwrap();
         let items = main.agents.take_running("b", 0);
-        assert_eq!(items.len(), 2, "the waiting line rides along");
+        assert_eq!(items.len(), 2, "both lines ride the same boundary");
         assert!(
             matches!(
                 &items[0],
@@ -632,12 +599,6 @@ mod tests {
                 ..
             }
         ));
-
-        // The first delivery armed the one age sweeper for this registry.
-        assert!(
-            !main.agents.try_arm_room_sweeper(),
-            "the sweeper is armed exactly once"
-        );
 
         // Misfires: an unknown token, then a stopped member, both named to the sender.
         let out = post_a

@@ -5532,3 +5532,57 @@ anything is deleted.
 Docs: conversation-model-v7.md (batch 1 of the table), guide.md's room
 paragraph. Tests: five new `CHANNEL_NOTE` anchors and two `MAIN_CHANNEL_NOTE`
 anchors, replacing D119's two — 1458 + 13 green.
+
+### D129. The wake rule: a non-empty inbox, and nothing else (v7 batch 2)
+
+The observation window batch 1 was ordered for closed itself in one afternoon.
+The user posted a greeting into `#dev-team` at 14:04 and screenshotted a roster
+of idle members 44 seconds later. The transcript says the gate worked exactly as
+built: all five members woke at **t+135s** — `ROOM_UNREAD_MAX_AGE` (120s) plus
+one `ROOM_WAKE_SWEEP` tick — read the line, and correctly posted nothing, in the
+new duties' own words ("no one named, nothing owed", "owing it nothing, staying
+out of the room"). D128 converged; only the two-minute lag was wrong.
+
+- **`inbox_wakes` is `!entry.inbox.is_empty()`.** The count and age gates were
+  proxies for a question the sender now answers with the `@`. The count was also
+  an amplifier: in a room of six, one round where everyone speaks leaves five
+  unread in every inbox and re-crosses the threshold for all of them — a knife
+  edge, not a margin (a five-member room is one line short of oscillating). Two
+  properties are kept: an empty inbox never wakes, so nothing polls and a quiet
+  room is free, and the predicate is still one function behind every door.
+- **A running member absorbs everything at its tool boundary.**
+  `take_interrupting_inbox` retires into `drain_inbox`: v6 took only
+  mention-bearing batches and then had to take every queued line with them
+  anyway, to keep the seen cursor honest. Taking all of it is the same behaviour
+  with the special case removed — and it is what the user asked for in one word:
+  *steer*.
+- **Main's pen is gone.** `MainPen`, `pen_or_release`, `release_pen`,
+  `pump_main_gate`, `main_gate_waiting` and the three pump points delete; `post`
+  pushes the relay line into `main_mail` the moment it lands. Main was a special
+  case in four places for a job every member does with none. The 2s/15s digest
+  debounce stays — it coalesces a burst into one turn and holds nothing back,
+  which is the opposite of a gate.
+- **The sweeper and its arming CAS delete** (`ensure_room_sweeper`,
+  `room_sweeper_armed`, `ROOM_WAKE_SWEEP`), and `InboxItem::Channel::arrived_at`
+  with them: it existed to drive the age half and nothing else read it.
+- **Not built, and named**: no per-member debounce. An idle member woken by the
+  first line of a burst absorbs the rest for free at its tool boundaries, so a
+  burst already costs about one wake; a second coalescer would be machinery for
+  a case the architecture handles. `max_awake` is batch 3's.
+
+Net: −5 constants, −5 methods, −1 background task, −1 struct field, −1 atomic.
+The behaviour it buys is the one the user asked for: post, and the room moves.
+
+**D128 patched in the same batch.** Main narrated three near-identical lines
+about five members reading a greeting, because the four tiers live in
+`MAIN_CHANNEL_NOTE` and a task notification is not a room line. The tiers now
+say what they always meant — they cover *everything that reaches main about
+somebody else*, and "a turn ended with nothing to report" is named as pure
+progress: *five members each reporting that they read a greeting is five lines
+that say nothing happened.*
+
+Docs: conversation-model-v7.md (status, batch table), v6's two superseded law
+headers, guide.md's two gate paragraphs, both module docs. Tests: the bulk/age
+test replaced by v7's wake rule, main's pen test by "hears every room line at
+once", the interrupt test by "both lines ride the same boundary", the pen-clock
+test by the debounce alone — 1458 + 13 green.

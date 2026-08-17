@@ -18,8 +18,11 @@
 //! 2. serial | free commit check (serial: a sender behind the channel head is bounced
 //!    back with the increments; the runtime only judges "staleness" — semantic
 //!    conflicts are left to the model: optimistic locking with the model as resolver);
-//! 3. Wake-up follows delivery (capability is universal, choice is autonomous:
-//!    silence = don't Post after waking, a zero-cost absorbing state);
+//! 3. Wake-up follows delivery, unconditionally (v7): a non-empty inbox wakes
+//!    its holder, a running one absorbs at its next tool boundary, and an empty
+//!    one never wakes, so a quiet room costs nothing. What a member *owes* is
+//!    the `@`'s business and the prompt's — silence after waking is a zero-cost
+//!    absorbing state, which is why reading can be free of judgement;
 //! 4. Sender stamping by the runtime (from comes from the session instance name and
 //!    cannot be forged) + a budget gate (freezes the channel on overrun and notifies
 //!    the main agent instead of silently burning money).
@@ -30,7 +33,6 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
@@ -46,21 +48,6 @@ pub const USER_NAME: &str = "user";
 /// (`@all`); never handed out as an instance name, or the token would be
 /// ambiguous.
 pub const ALL_NAME: &str = "all";
-
-/// Unread room lines that pile up to this count wake their holder even
-/// unmentioned (v6): enough context to be worth a look, few enough that a
-/// busy room is read in slices rather than as an avalanche.
-pub const ROOM_UNREAD_WAKE: usize = 5;
-/// How long the oldest unread, unmentioned room line may wait before its
-/// holder is woken to look anyway. Well above main's 15s digest deadline
-/// (that is a delivery-smoothing clock, not an attention clock) and well
-/// under the 300s ack default, so an unmentioned question is still read
-/// before its sender's watchdog starts chasing. The clock is born with the
-/// first unread line and dies with the drain — an empty inbox never wakes.
-pub const ROOM_UNREAD_MAX_AGE: Duration = Duration::from_secs(120);
-/// Cadence of the sweep enforcing [`ROOM_UNREAD_MAX_AGE`] (worst-case
-/// lateness is their sum). One registry lock scan per tick, no model calls.
-pub const ROOM_WAKE_SWEEP: Duration = Duration::from_secs(15);
 
 /// Channel speaking mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -302,48 +289,10 @@ struct Inner {
     /// draws the flow. Room relays are deliberately absent: see
     /// [`ChannelRegistry::drain_main_arrivals`].
     main_arrivals: VecDeque<MainArrival>,
-    /// Room lines addressed to nobody, held back per room from `main_mail`
-    /// until the gate opens (v6): main is a member under the same @-rules as
-    /// everyone else, restated here because it has no registry entry. A
-    /// mention (`@main`, `@all`) releases the room's pen and rides in behind
-    /// it; bulk releases at [`ROOM_UNREAD_WAKE`]; age is pumped by the frame
-    /// loop and the turn boundary. Direct messages were never penned.
-    main_pen: HashMap<String, MainPen>,
     limits: ChannelLimits,
 }
 
-/// One room's held-back relay lines and the age of the oldest.
-struct MainPen {
-    lines: Vec<String>,
-    first_at: std::time::Instant,
-}
-
-impl Inner {
-    /// The v6 gate on the main relay: release on mention, pen otherwise,
-    /// bulk-release at the count threshold. Order within a room is preserved
-    /// — a released pen precedes the line that released it.
-    fn pen_or_release(&mut self, room: &str, line: String, mentioned: bool) {
-        if mentioned {
-            self.release_pen(room);
-            self.main_mail.push(line);
-            return;
-        }
-        let pen = self.main_pen.entry(room.to_string()).or_insert(MainPen {
-            lines: Vec::new(),
-            first_at: std::time::Instant::now(),
-        });
-        pen.lines.push(line);
-        if pen.lines.len() >= ROOM_UNREAD_WAKE {
-            self.release_pen(room);
-        }
-    }
-
-    fn release_pen(&mut self, room: &str) {
-        if let Some(pen) = self.main_pen.remove(room) {
-            self.main_mail.extend(pen.lines);
-        }
-    }
-}
+impl Inner {}
 
 /// A message that arrived for the main agent, as the transcript needs it: who
 /// sent it, what they said, and the one-line preview they wrote for it. The
@@ -426,7 +375,6 @@ impl ChannelRegistry {
             inner: Mutex::new(Inner {
                 channels: HashMap::new(),
                 main_mail: Vec::new(),
-                main_pen: HashMap::new(),
                 main_mail_urgent: false,
                 main_arrivals: VecDeque::new(),
                 limits,
@@ -750,33 +698,14 @@ impl ChannelRegistry {
                 unknown_mentions,
             }
         };
-        if let Some((line, mentioned)) = main_line {
-            inner.pen_or_release(name, line, mentioned);
+        // v7: main is a member, and a member's inbox is not gated — the line
+        // goes to `main_mail` the moment it is posted, exactly as it goes to
+        // everyone else's inbox. What main *owes* is the `@`'s business
+        // (`MAIN_CHANNEL_NOTE`), never the delivery's.
+        if let Some((line, _mentioned)) = main_line {
+            inner.main_mail.push(line);
         }
         Ok(outcome)
-    }
-
-    /// Release every pen whose oldest held line has waited past `max_age` —
-    /// the age half of main's gate (the count and mention halves release at
-    /// post time). `max_age` is a parameter so a test can force expiry;
-    /// production passes [`ROOM_UNREAD_MAX_AGE`].
-    pub fn pump_main_gate(&self, max_age: Duration) {
-        let mut inner = self.lock();
-        let due: Vec<String> = inner
-            .main_pen
-            .iter()
-            .filter(|(_, pen)| pen.first_at.elapsed() >= max_age)
-            .map(|(room, _)| room.clone())
-            .collect();
-        for room in due {
-            inner.release_pen(&room);
-        }
-    }
-
-    /// Whether any room line is penned up waiting for main's gate — the frame
-    /// loop's reason to keep ticking toward the age release.
-    pub fn main_gate_waiting(&self) -> bool {
-        !self.lock().main_pen.is_empty()
     }
 
     /// Mark the member's inbox as digested up to seq (its running turn was injected with channel messages up to seq).
@@ -1015,20 +944,14 @@ mod tests {
             deliveries.iter().all(|d| !d.mentioned),
             "a post naming nobody carries no needs-you-now bit"
         );
-        // Main is a member under the same @-rules (v6): an unnamed line is
-        // penned, not mailed; age (forced here) releases it. Main's own posts
-        // never flow back at all.
-        assert!(!reg.has_main_mail(), "unnamed lines wait in the pen");
-        assert!(reg.main_gate_waiting());
-        reg.pump_main_gate(Duration::ZERO);
+        // Main is a member under the same rules (v7): the line is mailed when
+        // it is posted, named or not. Main's own posts never flow back at all.
         let mail = reg.drain_main_mail();
         assert_eq!(mail, vec!["[#t msg #1] a: hello everyone"]);
-        assert!(!reg.main_gate_waiting(), "released pens are gone");
         let _ = sent(
             reg.post("main", "t", "quiet")
                 .unwrap_or_else(|e| panic!("{e}")),
         );
-        reg.pump_main_gate(Duration::ZERO);
         assert!(!reg.has_main_mail(), "main's own posts do not flow back");
         // user (a human) is a natural member: can post, main hears it, doesn't consume the per_agent budget.
         let (_, deliveries) = sent(
@@ -1043,7 +966,6 @@ mod tests {
             vec!["a", "b", "c"],
             "user's post reaches every agent member's inbox"
         );
-        reg.pump_main_gate(Duration::ZERO);
         assert!(reg.drain_main_mail()[0].contains("user: everyone stop"));
         // Non-member / unknown channel error.
         assert!(reg.post("ghost", "t", "x").is_err());
@@ -1114,17 +1036,18 @@ mod tests {
         );
     }
 
-    /// Main's copy of the wake gate (v6): a mention releases the room's pen
-    /// at once and in order; unnamed lines release in bulk at the count
-    /// threshold; the frozen-budget warning was never a relay and never waits.
+    /// v7: main is a member, and a member's inbox is not gated. Every room
+    /// line reaches `main_mail` when it is posted, in room order, mention or
+    /// not — the pen, its bulk threshold and its age pump are gone. What main
+    /// *owes* is still the `@`'s business, and so is what it says about it.
     #[test]
-    fn main_hears_a_room_through_the_gate() {
+    fn main_hears_every_room_line_at_once() {
         let reg = registry();
         reg.create("t", vec![MAIN_NAME.into(), "a".into()], ChannelMode::Free)
             .unwrap_or_else(|e| panic!("{e}"));
         let _ = sent(reg.post("a", "t", "one").unwrap_or_else(|e| panic!("{e}")));
         let _ = sent(reg.post("a", "t", "two").unwrap_or_else(|e| panic!("{e}")));
-        assert!(!reg.has_main_mail(), "unnamed lines pen up");
+        assert!(reg.has_main_mail(), "nothing is held back any more");
         let _ = sent(
             reg.post("a", "t", "@main decide")
                 .unwrap_or_else(|e| panic!("{e}")),
@@ -1136,28 +1059,9 @@ mod tests {
                 "[#t msg #2] a: two",
                 "[#t msg #3] a: @main decide",
             ],
-            "the mention releases the pen ahead of itself, in room order"
+            "room order, whether or not a line names main"
         );
-        // @all is a mention of main too.
-        let _ = sent(
-            reg.post("a", "t", "@all stand-up")
-                .unwrap_or_else(|e| panic!("{e}")),
-        );
-        assert_eq!(reg.main_mail_len(), 1, "@all goes straight through");
-        let _ = reg.drain_main_mail();
-        // Bulk: the ROOM_UNREAD_WAKE-th unnamed line releases the whole pen.
-        for n in 0..ROOM_UNREAD_WAKE {
-            assert!(!reg.has_main_mail(), "below the threshold the pen holds");
-            let _ = sent(
-                reg.post("a", "t", &format!("line {n}"))
-                    .unwrap_or_else(|e| panic!("{e}")),
-            );
-        }
-        assert_eq!(
-            reg.main_mail_len(),
-            ROOM_UNREAD_WAKE,
-            "the fifth line opens the gate on the whole batch"
-        );
+        assert!(!reg.has_main_mail(), "and the drain empties it");
     }
 
     #[test]

@@ -1,8 +1,9 @@
 # Conversation model v7 — one wake rule, one sigil, seven duties
 
-> **Status: proposed, not implemented.** `conversation-model-v6.md` stays the
-> authority until the batches below land. This file is the design; the decision
-> records land in `notes/research.md` with the code that implements them.
+> **Status: in effect for batches 0–2 (D127, D128, D129); batch 3 is not built.**
+> Where this file and `conversation-model-v6.md` disagree on waking, obligation
+> or main's place, this one wins; v6 still holds for everything else (pages, the
+> roster, the byte contracts). The decision records are in `notes/research.md`.
 >
 > Ruled by the user 2026-08-17, in the session that followed D124–D126.
 
@@ -218,12 +219,12 @@ What is left: one wake rule, seven duties, two guards.
 Prompt before machine, deliberately — the gates are cheap to keep and expensive
 to restore, so the duties get observed under load before anything is deleted.
 
-| # | batch | scope |
-|---|---|---|
-| 0 | the two page bugs | the `ctrl+o` pager reads the active page, not always main; a speaker's name renders when avatars are off (D113's ruling, half-implemented) |
-| 1 | the sigil and the duties | `CHANNEL_NOTE` → R1–R7, `MAIN_CHANNEL_NOTE` → the four tiers, `@` semantics in the tool descriptions. **No machine change**; the gates still stand. Observe. |
-| 2 | the wake rule | delete the gates, generalise the debounce, main becomes a member with no exemptions |
-| 3 | the ledger and the bound | `@` as a tracked debt (roster/room surfaces, watchdog rekeyed), `max_awake` per room |
+| # | batch | landed | scope |
+|---|---|---|---|
+| 0 | the page bugs | **D127** | the `ctrl+o` pager reads the active page, not always main; a speaker's name renders when avatars are off (D113's ruling, half-implemented) |
+| 1 | the sigil and the duties | **D128** | `CHANNEL_NOTE` → R1–R7, `MAIN_CHANNEL_NOTE` → the four tiers, `@` semantics in the tool descriptions. **No machine change**; the gates still stand. Observe. |
+| 2 | the wake rule | **D129** | delete the gates, generalise the debounce, main becomes a member with no exemptions |
+| 3 | the ledger and the bound | — | `@` as a tracked debt (roster/room surfaces, watchdog rekeyed), `max_awake` per room |
 
 ## Not built, deliberately
 

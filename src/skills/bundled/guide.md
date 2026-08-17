@@ -284,9 +284,9 @@ Example (.bingo/settings.json):
   log still records it, because a log is a record. Room and direct mail for the main agent is
   **digested on a debounce**: a burst buys one turn once the inbox has been quiet for two seconds (or after
   fifteen, so a chatty room cannot starve the wake), never one turn per message; `urgent` skips the wait.
-  Room lines reach that inbox through the @-gate first (v6): the main agent is a room member under the same
-  rules as everyone else, so a line naming nobody waits in a per-room pen and enters the mail only on a
-  mention (`@main`/`@all`), in bulk at five held lines, or after two minutes; direct messages are never held.
+  Room lines reach that inbox unconditionally (v7): the main agent is a room member under the same
+  rules as everyone else, and no member's inbox is gated — a line enters the mail when it is posted, named or
+  not, and a debounce coalesces a burst into one digest turn rather than holding anything back.
   History is kept after completion, and the main agent can
   SendMessage to continue, or manage with AgentControl list/messages/stop/delete; each list row includes relative last activity
   (`active now`, `active 3s ago`, `active 2min ago`) so a quiet idle instance is distinguishable from one that just finished.
@@ -352,10 +352,11 @@ Example (.bingo/settings.json):
   with `SendMessage(to: "#room")` — messages enter every member's inbox (same order), the sender is stamped by the runtime; in serial channels, a stale
   post is bounced back with the new messages attached (the agent reads them, then re-decides/abandons; count-based ordering emerges this way);
   free channels allow interleaving. Channels show in the transcript as `◇ #name` rows (expandable to the full group chat);
-  over-budget channels auto-freeze and notify the main agent. **Waking is @-gated (v6)**: a message that names a member (`@name`) or everyone (`@all`)
-  reaches them at once — an idle member wakes on the spot, a running one absorbs it at its next tool round — while unnamed traffic waits and is read in
-  batches (five unread lines, or the oldest sitting two minutes; an empty inbox never wakes, so a quiet room costs nothing). Mentions that resolve to
-  nobody, or name a stopped member, are reported back in the sender's tool result. **The `@` decides what a reply is owed (D119, sharpened by D128)**: each
+  over-budget channels auto-freeze and notify the main agent. **Delivery wakes, and nothing gates it (v7)**: a message lands in every member's inbox and
+  whoever is idle starts a run on it — named or not — while a running member absorbs it at its next tool round, which costs input tokens and no model
+  call. An empty inbox never wakes, so a quiet room costs nothing and nothing polls. The `@` decides what is *owed*, never what is read (v6's five-unread
+  and two-minute gates are gone: the count was an amplifier — in a room of six, one round where everyone speaks re-crossed it for all of them). Mentions
+  that resolve to nobody, or name a stopped member, are reported back in the sender's tool result. **The `@` decides what a reply is owed (D119, sharpened by D128)**: each
   spawned member carries a system-prompt rule (only when the flag is on) with exactly two sources of obligation, both observable without
   judgement — an `@` on your name (answer it in the room, this turn), and a question whose sender is `user` (one covered answer is enough;
   the human is not required to learn the sigil). A line naming nobody owes nothing at all, and working out what you owe by judging whether a
