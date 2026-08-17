@@ -3365,8 +3365,14 @@ impl super::Chat {
                     .iter()
                     .rev()
                     .find_map(|a| match &a.kind {
+                        // The line reports a duration, so it needs one. A
+                        // rebuilt page has none — no clock is in the history
+                        // (D130) — and `✻ Thinking for 0.0s` would be a
+                        // measurement nobody took.
                         ActivityKind::Thinking(t)
-                            if t.state == ThinkingState::Done && !a.content.is_empty() =>
+                            if t.state == ThinkingState::Done
+                                && t.timed
+                                && !a.content.is_empty() =>
                         {
                             Some(crate::tui::activities::thinking_completion_line(
                                 t, theme, settling,

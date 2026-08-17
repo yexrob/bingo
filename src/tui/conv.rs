@@ -36,10 +36,13 @@ use std::sync::Arc;
 use crate::agents::LiveBlock;
 use crate::channels::USER_NAME;
 use crate::query::Session;
-use crate::tui::activities::{Activity, ActivityKind};
+use crate::tui::activities::{Activity, ActivityKind, EXPAND_HINT};
 use crate::tui::buffer::PostKind;
-use crate::tui::chat::{Chat, Role, UiMessage, group_ready_tool, hint_for};
-use crate::tui::perspective::{Filed, Protagonist, Target, walk};
+use crate::tui::chat::{
+    Chat, Role, UiMessage, group_ready_tool, result_content, result_summary, skill_result_summary,
+};
+use crate::tui::line::Line;
+use crate::tui::perspective::{Filed, Protagonist, Target, ToolOutcome, Work, walk};
 use crate::tui::zoom::ZoomTarget;
 
 /// What one away build differs on from a home build, threaded through the
@@ -131,14 +134,22 @@ impl RunBuilder {
         }
         self.msg.text.push_str(text);
         self.prose = true;
+        // Prose closes the open fold, exactly as `UiEvent::TextDelta` does on
+        // main's page: a sentence between two tool streaks is a boundary, and a
+        // group that swallowed it would summarise across a topic change.
+        if let Some(group) = self.msg.groups.last_mut() {
+            group.active = false;
+        }
     }
 
-    fn tool(&mut self, name: &str, input: &serde_json::Value) {
+    fn tool(&mut self, name: &str, input: &serde_json::Value, result: Option<&ToolOutcome>) {
         // The live path leaks tool names to `'static` too (`UiEvent::ToolStart`);
         // the vocabulary is the tool registry, so the leak is bounded.
         let leaked: &'static str = Box::leak(name.to_string().into_boxed_str());
-        let mut call = crate::tui::activities::ToolCall::running(leaked, hint_for(name, input));
-        call.status = crate::tui::activities::ToolStatus::Done;
+        let call = crate::tui::activities::ToolCall::running(
+            leaked,
+            crate::query::summarize_input(name, input),
+        );
         let idx = self.msg.activities.len();
         let text_len = self.msg.text.chars().count();
         self.msg
@@ -146,23 +157,54 @@ impl RunBuilder {
             .push(Activity::new(ActivityKind::Tool(call)));
         self.msg.insert_points.push(text_len);
         self.msg.group_of.push(None);
+        // Grouping first: whether the row is inside a fold is what decides
+        // between a counted summary and the raw first line, the same branch the
+        // console takes on `ToolDone`.
         group_ready_tool(&mut self.msg, idx, name, input);
+        let in_group = self.msg.group_of[idx].is_some();
+        let content = result.map(|r| result_content(name, &r.output));
+        let summary = result.and_then(|r| {
+            if in_group {
+                result_summary(name, &r.output)
+            } else if name == "Skill" {
+                skill_result_summary(&r.output)
+            } else {
+                None
+            }
+        });
+        let act = &mut self.msg.activities[idx];
+        act.expand_hint = Some(EXPAND_HINT.to_string());
+        if let Some(content) = content {
+            act.set_content(content);
+        }
+        if let ActivityKind::Tool(call) = &mut act.kind {
+            call.status = match result {
+                Some(r) if r.is_error => crate::tui::activities::ToolStatus::Error,
+                Some(_) => crate::tui::activities::ToolStatus::Done,
+                // A committed history is written when the run ends, so a call
+                // with no answer in it never got one: the run was cut short.
+                None => crate::tui::activities::ToolStatus::Interrupted,
+            };
+            call.result_summary = summary;
+        }
     }
 
-    fn thinking(&mut self) {
+    fn thinking(&mut self, text: &str, render: &mut dyn FnMut(&str) -> Vec<Line>) {
         let text_len = self.msg.text.chars().count();
-        self.msg
-            .activities
-            .push(Activity::new(ActivityKind::Thinking(
-                crate::tui::activities::Thinking {
-                    state: crate::tui::activities::ThinkingState::Done,
-                    duration_ms: 0,
-                    stage: "Thinking",
-                    done_verb: None,
-                    start_tick: 0,
-                    segments: 1,
-                },
-            )));
+        let mut act = Activity::new(ActivityKind::Thinking(crate::tui::activities::Thinking {
+            state: crate::tui::activities::ThinkingState::Done,
+            // Not in the history and not invented: the row simply carries no
+            // clock, which is what a zero reads as everywhere else.
+            duration_ms: 0,
+            stage: "Thinking",
+            done_verb: None,
+            start_tick: 0,
+            segments: 1,
+            timed: false,
+        }));
+        act.set_content(render(text));
+        act.expand_hint = Some(EXPAND_HINT.to_string());
+        self.msg.activities.push(act);
         self.msg.insert_points.push(text_len);
         self.msg.group_of.push(None);
     }
@@ -203,7 +245,11 @@ fn counterpart_message(from: &str, at: u64, text: String) -> UiMessage {
 /// volatile echoes (the domain's own record of "you sent this", so no local
 /// copy can drift from it), and the streaming run rides separately as the
 /// live tail block.
-fn agent_messages(session: &Arc<Session>, name: &str) -> (Vec<UiMessage>, usize) {
+fn agent_messages(
+    session: &Arc<Session>,
+    name: &str,
+    render: &mut dyn FnMut(&str) -> Vec<Line>,
+) -> (Vec<UiMessage>, usize) {
     let Some((history, stamps, _live, in_flight, _state)) = session.agents.view_of(name) else {
         return (Vec::new(), 0);
     };
@@ -215,10 +261,12 @@ fn agent_messages(session: &Arc<Session>, name: &str) -> (Vec<UiMessage>, usize)
         if own {
             let builder = run.get_or_insert_with(|| RunBuilder::new(name, post.at));
             match work {
-                Some(crate::tui::perspective::Work::Tool { name, input }) => {
-                    builder.tool(&name, &input)
-                }
-                Some(crate::tui::perspective::Work::Thinking) => builder.thinking(),
+                Some(Work::Tool {
+                    name,
+                    input,
+                    result,
+                }) => builder.tool(&name, &input, result.as_ref()),
+                Some(Work::Thinking { text }) => builder.thinking(&text, render),
                 None => {
                     if post.kind == PostKind::Said {
                         builder.prose(&post.text);
@@ -262,10 +310,16 @@ fn room_messages(session: &Arc<Session>, room: &str) -> (Vec<UiMessage>, usize) 
 }
 
 impl AwayPage {
-    fn build(session: &Arc<Session>, target: ZoomTarget) -> Self {
+    /// `chat` is borrowed for one thing only: the markdown pipeline that turns
+    /// an agent's reasoning into rows. It is the console's own — a second
+    /// renderer would be a second way for the same text to look different, which
+    /// is the whole class of bug D130 closes.
+    fn build(session: &Arc<Session>, target: ZoomTarget, chat: &mut Chat) -> Self {
         let print = fingerprint(session, &target);
         let (messages, stable) = match &target {
-            ZoomTarget::Agent(name) => agent_messages(session, name),
+            ZoomTarget::Agent(name) => {
+                agent_messages(session, name, &mut |text| chat.render_thinking(text))
+            }
             ZoomTarget::Room(name) => room_messages(session, name),
         };
         Self {
@@ -289,7 +343,8 @@ impl Chat {
         match target {
             Some(target) => {
                 self.enter_zoom(target.clone());
-                self.away = Some(AwayPage::build(&self.session, target));
+                let session = self.session.clone();
+                self.away = Some(AwayPage::build(&session, target, self));
                 self.flushed_segments = 0;
             }
             None => {
@@ -343,7 +398,8 @@ impl Chat {
             return;
         }
         let target = away.target.clone();
-        let rebuilt = AwayPage::build(&self.session, target);
+        let session = self.session.clone();
+        let rebuilt = AwayPage::build(&session, target, self);
         if let Some(away) = &mut self.away {
             *away = rebuilt;
         }

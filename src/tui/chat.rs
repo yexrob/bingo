@@ -549,6 +549,17 @@ pub fn result_summary(name: &str, output: &str) -> Option<String> {
     }
 }
 
+/// Skill's result row: only `✦ <skill name>`, the same family as the activity
+/// header `✦ Skill(input)`. The pointer path the tool returns stays in
+/// `tool_result`, where the model reads it — a row is not a place for a path.
+pub(crate) fn skill_result_summary(output: &str) -> Option<String> {
+    output.lines().next().and_then(|line| {
+        line.strip_prefix("✦ ")
+            .and_then(|rest| rest.split(" — ").next())
+            .map(|name| format!("✦ {name}"))
+    })
+}
+
 /// Bash tool result preview: strips the `$ cmd` echo and the `[Exited with code N]` footnote,
 /// leaving only the command output (the bare output shown for BashModeProgress).
 fn bash_output_preview(lines: &[String]) -> Vec<String> {
@@ -572,7 +583,7 @@ fn bash_output_preview(lines: &[String]) -> Vec<String> {
 /// ([`MAX_RESULT_CHARS`]): results reach the UI clipped to it, and applying it here bounds
 /// what a row retains even for the paths that build their output without going through the
 /// clip (a tool error string, a denied call).
-fn result_content(name: &str, output: &str) -> Vec<Line> {
+pub(crate) fn result_content(name: &str, output: &str) -> Vec<Line> {
     let bounded = match output.char_indices().nth(MAX_RESULT_CHARS) {
         Some((end, _)) => &output[..end],
         None => output,
@@ -1425,8 +1436,9 @@ impl Chat {
                     done_verb: Some(thinking_done_verb()),
                     start_tick: self.tick,
                     segments: 1,
+                    timed: true,
                 }));
-                hint.expand_hint = Some("ctrl+o to expand".to_string());
+                hint.expand_hint = Some(crate::tui::activities::EXPAND_HINT.to_string());
                 if let Some(i) = self.stream_msg {
                     self.messages[i].activities.push(hint);
                     self.messages[i].insert_points.push(0);
@@ -1446,8 +1458,9 @@ impl Chat {
                         done_verb: Some(thinking_done_verb()),
                         start_tick: self.tick,
                         segments: 1,
+                        timed: true,
                     }));
-                    hint.expand_hint = Some("ctrl+o to expand".to_string());
+                    hint.expand_hint = Some(crate::tui::activities::EXPAND_HINT.to_string());
                     self.messages[index].activities.push(hint);
                     self.messages[index].insert_points.push(text_len);
                     self.messages[index].group_of.push(None);
@@ -1555,9 +1568,10 @@ impl Chat {
                             done_verb: Some(thinking_done_verb()),
                             start_tick: self.tick,
                             segments: 1,
+                            timed: true,
                         }));
                         hint.set_content(content);
-                        hint.expand_hint = Some("ctrl+o to expand".to_string());
+                        hint.expand_hint = Some(crate::tui::activities::EXPAND_HINT.to_string());
                         self.messages[i].activities.push(hint);
                         let text_len = self.messages[i].text.chars().count();
                         self.messages[i].insert_points.push(text_len);
@@ -1599,7 +1613,7 @@ impl Chat {
                 self.thinking_seg_open = false;
                 let name: &'static str = Box::leak(name.into_boxed_str());
                 let mut hint = Activity::new(ActivityKind::Tool(ToolCall::running(name, "")));
-                hint.expand_hint = Some("ctrl+o to expand".to_string());
+                hint.expand_hint = Some(crate::tui::activities::EXPAND_HINT.to_string());
                 if let Some(i) = self.stream_msg {
                     let idx = self.messages[i].activities.len();
                     let text_len = self.messages[i].text.chars().count();
@@ -1725,7 +1739,8 @@ impl Chat {
                                 progress: Vec::new(),
                                 run_stats: None,
                             }));
-                            hint.expand_hint = Some("ctrl+o to expand".to_string());
+                            hint.expand_hint =
+                                Some(crate::tui::activities::EXPAND_HINT.to_string());
                             let text_len = self.messages[target].text.chars().count();
                             self.messages[target].activities.push(hint);
                             self.messages[target].insert_points.push(text_len);
@@ -1850,7 +1865,7 @@ impl Chat {
                     // row, so that is the width the diff itself has to fit in.
                     let content = diff_lines(&diff, &self.theme, self.diff_width());
                     let mut hint = Activity::new(ActivityKind::Diff(diff));
-                    hint.expand_hint = Some("ctrl+o to expand".to_string());
+                    hint.expand_hint = Some(crate::tui::activities::EXPAND_HINT.to_string());
                     hint.set_content(content);
                     self.messages[i].activities[pos] = hint;
                     return;
@@ -1877,13 +1892,7 @@ impl Chat {
                         if in_group {
                             call.result_summary = result_summary(&done.name, &done.output);
                         } else if done.name == "Skill" {
-                            // Skill: the result row shows only `✦ <skill name>` (same family as the activity header
-                            // `✦ Skill(input)`); the pointer path stays only in tool_result.
-                            call.result_summary = done.output.lines().next().and_then(|l| {
-                                l.strip_prefix("✦ ")
-                                    .and_then(|rest| rest.split(" — ").next())
-                                    .map(|name| format!("✦ {name}"))
-                            });
+                            call.result_summary = skill_result_summary(&done.output);
                         }
                         // Every finished call keeps its output, grouped or not: inside a fold the
                         // row summary (`Read 173 lines`) is all that survives, so dropping the
@@ -2142,7 +2151,7 @@ impl Chat {
 
     /// Thinking content renders with markdown streaming (code blocks/lists update as the stream flows).
     /// Re-renders with the full text each time (thinking deltas are small).
-    fn render_thinking(&mut self, text: &str) -> Vec<Line> {
+    pub(crate) fn render_thinking(&mut self, text: &str) -> Vec<Line> {
         if text.is_empty() {
             return Vec::new();
         }

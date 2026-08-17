@@ -154,6 +154,12 @@ pub struct Thinking {
     /// between body text merge into one block; the folded row shows
     /// `✻ Thinking · N segments`).
     pub segments: usize,
+    /// Whether a clock was taken (D130). The console times every block it
+    /// streams, even one that finishes inside a tick; a page rebuilt from
+    /// history has no measurement to report, because none is in the record.
+    /// [`thinking_completion_line`] is that report, so `false` suppresses it —
+    /// a zero would otherwise read as "measured, and instant".
+    pub timed: bool,
 }
 
 /// Task lifecycle (pending → in_progress → completed).
@@ -820,6 +826,11 @@ fn header_for(h: &Activity, theme: &Theme, portrait: Option<&Portrait>) -> Line 
     }
 }
 
+/// How a folded activity says it can be opened. One string, because a row that
+/// advertised a different key than the transcript binds would be worse than a
+/// row that advertised none.
+pub const EXPAND_HINT: &str = "ctrl+o to expand";
+
 /// The result line of a collapsed activity advertises how to open it.
 fn expand_hint(act: &Activity) -> Option<&str> {
     if act.expanded || act.content.is_empty() {
@@ -967,6 +978,7 @@ mod tests {
             done_verb: None,
             start_tick: 0,
             segments: 1,
+            timed: true,
         }));
         if state == ThinkingState::Done {
             h.set_content(vec![Line::plain("reasoning line")]);
@@ -1042,6 +1054,7 @@ mod tests {
             done_verb: Some("Churned"),
             start_tick: 0,
             segments: 1,
+            timed: true,
         };
         let line = thinking_completion_line(&t, &Theme::dark(), false);
         assert_eq!(text(&line), "✻ Churned for 40.0s");

@@ -5586,3 +5586,71 @@ headers, guide.md's two gate paragraphs, both module docs. Tests: the bulk/age
 test replaced by v7's wake rule, main's pen test by "hears every room line at
 once", the interrupt test by "both lines ride the same boundary", the pen-clock
 test by the debounce alone — 1458 + 13 green.
+
+## D130 — an agent's page shows what came back, not only what was asked
+
+The user reported that an agent's page "looks different from main's" and could
+not say how. It does, and the difference was not in the renderer: both pages run
+the same `UiMessage → Block → Doc` pipeline (v6's ruling), but they are fed from
+two different places. Main's activities are filled by the live events —
+`UiEvent::ToolDone` carries status, output and duration; the reasoning stream
+carries the text. An agent's page is *rebuilt* from its API history by
+`perspective::walk`, and that walk matched four block kinds. `ToolResult` was not
+one of them.
+
+Rendered side by side (the scratch that became the tests in `chat_tests_f`), the
+same run gave:
+
+| | main | agent's page |
+|---|---|---|
+| reasoning | `✻ Thinking … +2 lines (ctrl+o to expand)` | `✻ Thinking` |
+| a call that worked | `⎿ Done (ctrl+o to expand)` | `⎿ Done` |
+| **a call that failed** | `⎿ Failed` | **`⎿ Done`** |
+
+The third row is the one that matters: on the page whose whole job is telling
+you what an agent did, a failure was drawn as a success. The answers were in the
+record the whole time — one `tool_result` block per call, sitting in the very
+history the page is built from.
+
+- **`walk` collects results in a pre-pass** and hands each to its call
+  (`Work::Tool { result }`). A call and its answer live in two different
+  messages, so a forward pass would have to patch a row it had already emitted;
+  one pre-pass keeps the walk a walk. `Work::Thinking` carries its text the same
+  way.
+- **`RunBuilder` fills what the console's `ToolDone` fills**: status from
+  `is_error`, expandable content from `result_content`, the counted
+  `result_summary` inside a fold and the `✦` line for Skill outside one, and the
+  same summary source main uses (`summarize_input`, not `hint_for` — the two
+  disagreed, so the row read `WebFetch(url="…")` on one page and `WebFetch(…)` on
+  the other).
+- **A call with no answer in the record reads `Interrupted`.** A committed
+  history is written when the run ends, so a call still unanswered in it never
+  got an answer. Borrowing `Done` would report a completion that never happened.
+- **Prose closes the open fold**, exactly as `UiEvent::TextDelta` does. Without
+  it a sentence between two tool streaks was swallowed and one summary spanned
+  the change of subject.
+- **Work rows carry their message's stamp.** They used to carry zero — a process
+  row has no send time of its own — but a run takes its clock from its *first*
+  row and most turns open with reasoning, so the whole block rendered stamped
+  zero, which `buffer::stamp` draws as no clock at all.
+- **`Thinking::timed`.** Duration is the one fact that is genuinely not in the
+  history, and `✻ Thinking for 0.0s` would be a measurement nobody took. The
+  flag says whether a clock was taken rather than letting zero mean two things;
+  a fast turn on main still reports, because main always takes one.
+
+What still cannot be reconstructed, and is left alone deliberately: per-call
+duration (never enters the record) and the `Diff` activity for edits (the unified
+diff rides `ToolResult::diff` to the UI, not into the protocol block). Both
+degrade to the honest thing — no duration tail, and an ordinary tool row.
+
+`EXPAND_HINT` and `skill_result_summary` were lifted out of `chat.rs` rather than
+copied: a row on one page advertising a different key than the same row on the
+other is the exact class of drift this record is about.
+
+**`query.rs` split (same commit).** `scripts/check_discipline.sh` had been red
+since **D124** — the empty-turn tests pushed the file from 3941 to 4063 lines,
+past the 4000 cap — and D124 through D129 were reported as five-gate green when
+four had been. The tests move to `query_tests.rs` behind `#[path]`, which is what
+`query_steer_tests.rs` already does and for the same reason. `mod tests` is still
+`query::tests` and `use super::*` still reaches the loop; nothing changed but the
+file the lines live in.

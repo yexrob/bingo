@@ -1722,3 +1722,213 @@ fn mains_own_flow_grows_no_speaker_rows() {
         "no speaker rows in the console's own transcript: {rows:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// F. an agent's page is main's page (D130)
+// ---------------------------------------------------------------------------
+
+/// One agent, one finished run, seeded as the record the registry keeps.
+fn seed_run(chat: &Chat, name: &str, assistant: Vec<ContentBlock>, results: Vec<ContentBlock>) {
+    use crate::api::types::Role as ApiRole;
+    seed_agent(chat, name);
+    let mut history = vec![
+        Message {
+            role: ApiRole::User,
+            content: vec![ContentBlock::Text {
+                text: "map the parser".to_string(),
+            }],
+        },
+        Message {
+            role: ApiRole::Assistant,
+            content: assistant,
+        },
+    ];
+    if !results.is_empty() {
+        history.push(Message {
+            role: ApiRole::User,
+            content: results,
+        });
+    }
+    let _ = chat.session.agents.finish(name, history, 0);
+}
+
+fn call(id: &str, url: &str) -> ContentBlock {
+    ContentBlock::ToolUse {
+        id: id.to_string(),
+        name: "WebFetch".to_string(),
+        input: serde_json::json!({ "url": url }),
+    }
+}
+
+fn answer(id: &str, output: &str, is_error: bool) -> ContentBlock {
+    ContentBlock::ToolResult {
+        tool_use_id: id.to_string(),
+        content: serde_json::Value::String(output.to_string()),
+        is_error,
+    }
+}
+
+fn agent_page(chat: &mut Chat, name: &str) -> Vec<String> {
+    chat.switch_to(Some(crate::tui::zoom::ZoomTarget::Agent(name.to_string())));
+    main_rows(chat)
+}
+
+/// The bug this batch was written against: a page rebuilt from history showed
+/// every action and no answer. `walk` matched four block kinds and `tool_result`
+/// was not one of them, so a call that failed was drawn exactly like one that
+/// worked — and on a page whose whole job is telling you what an agent did, the
+/// one row that says whether it worked was the row that was missing.
+#[test]
+fn an_agent_page_says_whether_a_call_worked() {
+    let mut chat = test_chat();
+    seed_run(
+        &chat,
+        "scout",
+        vec![call("t1", "https://x.dev/a"), call("t2", "https://x.dev/b")],
+        vec![
+            answer("t1", "line a\nline b\nline c", false),
+            answer("t2", "connection refused", true),
+        ],
+    );
+    let rows = agent_page(&mut chat, "scout");
+    assert!(
+        rows.iter().any(|r| r.contains("⎿") && r.contains("Done")),
+        "the call that worked says so: {rows:?}"
+    );
+    assert!(
+        rows.iter().any(|r| r.contains("⎿") && r.contains("Failed")),
+        "and the one that did not is not drawn as a success: {rows:?}"
+    );
+    assert_eq!(
+        rows.iter()
+            .filter(|r| r.contains("(ctrl+o to expand)"))
+            .count(),
+        2,
+        "both answers are there to open, not just summarised: {rows:?}"
+    );
+}
+
+/// A call whose answer is not in the record never got one: a committed history
+/// is written when the run ends (`AgentRegistry::finish`), so the run was cut
+/// short. That is a state the console already draws, and borrowing "Done" for it
+/// would report a completion that never happened.
+#[test]
+fn a_call_with_no_answer_in_the_record_reads_as_interrupted() {
+    let mut chat = test_chat();
+    seed_run(
+        &chat,
+        "scout",
+        vec![call("t1", "https://x.dev/a")],
+        Vec::new(),
+    );
+    let rows = agent_page(&mut chat, "scout");
+    assert!(
+        rows.iter().any(|r| r.contains("Interrupted")),
+        "an unanswered call says what it is: {rows:?}"
+    );
+}
+
+/// Reasoning is in the record too, and the fold that opens it is the console's
+/// own. Before D130 the row read `✻ Thinking` and there was nothing behind it.
+#[test]
+fn an_agent_pages_reasoning_folds_like_mains() {
+    let mut chat = test_chat();
+    seed_run(
+        &chat,
+        "scout",
+        vec![
+            ContentBlock::Thinking {
+                thinking: "the lexer is the entry point\nso start there".to_string(),
+                signature: String::new(),
+            },
+            ContentBlock::Text {
+                text: "the lexer owns it".to_string(),
+            },
+        ],
+        Vec::new(),
+    );
+    let rows = agent_page(&mut chat, "scout");
+    assert!(
+        rows.iter()
+            .any(|r| r.contains("✻ Thinking") && r.contains("+2 lines") && r.contains("ctrl+o")),
+        "the reasoning is folded, with its size and its key: {rows:?}"
+    );
+    assert!(
+        !rows.iter().any(|r| r.contains("for 0.0s")),
+        "and no duration is reported, because none was measured: {rows:?}"
+    );
+}
+
+/// A run's clock comes from its first row, and most turns open with reasoning —
+/// a work row, which used to carry no stamp at all. The whole block then
+/// rendered stamped zero, which draws as no clock, on a page whose sibling rows
+/// all have one.
+#[test]
+fn a_run_that_opens_with_reasoning_keeps_its_clock() {
+    let mut chat = test_chat();
+    seed_run(
+        &chat,
+        "scout",
+        vec![
+            ContentBlock::Thinking {
+                thinking: "start at the lexer".to_string(),
+                signature: String::new(),
+            },
+            ContentBlock::Text {
+                text: "the lexer owns it".to_string(),
+            },
+        ],
+        Vec::new(),
+    );
+    chat.switch_to(Some(crate::tui::zoom::ZoomTarget::Agent("scout".into())));
+    let page = chat.away.as_ref().expect("the page is open");
+    let run = page
+        .messages
+        .iter()
+        .find(|m| m.text.contains("the lexer owns it"))
+        .expect("the run");
+    assert!(
+        run.at > 0,
+        "the run is stamped with its message's own time, not zero"
+    );
+}
+
+/// Prose between two tool streaks is a boundary on main's page
+/// (`UiEvent::TextDelta` closes the open fold) and has to be one here: a group
+/// that swallowed the sentence would summarise across a change of subject.
+#[test]
+fn prose_between_tool_streaks_closes_the_fold() {
+    let mut chat = test_chat();
+    seed_run(
+        &chat,
+        "scout",
+        vec![
+            ContentBlock::ToolUse {
+                id: "r1".to_string(),
+                name: "Read".to_string(),
+                input: serde_json::json!({"file_path": "a.rs"}),
+            },
+            ContentBlock::Text {
+                text: "now the other half".to_string(),
+            },
+            ContentBlock::ToolUse {
+                id: "r2".to_string(),
+                name: "Read".to_string(),
+                input: serde_json::json!({"file_path": "b.rs"}),
+            },
+        ],
+        vec![answer("r1", "a", false), answer("r2", "b", false)],
+    );
+    chat.switch_to(Some(crate::tui::zoom::ZoomTarget::Agent("scout".into())));
+    let page = chat.away.as_ref().expect("the page is open");
+    let run = page
+        .messages
+        .iter()
+        .find(|m| !m.groups.is_empty())
+        .expect("the run");
+    assert_eq!(
+        run.groups.len(),
+        2,
+        "one fold each side of the sentence, not one fold over it"
+    );
+}

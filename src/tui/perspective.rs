@@ -37,6 +37,7 @@
 //! | `[Message from user, sent while you were working]` block | `steer::SteerItem::block_text` | the user |
 //! | `[follow-up instruction] …` | `direct_text`, batched | the protagonist's default counterpart |
 //! | unmarked prose | `direct_text`, single | the default: main in a subagent's record, the user in main's |
+//! | a `tool_result` block | `query::tool_result_block` | nobody — it is the answer to the call above it, and rides on that row ([`Work::Tool`]) |
 //! | `[#room msg #N] who: …` | `absorb_inbox` | the room (recorded, attributed to nobody; the room's own log is authoritative) |
 //! | `[follow-up N/M] …` | `absorb_inbox` | intake — a chase, nobody wrote it |
 //! | `[SYSTEM NOTIFICATION - TASK REMINDER]` | `query::maybe_inject_task_reminder` | intake |
@@ -73,13 +74,53 @@ pub(crate) enum Target {
 /// The zoomed view (D105) renders X's work the way the console renders main's
 /// — collapsed activity groups — and the classifier that builds those groups
 /// reads the call, not the sentence it printed.
+///
+/// D130 gave both variants the payload the console's live path gets for free
+/// from `UiEvent::ToolDone` and the reasoning stream. Without it an agent's page
+/// showed the *actions* and never the *answers*: a failed call was drawn as a
+/// finished one, and a page of reasoning folded to the bare word "Thinking".
 #[derive(Debug, Clone)]
 pub(crate) enum Work {
     Tool {
         name: String,
         input: serde_json::Value,
+        /// The matching `tool_result`, absent only when the run was cut short
+        /// before one was recorded.
+        result: Option<ToolOutcome>,
     },
-    Thinking,
+    Thinking {
+        text: String,
+    },
+}
+
+/// What came back from one call: the same two facts `ToolCallDone` carries to
+/// the console, and the only two the protocol keeps.
+///
+/// Duration is not among them — it never enters the history — so an agent's row
+/// shows none rather than a fabricated one, and the `Ran in …s` tail simply does
+/// not appear.
+#[derive(Debug, Clone)]
+pub(crate) struct ToolOutcome {
+    pub output: String,
+    pub is_error: bool,
+}
+
+/// A `tool_result` block's text, as the model received it.
+///
+/// Two shapes reach the history (`query::tool_result_block`): a plain string,
+/// which is almost every call, and an array of protocol blocks when the result
+/// carried images. Only the text of the second is a row's business — the base64
+/// belongs to the image path, not to a fold.
+fn result_output(content: &serde_json::Value) -> String {
+    match content {
+        serde_json::Value::String(text) => text.clone(),
+        serde_json::Value::Array(blocks) => blocks
+            .iter()
+            .filter_map(|block| block.get("text").and_then(serde_json::Value::as_str))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        other => other.to_string(),
+    }
 }
 
 /// Whose record is being walked, and therefore what its unmarked shapes mean.
@@ -150,6 +191,12 @@ pub(crate) struct Filed {
 /// files; the user's `@X` pair lane keeps the one lane it is in
 /// ([`pair_lane`]). Both therefore agree about who said what by construction,
 /// rather than by two parsers that happen to read the same markers today.
+///
+/// Every row carries its message's stamp, work rows included (D130). They used
+/// to carry none — a process row has no send time of its own — but the page
+/// builder takes a run's clock from its *first* row, and a turn that opens with
+/// reasoning opens with a work row: the whole block then rendered stamped zero,
+/// which [`crate::tui::buffer::stamp`] draws as no clock at all.
 pub(crate) fn walk(who: Protagonist<'_>, history: &[Message], stamps: &[u64]) -> Vec<Filed> {
     let agent = who.name;
     let mut out: Vec<Filed> = Vec::new();
@@ -158,6 +205,29 @@ pub(crate) fn walk(who: Protagonist<'_>, history: &[Message], stamps: &[u64]) ->
     // best effort by construction — the timeline is the lane that is complete.
     let mut active: Option<String> = None;
     let mut seen_user_text = false;
+    // Results are collected before the walk rather than during it: a call and
+    // its answer sit in two different messages, and a forward pass would have to
+    // patch a row it already emitted. One pre-pass keeps the walk a walk.
+    let mut results: std::collections::HashMap<&str, ToolOutcome> =
+        std::collections::HashMap::new();
+    for msg in history {
+        for block in &msg.content {
+            if let ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            } = block
+            {
+                results.insert(
+                    tool_use_id.as_str(),
+                    ToolOutcome {
+                        output: result_output(content),
+                        is_error: *is_error,
+                    },
+                );
+            }
+        }
+    }
     let turn = |active: &Option<String>, post: Post, work: Option<Work>| Filed {
         target: match active {
             Some(name) => Target::Dm(name.clone()),
@@ -195,30 +265,33 @@ pub(crate) fn walk(who: Protagonist<'_>, history: &[Message], stamps: &[u64]) ->
                     },
                     None,
                 )),
-                (ApiRole::Assistant, ContentBlock::ToolUse { name, input, .. }) => out.push(turn(
+                (ApiRole::Assistant, ContentBlock::ToolUse { id, name, input }) => out.push(turn(
                     &active,
                     Post {
                         from: agent.to_string(),
                         you: false,
-                        at: 0,
+                        at,
                         text: tool_call_line(name, input),
                         kind: PostKind::Process,
                     },
                     Some(Work::Tool {
                         name: name.clone(),
                         input: input.clone(),
+                        result: results.get(id.as_str()).cloned(),
                     }),
                 )),
-                (ApiRole::Assistant, ContentBlock::Thinking { .. }) => out.push(turn(
+                (ApiRole::Assistant, ContentBlock::Thinking { thinking, .. }) => out.push(turn(
                     &active,
                     Post {
                         from: agent.to_string(),
                         you: false,
-                        at: 0,
+                        at,
                         text: THINKING_ROW.to_string(),
                         kind: PostKind::Process,
                     },
-                    Some(Work::Thinking),
+                    Some(Work::Thinking {
+                        text: thinking.clone(),
+                    }),
                 )),
                 _ => {}
             }
