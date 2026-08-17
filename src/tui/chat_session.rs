@@ -1,6 +1,11 @@
 //! Session commands and the session picker (split out of chat.rs, D91):
 //! `/rename`, `/resume`, `/gc` and `/share`, the transcript switch behind them,
 //! and the `/resume` selector model. Owns no state; `impl super::Chat`.
+//!
+//! `/compact` joined them in D135, for the reason the rest are here and for
+//! one of its own: it is the command that *rewrites* a session's record, and
+//! it is now the one command that asks which page the reader is on before it
+//! decides whose record that is.
 
 use super::*;
 
@@ -381,6 +386,176 @@ impl super::Chat {
                     events.send(UiEvent::SlashError(lines.join("\n")));
                 }
             }
+        });
+    }
+
+    /// `/compact` is the one command that follows the page instead of the
+    /// console (D135, the user's ruling).
+    ///
+    /// Every other slash command is a console setting — the model, the theme,
+    /// the working directory — so acting on the console is acting on what the
+    /// user meant, whatever page they happen to be reading. Compaction is not
+    /// a setting: it rewrites a context, and rewriting the wrong one destroys
+    /// work that cannot be got back. `shift+tab` set the precedent by cycling
+    /// the *viewed* agent's permission mode, and this is the one command where
+    /// the precedent is worth its cost.
+    pub(super) fn slash_compact(&mut self) {
+        match self.active.clone() {
+            crate::ui::ConvKey::Agent(name) => self.compact_agent(name),
+            // A room is a log, not a turn loop: there is no context behind it
+            // to summarise, and quietly compacting the console's instead would
+            // be the exact wrong-target loss this ruling exists to prevent.
+            crate::ui::ConvKey::Room(room) => self.push_slash_info(format!(
+                "#{room} is a log, not a context: nothing to compact"
+            )),
+            crate::ui::ConvKey::Main => self.compact_console(),
+        }
+    }
+
+    /// Compact the context of the instance whose page is up.
+    ///
+    /// Its history lives in the registry rather than in a transcript file, so
+    /// the rewrite is read-summarise-write and the write is refused while a
+    /// turn is running ([`crate::agents::AgentRegistry::replace_history`]).
+    fn compact_agent(&mut self, name: String) {
+        let Some((history, _, state)) = self.session.agents.view_of(&name) else {
+            self.push_slash_error(format!(
+                "[error] code={} msg=no instance named {name}",
+                crate::error::SLASH_ERROR_BAD_ARGUMENT
+            ));
+            return;
+        };
+        if state == crate::agents::AgentState::Running {
+            self.push_slash_error(format!(
+                "[error] code={} msg=@{name} is mid-turn and owns the history a compaction would rewrite (esc to stop it, then retry)",
+                crate::error::SLASH_ERROR_BAD_ARGUMENT
+            ));
+            return;
+        }
+        // Same floor the loop's own gate applies, reported as what it is.
+        if history.len() <= crate::compact::KEEP_RECENT {
+            self.push_slash_output(format!(
+                "@{name}'s context is too short; no compaction needed."
+            ));
+            return;
+        }
+        let Some(session) = self.session.agents.session_of(&name) else {
+            return;
+        };
+        let registry = self.session.agents.clone();
+        // The tiers are the console's and answer on whatever page is up; the
+        // window figure is the *instance's* and belongs to the instance's own
+        // footer, so it travels on a sink bound to that conversation.
+        let console = self.events.clone();
+        let page = self
+            .events
+            .bound_to(crate::ui::ConvKey::Agent(name.clone()));
+        self.pin_panel("compact", vec![format!("⏳ compacting @{name}'s context…")]);
+        tokio::spawn(async move {
+            let unpin = || {
+                console.send(UiEvent::Unpin {
+                    id: "compact".to_string(),
+                });
+            };
+            let mut messages = history;
+            let old_len = messages.len();
+            let compacted =
+                crate::compact::maybe_compact(&session, &mut messages, u64::MAX, &mut |_| {}).await;
+            if !compacted {
+                unpin();
+                console.send(UiEvent::SlashError(
+                    "compaction failed (model call error).".to_string(),
+                ));
+                return;
+            }
+            let kept = messages.len().saturating_sub(1);
+            let tokens = crate::compact::estimate_tokens(&session.system, &messages, &[]);
+            if !registry.replace_history(&name, messages) {
+                unpin();
+                console.send(UiEvent::SlashError(format!(
+                    "@{name} started a turn while it was being compacted; its context is unchanged."
+                )));
+                return;
+            }
+            page.send(UiEvent::ContextUsage(
+                crate::context_usage::ContextUsage::for_model(
+                    tokens,
+                    &session.client.models(),
+                    &session.runtime.model.borrow().clone(),
+                ),
+            ));
+            unpin();
+            console.send(UiEvent::SlashInfo(format!(
+                "✓ compacted @{name}: {old_len} messages → summary + the latest {kept}."
+            )));
+        });
+    }
+
+    fn compact_console(&mut self) {
+        let session = self.session.clone();
+        let events = self.events.clone();
+        // Long operation (a full model call): pinned until the flow resolves —
+        // a 2s hint left the rest of the wait silent.
+        self.pin_panel("compact", vec!["⏳ compacting the context…".to_string()]);
+        tokio::spawn(async move {
+            let unpin = || {
+                events.send(UiEvent::Unpin {
+                    id: "compact".to_string(),
+                });
+            };
+            let transcript = session.runtime.transcript.borrow().clone();
+            let mut messages = match &transcript {
+                Some(t) => t.load_messages().unwrap_or_default(),
+                None => Vec::new(),
+            };
+            // Same floor maybe_compact applies, so "too short" is reported as
+            // that and not as a model-call failure.
+            if messages.len() <= crate::compact::KEEP_RECENT {
+                unpin();
+                events.send(UiEvent::SlashOutput(
+                    "the conversation is too short; no compaction needed.".to_string(),
+                ));
+                return;
+            }
+            let old_len = messages.len();
+            // The slash command reports its own outcome below, so the shared
+            // notification channel stays quiet here.
+            let compacted =
+                crate::compact::maybe_compact(&session, &mut messages, u64::MAX, &mut |_| {}).await;
+            if !compacted {
+                unpin();
+                events.send(UiEvent::SlashError(
+                    "compaction failed (model call error).".to_string(),
+                ));
+                return;
+            }
+            let summary = messages
+                .first()
+                .map(|m| {
+                    m.content
+                        .iter()
+                        .filter_map(|b| match b {
+                            crate::api::types::ContentBlock::Text { text } => Some(text.clone()),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                })
+                .unwrap_or_default();
+            // Persistence happened inside compact() as an appended marker; the
+            // canonical lines are untouched (D74).
+            events.send(UiEvent::ContextUsage(
+                crate::context_usage::ContextUsage::for_model(
+                    crate::compact::estimate_tokens(&session.system, &messages, &[]),
+                    &session.client.models(),
+                    &session.runtime.model.borrow().clone(),
+                ),
+            ));
+            unpin();
+            let kept = messages.len().saturating_sub(1);
+            events.send(UiEvent::SlashInfo(format!(
+                "✓ compacted {old_len} messages → summary + the latest {kept}.\nSummary: {summary}"
+            )));
         });
     }
 }

@@ -843,12 +843,53 @@ impl AgentRegistry {
         true
     }
 
-    /// The session an instance runs on. Test-only: everything in production reaches a
-    /// session through the entry that already holds it, and handing the whole session out
-    /// would be a wider door than any caller needs.
-    #[cfg(test)]
+    /// The session an instance runs on.
+    ///
+    /// One production caller, and it is the reason the door opened (D135): the
+    /// console's `/compact` on an instance's page summarises *that* instance's
+    /// context, which means the model, the provider and — crucially — the
+    /// transcript of that instance rather than the console's. Compacting
+    /// through the console's own session would append the marker to the
+    /// console's transcript, which is the wrong record.
     pub fn session_of(&self, name: &str) -> Option<Arc<Session>> {
         self.lock().get(name).map(|e| e.session.clone())
+    }
+
+    /// Replace an instance's stored context with a rewritten one — `/compact`
+    /// on its page, and nothing else.
+    ///
+    /// **Refused while it is running**, and the refusal is the point: a turn in
+    /// flight carries its own copy of the history and writes it back at
+    /// [`AgentRegistry::finish`], so a summary spliced in underneath would be
+    /// overwritten by the very next round. The check reads the state under the
+    /// same lock the write takes, so a run that starts between the console's
+    /// look and its write loses the race rather than the work.
+    pub fn replace_history(&self, name: &str, history: Vec<Message>) -> bool {
+        let replaced = {
+            let mut inner = self.lock();
+            let Some(entry) = inner.get_mut(name) else {
+                return false;
+            };
+            if entry.state == AgentState::Running {
+                return false;
+            }
+            // `finish`'s rule: a shorter history was rewritten and the old
+            // clocks no longer describe it — better no stamp than a wrong one.
+            let refill = if history.len() < entry.stamps.len() {
+                entry.stamps.clear();
+                0
+            } else {
+                crate::channels::now_unix()
+            };
+            entry.stamps.resize(history.len(), refill);
+            entry.history = history;
+            entry.last_active = Instant::now();
+            true
+        };
+        if replaced {
+            self.sync_share(name);
+        }
+        replaced
     }
 
     pub fn set_abort_if_running(

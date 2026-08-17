@@ -322,6 +322,79 @@ mod tests {
         );
     }
 
+    /// The ruling `/compact` is the exception to (D135): most commands are
+    /// console settings and keep acting on the console, but compaction acts on
+    /// the context in front of you, because it is the one command whose
+    /// wrong target loses real work.
+    #[tokio::test]
+    async fn compact_on_a_page_targets_that_agents_context() {
+        let mut chat = test_chat();
+        seed_idle(&chat, "scout"); // finished: an empty stored history
+        chat.switch_to(Some(ZoomTarget::Agent("scout".into())));
+        chat.set_input("/compact".to_string());
+        chat.submit();
+        assert!(
+            chat.slash_lines.iter().any(|l| l.contains("@scout")),
+            "the answer names the instance, not the console: {:?}",
+            chat.slash_lines
+        );
+        assert!(
+            chat.pinned_panels.is_empty(),
+            "and the console's own compaction never started"
+        );
+    }
+
+    /// A running instance owns the history a compaction would rewrite, so the
+    /// command refuses instead of racing the turn that will overwrite it.
+    #[tokio::test]
+    async fn compact_refuses_while_the_agent_is_mid_turn() {
+        let mut chat = test_chat();
+        seed(&chat, "scout"); // spawned = Running
+        chat.switch_to(Some(ZoomTarget::Agent("scout".into())));
+        chat.set_input("/compact".to_string());
+        chat.submit();
+        assert!(
+            chat.slash_error_lines
+                .iter()
+                .any(|l| l.contains("@scout") && l.contains("mid-turn")),
+            "{:?}",
+            chat.slash_error_lines
+        );
+    }
+
+    /// A room has no context behind it, and compacting the console's instead
+    /// would be exactly the wrong-target loss the ruling exists to prevent.
+    #[tokio::test]
+    async fn compact_on_a_room_page_says_there_is_nothing_to_compact() {
+        let mut chat = test_chat();
+        seed_room(&chat, "crew", &["user"]);
+        chat.switch_to(Some(ZoomTarget::Room("crew".into())));
+        chat.set_input("/compact".to_string());
+        chat.submit();
+        assert!(
+            chat.slash_info_lines.iter().any(|l| l.contains("#crew")),
+            "{:?}",
+            chat.slash_info_lines
+        );
+        assert!(chat.pinned_panels.is_empty());
+    }
+
+    /// And home it is the console's own context, as it always was.
+    #[tokio::test]
+    async fn compact_at_home_is_still_the_consoles() {
+        let mut chat = test_chat();
+        seed_idle(&chat, "scout");
+        chat.set_input("/compact".to_string());
+        chat.submit();
+        assert!(
+            chat.pinned_panels
+                .iter()
+                .any(|(id, lines)| id == "compact" && lines.iter().all(|l| !l.contains('@'))),
+            "{:?}",
+            chat.pinned_panels
+        );
+    }
+
     /// `!` is the console's shell on every page too, and it opens the console's
     /// own turn rather than sending the command to the agent.
     #[tokio::test]
