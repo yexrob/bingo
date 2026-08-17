@@ -5654,3 +5654,86 @@ four had been. The tests move to `query_tests.rs` behind `#[path]`, which is wha
 `query_steer_tests.rs` already does and for the same reason. `mod tests` is still
 `query::tests` and `use super::*` still reaches the loop; nothing changed but the
 file the lines live in.
+
+## D131 — the `@` becomes a debt the runtime keeps (v7 batch 3)
+
+Ordered with `max_awake` explicitly cut ("我感觉那个没必要"), which is the right
+call and worth recording as a ruling rather than a scope trim: a cap on how many
+members may wake is the last survivor of the gating instinct v7 reverses. The
+storm was never everyone *reading* — it was everyone *speaking*, and R1 is what
+stops that. Queueing members behind a bound would also make the one real latency
+worse, since a room's delay is a member's own turn.
+
+**What was missing.** The `@` is the room's only obligation (R1) and it was the
+only obligation nothing recorded. A direct message has carried a delivery record
+since D44; a mention in a room ran bare. So a silent member was four situations
+wearing one face, and only one of them is fine:
+
+| | before | now |
+|---|---|---|
+| has not read it | invisible | `owes #build #5 · unread` |
+| read it, working | invisible | `owes #build #5 · Reading…` |
+| read it, not answering | invisible | `owes #build #5 · Idle for 2m` — a bug you can see |
+| its turn died | invisible | the state says so, and the chase says so again |
+
+D124 was row four: four crew turns died, main reported a transient stream error,
+and it took a screenshot to find out.
+
+**The ledger.** `channels::Mention { seq, from, to, at, answered }`, opened by
+the sigil in `post` and closed by the named member's next post to that room.
+Two decisions worth their reasons:
+
+- **Speaking is the answer.** No judgement of substance, because R2 already tells
+  the model an acknowledgement is not one, and a runtime that second-guessed the
+  wording would be making exactly the inference v7 removed from the prompt.
+- **Close before open, in one pass.** A member that answers and asks in the same
+  breath settles the old debt and opens the new one; a post can never settle the
+  question it is itself asking.
+- **`@all` is one debt against the room** (R4), closed by the first answer from
+  anybody but the asker — not one debt per member, which is the shape that would
+  have turned one greeting into five obligations.
+
+**The cursor, finally shown.** `Channel::seen` has existed since the beginning
+with exactly one reader, the serial staleness bounce, and has never been on
+screen. `standing_of` pairs it with the debt, and that pairing is the whole
+difference between rows one and three above: `unread` means the line is not even
+in the member's context yet.
+
+**The surfaces.** The roster, not the room page: a page header is a settled row
+under write-once and a debt is volatile, so the live answer belongs on the rows
+that redraw every frame — which is where v7's own mock put it.
+
+```
+○ dev        owes #build #5 · unread
+# build      waiting on @dev · 3m 12s
+```
+
+The accent stays reserved for *you* being the holdup, so a room waiting on `main`
+or `user` colours and a room waiting on a member does not: news, not a prompt.
+
+**The chase** (`spawn_mention_watchdog`) mirrors D44's, and is a parallel
+mechanism rather than a rekeyed `AckState` — the direct record is per-instance on
+a `MsgId`, the room's is per-room on a sequence, and forcing one into the other
+would couple two lifetimes with no reason to move together. Five minutes, three
+rounds, the same owner-addressed watch line back to the sender. `@all` is chased
+without nudging anybody: the sigil deliberately did not pick a member, so neither
+does the chase — the sender is told and the room's row says what it is waiting on.
+
+**Two things deleted on the way.**
+
+- `deposit`'s `if mentioned { notify_inbox() }` — v6 pulsed only for a mention
+  because an unmentioned line was on a batch clock it must not jump. D129 deleted
+  that clock and left the condition: the last place the runtime still read the
+  `@` as a wake bit instead of an obligation. Every deposit pulses now.
+- `InboxItem::Channel::mentioned` — its own doc said the bit "is what the
+  obligation ledger will key on". The ledger keys on the room's record instead,
+  which is strictly better: it outlives the inbox item, and one record answers
+  both the chase and the row so the two can never disagree.
+
+**A prompt that had gone false.** `CHANNEL_NOTE` still said *"room traffic that
+does not name you reaches you in batches, later"* — written true under v6, made a
+lie by D129, and a member that believes a line is still in flight has a reason
+not to answer it. Both notes now say every line arrives at once and the `@`
+decides only what is owed. A member is also told the debt is recorded and chased:
+that is a fact about the world, not a new rule, and a model that does not know it
+is being watched cannot factor it in.

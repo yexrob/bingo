@@ -124,12 +124,39 @@ pub(crate) fn deliver_post(
                         from: delivery.msg.from.clone(),
                         text: delivery.msg.text.clone(),
                         seq: delivery.msg.seq,
-                        mentioned: delivery.mentioned,
                     },
                 );
                 if !accepted && delivery.mentioned {
                     undelivered_mentions.push(delivery.member);
+                } else if delivery.mentioned {
+                    spawn_mention_watchdog(
+                        session.clone(),
+                        watch.clone(),
+                        channel.to_string(),
+                        seq,
+                        delivery.member,
+                        from.to_string(),
+                        crate::tool::agent::excerpt(text),
+                    );
                 }
+            }
+            // `@all` is one debt against the room rather than one per member
+            // (R4), so it gets one watchdog rather than N — the room is chased
+            // by nudging nobody and telling the sender, because a nudge would
+            // have to pick a member the sigil deliberately did not.
+            if crate::channels::mention_tokens(text)
+                .iter()
+                .any(|t| t == crate::channels::ALL_NAME)
+            {
+                spawn_mention_watchdog(
+                    session.clone(),
+                    watch.clone(),
+                    channel.to_string(),
+                    seq,
+                    crate::channels::ALL_NAME.to_string(),
+                    from.to_string(),
+                    crate::tool::agent::excerpt(text),
+                );
             }
             flush_agent_inbox(session, watch);
             Ok(PostDelivery::Sent {
@@ -139,6 +166,143 @@ pub(crate) fn deliver_post(
             })
         }
         PostOutcome::Stale { missed } => Ok(PostDelivery::Stale { missed }),
+    }
+}
+
+/// Chase one unanswered `@` (v7 batch 3) — the room's half of the watchdog a
+/// direct message has had since D44, and the reason the ledger acts rather than
+/// only displays.
+///
+/// The wait is not a parameter. `SendMessage`'s `ack_timeout` has always been
+/// documented as ignored for a room, and a per-post number would put the
+/// correctness of the check back on the sender remembering to ask for one —
+/// the exact failure the default exists to remove. It is the same five minutes
+/// the direct path defaults to, for the same reason: long enough that a member
+/// genuinely working is not nagged, short enough that a hang is not discovered
+/// an hour later.
+///
+/// The `@all` case chases without nudging anybody: the sigil deliberately did
+/// not pick a member, so neither does this — the sender is told, and the room's
+/// row says what it is waiting on.
+fn spawn_mention_watchdog(
+    session: Arc<Session>,
+    watch: Arc<crate::watch::WatchRegistry>,
+    channel: String,
+    seq: u64,
+    to: String,
+    from: String,
+    excerpt: String,
+) {
+    let owner = session.instance.clone();
+    let label = format!("{to} #{channel} msg #{seq} answer");
+    let everyone = to == crate::channels::ALL_NAME;
+    tokio::spawn(async move {
+        // Registered on the first missed deadline, exactly as the direct
+        // path does: an `@` answered on time leaves no trace, so the line
+        // itself means "this one needed chasing".
+        let mut line: Option<crate::watch::WatchId> = None;
+        let report = |state: crate::watch::WatchState, detail: String, line: &mut Option<_>| {
+            let id = *line.get_or_insert_with(|| {
+                watch.register_with_conditions(
+                    Box::new(MentionWatch {
+                        label: label.clone(),
+                    }),
+                    Vec::new(),
+                    owner.clone(),
+                )
+            });
+            watch.set_state(id, state, Some(detail), None);
+        };
+        for round in 1..=crate::agents::MAX_FOLLOW_UPS {
+            tokio::time::sleep(MENTION_CHASE).await;
+            let Some(owed) = session.channels.open_mention(&channel, seq, &to) else {
+                return;
+            };
+            let waited = MENTION_CHASE * u32::from(round);
+            if everyone {
+                report(
+                    crate::watch::WatchState::Running,
+                    format!("#{channel} msg #{seq} asked the room and nobody has answered"),
+                    &mut line,
+                );
+                continue;
+            }
+            let accepted = session.agents.deposit(
+                &to,
+                crate::agents::InboxItem::Unanswered {
+                    channel: channel.clone(),
+                    seq,
+                    from: owed.from.clone(),
+                    excerpt: excerpt.clone(),
+                    round,
+                    waited,
+                },
+            );
+            if !accepted {
+                report(
+                    crate::watch::WatchState::Failed,
+                    format!(
+                        "{to} is stopped; the `@` in #{channel} msg #{seq} will not be answered"
+                    ),
+                    &mut line,
+                );
+                return;
+            }
+            report(
+                crate::watch::WatchState::Running,
+                format!(
+                    "waiting on @{to} in #{channel}, chased {round}/{}",
+                    crate::agents::MAX_FOLLOW_UPS
+                ),
+                &mut line,
+            );
+            flush_agent_inbox(&session, &watch);
+        }
+        if session.channels.open_mention(&channel, seq, &to).is_some() {
+            let who = if everyone {
+                format!("nobody in #{channel}")
+            } else {
+                format!("@{to}")
+            };
+            report(
+                crate::watch::WatchState::Failed,
+                format!(
+                    "{} follow-ups and {who} has still not answered {from}'s #{channel} msg #{seq}",
+                    crate::agents::MAX_FOLLOW_UPS
+                ),
+                &mut line,
+            );
+        }
+    });
+}
+
+/// How long an `@` may go unanswered before the room chases it. See
+/// [`spawn_mention_watchdog`] for why it is a constant and not a parameter.
+const MENTION_CHASE: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// Watch line for a chased `@`: driven entirely by [`spawn_mention_watchdog`],
+/// so it declares no polling interval of its own.
+struct MentionWatch {
+    label: String,
+}
+
+impl crate::watch::Watchable for MentionWatch {
+    fn label(&self) -> String {
+        self.label.clone()
+    }
+    fn poll(&self) -> crate::watch::WatchPoll {
+        crate::watch::WatchPoll {
+            state: crate::watch::WatchState::Running,
+            detail: None,
+            payload: None,
+            signal: None,
+        }
+    }
+    fn check_interval(&self) -> Option<std::time::Duration> {
+        None
+    }
+    fn kind(&self) -> crate::watch::WatchKind {
+        crate::watch::WatchKind::Agent
     }
 }
 
@@ -507,7 +671,7 @@ mod tests {
             .unwrap_or_else(|| panic!("b's inbox should have a message"))
             .items;
         assert!(
-            matches!(&items[..], [crate::agents::InboxItem::Channel { from, text, mentioned: true, .. }]
+            matches!(&items[..], [crate::agents::InboxItem::Channel { from, text, .. }]
                 if from == "a" && text == "@b hello"),
             "stamped as a, and naming b set the needs-you-now bit"
         );
@@ -581,23 +745,12 @@ mod tests {
         let items = main.agents.take_running("b", 0);
         assert_eq!(items.len(), 2, "both lines ride the same boundary");
         assert!(
-            matches!(
-                &items[0],
-                crate::agents::InboxItem::Channel {
-                    seq: 1,
-                    mentioned: false,
-                    ..
-                }
-            ),
+            matches!(&items[0], crate::agents::InboxItem::Channel { seq: 1, .. }),
             "room order first, so the seen cursor never skips a line"
         );
         assert!(matches!(
             &items[1],
-            crate::agents::InboxItem::Channel {
-                seq: 2,
-                mentioned: true,
-                ..
-            }
+            crate::agents::InboxItem::Channel { seq: 2, .. }
         ));
 
         // Misfires: an unknown token, then a stopped member, both named to the sender.

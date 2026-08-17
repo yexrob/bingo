@@ -21,11 +21,11 @@
 use crossterm::event::{KeyCode, KeyModifiers};
 use ratatui::style::Color;
 
-use crate::channels::MAIN_NAME;
+use crate::channels::{MAIN_NAME, USER_NAME};
 use crate::tui::buffer::BufferId;
 use crate::tui::chat::{Chat, Row};
 use crate::tui::line::{Line, SegStyle, text_width};
-use crate::tui::tree::status_label;
+use crate::tui::tree::{duration_label, status_label};
 use crate::tui::zoom::ZoomTarget;
 
 /// Rows on screen at once. The selection scrolls the window; edge rows carry
@@ -49,6 +49,17 @@ struct Entry {
     badge: (u64, bool),
     /// A running agent `k` can stop.
     stoppable: bool,
+}
+
+/// A debt leads the row and the state follows it: the debt is what the user is
+/// looking for, and the state is what explains it. Either half alone is the
+/// whole detail.
+fn join_detail(owed: Option<String>, state: String) -> String {
+    match (owed, state.is_empty()) {
+        (Some(owed), true) => owed,
+        (Some(owed), false) => format!("{owed} · {state}"),
+        (None, _) => state,
+    }
 }
 
 impl Chat {
@@ -80,6 +91,7 @@ impl Chat {
             let stopped = status.state == crate::agents::AgentState::Stopped;
             let running = status.state == crate::agents::AgentState::Running;
             let waiting = asking.as_deref() == Some(status.name.as_str());
+            let owed = self.owed_by(&status.name);
             out.push(Entry {
                 target: Some(ZoomTarget::Agent(status.name.clone())),
                 label: format!("@{}", status.name),
@@ -98,7 +110,7 @@ impl Chat {
                 detail: if waiting {
                     "waiting on you (permission)".to_string()
                 } else {
-                    status_label(&status, now)
+                    join_detail(owed, status_label(&status, now))
                 },
                 urgent: waiting,
                 badge: self.badge_of(&BufferId::Dm(status.name.clone())),
@@ -107,18 +119,63 @@ impl Chat {
         }
         for room in self.tree_rooms() {
             let members = room.members.len();
+            let owed = self.session.channels.owed_in(&room.name);
+            let oldest = owed.first();
             out.push(Entry {
                 target: Some(ZoomTarget::Room(room.name.clone())),
                 label: format!("#{}", room.name),
                 dot: '○',
                 dot_color: palette.presence_off,
-                detail: format!("{members} member{}", if members == 1 { "" } else { "s" }),
-                urgent: false,
+                detail: match oldest {
+                    Some(mention) => format!(
+                        "waiting on {} · {}",
+                        Self::owed_target(&mention.to),
+                        duration_label(std::time::Duration::from_secs(
+                            crate::tui::buffer::now().saturating_sub(mention.at)
+                        ))
+                    ),
+                    None => format!("{members} member{}", if members == 1 { "" } else { "s" }),
+                },
+                // The accent means *you* are the holdup, and via R7 the user's
+                // half of a room is main. A room waiting on a member is news,
+                // not a prompt, so it says so without the colour.
+                urgent: oldest.is_some_and(|m| m.to == MAIN_NAME || m.to == USER_NAME),
                 badge: self.badge_of(&BufferId::Channel(room.name.clone())),
                 stoppable: false,
             });
         }
         out
+    }
+
+    /// The oldest `@` this member has not answered, as its row says it (v7
+    /// batch 3): which room, which message, and — the part that separates a
+    /// member that has not looked yet from one that looked and said nothing —
+    /// whether the line is even in its context.
+    fn owed_by(&self, name: &str) -> Option<String> {
+        let standing = self
+            .session
+            .channels
+            .standing_of(name)
+            .into_iter()
+            .find(|s| s.owes.is_some())?;
+        let mention = standing.owes.as_ref()?;
+        let unread = standing.read_to < mention.seq;
+        Some(format!(
+            "owes #{} #{}{}",
+            standing.room,
+            mention.seq,
+            if unread { " · unread" } else { "" }
+        ))
+    }
+
+    /// `@dev`, or the room itself for an `@all` — which is owed one covered
+    /// answer rather than one answer each (R4).
+    fn owed_target(to: &str) -> String {
+        if to == crate::channels::ALL_NAME {
+            "the room".to_string()
+        } else {
+            format!("@{to}")
+        }
     }
 
     /// How many rows the roster has — zero keeps it (and its keys) out of the
@@ -436,6 +493,114 @@ mod tests {
                 .iter()
                 .any(|s| s.name == "scout" && s.state == crate::agents::AgentState::Stopped),
             "the row under the cursor stopped"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // The `@` ledger on the rows (v7 batch 3)
+    // -----------------------------------------------------------------------
+
+    /// The four situations a silent member could be in used to look identical
+    /// (v7's table): not read yet, read and working, read and not answering, and
+    /// dead. The row now separates them — the debt says an answer is owed, the
+    /// cursor says whether the line has even reached the member, and the state
+    /// that was always there explains the rest.
+    #[test]
+    fn a_row_says_what_a_member_owes_and_whether_it_has_looked() {
+        let mut chat = test_chat();
+        seed(&chat, "dev");
+        chat.session
+            .channels
+            .create(
+                "build",
+                vec!["dev".to_string(), "qa".to_string()],
+                crate::channels::ChannelMode::Free,
+            )
+            .unwrap_or_else(|e| panic!("{e}"));
+        chat.session
+            .channels
+            .post("qa", "build", "@dev is the lexer done?")
+            .unwrap_or_else(|e| panic!("{e}"));
+        chat.refresh_conversations();
+
+        let unread = texts(&chat);
+        assert!(
+            unread.iter().any(|r| r.contains("@dev")
+                && r.contains("owes #build #1")
+                && r.contains("unread")),
+            "owed and not yet in its context: {unread:?}"
+        );
+
+        chat.session.channels.mark_seen("dev", "build", 1);
+        let read = texts(&chat);
+        assert!(
+            read.iter().any(|r| r.contains("@dev")
+                && r.contains("owes #build #1")
+                && !r.contains("unread")),
+            "read it and still owes it — the row that used to be invisible: {read:?}"
+        );
+
+        chat.session
+            .channels
+            .post("dev", "build", "not yet, two cases left")
+            .unwrap_or_else(|e| panic!("{e}"));
+        let answered = texts(&chat);
+        assert!(
+            !answered.iter().any(|r| r.contains("owes #build")),
+            "answering clears it: {answered:?}"
+        );
+    }
+
+    /// The room's own row says what it is waiting on, and for how long — the
+    /// slot a messenger fills with "delivered / read" and bingo had nothing in.
+    #[test]
+    fn a_rooms_row_says_who_it_is_waiting_on() {
+        let mut chat = test_chat();
+        seed(&chat, "dev");
+        chat.session
+            .channels
+            .create(
+                "build",
+                vec![
+                    "dev".to_string(),
+                    "qa".to_string(),
+                    crate::channels::USER_NAME.to_string(),
+                ],
+                crate::channels::ChannelMode::Free,
+            )
+            .unwrap_or_else(|e| panic!("{e}"));
+        chat.refresh_conversations();
+        assert!(
+            texts(&chat)
+                .iter()
+                .any(|r| r.contains("#build") && r.contains("member")),
+            "a quiet room reports its size"
+        );
+
+        chat.session
+            .channels
+            .post("qa", "build", "@dev status?")
+            .unwrap_or_else(|e| panic!("{e}"));
+        let waiting = texts(&chat);
+        assert!(
+            waiting
+                .iter()
+                .any(|r| r.contains("#build") && r.contains("waiting on @dev")),
+            "the room names who it is blocked on: {waiting:?}"
+        );
+
+        chat.session
+            .channels
+            .post("qa", "build", "@all anyone?")
+            .unwrap_or_else(|e| panic!("{e}"));
+        chat.session
+            .channels
+            .post("dev", "build", "here")
+            .unwrap_or_else(|e| panic!("{e}"));
+        let quiet = texts(&chat);
+        assert!(
+            !quiet.iter().any(|r| r.contains("waiting on")),
+            "both debts settled by the one answer (R4): {quiet:?}"
         );
     }
 }

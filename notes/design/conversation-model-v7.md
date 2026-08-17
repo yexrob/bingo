@@ -1,6 +1,7 @@
 # Conversation model v7 — one wake rule, one sigil, seven duties
 
-> **Status: in effect for batches 0–2 (D127, D128, D129); batch 3 is not built.**
+> **Status: in effect.** Batches 0–3 have landed (D127, D128, D129, D131);
+> `max_awake` is the one piece deliberately dropped — see "Not built".
 > Where this file and `conversation-model-v6.md` disagree on waking, obligation
 > or main's place, this one wins; v6 still holds for everything else (pages, the
 > roster, the byte contracts). The decision records are in `notes/research.md`.
@@ -148,13 +149,23 @@ per-member cursor of the last message a member has read. The first serves
 to guess. The second is read by exactly one caller — the serial-mode staleness
 bounce — and has never been shown to anyone.
 
-**What changes.** The key becomes the `@`, not the direct message: a mention
-records who asked, whom, in which room, at which sequence number, and when. It
-closes when that member speaks substantively in that room. Unclosed past the
-window, it takes the same chase the direct message takes today, and reports to
-the sender the same way. Three things fall out: a room `@` is tracked at all
-(today it runs bare), `ack_timeout` retires as a guessed parameter, and the
-chase logic is rekeyed rather than rewritten.
+**What changed (D131).** The debt is keyed on the `@`: `channels::Mention`
+records who asked, whom, in which room, at which sequence, and when. It closes
+when the named member next posts to that room — **speaking is the answer**,
+because R2 already says an acknowledgement is not one and a runtime that
+second-guessed the wording would be making the judgement call v7 exists to
+remove. `@all` is one debt against the room, closed by the first answer from
+anybody but the asker (R4). Unclosed past five minutes it is chased, up to the
+same three rounds a direct message gets, with the same watch line back to the
+sender.
+
+Two departures from the sketch above. The chase is a *parallel* mechanism rather
+than a rekeyed `AckState`: the direct path's record is per-instance and keyed on
+`MsgId`, the room's is per-room and keyed on a sequence, and forcing one into
+the other would have coupled two lifetimes that have no reason to move together.
+And `ack_timeout` does not retire — it stays what it always was, the direct
+path's knob — while the room's wait is a constant on purpose, because a sender
+who has to remember to ask for the check is the failure the default removes.
 
 **What it buys, at the cost of wiring and rendering only.**
 
@@ -224,7 +235,7 @@ to restore, so the duties get observed under load before anything is deleted.
 | 0 | the page bugs | **D127** | the `ctrl+o` pager reads the active page, not always main; a speaker's name renders when avatars are off (D113's ruling, half-implemented) |
 | 1 | the sigil and the duties | **D128** | `CHANNEL_NOTE` → R1–R7, `MAIN_CHANNEL_NOTE` → the four tiers, `@` semantics in the tool descriptions. **No machine change**; the gates still stand. Observe. |
 | 2 | the wake rule | **D129** | delete the gates, generalise the debounce, main becomes a member with no exemptions |
-| 3 | the ledger and the bound | — | `@` as a tracked debt (roster/room surfaces, watchdog rekeyed), `max_awake` per room |
+| 3 | the ledger | **D131** | `@` as a tracked debt: opened by the sigil, closed by the answer, shown on the roster with the read cursor beside it, chased when it goes unanswered. `max_awake` dropped on the user's ruling. |
 
 ## Not built, deliberately
 
@@ -238,5 +249,12 @@ to restore, so the duties get observed under load before anything is deleted.
   guess into a lookup. A second axis in the log is not paid for yet.
 - **A rate limit on `@`** — considered (a wake-token bucket at the sender) and
   dropped: with obligation moved to the sender and R3 closing the ping-pong,
-  the cascade terminates at depth 2 on its own. `max_awake` bounds the one
-  round that remains. Revisit only if a real room proves otherwise.
+  the cascade terminates at depth 2 on its own.
+- **`max_awake`** — dropped by the user when batch 3 was ordered ("我感觉那个没必要").
+  It was the last survivor of the gating instinct v7 exists to reverse: the
+  ruling is that **everyone wakes**, and a bound on how many is a gate wearing a
+  number. Every member reading every line is not the storm — the storm was every
+  member *speaking* — and R1 is what stops the speaking. The one thing it would
+  have bought is a ceiling on concurrent model calls, which is a cost question,
+  not a correctness one; the room's real latency is a member's own turn, and
+  queueing members behind each other would make that worse, not better.

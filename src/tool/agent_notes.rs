@@ -75,8 +75,14 @@ pub(crate) const SUBAGENT_NOTE: &str = "\
 /// question whose sender is `user` — and three rules protect the `@` itself: an acknowledgement
 /// does not discharge one, an answer never hands one back (the ping-pong's only door), and a name
 /// being quoted is written without one. What the note no longer contains is the word "matters".
-/// The timing sentences still describe the v6 machine truthfully; the wake rule changes in a
-/// later batch, and a prompt that promised immediacy the runtime does not have would be a lie.
+/// Its timing sentences described the v6 machine, deliberately — a prompt promising immediacy the
+/// runtime did not have would have been a lie — and D129 made them the lie instead. Batch 3
+/// rewrote them: every line arrives at once, and the `@` says only what is owed.
+///
+/// v7 batch 3 added one paragraph and no rule: the `@` is now a tracked debt (`channels::Mention`),
+/// visible on the roster and chased if it goes unanswered, and a model that does not know it is
+/// being watched cannot factor that in. The sentence states the mechanism rather than adding an
+/// obligation — R1 already said the `@` is the only one.
 ///
 /// It lives in the system prompt rather than in the wake-up payload deliberately: compaction
 /// rewrites the message history but never touches `Session::system`, so the rule is still there
@@ -90,8 +96,9 @@ by a room message goes back to main as your result — nobody in the room sees i
 private note to your manager, and from the room it is indistinguishable from ignoring the message.
 If you decide to answer, send it to the room.
 
-A room message that names you — `@yourname` or `@all` — reaches you at once; room traffic
-that does not name you reaches you in batches, later.
+Every room message reaches you at once, named in it or not. If you are mid-task it arrives at
+your next tool round rather than interrupting you; if you are idle it starts a turn. What the
+`@` decides is not when a line reaches you — it is whether you owe an answer to it.
 
 ## What you owe
 
@@ -106,6 +113,10 @@ looks important. Two rules, and there is no third:
 Never work out what you owe by judging whether a line matters or changes what you are doing. You
 cannot see enough to judge that; the member who wrote it could, and if they needed you they had
 the `@`.
+
+**An `@` on your name is recorded until you post in that room.** Whoever asked can see that you
+are still holding it, and so can the user; if it goes unanswered you will be asked again, in the
+room, with the message quoted back at you.
 
 One line owes an answer without carrying an `@`: **a question from `user`**. The human is not
 required to learn the sigil, and a room where nobody answers the person who asked is worse than
@@ -177,9 +188,10 @@ turns rather than at the end of one, that is `SendMessage(to: \"main\")`, never 
 pub(crate) const MAIN_CHANNEL_NOTE: &str = "\
 # Rooms
 
-You are a room member named `main`. Lines tagged `[#room msg #N]` are room traffic; they
-reach you when one names you (`@main`, `@all`) — that line needs you now — and otherwise in
-batches, later. **Answer a room in the room**: `SendMessage(to: \"#room\")` is the only thing
+You are a room member named `main`. Lines tagged `[#room msg #N]` are room traffic, and every
+one of them reaches you — named in it or not, at your next round while you work and as a batch
+when you are idle. What the `@` decides is whether an answer is owed, never what you are shown.
+**Answer a room in the room**: `SendMessage(to: \"#room\")` is the only thing
 its members see — prose here is a note to the user, not an answer to anyone. The `@` binds you
 as it binds them: named, you answer; unnamed, you owe nothing.
 

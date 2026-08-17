@@ -563,7 +563,9 @@ pub(crate) fn absorb_inbox(
         .iter()
         .filter_map(|item| match item {
             InboxItem::Direct { images, .. } => Some(images.clone()),
-            InboxItem::Channel { .. } | InboxItem::FollowUp { .. } => None,
+            InboxItem::Channel { .. }
+            | InboxItem::FollowUp { .. }
+            | InboxItem::Unanswered { .. } => None,
         })
         .flatten()
         .collect();
@@ -601,6 +603,23 @@ pub(crate) fn absorb_inbox(
                         waited.as_secs()
                     )
                 }
+                InboxItem::Unanswered {
+                    channel,
+                    seq,
+                    from,
+                    excerpt,
+                    round,
+                    waited,
+                } => format!(
+                    "[follow-up {round}/{MAX_FOLLOW_UPS}] {from} named you in \
+                     [#{channel} msg #{seq}] (\"{excerpt}\") {}s ago and you have not \
+                     posted to #{channel} since. An `@` on your name is the one thing \
+                     that owes an answer — answer it in the room now: if you are still \
+                     working, say what you are doing and what you have so far; if you \
+                     have nothing to add, say that. Silence in a room is free only when \
+                     nobody named you.",
+                    waited.as_secs()
+                ),
             })
             .collect::<Vec<_>>()
             .join("\n"),
@@ -2939,7 +2958,6 @@ mod tests {
             from: "zoe".into(),
             text: "the tests pass".into(),
             seq: 3,
-            mentioned: false,
         }]));
     }
 
@@ -3399,18 +3417,20 @@ mod tests {
              reopens the reply storm through a new door (D67)"
         );
         assert!(
-            CHANNEL_NOTE.contains("reaches you at once")
-                && CHANNEL_NOTE.contains("reaches you in batches"),
-            "must state the @-gated wake mechanics (v6) — the model cannot infer that unnamed \
-             room traffic arrives late, and would promise timeliness it does not have"
+            CHANNEL_NOTE.contains("Every room message reaches you at once")
+                && CHANNEL_NOTE.contains("not when a line reaches you"),
+            "must state v7's wake rule and separate it from the `@` — the note carried v6's \
+             \"unnamed traffic arrives later\" until D131, which D129 had already made false, \
+             and a member that believes a line is still in flight has a reason not to answer it"
         );
 
         // Main's half (D119; the narration ban reversed by D123 on the user's
         // ruling): the anchors keep the briefing duty, and its form, in place.
         let main_note = crate::tool::agent_notes::MAIN_CHANNEL_NOTE;
         assert!(
-            main_note.contains("needs you now"),
-            "main must know a line naming it is the timely tier"
+            main_note.contains("every\none of them reaches you"),
+            "main is a member and reads the room whole (v7) — the tier it used to be told about \
+             was the delivery gate D129 deleted"
         );
         assert!(
             main_note.contains("Keep the user posted on their team"),

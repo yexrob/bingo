@@ -251,11 +251,70 @@ pub struct ChannelStatus {
     pub frozen: bool,
 }
 
+/// One `@`, and whether it has been answered (v7 batch 3).
+///
+/// The `@` is the room's only obligation (R1), and until this it was the only
+/// obligation nothing recorded: a direct message has carried a delivery record
+/// since D44, while a mention in a room ran bare. So a member that read a
+/// question and said nothing was indistinguishable from one that had not read it
+/// yet, from one still working on the answer, and from one whose turn had died —
+/// four situations, one appearance, and only one of them fine (D124 was the
+/// fourth, and it took a screenshot to find).
+///
+/// Opened by the `@` and closed by the named member's next post to the same
+/// room. "Substantive" is not judged: **speaking is the answer**, because the
+/// note already says an acknowledgement is not one (R2) and a runtime that
+/// second-guessed the wording would be making the judgement call v7 exists to
+/// remove.
+#[derive(Debug, Clone)]
+pub struct Mention {
+    /// The message that carried the `@`.
+    pub seq: u64,
+    /// Who spent it.
+    pub from: String,
+    /// Who was named — [`ALL_NAME`] for `@all`, which the room owes *one*
+    /// covered answer rather than one answer each (R4).
+    pub to: String,
+    /// When it was posted, in the unix seconds every `at` here is measured in.
+    pub at: u64,
+    /// The post that closed it, if one has.
+    pub answered: Option<u64>,
+}
+
+impl Mention {
+    /// Whether this member's next post settles it: the one named, or anybody
+    /// but the asker when the room at large was.
+    fn settled_by(&self, speaker: &str) -> bool {
+        if self.to == ALL_NAME {
+            speaker != self.from
+        } else {
+            self.to == speaker
+        }
+    }
+}
+
+/// What a member's row can say about one room: how far it has read, and what it
+/// still owes. Both halves already existed and neither was ever shown — the
+/// cursor had exactly one reader (the serial staleness check) and the mention
+/// had none.
+#[derive(Debug, Clone)]
+pub struct MemberStanding {
+    pub room: String,
+    /// Highest sequence this member has taken into a turn.
+    pub read_to: u64,
+    /// The oldest `@` it has not answered.
+    pub owes: Option<Mention>,
+}
+
 struct Channel {
     members: Vec<String>,
     mode: ChannelMode,
     seq: u64,
     log: Vec<ChannelMessage>,
+    /// Every `@` posted here, open and closed (v7 batch 3). Kept whole rather
+    /// than pruned on close: the closed ones are the record of who answered
+    /// what, which is the same question the open ones ask.
+    mentions: Vec<Mention>,
     /// Highest channel sequence each member has seen (the cursor for serial commit checks).
     seen: HashMap<String, u64>,
     /// Per-member post count (per_agent budget).
@@ -486,6 +545,7 @@ impl ChannelRegistry {
                     mode,
                     seq: 0,
                     log: Vec::new(),
+                    mentions: Vec::new(),
                     seen: HashMap::new(),
                     sent: HashMap::new(),
                     frozen: false,
@@ -668,9 +728,37 @@ impl ChannelRegistry {
             self.sync_channel_message(name, &msg);
             ch.seen.insert(from.to_string(), ch.seq);
             *ch.sent.entry(from.to_string()).or_insert(0) += 1;
+            // Settle before opening: speaking is what answers an `@`, and this
+            // post is speech. Closing first also keeps a member that answers and
+            // asks in one breath from settling its own new question.
+            for owed in ch.mentions.iter_mut() {
+                if owed.answered.is_none() && owed.seq < msg.seq && owed.settled_by(from) {
+                    owed.answered = Some(msg.seq);
+                }
+            }
             let tokens = mention_tokens(text);
             let at_all = tokens.iter().any(|t| t == ALL_NAME);
             let main_mentioned = at_all || tokens.iter().any(|t| t == MAIN_NAME);
+            // One debt per `@`, and `@all` is one debt against the room rather
+            // than one per member: R4 owes it a single covered answer.
+            let named: Vec<String> = if at_all {
+                vec![ALL_NAME.to_string()]
+            } else {
+                ch.members
+                    .iter()
+                    .filter(|m| m.as_str() != from && tokens.iter().any(|t| *t == m.to_lowercase()))
+                    .cloned()
+                    .collect()
+            };
+            for to in named {
+                ch.mentions.push(Mention {
+                    seq: msg.seq,
+                    from: from.to_string(),
+                    to,
+                    at: msg.at,
+                    answered: None,
+                });
+            }
             let deliveries: Vec<RoomDelivery> = ch
                 .members
                 .iter()
@@ -706,6 +794,71 @@ impl ChannelRegistry {
             inner.main_mail.push(line);
         }
         Ok(outcome)
+    }
+
+    /// One `@`, if it is still open — the chase's whole question, asked of the
+    /// same record the roster reads, so a nudge and a row can never disagree.
+    pub fn open_mention(&self, name: &str, seq: u64, to: &str) -> Option<Mention> {
+        let inner = self.lock();
+        inner
+            .channels
+            .get(name)?
+            .mentions
+            .iter()
+            .find(|m| m.seq == seq && m.to == to && m.answered.is_none())
+            .cloned()
+    }
+
+    /// Every `@` this room is still waiting on, oldest first (v7 batch 3).
+    ///
+    /// The room's own answer to "is anybody blocked on anybody here", which is
+    /// what its roster row and its page header say.
+    pub fn owed_in(&self, name: &str) -> Vec<Mention> {
+        let inner = self.lock();
+        let Some(ch) = inner.channels.get(name) else {
+            return Vec::new();
+        };
+        ch.mentions
+            .iter()
+            .filter(|m| m.answered.is_none())
+            .cloned()
+            .collect()
+    }
+
+    /// Where one member stands in every room it belongs to: how far it has
+    /// read, and the oldest `@` it has not answered.
+    ///
+    /// Rooms it owes nothing in and has read to the end of are left out — a row
+    /// with nothing to report should report nothing.
+    pub fn standing_of(&self, member: &str) -> Vec<MemberStanding> {
+        let inner = self.lock();
+        let mut out: Vec<MemberStanding> = inner
+            .channels
+            .iter()
+            .filter(|(_, ch)| ch.members.iter().any(|m| m == member))
+            .filter_map(|(name, ch)| {
+                let read_to = ch.seen.get(member).copied().unwrap_or(0);
+                let owes = ch
+                    .mentions
+                    .iter()
+                    .find(|m| m.answered.is_none() && m.settled_by(member))
+                    .cloned();
+                (owes.is_some() || read_to < ch.seq).then(|| MemberStanding {
+                    room: name.clone(),
+                    read_to,
+                    owes,
+                })
+            })
+            .collect();
+        // A HashMap has no order and a status row must not flicker between
+        // frames; what a member owes comes before what it has merely not read.
+        out.sort_by(|a, b| {
+            b.owes
+                .is_some()
+                .cmp(&a.owes.is_some())
+                .then_with(|| a.room.cmp(&b.room))
+        });
+        out
     }
 
     /// Mark the member's inbox as digested up to seq (its running turn was injected with channel messages up to seq).
@@ -1362,5 +1515,154 @@ mod tests {
         );
         assert_eq!(payload, "1. a: first line");
         assert!(reg.row_snapshot("nope").is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // The `@` ledger (v7 batch 3)
+    // -----------------------------------------------------------------------
+
+    /// The debt the `@` opens, and the post that settles it. Before this a
+    /// mention in a room ran bare: the runtime recorded who was named nowhere,
+    /// so a member that read a question and said nothing looked exactly like one
+    /// that had not read it yet.
+    #[test]
+    fn an_at_opens_a_debt_and_speaking_settles_it() {
+        let reg = registry();
+        reg.create("build", vec!["dev".into(), "qa".into()], ChannelMode::Free)
+            .unwrap_or_else(|e| panic!("{e}"));
+        reg.post("qa", "build", "@dev is the lexer done?")
+            .unwrap_or_else(|e| panic!("{e}"));
+
+        let owed = reg.owed_in("build");
+        assert_eq!(owed.len(), 1, "one `@`, one debt: {owed:?}");
+        assert_eq!((owed[0].to.as_str(), owed[0].from.as_str()), ("dev", "qa"));
+
+        // Somebody else speaking is not an answer to a named `@`.
+        reg.post("qa", "build", "no rush")
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(
+            reg.owed_in("build").len(),
+            1,
+            "only the named member closes it"
+        );
+
+        reg.post("dev", "build", "not yet — two cases left")
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert!(reg.owed_in("build").is_empty(), "speaking is the answer");
+    }
+
+    /// R4: `@all` asks the room, not each member, so it is one debt and the
+    /// first answer from anybody but the asker covers it.
+    #[test]
+    fn at_all_is_one_debt_the_room_owes_together() {
+        let reg = registry();
+        reg.create(
+            "build",
+            vec!["dev".into(), "qa".into(), "ops".into()],
+            ChannelMode::Free,
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        reg.post("dev", "build", "@all who owns the release?")
+            .unwrap_or_else(|e| panic!("{e}"));
+        let owed = reg.owed_in("build");
+        assert_eq!(owed.len(), 1, "one debt, not one per member: {owed:?}");
+        assert_eq!(owed[0].to, ALL_NAME);
+
+        // The asker talking again does not answer its own question.
+        reg.post("dev", "build", "anyone?")
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(reg.owed_in("build").len(), 1);
+
+        reg.post("ops", "build", "I do")
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert!(
+            reg.owed_in("build").is_empty(),
+            "one covered answer is enough"
+        );
+    }
+
+    /// A member that answers and asks in the same breath settles the old debt
+    /// and opens the new one — the close pass runs before the open pass, so a
+    /// post can never settle the question it is itself asking.
+    #[test]
+    fn answering_with_a_question_settles_one_and_opens_another() {
+        let reg = registry();
+        reg.create("build", vec!["dev".into(), "qa".into()], ChannelMode::Free)
+            .unwrap_or_else(|e| panic!("{e}"));
+        reg.post("qa", "build", "@dev is it done?")
+            .unwrap_or_else(|e| panic!("{e}"));
+        reg.post("dev", "build", "almost — @qa which fixture?")
+            .unwrap_or_else(|e| panic!("{e}"));
+        let owed = reg.owed_in("build");
+        assert_eq!(
+            owed.len(),
+            1,
+            "the answer closed one and asked one: {owed:?}"
+        );
+        assert_eq!(owed[0].to, "qa");
+    }
+
+    /// What a member's row says, and the half that separates "has not looked
+    /// yet" from "looked and said nothing" — the two situations that were
+    /// indistinguishable before the cursor was ever shown.
+    #[test]
+    fn a_members_standing_carries_both_the_debt_and_the_cursor() {
+        let reg = registry();
+        reg.create("build", vec!["dev".into(), "qa".into()], ChannelMode::Free)
+            .unwrap_or_else(|e| panic!("{e}"));
+        reg.post("qa", "build", "@dev the suite is red")
+            .unwrap_or_else(|e| panic!("{e}"));
+
+        let standing = reg.standing_of("dev");
+        assert_eq!(standing.len(), 1);
+        assert_eq!(standing[0].room, "build");
+        assert_eq!(standing[0].read_to, 0, "not in dev's context yet");
+        assert_eq!(standing[0].owes.as_ref().map(|m| m.seq), Some(1));
+
+        reg.mark_seen("dev", "build", 1);
+        let standing = reg.standing_of("dev");
+        assert_eq!(standing[0].read_to, 1, "read it — and still owes it");
+        assert!(standing[0].owes.is_some(), "reading is not answering");
+
+        // qa asked and is owed nothing; it has read its own post, so it has
+        // nothing to report at all.
+        assert!(
+            reg.standing_of("qa").is_empty(),
+            "a member with no debt and nothing unread reports nothing"
+        );
+    }
+
+    /// The chase asks the same record the roster reads, so a nudge and a row
+    /// can never disagree about whether an answer is still owed.
+    #[test]
+    fn the_chase_and_the_row_read_one_record() {
+        let reg = registry();
+        reg.create("build", vec!["dev".into(), "qa".into()], ChannelMode::Free)
+            .unwrap_or_else(|e| panic!("{e}"));
+        reg.post("qa", "build", "@dev status?")
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert!(reg.open_mention("build", 1, "dev").is_some());
+        assert!(
+            reg.open_mention("build", 1, "qa").is_none(),
+            "the debt is the named member's, not the asker's"
+        );
+        reg.post("dev", "build", "green")
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert!(
+            reg.open_mention("build", 1, "dev").is_none(),
+            "answered — the chase stops here"
+        );
+    }
+
+    /// A name that is only being reported on is not a summons (R5), so it opens
+    /// no debt: the sigil is what the ledger keys on, and prose is not.
+    #[test]
+    fn a_name_without_the_sigil_owes_nothing() {
+        let reg = registry();
+        reg.create("build", vec!["dev".into(), "qa".into()], ChannelMode::Free)
+            .unwrap_or_else(|e| panic!("{e}"));
+        reg.post("qa", "build", "dev fixed the lexer this morning")
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert!(reg.owed_in("build").is_empty());
     }
 }

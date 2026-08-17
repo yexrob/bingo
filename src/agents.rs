@@ -339,10 +339,6 @@ pub enum InboxItem {
         from: String,
         text: String,
         seq: u64,
-        /// `@member` or `@all` named this member: v6 read it as "wake now",
-        /// v7 as "an answer is owed" — the wake is unconditional either way,
-        /// and the bit is what the obligation ledger will key on.
-        mentioned: bool,
     },
     /// Automatic chase for a direct message main never got an answer to. It carries no new
     /// instruction — only the fact that the sender is still waiting.
@@ -355,6 +351,20 @@ pub enum InboxItem {
         /// Whether the message had already been read into a prompt. The two silences need
         /// different words: nobody picked it up, versus you read it and said nothing.
         delivered: bool,
+    },
+    /// The room half of the same chase (v7 batch 3). An `@` is the only thing a
+    /// room post can owe (R1), and until the ledger it was the only obligation
+    /// nothing followed up on — a direct message has been chased since D44 while
+    /// a mention in a room ran bare.
+    Unanswered {
+        channel: String,
+        /// The post that named this member.
+        seq: u64,
+        from: String,
+        excerpt: String,
+        /// 1-based, out of MAX_FOLLOW_UPS.
+        round: u8,
+        waited: Duration,
     },
 }
 
@@ -995,10 +1005,10 @@ impl AgentRegistry {
         result
     }
 
-    /// Claim every idle instance whose waiting mail passes the wake gate (v6):
-    /// direct commands and mentions at once, unmentioned room lines only in
-    /// bulk or on age. The caller starts each returned run; draining the inbox
-    /// in one pass makes the batch boundary the receiver's actual claim point.
+    /// Claim every idle instance holding mail (v7): a non-empty inbox wakes its
+    /// holder and nothing else does. The caller starts each returned run;
+    /// draining the inbox in one pass makes the batch boundary the receiver's
+    /// actual claim point.
     pub fn flush_pending(&self) -> Vec<Wake> {
         let mut woken = Vec::new();
         {
@@ -1208,13 +1218,6 @@ impl AgentRegistry {
     /// Queue a channel message. A stopped member is silently skipped — a broadcast doesn't fail
     /// because one member stopped. Returns whether it was accepted.
     pub fn deposit(&self, name: &str, item: InboxItem) -> bool {
-        let mentioned = matches!(
-            item,
-            InboxItem::Channel {
-                mentioned: true,
-                ..
-            }
-        );
         {
             let mut inner = self.lock();
             let Some(entry) = inner.get_mut(name) else {
@@ -1226,12 +1229,11 @@ impl AgentRegistry {
             entry.last_active = Instant::now();
             entry.inbox.push(item);
         }
-        if mentioned {
-            // A mention interrupts the receiver's waits the way a direct
-            // message does; unmentioned room lines keep to the batch clock and
-            // must not pulse a running member awake.
-            self.notify_inbox();
-        }
+        // Every deposit pulses (v7). v6 pulsed only for a mention, because an
+        // unmentioned line was on a batch clock it must not jump; D129 deleted
+        // that clock, and the leftover condition was the last place the runtime
+        // still read the `@` as a wake bit rather than as an obligation.
+        self.notify_inbox();
         true
     }
 
@@ -1255,7 +1257,9 @@ impl AgentRegistry {
                         InboxItem::Direct { from, text, .. } => Some((from.clone(), text.clone())),
                         // A follow-up is the harness chasing an acknowledgement, not something
                         // the sender wrote — rendering it as their pending message would lie.
-                        InboxItem::Channel { .. } | InboxItem::FollowUp { .. } => None,
+                        InboxItem::Channel { .. }
+                        | InboxItem::FollowUp { .. }
+                        | InboxItem::Unanswered { .. } => None,
                     })
                     .collect()
             })
@@ -2112,13 +2116,12 @@ mod tests {
         );
     }
 
-    fn room_line(from: &str, seq: u64, mentioned: bool) -> InboxItem {
+    fn room_line(from: &str, seq: u64) -> InboxItem {
         InboxItem::Channel {
             channel: "t".into(),
             from: from.into(),
             text: "report".into(),
             seq,
-            mentioned,
         }
     }
 
@@ -2133,7 +2136,7 @@ mod tests {
             Vec::new(),
             None,
         );
-        assert!(reg.deposit("w", room_line("a", 3, false)));
+        assert!(reg.deposit("w", room_line("a", 3)));
         let items = reg
             .finish("w", Vec::new(), 1)
             .unwrap_or_else(|| panic!("continue"))
@@ -2154,13 +2157,13 @@ mod tests {
             reg.finish("w", Vec::new(), 1).is_none(),
             "empty inbox parks"
         );
-        assert!(reg.deposit("w", room_line("b", 4, false)));
+        assert!(reg.deposit("w", room_line("b", 4)));
         let woken = reg.flush_pending();
         assert_eq!(woken.len(), 1, "one unmentioned line is enough");
         assert_eq!(woken[0].items.len(), 1);
         assert!(reg.finish("w", Vec::new(), 1).is_none());
-        assert!(reg.deposit("w", room_line("b", 5, false)));
-        assert!(reg.deposit("w", room_line("b", 6, true)));
+        assert!(reg.deposit("w", room_line("b", 5)));
+        assert!(reg.deposit("w", room_line("b", 6)));
         let woken = reg.flush_pending();
         assert_eq!(woken.len(), 1);
         assert_eq!(
@@ -2169,7 +2172,7 @@ mod tests {
             "whatever is waiting drains together, in order"
         );
         let _ = reg.stop("w");
-        let dropped = room_line("c", 6, false);
+        let dropped = room_line("c", 6);
         assert!(
             !reg.deposit("w", dropped.clone()),
             "stopped members do not receive"
@@ -2195,7 +2198,7 @@ mod tests {
             "an empty inbox never wakes: no polling, and a quiet room is free"
         );
 
-        assert!(reg.deposit("w", room_line("a", 1, false)));
+        assert!(reg.deposit("w", room_line("a", 1)));
         let woken = reg.flush_pending();
         assert_eq!(woken.len(), 1, "one unmentioned line wakes on its own");
         assert_eq!(woken[0].items.len(), 1);
@@ -2206,7 +2209,7 @@ mod tests {
 
         // A running member is not woken twice: what lands while it works is
         // absorbed at its next tool boundary instead (`take_running`).
-        assert!(reg.deposit("w", room_line("a", 2, false)));
+        assert!(reg.deposit("w", room_line("a", 2)));
         assert!(
             reg.flush_pending().is_empty(),
             "a running member takes its mail at the tool boundary, not by waking"
