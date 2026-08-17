@@ -1881,8 +1881,10 @@ impl Chat {
             UiEvent::ToolDone(done) => {
                 // The finished call's own result row takes over from the tail. A
                 // sample still in flight when the command exited would otherwise
-                // paint output under a row that already reported it.
-                if done.name == "Bash" {
+                // paint output under a row that already reported it. The tail is
+                // the console's one foreground command, so only main's calls
+                // clear it — an instance running Bash used to blank it (D134).
+                if done.name == "Bash" && to.is_main() {
                     self.bash_tail = None;
                 }
                 // A tool that handed the model a picture hands the user one too
@@ -1959,7 +1961,9 @@ impl Chat {
             }
             UiEvent::TurnEnd => {
                 conv.busy = false;
-                self.bash_tail = None;
+                if to.is_main() {
+                    self.bash_tail = None;
+                }
                 // The `settle` blink starts here (D87): the completion row keeps
                 // the accent for one 120ms window, and the message it belongs to
                 // stays live for exactly that long, so the row freezes into
@@ -2048,15 +2052,31 @@ impl Chat {
                             keep.iter().map(|&k| conv.messages[i].group_of[k]).collect();
                     }
                     for hint in &mut conv.messages[i].activities {
-                        if let ActivityKind::Thinking(t) = &mut hint.kind
-                            && t.state == ThinkingState::Running
-                        {
-                            t.state = ThinkingState::Done;
-                            t.duration_ms = self
-                                .tick
-                                .saturating_sub(t.start_tick)
-                                .saturating_mul(crate::tui::motion::TICK_MS);
-                            hint.expanded = false;
+                        match &mut hint.kind {
+                            ActivityKind::Thinking(t) if t.state == ThinkingState::Running => {
+                                t.state = ThinkingState::Done;
+                                t.duration_ms = self
+                                    .tick
+                                    .saturating_sub(t.start_tick)
+                                    .saturating_mul(crate::tui::motion::TICK_MS);
+                                hint.expanded = false;
+                            }
+                            // A call still running when the turn ends never got a
+                            // `ToolDone`: the run was aborted under it. Left as it
+                            // was it reads `Running…` for the rest of the session
+                            // and pins the flush cursor with it, because
+                            // `message_static_settled` refuses a running activity
+                            // and settlement is prefix-monotone — an unbounded
+                            // redrawable tail on that page. Before D134 a stop was
+                            // survivable because the page re-read the committed
+                            // history; the live store is authoritative now and has
+                            // to correct itself.
+                            ActivityKind::Tool(call)
+                                if call.status == crate::tui::activities::ToolStatus::Running =>
+                            {
+                                call.status = crate::tui::activities::ToolStatus::Interrupted;
+                            }
+                            _ => {}
                         }
                     }
                     // Text is settled → asynchronously load its images (reply with ImageReady when done).
@@ -2125,7 +2145,7 @@ impl Chat {
                     crate::tui::conv::inbound_messages(&name, &text, at, intake, &mut |t| {
                         self.render_thinking(t)
                     });
-                conv.messages.extend(arrived);
+                conv.absorb_inbound(arrived, self.tick);
                 self.dirty = true;
             }
             // Console-wide events never reach here: `console_event` answers them

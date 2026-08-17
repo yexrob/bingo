@@ -2399,3 +2399,145 @@ fn a_working_agents_page_says_it_is_working() {
          never described on somebody else's page"
     );
 }
+
+// ---------------------------------------------------------------------------
+// G. what D134's first review caught (D134a)
+// ---------------------------------------------------------------------------
+
+/// The order the runtime actually produces is `TurnStart` then `Inbound`:
+/// `TurnBrackets::open` fires before `run_query` hands the prompt over. Appended,
+/// that renders every live-watched agent turn as answer-above-question — and
+/// write-once banks the inversion into scrollback for good.
+#[test]
+fn the_question_lands_above_the_answer_it_caused() {
+    let mut chat = test_chat();
+    seed_agent(&chat, "scout");
+    let scout = crate::ui::ConvKey::Agent("scout".into());
+    chat.switch_to(Some(crate::tui::zoom::ZoomTarget::Agent("scout".into())));
+    chat.apply_event_to(scout.clone(), UiEvent::TurnStart);
+    chat.apply_event_to(scout.clone(), UiEvent::Inbound("map the parser".into()));
+    chat.apply_event_to(
+        scout.clone(),
+        UiEvent::TextDelta("the lexer owns it".into()),
+    );
+    chat.apply_event_to(scout.clone(), UiEvent::TurnEnd);
+
+    let rows = main_rows(&mut chat);
+    let task = rows
+        .iter()
+        .position(|r| r.contains("map the parser"))
+        .expect("the task it was dispatched with");
+    let reply = rows
+        .iter()
+        .position(|r| r.contains("the lexer owns it"))
+        .expect("what it answered");
+    assert!(task < reply, "question before answer: {rows:?}");
+}
+
+/// Mail absorbed at a tool barrier arrives mid-turn, and belongs below what has
+/// been said and above what comes next — the shape steering already gives main.
+/// Appended without opening a continuation, the turn's next sentence continues
+/// into the message *above* the mail it is answering.
+#[test]
+fn mail_absorbed_mid_turn_splits_the_run_around_it() {
+    let mut chat = test_chat();
+    seed_agent(&chat, "scout");
+    let scout = crate::ui::ConvKey::Agent("scout".into());
+    chat.switch_to(Some(crate::tui::zoom::ZoomTarget::Agent("scout".into())));
+    chat.apply_event_to(scout.clone(), UiEvent::TurnStart);
+    chat.apply_event_to(scout.clone(), UiEvent::Inbound("map the parser".into()));
+    chat.apply_event_to(
+        scout.clone(),
+        UiEvent::TextDelta("reading the lexer".into()),
+    );
+    chat.apply_event_to(
+        scout.clone(),
+        UiEvent::Inbound("also check the parser".into()),
+    );
+    chat.apply_event_to(scout.clone(), UiEvent::TextDelta("both are fine".into()));
+    chat.apply_event_to(scout.clone(), UiEvent::TurnEnd);
+
+    let rows = main_rows(&mut chat);
+    let find = |needle: &str| {
+        rows.iter()
+            .position(|r| r.contains(needle))
+            .unwrap_or_else(|| panic!("{needle} missing from {rows:?}"))
+    };
+    assert!(find("reading the lexer") < find("also check the parser"));
+    assert!(find("also check the parser") < find("both are fine"));
+}
+
+/// A call still running when the turn ends never got a `ToolDone`: the run was
+/// aborted under it. Left as it was, the row reads `Running…` for the rest of
+/// the session — and pins the flush cursor with it, because a running activity
+/// never settles and settlement is prefix-monotone.
+#[test]
+fn a_call_the_abort_caught_stops_reading_as_running() {
+    let mut chat = test_chat();
+    seed_agent(&chat, "scout");
+    let scout = crate::ui::ConvKey::Agent("scout".into());
+    chat.switch_to(Some(crate::tui::zoom::ZoomTarget::Agent("scout".into())));
+    chat.apply_event_to(scout.clone(), UiEvent::TurnStart);
+    chat.apply_event_to(
+        scout.clone(),
+        UiEvent::ToolStart {
+            name: "WebFetch".into(),
+        },
+    );
+    chat.apply_event_to(
+        scout.clone(),
+        UiEvent::ToolReady {
+            tool_call_id: "t1".into(),
+            name: "WebFetch".into(),
+            input: serde_json::json!({"url": "https://x.dev/a"}),
+            standalone: false,
+        },
+    );
+    // The abort path: no ToolDone ever arrives, the brackets close anyway.
+    chat.apply_event_to(scout.clone(), UiEvent::TurnEnd);
+
+    let rows = main_rows(&mut chat);
+    assert!(
+        rows.iter().any(|r| r.contains("Interrupted")),
+        "the row says what happened to it: {rows:?}"
+    );
+    assert!(
+        !rows.iter().any(|r| r.contains("Running")),
+        "and stops claiming to be working: {rows:?}"
+    );
+}
+
+/// The live tail under a `!` command is the console's one foreground shell, not
+/// any conversation's. An instance running Bash — or merely ending a turn —
+/// used to blank it under the user's own running command.
+#[test]
+fn an_instances_bash_leaves_the_consoles_tail_alone() {
+    let mut chat = test_chat();
+    seed_agent(&chat, "scout");
+    let scout = crate::ui::ConvKey::Agent("scout".into());
+    chat.bash_tail = Some(crate::live::LiveTail {
+        lines: vec!["building…".to_string()],
+        total_lines: 1,
+    });
+    chat.apply_event_to(
+        scout.clone(),
+        UiEvent::ToolDone(crate::query::ToolCallDone {
+            tool_call_id: "b1".into(),
+            name: "Bash".into(),
+            summary: "ls".into(),
+            output: "a\nb".into(),
+            status: crate::query::ToolCallStatus::Done,
+            diff: None,
+            duration_ms: 3,
+        }),
+    );
+    assert!(
+        chat.bash_tail.is_some(),
+        "an instance's Bash is not the console's"
+    );
+    chat.apply_event_to(scout, UiEvent::TurnEnd);
+    assert!(
+        chat.bash_tail.is_some(),
+        "nor is an instance's turn ending a reason to clear it"
+    );
+}

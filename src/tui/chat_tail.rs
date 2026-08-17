@@ -785,38 +785,7 @@ impl super::Chat {
     /// open a fresh one, the way a turn boundary would: the transcript then reads in clock order.
     pub(crate) fn open_continuation_message(&mut self) {
         let tick = self.tick;
-        let main = self.main_conv();
-        let Some(prev) = main.stream_msg else {
-            return;
-        };
-        // Tool rows registered before the answer index into `prev`'s activities
-        // (`pending_tools` holds those indices), so a call still in flight pins the stream here.
-        if !main.pending_tools.is_empty() {
-            return;
-        }
-        // AskUserQuestion is a hidden tool: `ToolStart` returns before closing the running
-        // thinking block, and a block left running would keep `prev` from ever settling
-        // (`message_static_settled`) — with it the whole flush prefix, for the rest of the session.
-        main.close_running_thinking(prev, tick);
-        // The buffer belongs to the block just closed; carried over, the next reasoning delta
-        // would try to merge into a block the new message does not have, and be dropped.
-        main.thinking_buf.clear();
-        main.thinking_seg_open = false;
-        main.messages.push(UiMessage {
-            speaker: None,
-            role: Role::Assistant,
-            text: String::new(),
-            at: crate::channels::now_unix(),
-            activities: Vec::new(),
-            insert_points: Vec::new(),
-            groups: Vec::new(),
-            group_of: Vec::new(),
-        });
-        main.stream_msg = Some(main.messages.len() - 1);
-        main.stream_attempt_checkpoint = main
-            .stream_msg
-            .and_then(|index| main.messages.get(index).cloned());
-        main.continuation_msg = main.stream_msg;
+        self.main_conv().open_continuation(tick);
     }
 
     /// Keyboard events. Real-clock version; semantics in [`Chat::on_key_at`].

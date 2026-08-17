@@ -5968,3 +5968,58 @@ second input path retires with them.
 orchestration; it completed and passed all five gates but timed out before writing this record and
 bumping `AGENTS.md`. Both were written here, after reading the diff — a record nobody read the code
 for would be the wrong kind of record. It was then reviewed adversarially by Fable 5 (xhigh).
+
+## D134a — what the review caught
+
+D134's review (Fable 5, xhigh) found one blocking defect and three real ones. The
+blocking one is worth the space, because it is the same class D134 exists to
+close and it walked straight back in through the new door.
+
+**The answer rendered above the question.** The runtime's event order is fixed by
+construction: `TurnBrackets::open` sends `TurnStart` before `run_query` hands the
+prompt to `on_inbound`. So by the time an agent's intake arrives, `TurnStart` has
+already opened the turn's own message — and the handler appended. Every agent
+turn watched live read reply-first, and because it is the *live* half, write-once
+banked the inversion into scrollback permanently. Re-read from history it came
+out in the right order, which is exactly the live-versus-settled drift D130 and
+D132 were spent on.
+
+The suite was green because the new tests asserted the inbound lines were
+*present* and never that they were *in order*. A reviewer reproduced it with a
+scratch render rather than reasoning about it, which is why it was found.
+
+`Conversation::absorb_inbound` now decides by what the turn has said:
+
+- **Nothing yet** — splice above the open message, shifting `stream_msg` and
+  `continuation_msg`. "Nothing yet" has to count the placeholder reasoning block
+  `TurnStart` opens, or the mail lands under an empty row that renders above the
+  question anyway. (`pending_tools` holds *activity* indices inside one message
+  and is untouched by a message splice; `stream_attempt_checkpoint` is a clone,
+  not an index.)
+- **Something already** — mail absorbed at a tool barrier belongs below what was
+  said and above what comes next, so append and open a continuation. That is the
+  shape `absorb_steered` has given main since D83; `open_continuation_message`
+  moved onto `Conversation` and both paths call the one implementation.
+
+**Three more, all of them D134 making a console-wide assumption reachable from
+every conversation:**
+
+- A call still running when a turn ends never got a `ToolDone` — the run was
+  aborted under it. It read `Running…` for the rest of the session *and pinned
+  the flush cursor with it*, because `message_static_settled` refuses a running
+  activity and settlement is prefix-monotone: an unbounded redrawable tail on
+  that page. Before D134 a stop was survivable because the page re-read the
+  committed history and D130's rule gave `Interrupted`; the live store is
+  authoritative now and has to correct itself. `TurnEnd` closes running tool
+  calls as `Interrupted`, beside the running thinking blocks it already closed.
+- `bash_tail` is the console's one foreground `!` command. Its two clears were
+  written when only main could send those events; an instance running Bash, or
+  merely ending a turn, blanked the tail under the user's own running command.
+  Both gate on `is_main` now.
+
+**Left open, deliberately, and named here so it is not lost:** the cold-start
+race (`open_conversation` walks the registry at page-open time without draining
+the channel first, so a turn committed to history and still queued as events can
+render twice, permanently) and the loss of the pending/in-flight echo for
+main-originated sends. Both need a ruling rather than a patch; D135 is where the
+input paths merge and is the honest place for them.

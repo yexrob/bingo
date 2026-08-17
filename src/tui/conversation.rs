@@ -151,6 +151,94 @@ impl Conversation {
     }
 
     /// A tool call, message text, or a mid-turn answer all end the current reasoning segment.
+    /// Open a fresh streaming message under whatever the turn has already said.
+    ///
+    /// Its one caller used to be main's steering (D83) and it lived on `Chat`;
+    /// it is a fact about a transcript, not about the console, and D134 gave
+    /// every conversation the same shape of mid-turn arrival.
+    pub(crate) fn open_continuation(&mut self, tick: u64) {
+        let Some(prev) = self.stream_msg else {
+            return;
+        };
+        // Tool rows registered before the answer index into `prev`'s activities
+        // (`pending_tools` holds those indices), so a call still in flight pins the stream here.
+        if !self.pending_tools.is_empty() {
+            return;
+        }
+        // AskUserQuestion is a hidden tool: `ToolStart` returns before closing the running
+        // thinking block, and a block left running would keep `prev` from ever settling
+        // (`message_static_settled`) — with it the whole flush prefix, for the rest of the session.
+        self.close_running_thinking(prev, tick);
+        // The buffer belongs to the block just closed; carried over, the next reasoning delta
+        // would try to merge into a block the new message does not have, and be dropped.
+        self.thinking_buf.clear();
+        self.thinking_seg_open = false;
+        self.messages.push(crate::tui::chat::UiMessage {
+            speaker: None,
+            role: crate::tui::chat::Role::Assistant,
+            text: String::new(),
+            at: crate::channels::now_unix(),
+            activities: Vec::new(),
+            insert_points: Vec::new(),
+            groups: Vec::new(),
+            group_of: Vec::new(),
+        });
+        self.stream_msg = Some(self.messages.len() - 1);
+        self.stream_attempt_checkpoint = self
+            .stream_msg
+            .and_then(|index| self.messages.get(index).cloned());
+        self.continuation_msg = self.stream_msg;
+    }
+
+    /// File prose that arrived from outside this conversation's own turn — the
+    /// task an instance was dispatched with, the mail a continuation absorbed.
+    ///
+    /// Where it goes depends on what the turn has said, and appending is wrong
+    /// in the commonest case. `TurnStart` opens the turn's message *before* the
+    /// prompt that caused it arrives, so at intake the mail belongs above a
+    /// message that already exists and is still empty; appended, every agent
+    /// turn watched live renders the answer above the question — and write-once
+    /// banks that inversion into scrollback for good. Mid-turn it belongs below
+    /// what has been said and above what comes next, which is the shape
+    /// steering already gives main.
+    pub(crate) fn absorb_inbound(&mut self, arrived: Vec<crate::tui::chat::UiMessage>, tick: u64) {
+        if arrived.is_empty() {
+            return;
+        }
+        // "Said nothing yet" has to count the placeholder reasoning block
+        // `TurnStart` opens: it is scaffolding the turn removes again if nothing
+        // streams into it, and reading it as content puts the mail below an
+        // empty row that then renders above the question anyway.
+        let opened_but_silent = self.stream_msg.is_some_and(|at| {
+            self.messages.get(at).is_some_and(|msg| {
+                msg.text.is_empty()
+                    && msg.activities.iter().all(|activity| {
+                        matches!(
+                            activity.kind,
+                            crate::tui::activities::ActivityKind::Thinking(_)
+                        ) && activity.content.is_empty()
+                    })
+            })
+        });
+        if opened_but_silent {
+            let Some(at) = self.stream_msg else { return };
+            let count = arrived.len();
+            self.messages.splice(at..at, arrived);
+            // Message indices, shifted by the splice. `pending_tools` holds
+            // *activity* indices inside one message and is untouched;
+            // `stream_attempt_checkpoint` is a clone, not an index.
+            self.stream_msg = Some(at + count);
+            self.continuation_msg = self
+                .continuation_msg
+                .map(|i| if i >= at { i + count } else { i });
+            return;
+        }
+        self.messages.extend(arrived);
+        if self.stream_msg.is_some() {
+            self.open_continuation(tick);
+        }
+    }
+
     pub(crate) fn close_running_thinking(&mut self, i: usize, tick: u64) {
         for hint in &mut self.messages[i].activities {
             if let ActivityKind::Thinking(t) = &mut hint.kind
