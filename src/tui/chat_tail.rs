@@ -1185,7 +1185,10 @@ impl super::Chat {
             // key on an agent's page must not interrupt a turn the user is
             // not even looking at. Ctrl+C keeps the unconditional interrupt.
             EscLayer::Interrupt => self.conv.busy && self.active.is_main(),
-            EscLayer::BashMode => self.bash_mode && self.input.is_empty() && self.active.is_main(),
+            // Shell mode is the console's and outlives a page turn (D135), so
+            // the key that leaves it does too: a mode you turned on is a mode
+            // you close before the page under it closes.
+            EscLayer::BashMode => self.bash_mode && self.input.is_empty(),
             EscLayer::ClearInput => !self.input.is_empty(),
             EscLayer::AwayHome => !self.active.is_main(),
         }
@@ -2811,7 +2814,12 @@ impl super::Chat {
         }
         // Slash command output (/help /status /compact etc.): transient hints — rendered after messages and
         // above the input, **never settled or flushed**, auto-dismissed after the tick timeout (SLASH_OUTPUT_TTL).
-        if self.active.is_main() && !self.slash_lines.is_empty() {
+        //
+        // On every page since D135. The three tiers are the console's answer to
+        // the console's own commands, and those run wherever the screen is —
+        // suppressing them here was the display half of the split `submit`, and
+        // it would now swallow the answer to a command the user just ran.
+        if !self.slash_lines.is_empty() {
             blocks.push(Block::transient(El::Lines(
                 self.slash_lines
                     .iter()
@@ -2820,7 +2828,7 @@ impl super::Chat {
             )));
         }
         // Error/usage rows (G12/G13): longer TTL, error color, clear on the next input.
-        if self.active.is_main() && !self.slash_error_lines.is_empty() {
+        if !self.slash_error_lines.is_empty() {
             blocks.push(Block::transient(El::Lines(
                 self.slash_error_lines
                     .iter()
@@ -2830,7 +2838,7 @@ impl super::Chat {
         }
         // Informational output (/help /status …): persists until the next
         // input/Esc; never settles into scrollback.
-        if self.active.is_main() && !self.slash_info_lines.is_empty() {
+        if !self.slash_info_lines.is_empty() {
             blocks.push(Block::transient(El::Lines(
                 self.slash_info_lines
                     .iter()

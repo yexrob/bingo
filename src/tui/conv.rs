@@ -364,7 +364,6 @@ impl Chat {
         self.scroll = 0;
         self.auto_scroll = true;
         self.doc = crate::tui::statics::layout(Vec::new());
-        self.bash_mode = false;
         self.page_turn = true;
         self.force_redraw = true;
         self.dirty = true;

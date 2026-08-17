@@ -7,12 +7,15 @@
 //! page is drawn by the transcript's own pipeline and banks into the
 //! terminal's own scrollback ([`crate::tui::conv`]) — and what remains here is
 //! the part that was always about *meaning* rather than machinery: the target
-//! vocabulary, the accounting hand-off, the delivery path a page's composer
-//! shares with the `@name` grammar, and the tree's enter.
+//! vocabulary, the accounting hand-off, and the tree's enter.
+//!
+//! **The composer left with D135.** A page's draft used to be submitted here,
+//! by a second `submit` that read the whole line as prose. There is one now
+//! ([`Chat::submit`]): the console's `/`, `!` and `@name` work on every page,
+//! and where the *prose* goes is the only thing that reads which page it is.
 
 use crate::agents::AgentState;
 use crate::tui::buffer::BufferId;
-use crate::tui::bufferview::DirectTarget;
 use crate::tui::chat::Chat;
 
 /// Which conversation the screen is on.
@@ -54,16 +57,6 @@ impl ZoomTarget {
         match self {
             Self::Agent(name) => BufferId::Dm(name.clone()),
             Self::Room(name) => BufferId::Channel(name.clone()),
-        }
-    }
-
-    /// Where a submitted line goes. One grammar with the transcript's direct
-    /// send (D103), because it is the same delivery — the zoom only spells the
-    /// address differently.
-    fn direct(&self) -> DirectTarget {
-        match self {
-            Self::Agent(name) => DirectTarget::Agent(name.clone()),
-            Self::Room(name) => DirectTarget::Room(name.clone()),
         }
     }
 }
@@ -157,54 +150,6 @@ impl Chat {
     pub(crate) fn leave_zoom(&mut self, home: BufferId) {
         self.zoom = None;
         self.buffers.set_active(home);
-        self.dirty = true;
-    }
-
-    /// Submit the draft to the conversation on screen.
-    ///
-    /// One delivery path with the transcript's `@name`/`#room` send (D103):
-    /// [`Chat::direct_send`] puts it in the inbox (or the room's log) under the
-    /// user's own name, which is where the domain's own rules take over —
-    /// queue while the run is busy, drain at the next round, resume an instance
-    /// that had stopped, announce a join before speaking in a room.
-    ///
-    /// **The draft is plain text.** A `/` line is not a command and a `!` line
-    /// is not a shell: neither ever reaches the console's parser, because the
-    /// console is not what this composer is addressing. CC does the same by
-    /// construction — the teammate route returns before any slash handling
-    /// (`PromptInput.tsx:1086-1097`, `REPL.tsx:3548-3578`) — and here it is by
-    /// construction too, since nothing but this function reads the draft.
-    ///
-    /// **The echo is the receipt.** A message the user just sent is in the
-    /// instance's inbox, so the very next frame draws it as a queued bubble;
-    /// the transcript needs a `Sent to @scout` line because it has nowhere else
-    /// to show one, and this view is the somewhere else.
-    pub(crate) fn submit_to_zoom(&mut self) {
-        let Some(target) = self.zoom.clone() else {
-            return;
-        };
-        let text = std::mem::take(&mut self.input);
-        self.cursor = 0;
-        self.undo.clear();
-        self.last_edit = None;
-        if text.trim().is_empty() {
-            self.set_input(text);
-            return;
-        }
-        let body = self.expand_pastes(&text);
-        let body = self.expand_image_paths(&body);
-        // The whole line goes into history, exactly as the transcript's own
-        // submit records it: ↑ brings back what was typed.
-        self.record_history(&text);
-        // A refusal is news and takes the warning tier the stop takes; the
-        // *receipt* the transcript prints is not needed here, because what it
-        // would announce is drawn on this screen the moment the frame redraws.
-        if let crate::tui::buffer::Delivery::Rejected(why) =
-            self.deliver_direct(&target.direct(), body)
-        {
-            self.push_warning(why);
-        }
-        self.update_slash_suggestions();
         self.dirty = true;
     }
 }
@@ -339,22 +284,121 @@ mod tests {
     }
 
     /// Typing on a page reaches the subject as the user, through the same
-    /// delivery the `@name` grammar uses — and a `/` line is a message, not a
-    /// command (the zoom's rule, which is CC's).
+    /// delivery the `@name` grammar uses.
     #[tokio::test]
     async fn typing_on_a_page_reaches_the_agent_as_the_user() {
         let mut chat = test_chat();
         seed(&chat, "scout");
         chat.switch_to(Some(ZoomTarget::Agent("scout".into())));
-        chat.set_input("/help is not a command here".to_string());
+        chat.set_input("look at the lexer".to_string());
         chat.submit();
         let pending = chat.session.agents.pending_of("scout");
         assert_eq!(pending.len(), 1, "{pending:?}");
         assert_eq!(pending[0].0, "user");
-        assert!(pending[0].1.contains("/help is not a command here"));
+        assert!(pending[0].1.contains("look at the lexer"));
+    }
+
+    /// **Reversed by D135**, and it is the whole point of the record: a `/`
+    /// line used to be prose here, on the argument that the page's composer
+    /// addresses the page. It addresses the *console* — the command is the
+    /// console's, its answer is drawn on whatever page is up, and the agent
+    /// hears nothing.
+    #[tokio::test]
+    async fn a_slash_line_on_a_page_is_the_consoles_command() {
+        let mut chat = test_chat();
+        seed(&chat, "scout");
+        chat.switch_to(Some(ZoomTarget::Agent("scout".into())));
+        chat.set_input("/help".to_string());
+        chat.submit();
         assert!(
-            chat.slash_info_lines.is_empty() && chat.slash_lines.is_empty(),
-            "the console's parser never saw the draft"
+            chat.session.agents.pending_of("scout").is_empty(),
+            "scout heard nothing"
+        );
+        assert!(!chat.slash_info_lines.is_empty(), "the console answered");
+        let rows = page_rows(&mut chat);
+        assert!(
+            rows.iter().any(|r| r.contains("/compact")),
+            "and the answer is on the page the user is looking at: {rows:?}"
+        );
+    }
+
+    /// `!` is the console's shell on every page too, and it opens the console's
+    /// own turn rather than sending the command to the agent.
+    #[tokio::test]
+    async fn bash_mode_on_a_page_runs_the_consoles_shell() {
+        let mut chat = test_chat();
+        seed(&chat, "scout");
+        chat.switch_to(Some(ZoomTarget::Agent("scout".into())));
+        chat.on_key(KeyCode::Char('!'), KeyModifiers::NONE);
+        assert!(chat.bash_mode, "`!` on an empty composer arms shell mode");
+        chat.set_input("echo hi".to_string());
+        chat.submit();
+        assert!(
+            chat.session.agents.pending_of("scout").is_empty(),
+            "the command went to the shell, not to scout"
+        );
+        assert!(chat.main_conv().busy, "the console's own turn opened");
+    }
+
+    /// Shell mode is the console's, so it survives a page turn — and Esc's
+    /// ladder leaves the mode before it leaves the page.
+    #[test]
+    fn shell_mode_outlives_a_page_turn() {
+        let mut chat = test_chat();
+        seed_idle(&chat, "scout"); // no run to stop, so Esc reaches the mode
+        chat.on_key(KeyCode::Char('!'), KeyModifiers::NONE);
+        chat.switch_to(Some(ZoomTarget::Agent("scout".into())));
+        assert!(chat.bash_mode, "the mode came with the reader");
+        chat.on_key(KeyCode::Esc, KeyModifiers::NONE);
+        assert!(!chat.bash_mode, "esc leaves the mode first");
+        assert!(!chat.active.is_main(), "and the page is still up");
+        chat.on_key(KeyCode::Esc, KeyModifiers::NONE);
+        assert!(chat.active.is_main(), "the next press comes home");
+    }
+
+    /// The `@name` grammar reaches somebody who is not the page's subject —
+    /// dead on a page until D135, because the whole line was prose.
+    #[tokio::test]
+    async fn a_direct_send_from_a_page_reaches_a_third_party() {
+        let mut chat = test_chat();
+        seed(&chat, "scout");
+        seed(&chat, "dev");
+        chat.switch_to(Some(ZoomTarget::Agent("scout".into())));
+        chat.set_input("@dev take the parser".to_string());
+        chat.submit();
+        assert!(
+            chat.session.agents.pending_of("scout").is_empty(),
+            "the page's subject is not the addressee"
+        );
+        let pending = chat.session.agents.pending_of("dev");
+        assert_eq!(pending.len(), 1, "{pending:?}");
+        assert!(pending[0].1.contains("take the parser"));
+    }
+
+    /// A console command typed while main's turn runs waits behind that turn,
+    /// wherever the screen is — and says so, because the queue rows are main's
+    /// page and this is not main's page.
+    #[test]
+    fn a_command_on_a_page_waits_behind_mains_turn_and_says_so() {
+        let mut chat = test_chat();
+        seed(&chat, "scout");
+        chat.conv.busy = true; // main's turn, before the page turn parks it
+        chat.switch_to(Some(ZoomTarget::Agent("scout".into())));
+        chat.set_input("/clear".to_string());
+        chat.submit();
+        assert!(
+            chat.session.agents.pending_of("scout").is_empty(),
+            "and it never reached the agent"
+        );
+        assert_eq!(
+            chat.main_conv().queued.len(),
+            1,
+            "it is in the console's queue"
+        );
+        assert!(
+            chat.slash_info_lines.iter().any(|l| l.contains("queued")),
+            "{:?}",
+            chat.slash_info_lines
         );
     }
 

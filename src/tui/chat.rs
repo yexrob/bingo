@@ -2399,15 +2399,17 @@ impl Chat {
         true
     }
 
+    /// The one input path (D135): the same steps wherever the screen is.
+    ///
+    /// v6 gave an agent's page a composer of its own, which sent the whole
+    /// line as prose and never looked at it — so `/`, `!` and the `@name`
+    /// grammar were dead on every page but main's, while the placeholder went
+    /// on advertising them. The console's commands are the *console's*: a
+    /// terminal command and shell mode do not stop existing because of which
+    /// conversation you are reading. What is genuinely per-conversation is the
+    /// last step alone — prose goes to whoever the screen is pointed at, which
+    /// is the one difference main has, that it talks to the user by default.
     pub fn submit(&mut self) {
-        // The away page (v6): the whole line is prose to the conversation on
-        // screen — no slash, no bash, no direct-send grammar, no queue; the
-        // domain's own delivery already handles a busy receiver (the zoom's
-        // rule, which is CC's teammate rule).
-        if !self.active.is_main() {
-            self.submit_to_zoom();
-            return;
-        }
         let text = std::mem::take(&mut self.input);
         self.cursor = 0;
         self.undo.clear();
@@ -2438,7 +2440,13 @@ impl Chat {
             return;
         }
         // Turn in progress: queue it, submitted one by one after TurnEnd (CC message queueing).
-        if self.conv.busy {
+        //
+        // **The console's turn, wherever the screen is.** A command changes the
+        // console's session and a prompt enters the console's transcript, so
+        // both wait behind the console's own turn even while a page is up.
+        // Prose to somebody else never comes through here: it waits in *their*
+        // inbox, which is the domain's queue and not this one.
+        if self.waits_for_main(&text) && self.main_conv().busy {
             let text = self.expand_pastes(&text);
             let text = self.expand_image_paths(&text);
             // Instant commands bypass the queue (CC semantics: settings knobs apply
@@ -2454,11 +2462,18 @@ impl Chat {
                 }
             }
             let is_slash = text.starts_with('/');
-            let id = self.conv.next_queue_id;
-            self.conv.next_queue_id = self.conv.next_queue_id.wrapping_add(1);
-            self.conv.queued.push(QueuedInput { text, is_slash, id });
+            let main = self.main_conv();
+            let id = main.next_queue_id;
+            main.next_queue_id = main.next_queue_id.wrapping_add(1);
+            main.queued.push(QueuedInput { text, is_slash, id });
             // The turn may take it before TurnEnd does (D83).
             self.rearm_steer();
+            // The queue rows are main's page. Somewhere else, a line that
+            // silently joined a queue nobody can see is a keystroke that did
+            // nothing, so it says so on the tier the page does show.
+            if !self.active.is_main() {
+                self.push_slash_info("queued behind main's turn".to_string());
+            }
             self.update_slash_suggestions();
             return;
         }
@@ -2496,8 +2511,49 @@ impl Chat {
                 return;
             }
         }
+        // The one step that reads which page this is: prose belongs to the
+        // conversation on screen. Main's is a turn of its own; anybody else's
+        // is a delivery, and the domain takes it from there — queue behind a
+        // running receiver, wake an idle one, revive a stopped one, announce a
+        // join before speaking in a room.
+        if let Some(target) = self.page_addressee() {
+            // A refusal is news and takes the warning tier. There is no
+            // receipt, because what a receipt would announce is drawn on this
+            // very screen the moment the frame redraws.
+            if let crate::tui::buffer::Delivery::Rejected(why) = self.deliver_direct(&target, text)
+            {
+                self.push_warning(why);
+            }
+            self.update_slash_suggestions();
+            self.dirty = true;
+            return;
+        }
         self.last_prompt = text.clone();
         self.start_turn(text, true);
+    }
+
+    /// Whether a submitted line waits behind **main's** turn: everything the
+    /// console owns — its commands, its shell, and prose addressed to it.
+    ///
+    /// Prose on somebody else's page is the exception, and it is the only one:
+    /// its queue is that instance's inbox.
+    fn waits_for_main(&self, text: &str) -> bool {
+        self.bash_mode || text.starts_with('/') || self.active.is_main()
+    }
+
+    /// Who the composer addresses when the screen is not main's — the page's
+    /// own subject, spelled exactly as the `@name`/`#room` grammar spells it,
+    /// because it is the same delivery.
+    fn page_addressee(&self) -> Option<crate::tui::bufferview::DirectTarget> {
+        match &self.active {
+            crate::ui::ConvKey::Main => None,
+            crate::ui::ConvKey::Agent(name) => {
+                Some(crate::tui::bufferview::DirectTarget::Agent(name.clone()))
+            }
+            crate::ui::ConvKey::Room(name) => {
+                Some(crate::tui::bufferview::DirectTarget::Room(name.clone()))
+            }
+        }
     }
 
     /// Large pastes collapse into a placeholder: the input keeps `[Pasted text #N +M lines]`,
@@ -2850,7 +2906,10 @@ impl Chat {
     }
 
     fn slash_cd(&mut self, arg: &str) {
-        if self.conv.busy {
+        // Main's turn, not the page's: the directory is the console's setting
+        // and a command that runs on every page (D135) must read the state it
+        // actually disturbs.
+        if self.main_conv().busy {
             self.push_slash_error(format!(
                 "[error] code={} msg=cannot switch working directory mid-turn (press Esc to interrupt, then retry)",
                 crate::error::SLASH_ERROR_BAD_ARGUMENT
@@ -2972,12 +3031,18 @@ impl Chat {
         let _ = session.runtime.transcript_tx.send(new_transcript.clone());
         self.rebind_tasks_to_transcript(new_transcript.as_ref());
         self.attach_share_to_transcript(new_transcript.as_ref());
-        self.conv.messages.clear();
-        self.conv.stream_msg = None;
-        self.conv.stream_attempt_checkpoint = None;
+        let main = self.main_conv();
+        main.messages.clear();
+        main.stream_msg = None;
+        main.stream_attempt_checkpoint = None;
         self.slash_lines.clear();
         self.warnings.clear();
-        self.reset_flushed();
+        // The flush cursor belongs to the screen, and the screen may be
+        // somebody else's page: resetting it there would reprint that page from
+        // its top into scrollback, which write-once can never take back.
+        if self.active.is_main() {
+            self.reset_flushed();
+        }
         self.reset_context_usage();
         self.push_slash_output("✓ conversation cleared; starting a new session.".to_string());
     }
@@ -2992,7 +3057,8 @@ impl Chat {
 
     /// Switches the runtime model and persists it as the default (same path as /theme /think: writes the project layer).
     pub(crate) fn set_model(&mut self, model: String) {
-        if self.conv.busy {
+        // Main's turn: the model is the console's setting (see `slash_cd`).
+        if self.main_conv().busy {
             self.push_slash_error(
                 "[error] code=BUSY msg=cannot switch models mid-turn (press Esc to interrupt, then retry)"
                     .to_string(),
@@ -3095,7 +3161,15 @@ impl Chat {
     /// contract, not a gap here.
     fn rebuild_diff_rows(&mut self) {
         let (theme, width) = (self.theme.clone(), self.diff_width());
-        for message in &mut self.conv.messages {
+        // Every store, not just the one on screen: `/theme` runs on any page
+        // since D135, and a parked conversation the reader comes back to would
+        // otherwise still be wearing the old palette.
+        let messages = self
+            .conv
+            .messages
+            .iter_mut()
+            .chain(self.parked.values_mut().flat_map(|c| c.messages.iter_mut()));
+        for message in messages {
             for activity in &mut message.activities {
                 if let ActivityKind::Diff(d) = &activity.kind {
                     activity.content = diff_lines(d, &theme, width);
