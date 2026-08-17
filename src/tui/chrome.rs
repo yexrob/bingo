@@ -743,6 +743,7 @@ mod tests {
             text: "queued message".into(),
             is_slash: false,
             id: 0,
+            on: crate::ui::ConvKey::Main,
         });
         chat.notice = Some("Press ctrl-c again to exit");
         chat.search = Some(crate::tui::chat::HistorySearch::default());

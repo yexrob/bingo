@@ -435,16 +435,34 @@ impl Chat {
             self.dirty = true;
             self.last_progress_tick = self.tick;
         }
-        match self.parked.remove(key) {
+        let mut conv = match self.parked.remove(key) {
             Some(conv) => conv,
-            None => self.open_conversation(key),
+            None => return self.open_conversation(key),
+        };
+        // A store the event path opened blank still owes its record. The drain
+        // above is what makes reading it safe: nothing is left to replay, so the
+        // history goes in above whatever arrived — it was committed before any
+        // of it.
+        if !conv.history_read {
+            conv.history_read = true;
+            if let ConvKey::Agent(name) = key {
+                let session = self.session.clone();
+                let past = agent_history(&session, name, &mut |text| self.render_thinking(text));
+                if !past.is_empty() {
+                    conv.intake_seen = true;
+                    let arrived = std::mem::replace(&mut conv.messages, past);
+                    conv.messages.extend(arrived);
+                }
+            }
         }
+        conv
     }
 
     /// A store the console has not kept before, filled from whatever the domain
     /// can tell it about the conversation's past.
     pub(super) fn open_conversation(&mut self, key: &ConvKey) -> Conversation {
         let mut conv = self.blank_conversation();
+        conv.history_read = true;
         match key {
             ConvKey::Main => {}
             ConvKey::Agent(name) => {

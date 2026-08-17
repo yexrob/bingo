@@ -2618,3 +2618,85 @@ fn a_page_opened_over_undrained_events_does_not_double_the_turn() {
         .count();
     assert_eq!(after, 1, "and one after the channel empties: {rows:?}");
 }
+
+// ---------------------------------------------------------------------------
+// H. what D135's review caught (D135a)
+// ---------------------------------------------------------------------------
+
+/// `/compact` acts on the page it was typed on — and a queued one drains at
+/// TurnEnd, when the screen may be somewhere else entirely. Resolved at drain
+/// time it summarised and overwrote the history of an agent the user never
+/// pointed it at, which is exactly the wrong-target loss the ruling exists to
+/// prevent.
+#[test]
+fn a_queued_command_acts_on_the_page_it_was_typed_on() {
+    let mut chat = test_chat();
+    seed_agent(&chat, "scout");
+    chat.conv.busy = true;
+    chat.set_input("/compact");
+    chat.submit();
+
+    let queued = chat.main_conv().queued.clone();
+    assert_eq!(queued.len(), 1, "it queued behind the running turn");
+    assert_eq!(
+        queued[0].on,
+        crate::ui::ConvKey::Main,
+        "typed at home, so it is main's — whatever the screen shows when it drains"
+    );
+
+    chat.switch_to(Some(crate::tui::zoom::ZoomTarget::Agent("scout".into())));
+    assert_eq!(
+        chat.main_conv().queued[0].on,
+        crate::ui::ConvKey::Main,
+        "switching pages does not re-aim a command already typed"
+    );
+}
+
+/// A store the event path opens is blank on purpose — walking there replays a
+/// turn whose events are still in the channel. But a blank store then shadowed
+/// a record committed before the console ever heard of the instance: the page
+/// showed the delivered line and nothing else, for the session.
+#[test]
+fn a_store_opened_by_mail_still_owes_its_record() {
+    use crate::api::types::Role as ApiRole;
+    let mut chat = test_chat();
+    seed_agent(&chat, "scout");
+    let _ = chat.session.agents.finish(
+        "scout",
+        vec![
+            Message {
+                role: ApiRole::User,
+                content: vec![ContentBlock::Text {
+                    text: "map the parser".to_string(),
+                }],
+            },
+            assistant("the lexer owns it"),
+        ],
+        0,
+    );
+    // Mail lands before the page is ever opened: the store opens blank.
+    let _ =
+        chat.session
+            .agents
+            .deliver("scout", "main", "and check EOF handling", Vec::new(), None);
+    chat.drain_events();
+
+    let rows = agent_page(&mut chat, "scout");
+    assert!(
+        rows.iter().any(|r| r.contains("the lexer owns it")),
+        "the record it made before anyone was watching: {rows:?}"
+    );
+    assert!(
+        rows.iter().any(|r| r.contains("check EOF handling")),
+        "and the mail that opened the store: {rows:?}"
+    );
+    let past = rows
+        .iter()
+        .position(|r| r.contains("the lexer owns it"))
+        .expect("history");
+    let mail = rows
+        .iter()
+        .position(|r| r.contains("check EOF handling"))
+        .expect("mail");
+    assert!(past < mail, "the record was committed first: {rows:?}");
+}

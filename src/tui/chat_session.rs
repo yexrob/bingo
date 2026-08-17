@@ -399,8 +399,8 @@ impl super::Chat {
     /// work that cannot be got back. `shift+tab` set the precedent by cycling
     /// the *viewed* agent's permission mode, and this is the one command where
     /// the precedent is worth its cost.
-    pub(super) fn slash_compact(&mut self) {
-        match self.active.clone() {
+    pub(super) fn slash_compact(&mut self, on: &crate::ui::ConvKey) {
+        match on.clone() {
             crate::ui::ConvKey::Agent(name) => self.compact_agent(name),
             // A room is a log, not a turn loop: there is no context behind it
             // to summarise, and quietly compacting the console's instead would
@@ -440,6 +440,10 @@ impl super::Chat {
             return;
         }
         let Some(session) = self.session.agents.session_of(&name) else {
+            // Deleted between the two reads. Every other exit here speaks, and a
+            // keystroke that silently did nothing is what the queue-info line
+            // was added for.
+            self.push_slash_error(format!("no instance named {name}"));
             return;
         };
         let registry = self.session.agents.clone();
@@ -450,12 +454,14 @@ impl super::Chat {
         let page = self
             .events
             .bound_to(crate::ui::ConvKey::Agent(name.clone()));
-        self.pin_panel("compact", vec![format!("⏳ compacting @{name}'s context…")]);
+        // Keyed by instance: the console's own compaction uses the bare id, and
+        // one pin for both meant whichever finished first unpinned the other's
+        // progress line — the silence the pin exists to prevent (D135a).
+        let pin = format!("compact:@{name}");
+        self.pin_panel(&pin, vec![format!("⏳ compacting @{name}'s context…")]);
         tokio::spawn(async move {
             let unpin = || {
-                console.send(UiEvent::Unpin {
-                    id: "compact".to_string(),
-                });
+                console.send(UiEvent::Unpin { id: pin.clone() });
             };
             let mut messages = history;
             let old_len = messages.len();

@@ -1925,6 +1925,56 @@ mod tests {
         assert!(finished > streamed, "turn completion is activity");
     }
 
+    /// `replace_history` is the one call that irreversibly rewrites an
+    /// instance's context (`/compact` on its page, D135), and its safety
+    /// argument is a state check under the same lock as the write: a run that
+    /// starts in between loses the race instead of losing the work. Nothing
+    /// pinned that (D135a).
+    #[test]
+    fn replace_history_refuses_a_running_instance_and_drops_stale_clocks() {
+        let reg = AgentRegistry::new();
+        reg.insert(
+            "scout",
+            AgentKind::Hire,
+            None,
+            "research".into(),
+            test_session(),
+        );
+        assert!(
+            !reg.replace_history("ghost", vec![Message::user_text("summary")]),
+            "an instance that is not there cannot be rewritten"
+        );
+        // `insert` is the spawn path, and a spawned instance is running.
+        assert!(
+            !reg.replace_history("scout", vec![Message::user_text("summary")]),
+            "a running instance holds its own copy and overwrites this at finish"
+        );
+
+        assert!(
+            reg.finish(
+                "scout",
+                vec![
+                    Message::user_text("a"),
+                    Message::user_text("b"),
+                    Message::user_text("c"),
+                ],
+                0,
+            )
+            .is_none()
+        );
+        assert!(
+            reg.replace_history("scout", vec![Message::user_text("summary")]),
+            "idle, so the rewrite lands"
+        );
+        let (history, stamps, _) = reg.view_of("scout").unwrap_or_else(|| panic!("exists"));
+        assert_eq!(history.len(), 1);
+        assert_eq!(
+            stamps,
+            vec![0],
+            "a shorter history's old clocks no longer describe it: no stamp beats a wrong one"
+        );
+    }
+
     /// Every stored history message carries a landing clock for the DM view;
     /// a rewritten (shorter) history drops the stale clocks instead of lying.
     #[test]

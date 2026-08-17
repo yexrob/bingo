@@ -357,7 +357,7 @@ impl super::Chat {
                 break;
             }
             let item = self.main_conv().queued.remove(0);
-            self.run_slash(item.text.strip_prefix('/').unwrap_or(&item.text));
+            self.run_slash_on(item.text.strip_prefix('/').unwrap_or(&item.text), &item.on);
             if self.main_conv().busy {
                 return; // a skill command started a turn; the rest waits for TurnEnd
             }

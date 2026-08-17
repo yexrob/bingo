@@ -81,6 +81,17 @@ pub struct Conversation {
     /// spawn task as main speaking, and the same run would then render one way
     /// live and another way re-read from history.
     pub(crate) intake_seen: bool,
+    /// Whether this store has been reconciled with the record behind it (D135a).
+    ///
+    /// A store opened by the event path starts blank on purpose — walking there
+    /// would replay a turn whose events are still in the channel, which is the
+    /// doubling two of D134's reviewers found. But a blank store opened by, say,
+    /// a delivered message then *shadows* a history that was committed before
+    /// the console ever heard of the instance: the page shows the mail and
+    /// nothing else, for the session. The debt is settled once, at claim time,
+    /// where the channel has just been drained and there is nothing left to
+    /// replay. A turn seen streaming clears it too — those events are the record.
+    pub(crate) history_read: bool,
 }
 
 impl Conversation {
@@ -112,6 +123,7 @@ impl Conversation {
             turn_verb: super::chat::THINKING_WORDS[0],
             projected: 0,
             intake_seen: false,
+            history_read: false,
         }
     }
 

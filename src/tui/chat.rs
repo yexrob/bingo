@@ -119,6 +119,12 @@ pub struct QueuedInput {
     pub is_slash: bool,
     /// Session-unique, assigned on enqueue.
     pub id: u64,
+    /// The page it was typed on. A command whose target is the conversation on
+    /// screen has to resolve that at *typing* time: the queue drains at TurnEnd
+    /// and the screen may be somewhere else by then, which for `/compact` means
+    /// summarising and overwriting the history of an agent the user never
+    /// pointed it at (D135a).
+    pub on: crate::ui::ConvKey,
 }
 
 /// Footer model badge: `{model} · think {level}` (off = no level shown, keeps it concise).
@@ -1460,6 +1466,8 @@ impl Chat {
         let mut follow = Follow::default();
         match event {
             UiEvent::TurnStart => {
+                // Watching the turn happen *is* reading the record.
+                conv.history_read = true;
                 conv.thinking_buf.clear();
                 conv.thinking_seg_open = false;
                 conv.pending_tools_clear();
@@ -2502,10 +2510,16 @@ impl Chat {
                 }
             }
             let is_slash = text.starts_with('/');
+            let on = self.active.clone();
             let main = self.main_conv();
             let id = main.next_queue_id;
             main.next_queue_id = main.next_queue_id.wrapping_add(1);
-            main.queued.push(QueuedInput { text, is_slash, id });
+            main.queued.push(QueuedInput {
+                text,
+                is_slash,
+                id,
+                on,
+            });
             // The turn may take it before TurnEnd does (D83).
             self.rearm_steer();
             // The queue rows are main's page. Somewhere else, a line that
@@ -2881,7 +2895,18 @@ impl Chat {
     }
 
     /// Slash command dispatch. Returns true = consumed.
+    /// A slash command typed on the page that is up right now.
     pub(crate) fn run_slash(&mut self, line: &str) -> bool {
+        let on = self.active.clone();
+        self.run_slash_on(line, &on)
+    }
+
+    /// A slash command, with the page it was typed on carried explicitly.
+    ///
+    /// The two are the same call except when the command was queued: it drains
+    /// at TurnEnd, and by then `active` answers a question about *now* rather
+    /// than about where the user was when they typed (D135a).
+    pub(crate) fn run_slash_on(&mut self, line: &str, on: &crate::ui::ConvKey) -> bool {
         // Any slash run closes the dropdown (Enter on a full input skips submit's clear-menu branch,
         // otherwise suggestion rows like `+ /model …` would linger below the input forever).
         self.clear_slash_suggestions();
@@ -2901,7 +2926,7 @@ impl Chat {
             "resume" => self.slash_resume(arg),
             "gc" => self.slash_gc(),
             "share" => self.slash_share(arg),
-            "compact" => self.slash_compact(),
+            "compact" => self.slash_compact(on),
             "status" => self.slash_status(),
             "config" => self.slash_config(),
             "context" => self.slash_context(),

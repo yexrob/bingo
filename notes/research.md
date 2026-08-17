@@ -6213,3 +6213,45 @@ for three functions.
 - **The footer's hint ladder is untouched**, as instructed, and so are
   `shift+tab` and `esc` — all three are about *which conversation*, which is
   exactly the axis that survives.
+
+## D135a — what the review caught
+
+**A queued command aimed itself at drain time.** `/compact` resolves its target
+from `self.active` (D135's ruling: the page it was typed on), but a command typed
+while main's turn is running *queues* and drains at `TurnEnd` — by which point
+the screen may be somewhere else. Reproduced with a probe: typed at home, page
+switched to `@scout`, and the drained command answered about `@scout`'s context.
+With an idle instance holding enough history it would have summarised and
+overwritten it through `replace_history` — irreversibly, on a target the user
+never pointed at, which is the exact wrong-target loss the ruling exists to
+prevent.
+
+`QueuedInput` carries `on: ConvKey` now, captured at submit, and `run_slash_on`
+takes it. The bare `run_slash` stays as "typed here, now" and passes `active`.
+That is also the seam D136 needs: when main is an entry, "prose to main" becomes
+"prose to the queue's own conversation" and this field is already where the
+answer lives.
+
+**A blank store shadowed a cold record.** D135 stopped the event path from
+walking history — walking there replays a turn whose events are still in the
+channel (the doubling two D134 reviewers found). But a store opened blank by a
+*delivered message* then hid a history committed before the console ever heard of
+the instance: the page showed the mail and nothing else, for the session. The
+walk was not dead, it had just moved somewhere it could not run.
+
+`Conversation::history_read` records the debt. A store opened by the event path
+starts owing it; `claim_conversation` settles it once, after the drain that
+guarantees nothing is left to replay, prepending the record above whatever
+arrived — which is chronologically right, because the mail came after the commit.
+A `TurnStart` clears the debt too: watching the turn happen *is* reading the
+record. The regression test fails without the flag and passes with it, which is
+the property a test has to have to be worth writing.
+
+**And three smaller ones.** `replace_history` — the one call that irreversibly
+rewrites an instance's context — had no direct test, so the state-check-under-the-
+lock that is its whole safety argument was unpinned; it has one now (refuses while
+running, refuses an absent name, accepts idle, drops stale clocks). Two
+compactions shared the pinned-panel id `compact`, so whichever finished first
+unpinned the other's progress line — the silence the pin exists to prevent; the
+agent pin is keyed by name. And `compact_agent` returned silently when
+`session_of` missed, where every other exit speaks.
