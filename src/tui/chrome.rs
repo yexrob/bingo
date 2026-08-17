@@ -146,7 +146,7 @@ fn mode_badge(mode: PermissionMode, theme: &Theme) -> Vec<(String, Color)> {
 /// is omitted when it is default (keeps it terse); think off omits the level (P1-D).
 fn footer_row(chat: &Chat, width: usize) -> Row {
     let theme = &chat.theme;
-    let away = chat.away.is_some();
+    let away = !chat.active.is_main();
     let hints = if away {
         // The page's own ladder, said out loud (D39: a key with two meanings
         // declares which one is armed). A room has no run and no mode.
@@ -663,7 +663,7 @@ pub(crate) fn chrome(chat: &Chat, width: usize, fullscreen: bool) -> El {
     }
     // The queue is main's turn state; a page's own sends never queue (the
     // domain absorbs them), so its rows stay home with the turn they describe.
-    if chat.away.is_none() {
+    if chat.active.is_main() {
         for line in chat.queue_lines() {
             children.push(El::Row(dim_row(line, theme)));
         }

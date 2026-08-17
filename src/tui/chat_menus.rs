@@ -51,8 +51,9 @@ impl super::Chat {
                     ),
                 };
                 let model_now = session.runtime.model.borrow().clone();
-                self.conv.context_usage = crate::context_usage::ContextUsage::for_model(
-                    self.conv.context_usage.used,
+                let used = self.main_conv().context_usage.used;
+                self.main_conv().context_usage = crate::context_usage::ContextUsage::for_model(
+                    used,
                     &session.client.models(),
                     &model_now,
                 );
@@ -287,12 +288,12 @@ impl super::Chat {
                     let store = crate::auth::AuthStore::new(&home);
                     match store.set(&name, crate::auth::AuthEntry::Api { key: token }) {
                         Ok(()) => {
-                            let _ = events.send(UiEvent::SlashOutput(format!(
+                            events.send(UiEvent::SlashOutput(format!(
                                 "✓ saved {name}'s API key (subscription key)"
                             )));
                         }
                         Err(e) => {
-                            let _ = events.send(UiEvent::SlashError(format!("✗ save failed: {e}")));
+                            events.send(UiEvent::SlashError(format!("✗ save failed: {e}")));
                         }
                     }
                     return;
@@ -309,12 +310,12 @@ impl super::Chat {
                 };
                 match tp.save(&tokens).await {
                     Ok(()) => {
-                        let _ = events.send(UiEvent::SlashOutput(format!(
+                        events.send(UiEvent::SlashOutput(format!(
                             "✓ saved {name}'s login info (a --manual token does not auto-refresh)"
                         )));
                     }
                     Err(e) => {
-                        let _ = events.send(UiEvent::SlashError(format!("✗ save failed: {e}")));
+                        events.send(UiEvent::SlashError(format!("✗ save failed: {e}")));
                     }
                 }
             });
@@ -345,7 +346,7 @@ impl super::Chat {
                         // Pinned: the code is valid for 15 minutes — it must
                         // stay on screen for all of them (the 2s TTL burned
                         // it before anyone could type it).
-                        let _ = events.send(UiEvent::PinPanel {
+                        events.send(UiEvent::PinPanel {
                             id: "login".to_string(),
                             lines: vec![
                                 format!("sign in to {name} (device authorization)"),
@@ -357,7 +358,7 @@ impl super::Chat {
                         let outcome = flow
                             .poll(&device_auth_id, &prompt.user_code, interval)
                             .await;
-                        let _ = events.send(UiEvent::Unpin {
+                        events.send(UiEvent::Unpin {
                             id: "login".to_string(),
                         });
                         match outcome {
@@ -369,25 +370,24 @@ impl super::Chat {
                                 });
                                 match tp.save(&tokens).await {
                                     Ok(()) => {
-                                        let _ = events.send(UiEvent::SlashOutput(format!(
+                                        events.send(UiEvent::SlashOutput(format!(
                                             "✓ signed in to {name}"
                                         )));
                                     }
                                     Err(e) => {
-                                        let _ = events.send(UiEvent::SlashOutput(format!(
+                                        events.send(UiEvent::SlashOutput(format!(
                                             "✗ save failed: {e}"
                                         )));
                                     }
                                 }
                             }
                             Err(e) => {
-                                let _ = events
-                                    .send(UiEvent::SlashOutput(format!("✗ sign-in failed: {e}")));
+                                events.send(UiEvent::SlashOutput(format!("✗ sign-in failed: {e}")));
                             }
                         }
                     }
                     Err(e) => {
-                        let _ = events.send(UiEvent::SlashError(format!("✗ sign-in failed: {e}")));
+                        events.send(UiEvent::SlashError(format!("✗ sign-in failed: {e}")));
                     }
                 }
             });
@@ -403,7 +403,7 @@ impl super::Chat {
                     // Pinned, with the URL itself: on SSH/no-GUI hosts the
                     // browser never opens and this line is the only way
                     // through (it used to say "tried to open" and show nothing).
-                    let _ = events.send(UiEvent::PinPanel {
+                    events.send(UiEvent::PinPanel {
                         id: "login".to_string(),
                         lines: vec![
                             format!("sign in to {name}: complete the authorization in the browser (tried to open it automatically)"),
@@ -413,7 +413,7 @@ impl super::Chat {
                     });
                     let _ = crate::share::open_in_browser(&url);
                     let outcome = handle.await;
-                    let _ = events.send(UiEvent::Unpin {
+                    events.send(UiEvent::Unpin {
                         id: "login".to_string(),
                     });
                     match outcome {
@@ -425,28 +425,26 @@ impl super::Chat {
                             });
                             match tp.save(&tokens).await {
                                 Ok(()) => {
-                                    let _ = events.send(UiEvent::SlashOutput(format!(
+                                    events.send(UiEvent::SlashOutput(format!(
                                         "✓ signed in to {name}"
                                     )));
                                 }
                                 Err(e) => {
-                                    let _ = events
+                                    events
                                         .send(UiEvent::SlashOutput(format!("✗ save failed: {e}")));
                                 }
                             }
                         }
                         Ok(Err(e)) => {
-                            let _ =
-                                events.send(UiEvent::SlashError(format!("✗ sign-in failed: {e}")));
+                            events.send(UiEvent::SlashError(format!("✗ sign-in failed: {e}")));
                         }
                         Err(e) => {
-                            let _ = events
-                                .send(UiEvent::SlashError(format!("✗ sign-in interrupted: {e}")));
+                            events.send(UiEvent::SlashError(format!("✗ sign-in interrupted: {e}")));
                         }
                     }
                 }
                 Err(e) => {
-                    let _ = events.send(UiEvent::SlashError(format!("✗ sign-in failed: {e}")));
+                    events.send(UiEvent::SlashError(format!("✗ sign-in failed: {e}")));
                 }
             }
         });
@@ -482,12 +480,12 @@ impl super::Chat {
                 // apiKey preset (opencode-go): only clears the auth.json entry.
                 match crate::auth::AuthStore::new(&home).remove(&name) {
                     Ok(()) => {
-                        let _ = events.send(UiEvent::SlashOutput(format!(
+                        events.send(UiEvent::SlashOutput(format!(
                             "✓ signed out of {name} (key cleared)"
                         )));
                     }
                     Err(e) => {
-                        let _ = events.send(UiEvent::SlashError(format!("✗ sign-out failed: {e}")));
+                        events.send(UiEvent::SlashError(format!("✗ sign-out failed: {e}")));
                     }
                 }
                 return;
@@ -504,12 +502,12 @@ impl super::Chat {
             });
             match tp.logout().await {
                 Ok(()) => {
-                    let _ = events.send(UiEvent::SlashOutput(format!(
+                    events.send(UiEvent::SlashOutput(format!(
                         "✓ signed out of {name} (credentials cleared)"
                     )));
                 }
                 Err(e) => {
-                    let _ = events.send(UiEvent::SlashError(format!("✗ sign-out failed: {e}")));
+                    events.send(UiEvent::SlashError(format!("✗ sign-out failed: {e}")));
                 }
             }
         });

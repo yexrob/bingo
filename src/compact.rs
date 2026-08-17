@@ -813,7 +813,7 @@ mod tests {
         let (events_tx, mut events_rx) = tokio::sync::mpsc::unbounded_channel();
         let (asks_tx, _asks_rx) = tokio::sync::mpsc::unbounded_channel();
         let mut ui = crate::ui::tui_hooks(
-            events_tx,
+            crate::ui::EventSink::new(crate::ui::ConvKey::Main, events_tx),
             asks_tx,
             crate::steer::SteerQueue::new(),
             crate::live::LiveBash::detached(),
@@ -833,7 +833,10 @@ mod tests {
             check_and_compact(&session, &mut messages, &mut gate, &[], &mut ui.on_warning).await;
         assert_eq!(tokens, warning_at);
         match events_rx.try_recv() {
-            Ok(crate::ui::UiEvent::Warning(message)) => assert_eq!(
+            Ok(crate::ui::Addressed {
+                event: crate::ui::UiEvent::Warning(message),
+                ..
+            }) => assert_eq!(
                 message,
                 format!("context at {warning_at} tokens; auto-compact at {threshold}")
             ),

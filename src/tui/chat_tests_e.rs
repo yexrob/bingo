@@ -605,19 +605,18 @@ fn both_diff_surfaces_render_the_same_gutter() {
     chat.conv.busy = true;
     chat.conv.messages.push(msg(Role::Assistant, ""));
     chat.conv.stream_msg = Some(0);
-    let _ = chat.events.send(UiEvent::ToolStart {
+    chat.events.send(UiEvent::ToolStart {
         name: "Edit".into(),
     });
     chat.drain_events();
-    let _ = chat.events.send(UiEvent::ToolReady {
+    chat.events.send(UiEvent::ToolReady {
         tool_call_id: "edit-1".into(),
         name: "Edit".into(),
         input: serde_json::json!({ "file_path": "f.rs" }),
         standalone: false,
     });
     chat.drain_events();
-    let _ = chat
-        .events
+    chat.events
         .send(UiEvent::ToolDone(crate::query::ToolCallDone {
             tool_call_id: "edit-1".into(),
             name: "Edit".into(),
@@ -652,19 +651,18 @@ fn switching_theme_recolours_baked_diff_rows() {
     chat.conv.busy = true;
     chat.conv.messages.push(msg(Role::Assistant, ""));
     chat.conv.stream_msg = Some(0);
-    let _ = chat.events.send(UiEvent::ToolStart {
+    chat.events.send(UiEvent::ToolStart {
         name: "Edit".into(),
     });
     chat.drain_events();
-    let _ = chat.events.send(UiEvent::ToolReady {
+    chat.events.send(UiEvent::ToolReady {
         tool_call_id: "edit-1".into(),
         name: "Edit".into(),
         input: serde_json::json!({ "file_path": "f.rs" }),
         standalone: false,
     });
     chat.drain_events();
-    let _ = chat
-        .events
+    chat.events
         .send(UiEvent::ToolDone(crate::query::ToolCallDone {
             tool_call_id: "edit-1".into(),
             name: "Edit".into(),

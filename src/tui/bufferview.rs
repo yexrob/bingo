@@ -187,6 +187,7 @@ impl Chat {
     /// does. That is the v3 ruling, and it is what keeps reading a room free.
     /// One join path, so a zoom and a `#room` line announce identically.
     pub(crate) fn deliver_direct(&mut self, target: &DirectTarget, text: String) -> Delivery {
+        let echo = text.clone();
         let submit = match target {
             DirectTarget::Agent(name) => SubmitTarget::Dm {
                 agent: name.clone(),
@@ -207,8 +208,43 @@ impl Chat {
         let outcome = crate::tui::buffer::deliver(&self.session, submit);
         if outcome == Delivery::Sent {
             self.refresh_conversations();
+            // The user's own line enters the receiver's transcript here, the
+            // moment it is sent — exactly as main's prompt enters main's (D134).
+            // The run repeats it in the prompt it absorbs and the console drops
+            // it there, so it lands once, at the time it happened, rather than
+            // whenever the receiver gets round to reading it. A room needs none
+            // of this: its page is projected from the log the post just entered.
+            if let DirectTarget::Agent(name) = target {
+                self.echo_direct(name, echo);
+            }
         }
         outcome
+    }
+
+    /// Put the user's own words in an instance's transcript.
+    fn echo_direct(&mut self, name: &str, text: String) {
+        let key = crate::ui::ConvKey::Agent(name.to_string());
+        let echo = crate::tui::chat::UiMessage {
+            speaker: Some(USER_NAME.to_string()),
+            role: crate::tui::chat::Role::User,
+            text,
+            at: crate::channels::now_unix(),
+            activities: Vec::new(),
+            insert_points: Vec::new(),
+            groups: Vec::new(),
+            group_of: Vec::new(),
+        };
+        if key == self.active {
+            self.conv.messages.push(echo);
+        } else {
+            let mut conv = match self.parked.remove(&key) {
+                Some(conv) => conv,
+                None => self.open_conversation(&key),
+            };
+            conv.messages.push(echo);
+            self.parked.insert(key, conv);
+        }
+        self.dirty = true;
     }
 
     /// A direct send from the transcript, with its receipt.

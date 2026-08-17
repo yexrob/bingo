@@ -5901,3 +5901,70 @@ with its reason: it gates *when the console starts a turn*, not what any
 conversation contains, and it retires in D136 when main's mail becomes an
 ordinary inbox. D134 is now purely about event routing.
 
+
+## D134 — the console stops having a favourite
+
+The user's ruling, in their words: *"我们切换 agent 只是相同的 chrome 切换不同的数据来源"* — switching
+agents is the same chrome pointed at a different data source, and main differs in exactly one way:
+it talks to the user by default. The architecture said otherwise. Main was the source and everybody
+else was a **projection**:
+
+| | main | an agent |
+|---|---|---|
+| how its rows arrive | `UiEvent`, pushed per delta | rebuilt from `history` + `live` |
+| when | as it happens | every frame, if a fingerprint moved |
+| how much | the delta | the whole record, from scratch |
+
+Three decision records were spent on symptoms of that one fact before it was named: **D130** (the
+projection matched four block kinds and `tool_result` was not one, so a failed call rendered as a
+success), **D132** (the projection's moving half had a renderer of its own, with no result rows, no
+folds and no status), and the composer, which still branches on `away.is_some()` — D135's problem.
+
+**One channel, addressed.** `UiEvent` travels as `Addressed { to: ConvKey, event }`, and producers
+hold an `EventSink` bound to a conversation: *the producer says what happened, the sink says whose
+turn it happened in, and nothing downstream has to guess.* `subagent_hooks` stops accumulating into
+`entry.live` and emits onto the console's own channel, so an agent's stream reaches the very handler
+main's does. `EventSink::detached()` is the headless case — a run with no screen drops its events
+the way a closed channel does, so no producer branches on having an audience.
+
+**One store per conversation, the active one inline.** `Chat` holds `conv` (on screen) plus
+`parked: HashMap<ConvKey, Conversation>`. Main sits in `parked` like anybody else while the screen
+is elsewhere. Keeping the active one inline rather than behind a lookup is what makes `Chat::conv`
+infallible: the renderer, the composer and the status row read it every frame, and a lookup that
+could miss would be a panic path in all three.
+
+**First sight is an event, not a page opening.** An instance streams from the moment it is spawned;
+`detach` opens a store on the first event addressed to it, so a page opened later shows what
+happened meanwhile. Cold start — a conversation the console never saw stream, restored from a
+session — is `agent_history`, one `walk` at open time, and then pure append. The per-frame full
+re-walk is gone; so are `AwayPage`, `AwayBuild`, `fingerprint`, `agent_messages`, `live_message`,
+and the swap-in/swap-out around `build_rows`.
+
+**`LiveBlock` dies with the projection it fed** (`LiveBlock`, `LiveTool`, `push_text`,
+`push_thinking`, `answer_tool`, `set_live`, and `AgentView`'s live and in-flight halves). It existed
+to carry a running turn across the gap between the domain and a view that could not see events.
+There is no gap now.
+
+**Write-once, which was the risk.** An agent page had its own settled boundary (`AwayBuild::stable`);
+it now uses the console's, `message_static_settled`, the same one main's rows have always been
+flushed by. One rule for every page, and no second place for a half-finished row to slip into
+scrollback from.
+
+**Two facts a store cannot infer, so it carries them.** `intake_seen`: the first user-role text in an
+agent's record is the task it was dispatched with and every one after is somebody talking to it, but
+"first" cannot be read off the transcript — `TurnStart` opens the turn's own message before the
+prompt arrives, so a store guessing from emptiness would file a spawn task as main speaking, and the
+same run would render one way live and another way re-read from history. `projected`: how far a
+room's log has been copied in, because a room is the one conversation with no turn loop.
+
+**Rooms stay a projection, deliberately.** A room is a log, not a turn loop — there is no stream to
+push. It keeps a cursor (`projected`) and appends its tail, so even that path stopped rebuilding.
+
+Net for `src/`: +2036/−1387 across 32 files, and the tests grew 1473 → 1481. It is not the deletion
+the shape promises; that arrives in D135, when `submit` and the command paths stop branching and the
+second input path retires with them.
+
+**Provenance.** The implementation is an Opus 5 (max effort) agent's, run under this session's
+orchestration; it completed and passed all five gates but timed out before writing this record and
+bumping `AGENTS.md`. Both were written here, after reading the diff — a record nobody read the code
+for would be the wrong kind of record. It was then reviewed adversarially by Fable 5 (xhigh).

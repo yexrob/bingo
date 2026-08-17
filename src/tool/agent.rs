@@ -11,6 +11,7 @@ use crate::api::types::Message;
 use crate::channels::ChannelRegistry;
 use crate::query::{Session, UiHooks};
 use crate::tool::{Tool, ToolContext, ToolError, ToolResult, parse_input};
+use crate::ui::UiEvent;
 use crate::watch::{NotifyCondition, WatchId, WatchKind, WatchRegistry, WatchState};
 
 use crate::tool::address::{self, Address};
@@ -96,19 +97,40 @@ fn ask_gate() -> &'static tokio::sync::Mutex<()> {
 
 struct SubagentOutput {
     text: Arc<Mutex<String>>,
-    live: Arc<Mutex<Vec<crate::agents::LiveBlock>>>,
     progress: Arc<Mutex<crate::agents::AgentProgress>>,
 }
 
-/// Sub-agent UI: captures text, renders nothing, and forwards permission prompts to the
-/// session that owns the UI. The cell tracks the number of characters produced (for interval
-/// progress checks of background agents).
-/// Snapshot of everything a subagent's live view accumulated up to the last committed round;
+/// `TurnStart` on the way in, `TurnEnd` on the way out — including the way out
+/// an aborted task takes, which runs no code of its own.
+struct TurnBrackets(crate::ui::EventSink);
+
+impl TurnBrackets {
+    fn open(events: crate::ui::EventSink) -> Self {
+        events.send(UiEvent::TurnStart);
+        Self(events)
+    }
+}
+
+impl Drop for TurnBrackets {
+    fn drop(&mut self) {
+        self.0.send(UiEvent::TurnEnd);
+    }
+}
+
+/// Sub-agent UI: captures text, streams onto the console's event channel, and
+/// forwards permission prompts to the session that owns the UI. The cell tracks
+/// the number of characters produced (for interval progress checks of background
+/// agents).
+/// Snapshot of everything a subagent accumulated up to the last committed round;
 /// a stream retry rolls the failed attempt back to this point.
+///
+/// The rendered half of that rollback left with D134: `UiEvent::StreamRetry` is
+/// what the console has always used to unwind main's failed attempt, and an
+/// instance's turn is now on the same channel. What stays here is the flat reply
+/// — the spawn's return value, which no console sees.
 #[derive(Clone, Default)]
 struct AttemptCheckpoint {
     text_len: usize,
-    live: Vec<crate::agents::LiveBlock>,
     produced_chars: usize,
     output_tokens: u64,
     tool_uses: usize,
@@ -118,29 +140,31 @@ struct AttemptCheckpoint {
 #[allow(clippy::too_many_arguments)]
 fn subagent_hooks(
     output: SubagentOutput,
-    token_rate: Arc<Mutex<crate::token_rate::TokenRateSampler>>,
+    events: Option<crate::ui::EventSink>,
     cell: Arc<AgentCell>,
     watch: Arc<WatchRegistry>,
     id: WatchId,
     instance: String,
     ask: Option<Arc<crate::query::AskFn>>,
 ) -> UiHooks {
-    // `output` stays the flat reply (what the spawn returns and what `spoke` is
-    // judged on); `live` is the same turn as the instance view needs to show it,
-    // with the tool calls and round boundaries the flat string cannot carry.
-    let tool_live = output.live.clone();
-    let done_live = output.live.clone();
+    // `output.text` stays the flat reply — what the spawn returns and what
+    // `spoke` is judged on. Everything the *screen* needs travels as events, so
+    // an instance's page is built by the code that builds main's rather than by
+    // a second store polled per frame (D134).
+    let events = events.unwrap_or_else(crate::ui::EventSink::detached);
+    let tool_events = events.clone();
+    let done_events = events.clone();
+    let retry_events = events.clone();
+    let round_events = events.clone();
+    let warn_events = events.clone();
+    let inbound_events = events.clone();
+    let usage_events = events.clone();
     let tool_progress = output.progress.clone();
-    let retry_live = output.live.clone();
     let retry_text = output.text.clone();
     let retry_progress = output.progress.clone();
-    let warning_live = output.live.clone();
-    let round_live = output.live.clone();
     let round_text = output.text.clone();
-    let round_live_checkpoint = output.live.clone();
     let round_progress = output.progress.clone();
     let text_output = output.text;
-    let live_output = output.live;
     let progress_output = output.progress;
     let registry = cell.registry.clone();
     let event_registry = registry.clone();
@@ -149,8 +173,6 @@ fn subagent_hooks(
     let tool_instance = instance.clone();
     let done_registry = registry.clone();
     let done_instance = instance.clone();
-    let round_rate = token_rate.clone();
-    let retry_rate = token_rate.clone();
     let round_units = Arc::new(Mutex::new(0u64));
     let retry_units = round_units.clone();
     let event_round_units = round_units.clone();
@@ -172,9 +194,7 @@ fn subagent_hooks(
                     };
                     if let Ok(mut output) = text_output.lock() {
                         output.push_str(text);
-                        if let Ok(mut live) = live_output.lock() {
-                            crate::agents::LiveBlock::push_text(&mut live, text);
-                        }
+                        events.send(UiEvent::TextDelta(text.clone()));
                         event_cell.record_chars(text.chars().count());
                         // Feed produced text into the condition engine (notify_on hit → signal notification).
                         watch.feed_content(id, text);
@@ -183,12 +203,7 @@ fn subagent_hooks(
                 }
                 crate::api::contract::StreamEvent::ThinkingDelta { thinking, .. } => {
                     event_registry.touch(&event_instance);
-                    // The DM view shows the phase, not the stream: the block marks
-                    // "reasoning happened here" the way the transcript's collapsed
-                    // `✻ Thinking` row does.
-                    if let Ok(mut live) = live_output.lock() {
-                        crate::agents::LiveBlock::push_thinking(&mut live, thinking);
-                    }
+                    events.send(UiEvent::ThinkingDelta(thinking.clone()));
                     let mut units = event_round_units.lock().unwrap_or_else(|e| e.into_inner());
                     *units = units.saturating_add(crate::compact::text_units(thinking));
                     units.div_ceil(4)
@@ -197,6 +212,10 @@ fn subagent_hooks(
                     let mut units = event_round_units.lock().unwrap_or_else(|e| e.into_inner());
                     *units = units.saturating_add(crate::compact::text_units(partial_json));
                     units.div_ceil(4)
+                }
+                crate::api::contract::StreamEvent::ToolUseStart { name, .. } => {
+                    events.send(UiEvent::ToolStart { name: name.clone() });
+                    return;
                 }
                 crate::api::contract::StreamEvent::StopReason {
                     output_tokens: Some(tokens),
@@ -207,33 +226,28 @@ fn subagent_hooks(
                     if let Ok(mut progress) = progress_output.lock() {
                         progress.add_output_tokens(*tokens);
                     }
-                    // Accounting correction, not freshly streamed output: fed as a
-                    // sample it rendered as a one-frame rate spike (see UiEvent::OutputTokens).
-                    if let Ok(mut sampler) = token_rate.lock() {
-                        sampler.correct_round(*tokens, std::time::Instant::now());
-                    }
+                    events.send(UiEvent::OutputTokens {
+                        tokens: *tokens,
+                        authoritative: true,
+                    });
                     return;
                 }
                 _ => return,
             };
-            if let Ok(mut sampler) = token_rate.lock() {
-                sampler.observe_round(tokens, std::time::Instant::now());
-            }
+            events.send(UiEvent::OutputTokens {
+                tokens,
+                authoritative: false,
+            });
         }),
         on_stream_retry: Box::new(move || {
             *retry_units.lock().unwrap_or_else(|e| e.into_inner()) = 0;
-            if let Ok(mut sampler) = retry_rate.lock() {
-                sampler.retry_round();
-            }
+            retry_events.send(UiEvent::StreamRetry);
             let checkpoint = retry_checkpoint
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .clone();
             if let Ok(mut text) = retry_text.lock() {
                 text.truncate(checkpoint.text_len);
-            }
-            if let Ok(mut live) = retry_live.lock() {
-                *live = checkpoint.live;
             }
             retry_cell.set_chars(checkpoint.produced_chars);
             if let Ok(mut progress) = retry_progress.lock() {
@@ -244,15 +258,16 @@ fn subagent_hooks(
                 );
             }
         }),
-        // An instance's context usage had exactly one display, the workspace
-        // DM composer's footer, and it retired with the workspace (D89). The
-        // hook stays wired so the contract is unchanged and a later surface can
-        // read it again without re-plumbing the callback.
-        on_context_usage: Arc::new(move |_usage| {}),
-        on_tool_ready: Box::new(move |tool_call_id, name, input, _standalone| {
+        // The surface D89 left this hook waiting for: an instance's page has a
+        // footer of its own now, and it reports the instance's window rather
+        // than borrowing main's.
+        on_context_usage: Arc::new(move |usage| {
+            usage_events.send(UiEvent::ContextUsage(usage));
+        }),
+        on_tool_ready: Box::new(move |tool_call_id, name, input, standalone| {
             tool_registry.touch(&tool_instance);
-            // The progress line is a label and stays one; the live tail gets the
-            // call itself, because the page builds its own rows from it (D132).
+            // The progress line is a label and stays one; the call itself goes
+            // on the channel, because the page builds its rows from the call.
             let glyph = crate::tui::activities::tool_glyph(&name);
             let shown = crate::tui::activities::display_tool_name(&name);
             let summary = crate::query::summarize_input(&name, &input);
@@ -261,46 +276,23 @@ fn subagent_hooks(
             } else {
                 format!("{glyph}{shown}({summary})")
             };
-            if let Ok(mut live) = tool_live.lock() {
-                live.push(crate::agents::LiveBlock::Tool(crate::agents::LiveTool {
-                    id: tool_call_id,
-                    name,
-                    input,
-                    answer: None,
-                }));
-            }
+            tool_events.send(UiEvent::ToolReady {
+                tool_call_id,
+                name,
+                input,
+                standalone,
+            });
             if let Ok(mut progress) = tool_progress.lock() {
                 progress.record_tool(activity);
             }
         }),
         on_tool_done: Box::new(move |done| {
             done_registry.touch(&done_instance);
-            // The result reaches the page in the same round it arrives, instead
-            // of waiting for the run to end and the history to be written — the
-            // gap that made an agent's page look a whole turn behind main's.
-            if let Ok(mut live) = done_live.lock() {
-                crate::agents::LiveBlock::answer_tool(
-                    &mut live,
-                    &done.tool_call_id,
-                    crate::agents::ToolAnswer {
-                        output: done.output.clone(),
-                        is_error: done.status == crate::query::ToolCallStatus::Error,
-                    },
-                );
-            }
+            done_events.send(UiEvent::ToolDone(done.clone()));
         }),
-        // A round boundary closes the open prose block, so the next round's first
-        // sentence does not run into the previous round's last one.
         on_round_end: Box::new(move || {
             *round_units.lock().unwrap_or_else(|e| e.into_inner()) = 0;
-            if let Ok(mut sampler) = round_rate.lock() {
-                sampler.finish_round();
-            }
-            if let Ok(mut live) = round_live.lock()
-                && matches!(live.last(), Some(crate::agents::LiveBlock::Text(_)))
-            {
-                live.push(crate::agents::LiveBlock::Text(String::new()));
-            }
+            round_events.send(UiEvent::RoundEnd);
             let (output_tokens, tool_uses, recent_activity) = round_progress
                 .lock()
                 .map(|progress| {
@@ -313,26 +305,20 @@ fn subagent_hooks(
                 .unwrap_or_default();
             *round_checkpoint.lock().unwrap_or_else(|e| e.into_inner()) = AttemptCheckpoint {
                 text_len: round_text.lock().map_or(0, |text| text.len()),
-                live: round_live_checkpoint
-                    .lock()
-                    .map(|live| live.clone())
-                    .unwrap_or_default(),
                 produced_chars: round_cell.chars(),
                 output_tokens,
                 tool_uses,
                 recent_activity,
             };
         }),
+        // A reconnect notice used to be spliced into the instance's own prose,
+        // where it read as something the agent had said. It is a warning about
+        // the stream, so it takes the tier every other warning takes.
         on_warning: Box::new(move |message| {
-            if message.starts_with(crate::query::RECONNECT_WARNING_PREFIX)
-                && let Ok(mut live) = warning_live.lock()
-            {
-                live.retain(|block| {
-                    !matches!(block, crate::agents::LiveBlock::Text(text) if text.starts_with(crate::query::RECONNECT_WARNING_PREFIX))
-                });
-                live.push(crate::agents::LiveBlock::Text(message));
-                live.push(crate::agents::LiveBlock::Text(String::new()));
-            }
+            warn_events.send(UiEvent::Warning(message));
+        }),
+        on_inbound: Box::new(move |text| {
+            inbound_events.send(UiEvent::Inbound(text.to_string()));
         }),
         // A subagent has no prompt surface of its own, so its Ask decisions are forwarded to
         // the session that owns the UI, stamped with the instance name. Auto-denying here
@@ -752,37 +738,38 @@ pub(crate) fn spawn_agent_loop(
         let mut run = (first_id, cell);
         loop {
             let output = Arc::new(Mutex::new(String::new()));
-            let live = Arc::new(Mutex::new(Vec::new()));
             let progress = Arc::new(Mutex::new(crate::agents::AgentProgress::default()));
             if let Ok(mut progress) = progress.lock() {
                 progress.start_run();
             }
-            let token_rate = Arc::new(Mutex::new(crate::token_rate::TokenRateSampler::default()));
-            if let Ok(mut sampler) = token_rate.lock() {
-                sampler.start(std::time::Instant::now());
-            }
             loop_registry.set_prompt(&name, prompt.clone());
-            loop_registry.set_live(&name, Some(live.clone()), Some(token_rate.clone()));
             loop_registry.set_progress(&name, Some(progress.clone()));
+            let sink = loop_registry.sink_for(&name);
+            // The turn's brackets, and the reason they are a guard: an instance
+            // is stopped by aborting its task, which unwinds this future without
+            // running another line. A `TurnEnd` sent on the way out is the only
+            // one an abort cannot swallow — and a conversation left `busy`
+            // forever is a spinner that never stops.
+            let turn = sink.clone().map(TurnBrackets::open);
             let mut ui = subagent_hooks(
                 SubagentOutput {
                     text: output.clone(),
-                    live: live.clone(),
                     progress,
                 },
-                token_rate,
+                sink,
                 run.1.clone(),
                 watch.clone(),
                 run.0,
                 name.clone(),
                 loop_registry.ask_fn(),
             );
-            match crate::query::run_query(&session, history, &prompt, &images, &mut ui, None).await
-            {
+            let outcome =
+                crate::query::run_query(&session, history, &prompt, &images, &mut ui, None).await;
+            drop(turn);
+            match outcome {
                 Ok(outcome) => {
                     let text = output.lock().unwrap_or_else(|e| e.into_inner()).clone();
                     let output_chars = text.chars().count();
-                    loop_registry.set_live(&name, None, None);
                     loop_registry.set_progress(&name, None);
                     watch.set_state(
                         run.0,
@@ -817,7 +804,6 @@ pub(crate) fn spawn_agent_loop(
                     }
                 }
                 Err(e) => {
-                    loop_registry.set_live(&name, None, None);
                     loop_registry.set_progress(&name, None);
                     loop_registry.restore_inbox(&name, current_items);
                     watch.set_state(
@@ -1318,29 +1304,22 @@ impl Tool for AgentTool {
         );
         self.session.agents.set_run_watch(&name, id);
         let output = Arc::new(Mutex::new(String::new()));
-        let live = Arc::new(Mutex::new(Vec::new()));
         let progress = Arc::new(Mutex::new(crate::agents::AgentProgress::default()));
         if let Ok(mut progress) = progress.lock() {
             progress.start_run();
         }
-        let token_rate = Arc::new(Mutex::new(crate::token_rate::TokenRateSampler::default()));
-        if let Ok(mut sampler) = token_rate.lock() {
-            sampler.start(std::time::Instant::now());
-        }
         self.session.agents.set_prompt(&name, params.prompt.clone());
         self.session
             .agents
-            .set_live(&name, Some(live.clone()), Some(token_rate.clone()));
-        self.session
-            .agents
             .set_progress(&name, Some(progress.clone()));
+        let sink = self.session.agents.sink_for(&name);
+        let turn = sink.clone().map(TurnBrackets::open);
         let mut ui = subagent_hooks(
             SubagentOutput {
                 text: output.clone(),
-                live: live.clone(),
                 progress,
             },
-            token_rate,
+            sink,
             cell.clone(),
             ctx.watch.clone(),
             id,
@@ -1357,7 +1336,7 @@ impl Tool for AgentTool {
             None,
         )
         .await;
-        self.session.agents.set_live(&name, None, None);
+        drop(turn);
         self.session.agents.set_progress(&name, None);
         match sync_run {
             Ok(outcome) => {

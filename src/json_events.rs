@@ -1389,6 +1389,9 @@ fn json_hooks(
                 msg: sanitize_msg(&message),
             })));
         }),
+        // Protocol v1 has no event for prose arriving from another conversation;
+        // a JSON host drives one turn at a time and supplies its own prompt.
+        on_inbound: Box::new(|_| {}),
         // Protocol v1's permission reply is a bool on the wire, so the JSON host
         // keeps the two-option prompt: widening it to D81's three options is a
         // protocol change, not a rendering one, and belongs to whoever versions

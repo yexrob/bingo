@@ -371,18 +371,12 @@ pub enum InboxItem {
 /// A run the caller should start: the instance was idle with a non-empty inbox, and this call
 /// claimed it (state is already Running, inbox already drained) — so two flushes can't
 /// double-start the same instance.
-/// What [`AgentRegistry::view_of`] samples for the DM view: history, the
-/// landing-time stamp of each history message (unix seconds, 0 = unknown),
-/// the live tail, the direct messages claimed by the current run but not yet
-/// landed in history — `(sender, text)`, because a pair view has one
-/// conversation in it (D99) — and the instance state.
-pub type AgentView = (
-    Vec<Message>,
-    Vec<u64>,
-    Vec<LiveBlock>,
-    Vec<(String, String)>,
-    AgentState,
-);
+/// What [`AgentRegistry::view_of`] samples: history, the landing-time stamp of
+/// each history message (unix seconds, 0 = unknown), and the instance state.
+///
+/// The live tail left with D134. A running turn reaches the console as events
+/// now, the way main's always has, so there is nothing here to poll for it.
+pub type AgentView = (Vec<Message>, Vec<u64>, AgentState);
 
 pub struct Wake {
     pub name: String,
@@ -435,13 +429,8 @@ struct Entry {
     runs: u64,
     /// Watch line of the current turn (used to set Cancelled on stop/delete).
     watch_id: Option<crate::watch::WatchId>,
-    /// Streaming output of the current turn (shares the same Arc with subagent_hooks;
-    /// cleared at turn end — the TUI instance view shows the live tail from this).
-    live: Option<Arc<Mutex<Vec<LiveBlock>>>>,
     /// Progress sampled by the main TUI's background-task manager.
     progress: Option<Arc<Mutex<AgentProgress>>>,
-    /// Per-turn token-rate sampler, shared with the instance view.
-    token_rate: Option<Arc<Mutex<crate::token_rate::TokenRateSampler>>>,
 }
 
 const RECENT_AGENT_ACTIVITIES: usize = 5;
@@ -498,76 +487,6 @@ pub struct ToolAnswer {
     pub is_error: bool,
 }
 
-/// One call of a running turn: what was called, with what, and what came back
-/// when it does.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LiveTool {
-    /// Matches the call to its answer; the id the protocol uses.
-    pub id: String,
-    pub name: String,
-    pub input: serde_json::Value,
-    /// `None` while the call is still running.
-    pub answer: Option<ToolAnswer>,
-}
-
-/// One piece of a running turn, as the instance view sees it while it happens.
-///
-/// A running turn used to reach the view as one flat string of text deltas, which
-/// showed neither the tool calls between rounds nor the boundaries between them —
-/// so a five-round turn read as one wall with sentences butting together
-/// (`…the current state.Now let me verify…`). The finished history has always
-/// carried both; this is what lets the live view say the same thing before the
-/// turn ends.
-///
-/// **These are facts, not rows (D132).** `Tool` used to hold the finished line —
-/// `⏺ Read(a.rs)`, pre-rendered at the hook — which forced the page to own a
-/// second renderer for the half of itself that was still moving, and the two
-/// drifted exactly as far as you would expect: no result lines, no folds, no
-/// status, and a doubled glyph nobody had a reason to notice. The page now
-/// builds both halves with one builder, so there is nothing left to drift.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum LiveBlock {
-    /// Assistant prose, one block per round.
-    Text(String),
-    /// A tool call and, once it returns, its answer.
-    Tool(LiveTool),
-    /// A reasoning phase, accumulated as it streams.
-    Thinking(String),
-}
-
-impl LiveBlock {
-    /// Append streamed text, continuing the open prose block or opening one.
-    pub fn push_text(blocks: &mut Vec<LiveBlock>, text: &str) {
-        match blocks.last_mut() {
-            Some(LiveBlock::Text(open)) => open.push_str(text),
-            _ => blocks.push(LiveBlock::Text(text.to_string())),
-        }
-    }
-
-    /// Append streamed reasoning, continuing the open thinking block or opening
-    /// one (a tool or prose block in between starts a new phase).
-    pub fn push_thinking(blocks: &mut Vec<LiveBlock>, thinking: &str) {
-        match blocks.last_mut() {
-            Some(LiveBlock::Thinking(open)) => open.push_str(thinking),
-            _ => blocks.push(LiveBlock::Thinking(thinking.to_string())),
-        }
-    }
-
-    /// Hand a returning call its answer. Matched on the protocol's own id
-    /// rather than on position: rounds run tools concurrently, so the order
-    /// they come back in is not the order they were called in.
-    pub fn answer_tool(blocks: &mut [LiveBlock], id: &str, answer: ToolAnswer) {
-        for block in blocks.iter_mut() {
-            if let LiveBlock::Tool(call) = block
-                && call.id == id
-            {
-                call.answer = Some(answer);
-                return;
-            }
-        }
-    }
-}
-
 /// Session-level instance registry (Session holds the Arc; shared by child sessions).
 /// A single lock carries the state machine + inbox: the check-and-claim of delivery
 /// (deposit/deliver) and turn finalization (finish) happen atomically under one lock,
@@ -580,6 +499,11 @@ pub struct AgentRegistry {
     /// they borrow this one; the registry is the single place every spawn path can reach it from
     /// (the Agent tool, channel delivery, and the TUI channel room alike).
     ask: Mutex<Option<Arc<crate::query::AskFn>>>,
+    /// The console's event channel, attached by whichever front end owns the
+    /// screen. Every spawn path reaches a run's UI through the registry already
+    /// (`ask`), and a run's stream is the same kind of borrowing: the instance
+    /// has no surface of its own, so it writes onto the surface that does.
+    events: Mutex<Option<crate::ui::EventSink>>,
     /// Monotonic message id source (registry-wide, so ids never collide across instances).
     next_msg: std::sync::atomic::AtomicU64,
     /// Inbox generation: every accepted item advances this watch channel. Receivers wait on it
@@ -594,6 +518,7 @@ impl AgentRegistry {
             inner: Mutex::new(HashMap::new()),
             share: Mutex::new(None),
             ask: Mutex::new(None),
+            events: Mutex::new(None),
             next_msg: std::sync::atomic::AtomicU64::new(1),
             inbox_tx,
         })
@@ -638,6 +563,21 @@ impl AgentRegistry {
 
     pub fn ask_fn(&self) -> Option<Arc<crate::query::AskFn>> {
         self.ask.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// Attach the console's event channel (the front end does this once).
+    pub fn set_events(&self, events: crate::ui::EventSink) {
+        *self.events.lock().unwrap_or_else(|e| e.into_inner()) = Some(events);
+    }
+
+    /// A sink bound to `name`'s conversation, or `None` with no front end
+    /// attached — an embedded or headless run, whose turns nobody is watching.
+    pub fn sink_for(&self, name: &str) -> Option<crate::ui::EventSink> {
+        self.events
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map(|sink| sink.bound_to(crate::ui::ConvKey::Agent(name.to_string())))
     }
 
     /// Write an instance's latest snapshot into the share document (no-op without a store).
@@ -721,9 +661,7 @@ impl AgentRegistry {
                 abort: None,
                 runs: 0,
                 watch_id: None,
-                live: None,
                 progress: None,
-                token_rate: None,
             },
         );
         self.sync_share(name);
@@ -829,22 +767,6 @@ impl AgentRegistry {
         released
     }
 
-    /// Streaming output buffer of the current turn (attached at turn start, detached at turn end).
-    pub fn set_live(
-        &self,
-        name: &str,
-        live: Option<Arc<Mutex<Vec<LiveBlock>>>>,
-        token_rate: Option<Arc<Mutex<crate::token_rate::TokenRateSampler>>>,
-    ) {
-        if let Some(entry) = self.lock().get_mut(name) {
-            if live.is_some() {
-                entry.last_active = Instant::now();
-            }
-            entry.live = live;
-            entry.token_rate = token_rate;
-        }
-    }
-
     pub fn set_prompt(&self, name: &str, prompt: String) {
         if let Some(entry) = self.lock().get_mut(name) {
             entry.prompt = prompt;
@@ -872,22 +794,7 @@ impl AgentRegistry {
     pub fn view_of(&self, name: &str) -> Option<AgentView> {
         let inner = self.lock();
         let entry = inner.get(name)?;
-        let live = entry
-            .live
-            .as_ref()
-            .map(|l| l.lock().unwrap_or_else(|e| e.into_inner()).clone())
-            .unwrap_or_default();
-        Some((
-            entry.history.clone(),
-            entry.stamps.clone(),
-            live,
-            entry
-                .in_flight
-                .iter()
-                .map(|(_, from, text)| (from.clone(), text.clone()))
-                .collect(),
-            entry.state,
-        ))
+        Some((entry.history.clone(), entry.stamps.clone(), entry.state))
     }
 
     /// Whether an instance belongs to the given project directory.
@@ -1287,9 +1194,30 @@ impl AgentRegistry {
     }
 
     /// Direct messages still sitting in the inbox, in order, each with its
-    /// sender. The DM view renders the user's own after the history so a message
-    /// just sent stays visible until the receiver claims it — and leaves main's
-    /// alone, because that is somebody else's conversation (D99).
+    /// sender.
+    ///
+    /// It had one production reader, the away page's echo of a message not yet
+    /// claimed, and D134 replaced that with the console's own echo at send time
+    /// — the same moment main's prompt enters main's transcript. What is left is
+    /// the delivery assertion the tests make, which is worth keeping honest.
+    /// Direct messages claimed by the current run and not yet landed in
+    /// history. The registry's own bookkeeping, asserted here for the same
+    /// reason [`AgentRegistry::pending_of`] is.
+    #[cfg(test)]
+    pub fn in_flight_of(&self, name: &str) -> Vec<(String, String)> {
+        self.lock()
+            .get(name)
+            .map(|entry| {
+                entry
+                    .in_flight
+                    .iter()
+                    .map(|(_, from, text)| (from.clone(), text.clone()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    #[cfg(test)]
     pub fn pending_of(&self, name: &str) -> Vec<(String, String)> {
         self.lock()
             .get(name)
@@ -1960,7 +1888,7 @@ mod tests {
             )
             .is_none()
         );
-        let (history, stamps, _, _, _) = reg.view_of("scout").unwrap_or_else(|| panic!("exists"));
+        let (history, stamps, _) = reg.view_of("scout").unwrap_or_else(|| panic!("exists"));
         assert_eq!(stamps.len(), history.len());
         assert!(stamps.iter().all(|&at| at > 0), "{stamps:?}");
         // Compaction hands back a shorter, rewritten history: the old clocks no
@@ -1969,7 +1897,7 @@ mod tests {
             reg.finish("scout", vec![Message::user_text("summary")], 0)
                 .is_none()
         );
-        let (history, stamps, _, _, _) = reg.view_of("scout").unwrap_or_else(|| panic!("exists"));
+        let (history, stamps, _) = reg.view_of("scout").unwrap_or_else(|| panic!("exists"));
         assert_eq!(history.len(), 1);
         assert_eq!(stamps, vec![0]);
         // The record grows again: only the new tail is stamped.
@@ -1981,7 +1909,7 @@ mod tests {
             )
             .is_none()
         );
-        let (_, stamps, _, _, _) = reg.view_of("scout").unwrap_or_else(|| panic!("exists"));
+        let (_, stamps, _) = reg.view_of("scout").unwrap_or_else(|| panic!("exists"));
         assert_eq!(stamps[0], 0, "the rewritten prefix stays clockless");
         assert!(stamps[1] > 0, "{stamps:?}");
     }
@@ -2022,8 +1950,8 @@ mod tests {
         // Claimed: gone from the inbox, not yet in the history — in flight.
         assert_eq!(reg.flush_pending().len(), 1);
         assert!(reg.pending_of("scout").is_empty());
-        let (history, _, _, in_flight, _) =
-            reg.view_of("scout").unwrap_or_else(|| panic!("exists"));
+        let (history, _, _) = reg.view_of("scout").unwrap_or_else(|| panic!("exists"));
+        let in_flight = reg.in_flight_of("scout");
         assert!(history.is_empty());
         assert_eq!(
             in_flight,
@@ -2044,9 +1972,9 @@ mod tests {
             },
         ];
         assert!(reg.finish("scout", landed, 6).is_none());
-        let (history, _, _, in_flight, _) =
-            reg.view_of("scout").unwrap_or_else(|| panic!("exists"));
+        let (history, _, _) = reg.view_of("scout").unwrap_or_else(|| panic!("exists"));
         assert_eq!(history.len(), 2);
+        let in_flight = reg.in_flight_of("scout");
         assert!(in_flight.is_empty(), "history took over: {in_flight:?}");
     }
 
@@ -2077,11 +2005,11 @@ mod tests {
             .flush_pending()
             .pop()
             .unwrap_or_else(|| panic!("claimed"));
-        let (_, _, _, in_flight, _) = reg.view_of("scout").unwrap_or_else(|| panic!("exists"));
+        let in_flight = reg.in_flight_of("scout");
         assert_eq!(in_flight.len(), 1);
 
         reg.restore_inbox("scout", wake.items);
-        let (_, _, _, in_flight, _) = reg.view_of("scout").unwrap_or_else(|| panic!("exists"));
+        let in_flight = reg.in_flight_of("scout");
         assert!(in_flight.is_empty(), "{in_flight:?}");
         assert_eq!(
             reg.pending_of("scout"),

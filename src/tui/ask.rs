@@ -94,7 +94,7 @@ impl super::Chat {
         }
         if cancelled {
             self.reset_ask_state();
-            self.drop_empty_stream_message();
+            self.main_conv().drop_empty_stream_message();
             self.push_user_line(ASK_CANCELLED_TEXT.to_string());
             // The title still announced a question nobody could answer.
             self.notify_idle();
@@ -294,7 +294,7 @@ impl super::Chat {
     /// nothing was sent — and it never reaches the model, which learns the
     /// verdict from the gate instead.
     pub(super) fn push_user_line(&mut self, text: String) {
-        self.conv.messages.push(UiMessage {
+        self.main_conv().messages.push(UiMessage {
             speaker: None,
             role: Role::User,
             text,

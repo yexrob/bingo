@@ -344,7 +344,7 @@ impl super::Chat {
         );
         tokio::spawn(async move {
             let unpin = || {
-                let _ = events.send(crate::ui::UiEvent::Unpin {
+                events.send(crate::ui::UiEvent::Unpin {
                     id: "rewind".to_string(),
                 });
             };
@@ -356,28 +356,28 @@ impl super::Chat {
                 .collect();
             if tail.is_empty() {
                 unpin();
-                let _ = events.send(crate::ui::UiEvent::SlashInfo(
+                events.send(crate::ui::UiEvent::SlashInfo(
                     "that turn is no longer in this conversation; nothing was changed".to_string(),
                 ));
                 return;
             }
             let Some(summary) = crate::compact::summarize_slice(&session, &tail).await else {
                 unpin();
-                let _ = events.send(crate::ui::UiEvent::SlashError(
+                events.send(crate::ui::UiEvent::SlashError(
                     "[error] rewind could not summarize (model call failed).".to_string(),
                 ));
                 return;
             };
             if let Err(error) = crate::rewind::write_summary(&transcript, cut, &summary) {
                 unpin();
-                let _ = events.send(crate::ui::UiEvent::SlashError(format!(
+                events.send(crate::ui::UiEvent::SlashError(format!(
                     "[error] rewind could not rewrite the session: {error}"
                 )));
                 return;
             }
             crate::rewind::drop_from(&dir, line);
             unpin();
-            let _ = events.send(crate::ui::UiEvent::RewindDone(format!(
+            events.send(crate::ui::UiEvent::RewindDone(format!(
                 "{REWIND_PREFIX}turns from {stamp} replaced by a summary"
             )));
         });
@@ -502,7 +502,7 @@ mod tests {
         let (asks, asks_rx) = tokio::sync::mpsc::unbounded_channel();
         let mut chat = Chat::new(
             Arc::new(session),
-            events,
+            crate::ui::EventSink::new(crate::ui::ConvKey::Main, events),
             events_rx,
             asks,
             asks_rx,

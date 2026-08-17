@@ -329,6 +329,13 @@ pub struct UiHooks {
     /// the next turn's tools open a new group.
     pub on_round_end: Box<dyn Fn() + Send>,
     pub on_warning: Box<dyn Fn(String) + Send>,
+    /// Prose entering this conversation from outside its own turn: the prompt a
+    /// run opens with, and every batch of mail a running instance absorbs at a
+    /// round boundary. The console files it into the receiver's transcript —
+    /// without it an agent's page would show the answers and never the
+    /// questions. Main's is a no-op: the console typed its prompt and already
+    /// holds it.
+    pub on_inbound: Box<dyn Fn(&str) + Send>,
     /// Mid-turn steering: drained at each tool barrier of a turn that is continuing.
     /// [`no_steer`] for hosts with no composer, which leaves the turn exactly as it was.
     pub steer: Arc<SteerFn>,
@@ -387,6 +394,8 @@ pub fn headless_hooks() -> UiHooks {
         on_tool_done: Box::new(|_| {}),
         on_round_end: Box::new(|| {}),
         on_warning: Box::new(|message| eprintln!("[bingo] warning: {message}")),
+        // A headless run prints the model's answer, not the conversation around it.
+        on_inbound: Box::new(|_| {}),
         // No composer behind a headless run: nothing can be typed mid-turn.
         steer: no_steer(),
         // Nor a screen to tail a command on, nor a key to press to background it.
@@ -935,6 +944,7 @@ async fn query_loop(
             if !items.is_empty() {
                 let (prompt, images) =
                     crate::tool::agent::absorb_inbox(&session.channels, &inbox.instance, &items);
+                (ui.on_inbound)(&prompt);
                 record(
                     session,
                     &mut messages,
@@ -1471,6 +1481,7 @@ pub async fn run_query(
         Some(recalled) => format!("{user_input}\n\n{recalled}"),
         None => user_input.to_string(),
     };
+    (ui.on_inbound)(&user_input);
     record_turn_open(
         session,
         &mut messages,

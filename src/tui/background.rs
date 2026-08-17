@@ -1538,7 +1538,7 @@ mod tests {
         );
 
         chat.background_dialog_key(KeyCode::Char('f'), KeyModifiers::NONE);
-        assert!(chat.away.is_some(), "f entered the page directly");
+        assert!(!chat.active.is_main(), "f entered the page directly");
         chat.switch_to(None);
         chat.open_background_dialog();
         assert_eq!(

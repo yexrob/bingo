@@ -64,9 +64,13 @@ pub(super) fn test_chat_home(home: std::path::PathBuf) -> Chat {
         instance: None,
         attachments: crate::api::image::Attachments::new(),
     });
+    session.agents.set_events(crate::ui::EventSink::new(
+        crate::ui::ConvKey::Main,
+        events_tx.clone(),
+    ));
     Chat::new(
         session,
-        events_tx,
+        crate::ui::EventSink::new(crate::ui::ConvKey::Main, events_tx),
         events_rx,
         asks_tx,
         asks_rx,
@@ -413,11 +417,11 @@ pub(super) fn start_group(chat: &mut Chat) {
     chat.conv.messages.push(msg(Role::Assistant, ""));
     chat.conv.stream_msg = Some(0);
     for path in ["a.md", "b.md"] {
-        let _ = chat.events.send(UiEvent::ToolStart {
+        chat.events.send(UiEvent::ToolStart {
             name: "Read".into(),
         });
         chat.drain_events();
-        let _ = chat.events.send(UiEvent::ToolReady {
+        chat.events.send(UiEvent::ToolReady {
             tool_call_id: "test-tool".into(),
             name: "Read".into(),
             input: json!({"file_path": path}),
@@ -429,7 +433,7 @@ pub(super) fn start_group(chat: &mut Chat) {
 
 pub(super) fn finish_turn(chat: &mut Chat) {
     chat.conv.stream_msg = Some(0);
-    let _ = chat.events.send(UiEvent::TurnEnd);
+    chat.events.send(UiEvent::TurnEnd);
     chat.drain_events();
     chat.conv.stream_msg = None;
 }
@@ -438,8 +442,7 @@ pub(super) fn finish_turn(chat: &mut Chat) {
 pub(super) fn start_group_done(chat: &mut Chat) {
     start_group(chat);
     for (summary, out) in [("Read a.md", "l1\nl2\nl3"), ("Read b.md", "x\ny")] {
-        let _ = chat
-            .events
+        chat.events
             .send(UiEvent::ToolDone(crate::query::ToolCallDone {
                 tool_call_id: "test-tool".into(),
                 name: "Read".into(),
@@ -649,9 +652,9 @@ fn hidden_tools_produce_no_activities() {
         "TaskList",
         "AskUserQuestion",
     ] {
-        let _ = chat.events.send(UiEvent::ToolStart { name: name.into() });
+        chat.events.send(UiEvent::ToolStart { name: name.into() });
         chat.drain_events();
-        let _ = chat.events.send(UiEvent::ToolReady {
+        chat.events.send(UiEvent::ToolReady {
             tool_call_id: "test-tool".into(),
             name: name.into(),
             input: json!({}),
@@ -669,11 +672,11 @@ fn hidden_tools_produce_no_activities() {
         "the pending FIFO stays matched"
     );
     // Visible tools still render normally.
-    let _ = chat.events.send(UiEvent::ToolStart {
+    chat.events.send(UiEvent::ToolStart {
         name: "Bash".into(),
     });
     chat.drain_events();
-    let _ = chat.events.send(UiEvent::ToolReady {
+    chat.events.send(UiEvent::ToolReady {
         tool_call_id: "test-tool".into(),
         name: "Bash".into(),
         input: json!({"command": "ls"}),
@@ -1005,11 +1008,11 @@ fn bash_preview_expands_with_output() {
     let mut chat = test_chat();
     chat.conv.messages.push(msg(Role::Assistant, ""));
     chat.conv.stream_msg = Some(0);
-    let _ = chat.events.send(UiEvent::ToolStart {
+    chat.events.send(UiEvent::ToolStart {
         name: "Bash".into(),
     });
     chat.drain_events();
-    let _ = chat.events.send(UiEvent::ToolReady {
+    chat.events.send(UiEvent::ToolReady {
         tool_call_id: "test-tool".into(),
         name: "Bash".into(),
         input: json!({"command": "ls"}),
@@ -1020,8 +1023,7 @@ fn bash_preview_expands_with_output() {
         chat.conv.messages[0].groups.is_empty(),
         "standalone messages do not group"
     );
-    let _ = chat
-        .events
+    chat.events
         .send(UiEvent::ToolDone(crate::query::ToolCallDone {
             tool_call_id: "test-tool".into(),
             name: "Bash".into(),
@@ -1048,11 +1050,11 @@ fn model_bash_still_folds_into_group() {
     let mut chat = test_chat();
     chat.conv.messages.push(msg(Role::Assistant, ""));
     chat.conv.stream_msg = Some(0);
-    let _ = chat.events.send(UiEvent::ToolStart {
+    chat.events.send(UiEvent::ToolStart {
         name: "Bash".into(),
     });
     chat.drain_events();
-    let _ = chat.events.send(UiEvent::ToolReady {
+    chat.events.send(UiEvent::ToolReady {
         tool_call_id: "test-tool".into(),
         name: "Bash".into(),
         input: json!({"command": "cargo test"}),
@@ -1097,7 +1099,7 @@ async fn bash_submit_runs_command_and_ends_turn() {
     let (asks_tx, asks_rx) = mpsc::unbounded_channel();
     let mut chat = Chat::new(
         session,
-        events_tx,
+        crate::ui::EventSink::new(crate::ui::ConvKey::Main, events_tx),
         events_rx,
         asks_tx,
         asks_rx,
@@ -3318,7 +3320,7 @@ async fn models_loaded_preselects_current_model_and_caches() {
     chat.submit();
     chat.on_key(KeyCode::Enter, KeyModifiers::empty());
     // Current provider=default, current model=test-model (test_chat's initial value).
-    chat.handle(UiEvent::ModelsLoaded {
+    chat.apply_event(UiEvent::ModelsLoaded {
         provider: "default".into(),
         models: vec!["m0".into(), "test-model".into(), "m2".into()],
         failed: None,
@@ -3333,7 +3335,7 @@ async fn models_loaded_preselects_current_model_and_caches() {
     );
 
     // The current model is not in the list: the selection falls back to 0.
-    chat.handle(UiEvent::ModelsLoaded {
+    chat.apply_event(UiEvent::ModelsLoaded {
         provider: "default".into(),
         models: vec!["m0".into(), "m1".into()],
         failed: None,
@@ -3500,11 +3502,11 @@ fn parallel_reads_collapse_to_one_line() {
     chat.conv.messages.push(msg(Role::Assistant, ""));
     chat.conv.stream_msg = Some(0);
     for path in ["a.md", "b.md"] {
-        let _ = chat.events.send(UiEvent::ToolStart {
+        chat.events.send(UiEvent::ToolStart {
             name: "Read".into(),
         });
         chat.drain_events();
-        let _ = chat.events.send(UiEvent::ToolReady {
+        chat.events.send(UiEvent::ToolReady {
             tool_call_id: "test-tool".into(),
             name: "Read".into(),
             input: json!({"file_path": path}),
@@ -3538,11 +3540,11 @@ fn consecutive_agent_control_calls_fold_and_name_their_target() {
         json!({"action": "messages", "agent": "reviewer"}),
         json!({"action": "stop", "agent": "scout"}),
     ] {
-        let _ = chat.events.send(UiEvent::ToolStart {
+        chat.events.send(UiEvent::ToolStart {
             name: "AgentControl".into(),
         });
         chat.drain_events();
-        let _ = chat.events.send(UiEvent::ToolReady {
+        chat.events.send(UiEvent::ToolReady {
             tool_call_id: "test-tool".into(),
             name: "AgentControl".into(),
             input,
@@ -3578,9 +3580,9 @@ fn an_agent_control_call_no_longer_breaks_a_file_group() {
         ("AgentControl", json!({"action": "list"})),
         ("Read", json!({"file_path": "b.md"})),
     ] {
-        let _ = chat.events.send(UiEvent::ToolStart { name: name.into() });
+        chat.events.send(UiEvent::ToolStart { name: name.into() });
         chat.drain_events();
-        let _ = chat.events.send(UiEvent::ToolReady {
+        chat.events.send(UiEvent::ToolReady {
             tool_call_id: "test-tool".into(),
             name: name.into(),
             input,
@@ -3608,11 +3610,11 @@ fn a_failure_inside_the_fold_is_named_on_the_summary_row() {
         json!({"action": "stop", "agent": "ghost"}),
         json!({"action": "list"}),
     ] {
-        let _ = chat.events.send(UiEvent::ToolStart {
+        chat.events.send(UiEvent::ToolStart {
             name: "AgentControl".into(),
         });
         chat.drain_events();
-        let _ = chat.events.send(UiEvent::ToolReady {
+        chat.events.send(UiEvent::ToolReady {
             tool_call_id: "test-tool".into(),
             name: "AgentControl".into(),
             input,
@@ -3620,8 +3622,7 @@ fn a_failure_inside_the_fold_is_named_on_the_summary_row() {
         });
         chat.drain_events();
     }
-    let _ = chat
-        .events
+    chat.events
         .send(UiEvent::ToolDone(crate::query::ToolCallDone {
             tool_call_id: "test-tool".into(),
             name: "AgentControl".into(),
@@ -3652,8 +3653,7 @@ fn group_done_uses_past_tense() {
 fn ctrl_o_expands_group_to_individual_tools() {
     let mut chat = test_chat();
     start_group(&mut chat);
-    let _ = chat
-        .events
+    chat.events
         .send(UiEvent::ToolDone(crate::query::ToolCallDone {
             tool_call_id: "test-tool".into(),
             name: "Read".into(),
@@ -3663,8 +3663,7 @@ fn ctrl_o_expands_group_to_individual_tools() {
             duration_ms: 0,
             diff: None,
         }));
-    let _ = chat
-        .events
+    chat.events
         .send(UiEvent::ToolDone(crate::query::ToolCallDone {
             tool_call_id: "test-tool".into(),
             name: "Read".into(),
@@ -3700,21 +3699,21 @@ fn non_collapsible_tool_breaks_group() {
     let mut chat = test_chat();
     chat.conv.messages.push(msg(Role::Assistant, ""));
     chat.conv.stream_msg = Some(0);
-    let _ = chat.events.send(UiEvent::ToolStart {
+    chat.events.send(UiEvent::ToolStart {
         name: "Read".into(),
     });
     chat.drain_events();
-    let _ = chat.events.send(UiEvent::ToolReady {
+    chat.events.send(UiEvent::ToolReady {
         tool_call_id: "test-tool".into(),
         name: "Read".into(),
         input: json!({"file_path": "a.md"}),
         standalone: false,
     });
-    let _ = chat.events.send(UiEvent::ToolStart {
+    chat.events.send(UiEvent::ToolStart {
         name: "WebSearch".into(),
     });
     chat.drain_events();
-    let _ = chat.events.send(UiEvent::ToolReady {
+    chat.events.send(UiEvent::ToolReady {
         tool_call_id: "test-tool".into(),
         name: "WebSearch".into(),
         input: json!({"query": "rust"}),
@@ -3740,11 +3739,11 @@ fn tool_after_thinking_placeholder_groups_without_panic() {
     chat.conv.messages.push(msg(Role::Assistant, ""));
     chat.conv.stream_msg = Some(0);
     chat.apply_turn_start();
-    let _ = chat.events.send(UiEvent::ToolStart {
+    chat.events.send(UiEvent::ToolStart {
         name: "Read".into(),
     });
     chat.drain_events();
-    let _ = chat.events.send(UiEvent::ToolReady {
+    chat.events.send(UiEvent::ToolReady {
         tool_call_id: "test-tool".into(),
         name: "Read".into(),
         input: json!({"file_path": "a.md"}),
@@ -3802,16 +3801,16 @@ fn stream_retry_resets_only_current_attempt_and_replaces_progress_warning() {
     let home =
         std::env::temp_dir().join(format!("bingo-stream-retry-reset-{}", std::process::id()));
     let mut chat = test_chat_home(home.clone());
-    chat.handle(UiEvent::TurnStart);
-    chat.handle(UiEvent::TextDelta("committed".into()));
-    chat.handle(UiEvent::RoundEnd);
-    chat.handle(UiEvent::TextDelta("partial".into()));
-    chat.handle(UiEvent::ToolStart {
+    chat.apply_event(UiEvent::TurnStart);
+    chat.apply_event(UiEvent::TextDelta("committed".into()));
+    chat.apply_event(UiEvent::RoundEnd);
+    chat.apply_event(UiEvent::TextDelta("partial".into()));
+    chat.apply_event(UiEvent::ToolStart {
         name: "Read".into(),
     });
-    chat.handle(UiEvent::StreamRetry);
-    chat.handle(UiEvent::Warning("Reconnecting... 2/10".into()));
-    chat.handle(UiEvent::Warning("Reconnecting... 3/10".into()));
+    chat.apply_event(UiEvent::StreamRetry);
+    chat.apply_event(UiEvent::Warning("Reconnecting... 2/10".into()));
+    chat.apply_event(UiEvent::Warning("Reconnecting... 3/10".into()));
 
     let index = chat.conv.stream_msg.unwrap();
     assert_eq!(chat.conv.messages[index].text, "committed");

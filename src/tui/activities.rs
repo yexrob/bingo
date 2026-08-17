@@ -65,6 +65,15 @@ pub struct ToolCall {
     /// Result summary shown when expanded (CC `⎿ Read 173 lines`), rendered
     /// before the content.
     pub result_summary: Option<String>,
+    /// The protocol's own id for this call, recorded at `ToolReady` so the
+    /// answer can find the call that made it.
+    ///
+    /// A round runs its tools concurrently and they do not come back in call
+    /// order, so matching an answer to "the first running call with this name"
+    /// puts one `Read`'s output under another `Read`'s row. `None` for calls
+    /// the protocol never named — the `!` command's synthesized rows — which
+    /// fall back to that name match.
+    pub id: Option<String>,
 }
 
 impl ToolCall {
@@ -77,6 +86,7 @@ impl ToolCall {
             duration_ms: 0,
             output: None,
             result_summary: None,
+            id: None,
         }
     }
 }
@@ -1079,6 +1089,7 @@ mod tests {
             duration_ms: 12,
             output: Some("54 passed".into()),
             result_summary: None,
+            id: None,
         }));
         h.expand_hint = Some("ctrl+o to expand".to_string());
         h.set_content(vec![
@@ -1131,6 +1142,7 @@ mod tests {
             duration_ms: 2_300,
             output: Some("Compiling".into()),
             result_summary: None,
+            id: None,
         }));
         assert_eq!(
             text(&render_lines(&slow)[1]),
@@ -1143,6 +1155,7 @@ mod tests {
             duration_ms: 5,
             output: None,
             result_summary: None,
+            id: None,
         }));
         let lines = render_lines(&failed);
         assert_eq!(text(&lines[1]), "  ⎿  Failed");
@@ -1163,6 +1176,7 @@ mod tests {
             // Even with output on hand, the state is the result.
             output: Some("partial output".into()),
             result_summary: None,
+            id: None,
         }));
         let lines = render_lines(&stopped);
         assert_eq!(text(&lines[0]), "⏺ Bash(sleep 30)");
@@ -1312,6 +1326,7 @@ mod tests {
             duration_ms: 5,
             output: None,
             result_summary: None,
+            id: None,
         }));
         assert_eq!(
             text(&render_lines(&mcp)[0]),
@@ -1331,6 +1346,7 @@ mod tests {
             duration_ms: 0,
             output: None,
             result_summary: None,
+            id: None,
         }));
         assert_eq!(text(&render_lines(&skill)[0]), "✦ Skill(review doc.md)");
 

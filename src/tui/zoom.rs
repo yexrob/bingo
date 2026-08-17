@@ -41,11 +41,11 @@ impl ZoomTarget {
         }
     }
 
-    /// The header's subject — the sigil is part of the identity.
-    pub fn label(&self) -> String {
+    /// Which store the console keeps for this page.
+    pub fn conv_key(&self) -> crate::ui::ConvKey {
         match self {
-            Self::Agent(name) => format!("@{name}"),
-            Self::Room(name) => format!("#{name}"),
+            Self::Agent(name) => crate::ui::ConvKey::Agent(name.clone()),
+            Self::Room(name) => crate::ui::ConvKey::Room(name.clone()),
         }
     }
 
@@ -406,8 +406,8 @@ mod tests {
     fn esc_stops_the_run_first_and_comes_home_second() {
         let mut chat = test_chat();
         seed(&chat, "scout"); // Running
-        chat.switch_to(Some(ZoomTarget::Agent("scout".into())));
         chat.conv.busy = true; // main's own turn, out of Esc's reach while away
+        chat.switch_to(Some(ZoomTarget::Agent("scout".into())));
 
         chat.on_key(KeyCode::Esc, KeyModifiers::NONE);
         assert!(
@@ -418,11 +418,11 @@ mod tests {
                 .any(|s| s.name == "scout" && s.state == AgentState::Stopped),
             "the first press stops the subject's run"
         );
-        assert!(chat.away.is_some(), "and stays on the page");
-        assert!(chat.conv.busy, "main's turn was never touched");
+        assert!(!chat.active.is_main(), "and stays on the page");
+        assert!(chat.main_conv().busy, "main's turn was never touched");
 
         chat.on_key(KeyCode::Esc, KeyModifiers::NONE);
-        assert!(chat.away.is_none(), "the second press comes home");
+        assert!(chat.active.is_main(), "the second press comes home");
         assert!(chat.conv.busy, "still not touched");
     }
 
@@ -473,10 +473,10 @@ mod tests {
         seed_idle(&chat, "scout");
         chat.switch_to(Some(ZoomTarget::Agent("scout".into())));
         chat.sync_away();
-        assert!(chat.away.is_some(), "a finished agent's page stays open");
+        assert!(!chat.active.is_main(), "a finished agent's page stays open");
         let _ = chat.session.agents.remove("scout");
         chat.sync_away();
-        assert!(chat.away.is_none(), "a deleted agent's page cannot stay");
+        assert!(chat.active.is_main(), "a deleted agent's page cannot stay");
     }
 
     /// Every switch owes the terminal a page turn, and coming home reprints a
@@ -532,7 +532,7 @@ mod tests {
             Some(ZoomTarget::Agent("scout".to_string())),
             "enter switched to the page"
         );
-        assert!(chat.away.is_some());
+        assert!(!chat.active.is_main());
         assert!(
             chat.roster_selection().is_none(),
             "the cursor is spent by the switch"
@@ -540,6 +540,6 @@ mod tests {
         // Main's row comes home.
         assert!(chat.roster_enter_selection());
         assert!(chat.roster_key(KeyCode::Enter, KeyModifiers::NONE));
-        assert!(chat.away.is_none(), "the main row comes home");
+        assert!(chat.active.is_main(), "the main row comes home");
     }
 }

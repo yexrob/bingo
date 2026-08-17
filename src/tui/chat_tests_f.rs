@@ -601,7 +601,7 @@ fn content_images_register_newest_first_and_avatars_do_not() {
     std::fs::write(&shot, png_bytes(7)).expect("write");
 
     // A picture that placed on screen (agent prose, tool output, a URL).
-    chat.handle(crate::ui::UiEvent::ImageReady {
+    chat.apply_event(crate::ui::UiEvent::ImageReady {
         url: "https://example.com/plot.png".to_string(),
         meta: Some(crate::ui::ImageMeta {
             cols: 20,
@@ -610,7 +610,7 @@ fn content_images_register_newest_first_and_avatars_do_not() {
         }),
     });
     // A tool that handed the model a file.
-    chat.handle(crate::ui::UiEvent::ToolDone(crate::query::ToolCallDone {
+    chat.apply_event(crate::ui::UiEvent::ToolDone(crate::query::ToolCallDone {
         tool_call_id: "1".to_string(),
         name: "Read".to_string(),
         summary: "Read".to_string(),
@@ -647,7 +647,7 @@ fn content_images_register_newest_first_and_avatars_do_not() {
 #[test]
 fn a_failed_load_registers_nothing() {
     let mut chat = chat_at(100, 40);
-    chat.handle(crate::ui::UiEvent::ImageReady {
+    chat.apply_event(crate::ui::UiEvent::ImageReady {
         url: "https://example.com/gone.png".to_string(),
         meta: None,
     });
@@ -1911,8 +1911,8 @@ fn a_run_that_opens_with_reasoning_keeps_its_clock() {
         Vec::new(),
     );
     chat.switch_to(Some(crate::tui::zoom::ZoomTarget::Agent("scout".into())));
-    let page = chat.away.as_ref().expect("the page is open");
-    let run = page
+    let run = chat
+        .conv
         .messages
         .iter()
         .find(|m| m.text.contains("the lexer owns it"))
@@ -1950,8 +1950,8 @@ fn prose_between_tool_streaks_closes_the_fold() {
         vec![answer("r1", "a", false), answer("r2", "b", false)],
     );
     chat.switch_to(Some(crate::tui::zoom::ZoomTarget::Agent("scout".into())));
-    let page = chat.away.as_ref().expect("the page is open");
-    let run = page
+    let run = chat
+        .conv
         .messages
         .iter()
         .find(|m| !m.groups.is_empty())
@@ -1964,38 +1964,51 @@ fn prose_between_tool_streaks_closes_the_fold() {
 }
 
 /// The run in flight is drawn by the builder that draws every settled run above
-/// it (D132). Before this the page owned a second renderer for its moving half:
-/// no result rows, no folds, no status, and `⏺ ⏺ Read(a.rs)` — a glyph applied
+/// it (D132), and since D134 it is *the same store* — the events an instance
+/// produces land in its transcript exactly as main's land in main's, so there
+/// is no second renderer left to drift. Before D132 the page owned one: no
+/// result rows, no folds, no status, and `⏺ ⏺ Read(a.rs)` — a glyph applied
 /// twice because one side pre-rendered the line and the other prefixed it again.
 #[test]
 fn a_running_turn_is_drawn_like_a_finished_one() {
     use serde_json::json;
     let mut chat = test_chat();
     seed_agent(&chat, "scout");
-    let live = std::sync::Arc::new(std::sync::Mutex::new(vec![
-        crate::agents::LiveBlock::Thinking("first thought\nsecond thought".into()),
-        crate::agents::LiveBlock::Tool(crate::agents::LiveTool {
-            id: "t1".into(),
+    let scout = crate::ui::ConvKey::Agent("scout".to_string());
+    let call = |id: &str, url: &str| UiEvent::ToolReady {
+        tool_call_id: id.to_string(),
+        name: "WebFetch".to_string(),
+        input: json!({ "url": url }),
+        standalone: false,
+    };
+    for event in [
+        UiEvent::TurnStart,
+        UiEvent::ThinkingDelta("first thought\nsecond thought".into()),
+        UiEvent::ToolStart {
             name: "WebFetch".into(),
-            input: json!({"url": "https://x.dev/a"}),
-            answer: Some(crate::agents::ToolAnswer {
-                output: "line a\nline b".into(),
-                is_error: false,
-            }),
-        }),
-        crate::agents::LiveBlock::Tool(crate::agents::LiveTool {
-            id: "t2".into(),
+        },
+        call("t1", "https://x.dev/a"),
+        UiEvent::ToolDone(crate::query::ToolCallDone {
+            tool_call_id: "t1".into(),
             name: "WebFetch".into(),
-            input: json!({"url": "https://x.dev/b"}),
-            answer: None,
+            summary: "url=\"https://x.dev/a\"".into(),
+            output: "line a\nline b".into(),
+            status: crate::query::ToolCallStatus::Done,
+            diff: None,
+            duration_ms: 3,
         }),
-    ]));
-    chat.session.agents.set_live("scout", Some(live), None);
+        UiEvent::ToolStart {
+            name: "WebFetch".into(),
+        },
+        call("t2", "https://x.dev/b"),
+    ] {
+        chat.apply_event_to(scout.clone(), event);
+    }
     let rows = agent_page(&mut chat, "scout");
 
     assert!(
         rows.iter()
-            .any(|r| r.contains("✻ Thinking") && r.contains("+2 lines") && r.contains("ctrl+o")),
+            .any(|r| r.contains("✻") && r.contains("+2 lines") && r.contains("ctrl+o")),
         "reasoning folds while it streams, not only after: {rows:?}"
     );
     assert!(
@@ -2013,6 +2026,341 @@ fn a_running_turn_is_drawn_like_a_finished_one() {
     );
 }
 
+/// The turn an instance ran before its page was ever opened is on the page when
+/// it is: the store is opened on the *first event*, not on the first look.
+#[test]
+fn a_page_opened_late_still_has_the_turn_that_already_happened() {
+    let mut chat = test_chat();
+    seed_agent(&chat, "scout");
+    let scout = crate::ui::ConvKey::Agent("scout".to_string());
+    for event in [
+        UiEvent::TurnStart,
+        UiEvent::TextDelta("the lexer owns it".into()),
+        UiEvent::TurnEnd,
+    ] {
+        chat.apply_event_to(scout.clone(), event);
+    }
+    let rows = agent_page(&mut chat, "scout");
+    assert!(
+        rows.iter().any(|r| r.contains("the lexer owns it")),
+        "{rows:?}"
+    );
+}
+
+/// An instance's turn and main's run at once, and neither writes into the
+/// other's transcript. This is what one event channel costs and what addressing
+/// buys: before D134 there was one stream and the question could not be asked.
+#[test]
+fn two_conversations_stream_at_once_without_crossing() {
+    let mut chat = test_chat();
+    seed_agent(&chat, "scout");
+    let scout = crate::ui::ConvKey::Agent("scout".to_string());
+    chat.apply_event(UiEvent::TurnStart);
+    chat.apply_event_to(scout.clone(), UiEvent::TurnStart);
+    chat.apply_event(UiEvent::TextDelta("main is answering".into()));
+    chat.apply_event_to(scout.clone(), UiEvent::TextDelta("scout is working".into()));
+    chat.apply_event(UiEvent::TextDelta(" the user".into()));
+
+    let home: Vec<String> = chat.conv.messages.iter().map(|m| m.text.clone()).collect();
+    assert!(
+        home.iter().any(|t| t == "main is answering the user"),
+        "{home:?}"
+    );
+    assert!(
+        !home.iter().any(|t| t.contains("scout is working")),
+        "the instance's stream never lands in main's transcript: {home:?}"
+    );
+    let rows = agent_page(&mut chat, "scout");
+    assert!(
+        rows.iter().any(|r| r.contains("scout is working")),
+        "{rows:?}"
+    );
+    assert!(
+        !rows.iter().any(|r| r.contains("main is answering")),
+        "and main's never lands in the instance's: {rows:?}"
+    );
+}
+
+/// What was said *to* an instance is on its page too, filed by the same walk
+/// that reads a committed history — otherwise a page shows the answers and
+/// never the questions.
+///
+/// The turn opens its own message before the prompt arrives, so "is this the
+/// task the instance was dispatched with?" cannot be read off the transcript:
+/// the store records it. Get that wrong and the same run reads one way live and
+/// another way re-read from history, which is the drift this record removes.
+#[test]
+fn an_inbound_prompt_lands_as_the_sender_who_wrote_it() {
+    let mut chat = test_chat();
+    seed_agent(&chat, "scout");
+    let scout = crate::ui::ConvKey::Agent("scout".to_string());
+    chat.apply_event_to(scout.clone(), UiEvent::TurnStart);
+    chat.apply_event_to(scout.clone(), UiEvent::Inbound("map the parser".into()));
+    chat.apply_event_to(
+        scout.clone(),
+        UiEvent::Inbound("[follow-up instruction] and the lexer".into()),
+    );
+    let texts: Vec<String> = chat
+        .parked
+        .get(&scout)
+        .expect("the store opened on the first event")
+        .messages
+        .iter()
+        .map(|m| m.text.clone())
+        .collect();
+    assert!(
+        texts.iter().any(|t| t.contains("map the parser")),
+        "the task that created the instance: {texts:?}"
+    );
+    assert!(
+        texts.iter().any(|t| t.contains("and the lexer")),
+        "and what was said to it afterwards: {texts:?}"
+    );
+    let intake = chat
+        .parked
+        .get(&scout)
+        .expect("the store")
+        .messages
+        .iter()
+        .find(|m| m.text.contains("map the parser"))
+        .expect("the task");
+    assert!(
+        intake.speaker.is_none(),
+        "the task is intake, not main speaking — the same thing `walk` says \
+         when it reads the committed history back"
+    );
+}
+
+/// Write-once, on somebody else's page. A running turn's rows must stay in the
+/// redrawable tail — frozen into scrollback they are a half-finished row the
+/// terminal can never take back.
+///
+/// The away page used to get this from a boundary of its own (`stable`), which
+/// it needed because it was rebuilt: any message could change under the flush
+/// cursor. A store fed by events gets it from the rule main has always used —
+/// a running activity is what "not settled" means — and the boundary is gone.
+#[test]
+fn a_pages_running_turn_stays_out_of_scrollback() {
+    let mut chat = test_chat();
+    seed_agent(&chat, "scout");
+    let scout = crate::ui::ConvKey::Agent("scout".to_string());
+    chat.apply_event_to(scout.clone(), UiEvent::TurnStart);
+    chat.apply_event_to(scout.clone(), UiEvent::TextDelta("halfway through".into()));
+    chat.switch_to(Some(crate::tui::zoom::ZoomTarget::Agent("scout".into())));
+
+    chat.build_rows(80);
+    let frozen = |chat: &Chat| -> Vec<String> {
+        chat.doc.rows[..chat.doc.settled]
+            .iter()
+            .map(|r| r.line.plain_text())
+            .collect()
+    };
+    assert!(
+        !frozen(&chat).iter().any(|r| r.contains("halfway through")),
+        "nothing of a running turn may flush: {:?}",
+        frozen(&chat)
+    );
+    assert!(
+        chat.doc
+            .rows
+            .iter()
+            .any(|r| r.line.plain_text().contains("halfway through")),
+        "and all of it renders in the tail"
+    );
+    chat.advance_flushed();
+    assert_eq!(
+        chat.flushed_segments, 1,
+        "the cursor stops at the page header"
+    );
+
+    chat.apply_event_to(scout, UiEvent::TurnEnd);
+    past_settle(&mut chat);
+    chat.build_rows(80);
+    assert_eq!(
+        chat.doc.settled,
+        chat.doc.rows.len(),
+        "and settles whole once the turn ends"
+    );
+}
+
+/// What the user says to an instance is on that instance's page the moment it
+/// is said — the same moment main's prompt enters main's transcript — and it is
+/// there exactly once, because the run's own prompt repeats it and the console
+/// drops the repeat.
+#[test]
+fn a_line_sent_to_an_agent_shows_on_its_page_once() {
+    let mut chat = test_chat();
+    seed_agent(&chat, "scout");
+    chat.switch_to(Some(crate::tui::zoom::ZoomTarget::Agent("scout".into())));
+    chat.set_input("look at the lexer".to_string());
+    chat.submit();
+    assert!(
+        chat.conv
+            .messages
+            .iter()
+            .any(|m| m.text == "look at the lexer"),
+        "it is on the page it was typed on: {:?}",
+        chat.conv.messages
+    );
+
+    // The run absorbs it and hands the console the prompt it was given. The
+    // user's own lines are already there; main's instruction is not.
+    chat.apply_event(UiEvent::Inbound(
+        "[DM from user]\nlook at the lexer".to_string(),
+    ));
+    chat.apply_event(UiEvent::Inbound("map the parser".to_string()));
+    let said: Vec<&String> = chat
+        .conv
+        .messages
+        .iter()
+        .map(|m| &m.text)
+        .filter(|t| t.contains("look at the lexer"))
+        .collect();
+    assert_eq!(said.len(), 1, "once, not twice: {said:?}");
+    assert!(
+        chat.conv
+            .messages
+            .iter()
+            .any(|m| m.text == "map the parser"),
+        "and what main said still arrives: {:?}",
+        chat.conv.messages
+    );
+}
+
+/// A room stays a projection, and keeps up incrementally: its log is appended
+/// to by other people, so the page reads the tail past what it already has
+/// rather than rebuilding — which is what keeps the settled prefix still under
+/// the flush cursor.
+#[test]
+fn a_room_page_appends_what_was_posted_while_it_was_open() {
+    let mut chat = test_chat();
+    chat.session
+        .channels
+        .create(
+            "crew",
+            vec!["dev".to_string()],
+            crate::channels::ChannelMode::Free,
+        )
+        .expect("room");
+    chat.session
+        .channels
+        .post("dev", "crew", "first")
+        .expect("posted");
+    chat.switch_to(Some(crate::tui::zoom::ZoomTarget::Room("crew".to_string())));
+    assert_eq!(chat.conv.messages.len(), 1);
+
+    chat.session
+        .channels
+        .post("dev", "crew", "second")
+        .expect("posted");
+    chat.sync_away();
+    let texts: Vec<&String> = chat.conv.messages.iter().map(|m| &m.text).collect();
+    assert_eq!(texts, ["first", "second"], "{texts:?}");
+    assert!(
+        !chat.conv.busy,
+        "a room has no turn loop, so nothing about it is ever running"
+    );
+}
+
+/// Switching banks the page being left into scrollback and coming home reprints
+/// main's recent tail — D27's accepted duplicate, and the one thing the store
+/// model must not quietly drop.
+#[test]
+fn switching_turns_the_page_and_coming_home_reprints_the_tail() {
+    let mut chat = test_chat();
+    seed_agent(&chat, "scout");
+    chat.conv.messages.push(msg(Role::User, "what broke?"));
+    chat.conv
+        .messages
+        .push(msg(Role::Assistant, "the lexer did"));
+    chat.build_rows(80);
+    chat.advance_flushed();
+
+    chat.switch_to(Some(crate::tui::zoom::ZoomTarget::Agent("scout".into())));
+    assert!(chat.page_turn, "the page being left is banked");
+    assert_eq!(chat.flushed_segments, 0, "the new page prints from the top");
+    assert!(
+        chat.parked
+            .get(&crate::ui::ConvKey::Main)
+            .is_some_and(|main| main.messages.len() == 2),
+        "main's transcript is parked, not dropped"
+    );
+
+    chat.switch_to(None);
+    assert!(chat.page_turn);
+    let rows = main_rows(&mut chat);
+    assert!(
+        rows.iter().any(|r| r.contains("the lexer did")),
+        "coming home reprints the recent tail: {rows:?}"
+    );
+}
+
+/// Two calls of the same tool in one round, answered out of order. The answer
+/// belongs to the call that made it, and "the first running row with this name"
+/// is not that call.
+///
+/// D132 matched a page's live tail on the protocol's own id for exactly this
+/// reason; routing an instance's stream through the console's handler would have
+/// handed that property back, because the console had been discarding the id it
+/// is given at `ToolReady` since the event was written.
+#[test]
+fn a_concurrent_answer_lands_on_the_call_that_made_it() {
+    let mut chat = test_chat();
+    let ready = |id: &str, path: &str| UiEvent::ToolReady {
+        tool_call_id: id.to_string(),
+        name: "Read".to_string(),
+        input: serde_json::json!({ "file_path": path }),
+        standalone: false,
+    };
+    chat.apply_event(UiEvent::TurnStart);
+    chat.apply_event(UiEvent::ToolStart {
+        name: "Read".into(),
+    });
+    chat.apply_event(ready("r1", "a.rs"));
+    chat.apply_event(UiEvent::ToolStart {
+        name: "Read".into(),
+    });
+    chat.apply_event(ready("r2", "b.rs"));
+    // b comes back first, as a concurrent round's calls do.
+    chat.apply_event(UiEvent::ToolDone(crate::query::ToolCallDone {
+        tool_call_id: "r2".into(),
+        name: "Read".into(),
+        summary: "b.rs".into(),
+        output: "from b".into(),
+        status: crate::query::ToolCallStatus::Error,
+        diff: None,
+        duration_ms: 1,
+    }));
+
+    let i = chat.conv.stream_msg.expect("the streaming message");
+    let calls: Vec<(String, crate::tui::activities::ToolStatus)> = chat.conv.messages[i]
+        .activities
+        .iter()
+        .filter_map(|a| match &a.kind {
+            crate::tui::activities::ActivityKind::Tool(call) => {
+                Some((call.summary.clone(), call.status))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        calls
+            .iter()
+            .find(|(summary, _)| summary.contains("b.rs"))
+            .map(|(_, status)| *status),
+        Some(crate::tui::activities::ToolStatus::Error),
+        "b's failure is on b's row: {calls:?}"
+    );
+    assert_eq!(
+        calls
+            .iter()
+            .find(|(summary, _)| summary.contains("a.rs"))
+            .map(|(_, status)| *status),
+        Some(crate::tui::activities::ToolStatus::Running),
+        "and a is still out: {calls:?}"
+    );
+}
+
 /// A page whose agent is working gets the status row main gets. Without it the
 /// page has nothing moving on it at all, which is most of what read as delay —
 /// the rows were fresh, the screen just never said anything was happening.
@@ -2020,6 +2368,12 @@ fn a_running_turn_is_drawn_like_a_finished_one() {
 fn a_working_agents_page_says_it_is_working() {
     let mut chat = test_chat();
     seed_agent(&chat, "scout");
+    // The row reads the page's own store since D134, so the turn has to have
+    // started there — which is what `TurnStart` addressed to the instance is.
+    chat.apply_event_to(
+        crate::ui::ConvKey::Agent("scout".to_string()),
+        UiEvent::TurnStart,
+    );
     assert!(
         chat.page_running_status().is_none(),
         "main is idle and no page is open"

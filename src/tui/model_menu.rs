@@ -248,13 +248,13 @@ impl super::Chat {
                 Err(e) => {
                     // Same visibility contract as a fetch failure: page-level
                     // error row + in-menu reason.
-                    let _ = events.send(UiEvent::Error {
+                    events.send(UiEvent::Error {
                         code: "GENERIC",
                         msg: e.clone(),
                         level: crate::error::ErrorLevel::Page,
                         context: crate::error::ErrorContext::ShortSync,
                     });
-                    let _ = events.send(UiEvent::ModelsLoaded {
+                    events.send(UiEvent::ModelsLoaded {
                         provider,
                         models: Vec::new(),
                         failed: Some(e),
@@ -268,7 +268,7 @@ impl super::Chat {
                     let code = crate::error::map_error(&e);
                     // #18/main #91: short-op failures must be visible (page-level error row, error color),
                     // behavior keeps degrading gracefully — "degraded + visible".
-                    let _ = events.send(UiEvent::Error {
+                    events.send(UiEvent::Error {
                         code,
                         msg: e.to_string(),
                         level: crate::error::ErrorLevel::Page,
@@ -296,7 +296,7 @@ impl super::Chat {
                 crate::model_cache::ModelCache::new(&session.home)
                     .put(&provider, &base_url, &models);
             }
-            let _ = events.send(UiEvent::ModelsLoaded {
+            events.send(UiEvent::ModelsLoaded {
                 provider,
                 models,
                 failed,

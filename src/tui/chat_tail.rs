@@ -4,7 +4,6 @@
 
 use super::*;
 use crossterm::event::{KeyCode, KeyModifiers};
-use tokio::sync::mpsc;
 
 use crate::query::Session;
 use crate::tui::composer::KillDir;
@@ -342,7 +341,7 @@ impl super::Chat {
     /// Submits the next queued item after a turn (one at a time: a plain message starts
     /// the next turn; queued slash commands drain synchronously until one does).
     pub(crate) fn submit_queued(&mut self) {
-        if self.conv.busy || self.conv.queued.is_empty() {
+        if self.main_conv().busy || self.main_conv().queued.is_empty() {
             return;
         }
         if tokio::runtime::Handle::try_current().is_err() {
@@ -351,19 +350,19 @@ impl super::Chat {
         // Drain queued slash commands synchronously; stop at the first plain message
         // (it starts a turn, which re-triggers submit_queued on TurnEnd).
         loop {
-            let Some(first) = self.conv.queued.first() else {
+            let Some(first) = self.main_conv().queued.first() else {
                 return;
             };
             if !first.is_slash {
                 break;
             }
-            let item = self.conv.queued.remove(0);
+            let item = self.main_conv().queued.remove(0);
             self.run_slash(item.text.strip_prefix('/').unwrap_or(&item.text));
-            if self.conv.busy {
+            if self.main_conv().busy {
                 return; // a skill command started a turn; the rest waits for TurnEnd
             }
         }
-        let item = self.conv.queued.remove(0);
+        let item = self.main_conv().queued.remove(0);
         self.start_turn(item.text, true);
     }
 
@@ -379,12 +378,12 @@ impl super::Chat {
     /// With no turn running there is nothing to steer, and the channel is emptied rather
     /// than left holding an offer for whichever turn starts next.
     pub(crate) fn rearm_steer(&mut self) {
-        if !self.conv.busy {
+        if !self.main_conv().busy {
             self.steer.reset();
             return;
         }
         let mut items = Vec::new();
-        for entry in &self.conv.queued {
+        for entry in &self.main_conv().queued.clone() {
             if entry.is_slash || !self.resolve_images(&entry.text).is_empty() {
                 break;
             }
@@ -409,7 +408,7 @@ impl super::Chat {
         if items.is_empty() {
             return;
         }
-        self.conv
+        self.main_conv()
             .queued
             .retain(|entry| !items.iter().any(|item| item.id == entry.id));
         for item in items {
@@ -423,7 +422,7 @@ impl super::Chat {
     /// The transcript line a steered message leaves: the user's own words under the
     /// `↪` marker, rendered as a single dim line rather than a `❯` bubble.
     fn push_steered_line(&mut self, text: &str) {
-        self.conv.messages.push(UiMessage {
+        self.main_conv().messages.push(UiMessage {
             speaker: None,
             role: Role::User,
             text: format!("{}{text}", crate::steer::STEER_FLOW_PREFIX),
@@ -442,10 +441,11 @@ impl super::Chat {
     /// name, which is the only part of it the user needs here.
     pub(crate) fn push_agent_alert(&mut self, label: &str, reason: Option<&str>) {
         let instance = label.split_whitespace().next().unwrap_or(label);
-        self.conv.messages.push(UiMessage {
+        let line = crate::tui::bufferview::agent_alert_line(instance, reason);
+        self.main_conv().messages.push(UiMessage {
             speaker: None,
             role: Role::User,
-            text: crate::tui::bufferview::agent_alert_line(instance, reason),
+            text: line,
             at: crate::channels::now_unix(),
             activities: Vec::new(),
             insert_points: Vec::new(),
@@ -474,7 +474,7 @@ impl super::Chat {
 
     /// A user-role line the harness wrote about somebody else's life.
     fn push_flow_line(&mut self, text: String) {
-        self.conv.messages.push(UiMessage {
+        self.main_conv().messages.push(UiMessage {
             speaker: None,
             role: Role::User,
             text,
@@ -537,8 +537,10 @@ impl super::Chat {
             return false;
         }
         // Idle-only, as the per-post wake was: a running turn absorbs the mail at
-        // its own next round, and a queued user message goes first.
-        if self.conv.busy || self.conv.interrupted || !self.conv.queued.is_empty() {
+        // its own next round, and a queued user message goes first. Main's turn
+        // and main's queue, whatever page the screen is on.
+        let main = self.main_conv();
+        if main.busy || main.interrupted || !main.queued.is_empty() {
             return false;
         }
         self.submit_auto();
@@ -556,7 +558,7 @@ impl super::Chat {
     /// CC's leader narrates, and the noise control is the wake debounce above
     /// and the dispatch row's own state, not a marker that renders as nothing).
     pub(crate) fn submit_auto(&mut self) {
-        if self.conv.busy {
+        if self.main_conv().busy {
             return;
         }
         if tokio::runtime::Handle::try_current().is_err() {
@@ -591,24 +593,24 @@ impl super::Chat {
     /// memory extraction is deferred — it is a non-streaming model call (seconds) and the wrap-up should not block
     /// the turn-end UI; extraction runs fine in parallel with the next turn (e.g. a watch wake-up).
     async fn finish_turn(
-        events: &mpsc::UnboundedSender<UiEvent>,
+        events: &crate::ui::EventSink,
         session: &Arc<Session>,
         outcome: &crate::query::QueryOutcome,
     ) {
         if let Some(marker) = outcome.interrupt_marker {
-            let _ = events.send(UiEvent::Interrupted { marker });
+            events.send(UiEvent::Interrupted { marker });
         }
         if !outcome.aborted {
             match outcome.end_reason {
                 crate::query::QueryEndReason::EmptyResponseRetried => {
-                    let _ = events.send(UiEvent::Warning(
+                    events.send(UiEvent::Warning(
                         "model returned an empty response and was retried".to_string(),
                     ));
                 }
                 crate::query::QueryEndReason::Completed => {}
             }
         }
-        let _ = events.send(UiEvent::TurnEnd);
+        events.send(UiEvent::TurnEnd);
         let cwd = session.cwd();
         crate::memory::extract_memory(session, &outcome.messages, &session.home, &cwd).await;
     }
@@ -618,12 +620,12 @@ impl super::Chat {
     /// then answers only to `kill`. Watching the handle turns a lost turn back into the
     /// ordinary long-turn error state, which releases `busy` and offers retry / go back.
     pub(crate) fn supervise_turn(
-        events: mpsc::UnboundedSender<UiEvent>,
+        events: crate::ui::EventSink,
         handle: tokio::task::JoinHandle<()>,
     ) {
         tokio::spawn(async move {
             if handle.await.is_err() {
-                let _ = events.send(UiEvent::Error {
+                events.send(UiEvent::Error {
                     code: crate::error::TURN_LOST,
                     msg: "The turn ended unexpectedly; retry or go back.".to_string(),
                     level: crate::error::ErrorLevel::Full,
@@ -634,20 +636,26 @@ impl super::Chat {
     }
 
     pub(crate) fn start_turn(&mut self, text: String, show_user: bool) {
+        // Main's turn, wherever the screen is: a background run finishing wakes
+        // one while the reader is standing on somebody else's page, and its rows
+        // belong in the transcript that asked for them.
         if show_user {
-            self.conv.messages.push(UiMessage {
+            let at = crate::channels::now_unix();
+            let text = text.clone();
+            self.main_conv().messages.push(UiMessage {
                 speaker: None,
                 role: Role::User,
-                text: text.clone(),
-                at: crate::channels::now_unix(),
+                text,
+                at,
                 activities: Vec::new(),
                 insert_points: Vec::new(),
                 groups: Vec::new(),
                 group_of: Vec::new(),
             });
         }
-        self.conv.busy = true;
-        self.conv.interrupted = false;
+        let main = self.main_conv();
+        main.busy = true;
+        main.interrupted = false;
         // The steer channel belongs to one turn (D83): whatever the previous turn chose
         // not to take must not be folded into this one behind the user's back. The
         // caller re-arms it against the queue once this turn is the running one.
@@ -664,7 +672,7 @@ impl super::Chat {
         let cancel_rx = self.cancel_tx.subscribe();
         self.cancel_tx.send_replace(false);
         let handle = tokio::spawn(async move {
-            let _ = events.send(UiEvent::TurnStart);
+            events.send(UiEvent::TurnStart);
             let mut ui = crate::ui::tui_hooks(events.clone(), asks, steer, live);
             let history = Self::load_history(&session, &mut ui.on_warning);
             let result =
@@ -675,7 +683,7 @@ impl super::Chat {
                 }
                 Err(e) => {
                     let code = crate::error::map_error(&e);
-                    let _ = events.send(UiEvent::Error {
+                    events.send(UiEvent::Error {
                         code,
                         msg: Self::auth_error_hint(&session, code, e.to_string()),
                         // Turn-level error = long-turn failure → full-flow full-screen state (AC-53).
@@ -712,21 +720,23 @@ impl super::Chat {
     /// bash-mode turn (processBashCommand): `!` commands execute directly,
     /// output shown as a tool activity; with respondToBashCommands on, the model replies afterwards.
     pub(crate) fn start_bash_turn(&mut self, command: String) {
-        self.conv.messages.push(UiMessage {
+        let at = crate::channels::now_unix();
+        self.main_conv().messages.push(UiMessage {
             speaker: None,
             role: Role::User,
             text: format!("!{command}"),
-            at: crate::channels::now_unix(),
+            at,
             activities: Vec::new(),
             insert_points: Vec::new(),
             groups: Vec::new(),
             group_of: Vec::new(),
         });
-        self.conv.busy = true;
+        let main = self.main_conv();
+        main.busy = true;
         // Same as start_turn: a fresh turn clears interrupt suppression —
         // without this, one interrupt followed by only `!` commands kept
         // background wake-ups suppressed for the rest of the session.
-        self.conv.interrupted = false;
+        main.interrupted = false;
         // Same as start_turn: the channel is this turn's (D83).
         self.steer.reset();
         let steer = self.steer.clone();
@@ -738,7 +748,7 @@ impl super::Chat {
         let cancel_rx = self.cancel_tx.subscribe();
         self.cancel_tx.send_replace(false);
         let handle = tokio::spawn(async move {
-            let _ = events.send(UiEvent::TurnStart);
+            events.send(UiEvent::TurnStart);
             let mut ui = crate::ui::tui_hooks(events.clone(), asks, steer, live);
             let history = Self::load_history(&session, &mut ui.on_warning);
             let result = crate::query::run_bash_command(
@@ -755,7 +765,7 @@ impl super::Chat {
                 }
                 Err(e) => {
                     let code = crate::error::map_error(&e);
-                    let _ = events.send(UiEvent::Error {
+                    events.send(UiEvent::Error {
                         code,
                         msg: Self::auth_error_hint(&session, code, e.to_string()),
                         // Turn-level error = long-turn failure → full-flow full-screen state (AC-53).
@@ -774,23 +784,25 @@ impl super::Chat {
     /// and the answer stays pinned to the bottom until the turn ends. Close the old message and
     /// open a fresh one, the way a turn boundary would: the transcript then reads in clock order.
     pub(crate) fn open_continuation_message(&mut self) {
-        let Some(prev) = self.conv.stream_msg else {
+        let tick = self.tick;
+        let main = self.main_conv();
+        let Some(prev) = main.stream_msg else {
             return;
         };
         // Tool rows registered before the answer index into `prev`'s activities
         // (`pending_tools` holds those indices), so a call still in flight pins the stream here.
-        if !self.conv.pending_tools.is_empty() {
+        if !main.pending_tools.is_empty() {
             return;
         }
         // AskUserQuestion is a hidden tool: `ToolStart` returns before closing the running
         // thinking block, and a block left running would keep `prev` from ever settling
         // (`message_static_settled`) — with it the whole flush prefix, for the rest of the session.
-        self.close_running_thinking(prev);
+        main.close_running_thinking(prev, tick);
         // The buffer belongs to the block just closed; carried over, the next reasoning delta
         // would try to merge into a block the new message does not have, and be dropped.
-        self.conv.thinking_buf.clear();
-        self.conv.thinking_seg_open = false;
-        self.conv.messages.push(UiMessage {
+        main.thinking_buf.clear();
+        main.thinking_seg_open = false;
+        main.messages.push(UiMessage {
             speaker: None,
             role: Role::Assistant,
             text: String::new(),
@@ -800,45 +812,11 @@ impl super::Chat {
             groups: Vec::new(),
             group_of: Vec::new(),
         });
-        self.conv.stream_msg = Some(self.conv.messages.len() - 1);
-        self.conv.stream_attempt_checkpoint = self
-            .conv
+        main.stream_msg = Some(main.messages.len() - 1);
+        main.stream_attempt_checkpoint = main
             .stream_msg
-            .and_then(|index| self.conv.messages.get(index).cloned());
-        self.conv.continuation_msg = self.conv.stream_msg;
-    }
-
-    /// A continuation message the turn never filled (the answer was the last thing that happened):
-    /// an empty assistant block renders as a stray gap. Only ever drops the message
-    /// [`Chat::open_continuation_message`] opened. Call before clearing `stream_msg`.
-    pub(crate) fn drop_empty_stream_message(&mut self) {
-        let Some(i) = self.conv.continuation_msg.take() else {
-            return;
-        };
-        if self.conv.stream_msg == Some(i)
-            && i + 1 == self.conv.messages.len()
-            && self.conv.messages[i].text.is_empty()
-            && self.conv.messages[i].activities.is_empty()
-        {
-            self.conv.messages.pop();
-            self.conv.stream_msg = None;
-            self.conv.stream_attempt_checkpoint = None;
-        }
-    }
-
-    /// A tool call, message text, or a mid-turn answer all end the current reasoning segment.
-    pub(crate) fn close_running_thinking(&mut self, i: usize) {
-        let tick = self.tick;
-        for hint in &mut self.conv.messages[i].activities {
-            if let ActivityKind::Thinking(t) = &mut hint.kind
-                && t.state == ThinkingState::Running
-            {
-                t.state = ThinkingState::Done;
-                t.duration_ms = tick
-                    .saturating_sub(t.start_tick)
-                    .saturating_mul(crate::tui::motion::TICK_MS);
-            }
-        }
+            .and_then(|index| main.messages.get(index).cloned());
+        main.continuation_msg = main.stream_msg;
     }
 
     /// Keyboard events. Real-clock version; semantics in [`Chat::on_key_at`].
@@ -1001,7 +979,7 @@ impl super::Chat {
                 // On an away page, shift+tab cycles the **viewed agent's**
                 // permission mode and leaves the console's alone (the zoom's
                 // rule, which is CC's).
-                if self.away.is_some() {
+                if !self.active.is_main() {
                     self.cycle_zoom_permission_mode();
                 } else {
                     self.cycle_permission_mode();
@@ -1233,14 +1211,14 @@ impl super::Chat {
             EscLayer::HelpPanel => self.help_visible,
             EscLayer::Roster => self.roster_selection().is_some(),
             EscLayer::TaskPanel => self.tasks_visible && !self.tasks_auto,
-            EscLayer::AwayStop => self.away.is_some() && self.zoom_is_running(),
+            EscLayer::AwayStop => !self.active.is_main() && self.zoom_is_running(),
             // Main's turn is out of Esc's reach while a page is up (v6): the
             // key on an agent's page must not interrupt a turn the user is
             // not even looking at. Ctrl+C keeps the unconditional interrupt.
-            EscLayer::Interrupt => self.conv.busy && self.away.is_none(),
-            EscLayer::BashMode => self.bash_mode && self.input.is_empty() && self.away.is_none(),
+            EscLayer::Interrupt => self.conv.busy && self.active.is_main(),
+            EscLayer::BashMode => self.bash_mode && self.input.is_empty() && self.active.is_main(),
             EscLayer::ClearInput => !self.input.is_empty(),
-            EscLayer::AwayHome => self.away.is_some(),
+            EscLayer::AwayHome => !self.active.is_main(),
         }
     }
 
@@ -1354,7 +1332,7 @@ impl super::Chat {
         // On a page, `esc` stops the agent being watched (EscLayer::AwayStop),
         // so the row says which of the key's two meanings it has right now —
         // the D39 rule, applied to the surface D132 gave the row.
-        if self.away.is_some() && self.zoom_is_running() {
+        if !self.active.is_main() && self.zoom_is_running() {
             return "esc stops this agent · ↑ home".to_string();
         }
         let esc = self.esc_busy_hint();
@@ -1898,19 +1876,21 @@ impl super::Chat {
         if self.has_dynamic_rows() {
             self.dirty = true;
         }
-        // The away page follows the domain (v6): rebuilt when its conversation
+        // The room page follows its log (D134): appended when its conversation
         // moved, closed when its subject left. A no-change tick costs one
         // fingerprint.
         self.sync_away();
         // `meter` (D87): aim the status row's token readout at the live count;
         // a repeat target is a no-op, so this costs one comparison per frame.
-        let tokens = self.conv.output_tokens;
+        // Main's count: the meter eases main's row, and a page reports its own
+        // instance's figure directly (D132).
+        let tokens = self.main_conv().output_tokens;
         self.token_meter.retarget(tokens, self.tick, self.motion);
         // The terminal title's working animation (D79 machinery, D87 cadence):
         // one frame per 960ms, and `set_title` drops a repeat, so a busy turn
         // costs about one OSC 2 write per second. A pending permission prompt
         // owns the title while it is up — it is the more urgent state.
-        if self.conv.busy && self.pending_ask.is_none() {
+        if self.main_conv().busy && self.pending_ask.is_none() {
             let glyph = self.motion.title_glyph(self.tick);
             self.notify
                 .set_title(crate::tui::notify::Title::Busy(glyph));
@@ -2274,37 +2254,16 @@ impl super::Chat {
     /// Running status row (ActivityIndicator): when busy, returns the verb + elapsed time + tokens
     /// produced — preferring the running tool (summary/name), then the running
     /// thinking (whimsical word), falling back to "Working". Returns None when idle (row hidden).
-    /// The status row of whatever page is on screen (D132).
+    /// The status row of whatever page is on screen (D132), which since D134 is
+    /// [`Chat::running_status`] itself.
     ///
-    /// Main's row stays main's — on a page it would describe a turn the screen
-    /// is not showing — but the conclusion drawn from that used to be that a
-    /// page gets *no* row, and a page with no row has nothing moving on it at
-    /// all: no spinner, no clock, no token count, no key to stop with. That is
-    /// most of what "main feels live and an agent feels delayed" was, since the
-    /// registry has carried every number this needs all along.
+    /// It used to be a second reader — the registry's `elapsed`,
+    /// `output_tokens` and `recent_activity`, sampled because a page's turn was
+    /// not in the console's own state. It is now: the page's store carries the
+    /// running tool, the clock the turn started on and the tokens it has
+    /// produced, filled by the same events main's is. One reader, one row.
     pub fn page_running_status(&self) -> Option<RunningStatus> {
-        let Some(away) = &self.away else {
-            return self.running_status();
-        };
-        let crate::tui::zoom::ZoomTarget::Agent(name) = &away.target else {
-            return None;
-        };
-        let status = self
-            .tree_instances()
-            .into_iter()
-            .find(|s| &s.name == name && s.state == crate::agents::AgentState::Running)?;
-        Some(RunningStatus {
-            verb: status
-                .recent_activity
-                .last()
-                .cloned()
-                .unwrap_or_else(|| "Working".to_string()),
-            elapsed: status.elapsed.map(|d| d.as_secs_f64()).unwrap_or(0.0),
-            // The registry's own count, not the animated meter: the meter tracks
-            // main's stream, and borrowing it here would show main's numbers
-            // under somebody else's name.
-            tokens: status.output_tokens,
-        })
+        self.running_status()
     }
 
     pub fn running_status(&self) -> Option<RunningStatus> {
@@ -2346,7 +2305,14 @@ impl super::Chat {
         Some(RunningStatus {
             verb,
             elapsed,
-            tokens: self.token_meter.value(self.tick, self.motion),
+            // Main's row eases toward its number (D87); a page's reports the
+            // count its own turn produced, because the meter tracks one stream
+            // and there is one of it (D132's ruling, unchanged).
+            tokens: if self.active.is_main() {
+                self.token_meter.value(self.tick, self.motion)
+            } else {
+                self.conv.output_tokens
+            },
         })
     }
 
@@ -2417,6 +2383,15 @@ impl super::Chat {
     pub fn refresh_conversations(&mut self) {
         let session = self.session.clone();
         self.buffers.refresh(&session, self.tick);
+        // A store outlives its page but not its instance: once the registry has
+        // forgotten an agent there is no page left to open, and keeping its
+        // transcript would grow the console for the length of the session.
+        self.parked.retain(|key, _| match key {
+            crate::ui::ConvKey::Agent(name) => {
+                session.agents.list().iter().any(|s| &s.name == name)
+            }
+            crate::ui::ConvKey::Main | crate::ui::ConvKey::Room(_) => true,
+        });
     }
 
     /// Repaint when a badge moved (D115). The pills and the tree are chrome,
@@ -2640,24 +2615,19 @@ impl super::Chat {
             self.prev_build_width = width;
             self.reply_cache.clear();
         }
-        // The away page (v6): same pipeline, the page's own messages swapped in
-        // for the duration of this one build. `away_build` carries what the
-        // core needs to differ on — the header instead of the welcome card,
-        // the page's own settled boundary, no slash furniture.
-        if let Some(mut away) = self.away.take() {
-            std::mem::swap(&mut self.conv.messages, &mut away.messages);
-            self.away_build = Some(crate::tui::conv::AwayBuild {
-                label: away.target.label(),
-                stable: away.stable,
-            });
-            self.build_rows_core(width);
-            self.away_build = None;
-            std::mem::swap(&mut self.conv.messages, &mut away.messages);
-            self.away = Some(away);
-            return &self.doc;
-        }
         self.build_rows_core(width);
         &self.doc
+    }
+
+    /// The page's own header line, on every page but main's — the one row that
+    /// says whose conversation the screen has become. `None` is main, which
+    /// opens with the welcome card instead.
+    fn page_label(&self) -> Option<String> {
+        match &self.active {
+            crate::ui::ConvKey::Main => None,
+            crate::ui::ConvKey::Agent(name) => Some(format!("@{name}")),
+            crate::ui::ConvKey::Room(name) => Some(format!("#{name}")),
+        }
     }
 
     fn build_rows_core(&mut self, width: usize) {
@@ -2675,41 +2645,34 @@ impl super::Chat {
         self.mark_base = 0;
 
         // Prefix-monotone settlement, precomputed in one pass (recursing per
-        // message inside the loop would be quadratic on the hot path). An away
-        // page brings its own boundary: everything derived from committed
-        // history is settled, the volatile tail (queued echoes, the live run)
-        // never is.
+        // message inside the loop would be quadratic on the hot path).
+        //
+        // One rule for every page since D134. The away page used to need a
+        // boundary of its own because it was *rebuilt*: a message could change
+        // under the flush cursor, so only the half derived from committed
+        // history was safe to freeze. A store fed by events cannot change
+        // behind the reader — a running turn holds a running activity, and
+        // that is what "not settled" has always meant here.
         let mut settled_flags: Vec<bool> = Vec::with_capacity(count);
-        if let Some(page) = &self.away_build {
-            for i in 0..count {
-                settled_flags.push(i < page.stable);
-            }
-        } else {
-            let mut prefix_settled = true;
-            let settling = self.settling();
-            for i in 0..count {
-                // A message inside the `settle` blink is not final yet: its
-                // completion row is still wearing the accent, and freezing it now
-                // would print that accent into scrollback for good (D87).
-                prefix_settled = prefix_settled
-                    && self.message_static_settled(i)
-                    && !(settling && i + 1 == count);
-                settled_flags.push(prefix_settled);
-            }
+        let mut prefix_settled = true;
+        let settling = self.settling();
+        for i in 0..count {
+            // A message inside the `settle` blink is not final yet: its
+            // completion row is still wearing the accent, and freezing it now
+            // would print that accent into scrollback for good (D87).
+            prefix_settled =
+                prefix_settled && self.message_static_settled(i) && !(settling && i + 1 == count);
+            settled_flags.push(prefix_settled);
         }
 
         let mut blocks: Vec<Block> = Vec::new();
         if skip == 0 {
-            // An away page opens with its name as a rule, not the console's
+            // A page opens with its name as a rule, not the console's
             // welcome card — the one row that says whose page this became.
-            if let Some(page) = self.away_build.clone() {
-                let color = self.identity_color(page.label.trim_start_matches(['@', '#']));
+            if let Some(label) = self.page_label() {
+                let color = self.identity_color(label.trim_start_matches(['@', '#']));
                 blocks.push(Block::settled(
-                    El::Rows(vec![crate::tui::conv::page_header(
-                        &page.label,
-                        width,
-                        color,
-                    )]),
+                    El::Rows(vec![crate::tui::conv::page_header(&label, width, color)]),
                     true,
                 ));
             } else {
@@ -2879,7 +2842,7 @@ impl super::Chat {
         }
         // Slash command output (/help /status /compact etc.): transient hints — rendered after messages and
         // above the input, **never settled or flushed**, auto-dismissed after the tick timeout (SLASH_OUTPUT_TTL).
-        if self.away_build.is_none() && !self.slash_lines.is_empty() {
+        if self.active.is_main() && !self.slash_lines.is_empty() {
             blocks.push(Block::transient(El::Lines(
                 self.slash_lines
                     .iter()
@@ -2888,7 +2851,7 @@ impl super::Chat {
             )));
         }
         // Error/usage rows (G12/G13): longer TTL, error color, clear on the next input.
-        if self.away_build.is_none() && !self.slash_error_lines.is_empty() {
+        if self.active.is_main() && !self.slash_error_lines.is_empty() {
             blocks.push(Block::transient(El::Lines(
                 self.slash_error_lines
                     .iter()
@@ -2898,7 +2861,7 @@ impl super::Chat {
         }
         // Informational output (/help /status …): persists until the next
         // input/Esc; never settles into scrollback.
-        if self.away_build.is_none() && !self.slash_info_lines.is_empty() {
+        if self.active.is_main() && !self.slash_info_lines.is_empty() {
             blocks.push(Block::transient(El::Lines(
                 self.slash_info_lines
                     .iter()

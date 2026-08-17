@@ -1686,13 +1686,40 @@ fn sub_session_shares_parent_mcp_and_permissions() {
     );
 }
 
-/// Thinking deltas reach the live tail as their own blocks — one per
-/// phase, closed by whatever interrupts it — so the DM can show the
-/// reasoning happening, while the flat reply output stays prose-only.
+/// A sink bound to `worker`, with the receiver to read back what a run put on
+/// it.
+fn worker_sink() -> (
+    crate::ui::EventSink,
+    tokio::sync::mpsc::UnboundedReceiver<crate::ui::Addressed>,
+) {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    (
+        crate::ui::EventSink::new(crate::ui::ConvKey::Agent("worker".into()), tx),
+        rx,
+    )
+}
+
+fn drain(rx: &mut tokio::sync::mpsc::UnboundedReceiver<crate::ui::Addressed>) -> Vec<UiEvent> {
+    let mut out = Vec::new();
+    while let Ok(addressed) = rx.try_recv() {
+        assert_eq!(
+            addressed.to,
+            crate::ui::ConvKey::Agent("worker".into()),
+            "every event names the conversation it happened in"
+        );
+        out.push(addressed.event);
+    }
+    out
+}
+
+/// A subagent's turn reaches the console as the same events main's does (D134),
+/// addressed to the instance — reasoning, the call, its answer and the prose,
+/// in the order they happened — while the flat reply stays prose-only, because
+/// that string is the spawn's return value.
 #[tokio::test]
-async fn thinking_deltas_open_one_live_block_per_phase() {
+async fn a_subagents_turn_streams_as_addressed_events() {
     let output = Arc::new(Mutex::new(String::new()));
-    let live = Arc::new(Mutex::new(Vec::new()));
+    let (sink, mut rx) = worker_sink();
     let progress = Arc::new(Mutex::new(crate::agents::AgentProgress::default()));
     let watch = crate::watch::WatchRegistry::new();
     let registry = AgentRegistry::new();
@@ -1709,10 +1736,9 @@ async fn thinking_deltas_open_one_live_block_per_phase() {
     let mut ui = subagent_hooks(
         SubagentOutput {
             text: output.clone(),
-            live: live.clone(),
             progress,
         },
-        Arc::new(Mutex::new(crate::token_rate::TokenRateSampler::default())),
+        Some(sink),
         cell,
         watch,
         id,
@@ -1751,27 +1777,40 @@ async fn thinking_deltas_open_one_live_block_per_phase() {
         text: "the answer".into(),
     });
 
-    let live = live.lock().unwrap_or_else(|e| e.into_inner());
-    assert_eq!(live.len(), 4, "{live:?}");
-    assert!(
-        matches!(&live[0], crate::agents::LiveBlock::Thinking(t) if t == "first phase"),
-        "consecutive deltas fold into one phase: {live:?}"
+    let events = drain(&mut rx);
+    let thinking: Vec<&String> = events
+        .iter()
+        .filter_map(|e| match e {
+            UiEvent::ThinkingDelta(text) => Some(text),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        thinking,
+        ["first ", "phase", "second phase"],
+        "reasoning streams delta by delta, as main's does — the console folds \
+         the phases, because folding them twice is what D132 was about: {events:?}"
     );
-    // The call carries what was called and what came back (D132) — not a
-    // pre-rendered line, which is what forced the page to own a second
-    // renderer for its moving half.
+    // The call carries what was called and what came back (D132), and both
+    // reach the console in the round they happen rather than at run end.
     assert!(
-        matches!(&live[1], crate::agents::LiveBlock::Tool(call)
-            if call.name == "Read"
-                && call.input["file_path"] == "a"
-                && call.answer.as_ref().is_some_and(|a| a.output == "one line" && !a.is_error)),
-        "the answer reaches the tail in the round it arrives: {live:?}"
+        events
+            .iter()
+            .any(|e| matches!(e, UiEvent::ToolReady { name, input, .. }
+            if name == "Read" && input["file_path"] == "a")),
+        "{events:?}"
     );
     assert!(
-        matches!(&live[2], crate::agents::LiveBlock::Thinking(t) if t == "second phase"),
-        "a tool call closes the phase: {live:?}"
+        events.iter().any(|e| matches!(e, UiEvent::ToolDone(done)
+            if done.tool_call_id == "test-tool" && done.output == "one line")),
+        "{events:?}"
     );
-    assert!(matches!(&live[3], crate::agents::LiveBlock::Text(t) if t == "the answer"));
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, UiEvent::TextDelta(text) if text == "the answer")),
+        "{events:?}"
+    );
     assert_eq!(
         &*output.lock().unwrap_or_else(|e| e.into_inner()),
         "the answer",
@@ -1782,7 +1821,7 @@ async fn thinking_deltas_open_one_live_block_per_phase() {
 #[tokio::test]
 async fn subagent_retry_restores_the_current_attempt_checkpoint() {
     let output = Arc::new(Mutex::new(String::new()));
-    let live = Arc::new(Mutex::new(Vec::new()));
+    let (sink, mut rx) = worker_sink();
     let progress = Arc::new(Mutex::new(crate::agents::AgentProgress::default()));
     let watch = crate::watch::WatchRegistry::new();
     let registry = AgentRegistry::new();
@@ -1799,10 +1838,9 @@ async fn subagent_retry_restores_the_current_attempt_checkpoint() {
     let mut ui = subagent_hooks(
         SubagentOutput {
             text: output.clone(),
-            live: live.clone(),
             progress: progress.clone(),
         },
-        Arc::new(Mutex::new(crate::token_rate::TokenRateSampler::default())),
+        Some(sink),
         cell.clone(),
         watch,
         id,
@@ -1841,18 +1879,22 @@ async fn subagent_retry_restores_the_current_attempt_checkpoint() {
         &*output.lock().unwrap_or_else(|e| e.into_inner()),
         "committedanswer"
     );
-    let live = live.lock().unwrap_or_else(|e| e.into_inner());
+    let events = drain(&mut rx);
+    // The *rendered* half of the rollback is the console's, and it always was:
+    // `StreamRetry` is what unwinds main's failed attempt, and an instance's
+    // turn is on the same channel now. What this hook still owns is the flat
+    // reply, the produced-character count and the progress cell.
     assert!(
-        matches!(live.first(), Some(crate::agents::LiveBlock::Text(text)) if text == "committed")
+        events.iter().any(|e| matches!(e, UiEvent::StreamRetry)),
+        "the console is told to unwind the attempt: {events:?}"
     );
-    assert!(matches!(
-        live.get(live.len().saturating_sub(2)),
-        Some(crate::agents::LiveBlock::Text(text)) if text == "Reconnecting... 2/10"
-    ));
-    assert!(matches!(
-        live.last(),
-        Some(crate::agents::LiveBlock::Text(text)) if text == "answer"
-    ));
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, UiEvent::Warning(text) if text == "Reconnecting... 2/10")),
+        "a reconnect notice takes the warning tier instead of being spliced \
+         into the instance's own prose: {events:?}"
+    );
     let progress = progress.lock().unwrap_or_else(|e| e.into_inner());
     assert_eq!(progress.tool_uses, 1);
     assert_eq!(cell.chars(), "committedanswer".chars().count());
@@ -1861,7 +1903,6 @@ async fn subagent_retry_restores_the_current_attempt_checkpoint() {
 #[tokio::test]
 async fn subagent_progress_accumulates_tokens_tools_and_recent_activity() {
     let output = Arc::new(Mutex::new(String::new()));
-    let live = Arc::new(Mutex::new(Vec::new()));
     let progress = Arc::new(Mutex::new(crate::agents::AgentProgress::default()));
     progress
         .lock()
@@ -1881,10 +1922,9 @@ async fn subagent_progress_accumulates_tokens_tools_and_recent_activity() {
     let mut ui = subagent_hooks(
         SubagentOutput {
             text: output,
-            live,
             progress: progress.clone(),
         },
-        Arc::new(Mutex::new(crate::token_rate::TokenRateSampler::default())),
+        None,
         Arc::new(AgentCell::new(registry.clone())),
         watch,
         id,
@@ -1945,10 +1985,9 @@ async fn subagent_hooks_touch_activity_on_stream_and_tool_signals() {
     let mut ui = subagent_hooks(
         SubagentOutput {
             text: Arc::new(Mutex::new(String::new())),
-            live: Arc::new(Mutex::new(Vec::new())),
             progress: Arc::new(Mutex::new(crate::agents::AgentProgress::default())),
         },
-        Arc::new(Mutex::new(crate::token_rate::TokenRateSampler::default())),
+        None,
         Arc::new(AgentCell::new(registry.clone())),
         watch,
         id,
@@ -2017,10 +2056,9 @@ async fn subagent_ask_forwards_to_attached_prompt() {
     let ui = subagent_hooks(
         SubagentOutput {
             text: Arc::new(Mutex::new(String::new())),
-            live: Arc::new(Mutex::new(Vec::new())),
             progress: Arc::new(Mutex::new(crate::agents::AgentProgress::default())),
         },
-        Arc::new(Mutex::new(crate::token_rate::TokenRateSampler::default())),
+        None,
         Arc::new(AgentCell::new(registry.clone())),
         watch.clone(),
         id,
@@ -2047,10 +2085,9 @@ async fn subagent_ask_forwards_to_attached_prompt() {
     let ui = subagent_hooks(
         SubagentOutput {
             text: Arc::new(Mutex::new(String::new())),
-            live: Arc::new(Mutex::new(Vec::new())),
             progress: Arc::new(Mutex::new(crate::agents::AgentProgress::default())),
         },
-        Arc::new(Mutex::new(crate::token_rate::TokenRateSampler::default())),
+        None,
         Arc::new(AgentCell::new(registry.clone())),
         watch,
         id,

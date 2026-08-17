@@ -116,6 +116,88 @@ impl PermissionRequest {
     }
 }
 
+/// Which conversation an event, or a page, belongs to.
+///
+/// Main is a key like any other (D134). It differs in exactly one way — it
+/// talks to the user by default — and that difference lives in the composer,
+/// not in the store.
+///
+/// `Room` never appears on an [`Addressed`] event: a room is a log, not a turn
+/// loop, so nothing streams into it. It is a key because the console keeps a
+/// store per *page*, and a room is one.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ConvKey {
+    Main,
+    Agent(String),
+    Room(String),
+}
+
+impl ConvKey {
+    pub fn is_main(&self) -> bool {
+        matches!(self, ConvKey::Main)
+    }
+
+    /// The instance whose stream this addresses, if any.
+    pub fn agent(&self) -> Option<&str> {
+        match self {
+            ConvKey::Agent(name) => Some(name),
+            _ => None,
+        }
+    }
+}
+
+/// One [`UiEvent`] and the conversation that produced it.
+#[derive(Debug, Clone)]
+pub struct Addressed {
+    pub to: ConvKey,
+    pub event: UiEvent,
+}
+
+/// A [`UiEvent`] sender bound to one conversation.
+///
+/// The binding is what makes a subagent's stream reach the same handler main's
+/// does: the producer says what happened, the sink says whose turn it happened
+/// in, and nothing downstream has to guess.
+#[derive(Debug, Clone)]
+pub struct EventSink {
+    to: ConvKey,
+    tx: mpsc::UnboundedSender<Addressed>,
+}
+
+impl EventSink {
+    pub fn new(to: ConvKey, tx: mpsc::UnboundedSender<Addressed>) -> Self {
+        Self { to, tx }
+    }
+
+    /// A sink nobody is listening to: an embedded or headless run, whose turns
+    /// reach no screen. Sends are dropped the same way a closed channel's are,
+    /// so no producer has to branch on having an audience.
+    pub fn detached() -> Self {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        Self {
+            to: ConvKey::Main,
+            tx,
+        }
+    }
+
+    /// Re-point at another conversation over the same channel.
+    pub fn bound_to(&self, to: ConvKey) -> Self {
+        Self {
+            to,
+            tx: self.tx.clone(),
+        }
+    }
+
+    /// A closed channel means the console is gone; a turn still finishing then
+    /// has nobody to tell, which is not an error.
+    pub fn send(&self, event: UiEvent) {
+        let _ = self.tx.send(Addressed {
+            to: self.to.clone(),
+            event,
+        });
+    }
+}
+
 /// Event channel from the agent task to components.
 #[derive(Debug, Clone)]
 pub enum UiEvent {
@@ -184,6 +266,17 @@ pub enum UiEvent {
         meta: Option<ImageMeta>,
     },
     TurnEnd,
+    /// Prose that entered this conversation from outside its own turn: the task
+    /// an agent was dispatched with, the batch of mail a continuation absorbed,
+    /// a room relay claimed at a round boundary.
+    ///
+    /// Main's equivalent is the user pressing Enter, which the console holds
+    /// already — so main's hook does nothing and this is the one event an agent
+    /// produces that main does not. The text is the prompt exactly as the model
+    /// received it, markers and all; the console files it with the same
+    /// attribution walk that reads a committed history, so the two cannot
+    /// disagree about who said what.
+    Inbound(String),
     /// The running turn took these queued messages into its own context at a tool
     /// barrier (D83). They are already in the request, so the composer must drop them
     /// from its queue and show them in the flow where the model read them — the turn
@@ -293,7 +386,7 @@ fn ask_preview(ask: &crate::query::AskContext<'_>) -> Option<AskPreview> {
 
 /// Wire query's UiHooks to the TUI channels.
 pub fn tui_hooks(
-    events: mpsc::UnboundedSender<UiEvent>,
+    events: EventSink,
     asks: mpsc::UnboundedSender<AskRequest>,
     steer: crate::steer::SteerQueue,
     live: Arc<crate::live::LiveBash>,
@@ -321,8 +414,8 @@ pub fn tui_hooks(
                     state.0 = state.0.saturating_add(crate::compact::text_units(text));
                     state.0.div_ceil(4)
                 };
-                let _ = events.send(UiEvent::TextDelta(text.clone()));
-                let _ = events.send(UiEvent::OutputTokens {
+                events.send(UiEvent::TextDelta(text.clone()));
+                events.send(UiEvent::OutputTokens {
                     tokens,
                     authoritative: false,
                 });
@@ -337,8 +430,8 @@ pub fn tui_hooks(
                     state.0 = state.0.saturating_add(crate::compact::text_units(thinking));
                     state.0.div_ceil(4)
                 };
-                let _ = events.send(UiEvent::ThinkingDelta(thinking.clone()));
-                let _ = events.send(UiEvent::OutputTokens {
+                events.send(UiEvent::ThinkingDelta(thinking.clone()));
+                events.send(UiEvent::OutputTokens {
                     tokens,
                     authoritative: false,
                 });
@@ -358,13 +451,13 @@ pub fn tui_hooks(
                         .saturating_add(crate::compact::text_units(partial_json));
                     state.0.div_ceil(4)
                 };
-                let _ = events.send(UiEvent::OutputTokens {
+                events.send(UiEvent::OutputTokens {
                     tokens,
                     authoritative: false,
                 });
             }
             StreamEvent::ToolUseStart { name, .. } => {
-                let _ = events.send(UiEvent::ToolStart { name: name.clone() });
+                events.send(UiEvent::ToolStart { name: name.clone() });
             }
             StreamEvent::StopReason {
                 output_tokens: Some(tokens),
@@ -372,7 +465,7 @@ pub fn tui_hooks(
             } => {
                 let mut state = event_round_tokens.lock().unwrap_or_else(|e| e.into_inner());
                 state.0 = tokens.saturating_mul(4);
-                let _ = events.send(UiEvent::OutputTokens {
+                events.send(UiEvent::OutputTokens {
                     tokens: *tokens,
                     authoritative: true,
                 });
@@ -381,13 +474,13 @@ pub fn tui_hooks(
         }),
         on_stream_retry: Box::new(move || {
             *retry_round_tokens.lock().unwrap_or_else(|e| e.into_inner()) = (0, None);
-            let _ = retry_events.send(UiEvent::StreamRetry);
+            retry_events.send(UiEvent::StreamRetry);
         }),
         on_context_usage: Arc::new(move |usage| {
-            let _ = context_events.send(UiEvent::ContextUsage(usage));
+            context_events.send(UiEvent::ContextUsage(usage));
         }),
         on_tool_ready: Box::new(move |tool_call_id, name, input, standalone| {
-            let _ = ready_events.send(UiEvent::ToolReady {
+            ready_events.send(UiEvent::ToolReady {
                 tool_call_id,
                 name,
                 input,
@@ -395,7 +488,7 @@ pub fn tui_hooks(
             });
         }),
         on_tool_done: Box::new(move |done| {
-            let _ = tool_events.send(UiEvent::ToolDone(crate::query::ToolCallDone {
+            tool_events.send(UiEvent::ToolDone(crate::query::ToolCallDone {
                 tool_call_id: done.tool_call_id.clone(),
                 name: done.name.clone(),
                 summary: done.summary.clone(),
@@ -407,11 +500,15 @@ pub fn tui_hooks(
         }),
         on_round_end: Box::new(move || {
             *round_tokens.lock().unwrap_or_else(|e| e.into_inner()) = (0, None);
-            let _ = round_events.send(UiEvent::RoundEnd);
+            round_events.send(UiEvent::RoundEnd);
         }),
         on_warning: Box::new(move |message| {
-            let _ = warn_events.send(UiEvent::Warning(message));
+            warn_events.send(UiEvent::Warning(message));
         }),
+        // Main's inbound is the composer: the console put the line in its own
+        // transcript before the turn ever started, and echoing it here would
+        // print it twice.
+        on_inbound: Box::new(|_| {}),
         // Take and announce in one step, under the queue's own lock: whoever takes the
         // items owns them, and the composer learns of it from the same act. Splitting
         // the two would open a window in which an item is in the request and still
@@ -419,7 +516,7 @@ pub fn tui_hooks(
         steer: Arc::new(move || {
             let items = steer.take();
             if !items.is_empty() {
-                let _ = steer_events.send(UiEvent::Steered {
+                steer_events.send(UiEvent::Steered {
                     items: items.clone(),
                 });
             }
@@ -458,7 +555,7 @@ mod tests {
         let (events_tx, mut events_rx) = mpsc::unbounded_channel();
         let (asks_tx, _asks_rx) = mpsc::unbounded_channel();
         let mut ui = tui_hooks(
-            events_tx,
+            EventSink::new(ConvKey::Main, events_tx),
             asks_tx,
             crate::steer::SteerQueue::new(),
             crate::live::LiveBash::detached(),
@@ -469,16 +566,18 @@ mod tests {
         ));
         assert!(matches!(
             events_rx.try_recv(),
-            Ok(UiEvent::ContextUsage(usage)) if usage.used == 12_345 && usage.window == 128_000
+            Ok(Addressed { to: ConvKey::Main, event: UiEvent::ContextUsage(usage) })
+                if usage.used == 12_345 && usage.window == 128_000
         ));
 
         (ui.on_event)(&StreamEvent::TextDelta {
             index: 0,
             text: "abcdefghijkl".to_string(),
         });
-        assert!(matches!(events_rx.try_recv(), Ok(UiEvent::TextDelta(_))));
+        let next = |rx: &mut mpsc::UnboundedReceiver<Addressed>| rx.try_recv().map(|a| a.event);
+        assert!(matches!(next(&mut events_rx), Ok(UiEvent::TextDelta(_))));
         assert!(matches!(
-            events_rx.try_recv(),
+            next(&mut events_rx),
             Ok(UiEvent::OutputTokens {
                 tokens: 3,
                 authoritative: false
@@ -486,14 +585,14 @@ mod tests {
         ));
 
         (ui.on_stream_retry)();
-        assert!(matches!(events_rx.try_recv(), Ok(UiEvent::StreamRetry)));
+        assert!(matches!(next(&mut events_rx), Ok(UiEvent::StreamRetry)));
 
         (ui.on_event)(&StreamEvent::StopReason {
             stop_reason: Some("end_turn".to_string()),
             output_tokens: Some(10),
         });
         assert!(matches!(
-            events_rx.try_recv(),
+            next(&mut events_rx),
             Ok(UiEvent::OutputTokens {
                 tokens: 10,
                 authoritative: true
@@ -508,7 +607,7 @@ mod tests {
         let (events_tx, _events_rx) = mpsc::unbounded_channel();
         let (asks_tx, mut asks_rx) = mpsc::unbounded_channel();
         let ui = tui_hooks(
-            events_tx,
+            EventSink::new(ConvKey::Main, events_tx),
             asks_tx,
             crate::steer::SteerQueue::new(),
             crate::live::LiveBash::detached(),

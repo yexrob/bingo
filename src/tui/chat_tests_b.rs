@@ -8,13 +8,13 @@ fn interleaved_group_keeps_text_position() {
     let mut chat = test_chat();
     chat.conv.messages.push(msg(Role::Assistant, ""));
     chat.conv.stream_msg = Some(0);
-    let _ = chat.events.send(UiEvent::TextDelta("let me read".into()));
+    chat.events.send(UiEvent::TextDelta("let me read".into()));
     chat.drain_events();
-    let _ = chat.events.send(UiEvent::ToolStart {
+    chat.events.send(UiEvent::ToolStart {
         name: "Read".into(),
     });
     chat.drain_events();
-    let _ = chat.events.send(UiEvent::ToolReady {
+    chat.events.send(UiEvent::ToolReady {
         tool_call_id: "test-tool".into(),
         name: "Read".into(),
         input: json!({"file_path": "a.md"}),
@@ -76,11 +76,11 @@ fn running_tool_shows_input_summary_after_ready() {
     let mut chat = test_chat();
     chat.conv.messages.push(msg(Role::Assistant, ""));
     chat.conv.stream_msg = Some(0);
-    let _ = chat.events.send(UiEvent::ToolStart {
+    chat.events.send(UiEvent::ToolStart {
         name: "Skill".into(),
     });
     chat.drain_events();
-    let _ = chat.events.send(UiEvent::ToolReady {
+    chat.events.send(UiEvent::ToolReady {
         tool_call_id: "test-tool".into(),
         name: "Skill".into(),
         input: json!({"skill": "pdf", "args": "doc.md"}),
@@ -93,8 +93,7 @@ fn running_tool_shows_input_summary_after_ready() {
         "running header shows input summary: {joined}"
     );
     // After completion, duration uses the real value
-    let _ = chat
-        .events
+    chat.events
         .send(UiEvent::ToolDone(crate::query::ToolCallDone {
             tool_call_id: "test-tool".into(),
             name: "Skill".into(),
@@ -138,7 +137,7 @@ fn agent_tool_start_creates_no_tool_activity() {
     let mut chat = test_chat();
     chat.conv.messages.push(msg(Role::Assistant, ""));
     chat.conv.stream_msg = Some(0);
-    let _ = chat.events.send(UiEvent::ToolStart {
+    chat.events.send(UiEvent::ToolStart {
         name: "Agent".into(),
     });
     chat.drain_events();
@@ -156,7 +155,7 @@ fn agent_tool_start_creates_no_tool_activity() {
     );
 
     // The Watch activity row is created normally (the only Agent display).
-    let _ = chat.events.send(UiEvent::WatchEvent {
+    chat.events.send(UiEvent::WatchEvent {
         label: "Agent: listing desktop dir contents".into(),
         kind: crate::watch::WatchKind::Agent,
         status: WatchState::Running,
@@ -176,7 +175,7 @@ fn agent_tool_start_creates_no_tool_activity() {
     assert_eq!(watch_rows, 1, "a single Watch row");
 
     // Later events with the same label update in place, creating no new row.
-    let _ = chat.events.send(UiEvent::WatchEvent {
+    chat.events.send(UiEvent::WatchEvent {
         label: "Agent: listing desktop dir contents".into(),
         kind: crate::watch::WatchKind::Agent,
         status: WatchState::Running,
@@ -218,7 +217,7 @@ async fn terminal_watch_event_triggers_auto_turn_when_idle() {
     // main-relevant run from a user's own DM exchange.
     let watch = chat.session.watch.clone();
     let id = watch.register_with_conditions(Box::new(FakeWatchable), Vec::new(), None);
-    let _ = chat.events.send(UiEvent::WatchEvent {
+    chat.events.send(UiEvent::WatchEvent {
         label: "Agent: long task".into(),
         kind: crate::watch::WatchKind::Agent,
         status: WatchState::Running,
@@ -232,7 +231,7 @@ async fn terminal_watch_event_triggers_auto_turn_when_idle() {
     chat.drain_events();
     assert!(!chat.conv.busy);
     watch.set_state(id, WatchState::Done, Some("done".into()), None);
-    let _ = chat.events.send(UiEvent::WatchEvent {
+    chat.events.send(UiEvent::WatchEvent {
         label: "Agent: long task".into(),
         kind: crate::watch::WatchKind::Agent,
         status: WatchState::Done,
@@ -267,7 +266,7 @@ async fn a_terminal_event_with_no_notification_for_main_wakes_nothing() {
         watch.consume_notifications(None).is_empty(),
         "and there is nothing to inject either"
     );
-    let _ = chat.events.send(UiEvent::WatchEvent {
+    chat.events.send(UiEvent::WatchEvent {
         label: "scout #2 · answer the user".into(),
         kind: crate::watch::WatchKind::Agent,
         status: WatchState::Done,
@@ -310,7 +309,7 @@ async fn signal_triggers_auto_turn_even_while_typing() {
     chat.conv.stream_msg = Some(0);
     let watch = chat.session.watch.clone();
     let id = watch.register_with_conditions(Box::new(FakeWatchable), Vec::new(), None);
-    let _ = chat.events.send(UiEvent::WatchEvent {
+    chat.events.send(UiEvent::WatchEvent {
         label: "tail -f app.log".into(),
         kind: crate::watch::WatchKind::Command,
         status: WatchState::Running,
@@ -323,7 +322,7 @@ async fn signal_triggers_auto_turn_even_while_typing() {
     });
     chat.drain_events();
     watch.emit_signal(id, "found error: ERROR boom".into(), None);
-    let _ = chat.events.send(UiEvent::WatchEvent {
+    chat.events.send(UiEvent::WatchEvent {
         label: "tail -f app.log".into(),
         kind: crate::watch::WatchKind::Command,
         status: WatchState::Running,
@@ -378,7 +377,7 @@ async fn turn_end_triggers_auto_turn_when_wake_notification_pending() {
     assert!(watch.has_wake_notifications(None), "notification queued");
     chat.drain_events();
     assert!(chat.conv.busy, "still busy, no auto turn mid-turn");
-    let _ = chat.events.send(UiEvent::TurnEnd);
+    chat.events.send(UiEvent::TurnEnd);
     chat.drain_events();
     tokio::task::yield_now().await;
     chat.drain_events();
@@ -393,21 +392,21 @@ async fn draw_with_long_cjk_stream_and_activities_does_not_panic() {
     let big = "the clippy baseline is running in the background (task 2). Here is the summary and optimization list.\n\n---\n\n## Project overview (subagent summary)\n\n**bingo** is a local agent CLI implemented in Rust.\n\n- **Two run modes**: interactive TUI and headless `--print`\n- **9 built-in tools** + MCP (stdio) adapters; five permission-gate modes\n- **Core layering**: `api/`, `tool/`, `query.rs`, `tui.rs`\n- **watch mechanism**: background command / subagent state machines\n";
     for chunk in big.chars().collect::<Vec<_>>().chunks(120) {
         let t: String = chunk.iter().collect();
-        let _ = chat.events.send(UiEvent::TextDelta(t));
+        chat.events.send(UiEvent::TextDelta(t));
         chat.drain_events();
     }
-    let _ = chat.events.send(UiEvent::ToolStart {
+    chat.events.send(UiEvent::ToolStart {
         name: "Bash".into(),
     });
     chat.drain_events();
-    let _ = chat.events.send(UiEvent::ToolReady {
+    chat.events.send(UiEvent::ToolReady {
         tool_call_id: "test-tool".into(),
         name: "Bash".into(),
         input: json!({"command": "cargo clippy"}),
         standalone: false,
     });
     chat.drain_events();
-    let _ = chat.events.send(UiEvent::WatchEvent {
+    chat.events.send(UiEvent::WatchEvent {
         label: "Agent: review".into(),
         kind: crate::watch::WatchKind::Agent,
         status: WatchState::Running,
@@ -419,12 +418,11 @@ async fn draw_with_long_cjk_stream_and_activities_does_not_panic() {
         dispatch: true,
     });
     chat.drain_events();
-    let _ = chat.events.send(UiEvent::TextDelta(
+    chat.events.send(UiEvent::TextDelta(
         "more body text, with more CJK, continuing.".into(),
     ));
     chat.drain_events();
-    let _ = chat
-        .events
+    chat.events
         .send(UiEvent::ToolDone(crate::query::ToolCallDone {
             tool_call_id: "test-tool".into(),
             name: "Bash".into(),
@@ -435,9 +433,9 @@ async fn draw_with_long_cjk_stream_and_activities_does_not_panic() {
             duration_ms: 3000,
         }));
     chat.drain_events();
-    let _ = chat.events.send(UiEvent::TurnEnd);
+    chat.events.send(UiEvent::TurnEnd);
     chat.drain_events();
-    let _ = chat.events.send(UiEvent::WatchEvent {
+    chat.events.send(UiEvent::WatchEvent {
         label: "Agent: review".into(),
         kind: crate::watch::WatchKind::Agent,
         status: WatchState::Done,
@@ -458,7 +456,7 @@ fn watch_event_updates_across_messages_in_place() {
     let mut chat = test_chat();
     chat.conv.messages.push(msg(Role::Assistant, ""));
     chat.conv.stream_msg = Some(0);
-    let _ = chat.events.send(UiEvent::WatchEvent {
+    chat.events.send(UiEvent::WatchEvent {
         label: "Agent: explore".into(),
         kind: crate::watch::WatchKind::Agent,
         status: WatchState::Running,
@@ -471,11 +469,11 @@ fn watch_event_updates_across_messages_in_place() {
     });
     chat.drain_events();
     assert_eq!(chat.conv.messages[0].activities.len(), 1);
-    let _ = chat.events.send(UiEvent::TurnEnd);
+    chat.events.send(UiEvent::TurnEnd);
     chat.drain_events();
     chat.conv.stream_msg = None;
     chat.conv.messages.push(msg(Role::Assistant, ""));
-    let _ = chat.events.send(UiEvent::WatchEvent {
+    chat.events.send(UiEvent::WatchEvent {
         label: "Agent: explore".into(),
         kind: crate::watch::WatchKind::Agent,
         status: WatchState::Done,
@@ -509,7 +507,7 @@ fn idle_round_notification_does_not_trigger_auto_turn() {
     let mut chat = test_chat();
     chat.conv.messages.push(msg(Role::Assistant, ""));
     chat.conv.stream_msg = Some(0);
-    let _ = chat.events.send(UiEvent::WatchEvent {
+    chat.events.send(UiEvent::WatchEvent {
         label: "watch ls".into(),
         kind: crate::watch::WatchKind::Command,
         status: WatchState::Idle,
@@ -530,7 +528,7 @@ fn watch_event_renders_inline_and_updates() {
     let mut chat = test_chat();
     chat.conv.messages.push(msg(Role::Assistant, ""));
     chat.conv.stream_msg = Some(0);
-    let _ = chat.events.send(UiEvent::WatchEvent {
+    chat.events.send(UiEvent::WatchEvent {
         label: "watch -n 2 ls".into(),
         kind: crate::watch::WatchKind::Command,
         status: WatchState::Running,
@@ -543,7 +541,7 @@ fn watch_event_renders_inline_and_updates() {
     });
     chat.drain_events();
     assert_eq!(chat.conv.messages[0].activities.len(), 1);
-    let _ = chat.events.send(UiEvent::WatchEvent {
+    chat.events.send(UiEvent::WatchEvent {
         label: "watch -n 2 ls".into(),
         kind: crate::watch::WatchKind::Command,
         status: WatchState::Idle,
@@ -554,7 +552,7 @@ fn watch_event_renders_inline_and_updates() {
         notifies_main: false,
         dispatch: true,
     });
-    let _ = chat.events.send(UiEvent::WatchEvent {
+    chat.events.send(UiEvent::WatchEvent {
         label: "watch -n 2 ls".into(),
         kind: crate::watch::WatchKind::Command,
         status: WatchState::Done,
@@ -589,9 +587,9 @@ fn bash_folds_into_group_with_count() {
         ("Read", json!({"file_path": "a.md"})),
         ("Bash", json!({"command": "npm run build"})),
     ] {
-        let _ = chat.events.send(UiEvent::ToolStart { name: name.into() });
+        chat.events.send(UiEvent::ToolStart { name: name.into() });
         chat.drain_events();
-        let _ = chat.events.send(UiEvent::ToolReady {
+        chat.events.send(UiEvent::ToolReady {
             tool_call_id: "test-tool".into(),
             name: name.into(),
             input,
@@ -621,8 +619,7 @@ fn bash_folds_into_group_with_count() {
         ("Read a.md", "l1"),
         ("Bash $ npm run build", "done"),
     ] {
-        let _ = chat
-            .events
+        chat.events
             .send(UiEvent::ToolDone(crate::query::ToolCallDone {
                 tool_call_id: "test-tool".into(),
                 name: summary.split(' ').next().unwrap().into(),
@@ -646,11 +643,11 @@ fn running_group_shows_hint_line_then_hides_when_done() {
     let mut chat = test_chat();
     chat.conv.messages.push(msg(Role::Assistant, ""));
     chat.conv.stream_msg = Some(0);
-    let _ = chat.events.send(UiEvent::ToolStart {
+    chat.events.send(UiEvent::ToolStart {
         name: "Read".into(),
     });
     chat.drain_events();
-    let _ = chat.events.send(UiEvent::ToolReady {
+    chat.events.send(UiEvent::ToolReady {
         tool_call_id: "test-tool".into(),
         name: "Read".into(),
         input: json!({"file_path": "package.json"}),
@@ -662,8 +659,7 @@ fn running_group_shows_hint_line_then_hides_when_done() {
         joined.contains("⎿") && joined.contains("package.json"),
         "running group shows hint: {joined}"
     );
-    let _ = chat
-        .events
+    chat.events
         .send(UiEvent::ToolDone(crate::query::ToolCallDone {
             tool_call_id: "test-tool".into(),
             name: "Read".into(),
@@ -689,11 +685,11 @@ fn group_survives_rounds_and_thinking_until_text() {
     let mut chat = test_chat();
     chat.conv.messages.push(msg(Role::Assistant, ""));
     chat.conv.stream_msg = Some(0);
-    let _ = chat.events.send(UiEvent::ToolStart {
+    chat.events.send(UiEvent::ToolStart {
         name: "Grep".into(),
     });
     chat.drain_events();
-    let _ = chat.events.send(UiEvent::ToolReady {
+    chat.events.send(UiEvent::ToolReady {
         tool_call_id: "test-tool".into(),
         name: "Grep".into(),
         input: json!({"pattern": "nomatch"}),
@@ -701,15 +697,15 @@ fn group_survives_rounds_and_thinking_until_text() {
     });
     chat.drain_events();
     assert_eq!(chat.conv.messages[0].groups.len(), 1, "round 1 group");
-    let _ = chat.events.send(UiEvent::RoundEnd);
+    chat.events.send(UiEvent::RoundEnd);
     chat.drain_events();
-    let _ = chat.events.send(UiEvent::ThinkingDelta("hmm".into()));
+    chat.events.send(UiEvent::ThinkingDelta("hmm".into()));
     chat.drain_events();
-    let _ = chat.events.send(UiEvent::ToolStart {
+    chat.events.send(UiEvent::ToolStart {
         name: "Grep".into(),
     });
     chat.drain_events();
-    let _ = chat.events.send(UiEvent::ToolReady {
+    chat.events.send(UiEvent::ToolReady {
         tool_call_id: "test-tool".into(),
         name: "Grep".into(),
         input: json!({"pattern": "another"}),
@@ -723,11 +719,11 @@ fn group_survives_rounds_and_thinking_until_text() {
     );
     let idx = chat.conv.messages[0].activities.len() - 1;
     assert_eq!(chat.conv.messages[0].group_of[idx], Some(0));
-    let _ = chat.events.send(UiEvent::ToolStart {
+    chat.events.send(UiEvent::ToolStart {
         name: "Read".into(),
     });
     chat.drain_events();
-    let _ = chat.events.send(UiEvent::ToolReady {
+    chat.events.send(UiEvent::ToolReady {
         tool_call_id: "test-tool".into(),
         name: "Read".into(),
         input: json!({"file_path": "a.md"}),
@@ -740,13 +736,13 @@ fn group_survives_rounds_and_thinking_until_text() {
         "same-group Read joins group"
     );
     // Text appears: the group closes and later tools open a new one.
-    let _ = chat.events.send(UiEvent::TextDelta("conclusion…".into()));
+    chat.events.send(UiEvent::TextDelta("conclusion…".into()));
     chat.drain_events();
-    let _ = chat.events.send(UiEvent::ToolStart {
+    chat.events.send(UiEvent::ToolStart {
         name: "Grep".into(),
     });
     chat.drain_events();
-    let _ = chat.events.send(UiEvent::ToolReady {
+    chat.events.send(UiEvent::ToolReady {
         tool_call_id: "test-tool".into(),
         name: "Grep".into(),
         input: json!({"pattern": "post-text"}),
@@ -776,8 +772,7 @@ fn expand_running_then_complete_then_collapse_back() {
         "expanded"
     );
     for (summary, out) in [("Read a.md", "l1\nl2\nl3"), ("Read b.md", "x\ny")] {
-        let _ = chat
-            .events
+        chat.events
             .send(UiEvent::ToolDone(crate::query::ToolCallDone {
                 tool_call_id: "test-tool".into(),
                 name: "Read".into(),
@@ -834,8 +829,7 @@ fn collapse_after_expand_then_expand_again() {
     start_group(&mut chat);
     chat.conv.stream_msg = Some(0);
     for (summary, out) in [("Read a.md", "l1"), ("Read b.md", "x")] {
-        let _ = chat
-            .events
+        chat.events
             .send(UiEvent::ToolDone(crate::query::ToolCallDone {
                 tool_call_id: "test-tool".into(),
                 name: "Read".into(),
@@ -936,11 +930,11 @@ fn multiline_hint_stays_one_row() {
     let mut chat = test_chat();
     chat.conv.messages.push(msg(Role::Assistant, ""));
     chat.conv.stream_msg = Some(0);
-    let _ = chat.events.send(UiEvent::ToolStart {
+    chat.events.send(UiEvent::ToolStart {
         name: "Bash".into(),
     });
     chat.drain_events();
-    let _ = chat.events.send(UiEvent::ToolReady {
+    chat.events.send(UiEvent::ToolReady {
         tool_call_id: "test-tool".into(),
         name: "Bash".into(),
         input: json!({"command": "grep -rn foo \\\n  --include='*.rs' .\nls -la"}),
@@ -1018,8 +1012,8 @@ fn streaming_content_is_not_flushed_until_settled() {
     let welcome_segments = chat.flushed_segments;
     assert_eq!(welcome_segments, 1, "the welcome card is segment 0");
 
-    chat.handle(UiEvent::TurnStart);
-    chat.handle(UiEvent::TextDelta("| a | b |".into()));
+    chat.apply_event(UiEvent::TurnStart);
+    chat.apply_event(UiEvent::TextDelta("| a | b |".into()));
     chat.build_rows(80);
     assert_eq!(chat.doc.settled, 0, "streaming content is not settled");
     assert!(
@@ -1032,7 +1026,7 @@ fn streaming_content_is_not_flushed_until_settled() {
         "the cursor does not move"
     );
 
-    chat.handle(UiEvent::TurnEnd);
+    chat.apply_event(UiEvent::TurnEnd);
     past_settle(&mut chat);
     chat.build_rows(80);
     assert_eq!(
@@ -1142,7 +1136,7 @@ fn ask_answer_message_persists_across_turn_end() {
         "Enter selects B"
     );
 
-    chat.handle(UiEvent::TurnEnd);
+    chat.apply_event(UiEvent::TurnEnd);
     let answer = chat
         .conv
         .messages
@@ -1180,8 +1174,8 @@ fn ask_answer_message_persists_across_turn_end() {
 fn answer_mid_turn_opens_a_new_message_for_the_continuation() {
     let mut chat = test_chat();
     chat.conv.messages.push(msg(Role::User, "hi"));
-    chat.handle(UiEvent::TurnStart);
-    chat.handle(UiEvent::TextDelta("before".into()));
+    chat.apply_event(UiEvent::TurnStart);
+    chat.apply_event(UiEvent::TextDelta("before".into()));
     answer_pending_ask(&mut chat);
     assert_eq!(
         chat.conv.messages.len(),
@@ -1194,7 +1188,7 @@ fn answer_mid_turn_opens_a_new_message_for_the_continuation() {
         "the stream moved below the answer"
     );
 
-    chat.handle(UiEvent::TextDelta("after".into()));
+    chat.apply_event(UiEvent::TextDelta("after".into()));
     assert_eq!(chat.conv.messages[1].text, "before");
     assert_eq!(chat.conv.messages[2].role, Role::User, "the answer");
     assert_eq!(
@@ -1210,8 +1204,8 @@ fn answer_mid_turn_opens_a_new_message_for_the_continuation() {
 fn the_message_an_answer_closed_settles_without_waiting_for_the_turn() {
     let mut chat = test_chat();
     chat.conv.messages.push(msg(Role::User, "hi"));
-    chat.handle(UiEvent::TurnStart);
-    chat.handle(UiEvent::ThinkingDelta("weighing it up".into()));
+    chat.apply_event(UiEvent::TurnStart);
+    chat.apply_event(UiEvent::ThinkingDelta("weighing it up".into()));
     answer_pending_ask(&mut chat);
 
     chat.build_rows(80);
@@ -1226,7 +1220,7 @@ fn the_message_an_answer_closed_settles_without_waiting_for_the_turn() {
         "the continuation is still streaming"
     );
 
-    chat.handle(UiEvent::TurnEnd);
+    chat.apply_event(UiEvent::TurnEnd);
     past_settle(&mut chat);
     chat.build_rows(80);
     assert_eq!(
@@ -1242,12 +1236,12 @@ fn the_message_an_answer_closed_settles_without_waiting_for_the_turn() {
 fn an_unused_continuation_message_is_dropped_at_turn_end() {
     let mut chat = test_chat();
     chat.conv.messages.push(msg(Role::User, "hi"));
-    chat.handle(UiEvent::TurnStart);
-    chat.handle(UiEvent::TextDelta("before".into()));
+    chat.apply_event(UiEvent::TurnStart);
+    chat.apply_event(UiEvent::TextDelta("before".into()));
     answer_pending_ask(&mut chat);
     assert_eq!(chat.conv.messages.len(), 4);
 
-    chat.handle(UiEvent::TurnEnd);
+    chat.apply_event(UiEvent::TurnEnd);
     assert_eq!(
         chat.conv.messages.len(),
         3,
@@ -1269,8 +1263,8 @@ fn an_unused_continuation_message_is_dropped_at_turn_end() {
 fn a_tool_in_flight_pins_the_stream_to_its_own_message() {
     let mut chat = test_chat();
     chat.conv.messages.push(msg(Role::User, "hi"));
-    chat.handle(UiEvent::TurnStart);
-    chat.handle(UiEvent::ToolStart {
+    chat.apply_event(UiEvent::TurnStart);
+    chat.apply_event(UiEvent::ToolStart {
         name: "Read".into(),
     });
     answer_pending_ask(&mut chat);
@@ -1313,7 +1307,7 @@ fn ask_answer_message_survives_error_path() {
         "select A"
     );
 
-    chat.handle(UiEvent::Error {
+    chat.apply_event(UiEvent::Error {
         code: "SERVER_ERROR",
         msg: "turn failed".to_string(),
         level: crate::error::ErrorLevel::Full,
@@ -1387,20 +1381,20 @@ fn streaming_with_resize_never_prints_a_row_twice() {
         .messages
         .push(msg(Role::User, "please explain this code"));
     flush_frame(&mut chat, 100, &mut printed);
-    chat.handle(UiEvent::TurnStart);
+    chat.apply_event(UiEvent::TurnStart);
     for chunk in [
         "First paragraph.\n\n",
         "## Heading\n\n",
         "- item one\n",
         "- item two\n",
     ] {
-        chat.handle(UiEvent::TextDelta(chunk.into()));
+        chat.apply_event(UiEvent::TextDelta(chunk.into()));
         flush_frame(&mut chat, 100, &mut printed);
     }
     // Mid-turn resize: all row numbers change after re-layout.
     flush_frame(&mut chat, 60, &mut printed);
-    chat.handle(UiEvent::TextDelta("ending.".into()));
-    chat.handle(UiEvent::TurnEnd);
+    chat.apply_event(UiEvent::TextDelta("ending.".into()));
+    chat.apply_event(UiEvent::TurnEnd);
     past_settle(&mut chat);
     flush_frame(&mut chat, 60, &mut printed);
     // Idling a few frames must print nothing more.
@@ -1448,7 +1442,7 @@ fn tick_marks_dirty_only_when_dynamic() {
     // Pending events must also wake it up (otherwise they would never drain).
     chat.conv.busy = false;
     chat.dirty = false;
-    let _ = chat.events.send(UiEvent::Warning("w".into()));
+    chat.events.send(UiEvent::Warning("w".into()));
     assert!(chat.needs_tick(), "pending events need a wake-up");
 
     let mut slash_error = test_chat();
@@ -1483,12 +1477,12 @@ fn settled_tracks_streaming_message() {
         "empty session fully settled"
     );
     // Turn start: streaming message + placeholder thinking → must not settle.
-    chat.handle(UiEvent::TurnStart);
+    chat.apply_event(UiEvent::TurnStart);
     chat.build_rows(100);
     assert_eq!(chat.doc.settled, welcome, "streaming message not settled");
     assert!(chat.doc.rows.len() > welcome, "streaming message rendered");
     // Turn end: the message settles, all rows enter settled.
-    chat.handle(UiEvent::TurnEnd);
+    chat.apply_event(UiEvent::TurnEnd);
     past_settle(&mut chat);
     chat.build_rows(100);
     assert_eq!(
@@ -1498,7 +1492,7 @@ fn settled_tracks_streaming_message() {
     );
     // Settling is one-way: a second message (streaming) does not move existing boundaries.
     let after_turn = chat.doc.settled;
-    chat.handle(UiEvent::TurnStart);
+    chat.apply_event(UiEvent::TurnStart);
     chat.build_rows(100);
     assert_eq!(
         chat.doc.settled, after_turn,
@@ -1540,7 +1534,7 @@ fn settled_stops_before_permission_block() {
     chat.build_rows(100);
     let welcome = chat.doc.settled;
     // Streaming turn (dynamic message).
-    chat.handle(UiEvent::TurnStart);
+    chat.apply_event(UiEvent::TurnStart);
     chat.build_rows(100);
     assert_eq!(chat.doc.settled, welcome, "streaming message dynamic");
     // A permission block appears → the boundary stays put (ask blocks never settle).
@@ -1553,7 +1547,7 @@ fn settled_stops_before_permission_block() {
     assert_eq!(chat.doc.settled, welcome, "ask block not settled");
     // Turn end + request resolved → everything settles.
     chat.pending_ask = None;
-    chat.handle(UiEvent::TurnEnd);
+    chat.apply_event(UiEvent::TurnEnd);
     past_settle(&mut chat);
     chat.build_rows(100);
     assert_eq!(
@@ -1822,7 +1816,7 @@ fn image_ready_updates_cache_and_invalidates_render_cache() {
         rows: 3,
         bytes: vec![1, 2, 3],
     };
-    chat.handle(UiEvent::ImageReady {
+    chat.apply_event(UiEvent::ImageReady {
         url: "a.png".to_string(),
         meta: Some(meta.clone()),
     });
@@ -1837,7 +1831,7 @@ fn image_ready_updates_cache_and_invalidates_render_cache() {
     );
     assert!(chat.reply_cache.is_empty(), "reply_cache invalidated");
 
-    chat.handle(UiEvent::ImageReady {
+    chat.apply_event(UiEvent::ImageReady {
         url: "a.png".to_string(),
         meta: None,
     });
@@ -1855,10 +1849,10 @@ fn image_ready_updates_cache_and_invalidates_render_cache() {
 fn turn_end_without_capability_skips_image_loading() {
     let mut chat = test_chat();
     chat.apply_turn_start();
-    chat.handle(UiEvent::TextDelta(
+    chat.apply_event(UiEvent::TextDelta(
         "![img](https://example.com/i.png)".to_string(),
     ));
-    chat.handle(UiEvent::TurnEnd);
+    chat.apply_event(UiEvent::TurnEnd);
     assert!(chat.images.is_empty(), "no capability → not loaded");
     assert!(chat.images_pending.is_empty());
 }
@@ -1874,8 +1868,8 @@ async fn turn_end_loads_images_and_renders_image_block() {
         base64::engine::general_purpose::STANDARD.encode(&png)
     );
     chat.apply_turn_start();
-    chat.handle(UiEvent::TextDelta(format!("![img]({url})")));
-    chat.handle(UiEvent::TurnEnd);
+    chat.apply_event(UiEvent::TextDelta(format!("![img]({url})")));
+    chat.apply_event(UiEvent::TurnEnd);
     let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(5);
     while !chat.images.contains_key(&url) {
         assert!(
@@ -1929,7 +1923,7 @@ fn message_waits_for_pending_images_before_settling() {
         rows: 2,
         bytes: tiny_png(),
     };
-    chat.handle(UiEvent::ImageReady {
+    chat.apply_event(UiEvent::ImageReady {
         url: url.clone(),
         meta: Some(meta),
     });
@@ -1966,7 +1960,7 @@ fn failed_image_load_settles_with_placeholder() {
         1,
         "does not settle while in flight"
     );
-    chat.handle(UiEvent::ImageReady {
+    chat.apply_event(UiEvent::ImageReady {
         url: "missing.png".to_string(),
         meta: None,
     });
@@ -2248,13 +2242,19 @@ async fn a_lost_turn_reports_itself_instead_of_latching_busy() {
     // TUI it lands on the alternate screen and is repainted away within a frame.
     let handle = tokio::spawn(async { panic!("turn task died") });
 
-    Chat::supervise_turn(events, handle);
+    Chat::supervise_turn(
+        crate::ui::EventSink::new(crate::ui::ConvKey::Main, events),
+        handle,
+    );
 
     let event = rx.recv().await;
     assert!(
         matches!(
             event,
-            Some(UiEvent::Error { code, context, .. })
+            Some(crate::ui::Addressed {
+                event: UiEvent::Error { code, context, .. },
+                ..
+            })
                 if code == crate::error::TURN_LOST
                     && context == crate::error::ErrorContext::LongTurn
         ),
@@ -3597,7 +3597,7 @@ fn pinned_panel_lives_until_unpinned() {
         joined.contains("ABCD-EFGH"),
         "the panel is visible: {joined}"
     );
-    chat.handle(UiEvent::Unpin {
+    chat.apply_event(UiEvent::Unpin {
         id: "login".to_string(),
     });
     assert!(chat.pinned_panels.is_empty(), "unpin makes it disappear");
@@ -3714,7 +3714,7 @@ fn short_sync_error_keeps_the_running_turn() {
     let mut chat = test_chat();
     chat.conv.busy = true;
     chat.conv.stream_msg = Some(0);
-    chat.handle(UiEvent::Error {
+    chat.apply_event(UiEvent::Error {
         code: "TIMEOUT",
         msg: "list_models timeout".into(),
         level: crate::error::ErrorLevel::Page,
@@ -3727,7 +3727,7 @@ fn short_sync_error_keeps_the_running_turn() {
     assert_eq!(chat.conv.stream_msg, Some(0));
     assert!(chat.last_error.is_some(), "the error row is still recorded");
 
-    chat.handle(UiEvent::Error {
+    chat.apply_event(UiEvent::Error {
         code: "TIMEOUT",
         msg: "turn died".into(),
         level: crate::error::ErrorLevel::Full,
@@ -3741,7 +3741,7 @@ fn short_sync_error_keeps_the_running_turn() {
 #[test]
 fn escape_dismisses_page_level_errors() {
     let mut chat = test_chat();
-    chat.handle(UiEvent::Error {
+    chat.apply_event(UiEvent::Error {
         code: "TIMEOUT",
         msg: "x".into(),
         level: crate::error::ErrorLevel::Page,
@@ -3803,18 +3803,17 @@ fn interrupted_tool_row_reads_interrupted_in_the_warning_color() {
     chat.chat_avatars = true; // this test's subject predates the one avatar switch (D110)
     chat.conv.messages.push(msg(Role::Assistant, ""));
     chat.conv.stream_msg = Some(0);
-    let _ = chat.events.send(UiEvent::ToolStart {
+    chat.events.send(UiEvent::ToolStart {
         name: "Bash".into(),
     });
-    let _ = chat.events.send(UiEvent::ToolReady {
+    chat.events.send(UiEvent::ToolReady {
         tool_call_id: "tu_1".into(),
         name: "Bash".into(),
         input: json!({"command": "sleep 30"}),
         standalone: false,
     });
     chat.drain_events();
-    let _ = chat
-        .events
+    chat.events
         .send(UiEvent::ToolDone(crate::query::ToolCallDone {
             tool_call_id: "tu_1".into(),
             name: "Bash".into(),
@@ -3874,7 +3873,7 @@ fn interrupt_marker_renders_as_a_state_line_not_a_user_bubble() {
     chat.conv
         .messages
         .push(msg(Role::Assistant, "sure, starting"));
-    let _ = chat.events.send(UiEvent::Interrupted {
+    chat.events.send(UiEvent::Interrupted {
         marker: crate::query::INTERRUPT_MARKER,
     });
     chat.drain_events();
@@ -3940,10 +3939,10 @@ fn the_completion_row_blinks_accent_before_it_freezes() {
     let mut chat = test_chat();
     chat.chat_avatars = true; // this test's subject predates the one avatar switch (D110)
     chat.conv.messages.push(msg(Role::User, "hi"));
-    chat.handle(UiEvent::TurnStart);
-    chat.handle(UiEvent::ThinkingDelta("weighing it up".into()));
-    chat.handle(UiEvent::TextDelta("done".into()));
-    chat.handle(UiEvent::TurnEnd);
+    chat.apply_event(UiEvent::TurnStart);
+    chat.apply_event(UiEvent::ThinkingDelta("weighing it up".into()));
+    chat.apply_event(UiEvent::TextDelta("done".into()));
+    chat.apply_event(UiEvent::TurnEnd);
 
     let accent = chat.theme.claude;
     let completion_color = |chat: &mut Chat| -> Option<ratatui::style::Color> {
@@ -3980,8 +3979,8 @@ fn the_completion_row_blinks_accent_before_it_freezes() {
 #[test]
 fn the_settle_blink_wakes_the_loop_only_for_itself() {
     let mut chat = test_chat();
-    chat.handle(UiEvent::TurnStart);
-    chat.handle(UiEvent::TurnEnd);
+    chat.apply_event(UiEvent::TurnStart);
+    chat.apply_event(UiEvent::TurnEnd);
     assert!(chat.has_dynamic_rows(), "the blink keeps frames coming");
     let mut frames = 0;
     while chat.has_dynamic_rows() {

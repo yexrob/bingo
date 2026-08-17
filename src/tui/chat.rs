@@ -602,7 +602,7 @@ pub(crate) fn result_content(name: &str, output: &str) -> Vec<Line> {
 }
 
 /// Playful words for the thinking stage.
-const THINKING_WORDS: [&str; 12] = [
+pub(super) const THINKING_WORDS: [&str; 12] = [
     "Bootstrapping",
     "Razzle-dazzling",
     "Hashing",
@@ -673,17 +673,53 @@ pub struct HistorySearch {
     pub index: Option<usize>,
 }
 
+/// What the console does once the addressed store is back in place.
+///
+/// These reactions read a conversation themselves — they start turns, drain the
+/// queue, re-arm the steer channel and write into main's transcript — so none of
+/// them can run while a store is detached for the length of a handler.
+#[derive(Default)]
+struct Follow {
+    /// A finished background run left a notification in main's context: wake a
+    /// turn to read it.
+    wake: bool,
+    drain_queue: bool,
+    rearm: bool,
+    /// A run that failed, named, with its reason (D98).
+    alert: Option<(String, Option<String>)>,
+    /// A run that finished and reported itself to main (D106).
+    notice: Option<String>,
+    /// A turn that died on its own (error, lost task) leaves its dialog behind
+    /// exactly as an interrupt did; the receiver is already gone, which is what
+    /// tells it apart from a background agent's question (D80). It writes the
+    /// cancelled line into main's transcript, so it waits for the store.
+    settle_asks: bool,
+}
+
 /// bingo chat component state: message stream + activity notices + input + permission requests.
 pub struct Chat {
     pub session: Arc<Session>,
-    pub(super) events: mpsc::UnboundedSender<UiEvent>,
+    /// The console's own sink, bound to main. Every other conversation's
+    /// producer holds one bound to itself (`AgentRegistry::sink_for`).
+    pub(super) events: crate::ui::EventSink,
     pub asks: mpsc::UnboundedSender<AskRequest>,
-    pub(crate) events_rx: mpsc::UnboundedReceiver<UiEvent>,
+    pub(crate) events_rx: mpsc::UnboundedReceiver<crate::ui::Addressed>,
     pub(crate) asks_rx: mpsc::UnboundedReceiver<AskRequest>,
-    /// The conversation the screen is on, and the only one there is today
-    /// (D133). Everything the running turn writes lives here; everything the
-    /// console owns stays on `Chat`.
+    /// The conversation on screen. Everything the running turn writes lives
+    /// here; everything the console owns stays on `Chat`.
     pub conv: crate::tui::conversation::Conversation,
+    /// Every conversation that is *not* on screen, keyed. Main is in here like
+    /// anybody else whenever the screen is somewhere else — which is the D134
+    /// ruling made storage: switching pages is one chrome pointed at a different
+    /// store, and main differs only in talking to the user by default.
+    ///
+    /// Keeping the active one inline rather than in the map is what makes
+    /// [`Chat::conv`] infallible: the renderer, the composer and the status row
+    /// read it on every frame, and a lookup that could miss would be a panic
+    /// path in all of them.
+    pub(crate) parked: HashMap<crate::ui::ConvKey, crate::tui::conversation::Conversation>,
+    /// Which conversation `conv` is.
+    pub(crate) active: crate::ui::ConvKey,
     pub input: String,
     /// Byte position of the caret in `input` (always on a char boundary).
     pub cursor: usize,
@@ -756,15 +792,6 @@ pub struct Chat {
     /// The conversation the zoomed view is on, while it has the screen. `None`
     /// is the transcript, which is every frame the inline host draws.
     pub(crate) zoom: Option<crate::tui::zoom::ZoomTarget>,
-    /// The open away page (v6): the screen is this conversation, drawn by the
-    /// transcript's own pipeline; `None` is main. Set with
-    /// [`Chat::switch_to`], which also points `zoom` — the accounting and the
-    /// chrome read that, the build reads this.
-    pub(crate) away: Option<crate::tui::conv::AwayPage>,
-    /// Transient context of the away build in flight, set and cleared inside
-    /// [`Chat::build_rows`]: what the shared core differs on for a page (the
-    /// header, the settled boundary, the streaming run).
-    pub(crate) away_build: Option<crate::tui::conv::AwayBuild>,
     /// A page was just turned: the inline host owes the terminal one
     /// [`crate::tui::term::InlineTerm::page_break`] before the next frame
     /// (the fullscreen host redraws whole and only clears the flag).
@@ -1017,8 +1044,8 @@ impl Chat {
         // The turn's own cleanup still has to run against the message it opened, so the
         // continuation drop happens before the marker lands after it (TurnEnd's second
         // call then finds nothing to do).
-        self.drop_empty_stream_message();
-        self.conv.messages.push(UiMessage {
+        self.main_conv().drop_empty_stream_message();
+        self.main_conv().messages.push(UiMessage {
             speaker: None,
             role: Role::User,
             text: marker.to_string(),
@@ -1043,8 +1070,8 @@ impl Chat {
     #[allow(clippy::too_many_arguments)] // state-machine constructor: explicit args read better (same convention as tool/agent.rs)
     pub fn new(
         session: Arc<Session>,
-        events: mpsc::UnboundedSender<UiEvent>,
-        events_rx: mpsc::UnboundedReceiver<UiEvent>,
+        events: crate::ui::EventSink,
+        events_rx: mpsc::UnboundedReceiver<crate::ui::Addressed>,
         asks: mpsc::UnboundedSender<AskRequest>,
         asks_rx: mpsc::UnboundedReceiver<AskRequest>,
         theme: Theme,
@@ -1063,22 +1090,17 @@ impl Chat {
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                     };
-                    if watch_events
-                        .send(UiEvent::WatchEvent {
-                            label: ev.label,
-                            kind: ev.kind,
-                            status: ev.state,
-                            detail: ev.detail,
-                            duration_ms: ev.elapsed_ms,
-                            payload: ev.payload,
-                            signal: ev.signal,
-                            notifies_main: ev.notifies_main,
-                            dispatch: ev.dispatch,
-                        })
-                        .is_err()
-                    {
-                        break;
-                    }
+                    watch_events.send(UiEvent::WatchEvent {
+                        label: ev.label,
+                        kind: ev.kind,
+                        status: ev.state,
+                        detail: ev.detail,
+                        duration_ms: ev.elapsed_ms,
+                        payload: ev.payload,
+                        signal: ev.signal,
+                        notifies_main: ev.notifies_main,
+                        dispatch: ev.dispatch,
+                    });
                 }
             });
         }
@@ -1123,7 +1145,7 @@ impl Chat {
         // Nothing else in the TUI has to learn a second way to hear from a tool.
         let tail_events = events.clone();
         let live = crate::live::LiveBash::new(Arc::new(move |tail| {
-            let _ = tail_events.send(UiEvent::BashTail(tail));
+            tail_events.send(UiEvent::BashTail(tail));
         }));
         Self {
             session,
@@ -1131,27 +1153,9 @@ impl Chat {
             asks,
             events_rx,
             asks_rx,
-            conv: crate::tui::conversation::Conversation {
-                messages: Vec::new(),
-                queued: Vec::new(),
-                next_queue_id: 0,
-                busy: false,
-                interrupted: false,
-                stream_msg: None,
-                stream_attempt_checkpoint: None,
-                continuation_msg: None,
-                pending_tools: Vec::new(),
-                thinking_buf: String::new(),
-                thinking_seg_open: false,
-                output_tokens: 0,
-                output_round_tokens: 0,
-                token_rate: crate::token_rate::TokenRateSampler::default(),
-                context_usage,
-                turn_start_tick: 0,
-                turn_started: None,
-                settle_at: None,
-                turn_verb: THINKING_WORDS[0],
-            },
+            conv: crate::tui::conversation::Conversation::new(context_usage),
+            parked: HashMap::new(),
+            active: crate::ui::ConvKey::Main,
             input: String::new(),
             cursor: 0,
             composer: crate::tui::composer::Composer::default(),
@@ -1181,8 +1185,6 @@ impl Chat {
             open_transcript: false,
             open_editor: false,
             zoom: None,
-            away: None,
-            away_build: None,
             page_turn: false,
             bash_mode: false,
             tick: 0,
@@ -1273,13 +1275,20 @@ impl Chat {
     }
 
     /// Drains all pending events from the channel. Returns whether any event was handled.
+    /// Drains the channel; answers whether anything the *screen* is showing
+    /// moved.
+    ///
+    /// A background instance's stream lands in its own store and changes
+    /// nothing on a screen that is not on its page — so it must not repaint,
+    /// and above all must not reset the stall baseline: main's status row
+    /// turning warning-coloured is a statement about main's turn, and somebody
+    /// else's deltas are not evidence against it.
     pub fn drain_events(&mut self) -> bool {
-        let mut handled = false;
-        while let Ok(event) = self.events_rx.try_recv() {
-            handled = true;
-            self.handle(event);
+        let mut seen = false;
+        while let Ok(addressed) = self.events_rx.try_recv() {
+            seen |= self.route(addressed);
         }
-        handled
+        seen
     }
 
     /// Install the attention channel and take the terminal title with it (D79).
@@ -1304,8 +1313,8 @@ impl Chat {
         if changed {
             self.dirty = true;
             // The cheapest possible progress hook (D87): every stream delta,
-            // tool event and ask funnels through here, so one assignment is the
-            // whole `stall` baseline.
+            // tool event and ask that reaches the screen funnels through here,
+            // so one assignment is the whole `stall` baseline.
             self.last_progress_tick = self.tick;
         }
         changed
@@ -1325,63 +1334,129 @@ impl Chat {
             .is_some_and(|at| self.motion.settle(self.tick, at))
     }
 
-    fn handle(&mut self, event: UiEvent) {
+    /// Deliver one event to the conversation it names.
+    ///
+    /// The addressed store is taken *out* of the console for the length of the
+    /// handler. That is what lets one handler serve every conversation: the
+    /// body needs `&mut self` for the markdown pipeline, the clock and the
+    /// notifier, and it needs the transcript at the same time — with the store
+    /// detached the two borrows are disjoint, and the code says which
+    /// conversation it is writing into instead of assuming main.
+    ///
+    /// A handful of console reactions cannot run in that window because they
+    /// read `Chat::conv` themselves — they start turns and drain the queue —
+    /// so they run once the store is back ([`Follow`]).
+    fn route(&mut self, addressed: crate::ui::Addressed) -> bool {
+        let crate::ui::Addressed { to, event } = addressed;
+        let Some(event) = self.console_event(event) else {
+            return true;
+        };
+        let on_screen = to == self.active;
+        let mut conv = self.detach(&to);
+        let follow = self.handle(&to, &mut conv, event);
+        self.attach(&to, conv);
+        if follow.settle_asks {
+            self.cancel_asks(true);
+        }
+        if follow.wake {
+            self.submit_auto();
+        }
+        if follow.drain_queue {
+            self.submit_queued();
+        }
+        if follow.rearm {
+            // `start_turn` reset the channel for whatever turn just began; hand it
+            // the rest of the queue. With no turn running this only clears it —
+            // an offer with nothing to take it is an offer to the next turn.
+            self.rearm_steer();
+        }
+        if let Some((label, reason)) = follow.alert {
+            self.push_agent_alert(&label, reason.as_deref());
+        }
+        if let Some(label) = follow.notice {
+            self.push_agent_notice(&label);
+        }
+        on_screen
+    }
+
+    /// Take `key`'s store out of the console, opening it if this is the first
+    /// the console has heard of the conversation.
+    ///
+    /// First sight is an *event*, not a page opening: an instance streams from
+    /// the moment it is spawned, and a page opened later shows what it did
+    /// meanwhile because the store was there to receive it.
+    fn detach(&mut self, key: &crate::ui::ConvKey) -> crate::tui::conversation::Conversation {
+        if *key == self.active {
+            let usage = self.conv.context_usage;
+            return std::mem::replace(
+                &mut self.conv,
+                crate::tui::conversation::Conversation::new(usage),
+            );
+        }
+        match self.parked.remove(key) {
+            Some(conv) => conv,
+            None => self.open_conversation(key),
+        }
+    }
+
+    fn attach(&mut self, key: &crate::ui::ConvKey, conv: crate::tui::conversation::Conversation) {
+        if *key == self.active {
+            self.conv = conv;
+        } else {
+            self.parked.insert(key.clone(), conv);
+        }
+    }
+
+    /// Main's store, wherever it is right now. The console's own machinery —
+    /// its queue, its turn, the rows a background run hangs on it — is always
+    /// about this one, even while the screen is on somebody else's page.
+    pub(crate) fn main_conv(&mut self) -> &mut crate::tui::conversation::Conversation {
+        if self.active.is_main() {
+            return &mut self.conv;
+        }
+        let usage = self.conv.context_usage;
+        self.parked
+            .entry(crate::ui::ConvKey::Main)
+            .or_insert_with(|| crate::tui::conversation::Conversation::new(usage))
+    }
+
+    fn handle(
+        &mut self,
+        to: &crate::ui::ConvKey,
+        conv: &mut crate::tui::conversation::Conversation,
+        event: UiEvent,
+    ) -> Follow {
+        let mut follow = Follow::default();
         match event {
-            UiEvent::ModelsLoaded {
-                provider,
-                models,
-                failed,
-            } => self.apply_models_loaded(provider, models, failed),
-            UiEvent::ImageReady { url, meta } => {
-                self.images_pending.remove(&url);
-                match meta {
-                    Some(meta) => {
-                        self.images_failed.remove(&url);
-                        // A picture that placed on screen is a picture the user
-                        // can ask to see properly (D97). This is the tee for
-                        // everything that arrives as a markdown image — an
-                        // agent's chart, a tool's output, a URL in the model's
-                        // prose — and it fires here rather than at load time so
-                        // a failed fetch never lands in the list.
-                        self.image_registry.register_bytes(
-                            &url,
-                            crate::tui::buffer::now(),
-                            meta.bytes.clone(),
-                        );
-                        self.images.insert(url.clone(), Arc::new(meta));
-                    }
-                    None => {
-                        self.images.remove(&url);
-                        self.images_failed.insert(url.clone());
-                        self.push_warning(format!("image load failed: {url}"));
-                    }
-                }
-                // Bump the cache version: the renderer's per-block cache and reply_cache invalidate together.
-                self.images_version = self.images_version.wrapping_add(1);
-                self.reply_cache.clear();
-                self.dirty = true;
-            }
             UiEvent::TurnStart => {
-                // A new turn resets the error state (AC-03): page-level error rows vanish with the new turn
-                // (full-screen Full is already dismissed in error_screen_key; this is a fallback).
-                self.last_error = None;
-                self.conv.thinking_buf.clear();
-                self.conv.thinking_seg_open = false;
-                self.pending_tools_clear();
-                // No command of the previous turn may keep painting under a row of
-                // this one (an interrupt drops the tool future without a ToolDone).
-                self.bash_tail = None;
-                self.interrupt_at = None;
+                conv.thinking_buf.clear();
+                conv.thinking_seg_open = false;
+                conv.pending_tools_clear();
+                if to.is_main() {
+                    // A new turn resets the error state (AC-03): page-level error rows vanish with the new turn
+                    // (full-screen Full is already dismissed in error_screen_key; this is a fallback).
+                    self.last_error = None;
+                    // No command of the previous turn may keep painting under a row of
+                    // this one (an interrupt drops the tool future without a ToolDone).
+                    self.bash_tail = None;
+                    self.interrupt_at = None;
+                }
                 let now = std::time::Instant::now();
-                self.conv.turn_started = Some(now);
-                self.conv.output_tokens = 0;
-                self.conv.output_round_tokens = 0;
-                self.token_meter.reset(0, self.tick);
-                self.conv.settle_at = None;
-                self.conv.token_rate.start(now);
-                self.notify
-                    .set_title(Title::Busy(self.motion.title_glyph(self.tick)));
-                self.conv.messages.push(UiMessage {
+                conv.turn_started = Some(now);
+                conv.output_tokens = 0;
+                conv.output_round_tokens = 0;
+                conv.settle_at = None;
+                conv.token_rate.start(now);
+                if to.is_main() {
+                    // The meter eases *one* status row toward *one* number (D87),
+                    // and the title says the console is busy. Both are main's, and
+                    // borrowing them for a background run would put somebody else's
+                    // work under the console's name (D132's rule, kept).
+                    self.token_meter.reset(0, self.tick);
+                    self.notify
+                        .set_title(Title::Busy(self.motion.title_glyph(self.tick)));
+                }
+                conv.messages.push(UiMessage {
                     speaker: None,
                     role: Role::Assistant,
                     text: String::new(),
@@ -1391,88 +1466,87 @@ impl Chat {
                     groups: Vec::new(),
                     group_of: Vec::new(),
                 });
-                self.conv.stream_msg = Some(self.conv.messages.len() - 1);
+                conv.stream_msg = Some(conv.messages.len() - 1);
                 // One verb per turn (D87): sampled here and reused by every
                 // reasoning segment the turn opens.
-                self.conv.turn_verb = thinking_stage(self.conv.messages.len());
-                self.conv.stream_attempt_checkpoint = self
-                    .conv
+                conv.turn_verb = thinking_stage(conv.messages.len());
+                conv.stream_attempt_checkpoint = conv
                     .stream_msg
-                    .and_then(|index| self.conv.messages.get(index).cloned());
-                self.conv.continuation_msg = None;
-                self.conv.busy = true;
-                self.conv.turn_start_tick = self.tick;
+                    .and_then(|index| conv.messages.get(index).cloned());
+                conv.continuation_msg = None;
+                conv.busy = true;
+                conv.turn_start_tick = self.tick;
                 // Placeholder thinking: when the endpoint delays deltas (DeepSeek often by tens of seconds),
                 // the running row is visible immediately.
                 let mut hint = Activity::new(ActivityKind::Thinking(Thinking {
                     state: ThinkingState::Running,
                     duration_ms: 0,
-                    stage: self.conv.turn_verb,
+                    stage: conv.turn_verb,
                     done_verb: Some(thinking_done_verb()),
                     start_tick: self.tick,
                     segments: 1,
                     timed: true,
                 }));
                 hint.expand_hint = Some(crate::tui::activities::EXPAND_HINT.to_string());
-                if let Some(i) = self.conv.stream_msg {
-                    self.conv.messages[i].activities.push(hint);
-                    self.conv.messages[i].insert_points.push(0);
-                    self.conv.messages[i].group_of.push(None);
+                if let Some(i) = conv.stream_msg {
+                    conv.messages[i].activities.push(hint);
+                    conv.messages[i].insert_points.push(0);
+                    conv.messages[i].group_of.push(None);
                 }
             }
             UiEvent::StreamRetry => {
-                if let Some(index) = self.conv.stream_msg {
-                    if let Some(checkpoint) = self.conv.stream_attempt_checkpoint.clone() {
-                        self.conv.messages[index] = checkpoint;
+                if let Some(index) = conv.stream_msg {
+                    if let Some(checkpoint) = conv.stream_attempt_checkpoint.clone() {
+                        conv.messages[index] = checkpoint;
                     }
-                    let text_len = self.conv.messages[index].text.chars().count();
+                    let text_len = conv.messages[index].text.chars().count();
                     let mut hint = Activity::new(ActivityKind::Thinking(Thinking {
                         state: ThinkingState::Running,
                         duration_ms: 0,
-                        stage: self.conv.turn_verb,
+                        stage: conv.turn_verb,
                         done_verb: Some(thinking_done_verb()),
                         start_tick: self.tick,
                         segments: 1,
                         timed: true,
                     }));
                     hint.expand_hint = Some(crate::tui::activities::EXPAND_HINT.to_string());
-                    self.conv.messages[index].activities.push(hint);
-                    self.conv.messages[index].insert_points.push(text_len);
-                    self.conv.messages[index].group_of.push(None);
+                    conv.messages[index].activities.push(hint);
+                    conv.messages[index].insert_points.push(text_len);
+                    conv.messages[index].group_of.push(None);
                 }
-                self.conv.thinking_buf.clear();
-                self.conv.thinking_seg_open = false;
-                self.pending_tools_clear();
-                self.conv.output_round_tokens = 0;
-                self.conv.token_rate.retry_round();
+                conv.thinking_buf.clear();
+                conv.thinking_seg_open = false;
+                conv.pending_tools_clear();
+                conv.output_round_tokens = 0;
+                conv.token_rate.retry_round();
             }
             UiEvent::TextDelta(text) => {
-                if let Some(i) = self.conv.stream_msg
+                if let Some(i) = conv.stream_msg
                     && !text.is_empty()
                 {
-                    self.conv.messages[i].text.push_str(&text);
-                    if let Some(g) = self.conv.messages[i].groups.last_mut() {
+                    conv.messages[i].text.push_str(&text);
+                    if let Some(g) = conv.messages[i].groups.last_mut() {
                         g.active = false;
                     }
                     // Text is a segment boundary: thinking after text opens a new block (no more aggregation),
                     // and the running thinking block closes with it (same closing semantics as ToolStart).
-                    self.conv.thinking_buf.clear();
-                    self.conv.thinking_seg_open = false;
-                    self.close_running_thinking(i);
+                    conv.thinking_buf.clear();
+                    conv.thinking_seg_open = false;
+                    conv.close_running_thinking(i, self.tick);
                 }
             }
             UiEvent::ThinkingDelta(thinking) => {
-                if let Some(i) = self.conv.stream_msg {
+                if let Some(i) = conv.stream_msg {
                     let last_is_running_thinking =
-                        self.conv.messages[i].activities.last().is_some_and(|a| {
+                        conv.messages[i].activities.last().is_some_and(|a| {
                             matches!(&a.kind, ActivityKind::Thinking(t)
                                 if t.state == ThinkingState::Running)
                         });
                     if last_is_running_thinking {
-                        self.conv.thinking_buf.push_str(&thinking);
-                        let buf = self.conv.thinking_buf.clone();
+                        conv.thinking_buf.push_str(&thinking);
+                        let buf = conv.thinking_buf.clone();
                         let content = self.render_thinking(&buf);
-                        if let Some(hint) = self.conv.messages[i]
+                        if let Some(hint) = conv.messages[i]
                             .activities
                             .iter_mut()
                             .rev()
@@ -1481,8 +1555,8 @@ impl Chat {
                             hint.set_content(content);
                         }
                     } else {
-                        let dup = thinking == self.conv.thinking_buf
-                            || self.conv.messages[i]
+                        let dup = thinking == conv.thinking_buf
+                            || conv.messages[i]
                                 .activities
                                 .iter()
                                 .rev()
@@ -1493,23 +1567,23 @@ impl Chat {
                                         .is_some_and(|l| l.plain_text() == thinking)
                                 });
                         if dup {
-                            return;
+                            return follow;
                         }
                         // Aggregation: when text has not interrupted (thinking_buf still holds this stage's text),
                         // new reasoning merges into the last thinking block. Same-segment continuation (segment open)
                         // appends directly; a new segment (after a tool/text) is separated by a blank line and counted.
-                        if !self.conv.thinking_buf.is_empty() {
-                            let was_open = self.conv.thinking_seg_open;
+                        if !conv.thinking_buf.is_empty() {
+                            let was_open = conv.thinking_seg_open;
                             if was_open {
-                                self.conv.thinking_buf.push_str(&thinking);
+                                conv.thinking_buf.push_str(&thinking);
                             } else {
-                                self.conv.thinking_buf.push_str("\n\n");
-                                self.conv.thinking_buf.push_str(&thinking);
+                                conv.thinking_buf.push_str("\n\n");
+                                conv.thinking_buf.push_str(&thinking);
                             }
-                            self.conv.thinking_seg_open = true;
-                            let buf = self.conv.thinking_buf.clone();
+                            conv.thinking_seg_open = true;
+                            let buf = conv.thinking_buf.clone();
                             let content = self.render_thinking(&buf);
-                            let merged = self.conv.messages[i]
+                            let merged = conv.messages[i]
                                 .activities
                                 .iter_mut()
                                 .rev()
@@ -1527,19 +1601,19 @@ impl Chat {
                                 }
                                 hint.set_content(content);
                             }
-                            return;
+                            return follow;
                         }
-                        self.conv.thinking_buf = thinking.clone();
-                        self.conv.messages[i].activities.retain(|a| {
+                        conv.thinking_buf = thinking.clone();
+                        conv.messages[i].activities.retain(|a| {
                             !(matches!(a.kind, ActivityKind::Thinking(_)) && a.content.is_empty())
                         });
-                        let buf = self.conv.thinking_buf.clone();
+                        let buf = conv.thinking_buf.clone();
                         let content = self.render_thinking(&buf);
                         let mut hint = Activity::new(ActivityKind::Thinking(Thinking {
                             state: ThinkingState::Running,
-                            duration_ms: self.tick.saturating_sub(self.conv.turn_start_tick)
+                            duration_ms: self.tick.saturating_sub(conv.turn_start_tick)
                                 * crate::tui::motion::TICK_MS,
-                            stage: self.conv.turn_verb,
+                            stage: conv.turn_verb,
                             done_verb: Some(thinking_done_verb()),
                             start_tick: self.tick,
                             segments: 1,
@@ -1547,58 +1621,55 @@ impl Chat {
                         }));
                         hint.set_content(content);
                         hint.expand_hint = Some(crate::tui::activities::EXPAND_HINT.to_string());
-                        self.conv.messages[i].activities.push(hint);
-                        let text_len = self.conv.messages[i].text.chars().count();
-                        self.conv.messages[i].insert_points.push(text_len);
-                        self.conv.messages[i].group_of.push(None);
+                        conv.messages[i].activities.push(hint);
+                        let text_len = conv.messages[i].text.chars().count();
+                        conv.messages[i].insert_points.push(text_len);
+                        conv.messages[i].group_of.push(None);
                     }
                 }
             }
             UiEvent::ContextUsage(usage) => {
-                self.conv.context_usage = usage;
+                conv.context_usage = usage;
             }
             UiEvent::OutputTokens {
                 tokens,
                 authoritative,
             } => {
-                self.conv.output_tokens = self
-                    .conv
+                conv.output_tokens = conv
                     .output_tokens
-                    .saturating_sub(self.conv.output_round_tokens)
+                    .saturating_sub(conv.output_round_tokens)
                     .saturating_add(tokens);
-                self.conv.output_round_tokens = tokens;
+                conv.output_round_tokens = tokens;
                 // The end-of-round usage total is a correction, not freshly streamed
                 // output: fed as a sample it divided the jump by the live window and
                 // rendered as a one-frame spike of thousands of tok/s.
                 if authoritative {
-                    self.conv
-                        .token_rate
+                    conv.token_rate
                         .correct_round(tokens, std::time::Instant::now());
                 } else {
-                    self.conv
-                        .token_rate
+                    conv.token_rate
                         .observe_round(tokens, std::time::Instant::now());
                 }
             }
             UiEvent::ToolStart { name } => {
                 if is_hidden_tool(&name) {
-                    return;
+                    return follow;
                 }
-                if let Some(i) = self.conv.stream_msg {
-                    self.close_running_thinking(i);
+                if let Some(i) = conv.stream_msg {
+                    conv.close_running_thinking(i, self.tick);
                 }
                 // Tool start = reasoning segment boundary: subsequent deltas aggregate into a new segment.
-                self.conv.thinking_seg_open = false;
+                conv.thinking_seg_open = false;
                 let name: &'static str = Box::leak(name.into_boxed_str());
                 let mut hint = Activity::new(ActivityKind::Tool(ToolCall::running(name, "")));
                 hint.expand_hint = Some(crate::tui::activities::EXPAND_HINT.to_string());
-                if let Some(i) = self.conv.stream_msg {
-                    let idx = self.conv.messages[i].activities.len();
-                    let text_len = self.conv.messages[i].text.chars().count();
-                    self.conv.messages[i].activities.push(hint);
-                    self.conv.messages[i].insert_points.push(text_len);
-                    self.conv.messages[i].group_of.push(None);
-                    self.pending_tools_push(idx);
+                if let Some(i) = conv.stream_msg {
+                    let idx = conv.messages[i].activities.len();
+                    let text_len = conv.messages[i].text.chars().count();
+                    conv.messages[i].activities.push(hint);
+                    conv.messages[i].insert_points.push(text_len);
+                    conv.messages[i].group_of.push(None);
+                    conv.pending_tools_push(idx);
                 }
             }
             UiEvent::ToolReady {
@@ -1607,24 +1678,24 @@ impl Chat {
                 input,
                 standalone,
             } => {
-                let _ = tool_call_id;
-                let Some(i) = self.conv.stream_msg else {
-                    return;
+                let Some(i) = conv.stream_msg else {
+                    return follow;
                 };
                 if is_hidden_tool(&name) {
-                    return;
+                    return follow;
                 }
-                let Some(idx) = self.pending_tools_pop() else {
-                    return;
+                let Some(idx) = conv.pending_tools_pop() else {
+                    return follow;
                 };
-                if let ActivityKind::Tool(call) = &mut self.conv.messages[i].activities[idx].kind {
+                if let ActivityKind::Tool(call) = &mut conv.messages[i].activities[idx].kind {
                     call.summary = crate::query::summarize_input(&name, &input);
+                    call.id = Some(tool_call_id);
                 }
                 // `!` commands: standalone activities (output preview expanded directly), not part of collapse groups.
                 if standalone {
-                    return;
+                    return follow;
                 }
-                group_ready_tool(&mut self.conv.messages[i], idx, &name, &input);
+                group_ready_tool(&mut conv.messages[i], idx, &name, &input);
             }
             UiEvent::WatchEvent {
                 label,
@@ -1648,7 +1719,7 @@ impl Chat {
                 // flow's own dispatch and completion rows (D106), the dialog,
                 // and the instance's record.
                 self.refresh_conversations();
-                let found = self.conv.messages.iter_mut().find_map(|m| {
+                let found = conv.messages.iter_mut().find_map(|m| {
                     m.activities
                         .iter_mut()
                         .find(|a| matches!(&a.kind, ActivityKind::Watch(w) if w.label == *label))
@@ -1699,12 +1770,11 @@ impl Chat {
                     // saying — a "Running 3 agents" tree about work this turn
                     // never dispatched. Those runs live in the tree and the
                     // dialog; the flow's whitelist is main's own dispatches.
-                    let target = match self.conv.stream_msg {
+                    let target = match conv.stream_msg {
                         Some(_) if kind == crate::watch::WatchKind::Agent && !dispatch => None,
                         Some(i) => Some(i),
                         None if kind == crate::watch::WatchKind::Agent => None,
-                        None => self
-                            .conv
+                        None => conv
                             .messages
                             .iter()
                             .rposition(|m| m.role == Role::Assistant),
@@ -1722,15 +1792,15 @@ impl Chat {
                             }));
                             hint.expand_hint =
                                 Some(crate::tui::activities::EXPAND_HINT.to_string());
-                            let text_len = self.conv.messages[target].text.chars().count();
-                            self.conv.messages[target].activities.push(hint);
-                            self.conv.messages[target].insert_points.push(text_len);
-                            self.conv.messages[target].group_of.push(None);
+                            let text_len = conv.messages[target].text.chars().count();
+                            conv.messages[target].activities.push(hint);
+                            conv.messages[target].insert_points.push(text_len);
+                            conv.messages[target].group_of.push(None);
                         }
                         // No message to hang a row on and not an agent event:
                         // the pre-D94 contract returned here, and the terminal
                         // handling below has never run for this case.
-                        None if kind != crate::watch::WatchKind::Agent => return,
+                        None if kind != crate::watch::WatchKind::Agent => return follow,
                         // An agent event with no row is the routing above doing
                         // its job. It must still fall through: `submit_auto` is
                         // how the completion reaches the *model*, and D94 changes
@@ -1744,7 +1814,7 @@ impl Chat {
                 );
                 if terminal || signal.is_some() {
                     if let Some(sig) = &signal
-                        && let Some(hint) = self.conv.messages.iter_mut().find_map(|m| {
+                        && let Some(hint) = conv.messages.iter_mut().find_map(|m| {
                             m.activities.iter_mut().find(
                                 |a| matches!(&a.kind, ActivityKind::Watch(w) if w.label == *label),
                             )
@@ -1762,8 +1832,8 @@ impl Chat {
                     // console got loud in the first place. The same question is
                     // already asked at TurnEnd; asking it here too makes the two
                     // wake paths say one thing.
-                    if !self.conv.interrupted && self.session.watch.has_wake_notifications(None) {
-                        self.submit_auto();
+                    if !conv.interrupted && self.session.watch.has_wake_notifications(None) {
+                        follow.wake = true;
                     }
                 }
                 // The two lines an agent's life writes into this flow.
@@ -1786,35 +1856,27 @@ impl Chat {
                 // `⚠` alert stays unconditional: bad news is whitelisted.
                 if kind == crate::watch::WatchKind::Agent {
                     match status {
-                        WatchState::Failed => {
-                            let (who, why) = (label.clone(), detail.clone());
-                            self.push_agent_alert(&who, why.as_deref());
-                        }
+                        WatchState::Failed => follow.alert = Some((label.clone(), detail.clone())),
                         WatchState::Done if notifies_main && dispatch => {
-                            self.push_agent_notice(&label)
+                            follow.notice = Some(label.clone())
                         }
                         _ => {}
                     }
                 }
             }
             UiEvent::RoundEnd => {
-                self.conv.output_round_tokens = 0;
-                self.conv.token_rate.finish_round();
-                if let Some(i) = self.conv.stream_msg {
-                    self.conv.stream_attempt_checkpoint = self.conv.messages.get(i).cloned();
+                conv.output_round_tokens = 0;
+                conv.token_rate.finish_round();
+                if let Some(i) = conv.stream_msg {
+                    conv.stream_attempt_checkpoint = conv.messages.get(i).cloned();
                     // Collapse groups are bounded by text: model rounds do not split a group, nor does thinking —
                     // only text (TextDelta) and non-collapsible tools close the group.
                     // Warm the image cache a round early: by TurnEnd the message
                     // settles and flushes, and an image that only starts loading
                     // then would miss the flush (see `message_settled`).
-                    let text = self.conv.messages[i].text.clone();
+                    let text = conv.messages[i].text.clone();
                     self.load_message_images(&text);
                 }
-            }
-            UiEvent::BashTail(tail) => {
-                // Only worth keeping while there is a row to hang it under; the
-                // renderer decides that, and drops it the moment the call is done.
-                self.bash_tail = Some(tail);
             }
             UiEvent::ToolDone(done) => {
                 // The finished call's own result row takes over from the tail. A
@@ -1832,11 +1894,11 @@ impl Chat {
                     self.image_registry
                         .register_file(&path, crate::tui::buffer::now(), bytes);
                 }
-                let Some(i) = self.conv.stream_msg else {
-                    return;
+                let Some(i) = conv.stream_msg else {
+                    return follow;
                 };
                 if let Some(diff_text) = &done.diff
-                    && let Some(pos) = self.conv.messages[i].activities.iter().position(|h| {
+                    && let Some(pos) = conv.messages[i].activities.iter().position(|h| {
                         matches!(&h.kind, ActivityKind::Tool(c)
                             if c.name == done.name.as_str() && c.status == ToolStatus::Running)
                     })
@@ -1848,14 +1910,20 @@ impl Chat {
                     let mut hint = Activity::new(ActivityKind::Diff(diff));
                     hint.expand_hint = Some(crate::tui::activities::EXPAND_HINT.to_string());
                     hint.set_content(content);
-                    self.conv.messages[i].activities[pos] = hint;
-                    return;
+                    conv.messages[i].activities[pos] = hint;
+                    return follow;
                 }
-                let group_of = self.conv.messages[i].group_of.clone();
-                for (hint_idx, hint) in self.conv.messages[i].activities.iter_mut().enumerate() {
+                let group_of = conv.messages[i].group_of.clone();
+                for (hint_idx, hint) in conv.messages[i].activities.iter_mut().enumerate() {
+                    // The call the protocol named, or — for a row the protocol
+                    // never named — the first running one wearing this tool's
+                    // name (D134).
                     if let ActivityKind::Tool(call) = &mut hint.kind
-                        && call.name == done.name.as_str()
                         && call.status == ToolStatus::Running
+                        && match &call.id {
+                            Some(id) => id == &done.tool_call_id,
+                            None => call.name == done.name.as_str(),
+                        }
                     {
                         call.status = match done.status {
                             crate::query::ToolCallStatus::Done => ToolStatus::Done,
@@ -1890,35 +1958,32 @@ impl Chat {
                 }
             }
             UiEvent::TurnEnd => {
-                self.conv.busy = false;
+                conv.busy = false;
                 self.bash_tail = None;
                 // The `settle` blink starts here (D87): the completion row keeps
                 // the accent for one 120ms window, and the message it belongs to
                 // stays live for exactly that long, so the row freezes into
                 // scrollback at rest and write-once is never broken.
-                self.conv.settle_at = Some(self.tick);
+                conv.settle_at = Some(self.tick);
                 // A turn short enough to have been watched needs no
                 // notification; a long one is exactly what the user walked away
                 // from (D79). Read before the start time is cleared.
-                if self
-                    .conv
-                    .turn_started
-                    .is_some_and(|at| at.elapsed() >= crate::tui::notify::LONG_TURN)
-                {
-                    self.notify.attention(Attention::TurnComplete);
+                if to.is_main() {
+                    if conv
+                        .turn_started
+                        .is_some_and(|at| at.elapsed() >= crate::tui::notify::LONG_TURN)
+                    {
+                        self.notify.attention(Attention::TurnComplete);
+                    }
+                    self.notify_idle();
+                    follow.settle_asks = true;
                 }
-                self.notify_idle();
-                self.conv.turn_started = None;
-                self.conv.output_tokens = 0;
-                self.conv.output_round_tokens = 0;
-                self.conv.token_rate.stop();
-                self.conv.thinking_seg_open = false;
-                // A turn that died on its own (error, lost task) leaves its
-                // dialog behind exactly as an interrupt did; the receiver is
-                // already gone, which is what tells it apart from a background
-                // agent's question (D80).
-                self.cancel_asks(true);
-                self.drop_empty_stream_message();
+                conv.turn_started = None;
+                conv.output_tokens = 0;
+                conv.output_round_tokens = 0;
+                conv.token_rate.stop();
+                conv.thinking_seg_open = false;
+                conv.drop_empty_stream_message();
                 // AskUserQuestion answers are ordinary user messages (in the message flow,
                 // settled/flushed with it) — nothing to clean at turn end, they persist with the session.
                 // After a user interruption, background-task completion must not auto-start a new turn;
@@ -1928,62 +1993,61 @@ impl Chat {
                 // this condition since D98: it wakes through the digest debounce
                 // on the tick, so a burst costs one turn rather than one per
                 // message, and both wake paths cannot disagree about when.
-                if self.session.watch.has_wake_notifications(None)
-                    && !self.conv.interrupted
-                    && self.conv.queued.is_empty()
+                if to.is_main()
+                    && self.session.watch.has_wake_notifications(None)
+                    && !conv.interrupted
+                    && conv.queued.is_empty()
                 {
-                    self.submit_auto();
+                    follow.wake = true;
                 }
-                if let Some(i) = self.conv.stream_msg {
+                if let Some(i) = conv.stream_msg {
                     // The reply's send time is when it landed, not when the turn
                     // opened — the same clock the workspace DM stamps carry.
-                    self.conv.messages[i].at = crate::channels::now_unix();
+                    conv.messages[i].at = crate::channels::now_unix();
                     // @main's unread (D99): main just spoke, and the accounting
                     // store carries the count D104's pills read. Prose only — a
                     // turn that said nothing has nothing to come back for, and
                     // `observe` zeroes the count outright while @main is the
                     // active conversation.
-                    if !self.conv.messages[i].text.trim().is_empty() {
+                    if to.is_main() && !conv.messages[i].text.trim().is_empty() {
                         self.buffers.note_console(false, self.tick);
                     }
-                    if let Some(g) = self.conv.messages[i].groups.last_mut() {
+                    if let Some(g) = conv.messages[i].groups.last_mut() {
                         g.active = false;
                     }
                     // Remove synchronously: the empty placeholder thinking and its insert point.
                     let mut keep = Vec::new();
-                    for (idx, a) in self.conv.messages[i].activities.iter().enumerate() {
+                    for (idx, a) in conv.messages[i].activities.iter().enumerate() {
                         if matches!(a.kind, ActivityKind::Thinking(_)) && a.content.is_empty() {
                             continue;
                         }
                         keep.push(idx);
                     }
-                    if keep.len() != self.conv.messages[i].activities.len() {
+                    if keep.len() != conv.messages[i].activities.len() {
                         let old_to_new: HashMap<usize, usize> = keep
                             .iter()
                             .enumerate()
                             .map(|(new, old)| (*old, new))
                             .collect();
-                        for g in &mut self.conv.messages[i].groups {
+                        for g in &mut conv.messages[i].groups {
                             g.activities = g
                                 .activities
                                 .iter()
                                 .filter_map(|a| old_to_new.get(a).copied())
                                 .collect();
                         }
-                        self.conv.messages[i].activities = keep
+                        conv.messages[i].activities = keep
                             .iter()
-                            .map(|&k| self.conv.messages[i].activities[k].clone())
+                            .map(|&k| conv.messages[i].activities[k].clone())
                             .collect();
-                        self.conv.messages[i].insert_points = keep
+                        conv.messages[i].insert_points = keep
                             .iter()
-                            .map(|&k| self.conv.messages[i].insert_points[k])
+                            .map(|&k| conv.messages[i].insert_points[k])
                             .collect();
-                        self.conv.messages[i].group_of = keep
-                            .iter()
-                            .map(|&k| self.conv.messages[i].group_of[k])
-                            .collect();
+                        conv.messages[i].group_of =
+                            keep.iter().map(|&k| conv.messages[i].group_of[k]).collect();
                     }
-                    for hint in &mut self.conv.messages[i].activities {
+                    for hint in &mut conv.messages[i].activities {
                         if let ActivityKind::Thinking(t) = &mut hint.kind
                             && t.state == ThinkingState::Running
                         {
@@ -1996,16 +2060,125 @@ impl Chat {
                         }
                     }
                     // Text is settled → asynchronously load its images (reply with ImageReady when done).
-                    let text = self.conv.messages[i].text.clone();
+                    let text = conv.messages[i].text.clone();
                     self.load_message_images(&text);
                 }
-                self.conv.stream_msg = None;
-                self.conv.stream_attempt_checkpoint = None;
-                self.submit_queued();
-                // `start_turn` reset the channel for whatever turn just began; hand it
-                // the rest of the queue. With no turn running this only clears it —
-                // an offer with nothing to take it is an offer to the next turn.
-                self.rearm_steer();
+                conv.stream_msg = None;
+                conv.stream_attempt_checkpoint = None;
+                // The queue and the steer channel are the *composer's*, and the
+                // composer talks to main. An instance's turn ending is not a
+                // reason to submit what the user typed at main (D135 is where
+                // one submit serves every conversation).
+                follow.drain_queue = to.is_main();
+                follow.rearm = to.is_main();
+            }
+            UiEvent::Error {
+                code,
+                msg,
+                level,
+                context,
+            } => {
+                // Only a turn-level failure ends the running turn. Short sync
+                // ops (model list fetch, token counts) can fail while a turn is
+                // still streaming — resetting busy for them stopped the spinner
+                // and re-armed the input while the turn kept running (violated
+                // the v1.21 instant-command contract).
+                if matches!(context, crate::error::ErrorContext::LongTurn) {
+                    conv.busy = false;
+                    conv.drop_empty_stream_message();
+                    conv.stream_msg = None;
+                    conv.stream_attempt_checkpoint = None;
+                    // No turn left to steer: the channel empties with it, and what is
+                    // still queued stays queued (D83).
+                    follow.rearm = true;
+                }
+                // A flow-level failure ends the turn on a screen the user has to
+                // come back to; a page-level one is a hint beside a session that
+                // carries on, and carries no notification (D79).
+                if level == crate::error::ErrorLevel::Full {
+                    self.notify.attention(Attention::TurnFailed);
+                    self.notify_idle();
+                }
+                // #18: structured error-state record (code/msg/level/context); the render side uses it to
+                // produce the error row (Page/Field) or the full-screen state (Full) — independent of message-text
+                // replacement and doc-rebuild timing, so nothing renders twice.
+                self.last_error = Some(ErrorState {
+                    code,
+                    msg: msg.clone(),
+                    level,
+                    context,
+                });
+            }
+            UiEvent::Inbound(text) => {
+                // Prose that entered this conversation from outside its own turn.
+                // Filed by the same walk that reads a committed history, so a
+                // page cannot attribute the live half and the settled half
+                // differently — the class of bug D130 closed.
+                let Some(name) = to.agent() else {
+                    return follow;
+                };
+                let intake = !conv.intake_seen;
+                conv.intake_seen = true;
+                let name = name.to_string();
+                let at = crate::channels::now_unix();
+                let arrived =
+                    crate::tui::conv::inbound_messages(&name, &text, at, intake, &mut |t| {
+                        self.render_thinking(t)
+                    });
+                conv.messages.extend(arrived);
+                self.dirty = true;
+            }
+            // Console-wide events never reach here: `console_event` answers them
+            // and only hands on what a transcript owns.
+            other => debug_assert!(false, "unrouted console event: {other:?}"),
+        }
+        follow
+    }
+
+    /// Events that belong to the console rather than to any one transcript:
+    /// the image cache, the transient tiers, the pinned panels, and the queue
+    /// the running turn just took from. Returns the event again when it is not
+    /// one of them, so the caller can hand it to the conversation it names.
+    fn console_event(&mut self, event: UiEvent) -> Option<UiEvent> {
+        match event {
+            UiEvent::ModelsLoaded {
+                provider,
+                models,
+                failed,
+            } => self.apply_models_loaded(provider, models, failed),
+            UiEvent::ImageReady { url, meta } => {
+                self.images_pending.remove(&url);
+                match meta {
+                    Some(meta) => {
+                        self.images_failed.remove(&url);
+                        // A picture that placed on screen is a picture the user
+                        // can ask to see properly (D97). This is the tee for
+                        // everything that arrives as a markdown image — an
+                        // agent's chart, a tool's output, a URL in the model's
+                        // prose — and it fires here rather than at load time so
+                        // a failed fetch never lands in the list.
+                        self.image_registry.register_bytes(
+                            &url,
+                            crate::tui::buffer::now(),
+                            meta.bytes.clone(),
+                        );
+                        self.images.insert(url.clone(), Arc::new(meta));
+                    }
+                    None => {
+                        self.images.remove(&url);
+                        self.images_failed.insert(url.clone());
+                        self.push_warning(format!("image load failed: {url}"));
+                    }
+                }
+                // Bump the cache version: the renderer's per-block cache and reply_cache invalidate together.
+                self.images_version = self.images_version.wrapping_add(1);
+                self.reply_cache.clear();
+                self.dirty = true;
+            }
+            UiEvent::BashTail(tail) => {
+                // Only worth keeping while there is a row to hang it under; the
+                // renderer decides that, and drops it the moment the call is done.
+                self.bash_tail = Some(tail);
             }
             UiEvent::Steered { items } => {
                 self.absorb_steered(&items);
@@ -2036,54 +2209,29 @@ impl Chat {
             UiEvent::Unpin { id } => {
                 self.unpin_panel(&id);
             }
-            UiEvent::Error {
-                code,
-                msg,
-                level,
-                context,
-            } => {
-                // Only a turn-level failure ends the running turn. Short sync
-                // ops (model list fetch, token counts) can fail while a turn is
-                // still streaming — resetting busy for them stopped the spinner
-                // and re-armed the input while the turn kept running (violated
-                // the v1.21 instant-command contract).
-                if matches!(context, crate::error::ErrorContext::LongTurn) {
-                    self.conv.busy = false;
-                    self.drop_empty_stream_message();
-                    self.conv.stream_msg = None;
-                    self.conv.stream_attempt_checkpoint = None;
-                    // No turn left to steer: the channel empties with it, and what is
-                    // still queued stays queued (D83).
-                    self.rearm_steer();
-                }
-                // A flow-level failure ends the turn on a screen the user has to
-                // come back to; a page-level one is a hint beside a session that
-                // carries on, and carries no notification (D79).
-                if level == crate::error::ErrorLevel::Full {
-                    self.notify.attention(Attention::TurnFailed);
-                    self.notify_idle();
-                }
-                // #18: structured error-state record (code/msg/level/context); the render side uses it to
-                // produce the error row (Page/Field) or the full-screen state (Full) — independent of message-text
-                // replacement and doc-rebuild timing, so nothing renders twice.
-                self.last_error = Some(ErrorState {
-                    code,
-                    msg: msg.clone(),
-                    level,
-                    context,
-                });
-            }
+            other => return Some(other),
         }
+        None
     }
 
     #[cfg(test)]
     fn apply_turn_start(&mut self) {
-        self.handle(UiEvent::TurnStart);
+        self.apply_event(UiEvent::TurnStart);
     }
 
+    /// One event into the conversation on screen — the shape a test writes when
+    /// it is describing what the reader sees.
     #[cfg(test)]
-    fn apply_event(&mut self, event: UiEvent) {
-        self.handle(event);
+    pub(crate) fn apply_event(&mut self, event: UiEvent) {
+        let to = self.active.clone();
+        self.route(crate::ui::Addressed { to, event });
+    }
+
+    /// One event into a named conversation, for the tests that are about
+    /// somebody else's turn arriving while the screen is elsewhere.
+    #[cfg(test)]
+    pub(crate) fn apply_event_to(&mut self, to: crate::ui::ConvKey, event: UiEvent) {
+        self.route(crate::ui::Addressed { to, event });
     }
 
     /// Scans message text for markdown image references and asynchronously loads urls not cached
@@ -2114,23 +2262,9 @@ impl Chat {
                 )
                 .await
                 .unwrap_or_default();
-                let _ = events.send(UiEvent::ImageReady { url, meta });
+                events.send(UiEvent::ImageReady { url, meta });
             });
         }
-    }
-
-    fn pending_tools_clear(&mut self) {
-        self.conv.pending_tools.clear();
-    }
-    fn pending_tools_push(&mut self, idx: usize) {
-        self.conv.pending_tools.push(idx);
-    }
-    fn pending_tools_pop(&mut self) -> Option<usize> {
-        let first = self.conv.pending_tools.first().copied();
-        if first.is_some() {
-            self.conv.pending_tools.remove(0);
-        }
-        first
     }
 
     /// Thinking content renders with markdown streaming (code blocks/lists update as the stream flows).
@@ -2244,7 +2378,7 @@ impl Chat {
         // screen — no slash, no bash, no direct-send grammar, no queue; the
         // domain's own delivery already handles a busy receiver (the zoom's
         // rule, which is CC's teammate rule).
-        if self.away.is_some() {
+        if !self.active.is_main() {
             self.submit_to_zoom();
             return;
         }
@@ -2748,17 +2882,21 @@ impl Chat {
 
     fn reset_context_usage(&mut self) {
         let model = self.session.runtime.model.borrow().clone();
-        self.conv.context_usage =
+        let usage =
             crate::context_usage::ContextUsage::for_model(0, &self.session.client.models(), &model);
+        self.main_conv().context_usage = usage;
     }
 
+    /// Main's own occupancy: it is measured from main's transcript, so it is
+    /// recorded against main's store wherever the screen happens to be.
     fn estimate_context_usage(&mut self, messages: &[crate::api::types::Message]) {
         let model = self.session.runtime.model.borrow().clone();
-        self.conv.context_usage = crate::context_usage::ContextUsage::for_model(
+        let usage = crate::context_usage::ContextUsage::for_model(
             crate::compact::estimate_tokens(&self.session.system, messages, &[]),
             &self.session.client.models(),
             &model,
         );
+        self.main_conv().context_usage = usage;
     }
 
     fn refresh_context_usage_from_transcript(&mut self) {
@@ -3117,7 +3255,7 @@ impl Chat {
         self.pin_panel("compact", vec!["⏳ compacting the context…".to_string()]);
         tokio::spawn(async move {
             let unpin = || {
-                let _ = events.send(UiEvent::Unpin {
+                events.send(UiEvent::Unpin {
                     id: "compact".to_string(),
                 });
             };
@@ -3130,7 +3268,7 @@ impl Chat {
             // that and not as a model-call failure.
             if messages.len() <= crate::compact::KEEP_RECENT {
                 unpin();
-                let _ = events.send(UiEvent::SlashOutput(
+                events.send(UiEvent::SlashOutput(
                     "the conversation is too short; no compaction needed.".to_string(),
                 ));
                 return;
@@ -3142,7 +3280,7 @@ impl Chat {
                 crate::compact::maybe_compact(&session, &mut messages, u64::MAX, &mut |_| {}).await;
             if !compacted {
                 unpin();
-                let _ = events.send(UiEvent::SlashError(
+                events.send(UiEvent::SlashError(
                     "compaction failed (model call error).".to_string(),
                 ));
                 return;
@@ -3162,7 +3300,7 @@ impl Chat {
                 .unwrap_or_default();
             // Persistence happened inside compact() as an appended marker; the
             // canonical lines are untouched (D74).
-            let _ = events.send(UiEvent::ContextUsage(
+            events.send(UiEvent::ContextUsage(
                 crate::context_usage::ContextUsage::for_model(
                     crate::compact::estimate_tokens(&session.system, &messages, &[]),
                     &session.client.models(),
@@ -3171,7 +3309,7 @@ impl Chat {
             ));
             unpin();
             let kept = messages.len().saturating_sub(1);
-            let _ = events.send(UiEvent::SlashInfo(format!(
+            events.send(UiEvent::SlashInfo(format!(
                 "✓ compacted {old_len} messages → summary + the latest {kept}.\nSummary: {summary}"
             )));
         });
@@ -3184,7 +3322,7 @@ impl Chat {
         self.pin_panel("stats", vec!["⏳ gathering stats…".to_string()]);
         tokio::spawn(async move {
             let unpin = || {
-                let _ = events.send(UiEvent::Unpin {
+                events.send(UiEvent::Unpin {
                     id: "stats".to_string(),
                 });
             };
@@ -3208,7 +3346,7 @@ impl Chat {
                 Err(e) => {
                     // #18/main #91: short-op failures must be visible (page-level error row),
                     // behavior keeps degrading gracefully (budget still shows 0).
-                    let _ = events.send(UiEvent::Error {
+                    events.send(UiEvent::Error {
                         code: crate::error::map_error(&e),
                         msg: e.to_string(),
                         level: crate::error::ErrorLevel::Page,
@@ -3218,7 +3356,7 @@ impl Chat {
                 }
             };
             unpin();
-            let _ = events.send(UiEvent::SlashInfo(format(msgs.len(), tokens)));
+            events.send(UiEvent::SlashInfo(format(msgs.len(), tokens)));
         });
     }
 
@@ -3454,7 +3592,7 @@ impl Chat {
                 self.pin_panel("mcp", vec!["⏳ checking MCP servers…".to_string()]);
                 tokio::spawn(async move {
                     let unpin = || {
-                        let _ = events.send(UiEvent::Unpin {
+                        events.send(UiEvent::Unpin {
                             id: "mcp".to_string(),
                         });
                     };
@@ -3462,7 +3600,7 @@ impl Chat {
                     let names = mgr.configured();
                     if names.is_empty() {
                         unpin();
-                        let _ = events.send(UiEvent::SlashInfo(
+                        events.send(UiEvent::SlashInfo(
                             "no MCP servers configured.\nAdd them under mcpServers in .bingo/settings.json or \
                              ~/.config/bingo/settings.json."
                                 .to_string(),
@@ -3487,7 +3625,7 @@ impl Chat {
                         "usage: /mcp enable|disable [name|all] · /mcp reconnect <name>".into(),
                     );
                     unpin();
-                    let _ = events.send(UiEvent::SlashInfo(lines.join("\n")));
+                    events.send(UiEvent::SlashInfo(lines.join("\n")));
                 });
             }
             Some(action @ ("enable" | "disable")) => {
@@ -3507,8 +3645,7 @@ impl Chat {
                         Vec::new()
                     };
                     if targets.is_empty() {
-                        let _ = events
-                            .send(UiEvent::SlashError(format!("no MCP server \"{target}\".")));
+                        events.send(UiEvent::SlashError(format!("no MCP server \"{target}\".")));
                         return;
                     }
                     for name in &targets {
@@ -3534,7 +3671,7 @@ impl Chat {
                         );
                     }
                     let verb = if enabled { "enabled" } else { "disabled" };
-                    let _ = events.send(UiEvent::SlashOutput(format!(
+                    events.send(UiEvent::SlashOutput(format!(
                         "{verb} {} MCP server(s): {}",
                         targets.len(),
                         targets.join(", ")
@@ -3550,20 +3687,19 @@ impl Chat {
                 self.pin_panel("mcp", vec![format!("⏳ reconnecting {name}…")]);
                 tokio::spawn(async move {
                     let unpin = || {
-                        let _ = events.send(UiEvent::Unpin {
+                        events.send(UiEvent::Unpin {
                             id: "mcp".to_string(),
                         });
                     };
                     let mut mgr = session.runtime.mcp.lock().await;
                     if !mgr.configured().contains(&name) {
                         unpin();
-                        let _ =
-                            events.send(UiEvent::SlashError(format!("no MCP server \"{name}\".")));
+                        events.send(UiEvent::SlashError(format!("no MCP server \"{name}\".")));
                         return;
                     }
                     if mgr.is_disabled(&name) {
                         unpin();
-                        let _ = events.send(UiEvent::SlashError(format!(
+                        events.send(UiEvent::SlashError(format!(
                             "{name} is disabled; run /mcp enable {name} before reconnecting."
                         )));
                         return;
@@ -3575,13 +3711,13 @@ impl Chat {
                                 _ => 0,
                             };
                             unpin();
-                            let _ = events.send(UiEvent::SlashOutput(format!(
+                            events.send(UiEvent::SlashOutput(format!(
                                 "✓ {name} reconnected · {count} tools"
                             )));
                         }
                         Err(e) => {
                             unpin();
-                            let _ = events.send(UiEvent::SlashError(format!("✗ {e}")));
+                            events.send(UiEvent::SlashError(format!("✗ {e}")));
                         }
                     }
                 });

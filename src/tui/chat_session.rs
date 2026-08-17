@@ -339,7 +339,7 @@ impl super::Chat {
         );
         tokio::spawn(async move {
             let unpin = || {
-                let _ = events.send(UiEvent::Unpin {
+                events.send(UiEvent::Unpin {
                     id: "share".to_string(),
                 });
             };
@@ -354,7 +354,7 @@ impl super::Chat {
                     }
                     unpin();
                     // The URL must survive long enough to copy — info tier.
-                    let _ = events.send(UiEvent::SlashInfo(lines.join("\n")));
+                    events.send(UiEvent::SlashInfo(lines.join("\n")));
                 }
                 Err(e) => {
                     // Upload failure falls back to a local file + a notice (consistent with the bingo share subcommand).
@@ -378,7 +378,7 @@ impl super::Chat {
                             .to_string(),
                     );
                     unpin();
-                    let _ = events.send(UiEvent::SlashError(lines.join("\n")));
+                    events.send(UiEvent::SlashError(lines.join("\n")));
                 }
             }
         });

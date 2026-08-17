@@ -79,9 +79,12 @@ pub fn body(line: &crate::tui::line::Line, images: bool) -> crate::tui::line::Li
 pub fn chat_at(width: usize, height: usize) -> Chat {
     let (events_tx, events_rx) = tokio::sync::mpsc::unbounded_channel();
     let (asks_tx, asks_rx) = tokio::sync::mpsc::unbounded_channel();
+    let session = test_session();
+    let events = crate::ui::EventSink::new(crate::ui::ConvKey::Main, events_tx);
+    session.agents.set_events(events.clone());
     let mut chat = Chat::new(
-        test_session(),
-        events_tx,
+        session,
+        events,
         events_rx,
         asks_tx,
         asks_rx,
@@ -336,8 +339,8 @@ impl ErrorFixture {
     /// channel. Zero production changes — `UiEvent::Error` is already a
     /// structured event; the chat consumer records the error state by
     /// `level`, the render side branches on it.
-    pub fn inject(&self, events: &tokio::sync::mpsc::UnboundedSender<crate::ui::UiEvent>) {
-        let _ = events.send(crate::ui::UiEvent::Error {
+    pub fn inject(&self, events: &crate::ui::EventSink) {
+        events.send(crate::ui::UiEvent::Error {
             code: self.code,
             msg: self.msg.to_string(),
             level: self.level,

@@ -237,7 +237,7 @@ impl Chat {
                 self.roster_sel = None;
                 match target {
                     Some(Some(target)) => self.switch_to(Some(target)),
-                    Some(None) if self.away.is_some() => self.switch_to(None),
+                    Some(None) if !self.active.is_main() => self.switch_to(None),
                     _ => {}
                 }
                 self.dirty = true;
@@ -290,7 +290,7 @@ impl Chat {
         for (i, entry) in entries.iter().enumerate().skip(start).take(window) {
             let selected = sel == Some(i);
             let active = match &entry.target {
-                None => self.away.is_none(),
+                None => self.active.is_main(),
                 Some(target) => self.zoom.as_ref() == Some(target),
             };
             let mut line = Line::styled(
@@ -397,7 +397,7 @@ mod tests {
         // The page's row is the roster's bold cursor for "you are here";
         // switching marks it.
         chat.switch_to(Some(ZoomTarget::Agent("scout".into())));
-        assert!(chat.away.is_some());
+        assert!(!chat.active.is_main());
         let _ = chat.page_turn;
     }
 

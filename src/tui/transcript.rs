@@ -595,17 +595,16 @@ struct Folds {
 /// so the document covers the whole session and not just the unflushed tail)
 /// and the fold state (forced open when `show_all`). `dirty` is set on the way
 /// out so the host rebuilds its own document before drawing again.
-/// The messages the pager is looking at. `Chat::build_rows` already swaps an
-/// away page's own document in for the length of one build, so the pager has
-/// always *shown* the page on screen — but the fold bookkeeping around it read
-/// `Chat::messages`, which by construction always describes main. On a page,
-/// that made `a` (expand everything) a dead key: it opened main's folds, and
-/// main's document was not the one being drawn.
+/// The messages the pager is looking at.
+///
+/// One line since D134, and that is the point: `Chat::conv` *is* the page on
+/// screen, so the fold bookkeeping and the document it belongs to can no longer
+/// come apart. They used to — the build swapped the page's messages in for its
+/// own duration and everything around it still read main's, which made `a`
+/// (expand everything) a dead key on a page: it opened folds in a document
+/// nobody was drawing.
 fn active_messages(chat: &mut Chat) -> &mut Vec<crate::tui::chat::UiMessage> {
-    match chat.away.as_mut() {
-        Some(page) => &mut page.messages,
-        None => &mut chat.conv.messages,
-    }
+    &mut chat.conv.messages
 }
 
 pub fn transcript_rows(chat: &mut Chat, width: usize, show_all: bool) -> Vec<Row> {
@@ -805,7 +804,7 @@ mod tests {
     }
 
     fn send(chat: &mut Chat, event: UiEvent) {
-        let _ = chat.events.send(event);
+        chat.events.send(event);
         chat.drain_events();
     }
 
