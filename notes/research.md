@@ -5399,3 +5399,46 @@ request parameter — the tokens arrived and the adapter dropped them.
 Docs: this record (research.md is append-only — D33's mapping line stands as
 written; this is the amendment). Tests: one new SSE case in
 `api/providers/openai.rs` — 1456 + 13 green.
+
+### D126. DeepSeek takes the thinking parameters — the gate was an assumption
+
+D125 left `supports_thinking` false for the deepseek family and said splitting
+it per protocol would wait for a reason. The user asked for the level to work,
+so the assumption underneath got tested instead of split: **both endpoints take
+bingo's parameters**, and the flag is now true.
+
+- **Probed on the wire, not reasoned about.** The Anthropic-compatible endpoint
+  (`api.deepseek.com/anthropic/v1/messages`) answers 200 to bingo's exact pair —
+  `thinking:{"type":"adaptive"}` + `output_config:{"effort":"max"}` — and
+  returns its thinking block as before. The Responses shape behind the
+  openai-protocol proxy deserializes `reasoning.effort` into a typed enum and
+  says so when it rejects one: *unknown variant `bogus`, expected one of `none`,
+  `minimal`, `low`, `medium`, `high`, `xhigh`, `max`*. Every level bingo can
+  send is in that set. The old comment's claim — "their endpoints take
+  DeepSeek-shaped thinking parameters, not the ones bingo sends" — was never
+  checked against either endpoint.
+- **What the user gets**: `thinkingLevel` (and `/think`) now reach a DeepSeek
+  model instead of being nulled in `query_turn` before the request is built.
+  `effort_for` lets the deepseek prefix carry `xhigh`/`max` verbatim, as gpt-5.6
+  already did — capping them at `high` would have thrown away the two tiers the
+  endpoint explicitly accepts.
+- **What it does not buy, measured**: eight runs across unset/low/high/max on
+  the Responses path showed no depth signal — reasoning length varied more
+  within a level (386–877 chars) than between levels. The parameter is parsed
+  and validated upstream; whether DeepSeek acts on it is not visible from here,
+  and is not claimed. On the Anthropic shape the pair is accepted and probably
+  ignored (DeepSeek documents `reasoning.effort`, not `output_config`), which
+  costs two ignored fields per request and no behaviour.
+- **The blast radius is the family, not the endpoint**: any deepseek-prefixed
+  model now gets the parameters on any provider. An endpoint that refuses them
+  says so where it always could — `model-catalog.json`'s `overrides`, or a
+  per-provider `models` declaration, both of which outrank the compiled table.
+- **Pinned**: the table test that asserted the denial now asserts the reverse
+  with the reason; `qwen-max` inherits the "family that takes no thinking
+  parameter" role in it, in the resolver's re-enable case, and in the system
+  capability block's `Thinking: no` case — where DeepSeek now demonstrates the
+  two capabilities are independent (it reasons and cannot see).
+
+Docs: this record; guide.md's `thinkingLevel` row (the `off` line no longer
+calls itself DeepSeek-compatible); the `wire_thinking` comment carrying the
+retired assumption. Tests: 1456 + 13 green.

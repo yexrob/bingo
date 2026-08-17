@@ -188,8 +188,10 @@ impl Serialize for WireSystemBlock {
 /// The Claude 5 family (including the default `claude-sonnet-5`) rejects
 /// `{"type":"enabled","budget_tokens":N}` with a 400 — `adaptive` is the only
 /// on-mode, so every enabled level sends the same adaptive shape; depth goes
-/// through [`wire_effort`] instead. None sends no parameter at all (keeps
-/// DeepSeek/ollama endpoints happy).
+/// through [`wire_effort`] instead. None sends no parameter at all — the `off`
+/// level, and what an endpoint refusing the parameter is given (DeepSeek's
+/// Anthropic-compatible endpoint was assumed to be one and is not: verified
+/// 200 with this pair, D126).
 fn wire_thinking(level: Option<ThinkingLevel>) -> Option<serde_json::Value> {
     level.map(|_| serde_json::json!({ "type": "adaptive" }))
 }

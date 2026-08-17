@@ -203,18 +203,23 @@ const PREFIXES: &[(&str, ModelMeta)] = &[
         },
     ),
     // DeepSeek: v4-flash/v4-pro (the only current models) are 1M with a 384K
-    // documented output maximum. The gate stays false because their endpoints
-    // take DeepSeek-shaped thinking parameters, not the ones bingo sends —
-    // reasoning is on by default server-side either way; a user whose endpoint
-    // accepts bingo's parameters can flip it in model-catalog.json. Text-only:
-    // the models & pricing page lists JSON/tools/Responses/Anthropic-API/FIM
-    // as the v4 features, no image input.
+    // documented output maximum. The gate was false on the assumption that
+    // these endpoints take DeepSeek-shaped thinking parameters and not the
+    // ones bingo sends; both shapes were then checked on the wire (D126) and
+    // both are taken — the Anthropic-compatible endpoint answers 200 with the
+    // adaptive/effort pair, and the Responses shape deserializes
+    // `reasoning.effort` into a typed enum whose rejection message names the
+    // whole set. False cost the user their level on every request; reasoning
+    // is on by default server-side either way, and an endpoint that does
+    // refuse the parameters can say so in model-catalog.json. Text-only: the
+    // models & pricing page lists JSON/tools/Responses/Anthropic-API/FIM as
+    // the v4 features, no image input.
     (
         "deepseek",
         ModelMeta {
             context_window: 1_000_000,
             max_tokens: 384_000,
-            supports_thinking: false,
+            supports_thinking: true,
             supports_vision: false,
         },
     ),
@@ -572,7 +577,8 @@ mod tests {
             "providers": {
                 "proxy": {"apiKey": "k", "models": [
                     "gpt-5.6-sol",
-                    {"id": "deepseek-v4", "contextWindow": 131072, "thinking": true},
+                    {"id": "deepseek-v4", "contextWindow": 131072},
+                    {"id": "qwen-max-2026", "thinking": true},
                     {"id": "house-model", "thinking": false},
                     {"id": "small-model", "contextWindow": 32768, "maxTokens": 4096}
                 ]}
@@ -584,7 +590,7 @@ mod tests {
         // Declared overrides beat the prefix table, including the thinking gate.
         assert_eq!(proxy.context_window("deepseek-v4"), 131_072);
         assert!(
-            proxy.supports_thinking("deepseek-v4"),
+            proxy.supports_thinking("qwen-max-2026"),
             "a declaration may re-enable thinking the prefix table denies"
         );
         assert_eq!(
@@ -637,7 +643,7 @@ mod tests {
             ),
             (
                 "deepseek".to_string(),
-                fam(Some(200_000), Some(64_000), Some(true)),
+                fam(Some(200_000), Some(64_000), Some(false)),
             ),
         ]);
         let proxy = ModelResolver::new(Arc::new(catalog), "proxy".to_string());
@@ -645,7 +651,10 @@ mod tests {
         // declaration left out; longest prefix wins per field.
         assert_eq!(proxy.context_window("deepseek-v4-flash"), 131_072);
         assert_eq!(proxy.meta("deepseek-v4-flash").max_tokens, 32_000);
-        assert!(proxy.supports_thinking("deepseek-v4-flash"));
+        assert!(
+            !proxy.supports_thinking("deepseek-v4-flash"),
+            "a family override may deny what the compiled table allows"
+        );
         // An undeclared sibling still gets the family-wide values, and the
         // family tier beats the compiled prefix table.
         assert_eq!(proxy.context_window("deepseek-chat"), 200_000);
@@ -698,8 +707,14 @@ mod tests {
         );
         assert!(table.supports_thinking("claude-sonnet-5"));
         assert!(
-            !table.supports_thinking("deepseek-v4-flash"),
-            "the gate covers bingo's wire parameters, not the model's ability"
+            table.supports_thinking("deepseek-v4-flash"),
+            "both DeepSeek shapes take bingo's thinking parameters (D126); false \
+             dropped the user's level before the request was ever built"
+        );
+        assert!(
+            !table.supports_thinking("qwen-max-2026"),
+            "the gate still covers bingo's wire parameters, not the model's ability \
+             — a family that takes none says so"
         );
         assert!(
             table.supports_thinking("totally-new-model"),

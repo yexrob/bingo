@@ -346,7 +346,12 @@ mod tests {
         let text_only = model_capability_block("deepseek-v4-flash", "default", &resolver);
         assert!(text_only.text.contains("Vision: no"));
         assert!(text_only.text.contains("cannot see images"));
-        assert!(text_only.text.contains("Thinking: no"));
+        assert!(
+            text_only.text.contains("Thinking: yes"),
+            "the two capabilities are independent: DeepSeek reasons and cannot see"
+        );
+        let no_thinking = model_capability_block("qwen-max-2026", "proxy", &resolver);
+        assert!(no_thinking.text.contains("Thinking: no"));
     }
 
     /// The per-request refresh replaces any existing capability block instead

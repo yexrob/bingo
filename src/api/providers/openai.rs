@@ -37,14 +37,18 @@ const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 
 pub const MAX_RETRIES: u32 = 5;
 
-/// thinking level → Responses `reasoning.effort`; GPT-5.6 adds xhigh/max.
+/// thinking level → Responses `reasoning.effort`. The two deep tiers go only to
+/// models that take them, and everything else converges on `high`: GPT-5.6, and
+/// DeepSeek, whose upstream names its whole accepted set when it rejects one
+/// (`none|minimal|low|medium|high|xhigh|max`, verified on the wire, D126).
 fn effort_for(model: &str, level: ThinkingLevel) -> &'static str {
+    let deep = model.starts_with("gpt-5.6") || model.starts_with("deepseek");
     match level {
         ThinkingLevel::Low => "low",
         ThinkingLevel::Medium => "medium",
         ThinkingLevel::High => "high",
-        ThinkingLevel::Xhigh if model.starts_with("gpt-5.6") => "xhigh",
-        ThinkingLevel::Max if model.starts_with("gpt-5.6") => "max",
+        ThinkingLevel::Xhigh if deep => "xhigh",
+        ThinkingLevel::Max if deep => "max",
         ThinkingLevel::Xhigh | ThinkingLevel::Max => "high",
     }
 }
@@ -1007,11 +1011,16 @@ mod tests {
     #[test]
     fn body_scopes_extended_thinking_effort_to_gpt_5_6() {
         let mut r = req();
-        r.model = "gpt-5.6-sol".into();
-        for (level, effort) in [(ThinkingLevel::Xhigh, "xhigh"), (ThinkingLevel::Max, "max")] {
-            r.thinking = Some(level);
-            let body = build_body(&r, OpenAiVariant::Default);
-            assert_eq!(body["reasoning"]["effort"], effort);
+        for model in ["gpt-5.6-sol", "deepseek-v4-flash"] {
+            r.model = model.into();
+            for (level, effort) in [(ThinkingLevel::Xhigh, "xhigh"), (ThinkingLevel::Max, "max")] {
+                r.thinking = Some(level);
+                let body = build_body(&r, OpenAiVariant::Default);
+                assert_eq!(
+                    body["reasoning"]["effort"], effort,
+                    "{model} takes the deep tiers verbatim"
+                );
+            }
         }
 
         r.model = "gpt-5".into();
