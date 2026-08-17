@@ -2,7 +2,7 @@
 
 An agent CLI implemented in Rust (a local agent harness).
 
-> Architecture and selection decisions live in [`notes/research.md`](./notes/research.md) (decision records, currently D1-D129, with superseded decisions retained as history); check the latest applicable decision before changing the architecture. The conversation model's authority is [`notes/design/conversation-model-v6.md`](./notes/design/conversation-model-v6.md), which also carries the per-batch global rules.
+> Architecture and selection decisions live in [`notes/research.md`](./notes/research.md) (decision records, currently D1-D133, with superseded decisions retained as history); check the latest applicable decision before changing the architecture. The conversation model's authority is [`notes/design/conversation-model-v6.md`](./notes/design/conversation-model-v6.md), which also carries the per-batch global rules.
 
 ## Language and style
 

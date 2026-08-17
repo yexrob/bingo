@@ -157,7 +157,7 @@ fn footer_row(chat: &Chat, width: usize) -> Row {
         } else {
             "esc to return".to_string()
         }
-    } else if chat.busy {
+    } else if chat.conv.busy {
         crate::tui::keys::FOOTER_EXPAND_HINT.to_string()
     } else {
         format!(
@@ -552,7 +552,7 @@ pub(crate) fn prompt(chat: &Chat, width: usize) -> El {
     } else {
         addressee.unwrap_or(theme.prompt_border)
     };
-    let prompt_style = if chat.busy && addressee.is_none() {
+    let prompt_style = if chat.conv.busy && addressee.is_none() {
         theme.text_secondary
     } else {
         theme.text
@@ -730,7 +730,7 @@ mod tests {
         // Idle: input 3 rows (two borders + one placeholder row) + footer 1 row.
         assert_eq!(base, 4);
 
-        chat.busy = true;
+        chat.conv.busy = true;
         chat.push_warning("mcp connection failed".to_string());
         let (tx, _rx) = tokio::sync::oneshot::channel();
         chat.pending_ask = Some((
@@ -739,7 +739,7 @@ mod tests {
         ));
         chat.set_input("a\nb\nc");
         chat.help_visible = true;
-        chat.queued.push(crate::tui::chat::QueuedInput {
+        chat.conv.queued.push(crate::tui::chat::QueuedInput {
             text: "queued message".into(),
             is_slash: false,
             id: 0,
@@ -1340,7 +1340,7 @@ mod tests {
         // 2 columns of padding on each side (CC footer padding): the model name's right edge lands at width-2.
         assert_eq!(text_width(&text), 78, "model name right-aligned to width-2");
 
-        chat.busy = true;
+        chat.conv.busy = true;
         let text = row_text(&footer_row(&chat, 80));
         assert!(
             !text.contains("? for shortcuts"),
@@ -1348,7 +1348,7 @@ mod tests {
         );
         assert!(text.contains("ctrl+o to expand"), "{text}");
 
-        chat.busy = false;
+        chat.conv.busy = false;
         chat.bash_mode = true;
         chat.permission_mode = PermissionMode::Plan;
         let text = row_text(&footer_row(&chat, 80));
@@ -1359,7 +1359,7 @@ mod tests {
     #[test]
     fn footer_keeps_context_usage_idle_and_colors_thresholds() {
         let mut chat = chat_at(100, 24);
-        chat.context_usage = crate::context_usage::ContextUsage::new(74_240, 128_000, 100_000);
+        chat.conv.context_usage = crate::context_usage::ContextUsage::new(74_240, 128_000, 100_000);
         let normal = footer_row(&chat, 100);
         let text = row_text(&normal);
         assert!(text.contains("▓▓░░ 58% 74240/128k"), "{text}");
@@ -1373,7 +1373,7 @@ mod tests {
                     && seg.style.fg == Some(chat.theme.text_secondary))
         );
 
-        chat.context_usage = crate::context_usage::ContextUsage::new(70, 100, 90);
+        chat.conv.context_usage = crate::context_usage::ContextUsage::new(70, 100, 90);
         let warning = footer_row(&chat, 100);
         assert!(
             warning.line.segs.iter().any(|seg| {
@@ -1381,7 +1381,7 @@ mod tests {
             })
         );
 
-        chat.context_usage = crate::context_usage::ContextUsage::new(91, 100, 90);
+        chat.conv.context_usage = crate::context_usage::ContextUsage::new(91, 100, 90);
         let danger = footer_row(&chat, 100);
         assert!(
             danger
@@ -1400,11 +1400,14 @@ mod tests {
         assert!(row_text(&footer_row(&chat, 100)).contains("0% 0/200k"));
 
         let start = std::time::Instant::now() - std::time::Duration::from_secs(1);
-        chat.busy = true;
-        chat.token_rate.start(start);
-        chat.token_rate
+        chat.conv.busy = true;
+        chat.conv.token_rate.start(start);
+        chat.conv
+            .token_rate
             .observe_round(8, start + std::time::Duration::from_millis(500));
-        chat.token_rate.observe_round(24, std::time::Instant::now());
+        chat.conv
+            .token_rate
+            .observe_round(24, std::time::Instant::now());
         let text = row_text(&footer_row(&chat, 100));
         assert!(text.contains("tok/s"), "{text}");
         assert!(text.contains("0% 0/200k"), "{text}");
@@ -1414,7 +1417,7 @@ mod tests {
             "{text}"
         );
 
-        chat.busy = false;
+        chat.conv.busy = false;
         assert!(!row_text(&footer_row(&chat, 100)).contains("tok/s"));
     }
 
@@ -1515,7 +1518,7 @@ mod tests {
     #[test]
     fn the_bottom_states_compose_around_the_composer() {
         let mut chat = chat_at(100, 40);
-        chat.busy = true;
+        chat.conv.busy = true;
         chat.set_input("/theme");
         chat.run_slash("theme");
 

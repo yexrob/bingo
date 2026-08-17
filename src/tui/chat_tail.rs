@@ -342,7 +342,7 @@ impl super::Chat {
     /// Submits the next queued item after a turn (one at a time: a plain message starts
     /// the next turn; queued slash commands drain synchronously until one does).
     pub(crate) fn submit_queued(&mut self) {
-        if self.busy || self.queued.is_empty() {
+        if self.conv.busy || self.conv.queued.is_empty() {
             return;
         }
         if tokio::runtime::Handle::try_current().is_err() {
@@ -351,19 +351,19 @@ impl super::Chat {
         // Drain queued slash commands synchronously; stop at the first plain message
         // (it starts a turn, which re-triggers submit_queued on TurnEnd).
         loop {
-            let Some(first) = self.queued.first() else {
+            let Some(first) = self.conv.queued.first() else {
                 return;
             };
             if !first.is_slash {
                 break;
             }
-            let item = self.queued.remove(0);
+            let item = self.conv.queued.remove(0);
             self.run_slash(item.text.strip_prefix('/').unwrap_or(&item.text));
-            if self.busy {
+            if self.conv.busy {
                 return; // a skill command started a turn; the rest waits for TurnEnd
             }
         }
-        let item = self.queued.remove(0);
+        let item = self.conv.queued.remove(0);
         self.start_turn(item.text, true);
     }
 
@@ -379,12 +379,12 @@ impl super::Chat {
     /// With no turn running there is nothing to steer, and the channel is emptied rather
     /// than left holding an offer for whichever turn starts next.
     pub(crate) fn rearm_steer(&mut self) {
-        if !self.busy {
+        if !self.conv.busy {
             self.steer.reset();
             return;
         }
         let mut items = Vec::new();
-        for entry in &self.queued {
+        for entry in &self.conv.queued {
             if entry.is_slash || !self.resolve_images(&entry.text).is_empty() {
                 break;
             }
@@ -409,7 +409,8 @@ impl super::Chat {
         if items.is_empty() {
             return;
         }
-        self.queued
+        self.conv
+            .queued
             .retain(|entry| !items.iter().any(|item| item.id == entry.id));
         for item in items {
             self.push_steered_line(&item.text);
@@ -422,7 +423,7 @@ impl super::Chat {
     /// The transcript line a steered message leaves: the user's own words under the
     /// `↪` marker, rendered as a single dim line rather than a `❯` bubble.
     fn push_steered_line(&mut self, text: &str) {
-        self.messages.push(UiMessage {
+        self.conv.messages.push(UiMessage {
             speaker: None,
             role: Role::User,
             text: format!("{}{text}", crate::steer::STEER_FLOW_PREFIX),
@@ -441,7 +442,7 @@ impl super::Chat {
     /// name, which is the only part of it the user needs here.
     pub(crate) fn push_agent_alert(&mut self, label: &str, reason: Option<&str>) {
         let instance = label.split_whitespace().next().unwrap_or(label);
-        self.messages.push(UiMessage {
+        self.conv.messages.push(UiMessage {
             speaker: None,
             role: Role::User,
             text: crate::tui::bufferview::agent_alert_line(instance, reason),
@@ -473,7 +474,7 @@ impl super::Chat {
 
     /// A user-role line the harness wrote about somebody else's life.
     fn push_flow_line(&mut self, text: String) {
-        self.messages.push(UiMessage {
+        self.conv.messages.push(UiMessage {
             speaker: None,
             role: Role::User,
             text,
@@ -537,7 +538,7 @@ impl super::Chat {
         }
         // Idle-only, as the per-post wake was: a running turn absorbs the mail at
         // its own next round, and a queued user message goes first.
-        if self.busy || self.interrupted || !self.queued.is_empty() {
+        if self.conv.busy || self.conv.interrupted || !self.conv.queued.is_empty() {
             return false;
         }
         self.submit_auto();
@@ -555,7 +556,7 @@ impl super::Chat {
     /// CC's leader narrates, and the noise control is the wake debounce above
     /// and the dispatch row's own state, not a marker that renders as nothing).
     pub(crate) fn submit_auto(&mut self) {
-        if self.busy {
+        if self.conv.busy {
             return;
         }
         if tokio::runtime::Handle::try_current().is_err() {
@@ -634,7 +635,7 @@ impl super::Chat {
 
     pub(crate) fn start_turn(&mut self, text: String, show_user: bool) {
         if show_user {
-            self.messages.push(UiMessage {
+            self.conv.messages.push(UiMessage {
                 speaker: None,
                 role: Role::User,
                 text: text.clone(),
@@ -645,8 +646,8 @@ impl super::Chat {
                 group_of: Vec::new(),
             });
         }
-        self.busy = true;
-        self.interrupted = false;
+        self.conv.busy = true;
+        self.conv.interrupted = false;
         // The steer channel belongs to one turn (D83): whatever the previous turn chose
         // not to take must not be folded into this one behind the user's back. The
         // caller re-arms it against the queue once this turn is the running one.
@@ -711,7 +712,7 @@ impl super::Chat {
     /// bash-mode turn (processBashCommand): `!` commands execute directly,
     /// output shown as a tool activity; with respondToBashCommands on, the model replies afterwards.
     pub(crate) fn start_bash_turn(&mut self, command: String) {
-        self.messages.push(UiMessage {
+        self.conv.messages.push(UiMessage {
             speaker: None,
             role: Role::User,
             text: format!("!{command}"),
@@ -721,11 +722,11 @@ impl super::Chat {
             groups: Vec::new(),
             group_of: Vec::new(),
         });
-        self.busy = true;
+        self.conv.busy = true;
         // Same as start_turn: a fresh turn clears interrupt suppression —
         // without this, one interrupt followed by only `!` commands kept
         // background wake-ups suppressed for the rest of the session.
-        self.interrupted = false;
+        self.conv.interrupted = false;
         // Same as start_turn: the channel is this turn's (D83).
         self.steer.reset();
         let steer = self.steer.clone();
@@ -773,7 +774,9 @@ impl super::Chat {
     /// and the answer stays pinned to the bottom until the turn ends. Close the old message and
     /// open a fresh one, the way a turn boundary would: the transcript then reads in clock order.
     pub(crate) fn open_continuation_message(&mut self) {
-        let Some(prev) = self.stream_msg else { return };
+        let Some(prev) = self.conv.stream_msg else {
+            return;
+        };
         // Tool rows registered before the answer index into `prev`'s activities
         // (`pending_tools` holds those indices), so a call still in flight pins the stream here.
         if !self.pending_tools.is_empty() {
@@ -785,9 +788,9 @@ impl super::Chat {
         self.close_running_thinking(prev);
         // The buffer belongs to the block just closed; carried over, the next reasoning delta
         // would try to merge into a block the new message does not have, and be dropped.
-        self.thinking_buf.clear();
-        self.thinking_seg_open = false;
-        self.messages.push(UiMessage {
+        self.conv.thinking_buf.clear();
+        self.conv.thinking_seg_open = false;
+        self.conv.messages.push(UiMessage {
             speaker: None,
             role: Role::Assistant,
             text: String::new(),
@@ -797,35 +800,36 @@ impl super::Chat {
             groups: Vec::new(),
             group_of: Vec::new(),
         });
-        self.stream_msg = Some(self.messages.len() - 1);
-        self.stream_attempt_checkpoint = self
+        self.conv.stream_msg = Some(self.conv.messages.len() - 1);
+        self.conv.stream_attempt_checkpoint = self
+            .conv
             .stream_msg
-            .and_then(|index| self.messages.get(index).cloned());
-        self.continuation_msg = self.stream_msg;
+            .and_then(|index| self.conv.messages.get(index).cloned());
+        self.conv.continuation_msg = self.conv.stream_msg;
     }
 
     /// A continuation message the turn never filled (the answer was the last thing that happened):
     /// an empty assistant block renders as a stray gap. Only ever drops the message
     /// [`Chat::open_continuation_message`] opened. Call before clearing `stream_msg`.
     pub(crate) fn drop_empty_stream_message(&mut self) {
-        let Some(i) = self.continuation_msg.take() else {
+        let Some(i) = self.conv.continuation_msg.take() else {
             return;
         };
-        if self.stream_msg == Some(i)
-            && i + 1 == self.messages.len()
-            && self.messages[i].text.is_empty()
-            && self.messages[i].activities.is_empty()
+        if self.conv.stream_msg == Some(i)
+            && i + 1 == self.conv.messages.len()
+            && self.conv.messages[i].text.is_empty()
+            && self.conv.messages[i].activities.is_empty()
         {
-            self.messages.pop();
-            self.stream_msg = None;
-            self.stream_attempt_checkpoint = None;
+            self.conv.messages.pop();
+            self.conv.stream_msg = None;
+            self.conv.stream_attempt_checkpoint = None;
         }
     }
 
     /// A tool call, message text, or a mid-turn answer all end the current reasoning segment.
     pub(crate) fn close_running_thinking(&mut self, i: usize) {
         let tick = self.tick;
-        for hint in &mut self.messages[i].activities {
+        for hint in &mut self.conv.messages[i].activities {
             if let ActivityKind::Thinking(t) = &mut hint.kind
                 && t.state == ThinkingState::Running
             {
@@ -1132,7 +1136,7 @@ impl super::Chat {
     /// Ctrl+C: interrupts when busy; with text while idle, clears it (into history, retrievable with ↑);
     /// first press on idle empty input shows a hint, a second press within [`CTRL_C_WINDOW`] quits.
     fn ctrl_c(&mut self, now: std::time::Instant) -> bool {
-        if self.busy {
+        if self.conv.busy {
             // The quit path below is gated on `busy`, so a turn that never clears it (its
             // task died) used to leave `kill` as the only way out. An interrupt the turn
             // has ignored for [`INTERRUPT_GRACE`] hands Ctrl+C back its exit meaning.
@@ -1233,7 +1237,7 @@ impl super::Chat {
             // Main's turn is out of Esc's reach while a page is up (v6): the
             // key on an agent's page must not interrupt a turn the user is
             // not even looking at. Ctrl+C keeps the unconditional interrupt.
-            EscLayer::Interrupt => self.busy && self.away.is_none(),
+            EscLayer::Interrupt => self.conv.busy && self.away.is_none(),
             EscLayer::BashMode => self.bash_mode && self.input.is_empty() && self.away.is_none(),
             EscLayer::ClearInput => !self.input.is_empty(),
             EscLayer::AwayHome => self.away.is_some(),
@@ -1363,7 +1367,7 @@ impl super::Chat {
     /// Interrupts the current turn (Esc / Ctrl+C while busy). The first request is stamped
     /// so Ctrl+C can tell "the turn is stopping" from "the turn is never going to answer".
     fn interrupt(&mut self, now: std::time::Instant) {
-        self.interrupted = true;
+        self.conv.interrupted = true;
         self.interrupt_at.get_or_insert(now);
         self.cancel_tx.send_replace(true);
         // The dialog goes with the turn: the user asked for everything in flight
@@ -1586,8 +1590,8 @@ impl super::Chat {
     /// ↑ while busy with a queue pulls back the last queued message.
     fn vertical(&mut self, down: bool) -> bool {
         // Pulling back a queued message only happens on empty input: what is being typed should not be clobbered.
-        if !down && self.busy && self.input.is_empty() && !self.queued.is_empty() {
-            if let Some(entry) = self.queued.last() {
+        if !down && self.conv.busy && self.input.is_empty() && !self.conv.queued.is_empty() {
+            if let Some(entry) = self.conv.queued.last() {
                 // The turn may have taken this one already (D83). It is in the request
                 // by then, so pulling it into the composer would send it twice: the
                 // turn wins, and the absorption event — already on its way — is what
@@ -1596,7 +1600,7 @@ impl super::Chat {
                     return true;
                 }
             }
-            if let Some(item) = self.queued.pop() {
+            if let Some(item) = self.conv.queued.pop() {
                 self.set_input(item.text);
             }
             self.rearm_steer();
@@ -1900,13 +1904,13 @@ impl super::Chat {
         self.sync_away();
         // `meter` (D87): aim the status row's token readout at the live count;
         // a repeat target is a no-op, so this costs one comparison per frame.
-        let tokens = self.output_tokens;
+        let tokens = self.conv.output_tokens;
         self.token_meter.retarget(tokens, self.tick, self.motion);
         // The terminal title's working animation (D79 machinery, D87 cadence):
         // one frame per 960ms, and `set_title` drops a repeat, so a busy turn
         // costs about one OSC 2 write per second. A pending permission prompt
         // owns the title while it is up — it is the more urgent state.
-        if self.busy && self.pending_ask.is_none() {
+        if self.conv.busy && self.pending_ask.is_none() {
             let glyph = self.motion.title_glyph(self.tick);
             self.notify
                 .set_title(crate::tui::notify::Title::Busy(glyph));
@@ -1946,7 +1950,7 @@ impl super::Chat {
             self.slash_error_at = None;
             self.dirty = true;
         }
-        for msg in &mut self.messages {
+        for msg in &mut self.conv.messages {
             for act in &mut msg.activities {
                 if let ActivityKind::Thinking(t) = &mut act.kind
                     && t.state == ThinkingState::Running
@@ -1977,6 +1981,7 @@ impl super::Chat {
     /// so nothing written here can reach scrollback.
     fn sample_dispatches(&mut self) {
         let running = self
+            .conv
             .messages
             .iter()
             .any(|m| m.activities.iter().any(is_running_dispatch));
@@ -1984,7 +1989,7 @@ impl super::Chat {
             return;
         }
         let roster = self.session.agents.list();
-        for msg in &mut self.messages {
+        for msg in &mut self.conv.messages {
             for act in &mut msg.activities {
                 let ActivityKind::Watch(w) = &mut act.kind else {
                     continue;
@@ -2048,8 +2053,8 @@ impl super::Chat {
     /// Whether any row changes with the tick (spinner frames / elapsed time / status rows).
     /// false when idle — the tick neither rebuilds the doc nor wakes the component.
     pub fn has_dynamic_rows(&self) -> bool {
-        self.busy
-            || self.messages.iter().any(|m| {
+        self.conv.busy
+            || self.conv.messages.iter().any(|m| {
                 m.groups.iter().any(|g| g.active) || m.activities.iter().any(|a| a.is_running())
             })
             || (self.tasks_visible
@@ -2303,10 +2308,11 @@ impl super::Chat {
     }
 
     pub fn running_status(&self) -> Option<RunningStatus> {
-        if !self.busy {
+        if !self.conv.busy {
             return None;
         }
         let verb = self
+            .conv
             .messages
             .iter()
             .rev()
@@ -2333,6 +2339,7 @@ impl super::Chat {
             })
             .unwrap_or_else(|| "Working".to_string());
         let elapsed = self
+            .conv
             .turn_started
             .map(|t| t.elapsed().as_secs_f64())
             .unwrap_or(0.0);
@@ -2344,15 +2351,16 @@ impl super::Chat {
     }
 
     pub fn token_rate_label(&self) -> Option<String> {
-        if !self.busy {
+        if !self.conv.busy {
             return None;
         }
-        self.token_rate
+        self.conv
+            .token_rate
             .label(std::time::Instant::now(), self.motion.off())
     }
 
     pub fn context_usage(&self) -> crate::context_usage::ContextUsage {
-        self.context_usage
+        self.conv.context_usage
     }
 
     /// Input-area rendered rows — the single source for the row-count model and rendering:
@@ -2514,19 +2522,20 @@ impl super::Chat {
 
     /// Queued-message rows (dim `> {text}` below the input); overflow folds into one row.
     pub fn queue_lines(&self) -> Vec<String> {
-        if self.queued.is_empty() {
+        if self.conv.queued.is_empty() {
             return Vec::new();
         }
         let mut out: Vec<String> = self
+            .conv
             .queued
             .iter()
             .take(QUEUE_ROWS_MAX)
             .map(|item| format!("> {}", one_line(&item.text, self.width.saturating_sub(4))))
             .collect();
-        if self.queued.len() > QUEUE_ROWS_MAX {
+        if self.conv.queued.len() > QUEUE_ROWS_MAX {
             out.push(format!(
                 "… +{} more queued",
-                self.queued.len() - QUEUE_ROWS_MAX
+                self.conv.queued.len() - QUEUE_ROWS_MAX
             ));
         }
         out
@@ -2536,7 +2545,8 @@ impl super::Chat {
     /// running: with nothing in flight the queue is about to submit itself, and there is
     /// no window in which editing it would mean anything.
     pub fn queue_hint(&self) -> Option<&'static str> {
-        (self.busy && !self.queued.is_empty()).then_some("Press up to edit queued messages")
+        (self.conv.busy && !self.conv.queued.is_empty())
+            .then_some("Press up to edit queued messages")
     }
 
     /// ctrl+r search hint line (`(reverse-i-search)`query': hit`).
@@ -2575,10 +2585,10 @@ impl super::Chat {
     /// A message's own static settlement condition (independent of predecessors):
     /// streaming stopped, no running activities, no images loading.
     fn message_static_settled(&self, i: usize) -> bool {
-        if Some(i) == self.stream_msg {
+        if Some(i) == self.conv.stream_msg {
             return false;
         }
-        let m = &self.messages[i];
+        let m = &self.conv.messages[i];
         // Images load asynchronously. Settling (and therefore flushing) a
         // message whose images are still in flight would print the
         // `#[image]` fallback rows into the scrollback for good: the kitty
@@ -2635,14 +2645,14 @@ impl super::Chat {
         // core needs to differ on — the header instead of the welcome card,
         // the page's own settled boundary, no slash furniture.
         if let Some(mut away) = self.away.take() {
-            std::mem::swap(&mut self.messages, &mut away.messages);
+            std::mem::swap(&mut self.conv.messages, &mut away.messages);
             self.away_build = Some(crate::tui::conv::AwayBuild {
                 label: away.target.label(),
                 stable: away.stable,
             });
             self.build_rows_core(width);
             self.away_build = None;
-            std::mem::swap(&mut self.messages, &mut away.messages);
+            std::mem::swap(&mut self.conv.messages, &mut away.messages);
             self.away = Some(away);
             return &self.doc;
         }
@@ -2656,7 +2666,7 @@ impl super::Chat {
         // numbering counts message positions, because those are what the reader
         // sees go by: 0 = welcome card, k+1 = messages[k]. The order is
         // append-only, so the flush cursor keeps meaning what it meant.
-        let count = self.messages.len();
+        let count = self.conv.messages.len();
         // The clamp is defensive: if the message set is replaced wholesale
         // (/clear, /resume) without the cursor resetting, better to re-render
         // than leave a blank screen.
@@ -2737,7 +2747,7 @@ impl super::Chat {
         // self`, so the message cannot be borrowed across the loop.
         #[allow(clippy::needless_range_loop)]
         for i in 0..count {
-            let role = self.messages[i].role;
+            let role = self.conv.messages[i].role;
             // Who the last row belonged to, tracked across the whole flow so a
             // portrait is not repeated over every message in a run — and is
             // spent again the moment the other participant speaks.
@@ -2745,10 +2755,10 @@ impl super::Chat {
             // a room's members are not derivable from the text the way the
             // transcript's two participants are; `None` falls back to the
             // marker walk, so main's flow reads exactly as before.
-            let named = self.messages[i]
+            let named = self.conv.messages[i]
                 .speaker
                 .clone()
-                .or_else(|| speaker_of(role, &self.messages[i].text));
+                .or_else(|| speaker_of(role, &self.conv.messages[i].text));
             let previous = std::mem::replace(&mut spoke, named);
             if i + 1 < skip {
                 continue;
@@ -2771,9 +2781,9 @@ impl super::Chat {
                     // need the identity palette and the transcript-mode gate,
                     // neither of which the plain user renderer has.
                     let mut rows = El::Rows(
-                        self.agent_flow_rows(&self.messages[i].text, inner)
+                        self.agent_flow_rows(&self.conv.messages[i].text, inner)
                             .unwrap_or_else(|| {
-                                user_message_rows(&self.messages[i].text, inner, &theme)
+                                user_message_rows(&self.conv.messages[i].text, inner, &theme)
                             }),
                     );
                     // Send time beside the bubble's first row (D93). A state line
@@ -2787,12 +2797,12 @@ impl super::Chat {
                     // then. The others describe now and have nothing to
                     // stamp; the notification line reports the end of a run
                     // whose own row already carries how long that run took.
-                    let time = if crate::tui::chat::is_state_line(&self.messages[i].text)
-                        && !crate::tui::bufferview::is_agent_alert(&self.messages[i].text)
+                    let time = if crate::tui::chat::is_state_line(&self.conv.messages[i].text)
+                        && !crate::tui::bufferview::is_agent_alert(&self.conv.messages[i].text)
                     {
                         String::new()
                     } else {
-                        crate::tui::buffer::stamp(self.messages[i].at)
+                        crate::tui::buffer::stamp(self.conv.messages[i].at)
                     };
                     hang_stamp(&mut rows, &time, inner, &theme);
                     rows
@@ -2827,7 +2837,7 @@ impl super::Chat {
             // derived. Main's own flow leaves `speaker` unset and reads it back
             // out of the text (`speaker_of`), so it renders byte-identically,
             // and the user keeps the bubble that already says who they are.
-            let name_row = match (&self.messages[i].speaker, role) {
+            let name_row = match (&self.conv.messages[i].speaker, role) {
                 (Some(who), Role::Assistant) if !gutter.faces && spoke != previous => {
                     let color = pal.avatars[gutter.index_for(who) % pal.avatars.len()];
                     Some(Row::new(Line::styled(
@@ -2848,9 +2858,9 @@ impl super::Chat {
             let arrival = |text: &str| crate::tui::bufferview::is_agent_notice(text);
             let in_streak = i > 0
                 && role == Role::User
-                && arrival(&self.messages[i].text)
-                && self.messages[i - 1].role == Role::User
-                && arrival(&self.messages[i - 1].text);
+                && arrival(&self.conv.messages[i].text)
+                && self.conv.messages[i - 1].role == Role::User
+                && arrival(&self.conv.messages[i - 1].text);
             let block = {
                 let mut col = Vec::new();
                 if !in_streak {
@@ -2941,7 +2951,7 @@ impl super::Chat {
         if !self.chat_avatars || self.image_cap.is_none() {
             return Vec::new();
         }
-        let named: Vec<Option<String>> = self.messages[i]
+        let named: Vec<Option<String>> = self.conv.messages[i]
             .activities
             .iter()
             .enumerate()
@@ -2994,7 +3004,7 @@ impl super::Chat {
     /// falls back to the individual rows — which is also what the `ctrl+o`
     /// transcript gets, since it opens every activity before it builds.
     fn dispatch_groups(&self, i: usize) -> Vec<Option<Vec<usize>>> {
-        let msg = &self.messages[i];
+        let msg = &self.conv.messages[i];
         let is_dispatch = |idx: usize| -> bool {
             msg.group_of.get(idx).copied().flatten().is_none()
                 && matches!(&msg.activities[idx].kind,
@@ -3041,14 +3051,14 @@ impl super::Chat {
     fn dispatch_group_el(&self, i: usize, members: &[usize], theme: &Theme) -> El {
         let colors: Vec<Color> = members
             .iter()
-            .map(|&m| match &self.messages[i].activities[m].kind {
+            .map(|&m| match &self.conv.messages[i].activities[m].kind {
                 ActivityKind::Watch(w) => {
                     self.identity_color(crate::tui::activities::watch_instance(&w.label))
                 }
                 _ => theme.text,
             })
             .collect();
-        let msg = &self.messages[i];
+        let msg = &self.conv.messages[i];
         let calls: Vec<&crate::tui::activities::WatchCall> = members
             .iter()
             .filter_map(|&m| match &msg.activities[m].kind {
@@ -3143,7 +3153,7 @@ impl super::Chat {
         // `in-progress calls × lines-per-call + buffer`. The arithmetic is CC's;
         // the per-call figure is bingo's own, because a dispatch row here is a
         // header plus at most `PROGRESS_LINES`, not a full tool rendering.
-        let running_dispatches = self.messages[i]
+        let running_dispatches = self.conv.messages[i]
             .activities
             .iter()
             .filter(|a| {
@@ -3172,22 +3182,23 @@ impl super::Chat {
         // real thinking block (empty placeholder blocks produce no completion row).
         // Only rendered after the turn ends: while running, `✻ Baked for 0.4s` would appear
         // while tools are still running, contradicting the bottom running-status row.
-        let show_done_line = i == self.messages.len() - 1 && self.stream_msg.is_none() || settled;
+        let show_done_line =
+            i == self.conv.messages.len() - 1 && self.conv.stream_msg.is_none() || settled;
         // The `settle` token (D87): the completion row of the turn that just
         // ended carries the accent for one 120ms window. Only the last message
         // can be settling — every earlier one finished long ago.
-        let settling = i + 1 == self.messages.len() && self.settling();
+        let settling = i + 1 == self.conv.messages.len() && self.settling();
         // Built before the render closure takes its mutable borrows: the tail is the
         // same rows wherever the running command's row turns out to be inside this
         // message. Only the streaming message can hold one — the same rule the tool
         // events themselves follow — so every other message pays nothing.
-        let bash_tail = if self.stream_msg == Some(i) {
+        let bash_tail = if self.conv.stream_msg == Some(i) {
             self.bash_tail_rows(width)
         } else {
             Vec::new()
         };
         // Markdown render closure: borrows only disjoint fields to avoid conflicting with
-        // the shared read borrow of `self.messages`.
+        // the shared read borrow of `self.conv.messages`.
         let mut render = {
             let processor = &mut self.processor;
             let renderer = &mut self.renderer;
@@ -3215,7 +3226,7 @@ impl super::Chat {
                 lines
             }
         };
-        let msg = &self.messages[i];
+        let msg = &self.conv.messages[i];
         let text = &msg.text;
         let char_bounds: Vec<usize> = text.char_indices().map(|(b, _)| b).collect();
         let mut rendered_chars = 0usize;
@@ -3379,33 +3390,30 @@ impl super::Chat {
             parts.push(text_el(theme, reply));
         }
         if show_done_line
-            && let Some(line) =
-                self.messages[i]
-                    .activities
-                    .iter()
-                    .rev()
-                    .find_map(|a| match &a.kind {
-                        // The line reports a duration, so it needs one. A
-                        // rebuilt page has none — no clock is in the history
-                        // (D130) — and `✻ Thinking for 0.0s` would be a
-                        // measurement nobody took.
-                        ActivityKind::Thinking(t)
-                            if t.state == ThinkingState::Done
-                                && t.timed
-                                && !a.content.is_empty() =>
-                        {
-                            Some(crate::tui::activities::thinking_completion_line(
-                                t, theme, settling,
-                            ))
-                        }
-                        _ => None,
-                    })
+            && let Some(line) = self.conv.messages[i]
+                .activities
+                .iter()
+                .rev()
+                .find_map(|a| match &a.kind {
+                    // The line reports a duration, so it needs one. A
+                    // rebuilt page has none — no clock is in the history
+                    // (D130) — and `✻ Thinking for 0.0s` would be a
+                    // measurement nobody took.
+                    ActivityKind::Thinking(t)
+                        if t.state == ThinkingState::Done && t.timed && !a.content.is_empty() =>
+                    {
+                        Some(crate::tui::activities::thinking_completion_line(
+                            t, theme, settling,
+                        ))
+                    }
+                    _ => None,
+                })
         {
             parts.push(El::Line(line));
         }
         // Send time beside the reply's opening row (D93), and only once the turn
         // has finished — a clock arriving mid-stream would read as an ending.
-        let time = crate::tui::buffer::stamp(self.messages[i].at);
+        let time = crate::tui::buffer::stamp(self.conv.messages[i].at);
         let mut el = El::Col(parts);
         if show_done_line {
             hang_stamp(&mut el, &time, width, theme);

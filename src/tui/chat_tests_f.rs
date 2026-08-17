@@ -94,11 +94,14 @@ fn emitted(chat: &mut Chat) -> String {
 #[test]
 fn a_spawn_and_a_completion_add_no_rows_to_an_idle_console() {
     let mut chat = test_chat();
-    chat.messages.push(msg(Role::User, "have someone look"));
-    chat.messages
+    chat.conv
+        .messages
+        .push(msg(Role::User, "have someone look"));
+    chat.conv
+        .messages
         .push(msg(Role::Assistant, "I have asked scout"));
     assert!(
-        chat.stream_msg.is_none(),
+        chat.conv.stream_msg.is_none(),
         "the turn is over: what arrives now is the bus, not the conversation"
     );
     let before = main_rows(&mut chat);
@@ -120,7 +123,7 @@ fn a_spawn_and_a_completion_add_no_rows_to_an_idle_console() {
         "main flow is byte-identical: no spawn row, no completion row"
     );
     assert!(
-        chat.messages.iter().all(|m| m.activities.is_empty()),
+        chat.conv.messages.iter().all(|m| m.activities.is_empty()),
         "and nothing was hung off an older reply"
     );
 }
@@ -137,7 +140,7 @@ fn a_spawn_and_a_completion_add_no_rows_to_an_idle_console() {
 #[test]
 fn the_lifecycle_signal_reaches_the_dialog_and_not_the_console() {
     let mut chat = test_chat();
-    chat.messages.push(msg(Role::Assistant, ""));
+    chat.conv.messages.push(msg(Role::Assistant, ""));
     seed_agent(&chat, "scout");
     chat.refresh_conversations();
 
@@ -153,7 +156,7 @@ fn the_lifecycle_signal_reaches_the_dialog_and_not_the_console() {
     ));
 
     assert!(
-        chat.messages.iter().all(|m| m.activities.is_empty()),
+        chat.conv.messages.iter().all(|m| m.activities.is_empty()),
         "nothing was hung off a reply that had nothing to do with it"
     );
     chat.open_background_dialog();
@@ -173,7 +176,7 @@ fn the_lifecycle_signal_reaches_the_dialog_and_not_the_console() {
 #[test]
 fn a_completion_bumps_the_dm_instead_of_main() {
     let mut chat = test_chat();
-    chat.messages.push(msg(Role::Assistant, ""));
+    chat.conv.messages.push(msg(Role::Assistant, ""));
     seed_agent(&chat, "scout");
     chat.refresh_conversations();
 
@@ -237,8 +240,10 @@ fn a_completion_bumps_the_dm_instead_of_main() {
 #[test]
 fn the_running_turn_keeps_the_row_for_its_own_task_call() {
     let mut chat = test_chat();
-    chat.messages.push(msg(Role::Assistant, "hiring scout"));
-    chat.stream_msg = Some(chat.messages.len() - 1);
+    chat.conv
+        .messages
+        .push(msg(Role::Assistant, "hiring scout"));
+    chat.conv.stream_msg = Some(chat.conv.messages.len() - 1);
 
     chat.apply_event(lifecycle(
         "scout · fix the parser",
@@ -258,9 +263,10 @@ fn the_running_turn_keeps_the_row_for_its_own_task_call() {
 #[test]
 fn a_command_watch_still_reaches_the_last_reply() {
     let mut chat = test_chat();
-    chat.messages
+    chat.conv
+        .messages
         .push(msg(Role::Assistant, "watching the build"));
-    assert!(chat.stream_msg.is_none());
+    assert!(chat.conv.stream_msg.is_none());
 
     chat.apply_event(UiEvent::WatchEvent {
         label: "cargo watch".into(),
@@ -312,7 +318,7 @@ fn a_failed_run_writes_one_alert_line_and_rings() {
         "nobody typed it: no bubble putting the harness's words in the user's mouth"
     );
     assert!(
-        crate::tui::chat::is_state_line(&chat.messages[0].text),
+        crate::tui::chat::is_state_line(&chat.conv.messages[0].text),
         "and it is classified as one"
     );
     assert!(
@@ -326,7 +332,8 @@ fn a_failed_run_writes_one_alert_line_and_rings() {
 #[test]
 fn a_finished_or_cancelled_run_writes_nothing() {
     let mut chat = chat_with_bell();
-    chat.messages
+    chat.conv
+        .messages
         .push(msg(Role::Assistant, "I have asked scout"));
     let before = main_rows(&mut chat);
 
@@ -360,7 +367,7 @@ fn the_alert_line_keeps_its_stamp() {
         WatchState::Failed,
         None,
     ));
-    let stamp = crate::tui::buffer::stamp(chat.messages[0].at);
+    let stamp = crate::tui::buffer::stamp(chat.conv.messages[0].at);
     let rows = main_rows(&mut chat);
     assert!(
         rows.iter()
@@ -923,10 +930,12 @@ fn a_state_line_takes_the_indentation_and_nobodys_face() {
         if images {
             chat.image_cap = Some(crate::tui::gfx::ImageCap::default_cells());
         }
-        chat.messages
+        chat.conv
+            .messages
             .push(msg(Role::Assistant, "scout is on the parser."));
         chat.push_agent_alert("scout · fix the parser", Some("connection reset"));
-        chat.messages
+        chat.conv
+            .messages
             .push(msg(Role::Assistant, "I will hire a replacement."));
         chat.build_rows(78);
         let rows: Vec<String> = chat.doc.rows.iter().map(|r| r.line.plain_text()).collect();
@@ -978,7 +987,9 @@ fn a_state_line_takes_the_indentation_and_nobodys_face() {
 fn a_steered_message_still_wears_the_users_face() {
     let mut chat = chat_at(78, 40);
     chat.chat_avatars = true; // this test's subject predates the one avatar switch (D110)
-    chat.messages.push(msg(Role::Assistant, "working on it"));
+    chat.conv
+        .messages
+        .push(msg(Role::Assistant, "working on it"));
     chat.absorb_steered(&[crate::steer::SteerItem {
         id: 1,
         text: "also check the lexer".to_string(),
@@ -1105,8 +1116,10 @@ fn dispatching(chat: &mut Chat, name: &str, description: &str, activity: &[&str]
 #[test]
 fn a_dispatch_row_shows_the_last_three_things_the_agent_did() {
     let mut chat = test_chat();
-    chat.messages.push(msg(Role::Assistant, "hiring scout"));
-    chat.stream_msg = Some(chat.messages.len() - 1);
+    chat.conv
+        .messages
+        .push(msg(Role::Assistant, "hiring scout"));
+    chat.conv.stream_msg = Some(chat.conv.messages.len() - 1);
     dispatching(
         &mut chat,
         "scout",
@@ -1134,7 +1147,7 @@ fn a_dispatch_row_shows_the_last_three_things_the_agent_did() {
         "only the last three: {rows:?}"
     );
     assert!(
-        !chat.message_settled(chat.messages.len() - 1),
+        !chat.message_settled(chat.conv.messages.len() - 1),
         "a message holding a running dispatch never settles, which is why these \
          rows can be transient at all"
     );
@@ -1145,8 +1158,10 @@ fn a_dispatch_row_shows_the_last_three_things_the_agent_did() {
 #[test]
 fn a_short_window_condenses_the_dispatch_progress_to_one_line() {
     let mut chat = crate::tui::test_util::chat_at(80, 8);
-    chat.messages.push(msg(Role::Assistant, "hiring scout"));
-    chat.stream_msg = Some(chat.messages.len() - 1);
+    chat.conv
+        .messages
+        .push(msg(Role::Assistant, "hiring scout"));
+    chat.conv.stream_msg = Some(chat.conv.messages.len() - 1);
     dispatching(
         &mut chat,
         "scout",
@@ -1174,8 +1189,10 @@ fn a_short_window_condenses_the_dispatch_progress_to_one_line() {
 #[test]
 fn a_finished_dispatch_settles_into_what_the_run_cost() {
     let mut chat = test_chat();
-    chat.messages.push(msg(Role::Assistant, "hiring scout"));
-    chat.stream_msg = Some(chat.messages.len() - 1);
+    chat.conv
+        .messages
+        .push(msg(Role::Assistant, "hiring scout"));
+    chat.conv.stream_msg = Some(chat.conv.messages.len() - 1);
     dispatching(
         &mut chat,
         "scout",
@@ -1209,9 +1226,9 @@ fn a_finished_dispatch_settles_into_what_the_run_cost() {
         !rows.iter().any(|r| r.contains("Bash(cargo test)")),
         "the progress rows are not part of what settles: {rows:?}"
     );
-    chat.stream_msg = None;
+    chat.conv.stream_msg = None;
     assert!(
-        chat.message_settled(chat.messages.len() - 1),
+        chat.message_settled(chat.conv.messages.len() - 1),
         "and now the message can settle, which is when this row is printed once \
          and never touched again"
     );
@@ -1223,8 +1240,8 @@ fn a_finished_dispatch_settles_into_what_the_run_cost() {
 #[test]
 fn several_agents_from_one_round_draw_one_tree() {
     let mut chat = test_chat();
-    chat.messages.push(msg(Role::Assistant, "hiring two"));
-    chat.stream_msg = Some(chat.messages.len() - 1);
+    chat.conv.messages.push(msg(Role::Assistant, "hiring two"));
+    chat.conv.stream_msg = Some(chat.conv.messages.len() - 1);
     dispatching(
         &mut chat,
         "scout",
@@ -1279,8 +1296,8 @@ fn several_agents_from_one_round_draw_one_tree() {
     );
 
     // Opening one of them dissolves the group back into individual rows.
-    let last = chat.messages.len() - 1;
-    chat.messages[last].activities[0].expanded = true;
+    let last = chat.conv.messages.len() - 1;
+    chat.conv.messages[last].activities[0].expanded = true;
     let rows = main_rows(&mut chat);
     assert!(
         !rows.iter().any(|r| r.contains("agents finished")),
@@ -1304,8 +1321,10 @@ fn several_agents_from_one_round_draw_one_tree() {
 #[test]
 fn a_completion_notification_leaves_one_dim_line() {
     let mut chat = test_chat();
-    chat.messages.push(msg(Role::Assistant, "hiring scout"));
-    chat.stream_msg = Some(chat.messages.len() - 1);
+    chat.conv
+        .messages
+        .push(msg(Role::Assistant, "hiring scout"));
+    chat.conv.stream_msg = Some(chat.conv.messages.len() - 1);
     chat.apply_event(lifecycle(
         "scout · fix the parser",
         WatchState::Running,
@@ -1378,7 +1397,8 @@ fn a_streak_of_notices_reads_as_one_batch() {
     let mut chat = test_chat();
     seed_agent(&chat, "scout");
     seed_agent(&chat, "writer");
-    chat.messages
+    chat.conv
+        .messages
         .push(msg(Role::Assistant, "dispatching them now."));
     chat.push_agent_notice("scout · fix the lexer");
     chat.push_agent_notice("writer · draft the notes");
@@ -1540,7 +1560,9 @@ fn a_room_post_naming_the_user_rings_once_and_writes_nothing() {
 fn a_delivery_triggered_run_completes_without_a_notice() {
     let mut chat = test_chat();
     seed_agent(&chat, "scout");
-    chat.messages.push(msg(Role::Assistant, "the room is busy"));
+    chat.conv
+        .messages
+        .push(msg(Role::Assistant, "the room is busy"));
     let before = main_rows(&mut chat);
 
     chat.apply_event(UiEvent::WatchEvent {
@@ -1570,8 +1592,8 @@ fn a_streaming_turn_staples_only_its_own_dispatches() {
     let mut chat = test_chat();
     seed_agent(&chat, "scout");
     seed_agent(&chat, "writer");
-    chat.messages.push(msg(Role::Assistant, ""));
-    chat.stream_msg = Some(0);
+    chat.conv.messages.push(msg(Role::Assistant, ""));
+    chat.conv.stream_msg = Some(0);
 
     chat.apply_event(UiEvent::WatchEvent {
         label: "writer #3 · answer the room".to_string(),
@@ -1585,7 +1607,7 @@ fn a_streaming_turn_staples_only_its_own_dispatches() {
         dispatch: false,
     });
     assert!(
-        chat.messages[0].activities.is_empty(),
+        chat.conv.messages[0].activities.is_empty(),
         "a run the turn did not dispatch stays off its tree"
     );
 
@@ -1595,7 +1617,7 @@ fn a_streaming_turn_staples_only_its_own_dispatches() {
         None,
     ));
     assert_eq!(
-        chat.messages[0].activities.len(),
+        chat.conv.messages[0].activities.len(),
         1,
         "the turn's own dispatch is stapled as before"
     );
@@ -1606,8 +1628,12 @@ fn a_streaming_turn_staples_only_its_own_dispatches() {
 #[test]
 fn running_idle_and_stopped_write_no_line() {
     let mut chat = test_chat();
-    chat.messages.push(msg(Role::User, "have someone look"));
-    chat.messages.push(msg(Role::Assistant, "scout is on it"));
+    chat.conv
+        .messages
+        .push(msg(Role::User, "have someone look"));
+    chat.conv
+        .messages
+        .push(msg(Role::Assistant, "scout is on it"));
     seed_agent(&chat, "scout");
     let before = main_rows(&mut chat);
 
@@ -1638,8 +1664,10 @@ fn a_continuation_run_is_the_same_agent_as_the_first() {
     let mut chat = test_chat();
     chat.chat_avatars = true;
     chat.image_cap = Some(crate::tui::gfx::ImageCap::default_cells());
-    chat.messages.push(msg(Role::Assistant, "hiring scout"));
-    chat.stream_msg = Some(chat.messages.len() - 1);
+    chat.conv
+        .messages
+        .push(msg(Role::Assistant, "hiring scout"));
+    chat.conv.stream_msg = Some(chat.conv.messages.len() - 1);
     seed_agent(&chat, "scout");
     chat.apply_event(lifecycle(
         "scout #3 · look again",
@@ -1714,8 +1742,10 @@ fn a_room_page_names_every_speaker_without_avatars() {
 #[test]
 fn mains_own_flow_grows_no_speaker_rows() {
     let mut chat = test_chat();
-    chat.messages.push(msg(Role::User, "what broke?"));
-    chat.messages.push(msg(Role::Assistant, "the lexer did"));
+    chat.conv.messages.push(msg(Role::User, "what broke?"));
+    chat.conv
+        .messages
+        .push(msg(Role::Assistant, "the lexer did"));
     let rows = main_rows(&mut chat);
     assert!(
         !rows.iter().any(|r| r == "@main" || r == "@user"),

@@ -797,7 +797,7 @@ mod tests {
     fn a_batch_of_new_rows_is_visible_on_the_frame_it_arrives() {
         let mut chat = chat_at(80, 24);
         for i in 0..80 {
-            chat.messages.push(crate::tui::chat::UiMessage {
+            chat.conv.messages.push(crate::tui::chat::UiMessage {
                 speaker: None,
                 role: crate::tui::chat::Role::User,
                 text: format!("line {i}"),
@@ -820,7 +820,7 @@ mod tests {
         // A batch lands in one frame: the tail has to be the tail of the new
         // document, not of the one that was there when the frame started.
         for i in 0..20 {
-            chat.messages.push(crate::tui::chat::UiMessage {
+            chat.conv.messages.push(crate::tui::chat::UiMessage {
                 speaker: None,
                 role: crate::tui::chat::Role::User,
                 text: format!("arrived {i}"),
@@ -873,7 +873,7 @@ mod tests {
     #[test]
     fn tiny_terminal_keeps_the_prompt_and_footer() {
         let mut chat = chat_at(60, 6);
-        chat.busy = true;
+        chat.conv.busy = true;
         chat.push_warning("mcp connection failed".to_string());
         let frame = Frame::assemble(&chat, size(60, 6));
         assert_eq!(frame.rows.len(), 4, "height-2 cap");
@@ -1099,7 +1099,7 @@ mod tests {
     #[test]
     fn flush_cursor_survives_a_width_change() {
         let mut chat = chat_at(80, 24);
-        chat.messages.push(crate::tui::chat::UiMessage {
+        chat.conv.messages.push(crate::tui::chat::UiMessage {
             speaker: None,
             role: crate::tui::chat::Role::User,
             text: "a long-enough user message whose wrap count changes with the width".repeat(2),
@@ -1318,7 +1318,7 @@ mod tests {
     #[test]
     fn fullscreen_tiny_terminal_keeps_the_prompt_and_footer() {
         let mut chat = chat_at(60, 6);
-        chat.busy = true;
+        chat.conv.busy = true;
         chat.push_warning("mcp connection failed".to_string());
         chat.help_visible = true;
         let frame = fullscreen_frame(&chat, size(60, 6));

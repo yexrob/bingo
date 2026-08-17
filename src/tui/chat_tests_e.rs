@@ -259,8 +259,8 @@ fn shift_enter_inserts_a_newline() {
     assert!(shift(&mut chat, KeyCode::Enter));
     type_text(&mut chat, "two");
     assert_eq!(chat.input, "one\ntwo", "a newline, in place");
-    assert!(chat.queued.is_empty(), "and nothing was sent");
-    assert!(!chat.busy, "no turn started");
+    assert!(chat.conv.queued.is_empty(), "and nothing was sent");
+    assert!(!chat.conv.busy, "no turn started");
 }
 
 /// Paste-burst detection needs consecutive keys under the 10ms threshold; the
@@ -310,8 +310,8 @@ fn a_key_burst_lands_as_text_and_opens_nothing() {
         chat.input, "review the diff\n@src/tui/chat.rs\n/model please\nthanks",
         "every Enter in the burst is a literal newline"
     );
-    assert!(chat.queued.is_empty(), "nothing was submitted");
-    assert!(!chat.busy);
+    assert!(chat.conv.queued.is_empty(), "nothing was submitted");
+    assert!(!chat.conv.busy);
     assert!(chat.mention.is_none(), "no `@` dropdown mid-paste");
     assert!(
         chat.slash_suggestions.is_empty(),
@@ -533,17 +533,17 @@ fn ctrl_p_and_ctrl_n_mirror_the_arrows() {
 #[test]
 fn ctrl_p_pulls_back_a_queued_message_and_loses_the_same_race() {
     let mut chat = chat_with_history("d86-pullback");
-    chat.busy = true;
+    chat.conv.busy = true;
     chat.set_input("steer me");
     chat.submit();
-    assert_eq!(chat.queued.len(), 1);
+    assert_eq!(chat.conv.queued.len(), 1);
 
     assert!(ctrl(&mut chat, 'p'));
     assert_eq!(
         chat.input, "steer me",
         "ctrl+p pulls it back into the composer"
     );
-    assert!(chat.queued.is_empty());
+    assert!(chat.conv.queued.is_empty());
 
     // And the race: a message the turn already took stays taken.
     chat.set_input("too late");
@@ -552,7 +552,7 @@ fn ctrl_p_pulls_back_a_queued_message_and_loses_the_same_race() {
     assert_eq!(taken.len(), 1);
     assert!(ctrl(&mut chat, 'p'));
     assert_eq!(chat.input, "", "the composer is left alone");
-    assert_eq!(chat.queued.len(), 1, "the queue waits for the event");
+    assert_eq!(chat.conv.queued.len(), 1, "the queue waits for the event");
 }
 
 /// The outcome type carries its own copy, so the host and the tests cannot
@@ -602,9 +602,9 @@ fn both_diff_surfaces_render_the_same_gutter() {
 
     // Surface 2: the completed-edit rows in the flow.
     let mut chat = test_chat();
-    chat.busy = true;
-    chat.messages.push(msg(Role::Assistant, ""));
-    chat.stream_msg = Some(0);
+    chat.conv.busy = true;
+    chat.conv.messages.push(msg(Role::Assistant, ""));
+    chat.conv.stream_msg = Some(0);
     let _ = chat.events.send(UiEvent::ToolStart {
         name: "Edit".into(),
     });
@@ -629,6 +629,7 @@ fn both_diff_surfaces_render_the_same_gutter() {
         }));
     chat.drain_events();
     if let Some(activity) = chat
+        .conv
         .messages
         .iter_mut()
         .flat_map(|m| &mut m.activities)
@@ -648,9 +649,9 @@ fn both_diff_surfaces_render_the_same_gutter() {
 #[test]
 fn switching_theme_recolours_baked_diff_rows() {
     let mut chat = test_chat();
-    chat.busy = true;
-    chat.messages.push(msg(Role::Assistant, ""));
-    chat.stream_msg = Some(0);
+    chat.conv.busy = true;
+    chat.conv.messages.push(msg(Role::Assistant, ""));
+    chat.conv.stream_msg = Some(0);
     let _ = chat.events.send(UiEvent::ToolStart {
         name: "Edit".into(),
     });
@@ -676,7 +677,8 @@ fn switching_theme_recolours_baked_diff_rows() {
     chat.drain_events();
 
     let gutter_color = |chat: &Chat| {
-        chat.messages
+        chat.conv
+            .messages
             .iter()
             .flat_map(|m| &m.activities)
             // Row 0 is the `@@` header; the gutter starts on the one after it.

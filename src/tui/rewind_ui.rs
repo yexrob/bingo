@@ -144,7 +144,7 @@ impl super::Chat {
         if self.pending_ask.is_some() {
             return;
         }
-        if self.busy {
+        if self.conv.busy {
             self.push_slash_info("finish or interrupt the turn first".to_string());
             return;
         }
@@ -239,7 +239,7 @@ impl super::Chat {
         if action == 4 {
             return;
         }
-        if self.busy {
+        if self.conv.busy {
             self.push_slash_info("finish or interrupt the turn first".to_string());
             return;
         }
@@ -305,7 +305,7 @@ impl super::Chat {
             // The message goes back into the composer, where the user left it —
             // rewinding to a turn is almost always about asking it differently.
             self.set_input(point.text.clone());
-            self.queued.clear();
+            self.conv.queued.clear();
             let stamp = crate::tui::buffer::stamp(point.at);
             lines.push(match action {
                 0 => format!("{REWIND_PREFIX}code and conversation restored to {stamp}"),
@@ -572,7 +572,8 @@ mod tests {
     }
 
     fn state_lines(chat: &Chat) -> Vec<String> {
-        chat.messages
+        chat.conv
+            .messages
             .iter()
             .filter(|m| is_rewind_line(&m.text))
             .map(|m| m.text.clone())
@@ -633,7 +634,7 @@ mod tests {
         let transcript = attach(&chat, &home, "busy");
         turn(&transcript, "first question", "t1");
 
-        chat.busy = true;
+        chat.conv.busy = true;
         chat.open_rewind();
         assert!(chat.rewind.is_none());
         assert!(

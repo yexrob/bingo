@@ -21,7 +21,8 @@
 //! - [`tree`] is the status layer (D104): the agent tree and the footer pills,
 //!   both rebuilt from the agent registry every frame, both chrome.
 //! - [`chat`] is the state machine and the transcript block builder
-//!   (`build_rows`); [`slash`] owns slash command metadata and pure
+//!   (`build_rows`); [`conversation`] is the half of that state belonging to one
+//!   conversation rather than to the console (D133); [`slash`] owns slash command metadata and pure
 //!   suggestion/help transformations; [`complete`] owns the fuzzy scorer, the
 //!   `@` mention dropdown and the per-command argument sources.
 //! - [`app`] is the event loop and the frame assembly.
@@ -45,6 +46,7 @@ pub mod collapse;
 pub mod complete;
 pub mod composer;
 pub(crate) mod conv;
+pub mod conversation;
 pub mod el;
 pub mod gfx;
 pub mod highlight;

@@ -418,7 +418,7 @@ impl Chat {
                 // Everything of main's is "already flushed": the rows printed
                 // before the visit are banked in scrollback, and what the new
                 // page owes the reader is a recent tail, not the whole record.
-                self.flushed_segments = self.messages.len() + 1;
+                self.flushed_segments = self.conv.messages.len() + 1;
             }
         }
         self.tail_start = 0;

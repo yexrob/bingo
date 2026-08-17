@@ -604,7 +604,7 @@ struct Folds {
 fn active_messages(chat: &mut Chat) -> &mut Vec<crate::tui::chat::UiMessage> {
     match chat.away.as_mut() {
         Some(page) => &mut page.messages,
-        None => &mut chat.messages,
+        None => &mut chat.conv.messages,
     }
 }
 
@@ -853,8 +853,8 @@ mod tests {
     #[test]
     fn show_all_reveals_folded_tool_output() {
         let mut chat = chat_at(100, 30);
-        chat.messages.push(message(Role::Assistant, ""));
-        chat.stream_msg = Some(0);
+        chat.conv.messages.push(message(Role::Assistant, ""));
+        chat.conv.stream_msg = Some(0);
         tool_call(&mut chat, "Read", "alpha line\nbeta line\ngamma line");
 
         let collapsed = texts(&transcript_rows(&mut chat, 100, false)).join("\n");
@@ -877,8 +877,8 @@ mod tests {
     #[test]
     fn show_all_reveals_thinking_blocks() {
         let mut chat = chat_at(100, 30);
-        chat.messages.push(message(Role::Assistant, ""));
-        chat.stream_msg = Some(0);
+        chat.conv.messages.push(message(Role::Assistant, ""));
+        chat.conv.stream_msg = Some(0);
         send(
             &mut chat,
             UiEvent::ThinkingDelta("weighing the tradeoff".into()),
@@ -904,13 +904,13 @@ mod tests {
     #[test]
     fn building_the_transcript_leaves_the_session_untouched() {
         let mut chat = chat_at(100, 30);
-        chat.messages.push(message(Role::Assistant, ""));
-        chat.stream_msg = Some(0);
+        chat.conv.messages.push(message(Role::Assistant, ""));
+        chat.conv.stream_msg = Some(0);
         tool_call(&mut chat, "Read", "alpha line\nbeta line");
         chat.flushed_segments = 1;
         chat.tail_start = 4;
         chat.mark_base = 1;
-        let before: Vec<bool> = chat.messages[0]
+        let before: Vec<bool> = chat.conv.messages[0]
             .activities
             .iter()
             .map(|a| a.expanded)
@@ -918,7 +918,7 @@ mod tests {
 
         let _ = transcript_rows(&mut chat, 100, true);
 
-        let after: Vec<bool> = chat.messages[0]
+        let after: Vec<bool> = chat.conv.messages[0]
             .activities
             .iter()
             .map(|a| a.expanded)
@@ -1100,7 +1100,8 @@ mod tests {
     #[test]
     fn wide_rows_wrap_within_the_width() {
         let mut chat = chat_at(40, 30);
-        chat.messages
+        chat.conv
+            .messages
             .push(message(Role::User, &"北海啊要多想".repeat(12)));
         for row in transcript_rows(&mut chat, 40, true) {
             let text = row.line.plain_text();
@@ -1117,8 +1118,12 @@ mod tests {
     #[test]
     fn the_pager_covers_the_flushed_prefix() {
         let mut chat = chat_at(80, 30);
-        chat.messages.push(message(Role::User, "first question"));
-        chat.messages.push(message(Role::Assistant, "an answer"));
+        chat.conv
+            .messages
+            .push(message(Role::User, "first question"));
+        chat.conv
+            .messages
+            .push(message(Role::Assistant, "an answer"));
         chat.flushed_segments = 2;
         let all = texts(&transcript_rows(&mut chat, 80, true)).join("\n");
         assert!(all.contains("first question"), "{all}");

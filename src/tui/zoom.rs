@@ -407,7 +407,7 @@ mod tests {
         let mut chat = test_chat();
         seed(&chat, "scout"); // Running
         chat.switch_to(Some(ZoomTarget::Agent("scout".into())));
-        chat.busy = true; // main's own turn, out of Esc's reach while away
+        chat.conv.busy = true; // main's own turn, out of Esc's reach while away
 
         chat.on_key(KeyCode::Esc, KeyModifiers::NONE);
         assert!(
@@ -419,11 +419,11 @@ mod tests {
             "the first press stops the subject's run"
         );
         assert!(chat.away.is_some(), "and stays on the page");
-        assert!(chat.busy, "main's turn was never touched");
+        assert!(chat.conv.busy, "main's turn was never touched");
 
         chat.on_key(KeyCode::Esc, KeyModifiers::NONE);
         assert!(chat.away.is_none(), "the second press comes home");
-        assert!(chat.busy, "still not touched");
+        assert!(chat.conv.busy, "still not touched");
     }
 
     /// `shift+tab` cycles the **viewed agent's** permission mode and leaves
@@ -486,7 +486,7 @@ mod tests {
         let mut chat = test_chat();
         seed(&chat, "scout");
         for i in 0..40 {
-            chat.messages.push(crate::tui::chat::UiMessage {
+            chat.conv.messages.push(crate::tui::chat::UiMessage {
                 role: crate::tui::chat::Role::User,
                 text: format!("line {i}"),
                 at: 0,

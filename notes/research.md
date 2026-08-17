@@ -5814,3 +5814,81 @@ Same run, after:
 against a 4000 cap. The tests move to `agent_tests.rs` behind `#[path]`, which is
 what `agent_notes.rs` was carved out for in D114 and what `query_tests.rs` did in
 D130.
+
+## D133 — a conversation becomes a thing, instead of a privilege of the console
+
+The user's ruling, and it is the same one D132 was answering: *我们切换 agent 只是
+相同的 chrome 切换不同的数据来源* — switching agents is the same chrome pointed at a
+different source, and main differs in exactly one way, that it talks to the user
+by default. The code says the opposite. Main is a set of fields on `Chat`, fed by
+`UiEvent` as its turn runs; every other conversation is an `AwayPage` rebuilt
+from the registry whenever a fingerprint moves, and swapped into those same
+fields for the length of one `build_rows`.
+
+That asymmetry is where the last two records came from. D130: the rebuild lost
+tool results, so a failed call rendered as a success. D132: the rebuild's live
+half had a renderer of its own, so a running call drew twice and differently.
+Both were fixed where they showed. The composer is still doing it — `/`, `!` and
+`@name` branch on `away.is_some()` and are dead on an agent page.
+
+D133 is the first of four steps and runs nothing new: `Conversation` is lifted
+out of `Chat` and `Chat` holds one of them. No test's assertions moved; the only
+edits to test bodies are the field paths they name.
+
+**Where the line is: what there is one of.** One terminal, one composer, one
+input history, one theme, one tick — the console. One transcript and the turn
+writing into it — a conversation. Eighteen fields cross:
+
+- the transcript and what is waiting to enter it — `messages`, `queued`,
+  `next_queue_id`;
+- where the turn is writing — `stream_msg`, `stream_attempt_checkpoint`,
+  `continuation_msg`, `thinking_buf`, `thinking_seg_open`;
+- whether it is running, and how it ended — `busy`, `interrupted`;
+- what it has spent — `output_tokens`, `output_round_tokens`, `token_rate`,
+  `context_usage`;
+- and its clocks — `turn_start_tick`, `turn_started`, `settle_at`, `turn_verb`.
+
+Each is the transcript, an index into it, a byte produced into it, or a clock the
+turn writing it started. 702 sites become `self.conv.<field>`, 390 of them in the
+six `chat_tests_*` files — which is itself the measurement: the console reaches
+into one conversation's state that often and until now had no name for what it
+was reaching into.
+
+**No `Deref`.** It compiles and it would have made the diff a tenth the size, and
+it would have borrowed the whole `Chat` at every one of those 702 sites while
+hiding the split this record exists to make visible. The point is that the reader
+can see which half of the state a line touches.
+
+**What stayed, and why.**
+
+- `token_meter` — the *display's* travel toward `output_tokens` (D87). D132
+  already ruled that an agent's page shows the registry's count rather than this
+  meter, because a meter borrowed across pages puts main's numbers under somebody
+  else's name. It eases one status row and there is one status row.
+- `steer`, `cancel_tx`, `interrupt_at`, `bash_tail`, `live` — wires into the turn
+  that is running now, not a record of it. Who holds them once more than one turn
+  can run is the question D135 answers when submit stops branching on `away`;
+  moving them today would be guessing at that answer.
+- `last_progress_tick`, `warnings`, `last_error`, `last_prompt` — each measured
+  from "the last event that reached the TUI" and rendered in exactly one place.
+  They stay console until a second conversation can produce one, which is D134.
+- `pending_tools` — the honest miss. It holds activity indices into
+  `conv.messages[stream_msg]`, awaiting `ToolReady`; it fails the console test the
+  same way `thinking_buf` does and belongs beside it. It stayed because D133's
+  contract was the eighteen fields the plan named, and because cross-talk here is
+  impossible while one stream exists. It becomes a real bug the moment D134 puts a
+  second conversation's events on the same channel, so it moves there.
+
+**One widening.** `stream_attempt_checkpoint`, `output_round_tokens`,
+`turn_start_tick` and `turn_started` were private to `chat.rs`, which `chat_tail`
+and the test modules could still read as descendants of it. In `conversation.rs`
+they are `pub(super)`, i.e. `pub(in crate::tui)` — the smallest visibility that
+keeps those readers compiling, and the only visibility this change loosens.
+
+`conversation.rs` is a sibling of `chat`, not a child of it: `chrome`, `roster`
+and `chat_menus` already read these fields, and a conversation is not an
+implementation detail of the state machine that happens to hold one. It sits
+beside `conv.rs`, which is the projection D134 deletes.
+
+No file crossed the 4000-line cap and nothing needed splitting; `chat.rs` fell to
+3729. `chat_tests_b.rs` is the one to watch at 3993.

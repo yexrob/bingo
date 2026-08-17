@@ -21,8 +21,8 @@ fn seed_agent(chat: &Chat, name: &str) {
 
 /// Three grouped reads, each with output of its own.
 fn grouped_reads(chat: &mut Chat, calls: &[(&str, &str)]) {
-    chat.messages.push(msg(Role::Assistant, ""));
-    chat.stream_msg = Some(0);
+    chat.conv.messages.push(msg(Role::Assistant, ""));
+    chat.conv.stream_msg = Some(0);
     for (path, _) in calls {
         let _ = chat.events.send(UiEvent::ToolStart {
             name: "Read".into(),
@@ -76,10 +76,10 @@ fn grouped_results_keep_their_output_for_expansion() {
         "a collapsed group shows no output: {collapsed}"
     );
 
-    let group = chat.messages[0].groups.first().expect("one group");
+    let group = chat.conv.messages[0].groups.first().expect("one group");
     assert_eq!(group.activities.len(), 3, "all three folded together");
     for &idx in &group.activities {
-        let member = &chat.messages[0].activities[idx];
+        let member = &chat.conv.messages[0].activities[idx];
         assert!(member.expandable(), "member {idx} kept its output");
     }
 
@@ -148,8 +148,8 @@ fn a_large_grouped_result_is_bounded_like_a_standalone_one() {
     );
     let content = |standalone: bool| -> Vec<String> {
         let mut chat = test_chat();
-        chat.messages.push(msg(Role::Assistant, ""));
-        chat.stream_msg = Some(0);
+        chat.conv.messages.push(msg(Role::Assistant, ""));
+        chat.conv.stream_msg = Some(0);
         let _ = chat.events.send(UiEvent::ToolStart {
             name: "Read".into(),
         });
@@ -173,7 +173,7 @@ fn a_large_grouped_result_is_bounded_like_a_standalone_one() {
                 diff: None,
             }));
         chat.drain_events();
-        chat.messages[0].activities[0]
+        chat.conv.messages[0].activities[0]
             .content
             .iter()
             .map(|l| l.plain_text())
@@ -199,8 +199,8 @@ fn a_large_grouped_result_is_bounded_like_a_standalone_one() {
 #[test]
 fn an_interrupted_group_member_still_has_nothing_to_expand() {
     let mut chat = test_chat();
-    chat.messages.push(msg(Role::Assistant, ""));
-    chat.stream_msg = Some(0);
+    chat.conv.messages.push(msg(Role::Assistant, ""));
+    chat.conv.stream_msg = Some(0);
     for path in ["a.md", "b.md"] {
         let _ = chat.events.send(UiEvent::ToolStart {
             name: "Read".into(),
@@ -241,13 +241,13 @@ fn an_interrupted_group_member_still_has_nothing_to_expand() {
     chat.drain_events();
     finish_turn(&mut chat);
 
-    let stopped = &chat.messages[0].activities[1];
+    let stopped = &chat.conv.messages[0].activities[1];
     assert!(
         !stopped.expandable(),
         "an interrupted call produced no output to keep"
     );
     assert!(
-        chat.messages[0].activities[0].expandable(),
+        chat.conv.messages[0].activities[0].expandable(),
         "its neighbour still keeps its own"
     );
 
@@ -303,7 +303,7 @@ fn idle_title(chat: &Chat) -> String {
 
 /// Move the running turn's start stamp far enough back to cross the threshold.
 fn age_the_turn(chat: &mut Chat) {
-    chat.turn_started = Some(
+    chat.conv.turn_started = Some(
         std::time::Instant::now()
             .checked_sub(crate::tui::notify::LONG_TURN + std::time::Duration::from_secs(1))
             .expect("the process has been running for longer than the threshold"),
@@ -452,7 +452,7 @@ fn chrome_text(chat: &Chat) -> String {
 #[test]
 fn esc_peels_one_layer_per_press_before_it_reaches_the_turn() {
     let mut chat = test_chat();
-    chat.busy = true;
+    chat.conv.busy = true;
     chat.help_visible = true;
     chat.push_slash_info("session status".to_string());
     chat.set_input("/");
@@ -467,10 +467,10 @@ fn esc_peels_one_layer_per_press_before_it_reaches_the_turn() {
             break;
         }
         assert!(
-            !chat.interrupted,
+            !chat.conv.interrupted,
             "a layer above the interrupt closed instead of the turn: {layer:?}"
         );
-        assert!(chat.busy, "the turn kept running through {layer:?}");
+        assert!(chat.conv.busy, "the turn kept running through {layer:?}");
     }
     assert_eq!(
         order,
@@ -482,7 +482,7 @@ fn esc_peels_one_layer_per_press_before_it_reaches_the_turn() {
         ],
         "the stack is walked top-down, one entry per press"
     );
-    assert!(chat.interrupted, "the last press reached the turn");
+    assert!(chat.conv.interrupted, "the last press reached the turn");
 }
 
 /// D85: the `@` dropdown joined the stack in the slash dropdown's stratum, so
@@ -509,7 +509,7 @@ fn esc_peels_the_mention_dropdown_in_the_slash_dropdowns_place() {
     let _ = std::fs::remove_dir_all(&root);
     let _ = std::fs::create_dir_all(&root);
     let mut chat = test_chat_home(root.clone());
-    chat.busy = true;
+    chat.conv.busy = true;
     chat.help_visible = true;
     chat.push_slash_info("session status".to_string());
     chat.set_input("read @");
@@ -527,10 +527,10 @@ fn esc_peels_the_mention_dropdown_in_the_slash_dropdowns_place() {
             break;
         }
         assert!(
-            !chat.interrupted,
+            !chat.conv.interrupted,
             "a layer above the interrupt closed instead of the turn: {layer:?}"
         );
-        assert!(chat.busy, "the turn kept running through {layer:?}");
+        assert!(chat.conv.busy, "the turn kept running through {layer:?}");
     }
     assert_eq!(
         order,
@@ -542,7 +542,7 @@ fn esc_peels_the_mention_dropdown_in_the_slash_dropdowns_place() {
         ],
         "the mention peels where the slash dropdown would have"
     );
-    assert!(chat.interrupted, "the last press reached the turn");
+    assert!(chat.conv.interrupted, "the last press reached the turn");
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -551,18 +551,24 @@ fn esc_peels_the_mention_dropdown_in_the_slash_dropdowns_place() {
 #[test]
 fn esc_over_a_busy_turn_closes_the_dropdown_and_says_so() {
     let mut chat = test_chat();
-    chat.busy = true;
+    chat.conv.busy = true;
     chat.set_input("/");
     assert_eq!(chat.esc_busy_hint(), "esc to close");
 
     let t0 = std::time::Instant::now();
     assert!(chat.on_key_at(KeyCode::Esc, KeyModifiers::empty(), t0));
     assert!(chat.slash_suggestions.is_empty(), "the dropdown closed");
-    assert!(chat.busy && !chat.interrupted, "the turn is still running");
+    assert!(
+        chat.conv.busy && !chat.conv.interrupted,
+        "the turn is still running"
+    );
     assert_eq!(chat.esc_busy_hint(), "esc to interrupt");
 
     assert!(chat.on_key_at(KeyCode::Esc, KeyModifiers::empty(), t0));
-    assert!(chat.interrupted, "with nothing left open, Esc interrupts");
+    assert!(
+        chat.conv.interrupted,
+        "with nothing left open, Esc interrupts"
+    );
 }
 
 /// Info lines are reading the user asked for; Esc dismisses the reading, not
@@ -570,12 +576,15 @@ fn esc_over_a_busy_turn_closes_the_dropdown_and_says_so() {
 #[test]
 fn esc_clears_info_lines_without_ending_the_turn() {
     let mut chat = test_chat();
-    chat.busy = true;
+    chat.conv.busy = true;
     chat.push_slash_info("context: 12k/200k".to_string());
 
     assert!(chat.on_key(KeyCode::Esc, KeyModifiers::empty()));
     assert!(chat.slash_info_lines.is_empty(), "the info block cleared");
-    assert!(chat.busy && !chat.interrupted, "the turn is still running");
+    assert!(
+        chat.conv.busy && !chat.conv.interrupted,
+        "the turn is still running"
+    );
 }
 
 /// Ctrl+C is the one key the layers do not shield: it interrupts with the
@@ -591,11 +600,14 @@ fn an_interrupt_settles_the_dialog_it_leaves_behind() {
         ))
         .unwrap();
     assert!(chat.drain_asks());
-    chat.busy = true;
+    chat.conv.busy = true;
     assert!(chrome_text(&chat).contains("Waiting for permission…"));
 
     assert!(chat.on_key(KeyCode::Char('c'), KeyModifiers::CONTROL));
-    assert!(chat.interrupted, "ctrl+c still interrupts through a dialog");
+    assert!(
+        chat.conv.interrupted,
+        "ctrl+c still interrupts through a dialog"
+    );
     assert!(chat.pending_ask.is_none(), "the dialog went with the turn");
     assert_eq!(
         rx.try_recv(),
@@ -620,7 +632,7 @@ fn an_interrupt_settles_the_dialog_it_leaves_behind() {
     assert!(chat.on_key(KeyCode::Enter, KeyModifiers::empty()));
     assert!(chat.pending_ask.is_none(), "nothing came back to life");
     assert_eq!(
-        chat.queued.last().map(|q| q.text.as_str()),
+        chat.conv.queued.last().map(|q| q.text.as_str()),
         Some("1"),
         "Enter queued a message instead of confirming an option"
     );
@@ -647,7 +659,7 @@ fn turn_end_settles_the_asks_whose_turn_is_gone() {
         ))
         .unwrap();
     assert!(chat.drain_asks(), "the first request is on screen");
-    chat.busy = true;
+    chat.conv.busy = true;
     drop(dead_rx); // the turn awaiting the answer is gone
 
     chat.handle(UiEvent::TurnEnd);
@@ -676,14 +688,14 @@ fn turn_end_settles_the_asks_whose_turn_is_gone() {
 fn esc_stops_a_running_bash_command_before_it_leaves_bash_mode() {
     let mut chat = test_chat();
     chat.bash_mode = true;
-    chat.busy = true;
+    chat.conv.busy = true;
 
     assert_eq!(chat.esc_layer(), Some(EscLayer::Interrupt));
     assert!(chat.on_key(KeyCode::Esc, KeyModifiers::empty()));
-    assert!(chat.interrupted, "the command stops first");
+    assert!(chat.conv.interrupted, "the command stops first");
     assert!(chat.bash_mode, "and the prompt is still a shell prompt");
 
-    chat.busy = false;
+    chat.conv.busy = false;
     assert!(chat.on_key(KeyCode::Esc, KeyModifiers::empty()));
     assert!(!chat.bash_mode, "idle, the same key leaves bash mode");
 }
@@ -1021,7 +1033,7 @@ async fn ask_user_question_keeps_its_own_shape() {
 #[test]
 fn only_plain_messages_are_offered_to_the_running_turn() {
     let mut chat = chat_with_history("steer-offer");
-    chat.busy = true;
+    chat.conv.busy = true;
     chat.set_input("use tabs");
     chat.submit();
     assert_eq!(
@@ -1034,14 +1046,14 @@ fn only_plain_messages_are_offered_to_the_running_turn() {
     );
 
     let mut chat = chat_with_history("steer-offer-slash");
-    chat.busy = true;
+    chat.conv.busy = true;
     chat.set_input("/clear");
     chat.submit();
     assert!(
         chat.steer.is_empty(),
         "a slash command stays for TurnEnd: it is dispatched here, not by the turn"
     );
-    assert_eq!(chat.queued.len(), 1, "and it is still queued");
+    assert_eq!(chat.conv.queued.len(), 1, "and it is still queued");
 
     // Order survives: a plain message typed behind a slash command must not overtake it.
     chat.set_input("and then this");
@@ -1057,12 +1069,12 @@ fn only_plain_messages_are_offered_to_the_running_turn() {
 #[test]
 fn an_absorbed_message_moves_from_the_queue_into_the_flow() {
     let mut chat = chat_with_history("steer-absorb");
-    chat.busy = true;
+    chat.conv.busy = true;
     chat.set_input("first");
     chat.submit();
     chat.set_input("second");
     chat.submit();
-    assert_eq!(chat.queued.len(), 2);
+    assert_eq!(chat.conv.queued.len(), 2);
 
     // The barrier takes what is on offer, exactly as `tui_hooks` does.
     let taken = chat.steer.take();
@@ -1071,7 +1083,7 @@ fn an_absorbed_message_moves_from_the_queue_into_the_flow() {
     chat.drain_events();
 
     assert!(
-        chat.queued.is_empty(),
+        chat.conv.queued.is_empty(),
         "absorbed messages stop being pending"
     );
     assert!(
@@ -1102,7 +1114,7 @@ fn an_absorbed_message_moves_from_the_queue_into_the_flow() {
 #[test]
 fn a_pull_back_that_lost_the_race_does_nothing() {
     let mut chat = chat_with_history("steer-race");
-    chat.busy = true;
+    chat.conv.busy = true;
     chat.set_input("too late");
     chat.submit();
     let taken = chat.steer.take();
@@ -1110,11 +1122,11 @@ fn a_pull_back_that_lost_the_race_does_nothing() {
 
     press(&mut chat, KeyCode::Up);
     assert_eq!(chat.input, "", "the composer is left alone");
-    assert_eq!(chat.queued.len(), 1, "the queue waits for the event");
+    assert_eq!(chat.conv.queued.len(), 1, "the queue waits for the event");
 
     let _ = chat.events.send(UiEvent::Steered { items: taken });
     chat.drain_events();
-    assert!(chat.queued.is_empty(), "which then removes it");
+    assert!(chat.conv.queued.is_empty(), "which then removes it");
 }
 
 /// CC's wording, and only while it is true: with no turn running the queue is about to
@@ -1123,12 +1135,12 @@ fn a_pull_back_that_lost_the_race_does_nothing() {
 fn the_queue_hint_shows_exactly_while_a_busy_turn_holds_a_queue() {
     let mut chat = chat_with_history("steer-hint");
     assert_eq!(chat.queue_hint(), None, "idle and empty");
-    chat.busy = true;
+    chat.conv.busy = true;
     assert_eq!(chat.queue_hint(), None, "busy with nothing queued");
     chat.set_input("later");
     chat.submit();
     assert_eq!(chat.queue_hint(), Some("Press up to edit queued messages"));
-    chat.busy = false;
+    chat.conv.busy = false;
     assert_eq!(
         chat.queue_hint(),
         None,
@@ -1141,7 +1153,7 @@ fn the_queue_hint_shows_exactly_while_a_busy_turn_holds_a_queue() {
 #[tokio::test]
 async fn the_channel_is_re_armed_for_the_turn_that_actually_runs() {
     let mut chat = chat_with_history("steer-rearm");
-    chat.busy = true;
+    chat.conv.busy = true;
     chat.set_input("one");
     chat.submit();
     chat.set_input("two");
@@ -1149,10 +1161,10 @@ async fn the_channel_is_re_armed_for_the_turn_that_actually_runs() {
     assert_eq!(chat.steer.take().len(), 2);
 
     // TurnEnd: "one" starts the next turn, and only what is still queued is on offer.
-    chat.busy = false;
+    chat.conv.busy = false;
     chat.submit_queued();
     chat.rearm_steer();
-    assert!(chat.busy, "the first queued message opened a turn");
+    assert!(chat.conv.busy, "the first queued message opened a turn");
     assert_eq!(
         chat.steer.take(),
         vec![crate::steer::SteerItem {
@@ -1166,8 +1178,8 @@ async fn the_channel_is_re_armed_for_the_turn_that_actually_runs() {
 /// A Bash tool call in flight, exactly as the query layer announces one.
 /// `standalone`: the `!` shell mode's own call, which never joins a fold group.
 fn running_bash(chat: &mut Chat, command: &str, standalone: bool) {
-    chat.messages.push(msg(Role::Assistant, ""));
-    chat.stream_msg = Some(0);
+    chat.conv.messages.push(msg(Role::Assistant, ""));
+    chat.conv.stream_msg = Some(0);
     let _ = chat.events.send(UiEvent::ToolStart {
         name: "Bash".into(),
     });
@@ -1432,7 +1444,7 @@ async fn a_direct_send_never_steers_mains_turn() {
         chat.session.clone(),
     );
     chat.refresh_conversations();
-    chat.busy = true;
+    chat.conv.busy = true;
 
     chat.set_input("@scout use tabs");
     chat.submit();
@@ -1441,8 +1453,11 @@ async fn a_direct_send_never_steers_mains_turn() {
         chat.steer.is_empty(),
         "a direct send is not the turn's to read"
     );
-    assert!(chat.queued.is_empty(), "and it is not waiting for TurnEnd");
-    assert!(chat.busy, "the turn is untouched");
+    assert!(
+        chat.conv.queued.is_empty(),
+        "and it is not waiting for TurnEnd"
+    );
+    assert!(chat.conv.busy, "the turn is untouched");
     assert!(
         chat.session
             .agents
@@ -1485,7 +1500,7 @@ fn esc_peels_the_rewind_selector_one_stage_at_a_time() {
     );
 
     let mut chat = test_chat();
-    chat.busy = true;
+    chat.conv.busy = true;
     chat.help_visible = true;
     chat.rewind = Some(Rewind {
         points: vec![crate::rewind::Checkpoint {
@@ -1509,10 +1524,10 @@ fn esc_peels_the_rewind_selector_one_stage_at_a_time() {
             break;
         }
         assert!(
-            !chat.interrupted,
+            !chat.conv.interrupted,
             "a layer above the interrupt closed instead of the turn: {layer:?}"
         );
-        assert!(chat.busy, "the turn kept running through {layer:?}");
+        assert!(chat.conv.busy, "the turn kept running through {layer:?}");
     }
     assert_eq!(
         order,
@@ -1568,7 +1583,7 @@ fn esc_peels_the_agent_tree_in_the_slot_above_the_task_panel() {
 
     let mut chat = test_chat();
     seed_agent(&chat, "scout");
-    chat.busy = true;
+    chat.conv.busy = true;
     chat.help_visible = true;
     assert!(chat.roster_enter_selection(), "a cursor on the roster");
 
@@ -1584,10 +1599,10 @@ fn esc_peels_the_agent_tree_in_the_slot_above_the_task_panel() {
             assert!(chat.roster_selection().is_none(), "the cursor left");
         }
         assert!(
-            !chat.interrupted,
+            !chat.conv.interrupted,
             "a layer above the interrupt closed instead of the turn: {layer:?}"
         );
-        assert!(chat.busy, "the turn kept running through {layer:?}");
+        assert!(chat.conv.busy, "the turn kept running through {layer:?}");
     }
     assert_eq!(
         order,

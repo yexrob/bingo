@@ -294,7 +294,7 @@ impl super::Chat {
     /// nothing was sent — and it never reaches the model, which learns the
     /// verdict from the gate instead.
     pub(super) fn push_user_line(&mut self, text: String) {
-        self.messages.push(UiMessage {
+        self.conv.messages.push(UiMessage {
             speaker: None,
             role: Role::User,
             text,

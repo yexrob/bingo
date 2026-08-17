@@ -17,7 +17,7 @@ impl super::Chat {
         // A mid-turn protocol swap would send this conversation's accumulated
         // thinking/reasoning blocks to the other protocol's endpoint — refuse
         // instead of corrupting the running turn.
-        if self.busy {
+        if self.conv.busy {
             self.push_slash_error(
                 "[error] code=BUSY msg=cannot switch providers mid-turn (press Esc to interrupt, then retry)".to_string(),
             );
@@ -51,8 +51,8 @@ impl super::Chat {
                     ),
                 };
                 let model_now = session.runtime.model.borrow().clone();
-                self.context_usage = crate::context_usage::ContextUsage::for_model(
-                    self.context_usage.used,
+                self.conv.context_usage = crate::context_usage::ContextUsage::for_model(
+                    self.conv.context_usage.used,
                     &session.client.models(),
                     &model_now,
                 );

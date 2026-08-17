@@ -6,8 +6,8 @@ use serde_json::json;
 #[test]
 fn interleaved_group_keeps_text_position() {
     let mut chat = test_chat();
-    chat.messages.push(msg(Role::Assistant, ""));
-    chat.stream_msg = Some(0);
+    chat.conv.messages.push(msg(Role::Assistant, ""));
+    chat.conv.stream_msg = Some(0);
     let _ = chat.events.send(UiEvent::TextDelta("let me read".into()));
     chat.drain_events();
     let _ = chat.events.send(UiEvent::ToolStart {
@@ -74,8 +74,8 @@ fn group_fold_round_trips_back_to_its_summary() {
 #[test]
 fn running_tool_shows_input_summary_after_ready() {
     let mut chat = test_chat();
-    chat.messages.push(msg(Role::Assistant, ""));
-    chat.stream_msg = Some(0);
+    chat.conv.messages.push(msg(Role::Assistant, ""));
+    chat.conv.stream_msg = Some(0);
     let _ = chat.events.send(UiEvent::ToolStart {
         name: "Skill".into(),
     });
@@ -136,19 +136,19 @@ fn running_tool_shows_input_summary_after_ready() {
 fn agent_tool_start_creates_no_tool_activity() {
     assert!(is_hidden_tool("Agent"), "Agent is a hidden tool");
     let mut chat = test_chat();
-    chat.messages.push(msg(Role::Assistant, ""));
-    chat.stream_msg = Some(0);
+    chat.conv.messages.push(msg(Role::Assistant, ""));
+    chat.conv.stream_msg = Some(0);
     let _ = chat.events.send(UiEvent::ToolStart {
         name: "Agent".into(),
     });
     chat.drain_events();
     assert!(
-        chat.messages[0]
+        chat.conv.messages[0]
             .activities
             .iter()
             .all(|a| !matches!(a.kind, ActivityKind::Tool(_))),
         "Agent creates no Tool activity: {:?}",
-        chat.messages[0]
+        chat.conv.messages[0]
             .activities
             .iter()
             .map(|a| format!("{:?}", a.kind))
@@ -168,7 +168,7 @@ fn agent_tool_start_creates_no_tool_activity() {
         dispatch: true,
     });
     chat.drain_events();
-    let watch_rows = chat.messages[0]
+    let watch_rows = chat.conv.messages[0]
         .activities
         .iter()
         .filter(|a| matches!(a.kind, ActivityKind::Watch(_)))
@@ -188,13 +188,13 @@ fn agent_tool_start_creates_no_tool_activity() {
         dispatch: true,
     });
     chat.drain_events();
-    let watch_rows = chat.messages[0]
+    let watch_rows = chat.conv.messages[0]
         .activities
         .iter()
         .filter(|a| matches!(a.kind, ActivityKind::Watch(_)))
         .count();
     assert_eq!(watch_rows, 1, "same-label events do not create new rows");
-    let detail = chat.messages[0]
+    let detail = chat.conv.messages[0]
         .activities
         .iter()
         .find_map(|a| match &a.kind {
@@ -211,8 +211,8 @@ fn agent_tool_start_creates_no_tool_activity() {
 #[tokio::test]
 async fn terminal_watch_event_triggers_auto_turn_when_idle() {
     let mut chat = test_chat();
-    chat.messages.push(msg(Role::Assistant, ""));
-    chat.stream_msg = Some(0);
+    chat.conv.messages.push(msg(Role::Assistant, ""));
+    chat.conv.stream_msg = Some(0);
     // D98: the wake follows the *notification*, not the bare event, so the run
     // has to be registered — which is what production does, and what tells a
     // main-relevant run from a user's own DM exchange.
@@ -230,7 +230,7 @@ async fn terminal_watch_event_triggers_auto_turn_when_idle() {
         dispatch: true,
     });
     chat.drain_events();
-    assert!(!chat.busy);
+    assert!(!chat.conv.busy);
     watch.set_state(id, WatchState::Done, Some("done".into()), None);
     let _ = chat.events.send(UiEvent::WatchEvent {
         label: "Agent: long task".into(),
@@ -246,7 +246,7 @@ async fn terminal_watch_event_triggers_auto_turn_when_idle() {
     chat.drain_events();
     tokio::task::yield_now().await;
     chat.drain_events();
-    assert!(chat.busy, "auto turn started");
+    assert!(chat.conv.busy, "auto turn started");
 }
 
 /// The other half of the same rule (D98): a terminal state whose run was
@@ -255,7 +255,7 @@ async fn terminal_watch_event_triggers_auto_turn_when_idle() {
 #[tokio::test]
 async fn a_terminal_event_with_no_notification_for_main_wakes_nothing() {
     let mut chat = test_chat();
-    chat.messages.push(msg(Role::Assistant, ""));
+    chat.conv.messages.push(msg(Role::Assistant, ""));
     let watch = chat.session.watch.clone();
     let id = watch.register_addressed(Box::new(FakeWatchable), Vec::new(), None, false, false);
     watch.set_state(id, WatchState::Done, Some("done".into()), None);
@@ -281,7 +281,7 @@ async fn a_terminal_event_with_no_notification_for_main_wakes_nothing() {
     chat.drain_events();
     tokio::task::yield_now().await;
     chat.drain_events();
-    assert!(!chat.busy, "no turn was started");
+    assert!(!chat.conv.busy, "no turn was started");
     // Nor does the run appear in main's own conversation. D95 filed every
     // lifecycle event in a team feed and this asserted the filing was
     // unscoped; D107 retired that feed with the directory column that read it,
@@ -289,11 +289,16 @@ async fn a_terminal_event_with_no_notification_for_main_wakes_nothing() {
     // nobody wakes nobody and writes nothing where the user is reading.
     assert!(
         !chat
+            .conv
             .messages
             .iter()
             .any(|message| message.text.contains("answer the user")),
         "and it says nothing in @main: {:?}",
-        chat.messages.iter().map(|m| &m.text).collect::<Vec<_>>()
+        chat.conv
+            .messages
+            .iter()
+            .map(|m| &m.text)
+            .collect::<Vec<_>>()
     );
 }
 
@@ -301,8 +306,8 @@ async fn a_terminal_event_with_no_notification_for_main_wakes_nothing() {
 async fn signal_triggers_auto_turn_even_while_typing() {
     let mut chat = test_chat();
     chat.input = "still typing".to_string();
-    chat.messages.push(msg(Role::Assistant, ""));
-    chat.stream_msg = Some(0);
+    chat.conv.messages.push(msg(Role::Assistant, ""));
+    chat.conv.stream_msg = Some(0);
     let watch = chat.session.watch.clone();
     let id = watch.register_with_conditions(Box::new(FakeWatchable), Vec::new(), None);
     let _ = chat.events.send(UiEvent::WatchEvent {
@@ -332,7 +337,7 @@ async fn signal_triggers_auto_turn_even_while_typing() {
     chat.drain_events();
     tokio::task::yield_now().await;
     chat.drain_events();
-    assert!(chat.busy, "signal wakes despite typing");
+    assert!(chat.conv.busy, "signal wakes despite typing");
     assert_eq!(chat.input, "still typing", "input preserved");
 }
 
@@ -359,9 +364,9 @@ impl crate::watch::Watchable for FakeWatchable {
 #[tokio::test]
 async fn turn_end_triggers_auto_turn_when_wake_notification_pending() {
     let mut chat = test_chat();
-    chat.messages.push(msg(Role::Assistant, ""));
-    chat.stream_msg = Some(0);
-    chat.busy = true;
+    chat.conv.messages.push(msg(Role::Assistant, ""));
+    chat.conv.stream_msg = Some(0);
+    chat.conv.busy = true;
     let watch = chat.session.watch.clone();
     let id = watch.register_with_conditions(Box::new(FakeWatchable), Vec::new(), None);
     watch.set_state(
@@ -372,13 +377,13 @@ async fn turn_end_triggers_auto_turn_when_wake_notification_pending() {
     );
     assert!(watch.has_wake_notifications(None), "notification queued");
     chat.drain_events();
-    assert!(chat.busy, "still busy, no auto turn mid-turn");
+    assert!(chat.conv.busy, "still busy, no auto turn mid-turn");
     let _ = chat.events.send(UiEvent::TurnEnd);
     chat.drain_events();
     tokio::task::yield_now().await;
     chat.drain_events();
-    assert!(chat.busy, "auto turn started after TurnEnd");
-    assert_eq!(chat.messages.len(), 2, "new message for wake turn");
+    assert!(chat.conv.busy, "auto turn started after TurnEnd");
+    assert_eq!(chat.conv.messages.len(), 2, "new message for wake turn");
 }
 
 #[tokio::test]
@@ -445,14 +450,14 @@ async fn draw_with_long_cjk_stream_and_activities_does_not_panic() {
     });
     chat.drain_events();
     visible(&mut chat, 120, 40);
-    assert_eq!(chat.messages.len(), 1, "single message rendered");
+    assert_eq!(chat.conv.messages.len(), 1, "single message rendered");
 }
 
 #[test]
 fn watch_event_updates_across_messages_in_place() {
     let mut chat = test_chat();
-    chat.messages.push(msg(Role::Assistant, ""));
-    chat.stream_msg = Some(0);
+    chat.conv.messages.push(msg(Role::Assistant, ""));
+    chat.conv.stream_msg = Some(0);
     let _ = chat.events.send(UiEvent::WatchEvent {
         label: "Agent: explore".into(),
         kind: crate::watch::WatchKind::Agent,
@@ -465,11 +470,11 @@ fn watch_event_updates_across_messages_in_place() {
         dispatch: true,
     });
     chat.drain_events();
-    assert_eq!(chat.messages[0].activities.len(), 1);
+    assert_eq!(chat.conv.messages[0].activities.len(), 1);
     let _ = chat.events.send(UiEvent::TurnEnd);
     chat.drain_events();
-    chat.stream_msg = None;
-    chat.messages.push(msg(Role::Assistant, ""));
+    chat.conv.stream_msg = None;
+    chat.conv.messages.push(msg(Role::Assistant, ""));
     let _ = chat.events.send(UiEvent::WatchEvent {
         label: "Agent: explore".into(),
         kind: crate::watch::WatchKind::Agent,
@@ -482,9 +487,17 @@ fn watch_event_updates_across_messages_in_place() {
         dispatch: true,
     });
     chat.drain_events();
-    assert_eq!(chat.messages[0].activities.len(), 1, "updated in place");
-    assert_eq!(chat.messages[1].activities.len(), 0, "no new row at bottom");
-    let w = match &chat.messages[0].activities[0].kind {
+    assert_eq!(
+        chat.conv.messages[0].activities.len(),
+        1,
+        "updated in place"
+    );
+    assert_eq!(
+        chat.conv.messages[1].activities.len(),
+        0,
+        "no new row at bottom"
+    );
+    let w = match &chat.conv.messages[0].activities[0].kind {
         ActivityKind::Watch(w) => w,
         _ => unreachable!(),
     };
@@ -494,8 +507,8 @@ fn watch_event_updates_across_messages_in_place() {
 #[test]
 fn idle_round_notification_does_not_trigger_auto_turn() {
     let mut chat = test_chat();
-    chat.messages.push(msg(Role::Assistant, ""));
-    chat.stream_msg = Some(0);
+    chat.conv.messages.push(msg(Role::Assistant, ""));
+    chat.conv.stream_msg = Some(0);
     let _ = chat.events.send(UiEvent::WatchEvent {
         label: "watch ls".into(),
         kind: crate::watch::WatchKind::Command,
@@ -508,15 +521,15 @@ fn idle_round_notification_does_not_trigger_auto_turn() {
         dispatch: true,
     });
     chat.drain_events();
-    assert!(!chat.busy, "idle round does not wake");
-    assert_eq!(chat.messages.len(), 1);
+    assert!(!chat.conv.busy, "idle round does not wake");
+    assert_eq!(chat.conv.messages.len(), 1);
 }
 
 #[test]
 fn watch_event_renders_inline_and_updates() {
     let mut chat = test_chat();
-    chat.messages.push(msg(Role::Assistant, ""));
-    chat.stream_msg = Some(0);
+    chat.conv.messages.push(msg(Role::Assistant, ""));
+    chat.conv.stream_msg = Some(0);
     let _ = chat.events.send(UiEvent::WatchEvent {
         label: "watch -n 2 ls".into(),
         kind: crate::watch::WatchKind::Command,
@@ -529,7 +542,7 @@ fn watch_event_renders_inline_and_updates() {
         dispatch: true,
     });
     chat.drain_events();
-    assert_eq!(chat.messages[0].activities.len(), 1);
+    assert_eq!(chat.conv.messages[0].activities.len(), 1);
     let _ = chat.events.send(UiEvent::WatchEvent {
         label: "watch -n 2 ls".into(),
         kind: crate::watch::WatchKind::Command,
@@ -553,7 +566,11 @@ fn watch_event_renders_inline_and_updates() {
         dispatch: true,
     });
     chat.drain_events();
-    assert_eq!(chat.messages[0].activities.len(), 1, "updates in place");
+    assert_eq!(
+        chat.conv.messages[0].activities.len(),
+        1,
+        "updates in place"
+    );
     let joined = visible(&mut chat, 120, 30);
     assert!(joined.contains("⏺ watch -n 2 ls"), "header: {joined}");
     assert!(joined.contains("  ⎿  round 2"), "result row: {joined}");
@@ -565,8 +582,8 @@ fn watch_event_renders_inline_and_updates() {
 #[test]
 fn bash_folds_into_group_with_count() {
     let mut chat = test_chat();
-    chat.messages.push(msg(Role::Assistant, ""));
-    chat.stream_msg = Some(0);
+    chat.conv.messages.push(msg(Role::Assistant, ""));
+    chat.conv.stream_msg = Some(0);
     for (name, input) in [
         ("Bash", json!({"command": "cargo test"})),
         ("Read", json!({"file_path": "a.md"})),
@@ -582,8 +599,12 @@ fn bash_folds_into_group_with_count() {
         });
         chat.drain_events();
     }
-    assert_eq!(chat.messages[0].groups.len(), 1, "all fold into one group");
-    let g = &chat.messages[0].groups[0];
+    assert_eq!(
+        chat.conv.messages[0].groups.len(),
+        1,
+        "all fold into one group"
+    );
+    let g = &chat.conv.messages[0].groups[0];
     assert_eq!(g.bash, 2);
     assert_eq!(g.read_ops, 0);
     assert_eq!(g.read_paths, vec!["a.md".to_string()]);
@@ -623,8 +644,8 @@ fn bash_folds_into_group_with_count() {
 #[test]
 fn running_group_shows_hint_line_then_hides_when_done() {
     let mut chat = test_chat();
-    chat.messages.push(msg(Role::Assistant, ""));
-    chat.stream_msg = Some(0);
+    chat.conv.messages.push(msg(Role::Assistant, ""));
+    chat.conv.stream_msg = Some(0);
     let _ = chat.events.send(UiEvent::ToolStart {
         name: "Read".into(),
     });
@@ -666,8 +687,8 @@ fn running_group_shows_hint_line_then_hides_when_done() {
 #[test]
 fn group_survives_rounds_and_thinking_until_text() {
     let mut chat = test_chat();
-    chat.messages.push(msg(Role::Assistant, ""));
-    chat.stream_msg = Some(0);
+    chat.conv.messages.push(msg(Role::Assistant, ""));
+    chat.conv.stream_msg = Some(0);
     let _ = chat.events.send(UiEvent::ToolStart {
         name: "Grep".into(),
     });
@@ -679,7 +700,7 @@ fn group_survives_rounds_and_thinking_until_text() {
         standalone: false,
     });
     chat.drain_events();
-    assert_eq!(chat.messages[0].groups.len(), 1, "round 1 group");
+    assert_eq!(chat.conv.messages[0].groups.len(), 1, "round 1 group");
     let _ = chat.events.send(UiEvent::RoundEnd);
     chat.drain_events();
     let _ = chat.events.send(UiEvent::ThinkingDelta("hmm".into()));
@@ -695,9 +716,13 @@ fn group_survives_rounds_and_thinking_until_text() {
         standalone: false,
     });
     chat.drain_events();
-    assert_eq!(chat.messages[0].groups.len(), 1, "round 2 joins same group");
-    let idx = chat.messages[0].activities.len() - 1;
-    assert_eq!(chat.messages[0].group_of[idx], Some(0));
+    assert_eq!(
+        chat.conv.messages[0].groups.len(),
+        1,
+        "round 2 joins same group"
+    );
+    let idx = chat.conv.messages[0].activities.len() - 1;
+    assert_eq!(chat.conv.messages[0].group_of[idx], Some(0));
     let _ = chat.events.send(UiEvent::ToolStart {
         name: "Read".into(),
     });
@@ -710,7 +735,7 @@ fn group_survives_rounds_and_thinking_until_text() {
     });
     chat.drain_events();
     assert_eq!(
-        chat.messages[0].groups.len(),
+        chat.conv.messages[0].groups.len(),
         1,
         "same-group Read joins group"
     );
@@ -728,9 +753,13 @@ fn group_survives_rounds_and_thinking_until_text() {
         standalone: false,
     });
     chat.drain_events();
-    assert_eq!(chat.messages[0].groups.len(), 2, "text opens new group");
-    let idx = chat.messages[0].activities.len() - 1;
-    assert_eq!(chat.messages[0].group_of[idx], Some(1));
+    assert_eq!(
+        chat.conv.messages[0].groups.len(),
+        2,
+        "text opens new group"
+    );
+    let idx = chat.conv.messages[0].activities.len() - 1;
+    assert_eq!(chat.conv.messages[0].group_of[idx], Some(1));
 }
 
 #[test]
@@ -803,7 +832,7 @@ fn click_expanded_group_head_collapses_back() {
 fn collapse_after_expand_then_expand_again() {
     let mut chat = test_chat();
     start_group(&mut chat);
-    chat.stream_msg = Some(0);
+    chat.conv.stream_msg = Some(0);
     for (summary, out) in [("Read a.md", "l1"), ("Read b.md", "x")] {
         let _ = chat
             .events
@@ -818,7 +847,7 @@ fn collapse_after_expand_then_expand_again() {
             }));
     }
     chat.drain_events();
-    chat.stream_msg = None;
+    chat.conv.stream_msg = None;
     for _ in 0..3 {
         click_group(&mut chat);
         assert!(
@@ -837,7 +866,7 @@ fn collapse_after_expand_then_expand_again() {
 fn user_message_has_bubble_background() {
     let mut chat = test_chat();
     chat.chat_avatars = true; // this test's subject predates the one avatar switch (D110)
-    chat.messages.push(msg(Role::User, "hello"));
+    chat.conv.messages.push(msg(Role::User, "hello"));
     chat.build_rows(100);
     let row = chat
         .doc
@@ -854,7 +883,8 @@ fn user_message_has_bubble_background() {
 fn multiline_user_message_wraps_into_single_line_rows() {
     let mut chat = test_chat();
     chat.chat_avatars = true; // this test's subject predates the one avatar switch (D110)
-    chat.messages
+    chat.conv
+        .messages
         .push(msg(Role::User, "first line\nsecond line\nthird"));
     chat.build_rows(40);
     let bubbles: Vec<&Row> = chat.doc.rows.iter().filter(|r| r.bg.is_some()).collect();
@@ -886,7 +916,7 @@ fn multiline_user_message_wraps_into_single_line_rows() {
 fn long_user_message_wraps_to_width() {
     let mut chat = test_chat();
     let text = "word ".repeat(40);
-    chat.messages.push(msg(Role::User, text.trim()));
+    chat.conv.messages.push(msg(Role::User, text.trim()));
     chat.build_rows(30);
     let bubbles: Vec<&Row> = chat.doc.rows.iter().filter(|r| r.bg.is_some()).collect();
     assert!(bubbles.len() > 1, "a long message wraps into multiple rows");
@@ -904,8 +934,8 @@ fn long_user_message_wraps_to_width() {
 #[test]
 fn multiline_hint_stays_one_row() {
     let mut chat = test_chat();
-    chat.messages.push(msg(Role::Assistant, ""));
-    chat.stream_msg = Some(0);
+    chat.conv.messages.push(msg(Role::Assistant, ""));
+    chat.conv.stream_msg = Some(0);
     let _ = chat.events.send(UiEvent::ToolStart {
         name: "Bash".into(),
     });
@@ -938,8 +968,8 @@ fn multiline_hint_stays_one_row() {
 #[test]
 fn flush_cursor_survives_width_change() {
     let mut chat = test_chat();
-    chat.messages.push(msg(Role::User, "first message"));
-    chat.messages.push(msg(Role::Assistant, "reply body"));
+    chat.conv.messages.push(msg(Role::User, "first message"));
+    chat.conv.messages.push(msg(Role::Assistant, "reply body"));
     chat.build_rows(100);
     assert_eq!(
         chat.doc.settled,
@@ -966,7 +996,7 @@ fn flush_cursor_survives_width_change() {
     assert!(!text.contains("first message"), "not printed again");
 
     // A new message only builds its own segment.
-    chat.messages.push(msg(Role::User, "second message"));
+    chat.conv.messages.push(msg(Role::User, "second message"));
     chat.build_rows(40);
     assert!(
         chat.doc
@@ -1023,7 +1053,7 @@ fn streaming_content_is_not_flushed_until_settled() {
 #[test]
 fn clear_resets_flush_cursor() {
     let mut chat = test_chat();
-    chat.messages.push(msg(Role::User, "hi"));
+    chat.conv.messages.push(msg(Role::User, "hi"));
     chat.build_rows(80);
     chat.advance_flushed();
     assert!(chat.flushed_segments > 0);
@@ -1046,7 +1076,7 @@ fn clear_resets_flush_cursor() {
 #[test]
 fn ask_answer_message_flushes_like_normal_message() {
     let mut chat = test_chat();
-    chat.messages.push(msg(Role::User, "hi"));
+    chat.conv.messages.push(msg(Role::User, "hi"));
     chat.build_rows(80);
     chat.advance_flushed();
     assert_eq!(chat.flushed_segments, 2, "welcome card + the user's input");
@@ -1066,6 +1096,7 @@ fn ask_answer_message_flushes_like_normal_message() {
 
     // The answer enters the message flow as a user message.
     let answer = chat
+        .conv
         .messages
         .last()
         .expect("the answer message entered the flow");
@@ -1099,7 +1130,7 @@ fn ask_answer_message_flushes_like_normal_message() {
 #[test]
 fn ask_answer_message_persists_across_turn_end() {
     let mut chat = test_chat();
-    chat.messages.push(msg(Role::User, "hi"));
+    chat.conv.messages.push(msg(Role::User, "hi"));
     let (tx, _rx) = oneshot::channel();
     let mut request =
         PermissionRequest::new("Tech stack", "Which library?", vec!["A".into(), "B".into()]);
@@ -1113,6 +1144,7 @@ fn ask_answer_message_persists_across_turn_end() {
 
     chat.handle(UiEvent::TurnEnd);
     let answer = chat
+        .conv
         .messages
         .last()
         .expect("the answer message is still there");
@@ -1147,26 +1179,26 @@ fn ask_answer_message_persists_across_turn_end() {
 #[test]
 fn answer_mid_turn_opens_a_new_message_for_the_continuation() {
     let mut chat = test_chat();
-    chat.messages.push(msg(Role::User, "hi"));
+    chat.conv.messages.push(msg(Role::User, "hi"));
     chat.handle(UiEvent::TurnStart);
     chat.handle(UiEvent::TextDelta("before".into()));
     answer_pending_ask(&mut chat);
     assert_eq!(
-        chat.messages.len(),
+        chat.conv.messages.len(),
         4,
         "hi + what the model said before asking + the answer + the continuation"
     );
     assert_eq!(
-        chat.stream_msg,
+        chat.conv.stream_msg,
         Some(3),
         "the stream moved below the answer"
     );
 
     chat.handle(UiEvent::TextDelta("after".into()));
-    assert_eq!(chat.messages[1].text, "before");
-    assert_eq!(chat.messages[2].role, Role::User, "the answer");
+    assert_eq!(chat.conv.messages[1].text, "before");
+    assert_eq!(chat.conv.messages[2].role, Role::User, "the answer");
     assert_eq!(
-        chat.messages[3].text, "after",
+        chat.conv.messages[3].text, "after",
         "the continuation lands under the answer, not above it"
     );
 }
@@ -1177,7 +1209,7 @@ fn answer_mid_turn_opens_a_new_message_for_the_continuation() {
 #[test]
 fn the_message_an_answer_closed_settles_without_waiting_for_the_turn() {
     let mut chat = test_chat();
-    chat.messages.push(msg(Role::User, "hi"));
+    chat.conv.messages.push(msg(Role::User, "hi"));
     chat.handle(UiEvent::TurnStart);
     chat.handle(UiEvent::ThinkingDelta("weighing it up".into()));
     answer_pending_ask(&mut chat);
@@ -1209,19 +1241,19 @@ fn the_message_an_answer_closed_settles_without_waiting_for_the_turn() {
 #[test]
 fn an_unused_continuation_message_is_dropped_at_turn_end() {
     let mut chat = test_chat();
-    chat.messages.push(msg(Role::User, "hi"));
+    chat.conv.messages.push(msg(Role::User, "hi"));
     chat.handle(UiEvent::TurnStart);
     chat.handle(UiEvent::TextDelta("before".into()));
     answer_pending_ask(&mut chat);
-    assert_eq!(chat.messages.len(), 4);
+    assert_eq!(chat.conv.messages.len(), 4);
 
     chat.handle(UiEvent::TurnEnd);
     assert_eq!(
-        chat.messages.len(),
+        chat.conv.messages.len(),
         3,
         "the empty continuation is dropped: hi + the model's text + the answer"
     );
-    assert_eq!(chat.messages[2].role, Role::User, "the answer is last");
+    assert_eq!(chat.conv.messages[2].role, Role::User, "the answer is last");
     past_settle(&mut chat);
     chat.build_rows(80);
     chat.advance_flushed();
@@ -1236,14 +1268,18 @@ fn an_unused_continuation_message_is_dropped_at_turn_end() {
 #[test]
 fn a_tool_in_flight_pins_the_stream_to_its_own_message() {
     let mut chat = test_chat();
-    chat.messages.push(msg(Role::User, "hi"));
+    chat.conv.messages.push(msg(Role::User, "hi"));
     chat.handle(UiEvent::TurnStart);
     chat.handle(UiEvent::ToolStart {
         name: "Read".into(),
     });
     answer_pending_ask(&mut chat);
-    assert_eq!(chat.stream_msg, Some(1), "the stream stays with the tool");
-    assert_eq!(chat.messages.len(), 3, "hi + assistant + answer");
+    assert_eq!(
+        chat.conv.stream_msg,
+        Some(1),
+        "the stream stays with the tool"
+    );
+    assert_eq!(chat.conv.messages.len(), 3, "hi + assistant + answer");
 }
 
 /// Answers a pending free-text question by confirming its first option.
@@ -1265,7 +1301,7 @@ fn answer_pending_ask(chat: &mut Chat) {
 #[test]
 fn ask_answer_message_survives_error_path() {
     let mut chat = test_chat();
-    chat.messages.push(msg(Role::User, "hi"));
+    chat.conv.messages.push(msg(Role::User, "hi"));
     let (tx, _rx) = oneshot::channel();
     let mut request =
         PermissionRequest::new("Tech stack", "Which library?", vec!["A".into(), "B".into()]);
@@ -1285,6 +1321,7 @@ fn ask_answer_message_survives_error_path() {
     });
     // The answer message stays in the flow and renders as usual.
     let answer = chat
+        .conv
         .messages
         .last()
         .expect("the answer message is still there");
@@ -1314,13 +1351,13 @@ fn ask_answer_message_survives_error_path() {
 fn message_settled_guard_is_linear_for_large_settled_sessions() {
     let mut chat = test_chat();
     for _ in 0..400 {
-        chat.messages.push(msg(Role::User, "hi"));
-        chat.messages.push(msg(Role::Assistant, "ok"));
+        chat.conv.messages.push(msg(Role::User, "hi"));
+        chat.conv.messages.push(msg(Role::Assistant, "ok"));
     }
     // Fully static settling: build_rows decides settling for every message.
     chat.build_rows(80);
     assert_eq!(chat.doc.settled, chat.doc.rows.len(), "everything settles");
-    for i in 0..chat.messages.len() {
+    for i in 0..chat.conv.messages.len() {
         assert!(chat.message_settled(i), "message {i} settles");
     }
 }
@@ -1346,7 +1383,8 @@ fn streaming_with_resize_never_prints_a_row_twice() {
     let welcome = printed.len();
     assert!(welcome > 0, "the welcome card flushes");
 
-    chat.messages
+    chat.conv
+        .messages
         .push(msg(Role::User, "please explain this code"));
     flush_frame(&mut chat, 100, &mut printed);
     chat.handle(UiEvent::TurnStart);
@@ -1403,12 +1441,12 @@ fn tick_marks_dirty_only_when_dynamic() {
     chat.tick();
     assert!(!chat.dirty, "no rebuild when idle");
     assert!(!chat.needs_tick(), "idle does not wake components");
-    chat.busy = true;
+    chat.conv.busy = true;
     chat.tick();
     assert!(chat.dirty, "rebuilds while busy (spinner/duration row)");
     assert!(chat.needs_tick());
     // Pending events must also wake it up (otherwise they would never drain).
-    chat.busy = false;
+    chat.conv.busy = false;
     chat.dirty = false;
     let _ = chat.events.send(UiEvent::Warning("w".into()));
     assert!(chat.needs_tick(), "pending events need a wake-up");
@@ -1476,14 +1514,14 @@ fn settled_stops_at_running_activity() {
     // A message with a running tool.
     let mut m = msg(Role::Assistant, "");
     m.activities.push(tool_activity());
-    chat.messages.push(m);
+    chat.conv.messages.push(m);
     chat.build_rows(100);
     assert_eq!(
         chat.doc.settled, welcome,
         "running tool keeps message dynamic"
     );
     // Tool done → settles.
-    let a = &mut chat.messages[0].activities[0];
+    let a = &mut chat.conv.messages[0].activities[0];
     match &mut a.kind {
         ActivityKind::Tool(t) => t.status = ToolStatus::Done,
         _ => panic!("tool activity expected"),
@@ -1620,6 +1658,7 @@ fn ask_question_renders_other_and_answers_free_text() {
     assert_eq!(rx.try_recv(), Ok(DialogAction::Answer("serde".to_string())));
     // The answer enters the message flow: an ordinary user message (Q&A echo).
     let answer = chat
+        .conv
         .messages
         .last()
         .expect("the answer message entered the flow");
@@ -1667,6 +1706,7 @@ fn ask_other_empty_submit_cancels() {
     assert_eq!(rx.try_recv(), Ok(DialogAction::Cancel));
     // A decline also enters the message flow (an ordinary user message).
     let declined = chat
+        .conv
         .messages
         .last()
         .expect("the decline message entered the flow");
@@ -1717,6 +1757,7 @@ fn ask_arrow_keys_move_focus() {
     );
     assert_eq!(rx.try_recv(), Ok(DialogAction::Confirm(1)));
     let answer = chat
+        .conv
         .messages
         .last()
         .expect("the answer message entered the flow");
@@ -1733,19 +1774,19 @@ fn ask_arrow_keys_move_focus() {
 #[test]
 fn esc_sets_interrupted_and_start_turn_resets() {
     let mut chat = test_chat();
-    chat.busy = true;
+    chat.conv.busy = true;
     assert!(
         chat.on_key(KeyCode::Esc, KeyModifiers::empty()),
         "busy Esc interrupts"
     );
-    assert!(chat.interrupted, "Esc sets interrupted");
+    assert!(chat.conv.interrupted, "Esc sets interrupted");
     assert!(
         *chat.cancel_tx.borrow(),
         "the interrupt signal was sent (send_replace applies unconditionally)"
     );
-    chat.busy = false;
-    chat.interrupted = false;
-    chat.busy = true;
+    chat.conv.busy = false;
+    chat.conv.interrupted = false;
+    chat.conv.busy = true;
     let _ = chat.cancel_tx.send_replace(true);
     let cancel_rx = chat.cancel_tx.subscribe();
     chat.cancel_tx.send_replace(false);
@@ -1870,7 +1911,8 @@ fn message_waits_for_pending_images_before_settling() {
         "data:image/png;base64,{}",
         base64::engine::general_purpose::STANDARD.encode(tiny_png())
     );
-    chat.messages
+    chat.conv
+        .messages
         .push(msg(Role::Assistant, &format!("![img]({url})")));
     // Load in flight (the effect of load_message_images).
     chat.images_pending.insert(url.clone());
@@ -1914,7 +1956,8 @@ fn message_waits_for_pending_images_before_settling() {
 fn failed_image_load_settles_with_placeholder() {
     let mut chat = test_chat();
     chat.image_cap = Some(ImageCap::default_cells());
-    chat.messages
+    chat.conv
+        .messages
         .push(msg(Role::Assistant, "![img](missing.png)"));
     chat.images_pending.insert("missing.png".to_string());
     chat.build_rows(100);
@@ -1950,7 +1993,9 @@ fn failed_image_load_settles_with_placeholder() {
 #[test]
 fn without_image_capability_messages_settle_immediately() {
     let mut chat = test_chat();
-    chat.messages.push(msg(Role::Assistant, "![img](a.png)"));
+    chat.conv
+        .messages
+        .push(msg(Role::Assistant, "![img](a.png)"));
     chat.build_rows(100);
     assert!(chat.images_pending.is_empty());
     assert_eq!(
@@ -2095,12 +2140,12 @@ fn prompt_rows_are_capped() {
 fn ctrl_c_interrupt_clear_then_exit() {
     let mut chat = chat_with_history("ctrlc");
     let t0 = std::time::Instant::now();
-    chat.busy = true;
+    chat.conv.busy = true;
     chat.on_key_at(KeyCode::Char('c'), KeyModifiers::CONTROL, t0);
-    assert!(chat.interrupted, "busy → interrupt");
+    assert!(chat.conv.interrupted, "busy → interrupt");
     assert!(!chat.exit);
 
-    chat.busy = false;
+    chat.conv.busy = false;
     chat.set_input("draft");
     chat.on_key_at(KeyCode::Char('c'), KeyModifiers::CONTROL, t0);
     assert_eq!(chat.input, "", "non-empty input clears first");
@@ -2140,10 +2185,13 @@ fn ctrl_c_interrupt_clear_then_exit() {
 fn ctrl_c_force_quits_a_turn_that_never_stops() {
     let mut chat = chat_with_history("wedged");
     let t0 = std::time::Instant::now();
-    chat.busy = true;
+    chat.conv.busy = true;
 
     chat.on_key_at(KeyCode::Char('c'), KeyModifiers::CONTROL, t0);
-    assert!(chat.interrupted, "the first press asks the turn to stop");
+    assert!(
+        chat.conv.interrupted,
+        "the first press asks the turn to stop"
+    );
     assert!(
         !chat.exit,
         "a turn that may still be stopping is not killed"
@@ -2171,7 +2219,7 @@ fn ctrl_c_force_quits_a_turn_that_never_stops() {
 fn a_new_turn_rearms_the_ordinary_interrupt() {
     let mut chat = chat_with_history("rearm");
     let t0 = std::time::Instant::now();
-    chat.busy = true;
+    chat.conv.busy = true;
     chat.on_key_at(KeyCode::Char('c'), KeyModifiers::CONTROL, t0);
     assert!(chat.interrupt_at.is_some());
 
@@ -2220,11 +2268,11 @@ async fn a_lost_turn_reports_itself_instead_of_latching_busy() {
 fn esc_closes_layers_then_clears_input() {
     let mut chat = chat_with_history("esc");
     let t0 = std::time::Instant::now();
-    chat.busy = true;
+    chat.conv.busy = true;
     chat.on_key_at(KeyCode::Esc, KeyModifiers::empty(), t0);
-    assert!(chat.interrupted, "busy → interrupt");
+    assert!(chat.conv.interrupted, "busy → interrupt");
 
-    chat.busy = false;
+    chat.conv.busy = false;
     chat.set_input("/");
     assert!(!chat.slash_suggestions.is_empty());
     chat.on_key_at(KeyCode::Esc, KeyModifiers::empty(), t0);
@@ -2298,11 +2346,11 @@ fn shift_tab_cycles_permission_mode() {
 #[test]
 fn messages_queue_while_busy() {
     let mut chat = chat_with_history("queue");
-    chat.busy = true;
+    chat.conv.busy = true;
     chat.set_input("first queued");
     chat.submit();
     assert_eq!(
-        chat.queued,
+        chat.conv.queued,
         vec![QueuedInput {
             text: "first queued".into(),
             is_slash: false,
@@ -2312,14 +2360,14 @@ fn messages_queue_while_busy() {
     assert_eq!(chat.input, "", "the input clears after enqueueing");
     chat.set_input("second queued");
     chat.submit();
-    assert_eq!(chat.queued.len(), 2);
+    assert_eq!(chat.conv.queued.len(), 2);
     let lines = chat.queue_lines();
     assert_eq!(lines.len(), 2);
     assert!(lines[0].starts_with("> first queued"), "{lines:?}");
     // While busy, ↑ pulls back the last queued message for further editing.
     press(&mut chat, KeyCode::Up);
     assert_eq!(chat.input, "second queued");
-    assert_eq!(chat.queued.len(), 1);
+    assert_eq!(chat.conv.queued.len(), 1);
 }
 
 /// Busy dispatch (contract §4.2): instant commands run immediately and never reset
@@ -2330,7 +2378,7 @@ fn busy_dispatch_runs_instant_and_queues_the_rest() {
     let _ = std::fs::remove_dir_all(&tmp);
     let mut chat = test_chat_home(tmp.join("home"));
     chat.cwd = tmp.display().to_string();
-    chat.busy = true;
+    chat.conv.busy = true;
 
     // Instant: /think xhigh applies now, not queued; busy stays true.
     chat.set_input("/think xhigh");
@@ -2340,15 +2388,24 @@ fn busy_dispatch_runs_instant_and_queues_the_rest() {
         Some("xhigh"),
         "whitelisted commands apply immediately while busy"
     );
-    assert!(chat.busy, "the whitelist path does not reset busy");
-    assert!(chat.queued.is_empty(), "whitelisted commands do not queue");
+    assert!(chat.conv.busy, "the whitelist path does not reset busy");
+    assert!(
+        chat.conv.queued.is_empty(),
+        "whitelisted commands do not queue"
+    );
     let out = chat.slash_lines.join("\n");
     assert!(out.contains("✓ thinking level set: xhigh"), "{out}");
 
     chat.set_input("/gc");
     chat.submit();
-    assert!(chat.busy, "refused cleanup does not reset the active turn");
-    assert!(chat.queued.is_empty(), "refused cleanup is never queued");
+    assert!(
+        chat.conv.busy,
+        "refused cleanup does not reset the active turn"
+    );
+    assert!(
+        chat.conv.queued.is_empty(),
+        "refused cleanup is never queued"
+    );
     assert!(
         chat.slash_error_lines
             .join("\n")
@@ -2368,7 +2425,7 @@ fn busy_dispatch_runs_instant_and_queues_the_rest() {
     chat.set_input("/clear");
     chat.submit();
     assert_eq!(
-        chat.queued,
+        chat.conv.queued,
         vec![QueuedInput {
             text: "/clear".into(),
             is_slash: true,
@@ -2380,8 +2437,8 @@ fn busy_dispatch_runs_instant_and_queues_the_rest() {
     // Plain message: queued without the marker.
     chat.set_input("hello");
     chat.submit();
-    assert_eq!(chat.queued.len(), 2);
-    assert!(!chat.queued[1].is_slash);
+    assert_eq!(chat.conv.queued.len(), 2);
+    assert!(!chat.conv.queued[1].is_slash);
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
@@ -2393,7 +2450,7 @@ async fn queued_slashes_drain_through_run_slash() {
     let _ = std::fs::remove_dir_all(&tmp);
     let mut chat = test_chat_home(tmp.join("home"));
     chat.cwd = tmp.display().to_string();
-    chat.queued = vec![
+    chat.conv.queued = vec![
         QueuedInput {
             text: "/think low".into(),
             is_slash: true,
@@ -2422,10 +2479,11 @@ async fn queued_slashes_drain_through_run_slash() {
         out.contains("unknown command: /nope") && out.contains("code=UNKNOWN_COMMAND"),
         "unknown commands get guidance instead of the model: {out}"
     );
-    assert!(chat.busy, "the last plain message starts a new turn");
-    assert_eq!(chat.messages.last().map(|m| m.role), Some(Role::User));
+    assert!(chat.conv.busy, "the last plain message starts a new turn");
+    assert_eq!(chat.conv.messages.last().map(|m| m.role), Some(Role::User));
     assert!(
-        chat.messages
+        chat.conv
+            .messages
             .last()
             .is_some_and(|m| m.text == "the message"),
         "plain messages reach the model via start_turn"
@@ -2636,7 +2694,7 @@ fn the_background_dialog_lists_opens_details_and_stops_agents() {
 #[test]
 fn queue_lines_are_capped() {
     let mut chat = chat_with_history("queuecap");
-    chat.queued = (0..10)
+    chat.conv.queued = (0..10)
         .map(|i| QueuedInput {
             text: format!("m{i}"),
             is_slash: false,
@@ -2762,7 +2820,7 @@ fn paste_burst_inserts_newlines_and_collapses() {
         now += fast;
         chat.on_key_at(KeyCode::Enter, KeyModifiers::empty(), now);
     }
-    assert!(!chat.busy, "Enter during a paste does not send");
+    assert!(!chat.conv.busy, "Enter during a paste does not send");
     assert!(
         chat.input.starts_with("[Pasted text #1 +"),
         "placeholder: {}",
@@ -2776,7 +2834,7 @@ fn paste_burst_inserts_newlines_and_collapses() {
 
     // Normal typing (wide intervals): Enter submits as usual instead of inserting a newline.
     let mut chat = chat_with_history("paste2");
-    chat.busy = true; // queueing path: no tokio runtime needed
+    chat.conv.busy = true; // queueing path: no tokio runtime needed
     let slow = std::time::Duration::from_millis(50);
     let mut now = std::time::Instant::now();
     for c in "hi".chars() {
@@ -2787,7 +2845,7 @@ fn paste_burst_inserts_newlines_and_collapses() {
     chat.on_key_at(KeyCode::Enter, KeyModifiers::empty(), now);
     assert_eq!(chat.input, "", "Enter submits instead of a newline");
     assert_eq!(
-        chat.queued,
+        chat.conv.queued,
         vec![QueuedInput {
             text: "hi".into(),
             is_slash: false,
@@ -2864,14 +2922,14 @@ fn image_path_line_becomes_marker_on_submit() {
     std::fs::create_dir_all(&dir).unwrap();
     let png = test_png_path(&dir, "a.png", 8, 8);
     chat.set_input(format!("take a look at this image\n{}", png.display()));
-    chat.busy = true; // take the queue path: no tokio runtime needed
+    chat.conv.busy = true; // take the queue path: no tokio runtime needed
     chat.submit();
-    assert_eq!(chat.queued.len(), 1);
+    assert_eq!(chat.conv.queued.len(), 1);
     assert_eq!(
-        chat.queued[0].text,
+        chat.conv.queued[0].text,
         format!("take a look at this image\n#[image 1]"),
         "the path line becomes a placeholder: {}",
-        chat.queued[0].text
+        chat.conv.queued[0].text
     );
     assert_eq!(chat.session.attachments.len(), 1);
     assert_eq!(
@@ -2891,10 +2949,10 @@ fn markdown_image_syntax_and_non_image_lines() {
     let txt = dir.join("note.txt");
     std::fs::write(&txt, "hi").unwrap();
     chat.set_input(format!("![img]({})\n{}", png.display(), txt.display()));
-    chat.busy = true;
+    chat.conv.busy = true;
     chat.submit();
     assert_eq!(
-        chat.queued[0].text,
+        chat.conv.queued[0].text,
         format!("#[image 1]\n{}", txt.display())
     );
     assert_eq!(chat.session.attachments.len(), 1, "txt is not registered");
@@ -3244,7 +3302,7 @@ async fn full_error_enter_retries_last_prompt() {
     assert_eq!(chat.last_error.as_ref().unwrap().level, ErrorLevel::Full);
     chat.on_key(KeyCode::Enter, KeyModifiers::empty());
     assert!(chat.last_error.is_none(), "Enter clears the error state");
-    assert!(chat.busy, "Enter retries and starts a new turn");
+    assert!(chat.conv.busy, "Enter retries and starts a new turn");
 }
 
 // ---- QA assertion side (delivery 3/3): AC-53 / AC-29 / presentation styling ----
@@ -3602,7 +3660,7 @@ fn switch_provider_resolves_model_atomically() {
 #[test]
 fn switch_provider_refuses_while_busy() {
     let mut chat = test_chat();
-    chat.busy = true;
+    chat.conv.busy = true;
     chat.input = "/provider codex".to_string();
     chat.submit();
     assert_eq!(
@@ -3654,8 +3712,8 @@ fn ask_other_input_does_not_swallow_modifier_chords() {
 #[test]
 fn short_sync_error_keeps_the_running_turn() {
     let mut chat = test_chat();
-    chat.busy = true;
-    chat.stream_msg = Some(0);
+    chat.conv.busy = true;
+    chat.conv.stream_msg = Some(0);
     chat.handle(UiEvent::Error {
         code: "TIMEOUT",
         msg: "list_models timeout".into(),
@@ -3663,10 +3721,10 @@ fn short_sync_error_keeps_the_running_turn() {
         context: crate::error::ErrorContext::ShortSync,
     });
     assert!(
-        chat.busy,
+        chat.conv.busy,
         "a short-sync failure does not interrupt the turn"
     );
-    assert_eq!(chat.stream_msg, Some(0));
+    assert_eq!(chat.conv.stream_msg, Some(0));
     assert!(chat.last_error.is_some(), "the error row is still recorded");
 
     chat.handle(UiEvent::Error {
@@ -3675,7 +3733,7 @@ fn short_sync_error_keeps_the_running_turn() {
         level: crate::error::ErrorLevel::Full,
         context: crate::error::ErrorContext::LongTurn,
     });
-    assert!(!chat.busy, "a turn-level failure resets as usual");
+    assert!(!chat.conv.busy, "a turn-level failure resets as usual");
 }
 
 /// Page/Field error rows dismiss with Esc instead of squatting above the
@@ -3710,12 +3768,12 @@ fn slash_theme_rejects_unknown_names() {
 #[tokio::test]
 async fn bash_turn_resets_interrupted() {
     let mut chat = test_chat();
-    chat.interrupted = true;
+    chat.conv.interrupted = true;
     chat.bash_mode = true;
     chat.set_input("echo hi");
     chat.submit();
     assert!(
-        !chat.interrupted,
+        !chat.conv.interrupted,
         "! suppresses the interrupt on turn reset"
     );
 }
@@ -3743,8 +3801,8 @@ fn notice_expires_after_its_window() {
 fn interrupted_tool_row_reads_interrupted_in_the_warning_color() {
     let mut chat = test_chat();
     chat.chat_avatars = true; // this test's subject predates the one avatar switch (D110)
-    chat.messages.push(msg(Role::Assistant, ""));
-    chat.stream_msg = Some(0);
+    chat.conv.messages.push(msg(Role::Assistant, ""));
+    chat.conv.stream_msg = Some(0);
     let _ = chat.events.send(UiEvent::ToolStart {
         name: "Bash".into(),
     });
@@ -3768,7 +3826,7 @@ fn interrupted_tool_row_reads_interrupted_in_the_warning_color() {
         }));
     chat.drain_events();
 
-    let call = chat.messages[0]
+    let call = chat.conv.messages[0]
         .activities
         .iter()
         .find_map(|a| match &a.kind {
@@ -3812,14 +3870,16 @@ fn interrupted_tool_row_reads_interrupted_in_the_warning_color() {
 #[test]
 fn interrupt_marker_renders_as_a_state_line_not_a_user_bubble() {
     let mut chat = test_chat();
-    chat.messages.push(msg(Role::User, "run the tests"));
-    chat.messages.push(msg(Role::Assistant, "sure, starting"));
+    chat.conv.messages.push(msg(Role::User, "run the tests"));
+    chat.conv
+        .messages
+        .push(msg(Role::Assistant, "sure, starting"));
     let _ = chat.events.send(UiEvent::Interrupted {
         marker: crate::query::INTERRUPT_MARKER,
     });
     chat.drain_events();
 
-    let last = chat.messages.last().expect("the marker message");
+    let last = chat.conv.messages.last().expect("the marker message");
     assert_eq!(last.role, Role::User);
     assert_eq!(last.text, crate::query::INTERRUPT_MARKER);
     assert!(
@@ -3879,7 +3939,7 @@ fn tool_use_interrupt_marker_renders_the_same_way() {
 fn the_completion_row_blinks_accent_before_it_freezes() {
     let mut chat = test_chat();
     chat.chat_avatars = true; // this test's subject predates the one avatar switch (D110)
-    chat.messages.push(msg(Role::User, "hi"));
+    chat.conv.messages.push(msg(Role::User, "hi"));
     chat.handle(UiEvent::TurnStart);
     chat.handle(UiEvent::ThinkingDelta("weighing it up".into()));
     chat.handle(UiEvent::TextDelta("done".into()));

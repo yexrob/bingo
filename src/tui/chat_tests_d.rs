@@ -132,7 +132,7 @@ fn mention_selection_inserts_a_relative_path_and_closes() {
     chat.set_input("@main");
     assert!(chat.on_key(KeyCode::Enter, KeyModifiers::NONE));
     assert_eq!(chat.input, "src/main.rs ");
-    assert!(chat.messages.is_empty(), "nothing was sent");
+    assert!(chat.conv.messages.is_empty(), "nothing was sent");
 
     let _ = std::fs::remove_dir_all(&root);
 }
@@ -516,7 +516,7 @@ fn tab_completes_an_argument_without_submitting() {
     assert!(chat.on_key(KeyCode::Tab, KeyModifiers::NONE));
     assert_eq!(chat.input, "/model claude-opus-5 ");
     assert_eq!(chat.cursor, chat.input.len());
-    assert!(chat.messages.is_empty(), "tab does not send");
+    assert!(chat.conv.messages.is_empty(), "tab does not send");
 
     // The two-token shape splices at the partial, not at the line start.
     chat.set_input("/provider login cod");

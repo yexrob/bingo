@@ -120,7 +120,7 @@ impl super::Chat {
         let _ = self.session.runtime.transcript_tx.send(Some(found.clone()));
         self.rebind_tasks_to_transcript(Some(found));
         self.attach_share_to_transcript(Some(found));
-        self.messages.clear();
+        self.conv.messages.clear();
         self.slash_lines.clear();
         self.reset_flushed();
         self.refresh_context_usage_from_transcript();
@@ -202,7 +202,7 @@ impl super::Chat {
                 let _ = self.session.runtime.transcript_tx.send(Some(t.clone()));
                 self.rebind_tasks_to_transcript(Some(&t));
                 self.attach_share_to_transcript(Some(&t));
-                self.messages.clear();
+                self.conv.messages.clear();
                 self.slash_lines.clear();
                 self.reset_flushed();
                 self.refresh_context_usage_from_transcript();
@@ -220,7 +220,7 @@ impl super::Chat {
     }
 
     pub(super) fn slash_gc(&mut self) {
-        if self.busy {
+        if self.conv.busy {
             self.push_slash_error(format!(
                 "[error] code={} msg=cannot clean session data mid-turn (press Esc to interrupt, then retry)",
                 crate::error::SLASH_ERROR_BAD_ARGUMENT

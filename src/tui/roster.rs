@@ -72,14 +72,14 @@ impl Chat {
         out.push(Entry {
             target: None,
             label: format!("@{MAIN_NAME}"),
-            dot: if self.busy { '●' } else { '○' },
-            dot_color: if self.busy {
+            dot: if self.conv.busy { '●' } else { '○' },
+            dot_color: if self.conv.busy {
                 palette.presence_on
             } else {
                 palette.presence_off
             },
-            detail: if self.busy {
-                format!("{}…", self.turn_verb)
+            detail: if self.conv.busy {
+                format!("{}…", self.conv.turn_verb)
             } else {
                 String::new()
             },

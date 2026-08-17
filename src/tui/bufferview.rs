@@ -355,7 +355,7 @@ mod tests {
     }
 
     fn main_message(chat: &mut Chat, role: Role, text: &str) {
-        chat.messages.push(UiMessage {
+        chat.conv.messages.push(UiMessage {
             speaker: None,
             role,
             text: text.to_string(),
@@ -398,6 +398,7 @@ mod tests {
         );
         assert!(
             !chat
+                .conv
                 .messages
                 .iter()
                 .any(|message| message.text.contains("/team")),
@@ -416,15 +417,18 @@ mod tests {
         let mut chat = test_chat();
         seed_agent(&chat, "scout", Vec::new());
         chat.refresh_conversations();
-        let before = chat.messages.len();
+        let before = chat.conv.messages.len();
 
         chat.set_input("@scout have a look at the parser");
         chat.submit();
 
-        assert!(!chat.busy, "a direct send is not a turn");
-        assert!(chat.queued.is_empty(), "and it did not queue behind main");
+        assert!(!chat.conv.busy, "a direct send is not a turn");
+        assert!(
+            chat.conv.queued.is_empty(),
+            "and it did not queue behind main"
+        );
         assert_eq!(
-            chat.messages.len(),
+            chat.conv.messages.len(),
             before,
             "nothing was written into main's history"
         );
@@ -454,7 +458,10 @@ mod tests {
 
         assert_eq!(chat.slash_info_lines, vec!["Sent to @scout".to_string()]);
         assert!(
-            chat.messages.iter().all(|m| !m.text.contains("Sent to")),
+            chat.conv
+                .messages
+                .iter()
+                .all(|m| !m.text.contains("Sent to")),
             "the receipt is not a message in the flow, so it never settles into \
              scrollback and never reaches the model's history"
         );
@@ -488,7 +495,7 @@ mod tests {
         chat.set_input("#build tests are green");
         chat.submit();
 
-        assert!(!chat.busy);
+        assert!(!chat.conv.busy);
         assert!(
             chat.session.channels.is_member("build", USER_NAME),
             "speaking made them a member"
@@ -516,7 +523,7 @@ mod tests {
         chat.set_input("@nobody are you there");
         chat.submit();
 
-        assert!(chat.busy, "it opened an ordinary main turn");
+        assert!(chat.conv.busy, "it opened an ordinary main turn");
         assert_eq!(
             chat.last_prompt, "@nobody are you there",
             "verbatim, envelope and all"

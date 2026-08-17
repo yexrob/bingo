@@ -680,7 +680,10 @@ pub struct Chat {
     pub asks: mpsc::UnboundedSender<AskRequest>,
     pub(crate) events_rx: mpsc::UnboundedReceiver<UiEvent>,
     pub(crate) asks_rx: mpsc::UnboundedReceiver<AskRequest>,
-    pub messages: Vec<UiMessage>,
+    /// The conversation the screen is on, and the only one there is today
+    /// (D133). Everything the running turn writes lives here; everything the
+    /// console owns stays on `Chat`.
+    pub conv: crate::tui::conversation::Conversation,
     pub input: String,
     /// Byte position of the caret in `input` (always on a char boundary).
     pub cursor: usize,
@@ -699,11 +702,6 @@ pub struct Chat {
     pub history: crate::tui::history::History,
     /// Whether the history file is writable (after one failure, never retry — avoid hitting the same error on every submit).
     pub(crate) history_writable: bool,
-    /// Messages queued while busy (submitted one by one after TurnEnd, or absorbed
-    /// earlier by the running turn through [`Chat::steer`]).
-    pub queued: Vec<QueuedInput>,
-    /// Id of the next queued entry.
-    pub(crate) next_queue_id: u64,
     /// Mid-turn steering channel (D83): the eligible prefix of `queued`, offered to the
     /// turn that is running now. Re-armed from `queued` on every change, so it is a
     /// projection of the queue rather than a second copy that could drift from it.
@@ -773,35 +771,10 @@ pub struct Chat {
     pub page_turn: bool,
     /// bash mode (`!` prefix): input executes directly, bypassing the model.
     pub bash_mode: bool,
-    pub busy: bool,
-    /// Esc/Ctrl+C interrupted the current turn: background-task completion no longer auto-starts
-    /// a new turn (interrupt semantics: wait for the user to submit), reset in start_turn.
-    pub interrupted: bool,
-    /// Index of the current assistant message.
-    pub stream_msg: Option<usize>,
-    /// Current response-attempt start within the live message. Retrying restores this snapshot,
-    /// preserving completed tool rounds even when the failed attempt mutated an existing group.
-    stream_attempt_checkpoint: Option<UiMessage>,
-    /// Message opened by [`Chat::open_continuation_message`] to carry what the model says after a
-    /// mid-turn answer. Recorded so a turn that ends without using it can drop it again —
-    /// inferring that from "empty assistant message" would also catch messages nobody opened here.
-    pub(crate) continuation_msg: Option<usize>,
-    pub(crate) thinking_buf: String,
-    /// Whether the current thinking segment is open for continuation: closed after ToolStart/TextDelta
-    /// (segment boundaries); deltas in the same segment continue without paragraph breaks; new segments (fresh reasoning after a tool) are aggregated with \n\n.
-    pub(crate) thinking_seg_open: bool,
-    pub(crate) output_tokens: u64,
-    output_round_tokens: u64,
-    pub(super) token_rate: crate::token_rate::TokenRateSampler,
-    pub(super) context_usage: crate::context_usage::ContextUsage,
     pub tick: u64,
     /// The digest debounce's state while mail is waiting (D98). `None` means the
     /// main agent's inbox is empty and there is nothing to wait out.
     pub(crate) mail_wake: Option<chat_tail::MailWake>,
-    /// Tick at TurnStart: the relative timing baseline for running-state thinking.
-    turn_start_tick: u64,
-    /// Real clock at TurnStart (baseline for the status-row elapsed time; cleared at TurnEnd).
-    turn_started: Option<std::time::Instant>,
     /// Non-fatal warnings (timestamp + text): entries past `WARNING_TTL` expire
     /// automatically; rendering shows only valid entries (pruned on push).
     pub warnings: Vec<(std::time::Instant, String)>,
@@ -903,11 +876,6 @@ pub struct Chat {
     /// Tick of the last event that reached the TUI. `stall` measures from it:
     /// three seconds of silence mid-turn is worth saying out loud.
     pub(crate) last_progress_tick: u64,
-    /// Tick the last turn ended on — the origin of the `settle` blink window.
-    pub(crate) settle_at: Option<u64>,
-    /// The running verb, pinned for the whole turn: a second reasoning segment
-    /// used to re-roll it, so the status row changed its mind mid-thought.
-    pub(crate) turn_verb: &'static str,
     /// Eased token counter for the status row (D87 `meter`): a count that jumps
     /// by hundreds mid-stream reads as a glitch, so the display travels to it.
     pub(crate) token_meter: crate::tui::motion::Meter,
@@ -1047,7 +1015,7 @@ impl Chat {
         // continuation drop happens before the marker lands after it (TurnEnd's second
         // call then finds nothing to do).
         self.drop_empty_stream_message();
-        self.messages.push(UiMessage {
+        self.conv.messages.push(UiMessage {
             speaker: None,
             role: Role::User,
             text: marker.to_string(),
@@ -1160,7 +1128,26 @@ impl Chat {
             asks,
             events_rx,
             asks_rx,
-            messages: Vec::new(),
+            conv: crate::tui::conversation::Conversation {
+                messages: Vec::new(),
+                queued: Vec::new(),
+                next_queue_id: 0,
+                busy: false,
+                interrupted: false,
+                stream_msg: None,
+                stream_attempt_checkpoint: None,
+                continuation_msg: None,
+                thinking_buf: String::new(),
+                thinking_seg_open: false,
+                output_tokens: 0,
+                output_round_tokens: 0,
+                token_rate: crate::token_rate::TokenRateSampler::default(),
+                context_usage,
+                turn_start_tick: 0,
+                turn_started: None,
+                settle_at: None,
+                turn_verb: THINKING_WORDS[0],
+            },
             input: String::new(),
             cursor: 0,
             composer: crate::tui::composer::Composer::default(),
@@ -1170,8 +1157,6 @@ impl Chat {
             stash: None,
             history,
             history_writable: true,
-            queued: Vec::new(),
-            next_queue_id: 0,
             steer: crate::steer::SteerQueue::new(),
             live,
             bash_tail: None,
@@ -1196,20 +1181,8 @@ impl Chat {
             away_build: None,
             page_turn: false,
             bash_mode: false,
-            busy: false,
-            stream_msg: None,
-            stream_attempt_checkpoint: None,
-            continuation_msg: None,
-            thinking_buf: String::new(),
-            thinking_seg_open: false,
-            output_tokens: 0,
-            output_round_tokens: 0,
-            token_rate: crate::token_rate::TokenRateSampler::default(),
-            context_usage,
             tick: 0,
             mail_wake: None,
-            turn_start_tick: 0,
-            turn_started: None,
             warnings: Vec::new(),
             last_error: None,
             last_prompt: String::new(),
@@ -1256,8 +1229,6 @@ impl Chat {
             update_banner_stopped: false,
             motion,
             last_progress_tick: 0,
-            settle_at: None,
-            turn_verb: THINKING_WORDS[0],
             token_meter: crate::tui::motion::Meter::default(),
             notify: Notifier::default(),
             buffers: crate::tui::buffer::Buffers::new(),
@@ -1294,7 +1265,6 @@ impl Chat {
             badge_print: Vec::new(),
             agent_mail: std::collections::HashMap::new(),
             rewind: None,
-            interrupted: false,
             cancel_tx: tokio::sync::watch::channel(false).0,
         }
     }
@@ -1341,13 +1311,14 @@ impl Chat {
     /// Whether a busy turn has gone quiet past the `stall` threshold — the
     /// status row turns warning-coloured and stops glimmering.
     pub(crate) fn stalled(&self) -> bool {
-        self.busy && self.motion.stall(self.tick, self.last_progress_tick)
+        self.conv.busy && self.motion.stall(self.tick, self.last_progress_tick)
     }
 
     /// Whether the last turn's completion row is still inside its `settle`
     /// blink. Also what holds that message out of scrollback for the window.
     pub(crate) fn settling(&self) -> bool {
-        self.settle_at
+        self.conv
+            .settle_at
             .is_some_and(|at| self.motion.settle(self.tick, at))
     }
 
@@ -1391,23 +1362,23 @@ impl Chat {
                 // A new turn resets the error state (AC-03): page-level error rows vanish with the new turn
                 // (full-screen Full is already dismissed in error_screen_key; this is a fallback).
                 self.last_error = None;
-                self.thinking_buf.clear();
-                self.thinking_seg_open = false;
+                self.conv.thinking_buf.clear();
+                self.conv.thinking_seg_open = false;
                 self.pending_tools_clear();
                 // No command of the previous turn may keep painting under a row of
                 // this one (an interrupt drops the tool future without a ToolDone).
                 self.bash_tail = None;
                 self.interrupt_at = None;
                 let now = std::time::Instant::now();
-                self.turn_started = Some(now);
-                self.output_tokens = 0;
-                self.output_round_tokens = 0;
+                self.conv.turn_started = Some(now);
+                self.conv.output_tokens = 0;
+                self.conv.output_round_tokens = 0;
                 self.token_meter.reset(0, self.tick);
-                self.settle_at = None;
-                self.token_rate.start(now);
+                self.conv.settle_at = None;
+                self.conv.token_rate.start(now);
                 self.notify
                     .set_title(Title::Busy(self.motion.title_glyph(self.tick)));
-                self.messages.push(UiMessage {
+                self.conv.messages.push(UiMessage {
                     speaker: None,
                     role: Role::Assistant,
                     text: String::new(),
@@ -1417,87 +1388,88 @@ impl Chat {
                     groups: Vec::new(),
                     group_of: Vec::new(),
                 });
-                self.stream_msg = Some(self.messages.len() - 1);
+                self.conv.stream_msg = Some(self.conv.messages.len() - 1);
                 // One verb per turn (D87): sampled here and reused by every
                 // reasoning segment the turn opens.
-                self.turn_verb = thinking_stage(self.messages.len());
-                self.stream_attempt_checkpoint = self
+                self.conv.turn_verb = thinking_stage(self.conv.messages.len());
+                self.conv.stream_attempt_checkpoint = self
+                    .conv
                     .stream_msg
-                    .and_then(|index| self.messages.get(index).cloned());
-                self.continuation_msg = None;
-                self.busy = true;
-                self.turn_start_tick = self.tick;
+                    .and_then(|index| self.conv.messages.get(index).cloned());
+                self.conv.continuation_msg = None;
+                self.conv.busy = true;
+                self.conv.turn_start_tick = self.tick;
                 // Placeholder thinking: when the endpoint delays deltas (DeepSeek often by tens of seconds),
                 // the running row is visible immediately.
                 let mut hint = Activity::new(ActivityKind::Thinking(Thinking {
                     state: ThinkingState::Running,
                     duration_ms: 0,
-                    stage: self.turn_verb,
+                    stage: self.conv.turn_verb,
                     done_verb: Some(thinking_done_verb()),
                     start_tick: self.tick,
                     segments: 1,
                     timed: true,
                 }));
                 hint.expand_hint = Some(crate::tui::activities::EXPAND_HINT.to_string());
-                if let Some(i) = self.stream_msg {
-                    self.messages[i].activities.push(hint);
-                    self.messages[i].insert_points.push(0);
-                    self.messages[i].group_of.push(None);
+                if let Some(i) = self.conv.stream_msg {
+                    self.conv.messages[i].activities.push(hint);
+                    self.conv.messages[i].insert_points.push(0);
+                    self.conv.messages[i].group_of.push(None);
                 }
             }
             UiEvent::StreamRetry => {
-                if let Some(index) = self.stream_msg {
-                    if let Some(checkpoint) = self.stream_attempt_checkpoint.clone() {
-                        self.messages[index] = checkpoint;
+                if let Some(index) = self.conv.stream_msg {
+                    if let Some(checkpoint) = self.conv.stream_attempt_checkpoint.clone() {
+                        self.conv.messages[index] = checkpoint;
                     }
-                    let text_len = self.messages[index].text.chars().count();
+                    let text_len = self.conv.messages[index].text.chars().count();
                     let mut hint = Activity::new(ActivityKind::Thinking(Thinking {
                         state: ThinkingState::Running,
                         duration_ms: 0,
-                        stage: self.turn_verb,
+                        stage: self.conv.turn_verb,
                         done_verb: Some(thinking_done_verb()),
                         start_tick: self.tick,
                         segments: 1,
                         timed: true,
                     }));
                     hint.expand_hint = Some(crate::tui::activities::EXPAND_HINT.to_string());
-                    self.messages[index].activities.push(hint);
-                    self.messages[index].insert_points.push(text_len);
-                    self.messages[index].group_of.push(None);
+                    self.conv.messages[index].activities.push(hint);
+                    self.conv.messages[index].insert_points.push(text_len);
+                    self.conv.messages[index].group_of.push(None);
                 }
-                self.thinking_buf.clear();
-                self.thinking_seg_open = false;
+                self.conv.thinking_buf.clear();
+                self.conv.thinking_seg_open = false;
                 self.pending_tools_clear();
-                self.output_round_tokens = 0;
-                self.token_rate.retry_round();
+                self.conv.output_round_tokens = 0;
+                self.conv.token_rate.retry_round();
             }
             UiEvent::TextDelta(text) => {
-                if let Some(i) = self.stream_msg
+                if let Some(i) = self.conv.stream_msg
                     && !text.is_empty()
                 {
-                    self.messages[i].text.push_str(&text);
-                    if let Some(g) = self.messages[i].groups.last_mut() {
+                    self.conv.messages[i].text.push_str(&text);
+                    if let Some(g) = self.conv.messages[i].groups.last_mut() {
                         g.active = false;
                     }
                     // Text is a segment boundary: thinking after text opens a new block (no more aggregation),
                     // and the running thinking block closes with it (same closing semantics as ToolStart).
-                    self.thinking_buf.clear();
-                    self.thinking_seg_open = false;
+                    self.conv.thinking_buf.clear();
+                    self.conv.thinking_seg_open = false;
                     self.close_running_thinking(i);
                 }
             }
             UiEvent::ThinkingDelta(thinking) => {
-                if let Some(i) = self.stream_msg {
+                if let Some(i) = self.conv.stream_msg {
                     let last_is_running_thinking =
-                        self.messages[i].activities.last().is_some_and(|a| {
+                        self.conv.messages[i].activities.last().is_some_and(|a| {
                             matches!(&a.kind, ActivityKind::Thinking(t)
                                 if t.state == ThinkingState::Running)
                         });
                     if last_is_running_thinking {
-                        self.thinking_buf.push_str(&thinking);
-                        let buf = self.thinking_buf.clone();
+                        self.conv.thinking_buf.push_str(&thinking);
+                        let buf = self.conv.thinking_buf.clone();
                         let content = self.render_thinking(&buf);
-                        if let Some(hint) = self.messages[i]
+                        if let Some(hint) = self.conv.messages[i]
                             .activities
                             .iter_mut()
                             .rev()
@@ -1506,8 +1478,8 @@ impl Chat {
                             hint.set_content(content);
                         }
                     } else {
-                        let dup = thinking == self.thinking_buf
-                            || self.messages[i]
+                        let dup = thinking == self.conv.thinking_buf
+                            || self.conv.messages[i]
                                 .activities
                                 .iter()
                                 .rev()
@@ -1523,18 +1495,18 @@ impl Chat {
                         // Aggregation: when text has not interrupted (thinking_buf still holds this stage's text),
                         // new reasoning merges into the last thinking block. Same-segment continuation (segment open)
                         // appends directly; a new segment (after a tool/text) is separated by a blank line and counted.
-                        if !self.thinking_buf.is_empty() {
-                            let was_open = self.thinking_seg_open;
+                        if !self.conv.thinking_buf.is_empty() {
+                            let was_open = self.conv.thinking_seg_open;
                             if was_open {
-                                self.thinking_buf.push_str(&thinking);
+                                self.conv.thinking_buf.push_str(&thinking);
                             } else {
-                                self.thinking_buf.push_str("\n\n");
-                                self.thinking_buf.push_str(&thinking);
+                                self.conv.thinking_buf.push_str("\n\n");
+                                self.conv.thinking_buf.push_str(&thinking);
                             }
-                            self.thinking_seg_open = true;
-                            let buf = self.thinking_buf.clone();
+                            self.conv.thinking_seg_open = true;
+                            let buf = self.conv.thinking_buf.clone();
                             let content = self.render_thinking(&buf);
-                            let merged = self.messages[i]
+                            let merged = self.conv.messages[i]
                                 .activities
                                 .iter_mut()
                                 .rev()
@@ -1554,17 +1526,17 @@ impl Chat {
                             }
                             return;
                         }
-                        self.thinking_buf = thinking.clone();
-                        self.messages[i].activities.retain(|a| {
+                        self.conv.thinking_buf = thinking.clone();
+                        self.conv.messages[i].activities.retain(|a| {
                             !(matches!(a.kind, ActivityKind::Thinking(_)) && a.content.is_empty())
                         });
-                        let buf = self.thinking_buf.clone();
+                        let buf = self.conv.thinking_buf.clone();
                         let content = self.render_thinking(&buf);
                         let mut hint = Activity::new(ActivityKind::Thinking(Thinking {
                             state: ThinkingState::Running,
-                            duration_ms: self.tick.saturating_sub(self.turn_start_tick)
+                            duration_ms: self.tick.saturating_sub(self.conv.turn_start_tick)
                                 * crate::tui::motion::TICK_MS,
-                            stage: self.turn_verb,
+                            stage: self.conv.turn_verb,
                             done_verb: Some(thinking_done_verb()),
                             start_tick: self.tick,
                             segments: 1,
@@ -1572,33 +1544,36 @@ impl Chat {
                         }));
                         hint.set_content(content);
                         hint.expand_hint = Some(crate::tui::activities::EXPAND_HINT.to_string());
-                        self.messages[i].activities.push(hint);
-                        let text_len = self.messages[i].text.chars().count();
-                        self.messages[i].insert_points.push(text_len);
-                        self.messages[i].group_of.push(None);
+                        self.conv.messages[i].activities.push(hint);
+                        let text_len = self.conv.messages[i].text.chars().count();
+                        self.conv.messages[i].insert_points.push(text_len);
+                        self.conv.messages[i].group_of.push(None);
                     }
                 }
             }
             UiEvent::ContextUsage(usage) => {
-                self.context_usage = usage;
+                self.conv.context_usage = usage;
             }
             UiEvent::OutputTokens {
                 tokens,
                 authoritative,
             } => {
-                self.output_tokens = self
+                self.conv.output_tokens = self
+                    .conv
                     .output_tokens
-                    .saturating_sub(self.output_round_tokens)
+                    .saturating_sub(self.conv.output_round_tokens)
                     .saturating_add(tokens);
-                self.output_round_tokens = tokens;
+                self.conv.output_round_tokens = tokens;
                 // The end-of-round usage total is a correction, not freshly streamed
                 // output: fed as a sample it divided the jump by the live window and
                 // rendered as a one-frame spike of thousands of tok/s.
                 if authoritative {
-                    self.token_rate
+                    self.conv
+                        .token_rate
                         .correct_round(tokens, std::time::Instant::now());
                 } else {
-                    self.token_rate
+                    self.conv
+                        .token_rate
                         .observe_round(tokens, std::time::Instant::now());
                 }
             }
@@ -1606,20 +1581,20 @@ impl Chat {
                 if is_hidden_tool(&name) {
                     return;
                 }
-                if let Some(i) = self.stream_msg {
+                if let Some(i) = self.conv.stream_msg {
                     self.close_running_thinking(i);
                 }
                 // Tool start = reasoning segment boundary: subsequent deltas aggregate into a new segment.
-                self.thinking_seg_open = false;
+                self.conv.thinking_seg_open = false;
                 let name: &'static str = Box::leak(name.into_boxed_str());
                 let mut hint = Activity::new(ActivityKind::Tool(ToolCall::running(name, "")));
                 hint.expand_hint = Some(crate::tui::activities::EXPAND_HINT.to_string());
-                if let Some(i) = self.stream_msg {
-                    let idx = self.messages[i].activities.len();
-                    let text_len = self.messages[i].text.chars().count();
-                    self.messages[i].activities.push(hint);
-                    self.messages[i].insert_points.push(text_len);
-                    self.messages[i].group_of.push(None);
+                if let Some(i) = self.conv.stream_msg {
+                    let idx = self.conv.messages[i].activities.len();
+                    let text_len = self.conv.messages[i].text.chars().count();
+                    self.conv.messages[i].activities.push(hint);
+                    self.conv.messages[i].insert_points.push(text_len);
+                    self.conv.messages[i].group_of.push(None);
                     self.pending_tools_push(idx);
                 }
             }
@@ -1630,21 +1605,23 @@ impl Chat {
                 standalone,
             } => {
                 let _ = tool_call_id;
-                let Some(i) = self.stream_msg else { return };
+                let Some(i) = self.conv.stream_msg else {
+                    return;
+                };
                 if is_hidden_tool(&name) {
                     return;
                 }
                 let Some(idx) = self.pending_tools_pop() else {
                     return;
                 };
-                if let ActivityKind::Tool(call) = &mut self.messages[i].activities[idx].kind {
+                if let ActivityKind::Tool(call) = &mut self.conv.messages[i].activities[idx].kind {
                     call.summary = crate::query::summarize_input(&name, &input);
                 }
                 // `!` commands: standalone activities (output preview expanded directly), not part of collapse groups.
                 if standalone {
                     return;
                 }
-                group_ready_tool(&mut self.messages[i], idx, &name, &input);
+                group_ready_tool(&mut self.conv.messages[i], idx, &name, &input);
             }
             UiEvent::WatchEvent {
                 label,
@@ -1668,7 +1645,7 @@ impl Chat {
                 // flow's own dispatch and completion rows (D106), the dialog,
                 // and the instance's record.
                 self.refresh_conversations();
-                let found = self.messages.iter_mut().find_map(|m| {
+                let found = self.conv.messages.iter_mut().find_map(|m| {
                     m.activities
                         .iter_mut()
                         .find(|a| matches!(&a.kind, ActivityKind::Watch(w) if w.label == *label))
@@ -1719,11 +1696,12 @@ impl Chat {
                     // saying — a "Running 3 agents" tree about work this turn
                     // never dispatched. Those runs live in the tree and the
                     // dialog; the flow's whitelist is main's own dispatches.
-                    let target = match self.stream_msg {
+                    let target = match self.conv.stream_msg {
                         Some(_) if kind == crate::watch::WatchKind::Agent && !dispatch => None,
                         Some(i) => Some(i),
                         None if kind == crate::watch::WatchKind::Agent => None,
                         None => self
+                            .conv
                             .messages
                             .iter()
                             .rposition(|m| m.role == Role::Assistant),
@@ -1741,10 +1719,10 @@ impl Chat {
                             }));
                             hint.expand_hint =
                                 Some(crate::tui::activities::EXPAND_HINT.to_string());
-                            let text_len = self.messages[target].text.chars().count();
-                            self.messages[target].activities.push(hint);
-                            self.messages[target].insert_points.push(text_len);
-                            self.messages[target].group_of.push(None);
+                            let text_len = self.conv.messages[target].text.chars().count();
+                            self.conv.messages[target].activities.push(hint);
+                            self.conv.messages[target].insert_points.push(text_len);
+                            self.conv.messages[target].group_of.push(None);
                         }
                         // No message to hang a row on and not an agent event:
                         // the pre-D94 contract returned here, and the terminal
@@ -1763,7 +1741,7 @@ impl Chat {
                 );
                 if terminal || signal.is_some() {
                     if let Some(sig) = &signal
-                        && let Some(hint) = self.messages.iter_mut().find_map(|m| {
+                        && let Some(hint) = self.conv.messages.iter_mut().find_map(|m| {
                             m.activities.iter_mut().find(
                                 |a| matches!(&a.kind, ActivityKind::Watch(w) if w.label == *label),
                             )
@@ -1781,7 +1759,7 @@ impl Chat {
                     // console got loud in the first place. The same question is
                     // already asked at TurnEnd; asking it here too makes the two
                     // wake paths say one thing.
-                    if !self.interrupted && self.session.watch.has_wake_notifications(None) {
+                    if !self.conv.interrupted && self.session.watch.has_wake_notifications(None) {
                         self.submit_auto();
                     }
                 }
@@ -1817,16 +1795,16 @@ impl Chat {
                 }
             }
             UiEvent::RoundEnd => {
-                self.output_round_tokens = 0;
-                self.token_rate.finish_round();
-                if let Some(i) = self.stream_msg {
-                    self.stream_attempt_checkpoint = self.messages.get(i).cloned();
+                self.conv.output_round_tokens = 0;
+                self.conv.token_rate.finish_round();
+                if let Some(i) = self.conv.stream_msg {
+                    self.conv.stream_attempt_checkpoint = self.conv.messages.get(i).cloned();
                     // Collapse groups are bounded by text: model rounds do not split a group, nor does thinking —
                     // only text (TextDelta) and non-collapsible tools close the group.
                     // Warm the image cache a round early: by TurnEnd the message
                     // settles and flushes, and an image that only starts loading
                     // then would miss the flush (see `message_settled`).
-                    let text = self.messages[i].text.clone();
+                    let text = self.conv.messages[i].text.clone();
                     self.load_message_images(&text);
                 }
             }
@@ -1851,11 +1829,11 @@ impl Chat {
                     self.image_registry
                         .register_file(&path, crate::tui::buffer::now(), bytes);
                 }
-                let Some(i) = self.stream_msg else {
+                let Some(i) = self.conv.stream_msg else {
                     return;
                 };
                 if let Some(diff_text) = &done.diff
-                    && let Some(pos) = self.messages[i].activities.iter().position(|h| {
+                    && let Some(pos) = self.conv.messages[i].activities.iter().position(|h| {
                         matches!(&h.kind, ActivityKind::Tool(c)
                             if c.name == done.name.as_str() && c.status == ToolStatus::Running)
                     })
@@ -1867,11 +1845,11 @@ impl Chat {
                     let mut hint = Activity::new(ActivityKind::Diff(diff));
                     hint.expand_hint = Some(crate::tui::activities::EXPAND_HINT.to_string());
                     hint.set_content(content);
-                    self.messages[i].activities[pos] = hint;
+                    self.conv.messages[i].activities[pos] = hint;
                     return;
                 }
-                let group_of = self.messages[i].group_of.clone();
-                for (hint_idx, hint) in self.messages[i].activities.iter_mut().enumerate() {
+                let group_of = self.conv.messages[i].group_of.clone();
+                for (hint_idx, hint) in self.conv.messages[i].activities.iter_mut().enumerate() {
                     if let ActivityKind::Tool(call) = &mut hint.kind
                         && call.name == done.name.as_str()
                         && call.status == ToolStatus::Running
@@ -1909,28 +1887,29 @@ impl Chat {
                 }
             }
             UiEvent::TurnEnd => {
-                self.busy = false;
+                self.conv.busy = false;
                 self.bash_tail = None;
                 // The `settle` blink starts here (D87): the completion row keeps
                 // the accent for one 120ms window, and the message it belongs to
                 // stays live for exactly that long, so the row freezes into
                 // scrollback at rest and write-once is never broken.
-                self.settle_at = Some(self.tick);
+                self.conv.settle_at = Some(self.tick);
                 // A turn short enough to have been watched needs no
                 // notification; a long one is exactly what the user walked away
                 // from (D79). Read before the start time is cleared.
                 if self
+                    .conv
                     .turn_started
                     .is_some_and(|at| at.elapsed() >= crate::tui::notify::LONG_TURN)
                 {
                     self.notify.attention(Attention::TurnComplete);
                 }
                 self.notify_idle();
-                self.turn_started = None;
-                self.output_tokens = 0;
-                self.output_round_tokens = 0;
-                self.token_rate.stop();
-                self.thinking_seg_open = false;
+                self.conv.turn_started = None;
+                self.conv.output_tokens = 0;
+                self.conv.output_round_tokens = 0;
+                self.conv.token_rate.stop();
+                self.conv.thinking_seg_open = false;
                 // A turn that died on its own (error, lost task) leaves its
                 // dialog behind exactly as an interrupt did; the receiver is
                 // already gone, which is what tells it apart from a background
@@ -1947,59 +1926,61 @@ impl Chat {
                 // on the tick, so a burst costs one turn rather than one per
                 // message, and both wake paths cannot disagree about when.
                 if self.session.watch.has_wake_notifications(None)
-                    && !self.interrupted
-                    && self.queued.is_empty()
+                    && !self.conv.interrupted
+                    && self.conv.queued.is_empty()
                 {
                     self.submit_auto();
                 }
-                if let Some(i) = self.stream_msg {
+                if let Some(i) = self.conv.stream_msg {
                     // The reply's send time is when it landed, not when the turn
                     // opened — the same clock the workspace DM stamps carry.
-                    self.messages[i].at = crate::channels::now_unix();
+                    self.conv.messages[i].at = crate::channels::now_unix();
                     // @main's unread (D99): main just spoke, and the accounting
                     // store carries the count D104's pills read. Prose only — a
                     // turn that said nothing has nothing to come back for, and
                     // `observe` zeroes the count outright while @main is the
                     // active conversation.
-                    if !self.messages[i].text.trim().is_empty() {
+                    if !self.conv.messages[i].text.trim().is_empty() {
                         self.buffers.note_console(false, self.tick);
                     }
-                    if let Some(g) = self.messages[i].groups.last_mut() {
+                    if let Some(g) = self.conv.messages[i].groups.last_mut() {
                         g.active = false;
                     }
                     // Remove synchronously: the empty placeholder thinking and its insert point.
                     let mut keep = Vec::new();
-                    for (idx, a) in self.messages[i].activities.iter().enumerate() {
+                    for (idx, a) in self.conv.messages[i].activities.iter().enumerate() {
                         if matches!(a.kind, ActivityKind::Thinking(_)) && a.content.is_empty() {
                             continue;
                         }
                         keep.push(idx);
                     }
-                    if keep.len() != self.messages[i].activities.len() {
+                    if keep.len() != self.conv.messages[i].activities.len() {
                         let old_to_new: HashMap<usize, usize> = keep
                             .iter()
                             .enumerate()
                             .map(|(new, old)| (*old, new))
                             .collect();
-                        for g in &mut self.messages[i].groups {
+                        for g in &mut self.conv.messages[i].groups {
                             g.activities = g
                                 .activities
                                 .iter()
                                 .filter_map(|a| old_to_new.get(a).copied())
                                 .collect();
                         }
-                        self.messages[i].activities = keep
+                        self.conv.messages[i].activities = keep
                             .iter()
-                            .map(|&k| self.messages[i].activities[k].clone())
+                            .map(|&k| self.conv.messages[i].activities[k].clone())
                             .collect();
-                        self.messages[i].insert_points = keep
+                        self.conv.messages[i].insert_points = keep
                             .iter()
-                            .map(|&k| self.messages[i].insert_points[k])
+                            .map(|&k| self.conv.messages[i].insert_points[k])
                             .collect();
-                        self.messages[i].group_of =
-                            keep.iter().map(|&k| self.messages[i].group_of[k]).collect();
+                        self.conv.messages[i].group_of = keep
+                            .iter()
+                            .map(|&k| self.conv.messages[i].group_of[k])
+                            .collect();
                     }
-                    for hint in &mut self.messages[i].activities {
+                    for hint in &mut self.conv.messages[i].activities {
                         if let ActivityKind::Thinking(t) = &mut hint.kind
                             && t.state == ThinkingState::Running
                         {
@@ -2012,11 +1993,11 @@ impl Chat {
                         }
                     }
                     // Text is settled → asynchronously load its images (reply with ImageReady when done).
-                    let text = self.messages[i].text.clone();
+                    let text = self.conv.messages[i].text.clone();
                     self.load_message_images(&text);
                 }
-                self.stream_msg = None;
-                self.stream_attempt_checkpoint = None;
+                self.conv.stream_msg = None;
+                self.conv.stream_attempt_checkpoint = None;
                 self.submit_queued();
                 // `start_turn` reset the channel for whatever turn just began; hand it
                 // the rest of the queue. With no turn running this only clears it —
@@ -2064,10 +2045,10 @@ impl Chat {
                 // and re-armed the input while the turn kept running (violated
                 // the v1.21 instant-command contract).
                 if matches!(context, crate::error::ErrorContext::LongTurn) {
-                    self.busy = false;
+                    self.conv.busy = false;
                     self.drop_empty_stream_message();
-                    self.stream_msg = None;
-                    self.stream_attempt_checkpoint = None;
+                    self.conv.stream_msg = None;
+                    self.conv.stream_attempt_checkpoint = None;
                     // No turn left to steer: the channel empties with it, and what is
                     // still queued stays queued (D83).
                     self.rearm_steer();
@@ -2188,7 +2169,7 @@ impl Chat {
         };
         match &range.target {
             ClickTarget::Group { message, group } => {
-                let Some(msg) = self.messages.get_mut(*message) else {
+                let Some(msg) = self.conv.messages.get_mut(*message) else {
                     return false;
                 };
                 let Some(g) = msg.groups.get_mut(*group) else {
@@ -2212,7 +2193,7 @@ impl Chat {
                 true
             }
             ClickTarget::Activity { message, path } => {
-                let Some(msg) = self.messages.get_mut(*message) else {
+                let Some(msg) = self.conv.messages.get_mut(*message) else {
                     return false;
                 };
                 if let Some(act) = activities_path_get_mut(&mut msg.activities, path) {
@@ -2241,13 +2222,13 @@ impl Chat {
     /// terminal.
     #[cfg(test)]
     pub fn expand_all_folds(&mut self) -> bool {
-        let Some(i) = self.messages.len().checked_sub(1) else {
+        let Some(i) = self.conv.messages.len().checked_sub(1) else {
             return false;
         };
-        for act in &mut self.messages[i].activities {
+        for act in &mut self.conv.messages[i].activities {
             act.expanded = true;
         }
-        for group in &mut self.messages[i].groups {
+        for group in &mut self.conv.messages[i].groups {
             group.expanded = true;
         }
         self.auto_scroll = false;
@@ -2294,7 +2275,7 @@ impl Chat {
             return;
         }
         // Turn in progress: queue it, submitted one by one after TurnEnd (CC message queueing).
-        if self.busy {
+        if self.conv.busy {
             let text = self.expand_pastes(&text);
             let text = self.expand_image_paths(&text);
             // Instant commands bypass the queue (CC semantics: settings knobs apply
@@ -2310,9 +2291,9 @@ impl Chat {
                 }
             }
             let is_slash = text.starts_with('/');
-            let id = self.next_queue_id;
-            self.next_queue_id = self.next_queue_id.wrapping_add(1);
-            self.queued.push(QueuedInput { text, is_slash, id });
+            let id = self.conv.next_queue_id;
+            self.conv.next_queue_id = self.conv.next_queue_id.wrapping_add(1);
+            self.conv.queued.push(QueuedInput { text, is_slash, id });
             // The turn may take it before TurnEnd does (D83).
             self.rearm_steer();
             self.update_slash_suggestions();
@@ -2706,7 +2687,7 @@ impl Chat {
     }
 
     fn slash_cd(&mut self, arg: &str) {
-        if self.busy {
+        if self.conv.busy {
             self.push_slash_error(format!(
                 "[error] code={} msg=cannot switch working directory mid-turn (press Esc to interrupt, then retry)",
                 crate::error::SLASH_ERROR_BAD_ARGUMENT
@@ -2764,13 +2745,13 @@ impl Chat {
 
     fn reset_context_usage(&mut self) {
         let model = self.session.runtime.model.borrow().clone();
-        self.context_usage =
+        self.conv.context_usage =
             crate::context_usage::ContextUsage::for_model(0, &self.session.client.models(), &model);
     }
 
     fn estimate_context_usage(&mut self, messages: &[crate::api::types::Message]) {
         let model = self.session.runtime.model.borrow().clone();
-        self.context_usage = crate::context_usage::ContextUsage::for_model(
+        self.conv.context_usage = crate::context_usage::ContextUsage::for_model(
             crate::compact::estimate_tokens(&self.session.system, messages, &[]),
             &self.session.client.models(),
             &model,
@@ -2824,9 +2805,9 @@ impl Chat {
         let _ = session.runtime.transcript_tx.send(new_transcript.clone());
         self.rebind_tasks_to_transcript(new_transcript.as_ref());
         self.attach_share_to_transcript(new_transcript.as_ref());
-        self.messages.clear();
-        self.stream_msg = None;
-        self.stream_attempt_checkpoint = None;
+        self.conv.messages.clear();
+        self.conv.stream_msg = None;
+        self.conv.stream_attempt_checkpoint = None;
         self.slash_lines.clear();
         self.warnings.clear();
         self.reset_flushed();
@@ -2844,7 +2825,7 @@ impl Chat {
 
     /// Switches the runtime model and persists it as the default (same path as /theme /think: writes the project layer).
     pub(crate) fn set_model(&mut self, model: String) {
-        if self.busy {
+        if self.conv.busy {
             self.push_slash_error(
                 "[error] code=BUSY msg=cannot switch models mid-turn (press Esc to interrupt, then retry)"
                     .to_string(),
@@ -2947,7 +2928,7 @@ impl Chat {
     /// contract, not a gap here.
     fn rebuild_diff_rows(&mut self) {
         let (theme, width) = (self.theme.clone(), self.diff_width());
-        for message in &mut self.messages {
+        for message in &mut self.conv.messages {
             for activity in &mut message.activities {
                 if let ActivityKind::Diff(d) = &activity.kind {
                     activity.content = diff_lines(d, &theme, width);
