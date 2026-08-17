@@ -1027,9 +1027,15 @@ impl Chat {
     pub(crate) fn push_warning(&mut self, message: String) {
         self.warnings
             .retain(|(t, _)| t.elapsed() < Self::WARNING_TTL);
-        if message.starts_with(crate::query::RECONNECT_WARNING_PREFIX) {
+        // A reconnect notice replaces the sender's previous one — 2/10 supersedes
+        // 1/10 — but only that sender's: the tier is shared now, and a dedupe
+        // that keyed on the prefix alone collapsed main's retry and an
+        // instance's into one line that alternated between them (D134a).
+        if let Some(at) = message.find(crate::query::RECONNECT_WARNING_PREFIX) {
+            let (who, _) = message.split_at(at);
             self.warnings.retain(|(_, warning)| {
-                !warning.starts_with(crate::query::RECONNECT_WARNING_PREFIX)
+                !(warning.starts_with(who)
+                    && warning[who.len()..].starts_with(crate::query::RECONNECT_WARNING_PREFIX))
             });
         }
         if !self.warnings.iter().any(|(_, w)| w == &message) {

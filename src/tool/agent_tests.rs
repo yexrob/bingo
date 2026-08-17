@@ -1889,11 +1889,12 @@ async fn subagent_retry_restores_the_current_attempt_checkpoint() {
         "the console is told to unwind the attempt: {events:?}"
     );
     assert!(
-        events
-            .iter()
-            .any(|e| matches!(e, UiEvent::Warning(text) if text == "Reconnecting... 2/10")),
-        "a reconnect notice takes the warning tier instead of being spliced \
-         into the instance's own prose: {events:?}"
+        events.iter().any(
+            |e| matches!(e, UiEvent::Warning(text) if text == "@worker · Reconnecting... 2/10")
+        ),
+        "a reconnect notice takes the warning tier instead of being spliced into the \
+         instance's own prose — and wears whose stream it is about, because the tier \
+         is shared and an unattributed one reads as the console's: {events:?}"
     );
     let progress = progress.lock().unwrap_or_else(|e| e.into_inner());
     assert_eq!(progress.tool_uses, 1);

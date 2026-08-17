@@ -6023,3 +6023,29 @@ the channel first, so a turn committed to history and still queued as events can
 render twice, permanently) and the loss of the pending/in-flight echo for
 main-originated sends. Both need a ruling rather than a patch; D135 is where the
 input paths merge and is the honest place for them.
+
+**A second review, independently.** The D134 commit was reviewed twice — the
+first pass caught the three defects above while the tree was still uncommitted;
+a second, pinned in an isolated worktree at `7895023`, reproduced all three with
+compiled probes rather than by reading, and traced the write-once boundary end to
+end: settlement is prefix-monotone over `message_static_settled`, read from the
+active store, and the abort corner fails *safe* — it starves the flush rather
+than banking a volatile row. It added two:
+
+- **A warning had no sender.** An instance's `Reconnecting… 2/10` reached the
+  console's shared warning tier unattributed, so it read as main's stream while
+  the user watched main. It wears `@name` now, and the reconnect dedupe keys on
+  the sender as well as the prefix — keyed on the prefix alone it collapsed
+  main's retry and an instance's into one line that alternated between them.
+- **A test was weakened that did not need to be.** `✻ Thinking` had been relaxed
+  to `✻`; the stronger assertion passes unchanged. Restored. That is the exact
+  failure mode the review was asked to look for, and it was found by diffing the
+  test files rather than by trusting the suite.
+
+And it read the record against the code, which is what a second-hand record is
+for: `pending_of`'s doc claimed D134 replaced the away page's echo "with the
+console's own echo at send time". Only the *user's* sends are echoed. Main's
+dispatches and mail are not, so a user watching a busy instance cannot see what
+main just asked it. The doc says so now, plainly, instead of overstating the
+replacement.
+

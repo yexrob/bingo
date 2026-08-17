@@ -2008,7 +2008,7 @@ fn a_running_turn_is_drawn_like_a_finished_one() {
 
     assert!(
         rows.iter()
-            .any(|r| r.contains("✻") && r.contains("+2 lines") && r.contains("ctrl+o")),
+            .any(|r| r.contains("✻ Thinking") && r.contains("+2 lines") && r.contains("ctrl+o")),
         "reasoning folds while it streams, not only after: {rows:?}"
     );
     assert!(

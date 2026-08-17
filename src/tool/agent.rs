@@ -173,6 +173,7 @@ fn subagent_hooks(
     let tool_instance = instance.clone();
     let done_registry = registry.clone();
     let done_instance = instance.clone();
+    let warn_instance = instance.clone();
     let round_units = Arc::new(Mutex::new(0u64));
     let retry_units = round_units.clone();
     let event_round_units = round_units.clone();
@@ -313,9 +314,12 @@ fn subagent_hooks(
         }),
         // A reconnect notice used to be spliced into the instance's own prose,
         // where it read as something the agent had said. It is a warning about
-        // the stream, so it takes the tier every other warning takes.
+        // the stream, so it takes the tier every other warning takes — wearing
+        // the name of whose stream it is about, because the tier is shared and
+        // an unattributed "Reconnecting…" on a page the user is not watching
+        // reads as the console's own (D134a).
         on_warning: Box::new(move |message| {
-            warn_events.send(UiEvent::Warning(message));
+            warn_events.send(UiEvent::Warning(format!("@{warn_instance} · {message}")));
         }),
         on_inbound: Box::new(move |text| {
             inbound_events.send(UiEvent::Inbound(text.to_string()));

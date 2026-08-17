@@ -1197,9 +1197,13 @@ impl AgentRegistry {
     /// sender.
     ///
     /// It had one production reader, the away page's echo of a message not yet
-    /// claimed, and D134 replaced that with the console's own echo at send time
-    /// — the same moment main's prompt enters main's transcript. What is left is
-    /// the delivery assertion the tests make, which is worth keeping honest.
+    /// claimed. D134 replaced that for the *user's* own sends, which the console
+    /// echoes at the moment it delivers them — the same moment main's prompt
+    /// enters main's transcript. Main's dispatches and mail get no echo, so a
+    /// user watching a busy instance cannot see what main just asked it until
+    /// the run absorbs it at a barrier; that is a loss, named here rather than
+    /// papered over, and D135 is where the send paths merge and can close it.
+    /// What is left is the delivery assertion the tests make.
     /// Direct messages claimed by the current run and not yet landed in
     /// history. The registry's own bookkeeping, asserted here for the same
     /// reason [`AgentRegistry::pending_of`] is.
