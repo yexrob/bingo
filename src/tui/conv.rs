@@ -15,7 +15,10 @@
 //! - **A cold start** ([`agent_history`]). A conversation the console never saw
 //!   streaming — an instance restored from a session — has only its API
 //!   history. [`crate::tui::perspective::walk`] builds the store once, and
-//!   events append from there. Never per frame.
+//!   events append from there. Never per frame, and (D135) never while an
+//!   event for that conversation is still in the channel: the walk reads the
+//!   registry as it stands *now*, so a queued run that has already committed
+//!   would be read once and streamed again.
 //! - **An inbound line** ([`inbound_messages`]). Prose enters a conversation
 //!   from outside its own turn: the task an instance was dispatched with, the
 //!   mail a continuation absorbed. It arrives as `UiEvent::Inbound` and is filed
@@ -383,34 +386,58 @@ impl Chat {
 
     /// Park the store on screen and bring `key`'s up, opening it on first sight.
     ///
-    /// First sight is where [`crate::tui::perspective::walk`] still earns its
-    /// keep: an instance restored from a session, or one that ran before this
-    /// console existed, has its past in the API history and nowhere else. It is
-    /// read once, here — every later row arrives as an event.
+    /// The page it opens on is claimed, not merely looked up: the claim drains
+    /// the channel first, which is what makes the one remaining cold-start walk
+    /// safe ([`Chat::claim_conversation`]).
     fn point_at(&mut self, key: ConvKey) {
         if key == self.active {
             return;
         }
-        let opened = match self.parked.remove(&key) {
-            Some(conv) => conv,
-            None => self.open_conversation(&key),
-        };
+        let opened = self.claim_conversation(&key);
         let parked = std::mem::replace(&mut self.conv, opened);
         self.parked
             .insert(std::mem::replace(&mut self.active, key), parked);
     }
 
+    /// Take `key`'s store out of the parking, opening it from the domain's
+    /// record when the console has never held one.
+    ///
+    /// **The channel is drained first, and that is the whole point.** A store
+    /// built by [`Chat::open_conversation`] is a *cold* start: it assumes the
+    /// console has heard nothing about this conversation and reads its whole
+    /// past off the registry. Events already queued say otherwise — a run that
+    /// committed its history before the console got round to draining (a short
+    /// turn, or a console stalled a tick) is in the walk **and** still in the
+    /// channel, and the `TurnStart`/`Inbound`/deltas behind it then replay it
+    /// into a store nothing ever rebuilds. The turn renders twice, for good.
+    ///
+    /// Draining is half the answer and [`Chat::detach`] is the other: a store
+    /// opened by an event opens **blank**, so the drain can never walk on the
+    /// console's behalf either. What is left here is the only walk that is
+    /// safe — the channel is empty, so nothing is waiting to replay what it
+    /// reads, and no store means the console has genuinely never heard of the
+    /// conversation.
+    ///
+    /// Only the console's own entry points come through here. `detach` is
+    /// inside the drain and must not start another.
+    pub(super) fn claim_conversation(&mut self, key: &ConvKey) -> Conversation {
+        if self.drain_events() {
+            // What `drain_all` does with the same answer: the screen moved, and
+            // the stall baseline is measured from the last event that reached
+            // the TUI wherever it was consumed.
+            self.dirty = true;
+            self.last_progress_tick = self.tick;
+        }
+        match self.parked.remove(key) {
+            Some(conv) => conv,
+            None => self.open_conversation(key),
+        }
+    }
+
     /// A store the console has not kept before, filled from whatever the domain
     /// can tell it about the conversation's past.
     pub(super) fn open_conversation(&mut self, key: &ConvKey) -> Conversation {
-        // The window is the model's and the same for everyone; what is *used* is
-        // per conversation and starts at nothing.
-        let usage = self.conv.context_usage;
-        let mut conv = Conversation::new(crate::context_usage::ContextUsage::new(
-            0,
-            usage.window,
-            usage.trigger,
-        ));
+        let mut conv = self.blank_conversation();
         match key {
             ConvKey::Main => {}
             ConvKey::Agent(name) => {

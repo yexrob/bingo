@@ -2541,3 +2541,53 @@ fn an_instances_bash_leaves_the_consoles_tail_alone() {
         "nor is an instance's turn ending a reason to clear it"
     );
 }
+
+/// **The cold-start race**, flagged by two of D134's reviewers independently
+/// and closed in D135.
+///
+/// A store opened from the registry's history is a *cold* start: it assumes
+/// the console has heard nothing about the conversation. A run whose `finish`
+/// beat the console's drain — a short turn, or a console stalled a tick — is
+/// in the committed history **and** still in the channel, so the queued
+/// `TurnStart`/`Inbound`/deltas replay what the walk just read. Nothing ever
+/// rebuilds that store, so the turn rendered twice for the rest of the
+/// session. The fix is to drain before looking: either the events opened the
+/// store and the walk never runs, or there were none and the walk is right.
+#[test]
+fn a_page_opened_over_undrained_events_does_not_double_the_turn() {
+    let mut chat = test_chat();
+    seed_agent(&chat, "scout");
+    // The run committed its history first.
+    chat.session.agents.finish(
+        "scout",
+        vec![
+            Message::user_text("fix the parser"),
+            assistant("the lexer drops a token at EOF"),
+        ],
+        0,
+    );
+    // …and the events that produced it are still queued, unread.
+    let sink = chat
+        .events
+        .bound_to(crate::ui::ConvKey::Agent("scout".to_string()));
+    sink.send(UiEvent::TurnStart);
+    sink.send(UiEvent::Inbound("fix the parser".to_string()));
+    sink.send(UiEvent::TextDelta("the lexer drops a token at EOF".into()));
+    sink.send(UiEvent::TurnEnd);
+
+    let rows = agent_page(&mut chat, "scout");
+    let opened = rows
+        .iter()
+        .filter(|r| r.contains("the lexer drops a token"))
+        .count();
+    assert_eq!(opened, 1, "the page opens with one copy: {rows:?}");
+    // And it stays one: write-once means a doubled row could never be taken
+    // back, so the assertion that matters is the one after the next drain.
+    chat.drain_all();
+    let rows = main_rows(&mut chat);
+    let after = rows
+        .iter()
+        .filter(|r| r.contains("the lexer drops a token"))
+        .count();
+    assert_eq!(after, 1, "and one after the channel empties: {rows:?}");
+}

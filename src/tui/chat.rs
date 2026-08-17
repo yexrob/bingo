@@ -1391,6 +1391,18 @@ impl Chat {
     /// First sight is an *event*, not a page opening: an instance streams from
     /// the moment it is spawned, and a page opened later shows what it did
     /// meanwhile because the store was there to receive it.
+    ///
+    /// **And the store opens blank, never walked** (D135). The cold-start walk
+    /// reads the registry's history *now*, while the event in hand describes
+    /// something that happened *then*: a run whose `finish` beat this drain is
+    /// in that history already, and the deltas behind this event would replay
+    /// it into a store nothing rebuilds — the doubled turn two of D134's
+    /// reviewers found. Every instance is inserted with an empty history
+    /// (`tool::agent`, `team::spawn`), so a store that opens on the first event
+    /// misses nothing by starting empty: the walk's whole job is the
+    /// conversation the console has *never* heard from, and that one is opened
+    /// by [`Chat::claim_conversation`], which drains the channel first and so
+    /// knows there is nothing left to replay.
     fn detach(&mut self, key: &crate::ui::ConvKey) -> crate::tui::conversation::Conversation {
         if *key == self.active {
             let usage = self.conv.context_usage;
@@ -1401,8 +1413,21 @@ impl Chat {
         }
         match self.parked.remove(key) {
             Some(conv) => conv,
-            None => self.open_conversation(key),
+            None => self.blank_conversation(),
         }
+    }
+
+    /// A store with nothing in it but the model's window — what a conversation
+    /// starts life with when the console has nothing to fill it from. The
+    /// window is the model's and the same for everyone; what is *used* is per
+    /// conversation and starts at nothing.
+    pub(super) fn blank_conversation(&self) -> crate::tui::conversation::Conversation {
+        let usage = self.conv.context_usage;
+        crate::tui::conversation::Conversation::new(crate::context_usage::ContextUsage::new(
+            0,
+            usage.window,
+            usage.trigger,
+        ))
     }
 
     fn attach(&mut self, key: &crate::ui::ConvKey, conv: crate::tui::conversation::Conversation) {

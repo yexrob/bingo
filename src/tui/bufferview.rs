@@ -237,10 +237,10 @@ impl Chat {
         if key == self.active {
             self.conv.messages.push(echo);
         } else {
-            let mut conv = match self.parked.remove(&key) {
-                Some(conv) => conv,
-                None => self.open_conversation(&key),
-            };
+            // Through the claim, not the map: a store opened here would be the
+            // same cold start a page opening is, and would race the same queued
+            // events (see `Chat::claim_conversation`).
+            let mut conv = self.claim_conversation(&key);
             conv.messages.push(echo);
             self.parked.insert(key, conv);
         }
