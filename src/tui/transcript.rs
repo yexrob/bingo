@@ -595,23 +595,41 @@ struct Folds {
 /// so the document covers the whole session and not just the unflushed tail)
 /// and the fold state (forced open when `show_all`). `dirty` is set on the way
 /// out so the host rebuilds its own document before drawing again.
+/// The messages the pager is looking at. `Chat::build_rows` already swaps an
+/// away page's own document in for the length of one build, so the pager has
+/// always *shown* the page on screen — but the fold bookkeeping around it read
+/// `Chat::messages`, which by construction always describes main. On a page,
+/// that made `a` (expand everything) a dead key: it opened main's folds, and
+/// main's document was not the one being drawn.
+fn active_messages(chat: &mut Chat) -> &mut Vec<crate::tui::chat::UiMessage> {
+    match chat.away.as_mut() {
+        Some(page) => &mut page.messages,
+        None => &mut chat.messages,
+    }
+}
+
 pub fn transcript_rows(chat: &mut Chat, width: usize, show_all: bool) -> Vec<Row> {
+    let (activities, groups) = {
+        let messages = active_messages(chat);
+        (
+            messages
+                .iter()
+                .map(|m| {
+                    m.activities
+                        .iter()
+                        .map(|a| (a.expanded, a.auto_expanded))
+                        .collect()
+                })
+                .collect(),
+            messages
+                .iter()
+                .map(|m| m.groups.iter().map(|g| g.expanded).collect())
+                .collect(),
+        )
+    };
     let saved = Folds {
-        activities: chat
-            .messages
-            .iter()
-            .map(|m| {
-                m.activities
-                    .iter()
-                    .map(|a| (a.expanded, a.auto_expanded))
-                    .collect()
-            })
-            .collect(),
-        groups: chat
-            .messages
-            .iter()
-            .map(|m| m.groups.iter().map(|g| g.expanded).collect())
-            .collect(),
+        activities,
+        groups,
         flushed_segments: chat.flushed_segments,
         tail_start: chat.tail_start,
         mark_base: chat.mark_base,
@@ -625,7 +643,7 @@ pub fn transcript_rows(chat: &mut Chat, width: usize, show_all: bool) -> Vec<Row
     let saved_transcript_mode = chat.transcript_mode;
     chat.transcript_mode = true;
     if show_all {
-        for message in &mut chat.messages {
+        for message in active_messages(chat) {
             for act in &mut message.activities {
                 act.expanded = true;
             }
@@ -635,13 +653,13 @@ pub fn transcript_rows(chat: &mut Chat, width: usize, show_all: bool) -> Vec<Row
         }
     }
     let rows = chat.build_rows(width).rows.clone();
-    for (message, folds) in chat.messages.iter_mut().zip(&saved.activities) {
+    for (message, folds) in active_messages(chat).iter_mut().zip(&saved.activities) {
         for (act, (expanded, auto)) in message.activities.iter_mut().zip(folds) {
             act.expanded = *expanded;
             act.auto_expanded = *auto;
         }
     }
-    for (message, folds) in chat.messages.iter_mut().zip(&saved.groups) {
+    for (message, folds) in active_messages(chat).iter_mut().zip(&saved.groups) {
         for (group, expanded) in message.groups.iter_mut().zip(folds) {
             group.expanded = *expanded;
         }

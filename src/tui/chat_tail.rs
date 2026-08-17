@@ -2786,6 +2786,27 @@ impl super::Chat {
                 // blank cell on every row of the block.
                 None => Vec::new(),
             };
+            // D113 ruled "avatar and name, or name alone"; only the first half
+            // was ever built, so with `chatAvatars` off — the default — a room
+            // page drew every speaker identically and there was no way to tell
+            // who said what. The name is the identity when no portrait is: one
+            // row per run, in the colour the roster gives that same name.
+            //
+            // Only a message carrying an *explicit* speaker takes one — a
+            // room's or an agent's page, where the participants cannot be
+            // derived. Main's own flow leaves `speaker` unset and reads it back
+            // out of the text (`speaker_of`), so it renders byte-identically,
+            // and the user keeps the bubble that already says who they are.
+            let name_row = match (&self.messages[i].speaker, role) {
+                (Some(who), Role::Assistant) if !gutter.faces && spoke != previous => {
+                    let color = pal.avatars[gutter.index_for(who) % pal.avatars.len()];
+                    Some(Row::new(Line::styled(
+                        format!("@{who}"),
+                        SegStyle::fg(color).bold(),
+                    )))
+                }
+                _ => None,
+            };
             // Consecutive arrivals read as one batch (the user's ruling, with
             // the tool groups' own argument): three dispatches completing are
             // one event to the reader, not three blocks with a blank row each.
@@ -2800,10 +2821,16 @@ impl super::Chat {
                 && arrival(&self.messages[i].text)
                 && self.messages[i - 1].role == Role::User
                 && arrival(&self.messages[i - 1].text);
-            let block = if in_streak {
-                El::col(vec![El::gutter(cells, gutter.blank(), body)])
-            } else {
-                El::col(vec![El::Blank, El::gutter(cells, gutter.blank(), body)])
+            let block = {
+                let mut col = Vec::new();
+                if !in_streak {
+                    col.push(El::Blank);
+                }
+                if let Some(row) = name_row {
+                    col.push(El::Rows(vec![row]));
+                }
+                col.push(El::gutter(cells, gutter.blank(), body));
+                El::col(col)
             };
             blocks.push(Block::settled(block, settled));
         }

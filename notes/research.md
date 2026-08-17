@@ -5442,3 +5442,41 @@ bingo's parameters**, and the flag is now true.
 Docs: this record; guide.md's `thinkingLevel` row (the `off` line no longer
 calls itself DeepSeek-compatible); the `wire_thinking` comment carrying the
 retired assumption. Tests: 1456 + 13 green.
+
+### D127. A room page names its speakers (v7 batch 0)
+
+Reported while reviewing the conversation model: "房间界面 里面不同的人说话分不
+清" — a room page's messages are indistinguishable. Confirmed, and it is not a
+perception problem.
+
+- **Half of D113 was never built.** The ruling was "avatar and name, or name
+  alone". `Gutter::cells` returns nothing at all when `faces` is false, and the
+  row builder's `Some(_) => Vec::new()` arm meant a message with a known
+  speaker and no portrait drew *nothing* — no name, no colour, no initial.
+  `experimental.chatAvatars` is off by default, so the default rendering of a
+  room was one anonymous voice, with `UiMessage::speaker` sitting there unread.
+- **The name is the identity when no portrait is**: one row per run, `@dev` in
+  the colour the roster gives that same name (`Palette::avatars` through
+  `Gutter::index_for`, the identity-colour path, not the avatar path).
+- **Only an explicit speaker takes one.** Room and agent pages carry
+  `UiMessage::speaker`; main's own flow leaves it unset and derives its two
+  participants from the text (`speaker_of` answers `main` for every assistant
+  message), so gating on the *explicit* field keeps the console byte-identical
+  and off the write-once tests' toes. The user's own bubble is exempt: `❯`
+  already says who they are.
+- **The pager's folds followed the page.** `transcript_rows` saved, expanded
+  and restored fold state on `Chat::messages` — which always describes main —
+  while `build_rows` underneath swapped the away page's document in for the
+  draw. The content was right all along; `a` (expand everything) was a dead key
+  on a page. Both now go through `active_messages`.
+
+**Correction to the same session's review**: the claim that `ctrl+o` shows
+main's transcript while a page is open was wrong — it renders the active page,
+and always did. What was broken is the fold bookkeeping around it. And the
+inline console has no scroll of its own *by design* (the rows belong to the
+terminal, D27/D98); the pager is the scrollable surface, and a dead wheel is
+the host's mouse mode, not bingo's.
+
+Docs: conversation-model-v7.md (proposed) records this as batch 0. Tests: a
+room page names both speakers and the name leads its run; main's flow grows no
+speaker rows — 1458 + 13 green.

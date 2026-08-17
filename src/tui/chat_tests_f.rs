@@ -1665,3 +1665,67 @@ fn a_continuation_run_is_the_same_agent_as_the_first() {
         chat.faces
     );
 }
+
+/// v7 batch 0: a room page names whoever is speaking, with no avatars on.
+///
+/// D113 ruled "avatar and name, or name alone"; only the avatar half was ever
+/// built, so under the default (`chatAvatars` off) `Gutter::cells` returned
+/// nothing and every member's line rendered identically — a room read as one
+/// anonymous voice, which is what the user reported. The name is the identity
+/// when no portrait is.
+#[test]
+fn a_room_page_names_every_speaker_without_avatars() {
+    let mut chat = test_chat();
+    assert!(
+        !chat.chat_avatars,
+        "the default is off — the state the bug lived in"
+    );
+    chat.session
+        .channels
+        .create(
+            "dev-team",
+            vec!["dev".to_string(), "qa".to_string()],
+            crate::channels::ChannelMode::Free,
+        )
+        .expect("room");
+    chat.session
+        .channels
+        .post("dev", "dev-team", "the lexer is fixed")
+        .expect("posted");
+    chat.session
+        .channels
+        .post("qa", "dev-team", "running the suite now")
+        .expect("posted");
+
+    chat.switch_to(Some(crate::tui::zoom::ZoomTarget::Room(
+        "dev-team".to_string(),
+    )));
+    let rows = main_rows(&mut chat);
+    let named: Vec<&String> = rows.iter().filter(|r| r.starts_with('@')).collect();
+    assert!(
+        rows.iter().any(|r| r == "@dev") && rows.iter().any(|r| r == "@qa"),
+        "both speakers are named on their own row: {named:?}"
+    );
+    let dev = rows.iter().position(|r| r == "@dev").expect("dev's name");
+    let said = rows
+        .iter()
+        .position(|r| r.contains("the lexer is fixed"))
+        .expect("dev's line");
+    assert!(dev < said, "the name leads the run it belongs to");
+}
+
+/// The other half of the same edit: main's own flow is byte-identical. Its
+/// messages carry no explicit speaker — the participants are derived from the
+/// text (`speaker_of`) — so no `@main` row appears over its replies, and the
+/// user keeps the bubble that already says who they are.
+#[test]
+fn mains_own_flow_grows_no_speaker_rows() {
+    let mut chat = test_chat();
+    chat.messages.push(msg(Role::User, "what broke?"));
+    chat.messages.push(msg(Role::Assistant, "the lexer did"));
+    let rows = main_rows(&mut chat);
+    assert!(
+        !rows.iter().any(|r| r == "@main" || r == "@user"),
+        "no speaker rows in the console's own transcript: {rows:?}"
+    );
+}
