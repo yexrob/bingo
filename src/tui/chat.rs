@@ -2179,6 +2179,21 @@ impl Chat {
                 conv.absorb_inbound(arrived, self.tick);
                 self.dirty = true;
             }
+            UiEvent::Mail { from, text } => {
+                // A message that has been *delivered*. It is filed by the same
+                // builder an absorbed prompt is filed by, so a page cannot draw
+                // the two differently — and it is spliced by `absorb_inbound`,
+                // so a question still lands above the answer it caused (D134a).
+                let at = crate::channels::now_unix();
+                let arrived = vec![crate::tui::conv::counterpart_message(&from, at, text)];
+                conv.absorb_inbound(arrived, self.tick);
+                // A delivered message accounts for the receiver's first
+                // user-role text, so the run's repeat of it is not the task the
+                // instance was spawned with — only a hire's prompt is, and that
+                // one never comes through the inbox.
+                conv.intake_seen = true;
+                self.dirty = true;
+            }
             // Console-wide events never reach here: `console_event` answers them
             // and only hands on what a transcript owns.
             other => debug_assert!(false, "unrouted console event: {other:?}"),

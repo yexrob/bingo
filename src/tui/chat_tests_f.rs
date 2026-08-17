@@ -2096,9 +2096,14 @@ fn an_inbound_prompt_lands_as_the_sender_who_wrote_it() {
     let scout = crate::ui::ConvKey::Agent("scout".to_string());
     chat.apply_event_to(scout.clone(), UiEvent::TurnStart);
     chat.apply_event_to(scout.clone(), UiEvent::Inbound("map the parser".into()));
+    // What was said to it afterwards arrives as a *delivery* since D135 — the
+    // moment main sent it, not the moment the run read it back.
     chat.apply_event_to(
         scout.clone(),
-        UiEvent::Inbound("[follow-up instruction] and the lexer".into()),
+        UiEvent::Mail {
+            from: crate::channels::MAIN_NAME.to_string(),
+            text: "and the lexer".to_string(),
+        },
     );
     let texts: Vec<String> = chat
         .parked
@@ -2183,17 +2188,34 @@ fn a_pages_running_turn_stays_out_of_scrollback() {
     );
 }
 
-/// What the user says to an instance is on that instance's page the moment it
-/// is said — the same moment main's prompt enters main's transcript — and it is
-/// there exactly once, because the run's own prompt repeats it and the console
-/// drops the repeat.
-#[test]
-fn a_line_sent_to_an_agent_shows_on_its_page_once() {
+/// A direct message is on the receiver's page the moment it is **delivered**,
+/// and it is there exactly once, because the run's own prompt repeats it and
+/// the console drops the repeat.
+///
+/// D134 echoed the user's sends and only the user's, so main's instructions to
+/// a busy instance were invisible on that instance's page until the run reached
+/// a tool barrier and read them. D135 moves the echo to the one point every
+/// sender passes through, so both land here and neither doubles.
+#[tokio::test]
+async fn a_line_sent_to_an_agent_shows_on_its_page_once() {
     let mut chat = test_chat();
     seed_agent(&chat, "scout");
     chat.switch_to(Some(crate::tui::zoom::ZoomTarget::Agent("scout".into())));
     chat.set_input("look at the lexer".to_string());
     chat.submit();
+    // Main's own instruction, sent while the instance is still running: it has
+    // not been read yet and it is on the page anyway.
+    chat.session
+        .agents
+        .deliver(
+            "scout",
+            crate::channels::MAIN_NAME,
+            "map the parser",
+            Vec::new(),
+            None,
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+    chat.drain_all();
     assert!(
         chat.conv
             .messages
@@ -2202,29 +2224,31 @@ fn a_line_sent_to_an_agent_shows_on_its_page_once() {
         "it is on the page it was typed on: {:?}",
         chat.conv.messages
     );
-
-    // The run absorbs it and hands the console the prompt it was given. The
-    // user's own lines are already there; main's instruction is not.
-    chat.apply_event(UiEvent::Inbound(
-        "[DM from user]\nlook at the lexer".to_string(),
-    ));
-    chat.apply_event(UiEvent::Inbound("map the parser".to_string()));
-    let said: Vec<&String> = chat
-        .conv
-        .messages
-        .iter()
-        .map(|m| &m.text)
-        .filter(|t| t.contains("look at the lexer"))
-        .collect();
-    assert_eq!(said.len(), 1, "once, not twice: {said:?}");
     assert!(
         chat.conv
             .messages
             .iter()
             .any(|m| m.text == "map the parser"),
-        "and what main said still arrives: {:?}",
+        "and so is what main asked for, before the run has read it: {:?}",
         chat.conv.messages
     );
+
+    // The run absorbs both and hands the console the prompt it was given.
+    // Every line of it is a repeat of a delivery, so none of it lands twice.
+    chat.apply_event(UiEvent::Inbound(
+        "[DM from user]\nlook at the lexer".to_string(),
+    ));
+    chat.apply_event(UiEvent::Inbound("map the parser".to_string()));
+    for needle in ["look at the lexer", "map the parser"] {
+        let said: Vec<&String> = chat
+            .conv
+            .messages
+            .iter()
+            .map(|m| &m.text)
+            .filter(|t| t.contains(needle))
+            .collect();
+        assert_eq!(said.len(), 1, "{needle} once, not twice: {said:?}");
+    }
 }
 
 /// A room stays a projection, and keeps up incrementally: its log is appended
@@ -2434,12 +2458,12 @@ fn the_question_lands_above_the_answer_it_caused() {
     assert!(task < reply, "question before answer: {rows:?}");
 }
 
-/// Mail absorbed at a tool barrier arrives mid-turn, and belongs below what has
-/// been said and above what comes next — the shape steering already gives main.
-/// Appended without opening a continuation, the turn's next sentence continues
-/// into the message *above* the mail it is answering.
+/// Mail delivered mid-turn belongs below what has been said and above what
+/// comes next — the shape steering already gives main. Appended without opening
+/// a continuation, the turn's next sentence continues into the message *above*
+/// the mail it is answering.
 #[test]
-fn mail_absorbed_mid_turn_splits_the_run_around_it() {
+fn mail_delivered_mid_turn_splits_the_run_around_it() {
     let mut chat = test_chat();
     seed_agent(&chat, "scout");
     let scout = crate::ui::ConvKey::Agent("scout".into());
@@ -2452,7 +2476,10 @@ fn mail_absorbed_mid_turn_splits_the_run_around_it() {
     );
     chat.apply_event_to(
         scout.clone(),
-        UiEvent::Inbound("also check the parser".into()),
+        UiEvent::Mail {
+            from: crate::channels::MAIN_NAME.to_string(),
+            text: "also check the parser".to_string(),
+        },
     );
     chat.apply_event_to(scout.clone(), UiEvent::TextDelta("both are fine".into()));
     chat.apply_event_to(scout.clone(), UiEvent::TurnEnd);

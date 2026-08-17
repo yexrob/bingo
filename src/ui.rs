@@ -277,6 +277,20 @@ pub enum UiEvent {
     /// attribution walk that reads a committed history, so the two cannot
     /// disagree about who said what.
     Inbound(String),
+    /// A direct message *landing in this conversation's inbox* — the moment it
+    /// was sent, not the moment the receiver got round to reading it (D135).
+    ///
+    /// [`Inbound`](UiEvent::Inbound) is the reading: it fires when a run absorbs
+    /// its prompt, which for a busy instance is its next tool barrier, minutes
+    /// later. A user watching that instance could see what *they* had asked for
+    /// (the console echoed it at send time) and nothing of what main had. So the
+    /// echo moves to the one place every sender passes through
+    /// ([`crate::agents::AgentRegistry::deliver`]) and covers all of them, and
+    /// the absorbed prompt's DM lines are dropped as the repeat they are.
+    Mail {
+        from: String,
+        text: String,
+    },
     /// The running turn took these queued messages into its own context at a tool
     /// barrier (D83). They are already in the request, so the composer must drop them
     /// from its queue and show them in the flow where the model read them — the turn

@@ -177,7 +177,7 @@ impl RunBuilder {
 }
 
 /// A counterpart's (or the runtime's) single entry as one message.
-fn counterpart_message(from: &str, at: u64, text: String) -> UiMessage {
+pub(crate) fn counterpart_message(from: &str, at: u64, text: String) -> UiMessage {
     // The user keeps the bubble they wear on main's page; everybody else —
     // main's instructions, another agent's mail, the runtime's notes — is
     // prose with (or without) a face, exactly as main's own replies are.
@@ -228,11 +228,18 @@ pub(crate) fn agent_history(
 /// the one shape a continuation's mail can never be — the same flag the walk
 /// carries over a whole history, applied to the one message this is.
 ///
-/// **The user's own lines are dropped here.** They reach an instance twice: the
-/// console echoes them into its store when they are sent (as it does main's own
-/// prompt), and the run repeats them in the prompt it absorbs. The echo is the
-/// one that happened at the moment the user pressed Enter, so it is the one that
-/// stays. A cold start keeps them, because there was no console to echo them.
+/// **Every direct message is dropped here** (D135). A DM reaches an instance
+/// twice: [`crate::ui::UiEvent::Mail`] when it is delivered, and again inside
+/// the prompt the run absorbs. The delivery is the one that happened at the
+/// moment somebody sent it, so it is the one that stays — and *this* copy would
+/// arrive whenever the receiver got round to reading it, which for a busy
+/// instance is minutes later and in the wrong place.
+///
+/// The rule is exactly the DM lane: mail from the user, from main, from another
+/// agent. Everything else in an absorbed prompt — the spawn task, a room relay,
+/// a chase, the task reminder — never passed through `deliver`, so it has no
+/// delivery event and lands here. A cold start keeps all of it, because there
+/// was no console to hear the deliveries.
 pub(crate) fn inbound_messages(
     name: &str,
     text: &str,
@@ -250,7 +257,7 @@ pub(crate) fn inbound_messages(
     }];
     let filed = walk(who, &history, &[at])
         .into_iter()
-        .filter(|f| !matches!(&f.target, Target::Dm(from) if from == USER_NAME))
+        .filter(|f| !matches!(&f.target, Target::Dm(_)))
         .collect();
     file_walk(filed, name, render, false)
 }

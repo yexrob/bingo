@@ -1169,6 +1169,18 @@ impl AgentRegistry {
             },
         );
         drop(inner);
+        // The receiver's page shows what it was told, when it was told (D135).
+        // A running instance absorbs its mail at its next tool barrier, so
+        // without this a user watching one could not see what main had just
+        // asked for until the run got round to reading it. Every sender comes
+        // through here, so this is where the echo belongs; the absorbed prompt
+        // repeats it and the console drops the repeat.
+        if let Some(sink) = self.sink_for(name) {
+            sink.send(crate::ui::UiEvent::Mail {
+                from: from.to_string(),
+                text: message.to_string(),
+            });
+        }
         self.notify_inbox();
         Ok(id)
     }
