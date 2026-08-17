@@ -6049,3 +6049,119 @@ dispatches and mail are not, so a user watching a busy instance cannot see what
 main just asked it. The doc says so now, plainly, instead of overstating the
 replacement.
 
+
+## D135 — one input path, and the one command that follows the page
+
+The placeholder said `/ for commands · ! for shell` on every page, and on every
+page but main's it was a lie. `Chat::submit` opened with
+
+```rust
+if self.away.is_some() { self.submit_to_zoom(); return; }
+```
+
+and `submit_to_zoom` read the whole line as prose. So on an agent's page `/` did
+nothing, `!` did nothing, `@name` and `#room` were dead, and the three output
+tiers (`slash_lines`, `slash_error_lines`, `slash_info_lines`) were gated on the
+page being main's — the display half of the same split, which would now swallow
+the answer to a command the user had just run.
+
+v6's reasoning was that a page's composer addresses the page, and CC's teammate
+route does return before any slash handling. It addresses the **console**. A
+terminal command and shell mode are not properties of what you happen to be
+reading; a page turn is not a modal, and D132 already stopped treating it as
+one. **One `submit`**: take the draft, the `@name`/`#room` grammar, the queue
+behind the console's turn, `!`, `/` — the same steps in the same order wherever
+the screen is — and one last step that reads `active`, because where *prose*
+goes is the only thing a page decides. `submit_to_zoom` and `ZoomTarget::direct`
+retire into it; `zoom.rs` keeps the target vocabulary and loses the composer.
+
+**What the merge made visible, and what it cost.**
+
+- **Whose `busy`.** `self.conv.busy` is the *active* conversation's since D134,
+  and a `/model` typed on scout's page must not read scout's turn. `waits_for_main`
+  names the rule instead of leaving it in the shape of a branch: a command, a
+  shell line, or prose to main waits behind main's turn; prose to anybody else
+  never queues here at all, because their queue is their inbox and the domain
+  already runs it. `slash_cd` and `set_model` were reading the same wrong field
+  and now read main's; `slash_clear` was clearing the store on screen.
+- **The queue rows are main's page.** A command queued from somebody else's page
+  joined a queue nobody could see, which is a keystroke that did nothing. It
+  says `queued behind main's turn` on the tier that does show.
+- **`/theme` walks every store**, not just the one on screen: diff rows are baked
+  at edit time, and a parked conversation the reader comes back to would still be
+  wearing the old palette.
+- **Shell mode stopped being cancelled by a page turn** (`switch_to` cleared it),
+  which is the same complaint one level down, and `EscLayer::BashMode` lost its
+  `is_main` gate with it — a mode you turned on is a mode you close before the
+  page under it closes.
+
+**The `/compact` ruling.** The user's, verbatim: *大多数照旧作用于控制台会话（它们
+本来就是控制台的设置），但 `/compact` 在 agent 页上应该压缩这个 agent 的上下文 —— 因为
+shift+tab 已经立了这个先例，而 compact 是唯一一个"作用错对象会真的有损失"的.*
+Implemented as stated. Most commands keep acting on the console because acting on
+the console *is* acting on what the user meant — they are settings, and a setting
+has one owner. Compaction is not a setting: it rewrites a context, and rewriting
+the wrong one destroys work that cannot be got back. `shift+tab` has cycled the
+viewed agent's permission mode since D105, so the precedent was already paid for;
+this is the one command worth spending it on again.
+
+An instance's context is not a transcript file — it is `Entry::history` in the
+registry — so the rewrite is read, summarise, write:
+
+- The summarising call runs on the **instance's own session**, which is what
+  opened `AgentRegistry::session_of` to production. Through the console's session
+  it would have appended the compact marker to the *console's* transcript (D74's
+  `append_compact`), which is the wrong record; the instance has no transcript, so
+  the marker is correctly a no-op.
+- `replace_history` **refuses while the instance is running**, and the refusal is
+  the design rather than a gap: a turn in flight holds its own copy of the history
+  and writes it back at `finish`, so a summary spliced in underneath would be
+  overwritten by the next round. The state is read under the same lock the write
+  takes, so a run that starts in between loses the race instead of the work. The
+  error says `esc to stop it, then retry`, which is a ladder the user already has.
+- A **room** answers that there is nothing to compact. It is a log, not a turn
+  loop; falling back to the console's context there would be exactly the
+  wrong-target loss this ruling exists to prevent.
+- The `✓`/`⏳` lines take the console's tiers (they answer the console's command,
+  on whatever page is up); the new window figure takes a sink bound to the
+  instance, because it is the instance's footer that reports it.
+
+**The cold-start race** (deferred by both of D134's reviews). The suggested fix
+was to drain the channel before opening a store. Drained alone, it does not
+work — and the test written first is what said so. The drain routes the queued
+events, `detach` opens the store for the first of them, and `detach` walked too:
+the walk simply moved, and read the same already-committed history.
+
+The walk's real precondition was never "no store yet", it is **"nothing is
+waiting to replay what I am about to read"**. It reads the registry as it stands
+*now*; an event in hand describes something that happened *then*. So the walk
+leaves the event path entirely — `detach` opens a **blank** store — and survives
+only behind a full drain, where the channel is empty and no store means the
+console has genuinely never heard of the conversation. Blank costs nothing: both
+production `insert` call sites (`tool::agent`, `team::spawn`) create an instance
+with an empty history, so walking at first sight was walking nothing in every
+healthy case and walking a duplicate in the broken one. `echo_direct` claims its
+store the same way, because a store opened there was the same cold start racing
+the same events.
+
+**Left undone, and named so it is not lost:** main's own sends to an instance are
+still invisible on that instance's page until the run absorbs them at a barrier.
+The user's sends are echoed at send time (`echo_direct`); `Agent` dispatches show
+up as intake the moment the run opens, so the gap is `SendMessage` mail to a
+*running* instance. Closing it means echoing from `AgentRegistry::deliver` — the
+one point every sender passes through — and dropping the absorb-time replay for
+`Target::Dm(MAIN_NAME)` the way `inbound_messages` already drops the user's. That
+is a domain-layer emit and a second dedupe rule, and it belongs with D136, where
+main becomes a registry entry and `deliver` stops having a special sender at all.
+
+**Changed assertions.** One: `typing_on_a_page_reaches_the_agent_as_the_user`
+asserted that `/help is not a command here` reached scout's inbox and that the
+console's parser never saw the draft. That is the behaviour this record reverses,
+so the test keeps the half that is still true (prose reaches the subject as the
+user) and the `/` half becomes its own test asserting the opposite. Nothing else
+in 1490 tests moved.
+
+**`chat.rs` split.** 4070 against the 4000 cap. `/compact` moved to
+`chat_session.rs`, which already owns `/rename`, `/resume`, `/gc` and `/share` —
+the commands that act on a session's record on disk — rather than to a new file
+for three functions.
