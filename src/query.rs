@@ -1097,13 +1097,19 @@ async fn query_loop(
                 interrupt_marker: Some(marker),
             });
         }
+        // A turn nobody downstream can read: thinking counts as nothing, because its text
+        // never leaves the model's own head. A turn the output budget cut off mid-thought
+        // reads identically here and is not the same thing — that is truncation, and it
+        // belongs to the max_tokens recovery below, which this classifier used to shadow
+        // (D73's leftover: the thinking-only truncated turn was discarded whole).
         let empty_assistant = turn.assistant.content.iter().all(|block| match block {
             ContentBlock::Text { text } => text.trim().is_empty(),
             ContentBlock::Thinking { .. } => true,
             ContentBlock::ToolUse { .. } => false,
             ContentBlock::ToolResult { .. } | ContentBlock::Image { .. } => true,
         });
-        if turn.tool_uses.is_empty() && empty_assistant {
+        let truncated = turn.stop_reason.as_deref() == Some("max_tokens");
+        if turn.tool_uses.is_empty() && empty_assistant && !truncated {
             if empty_retry_count == 0 {
                 empty_retry_count = 1;
                 if !session.quiet {
@@ -1111,12 +1117,28 @@ async fn query_loop(
                 }
                 continue;
             }
-            if let Some(inbox) = inbox_wake.as_mut() {
-                inbox.restore(session);
+            // Twice over is a decision, not a broken stream: a member draining room lines
+            // it owes nothing is *told* to end its turn this way (`CHANNEL_NOTE`), and any
+            // session can be woken by an inbox with nothing in it to answer. Failing the
+            // turn there restored the inbox and had the same batch redelivered into the
+            // same silence, once per chase round, under a message that named the transport
+            // (D124). The turn ends instead — silent, reported, and not written to history,
+            // for the same reason the first attempt is not.
+            if !session.quiet {
+                println!();
             }
-            return Err(QueryError::Protocol(
-                "the model returned no response after the stream ended; retry the turn".to_string(),
+            let context_tokens = gate.current(crate::compact::estimate_tokens(
+                &session.system,
+                &messages,
+                &tool_schemas,
             ));
+            report_context_usage(session, ui, context_tokens);
+            return Ok(QueryOutcome {
+                messages,
+                end_reason: QueryEndReason::EmptyResponseRetried,
+                aborted: false,
+                interrupt_marker: None,
+            });
         }
         // The assistant message must enter history before branching: max_tokens recovery
         // and the Stop hook both need the model to see the truncated content, and a normal
@@ -2404,6 +2426,33 @@ mod tests {
         ])
     }
 
+    fn thinking_turn(thinking: &str, stop_reason: &str) -> String {
+        sse(&[
+            (
+                "message_start",
+                r#"{"message":{"id":"m_1","model":"m"}}"#.into(),
+            ),
+            (
+                "content_block_start",
+                r#"{"index":0,"content_block":{"type":"thinking","thinking":""}}"#.into(),
+            ),
+            (
+                "content_block_delta",
+                format!(
+                    r#"{{"index":0,"delta":{{"type":"thinking_delta","thinking":"{thinking}"}}}}"#
+                ),
+            ),
+            ("content_block_stop", r#"{"index":0}"#.into()),
+            (
+                "message_delta",
+                format!(
+                    r#"{{"delta":{{"stop_reason":"{stop_reason}"}},"usage":{{"output_tokens":5}}}}"#
+                ),
+            ),
+            ("message_stop", "{}".into()),
+        ])
+    }
+
     fn tool_turn(id: &str, name: &str, input: serde_json::Value) -> String {
         let input = serde_json::to_string(&input.to_string()).unwrap_or_default();
         sse(&[
@@ -3597,8 +3646,11 @@ mod tests {
         );
     }
 
+    /// D124 turned the second empty attempt from a `SERVER_ERROR` into a silent turn: the
+    /// transport is not what produced it. What the error path guarded stays guarded — neither
+    /// attempt reaches the transcript.
     #[tokio::test]
-    async fn repeated_empty_turn_returns_server_error_without_recording_assistant() {
+    async fn repeated_empty_turn_completes_silently_without_recording_assistant() {
         let home = std::env::temp_dir().join(format!("bingo-empty-turn-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&home);
         std::fs::create_dir_all(&home).unwrap();
@@ -3610,12 +3662,11 @@ mod tests {
         .await;
         let session = test_session(base_url, Some(transcript.clone()));
         let mut ui = headless_hooks();
-        let error = run_query(&session, Vec::new(), "go", &[], &mut ui, None)
+        let outcome = run_query(&session, Vec::new(), "go", &[], &mut ui, None)
             .await
-            .unwrap_err();
+            .unwrap();
 
-        assert_eq!(error.error_code(), "SERVER_ERROR");
-        assert!(error.to_string().contains("no response"));
+        assert_eq!(outcome.end_reason, QueryEndReason::EmptyResponseRetried);
         assert!(
             transcript
                 .load_messages()
@@ -3713,6 +3764,77 @@ mod tests {
             texts[3],
             (Role::Assistant, "done".to_string()),
             "a normally finished assistant is also in the returned messages"
+        );
+    }
+
+    /// D124: the budget cutting a turn off mid-thought produces a turn that reads empty
+    /// (thinking is the only block, and thinking is not readable output). It is truncation,
+    /// so it belongs to the recovery path — the empty classifier used to shadow it and throw
+    /// the whole turn away (D73's leftover).
+    #[tokio::test]
+    async fn thinking_only_max_tokens_turn_recovers_instead_of_reading_as_empty() {
+        let base_url = spawn_api(vec![
+            thinking_turn("burning the budget", "max_tokens"),
+            text_turn("done", "end_turn"),
+        ])
+        .await;
+        let session = test_session(base_url, None);
+        let mut ui = headless_hooks();
+        let outcome = run_query(&session, Vec::new(), "go", &[], &mut ui, None)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            outcome.end_reason,
+            QueryEndReason::Completed,
+            "the turn was truncated, never empty"
+        );
+        let roles: Vec<Role> = outcome.messages.iter().map(|m| m.role).collect();
+        assert_eq!(
+            outcome
+                .messages
+                .iter()
+                .filter(|m| m.role == Role::Assistant)
+                .count(),
+            2,
+            "the truncated turn stays in history and the recovery request happened: {roles:?}"
+        );
+        assert!(
+            outcome.messages.iter().any(|m| m.content.iter().any(|b| {
+                matches!(b, ContentBlock::Thinking { thinking, .. } if thinking == "burning the budget")
+            })),
+            "the model sees what it had already thought"
+        );
+        assert!(
+            outcome
+                .messages
+                .iter()
+                .any(|m| text_of(m) == MAX_TOKENS_RESUME_PROMPT),
+            "the resume prompt was injected"
+        );
+    }
+
+    /// D124: a member draining room lines it owes nothing is told to end its turn without
+    /// saying anything (`CHANNEL_NOTE`). Twice-over silence is that decision, not a broken
+    /// stream — the turn completes instead of failing under a transport-shaped error.
+    #[tokio::test]
+    async fn silence_twice_over_completes_the_turn_instead_of_failing() {
+        let base_url = spawn_api(vec![
+            text_turn("", "end_turn"),
+            text_turn("", "end_turn"),
+            text_turn("unreachable", "end_turn"),
+        ])
+        .await;
+        let session = test_session(base_url, None);
+        let mut ui = headless_hooks();
+        let outcome = run_query(&session, Vec::new(), "go", &[], &mut ui, None)
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.end_reason, QueryEndReason::EmptyResponseRetried);
+        assert!(
+            !outcome.messages.iter().any(|m| m.role == Role::Assistant),
+            "neither silent attempt is recorded, and no third request went out"
         );
     }
 

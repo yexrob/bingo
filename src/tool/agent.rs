@@ -3351,6 +3351,12 @@ mod tests {
              thing that survives the batch quiet (and the anchor phrase must sit on one line)"
         );
         assert!(
+            CHANNEL_NOTE.contains("Silence belongs in the room, not in your turn text"),
+            "D124: \"end the turn without posting\" alone reads as \"produce nothing at all\", \
+             and a turn with neither text nor tool call reports nothing to main (the anchor \
+             phrase must sit on one line)"
+        );
+        assert!(
             CHANNEL_NOTE.contains("fire alarm"),
             "@all needs a cost the model can feel, or every FYI wears it"
         );

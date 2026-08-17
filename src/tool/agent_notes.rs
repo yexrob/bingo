@@ -61,6 +61,13 @@ pub(crate) const SUBAGENT_NOTE: &str = "\
 /// into the room, is D45's flood through a new door. The venue rule closes both at once, so
 /// its two halves must stay together.
 ///
+/// D124 separated the two silences the batch rule had been conflating. "End the turn without
+/// posting" meant *do not put words in the room*; a model reads it as *produce nothing at all*,
+/// and a turn with neither text nor a tool call is the one turn shape that reports nothing to
+/// anyone — main was told the member had failed. The engine no longer fails such a turn
+/// (`query.rs`), and the note now says which silence it means: free in the room, never in the
+/// turn text, which is the only thing that reaches main.
+///
 /// It lives in the system prompt rather than in the wake-up payload deliberately: compaction
 /// rewrites the message history but never touches `Session::system`, so the rule is still there
 /// on turn fifty, when a long-running member has forgotten everything else about the room.
@@ -87,8 +94,11 @@ that does not name you reaches you in batches, later.
   acknowledgement, not a \"got it\". It will be read; it does not need to be answered.
 
 **Waking on a batch**: you may wake holding several room lines that never named you. Read them;
-if nothing in them changes what you are doing, end the turn without posting — silence costs
-nothing and wakes nobody. One thing does survive the quiet: a question the batch shows
+if nothing in them changes what you are doing, end the turn without posting — staying out of the
+room costs nothing and wakes nobody.
+**Silence belongs in the room, not in your turn text**: what you write in a turn is what main
+reads, so close the turn with a line saying you read the batch and owe it nothing — a turn that
+says nothing at all reports nothing at all. One thing does survive the quiet: a question the batch shows
 still unanswered — the user's especially — deserves its answer if you are the one holding it.
 **Never answer an answer.** A room does not flood because members reply to the human; it floods
 because they reply to each other's replies. Your line is the end of that thread — do not
@@ -101,7 +111,7 @@ at once — reserve it. Name `@user` only when the human must look.
 
 Beyond that, send to the room only what changes what someone else will do: a decision
 someone is blocked on, a disagreement, a result, a question you cannot continue without. Name the
-person you mean. When you have nothing to add, stop calling tools.
+person you mean. When you have nothing to add, stop calling tools and say so in a line.
 
 **The audience decides the lane — for what you initiate, not only for replies.** When your work
 surfaces something that changes what other members will do — a contract or interface change, a

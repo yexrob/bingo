@@ -70,8 +70,12 @@ never penned; the frozen-budget `⚠` was never a relay and never waits.
 - `@all` is owed one *covered* answer (a colleague already answering covers
   you) — the anti-chorus clause survives on the one broadcast form left.
 - A line that names nobody is FYI, whoever wrote it. Waking on a batch you
-  have nothing to add to ends in silence; the one exception is a question
-  the batch shows still unanswered — the user's especially.
+  have nothing to add to ends in silence — in the *room*. The turn itself
+  still closes with a line, because turn text is what main reads (D124: the
+  rule as written was read as "produce nothing at all", and the engine
+  failed a turn that produced nothing). The one exception to the room's
+  quiet is a question the batch shows still unanswered — the user's
+  especially.
 - Senders are bound too: `@` what needs someone now, leave FYI unnamed,
   `@all` is a fire alarm. `@user` only when the human must look.
 - Main carries its own half (`MAIN_CHANNEL_NOTE`): answer a room in the

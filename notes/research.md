@@ -5313,3 +5313,57 @@ they go door to door themselves.
 
 Docs: this record; conversation-model-v6.md law bullet. Tests: the
 reworked anchor assertions in `tool/agent.rs` — 1453 + 13 green.
+
+### D124. Silence is a turn — the empty-response guard, and D73's leftover
+
+Reported from a live session: four crew turns in a row died with
+`subagent failed: stream protocol error: the model returned no response after
+the stream ended`. Nothing was wrong with the stream. `dev #2`, `ui-ux #2` and
+their two chase rounds had each woken on `[#dev-team msg #3] qa: @user Hi!…` —
+room traffic naming nobody, with their own greetings already posted — and did
+exactly what `CHANNEL_NOTE` tells a member to do with a batch it owes nothing:
+ended the turn without saying anything. `devex`, on the same model and the same
+batch, wrote "No reply needed." and passed. It was a coin flip on phrasing.
+
+- **The engine and the prompt disagreed.** `query_loop`'s classifier reads a
+  turn with no tool calls and no readable text as a malformed response: retry
+  once, then `QueryError::Protocol`. That is right for a session answering the
+  user and wrong for every wake-driven turn — a member draining an FYI batch,
+  or main pumped by an aged pen with nothing to brief. The second silence now
+  ends the turn instead: `QueryEndReason::EmptyResponseRetried`, neither
+  attempt recorded (history stays as clean as the first retry left it), the
+  inbox **not** restored — silence is the absorbing state `channels.rs` always
+  claimed it was — and the subagent's result reads `[subagent returned no
+  text]`, the sentence `non_empty` already held for it.
+- **The repeat was the restore.** Failing the turn put the drained batch back;
+  the chase redelivered it; the same lines produced the same silence, once per
+  round. Completing the turn ends that loop by construction.
+- **The error named the transport for a decision the model made.**
+  `QueryError::Protocol` renders as `stream protocol error: …` and is also what
+  a genuinely dead stream returns (`query_turn.rs`), so main read the wording
+  and told the user it was transient. The real ladder — 429/5xx/overloaded,
+  reconnect notices, ten attempts — is untouched; it was never in this path.
+- **The retry was invisible.** `model returned an empty response; retrying
+  once` is gated on `!session.quiet`, and every subagent inherits the TUI's
+  quiet, so the user saw the verdict and never the first attempt. Left as is:
+  the surviving warning is the main session's, and a crew member's private
+  retry is not the user's business.
+- **D73's leftover, closed in the same edit.** A turn the output budget cut off
+  mid-thought has thinking as its only block and reads empty — so the
+  classifier discarded it *before* the `max_tokens` recovery written for
+  exactly that turn (the dnf incident, August 13; the fix was agreed then and
+  never authorized). `stop_reason == "max_tokens"` now leaves the empty branch
+  untouched: the truncated content enters history and the resume prompt
+  continues it, thinking-only included.
+- **The prompt half.** "End the turn without posting" meant *do not put words
+  in the room*; models read it as *produce nothing at all*. `CHANNEL_NOTE` now
+  says which silence it means — **Silence belongs in the room, not in your turn
+  text** (one line, the anchor trap's fourth sighting) — because turn text is
+  the only thing that reaches main, and closes with the line the note asks for.
+  `stop calling tools` gained `and say so in a line`.
+
+Docs: this record; conversation-model-v6.md's FYI law; feedback-states v1.86
+(§4 empty-turn recovery, §7 acceptance anchor). Tests: two new in `query.rs`
+(silence completes and records nothing; a thinking-only `max_tokens` turn
+recovers), one new `CHANNEL_NOTE` anchor assertion, and the old
+`SERVER_ERROR` expectation reshaped to the silent outcome — 1455 + 13 green.
