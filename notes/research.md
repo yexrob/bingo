@@ -6341,3 +6341,73 @@ stop its siblings is the loop D95's tool comment already refused. No cap on
 agent-to-agent traffic either: the doctrine here is that the rule goes in the
 note and the runtime stays out of it (`max_awake` was cut for the same reason),
 and `MAX_FOLLOW_UPS` still bounds the one loop the runtime does drive.
+
+## D140 — the first protocol leaves before the second one arrives
+
+**What went.** `src/json_events.rs` — 1836 lines, protocol v1 whole: `ClientCommand`,
+`CliEvent`, `JsonSession`, `json_hooks`, `EventWriter`, `probe_event`, `run_inspect`,
+`fatal_event`, `resolve_session`, `JsonEventsError` — together with the four flags that
+reached it (`--json-events`, `--probe`, `--inspect`, `--session`), every `cli.json_events`
+branch in `main.rs`, and its fourteen tests. `--continue` stays: it was never the
+protocol's, and the exact-stem resume that `--session` did will come back as
+`session/resume`.
+
+The reason is in the plan's first line and in the spec's first amendment: **nothing
+consumes it**. The app-server (`notes/design/gui-app-server.md`) replaces the boundary
+outright — no adapter, no compatibility window — and a protocol kept alive for the length
+of a nine-batch rewrite is a second contract every batch has to keep true. Deleting it
+first makes the campaign's later work smaller instead of larger, which is the only
+argument delete-first ever needs.
+
+**What the gates were actually hiding.** `--json-events` had grown into a second startup
+path rather than a second output format. Six `if !cli.json_events` conditions, read
+together, describe a different product: no share store attached (so `bingo share` on a
+GUI session would have had the conversation and neither agents nor rooms), no team
+auto-start (a project with `.bingo/team.json` came up empty), no team memory persisted at
+session end, config warnings swallowed, startup notes drained unread, and a
+`create_reserved` transcript that pre-claimed its own file so the `session.ready` event
+could name one that existed. Each was defensible on its own — stdout had to stay pure
+NDJSON, and a team spawning into a frontend that could not show it is noise — but the sum
+was drift: the frontend decided which of the application's parts existed. That is the
+condition the app-server is designed to end (*no frontend-specific capability gates
+anywhere in startup*), so the gates go now rather than after the core is extracted around
+them. What is left is the double opt-out the ruling that created them asked for:
+`--no-team` plus `team.autoStart:false`, and nothing else.
+
+**Three things died of the same cause, and are named because they will be wanted again.**
+`transcript::create_reserved` (the id-reservation `session/start` will need),
+`ShellDialect::as_str` (the wire form `catalog/read` will need), and `Transcript::delete`
+(what `session.delete` called). All three had exactly one caller, all in the deleted
+protocol; leaving them would have been dead code under `-D warnings`, and git remembers
+them better than a stub would.
+
+**What stayed, deliberately.** `src/error.rs` keeps the `ErrorCode` trait, the stable-code
+registry, `error_code_boxed`, and `sanitize_msg` — a shared contract that the CLI exit and
+the JSON-RPC `error.data` map will both consume; only `JsonEventsError`'s registration is
+gone and the coverage test's count drops 14 → 13. The `BadArgument → exit 2` mapping in
+`main` was checked and *was* json-only (`json_events_exit_code` had one call site, inside
+the `if json_events` arm), so it went with it; clap still exits 2 on an argument error,
+which is what the display-mode black-box test pins.
+
+**Verified.** Four gates green — `cargo fmt --all -- --check`, `cargo check --locked
+--all-targets`, `cargo clippy --locked --all-targets -- -D warnings`, `cargo test --locked
+--all-targets`. `rg "json_events|JsonSession|CliEvent|json_hooks" src/ tests/` returns
+nothing. `--help` no longer prints the four flags and still prints `--continue`, pinned by
+an assertion in the black-box help test rather than left to the eye.
+
+**Baseline, for the campaign's ledger.** Before: 1504 unit + 13 black-box = **1517**.
+After: 1494 + 6 = **1500**. Eighteen tests deleted, one added. The eighteen are all
+protocol-layer, not behavior that moved: seven `json_events::tests::*` (command round-trip,
+sequence gapless, caps, version rejection, exact-session resolution), seven black-box
+`json_events_*`, three `main.rs` argument-parse tests for the deleted flags, and
+`platform::tests::dialect_wire_form_is_stable`, which existed to pin v1's four strings.
+The one added — `the_deleted_json_protocol_flags_are_no_longer_arguments` — asserts the
+absence, because a flag that quietly kept parsing is a flag a client will eventually find.
+From here the count only grows: per the plan, domain tests move with their logic rather
+than being deleted with it.
+
+**Not verified.** No real-terminal smoke; the TUI and `--print` paths were exercised only
+by the suite, and the un-gated startup (share attach, team auto-start, team-memory
+persistence) is now on the *same* path the whole suite already covered, so nothing new
+was written for it. Nothing was built in `src/app/` — B0 is a deletion, and the contract
+is B1's.
