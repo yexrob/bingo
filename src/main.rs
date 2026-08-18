@@ -24,7 +24,6 @@ mod context_usage;
 mod error;
 mod experience;
 mod hooks;
-mod json_events;
 mod live;
 mod mcp;
 mod memory;
@@ -61,35 +60,8 @@ mod watch;
 #[command(args_conflicts_with_subcommands = true)]
 struct Cli {
     /// Headless mode: print the reply straight to stdout
-    #[arg(short, long, conflicts_with = "json_events")]
+    #[arg(short, long)]
     print: bool,
-
-    /// Persistent protocol-v1 NDJSON events over stdio
-    #[arg(
-        long,
-        conflicts_with_all = ["print", "inline", "fullscreen", "continue_", "prompt"]
-    )]
-    json_events: bool,
-
-    /// Resume one exact transcript stem in JSON-events mode
-    #[arg(long, requires = "json_events")]
-    session: Option<String>,
-
-    /// Side-effect-free capability probe in JSON-events mode (protocol.ready, then exit 0)
-    #[arg(
-        long,
-        requires = "json_events",
-        conflicts_with_all = ["session", "model", "permission_mode", "no_team"]
-    )]
-    probe: bool,
-
-    /// Side-effect-free settings inspection in JSON-events mode (no transcript)
-    #[arg(
-        long,
-        requires = "json_events",
-        conflicts_with_all = ["session", "probe"]
-    )]
-    inspect: bool,
 
     /// Fullscreen mode (default): alternate-screen canvas, input pinned at the
     /// bottom, and in-app scrolling. Retained as an explicit compatibility flag.
@@ -161,26 +133,14 @@ enum Command {
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
-    let json_events = cli.json_events;
     if let Err(e) = run(cli).await {
-        let code = if json_events {
-            crate::json_events::fatal_event(std::io::stdout().lock(), &*e)
-                .map(|_| json_events_exit_code(&*e))
-                .unwrap_or(1)
-        } else {
-            report_error(&*e);
-            1
-        };
-        std::process::exit(code);
+        report_error(&*e);
+        std::process::exit(1);
     }
 }
 
 /// The actual main flow (formerly the `main` body). Errors propagate upward and exit through [`main`].
 async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
-    if cli.json_events && cli.probe {
-        crate::json_events::probe_event(std::io::stdout().lock())?;
-        return Ok(());
-    }
     let fullscreen = cli.fullscreen_mode();
 
     let home = crate::storage::resolve_home()?;
@@ -243,9 +203,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         ));
     }
     for note in &config_notes {
-        if !cli.json_events {
-            eprintln!("[bingo] warning: {note}");
-        }
+        eprintln!("[bingo] warning: {note}");
     }
 
     let permission_mode: PermissionMode = cli
@@ -255,15 +213,6 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         .parse()?;
 
     let client = Client::from_settings_at(&settings, &home)?;
-    if cli.json_events && cli.inspect {
-        let reader = std::io::BufReader::new(std::io::stdin());
-        let writer = std::io::BufWriter::new(std::io::stdout());
-        let exit_code = crate::json_events::run_inspect(client, reader, writer).await?;
-        if exit_code != 0 {
-            std::process::exit(exit_code);
-        }
-        return Ok(());
-    }
     let mut system = build_system(
         &load_memory(&home, &project_dir),
         load_project_memory(&home, &project_dir),
@@ -306,43 +255,17 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // alternate screen opens is wiped by it — the fullscreen (default) host
     // never showed these. They still go to stderr for headless/log capture.
     let mut startup_notes: Vec<String> = config_notes;
-    let (transcript, initial_messages, resumed): (Option<Transcript>, Vec<Message>, bool) =
-        if let Some(stem) = cli.session.as_deref() {
-            let transcript = crate::json_events::resolve_session(&home, stem)?;
-            transcript.activate()?;
-            let messages = transcript.load_messages()?;
-            (Some(transcript), messages, true)
-        } else if cli.continue_ {
-            match latest_transcript(&home)? {
-                Some(t) => {
-                    t.activate()?;
-                    eprintln!("[bingo] continuing transcript: {}", t.path().display());
-                    (Some(t.clone()), t.load_messages()?, true)
-                }
-                None => match create_transcript(&home, &project_dir) {
-                    Ok(t) => (Some(t), Vec::new(), false),
-                    Err(e) => {
-                        if !cli.print && !cli.json_events {
-                            eprintln!(
-                                "[bingo] warning: cannot create transcript (history will not persist): {e}"
-                            );
-                            startup_notes.push(format!(
-                                "⚠ cannot create transcript (history will not persist): {e}"
-                            ));
-                        }
-                        (None, Vec::new(), false)
-                    }
-                },
+    let (transcript, initial_messages): (Option<Transcript>, Vec<Message>) = if cli.continue_ {
+        match latest_transcript(&home)? {
+            Some(t) => {
+                t.activate()?;
+                eprintln!("[bingo] continuing transcript: {}", t.path().display());
+                (Some(t.clone()), t.load_messages()?)
             }
-        } else {
-            match if cli.json_events {
-                crate::transcript::create_reserved(&home, &project_dir)
-            } else {
-                create_transcript(&home, &project_dir)
-            } {
-                Ok(t) => (Some(t), Vec::new(), false),
+            None => match create_transcript(&home, &project_dir) {
+                Ok(t) => (Some(t), Vec::new()),
                 Err(e) => {
-                    if !cli.print && !cli.json_events {
+                    if !cli.print {
                         eprintln!(
                             "[bingo] warning: cannot create transcript (history will not persist): {e}"
                         );
@@ -350,10 +273,26 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                             "⚠ cannot create transcript (history will not persist): {e}"
                         ));
                     }
-                    (None, Vec::new(), false)
+                    (None, Vec::new())
                 }
+            },
+        }
+    } else {
+        match create_transcript(&home, &project_dir) {
+            Ok(t) => (Some(t), Vec::new()),
+            Err(e) => {
+                if !cli.print {
+                    eprintln!(
+                        "[bingo] warning: cannot create transcript (history will not persist): {e}"
+                    );
+                    startup_notes.push(format!(
+                        "⚠ cannot create transcript (history will not persist): {e}"
+                    ));
+                }
+                (None, Vec::new())
             }
-        };
+        }
+    };
 
     let (expand_tx, expand_rx) = tokio::sync::watch::channel(false);
     // Task lists are isolated per session: key = transcript file stem (--continue restores the
@@ -388,11 +327,9 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 let _ = runtime.provider_tx.send(name.to_string());
             }
             Err(e) => {
-                if !cli.json_events {
-                    eprintln!(
-                        "[bingo] warning: provider \"{name}\" is no longer valid, falling back to default: {e}"
-                    );
-                }
+                eprintln!(
+                    "[bingo] warning: provider \"{name}\" is no longer valid, falling back to default: {e}"
+                );
                 startup_notes.push(format!(
                     "⚠ the provider \"{name}\" in settings is no longer valid; fell back to default: {e}"
                 ));
@@ -431,11 +368,10 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
     // Share persistence: incrementally records subagent/channel snapshots per session (the data source for `bingo share`).
     // Same key as the task list = transcript file stem; create/read failures only warn (an enhancement, not a contract).
-    if !cli.json_events
-        && let Some(stem) = transcript
-            .as_ref()
-            .map(|t| t.name())
-            .filter(|s| !s.is_empty())
+    if let Some(stem) = transcript
+        .as_ref()
+        .map(|t| t.name())
+        .filter(|s| !s.is_empty())
     {
         let share_path = crate::share::shares_dir(&home).join(format!("{stem}.json"));
         match crate::share::ShareStore::load_or_create(&share_path) {
@@ -456,7 +392,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // The whole tree, not just the root (D54): a chart declared in one file is one
     // formation, and a half-started org is worse than none.
     // Double opt-out: settings `team.autoStart:false` + `--no-team`.
-    if !cli.json_events && !cli.no_team && session.settings.team.auto_start.unwrap_or(true) {
+    if !cli.no_team && session.settings.team.auto_start.unwrap_or(true) {
         match crate::team::load_team_tree(&project_dir) {
             Ok(Some(tree)) => {
                 let name = tree.root().def.name.clone();
@@ -491,53 +427,8 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    if cli.json_events {
-        drop(startup_notes.drain(..));
-    }
-
     let result = async {
-        if cli.json_events {
-            drop(initial_messages);
-            let transcript = session.runtime.transcript.borrow().clone().ok_or_else(|| {
-                crate::json_events::JsonEventsError::BadArgument(
-                    "JSON-events mode requires a transcript".to_string(),
-                )
-            })?;
-            let metadata = crate::json_events::CliSessionMetadata {
-                bingo_version: env!("CARGO_PKG_VERSION").to_string(),
-                protocol_version: crate::json_events::PROTOCOL_VERSION,
-                session_id: transcript.name(),
-                transcript_path: transcript.path().display().to_string(),
-                resumed,
-                cwd: project_dir.display().to_string(),
-                provider: session.runtime.provider.borrow().clone(),
-                model: session.runtime.model.borrow().clone(),
-                thinking_level: session
-                    .runtime
-                    .thinking
-                    .borrow()
-                    .clone()
-                    .unwrap_or_else(|| "off".to_string()),
-                permission_mode: mode_str.to_string(),
-                theme: session
-                    .settings
-                    .theme
-                    .clone()
-                    .filter(|theme| matches!(theme.as_str(), "auto" | "dark" | "light"))
-                    .unwrap_or_else(|| "auto".to_string()),
-                supports_images: session.client.supports_images(),
-                shell: crate::platform::shell().to_string(),
-                shell_dialect: crate::platform::shell_dialect().as_str().to_string(),
-            };
-            let reader = std::io::BufReader::new(std::io::stdin());
-            let writer = std::io::BufWriter::new(std::io::stdout());
-            let exit_code = crate::json_events::JsonSession::new(session.clone(), metadata, writer)
-                .run(reader)
-                .await?;
-            if exit_code != 0 {
-                std::process::exit(exit_code);
-            }
-        } else if cli.print {
+        if cli.print {
             let prompt = if !cli.prompt.is_empty() {
                 cli.prompt.join(" ")
             } else {
@@ -574,7 +465,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
     // D31 session-end persistence: latest history of team members (for cross-session
     // restore; failures are silent).
-    if !cli.json_events && !cli.no_team && session.settings.team.auto_start.unwrap_or(true) {
+    if !cli.no_team && session.settings.team.auto_start.unwrap_or(true) {
         persist_team_memory(&session, &home, &session.cwd());
     }
     crate::hooks::run_session_end(&session.settings.hooks, mode_str, &session.cwd()).await;
@@ -682,17 +573,6 @@ async fn run_share(
     Ok(())
 }
 
-fn json_events_exit_code(error: &(dyn std::error::Error + 'static)) -> i32 {
-    if error
-        .downcast_ref::<crate::json_events::JsonEventsError>()
-        .is_some_and(|error| matches!(error, crate::json_events::JsonEventsError::BadArgument(_)))
-    {
-        2
-    } else {
-        1
-    }
-}
-
 /// Top-level error exit (C exit mapping): `Box<dyn Error>` walks the cause chain for a stable
 /// code ([`crate::error::error_code_boxed`]); msg is escaped/truncated.
 /// Non-TTY prints `[error] code=<SCREAMING_SNAKE> msg=<single line ≤200>` (AC-30/31/32);
@@ -763,48 +643,19 @@ mod tests {
         assert!(cli.fullscreen_mode());
     }
 
+    /// The v1 JSON protocol's flags are gone with it (D140): the app-server
+    /// replaces them, and a flag left parsing is a flag a client will find.
     #[test]
-    fn json_events_accepts_exact_session_and_compatible_options() {
-        let cli = Cli::try_parse_from([
-            "bingo",
-            "--json-events",
-            "--session",
-            "project-123",
-            "--model",
-            "model-1",
-            "--permission-mode",
-            "dontAsk",
-            "--no-team",
-        ])
-        .unwrap_or_else(|error| panic!("{error}"));
-
-        assert!(cli.json_events);
-        assert_eq!(cli.session.as_deref(), Some("project-123"));
-    }
-
-    #[test]
-    fn json_events_conflicts_with_legacy_front_ends_and_prompts() {
+    fn the_deleted_json_protocol_flags_are_no_longer_arguments() {
         for args in [
-            vec!["bingo", "--json-events", "--print"],
-            vec!["bingo", "--json-events", "--inline"],
-            vec!["bingo", "--json-events", "--fullscreen"],
-            vec!["bingo", "--json-events", "--continue"],
-            vec!["bingo", "--json-events", "hello"],
+            vec!["bingo", "--json-events"],
+            vec!["bingo", "--probe"],
+            vec!["bingo", "--inspect"],
+            vec!["bingo", "--session", "project-123"],
         ] {
-            let error = Cli::try_parse_from(args).expect_err("modes must conflict");
-            assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+            let error = Cli::try_parse_from(args).expect_err("the flag must not parse");
+            assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
         }
-    }
-
-    #[test]
-    fn exact_session_requires_json_events() {
-        let error = Cli::try_parse_from(["bingo", "--session", "project-123"])
-            .expect_err("--session is JSON-only");
-
-        assert_eq!(
-            error.kind(),
-            clap::error::ErrorKind::MissingRequiredArgument
-        );
     }
 
     #[test]

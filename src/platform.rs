@@ -60,18 +60,6 @@ pub enum ShellDialect {
     Unknown,
 }
 
-impl ShellDialect {
-    /// Wire form (JSON `shellDialect`).
-    pub fn as_str(self) -> &'static str {
-        match self {
-            ShellDialect::Posix => "posix",
-            ShellDialect::PowerShell => "powershell",
-            ShellDialect::Cmd => "cmd",
-            ShellDialect::Unknown => "unknown",
-        }
-    }
-}
-
 /// Dialect of the process-wide resolved shell.
 pub fn shell_dialect() -> ShellDialect {
     dialect_of(shell())
@@ -233,15 +221,6 @@ mod tests {
         ] {
             assert_eq!(dialect_of(shell), dialect, "{shell}");
         }
-    }
-
-    #[test]
-    fn dialect_wire_form_is_stable() {
-        // The JSON protocol serializes these strings; renaming breaks clients.
-        assert_eq!(ShellDialect::Posix.as_str(), "posix");
-        assert_eq!(ShellDialect::PowerShell.as_str(), "powershell");
-        assert_eq!(ShellDialect::Cmd.as_str(), "cmd");
-        assert_eq!(ShellDialect::Unknown.as_str(), "unknown");
     }
 
     #[test]

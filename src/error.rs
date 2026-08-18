@@ -163,7 +163,6 @@ fn downcast_error_code(err: &(dyn std::error::Error + 'static)) -> Option<&'stat
         crate::transcript::TranscriptError,
         crate::experience::ExperienceError,
         crate::hooks::HookError,
-        crate::json_events::JsonEventsError,
         crate::mcp::McpError,
         crate::share::ShareError,
         crate::storage::StorageError,
@@ -464,7 +463,7 @@ mod tests {
     }
 
     /// The macro registry covers all ErrorCode-implementing types (guardrail 4
-    /// "registry is the contract's second place"): each of the 14 registered types is
+    /// "registry is the contract's second place"): each of the 13 registered types is
     /// asserted non-GENERIC through the boxed exit — a type implementing ErrorCode that
     /// only takes effect on the TUI exit while missing from the downcast macro would
     /// silently fall to GENERIC on the CLI exit and turn this test red. Cross-checked
@@ -474,7 +473,6 @@ mod tests {
         use crate::api::client::ClientError;
         use crate::experience::ExperienceError;
         use crate::hooks::HookError;
-        use crate::json_events::JsonEventsError;
         use crate::mcp::McpError;
         use crate::query::QueryError;
         use crate::settings::SettingsError;
@@ -495,7 +493,6 @@ mod tests {
             Box::new(TranscriptError::Io(std::io::Error::other("x"))),
             Box::new(ExperienceError::Io(std::io::Error::other("x"))),
             Box::new(HookError::Failed("x".into())),
-            Box::new(JsonEventsError::BadArgument("x".into())),
             Box::new(McpError::Connect {
                 server: "s".into(),
                 detail: "d".into(),
@@ -506,8 +503,8 @@ mod tests {
         ];
         assert_eq!(
             samples.len(),
-            14,
-            "the boxed exit should have 14 registered types: new ErrorCode implementors must be \
+            13,
+            "the boxed exit should have 13 registered types: new ErrorCode implementors must be \
              `downcast_error_code` macro registration + an instance in this test; missing either turns CI red"
         );
         for e in &samples {
