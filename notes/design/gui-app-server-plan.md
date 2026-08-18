@@ -156,6 +156,15 @@ B2b：三 registry 收编为 actor 状态；agent run loop、看门狗、inbox p
 > 已全量过桥。附：`&EngineHost` 把"一 run 一 host"降为约定，B3 由 actor 落为强制；
 > `AppError::Unserved` 须于 B5 清零。
 
+> **B2b review 裁决（2026-08-18，Fable）**：三个偏离全部核准——① actor 跑独立 OS 线程 +
+> 无界收件箱：同步调用方无法等待、死锁类整体消除，进程内生产者受 turn 并发度约束；
+> B6 的 wire 入口仍按规范有界。② `Answer::now()`（自写 parker，96 个调用点）核准为 shim，
+> **B7 必须清零**。③ 读模型携带活句柄（`Arc<Session>`、`Arc<Mutex<AgentProgress>>`）是
+> "一切变更经 actor"的**特许例外**，边界：只许单调进度计数与现场采样走这条缝，
+> 任何承载不变式的状态不得经活句柄变更——B4/B7 不得误读扩用。
+> ④ 已知债务转 B3：D29 循环现在停一根线程（AgentRegistry 持 Session、Session 持句柄）——
+> B3 须落 AppCore/session 关闭路径（actor 收摊、线程退出），wire 的 session/close 在 B6 接。
+
 ### B3 · 会话与 turn 行为（L）
 `conversation/submit` 全路由（composer 解析从 chat/bufferview 迁入）；queue/steer 仲裁
 （FIFO 前缀、吸收/回收一场竞态）；turn 生命周期**恰好一个终态**（error 不再替代终态——
