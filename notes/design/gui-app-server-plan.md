@@ -223,6 +223,16 @@ stdio JSON-RPC 循环（framing、initialize 协商、有界队列、delta 合�
 隔离 HOME/stdout 纯净形制）。
 **验收**：四门绿 + 黑盒全绿 + stderr/stdout 分离断言。
 
+> **B6 落地记（2026-08-19）**：传输已上（D147，五提交）。三任务一循环，`select!` 偏向内核帧 →
+> 不变式 #3 成为定序的事实而非纪律。两处停机修补：`settle()`（EOF/shutdown 前把已受理的请求
+> 答完）与 `retire()`（被替换/关闭的 session 把链路读到尽头再放手）。`session/start`/`resume`
+> 归传输（B5 裁决②），中间以 **lobby**（无 session 的 AppCore）让 catalog/session-list/delete/
+> asset-chunk 继续作答；哪四个方法无需 session 由「声明错误里没有 NO_ACTIVE_SESSION」的测试锁死。
+> 两处加法契约：`RequestId::Null`（JSON-RPC 要求）与 `EventMeta.coalescedFrom`（合并帧必须说明
+> 它代表哪一段，否则 seq 不再无洞）——后者是本批唯一「宁可加字段也不留需求不做」的取舍，**请 review 重点看**。
+> 退出码 0/1/2 已定义并测试。engine 未接：text/tool/permission/retry/steer 场景显式留 B7，
+> 两个测试文件头部各自写明。
+
 ### B7 · TUI 重接（L）
 Chat/App 管线换 AppLink 帧，删全部 shim；TuiEvent 本地化；按键动作走同一 Action registry；
 渲染层不动（写 once 不变量、statics、页引擎照旧）。

@@ -7377,3 +7377,142 @@ Six tests retargeted, none weakened:
 - **`resource/read` for tasks is always empty** — the task store is the session's, and the core
   does not hold it yet.
 - **`session/delete` cannot delete the open session**, by refusal rather than by omission.
+
+## D147 — the contract gets a transport
+
+**What it lands.** B6 of the app-server campaign. `bingo app-server` stops being a schema
+generator that refuses to serve and becomes the JSON frontend: NDJSON on stdio, one JSON-RPC
+message per line, the twenty methods B1–B5 built answered over the wire, and the two the
+transport owns itself.
+
+Five commits, four gates green after each. Baseline 1644 unit + 7 black-box → **1678 unit +
+21 black-box** (7 CLI + 14 app-server); no test deleted, one retargeted (below).
+
+### The shape of it
+
+Three tasks and one loop, in `src/app_server/stdio.rs`:
+
+| part | what it owns |
+|---|---|
+| reader task | bytes → lines. Refuses a line past 1 MiB and a stream that is not UTF-8 by ending, because neither can be framed past. |
+| the loop | the connection: which protocol was negotiated, which session is open, which request waits for which reply. |
+| writer task | frames → bytes. One batch per flush, coalescing what may be coalesced, with a write deadline. |
+
+The loop's `select!` is **biased toward the core**: its frames are read before the client's
+lines. That is what makes "an accepted request's response is written before the first event
+it caused" (invariant #3) a fact of the ordering rather than a rule to remember — the reply
+and the events travel the same channel, in the order the actor decided.
+
+Two things the first run found, both about stopping:
+
+- **A request the core accepted is a request the core answers.** EOF and `shutdown` arriving
+  while a reply was in flight used to strand it, because a ready inbound line beat a
+  not-yet-ready core frame. `settle()` drains the outstanding replies before either exit.
+- **A session that is replaced or closed is drained, not dropped.** Its link still has the
+  events its closing published, and terminal events are exactly the ones that may not be
+  dropped. `retire()` reads it to the end; anything the dead actor will never answer is
+  answered with a refusal rather than with silence.
+
+### `session/start` and `session/resume` (B5 ruling ②)
+
+One `AppCore` *is* one session, so choosing another replaces the actor rather than asking it.
+`src/app_server/session.rs` is that assembly: settings, catalogs, transcript, the room
+sidecar, the actor. No engine — a session started here can be read, configured, and closed;
+it cannot run a turn, and `action/list` already says which actions need one.
+
+- **Locators are matched exactly.** The fuzzy `--session` fragment left with the first
+  protocol (D140); a locator is a name `session/list` handed out.
+- **A started session opens its transcript.** The TUI opens it at the first thing written;
+  the app-server opens it at `session/start`, so the session a client just started is one
+  `session/list` can name and `session/resume` can find — and holding it holds its lock.
+- **The epoch moves with the actor.** `initialize` announces the connection's; every start or
+  resume mints a new one and publishes it in the snapshot, and every identifier from the
+  previous epoch is invalid from that moment. The resume test asserts the epoch changed.
+- **Between sessions there is a lobby**: an `AppCore` with no session, kept so `catalog/read`,
+  `session/list`, `session/delete`, and `asset/readChunk` keep answering (Amendment #7). Which
+  four those are is not a hand-kept list — a test asserts it is exactly the set whose declared
+  errors omit `NO_ACTIVE_SESSION`, so the table cannot drift from the manifest.
+
+### Two additive contract changes, and why each was needed
+
+Flow as the rules require: types, regenerated bundle, and fixtures in one commit.
+
+- **`RequestId::Null`.** JSON-RPC says a reply to a line whose id could not be read carries
+  null. B1 had no way to write it. A defect, fixed additively.
+- **`EventMeta.coalescedFrom`.** The spec permits coalescing "before a sequence number is
+  assigned"; in this architecture the actor assigns it, so a transport-side merge would drop
+  sequence numbers and a client counting them would read three lost events. The merged frame
+  now says which run it stands for: `coalescedFrom` is where the run began, `seq` is where it
+  ended, the text is carried whole and `deltaSeq` is the run's last. Gapless either way.
+  **This is the one place the batch chose a contract addition over leaving a requirement
+  unbuilt; it is worth a reviewer's eye.**
+
+Two core reply shapes also had to grow, because serving their methods needed facts only the
+core holds: `AppReply::Marked` (the summary a `conversation/markRead` produced — a client that
+just cleared a badge should not wait for a notification to know) and `Reclaim::Absorbed(QueueId)`
+(the wire's `alreadyAbsorbed` names the entry the barrier took).
+
+### Errors, load, and the exit codes
+
+| exit | when |
+|---|---|
+| 0 | EOF or `shutdown`, after the shutdown policy ran |
+| 1 | `FRAME_TOO_LARGE`, `TRANSPORT_FAILED` (not UTF-8, or stdout stopped taking frames), `CLIENT_TOO_SLOW`, or a non-recoverable initialization (`PROTOCOL_UNSUPPORTED` / `CAPABILITY_REQUIRED`) |
+| 2 | the CLI's own usage error, before a connection exists |
+
+`TRANSPORT_FAILED` is a new stable code (`src/error.rs`); it never appears on the wire, only
+as the process's exit. Non-recoverable initialization ends the connection because the contract
+already said those two are non-recoverable — the refusal is written first, then the connection
+closes.
+
+Backpressure: outbound queue bounded at 1024 frames, inbound at 64 lines, a 30 s write
+deadline, a 1 s best-effort `CLIENT_TOO_SLOW` notice on the null id, then close → interrupt →
+persist. A response too large for the 8 MiB ceiling becomes the error that says so; a
+notification too large closes the transport, because dropping a lifecycle event is what the
+protocol forbids.
+
+### Verified, and how
+
+| what | where |
+|---|---|
+| handshake, and every way it is refused | `stdio::tests::{the_handshake_agrees…, initialization_fails_rather_than_pretending_to_agree, initializing_twice_is_refused}` |
+| nothing served between `initialize` and `initialized` | `…::nothing_is_served_before_the_client_says_it_is_ready` |
+| parse error / invalid request / unknown method / bad params, told apart | `…::{a_malformed_line_is_a_parse_error…, a_frame_that_is_not_a_request…, an_unknown_method_and_unreadable_params_are_told_apart}` |
+| duplicate in-flight id; additive fields; notifications never answered | `…::{a_request_id_already_in_flight_is_refused, unknown_additive_fields_are_accepted, a_notification_is_never_answered}` |
+| oversized frame, non-UTF-8, EOF | `…::{a_line_past_the_client_ceiling…, input_that_is_not_utf8…, eof_ends_the_connection_cleanly}` |
+| session lifecycle, resume, epoch change, delete | `…::{a_session_starts_reads_closes…, a_session_is_resumed_by_the_name_it_keeps_across_epochs, deleting_the_open_session_is_refused…}` |
+| response before its caused events; snapshot cursor orders the stream | `…::a_response_is_written_before_the_events_it_caused` |
+| every method travels the wire, answering within its declared errors | `…::every_method_travels_the_transport_and_answers_within_its_contract` |
+| the session-free four match the manifest | `…::the_session_free_methods_are_the_ones_that_declare_no_missing_session` |
+| coalescing: merged, never a lifecycle event, never across items or streams | `…::{adjacent_appends_for_one_item…, a_lifecycle_event_is_never_merged_or_dropped, reasoning_and_text_are_never_merged_together, a_response_is_never_merged…}` |
+| the server ceiling refuses rather than writes | `…::a_frame_past_the_server_ceiling_is_refused_rather_than_written` |
+| a client that stops reading loses the transport | `…::a_client_that_stops_reading_loses_the_transport` (paused clock) |
+| real process: handshake, refusals, lifecycle, resume + rooms, catalogs, actions, queue, attention, assets, errors, stdout purity, exit codes | `tests/app_server_black_box.rs`, 14 scenarios |
+| no credential on the wire | `…::the_catalogs_answer_before_a_session_and_never_carry_a_key` — a settings file with an `apiKey` fixture, and the whole of every catalog, config, and resource frame searched for its bytes |
+
+One test retargeted, not weakened: `the_app_server_publishes_its_schema_and_refuses_to_serve_yet`
+lost its second half (serving is no longer refused) and became
+`the_app_server_publishes_its_schema`; what it used to assert is now fourteen scenarios in the
+new file.
+
+### Not verified, and the boundaries kept
+
+- **No model turn crosses the wire.** Text, tool calls, permission prompts, stream retries and
+  steering are B7's — the engine is not attached to the transport. Both test files say so at
+  the top; the black-box file names them as B7's to add. Nothing here pretends to cover them.
+- **The rooms in the resume scenario are a fixture on disk**, not rooms the test created:
+  opening a room takes an agent, and an agent takes the engine. What is under test is the
+  transport's half — that resume names a session across epochs, replays the sidecar B4 wrote,
+  and publishes what came back.
+- **`conversation/submit` with prose is still `Unserved`** and reaches the wire as
+  `ACTION_UNAVAILABLE` (B7). A slash line through the composer works, and is tested.
+- **The lobby is one OS thread while idle.** It is a whole `AppCore` with no session, which is
+  the cheapest honest way to answer the catalogs from the one implementation rather than a
+  second one in the transport.
+- **A pipelined request can be abandoned.** If a client sends `session/close` and more requests
+  in the same breath, a request the dying actor never reached is answered with a refusal
+  (`NO_ACTIVE_SESSION`, or the standard internal error for a method that never needed a
+  session) rather than with silence. A client that waits for each reply never sees it.
+- **The discipline gate is still red on dev**: `src/agents.rs` (4024), `src/app/controller.rs`
+  (4214), `src/tui/chat.rs` (4103) exceed the 4000-line cap. All three were over before this
+  batch; controller.rs grew by 32 lines here. Splitting them is nobody's batch yet.
