@@ -208,6 +208,15 @@ attention（markRead/unread/mention obligations）；**房间+attention 持久�
 `resource/read` 分页；`asset/registerPath`/`readChunk`。
 **验收**：四门绿 + registry 完备性测试 + 每 Action 至少一条行为测试。
 
+> **B5 review 裁决（2026-08-19，Fable）**：① `Turn`/`Shell` disposition 与 `Deliver` 同墙
+> （都要 engine），并归 B7——对任务书的偏离核准，诚实记录优于硬凑。② `session/start`/`resume`
+> 归 B6 传输层拥有（一个 AppCore 即一个 session，换 session 是换 actor，不是问 actor）——正确。
+> ③ `provider.login` 不携带 `--device-auth`/`--manual <token>` 核准：凭据不进 wire 请求；
+> GUI 侧认证是未来的设计决定（operation 式 device flow），不是加个字段。④ 四个终端 handler
+> 二次读参、core/engine 双镜像、`ArgumentSource` 留进程内——均为已标记 shim/已知限界，B7 收敛。
+> ⑤ D81 session 级授权未出现在 `config/read`：**B7 跑 parity ledger 时核验** TUI /permissions
+> 是否展示 session 规则，若展示则 wire 必须跟上（B8 补），不许静默分叉。
+
 ### B6 · app-server 传输（M）
 stdio JSON-RPC 循环（framing、initialize 协商、有界队列、delta 合并、慢客户端关闭策略）；
 黑盒场景套件（真进程 + fake provider，覆盖规范 §Black-box 列表；沿用 v1 黑盒的
