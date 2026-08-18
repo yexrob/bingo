@@ -23,6 +23,7 @@
 
 pub mod action;
 pub mod answer;
+pub mod asset;
 pub mod attention;
 pub mod catalog;
 #[cfg(test)]

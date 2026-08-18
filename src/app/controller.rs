@@ -198,6 +198,17 @@ pub(super) fn spawn(setup: SessionSetup) -> (mpsc::UnboundedSender<Control>, Reg
     )
 }
 
+/// Why the core would not take an asset, in the protocol's own vocabulary.
+fn asset_refusal(error: &crate::app::asset::AssetError) -> AppError {
+    use crate::app::asset::AssetError;
+    use crate::app_server::protocol::error::ProtocolErrorKind;
+    AppError::Refused(match error {
+        AssetError::NotFound => ProtocolErrorKind::AssetNotFound,
+        AssetError::Rejected(_) => ProtocolErrorKind::AssetRejected,
+        AssetError::BadArgument(_) => ProtocolErrorKind::BadArgument,
+    })
+}
+
 /// The permission rules settings declares. Session-scoped grants (D81's
 /// `allowSession`) live in the run that granted them and reach the core in B7.
 fn rules_of(settings: &crate::settings::Settings) -> Vec<crate::app::snapshot::PermissionRule> {
@@ -293,6 +304,9 @@ struct Controller {
     /// What the MCP manager last reported. Empty until something has connected,
     /// which is the honest answer for a session that has not.
     mcp: Vec<crate::app::snapshot::McpServerState>,
+    /// The bytes this session owns: attachments, and output too large for an
+    /// item. They go when the session does.
+    assets: crate::app::asset::AssetStore,
     /// The last sequence number stamped. Strictly increasing, gapless, scoped to
     /// this epoch.
     seq: u64,
@@ -382,6 +396,10 @@ struct RoomSummary {
 impl Controller {
     fn new(setup: SessionSetup, control: mpsc::WeakUnboundedSender<Control>, state: State) -> Self {
         let epoch = EpochId::mint();
+        let assets = crate::app::asset::AssetStore::new(
+            &crate::storage::data_dir(setup.catalog.home()),
+            epoch.as_str(),
+        );
         let mut mint = IdMint::new(epoch.clone());
         let id: SessionId = mint.mint();
         let conversations = Conversations::new(&mut mint);
@@ -420,6 +438,7 @@ impl Controller {
             session,
             capabilities: setup.capabilities,
             config,
+            assets,
             catalog: setup.catalog,
             mcp: Vec::new(),
             seq: 0,
@@ -623,6 +642,18 @@ impl Controller {
                 *expected_revision,
             );
         }
+        if let AppCommand::RegisterAsset {
+            path,
+            expected_mime,
+            expected_sha256,
+        } = &command
+        {
+            return self.serve_register_asset(
+                path,
+                expected_mime.as_deref(),
+                expected_sha256.as_deref(),
+            );
+        }
         if matches!(command, AppCommand::CloseSession | AppCommand::Shutdown) {
             // The reply goes out before the loop ends, which is why the closing
             // itself is a control message rather than work done here: a request
@@ -645,6 +676,8 @@ impl Controller {
             AppCommand::RespondInteraction { .. } => "interaction/respond",
 
             AppCommand::ReclaimQueueTail { .. } => "queue/reclaimTail",
+
+            // Answered above; the compiler is what keeps this exhaustive.
             AppCommand::RegisterAsset { .. } => "asset/registerPath",
             // Answered above; the compiler is what keeps this exhaustive.
             AppCommand::MarkRead { .. } => "conversation/markRead",
@@ -729,7 +762,7 @@ impl Controller {
                 limit,
                 &crate::app::catalog::Live {
                     mcp: (!self.mcp.is_empty()).then_some(self.mcp.as_slice()),
-                    images: &[],
+                    images: &self.assets.images(),
                 },
             )))),
             AppQuery::ReadResource {
@@ -741,8 +774,55 @@ impl Controller {
                 cursor.as_deref(),
                 limit,
             )))),
-            AppQuery::ReadAssetChunk { .. } => Err(AppError::Unserved("asset/readChunk")),
+            AppQuery::ReadAssetChunk {
+                asset_id,
+                offset,
+                length,
+            } => match self.assets.read_chunk(&asset_id, offset, length) {
+                Ok((data, next_offset, eof)) => Ok(AppReply::AssetChunk {
+                    data,
+                    next_offset,
+                    eof,
+                }),
+                Err(error) => Err(asset_refusal(&error)),
+            },
         }
+    }
+
+    /// `asset/registerPath`: take the file into the server's own storage and
+    /// announce that the bytes are available.
+    fn serve_register_asset(
+        &mut self,
+        path: &std::path::Path,
+        expected_mime: Option<&str>,
+        expected_sha256: Option<&str>,
+    ) -> Result<AppReply, AppError> {
+        let record = self
+            .assets
+            .register_path(&mut self.mint, path, expected_mime, expected_sha256)
+            .map_err(|error| asset_refusal(&error))?;
+        let is_image = record.kind == crate::app::snapshot::AssetKind::Image;
+        self.publish(
+            Box::new(AppEventPayload::AssetAvailable(
+                crate::app::event::AssetAvailable {
+                    asset: record.clone(),
+                },
+            )),
+            None,
+        );
+        if is_image {
+            let revision = self.assets.len() as u64;
+            self.publish(
+                Box::new(AppEventPayload::CatalogChanged(
+                    crate::app::event::CatalogChanged {
+                        catalog: crate::app::snapshot::CatalogKind::Images,
+                        revision,
+                    },
+                )),
+                None,
+            );
+        }
+        Ok(AppReply::Asset(Box::new(record)))
     }
 
     /// Take what the MCP manager reports, and say so once it has changed.
@@ -1493,6 +1573,9 @@ impl Controller {
         self.announce_operations(changes);
 
         self.agents.release();
+        // Session assets die with the session; what a transcript refers to stays
+        // reconstructable from its own durable content.
+        self.assets.clear();
         self.session.state = SessionState::Closed;
         self.publish(
             Box::new(AppEventPayload::SessionClosed(SessionClosed {
@@ -2880,6 +2963,105 @@ mod tests {
                 crate::app_server::protocol::error::ProtocolErrorKind::ConversationNotFound
             ),
             other => panic!("expected a refusal, got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// `asset/registerPath` then `asset/readChunk`: the bytes go into the
+    /// server's own storage, the caller's file is no longer needed, and the
+    /// image shows up in the catalog that lists them.
+    #[tokio::test]
+    async fn an_asset_is_registered_and_read_back_through_the_core() {
+        let (core, home) = configured("assets");
+        let (mut link, _) = attached(&core, "test").await;
+        let mut png = Vec::new();
+        image::RgbaImage::from_pixel(4, 2, image::Rgba([9, 9, 9, 255]))
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap_or_else(|error| panic!("{error}"));
+        let source = home.join("shot.png");
+        std::fs::write(&source, &png).unwrap_or_else(|error| panic!("{error}"));
+
+        link.request(AppRequest::Command {
+            id: RequestId(2),
+            command: AppCommand::RegisterAsset {
+                path: source.clone(),
+                expected_mime: Some("image/png".to_string()),
+                expected_sha256: None,
+            },
+        })
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+        let record = match next_reply(&mut link, RequestId(2)).await {
+            Ok(AppReply::Asset(record)) => *record,
+            other => panic!("expected an asset, got {other:?}"),
+        };
+        assert_eq!(record.bytes, png.len() as u64);
+        assert_eq!((record.width, record.height), (Some(4), Some(2)));
+        // The caller's file is the server's business no longer.
+        std::fs::remove_file(&source).unwrap_or_else(|error| panic!("{error}"));
+
+        let mut back = Vec::new();
+        let mut offset = 0;
+        let mut id = 3;
+        loop {
+            let reply = read(
+                &mut link,
+                id,
+                AppQuery::ReadAssetChunk {
+                    asset_id: record.id.clone(),
+                    offset,
+                    length: 32,
+                },
+            )
+            .await;
+            let (data, next, eof) = match reply {
+                Ok(AppReply::AssetChunk {
+                    data,
+                    next_offset,
+                    eof,
+                }) => (data, next_offset, eof),
+                other => panic!("expected a chunk, got {other:?}"),
+            };
+            use base64::Engine;
+            back.extend(
+                base64::engine::general_purpose::STANDARD
+                    .decode(data)
+                    .unwrap_or_else(|error| panic!("{error}")),
+            );
+            offset = next;
+            id += 1;
+            if eof {
+                break;
+            }
+        }
+        assert_eq!(back, png, "byte for byte, through the request path");
+
+        match read(
+            &mut link,
+            id,
+            AppQuery::ReadCatalog {
+                catalog: CatalogKind::Images,
+                provider: None,
+                cursor: None,
+                limit: None,
+            },
+        )
+        .await
+        {
+            Ok(AppReply::Catalog(catalog)) => match *catalog {
+                crate::app::snapshot::Catalog::Images(page) => {
+                    assert_eq!(
+                        page.items
+                            .iter()
+                            .map(|image| image.asset_id.clone())
+                            .collect::<Vec<_>>(),
+                        vec![record.id.clone()]
+                    );
+                    assert_eq!(page.items[0].label.as_deref(), Some("shot.png"));
+                }
+                other => panic!("expected images, got {other:?}"),
+            },
+            other => panic!("expected a catalog, got {other:?}"),
         }
         let _ = std::fs::remove_dir_all(&home);
     }
