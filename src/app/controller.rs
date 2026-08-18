@@ -667,25 +667,524 @@ impl Controller {
             }
             return Ok(AppReply::Accepted);
         }
-        Err(AppError::Unserved(match command {
-            AppCommand::StartSession { .. } => "session/start",
-            AppCommand::ResumeSession { .. } => "session/resume",
-            AppCommand::DeleteSession { .. } => "session/delete",
-            AppCommand::Execute { .. } => "action/execute",
-            AppCommand::Interrupt { .. } => "turn/interrupt",
-            AppCommand::RespondInteraction { .. } => "interaction/respond",
+        match command {
+            AppCommand::Interrupt {
+                conversation_id,
+                turn_id,
+            } => self.serve_interrupt(&conversation_id, turn_id),
+            AppCommand::RespondInteraction {
+                interaction_id,
+                activation,
+                decision,
+            } => self.serve_respond(interaction_id, activation, decision),
+            AppCommand::ReclaimQueueTail {
+                conversation_id,
+                expected_revision,
+            } => self.serve_reclaim(&conversation_id, expected_revision),
+            AppCommand::DeleteSession { locator } => self.serve_delete_session(&locator),
+            AppCommand::Execute {
+                origin_conversation_id,
+                precondition,
+                action,
+            } => self.serve_execute(&origin_conversation_id, precondition, action),
+            // Which session this connection has is the transport's to decide:
+            // one `AppCore` *is* one session, so starting or resuming another is
+            // replacing this actor rather than asking it (spec "Resource model":
+            // one session per connection). B6 owns that lifecycle.
+            AppCommand::StartSession { .. } => Err(AppError::Unserved("session/start")),
+            AppCommand::ResumeSession { .. } => Err(AppError::Unserved("session/resume")),
+            // Answered above; the compiler is what keeps this exhaustive.
+            AppCommand::RegisterAsset { .. }
+            | AppCommand::MarkRead { .. }
+            | AppCommand::Submit { .. }
+            | AppCommand::CloseSession
+            | AppCommand::Shutdown => Ok(AppReply::Accepted),
+        }
+    }
 
-            AppCommand::ReclaimQueueTail { .. } => "queue/reclaimTail",
-
-            // Answered above; the compiler is what keeps this exhaustive.
-            AppCommand::RegisterAsset { .. } => "asset/registerPath",
-            // Answered above; the compiler is what keeps this exhaustive.
-            AppCommand::MarkRead { .. } => "conversation/markRead",
-            // Answered above; the compiler is what keeps this exhaustive.
-            AppCommand::Submit { .. } => "conversation/submit",
-            AppCommand::CloseSession => "session/close",
-            AppCommand::Shutdown => "shutdown",
+    /// `action/execute`: one registry decides what an action is called, whether
+    /// it can run now, and what happens when it does.
+    ///
+    /// The origin conversation is carried rather than read off the screen, so a
+    /// queued action acts on the page it was typed on (D135a). A precondition is
+    /// checked against the live revision, so a stale write fails instead of
+    /// overwriting a view somebody else refreshed.
+    fn serve_execute(
+        &mut self,
+        origin: &ConversationId,
+        precondition: Option<crate::app::snapshot::ResourceRevision>,
+        action: crate::app::command::Action,
+    ) -> Result<AppReply, AppError> {
+        use crate::app::command::{ActionResult, SubmitDisposition};
+        use crate::app_server::protocol::error::ProtocolErrorKind;
+        if self.conversations.key(origin).is_none() {
+            return Err(AppError::Refused(ProtocolErrorKind::ConversationNotFound));
+        }
+        let spec = crate::app::action::spec_of(&action);
+        if spec.requires.unmet(self.availability()).is_some() {
+            return Err(AppError::Refused(ProtocolErrorKind::ActionUnavailable));
+        }
+        if let Some(expected) = &precondition
+            && expected.revision != self.revision_of(expected.scope)
+        {
+            return Err(AppError::Refused(ProtocolErrorKind::StaleRevision));
+        }
+        let status = self.apply_action(action)?;
+        let revision = spec
+            .precondition
+            .map(|scope| crate::app::snapshot::ResourceRevision {
+                scope,
+                revision: self.revision_of(scope),
+            });
+        Ok(AppReply::Submitted(SubmitDisposition::Applied {
+            result: ActionResult {
+                status,
+                revision,
+                message: None,
+            },
         }))
+    }
+
+    /// Where a revisioned resource stands right now.
+    fn revision_of(&self, scope: crate::app::snapshot::RevisionScope) -> u64 {
+        use crate::app::snapshot::RevisionScope;
+        match scope {
+            RevisionScope::Config => self.config.revision,
+            RevisionScope::Session => self.session.updated_at,
+            RevisionScope::Rooms => self.channels.facts().len() as u64,
+            RevisionScope::Agents => self.agents.facts().len() as u64,
+            RevisionScope::Conversation | RevisionScope::Queue => {
+                self.queue.stand(&ConvKey::Main).0
+            }
+            RevisionScope::Catalog | RevisionScope::Tasks | RevisionScope::Team => 0,
+        }
+    }
+
+    /// Perform one action the core owns outright.
+    ///
+    /// Every arm here changes state this loop holds. The ones that need a model,
+    /// a transcript rewrite or a network round trip never reach it: their spec
+    /// says they need an engine, and `action/list` says so too rather than
+    /// letting a client find out by failing (B7 attaches the engine).
+    fn apply_action(
+        &mut self,
+        action: crate::app::command::Action,
+    ) -> Result<crate::app::command::ActionResultStatus, AppError> {
+        use crate::app::command::{Action, ActionResultStatus};
+        use crate::app_server::protocol::error::ProtocolErrorKind;
+        let unavailable = || AppError::Refused(ProtocolErrorKind::ActionUnavailable);
+        let user = crate::channels::USER_NAME;
+        match action {
+            Action::ThemeSet { theme } => {
+                if self.config.theme == theme {
+                    return Ok(ActionResultStatus::NoChange);
+                }
+                self.config.theme = theme;
+                self.persist(&serde_json::json!({ "theme": theme.as_str() }));
+                self.config_changed();
+                Ok(ActionResultStatus::Applied)
+            }
+            Action::ThinkingSelect { level } => {
+                if self.config.thinking == level {
+                    return Ok(ActionResultStatus::NoChange);
+                }
+                self.config.thinking = level;
+                self.session.thinking = level;
+                self.persist(&serde_json::json!({ "thinkingLevel": level.as_str() }));
+                self.config_changed();
+                Ok(ActionResultStatus::Applied)
+            }
+            Action::PermissionModeSet { mode } => {
+                if self.config.permission_mode == mode {
+                    return Ok(ActionResultStatus::NoChange);
+                }
+                self.config.permission_mode = mode;
+                self.session.permission_mode = mode;
+                self.config_changed();
+                Ok(ActionResultStatus::Applied)
+            }
+            Action::ModelSelect { model } => {
+                if self.config.model == model {
+                    return Ok(ActionResultStatus::NoChange);
+                }
+                self.config.model = model.clone();
+                self.session.model = model.clone();
+                self.persist(&serde_json::json!({ "model": model }));
+                self.config_changed();
+                Ok(ActionResultStatus::Applied)
+            }
+            Action::ProviderSelect { provider } => {
+                if !self
+                    .catalog
+                    .providers()
+                    .iter()
+                    .any(|known| known.name == provider)
+                {
+                    return Err(AppError::Refused(ProtocolErrorKind::BadArgument));
+                }
+                if self.config.provider == provider {
+                    return Ok(ActionResultStatus::NoChange);
+                }
+                self.config.provider = provider.clone();
+                self.session.provider = provider.clone();
+                self.persist(&serde_json::json!({ "provider": provider }));
+                self.config_changed();
+                Ok(ActionResultStatus::Applied)
+            }
+            Action::ProviderLogout { provider } => {
+                let store = crate::auth::AuthStore::new(self.catalog.home());
+                let held = matches!(store.get(&provider), Ok(Some(_)));
+                if !held {
+                    return Ok(ActionResultStatus::NoChange);
+                }
+                store.remove(&provider).map_err(|_| unavailable())?;
+                self.config_changed();
+                Ok(ActionResultStatus::Applied)
+            }
+            Action::PermissionRuleAdd { decision, rule } => {
+                Ok(self.permission_rule(decision, rule, true))
+            }
+            Action::PermissionRuleRemove { decision, rule } => {
+                Ok(self.permission_rule(decision, rule, false))
+            }
+            Action::McpEnable { server } => self.set_mcp_enabled(&server, true),
+            Action::McpDisable { server } => self.set_mcp_enabled(&server, false),
+            Action::SessionGarbageCollect => {
+                let protected = match &self.session.locator {
+                    crate::app::snapshot::SessionLocator::Path { path } => Some(path.as_path()),
+                    _ => None,
+                };
+                let report = crate::storage::cleanup(self.catalog.home(), protected)
+                    .map_err(|_| unavailable())?;
+                Ok(if report.total() == 0 {
+                    ActionResultStatus::NoChange
+                } else {
+                    ActionResultStatus::Applied
+                })
+            }
+            Action::SessionChangeDirectory { path } => {
+                let requested = if path.is_absolute() {
+                    path
+                } else {
+                    self.session.cwd.join(path)
+                };
+                let resolved = std::fs::canonicalize(&requested)
+                    .map_err(|_| AppError::Refused(ProtocolErrorKind::BadArgument))?;
+                if !resolved.is_dir() {
+                    return Err(AppError::Refused(ProtocolErrorKind::BadArgument));
+                }
+                if resolved == self.session.cwd {
+                    return Ok(ActionResultStatus::NoChange);
+                }
+                self.session.cwd = resolved.clone();
+                self.config.cwd = resolved.clone();
+                self.catalog.set_cwd(resolved);
+                self.config_changed();
+                self.session_changed();
+                Ok(ActionResultStatus::Applied)
+            }
+            Action::RoomJoin { room } => self.room_membership(&room, user, true),
+            Action::RoomLeave { room } => self.room_membership(&room, user, false),
+            // Everything else needs the engine, and its spec said so before it
+            // got here.
+            _ => Err(unavailable()),
+        }
+    }
+
+    /// Join or leave a room, as the user.
+    fn room_membership(
+        &mut self,
+        room: &str,
+        member: &str,
+        join: bool,
+    ) -> Result<crate::app::command::ActionResultStatus, AppError> {
+        use crate::app::command::ActionResultStatus;
+        use crate::app_server::protocol::error::ProtocolErrorKind;
+        let seated = self.channels.facts().into_iter().any(|room_facts| {
+            room_facts.name == room && room_facts.members.iter().any(|held| held == member)
+        });
+        if seated == join {
+            return Ok(ActionResultStatus::NoChange);
+        }
+        let (reply, answer) = oneshot::channel();
+        let message = if join {
+            crate::channels::ChannelMsg::Invite {
+                name: room.to_string(),
+                member: member.to_string(),
+                reply,
+            }
+        } else {
+            crate::channels::ChannelMsg::Kick {
+                name: room.to_string(),
+                member: member.to_string(),
+                reply,
+            }
+        };
+        self.channels.handle(message);
+        self.absorb_posts();
+        self.announce_rooms();
+        match crate::app::answer::Answer::new(answer, Err(String::new())).now() {
+            Ok(()) => Ok(ActionResultStatus::Applied),
+            Err(_) => Err(AppError::Refused(ProtocolErrorKind::BadArgument)),
+        }
+    }
+
+    /// Add or drop one permission rule, in the core's own table.
+    fn permission_rule(
+        &mut self,
+        decision: crate::app::snapshot::PermissionRuleDecision,
+        rule: String,
+        add: bool,
+    ) -> crate::app::command::ActionResultStatus {
+        use crate::app::command::ActionResultStatus;
+        use crate::app::snapshot::PermissionRule;
+        let held = self
+            .config
+            .permissions
+            .iter()
+            .any(|entry| entry.decision == decision && entry.rule == rule);
+        if add == held {
+            return ActionResultStatus::NoChange;
+        }
+        if add {
+            self.config.permissions.push(PermissionRule {
+                decision,
+                rule,
+                session_scoped: false,
+            });
+        } else {
+            self.config
+                .permissions
+                .retain(|entry| !(entry.decision == decision && entry.rule == rule));
+        }
+        let list = |wanted: crate::app::snapshot::PermissionRuleDecision| -> Vec<&str> {
+            self.config
+                .permissions
+                .iter()
+                .filter(|entry| entry.decision == wanted && !entry.session_scoped)
+                .map(|entry| entry.rule.as_str())
+                .collect()
+        };
+        let patch = serde_json::json!({
+            "permissions": {
+                "allow": list(crate::app::snapshot::PermissionRuleDecision::Allow),
+                "deny": list(crate::app::snapshot::PermissionRuleDecision::Deny),
+                "ask": list(crate::app::snapshot::PermissionRuleDecision::Ask),
+            }
+        });
+        self.persist(&patch);
+        self.config_changed();
+        ActionResultStatus::Applied
+    }
+
+    /// Turn one MCP server on or off, in settings and in what the catalogs say.
+    fn set_mcp_enabled(
+        &mut self,
+        server: &str,
+        enable: bool,
+    ) -> Result<crate::app::command::ActionResultStatus, AppError> {
+        use crate::app::command::ActionResultStatus;
+        use crate::app_server::protocol::error::ProtocolErrorKind;
+        let known = self.catalog.mcp_servers(None);
+        let Some(state) = known.iter().find(|state| state.name == server) else {
+            return Err(AppError::Refused(ProtocolErrorKind::BadArgument));
+        };
+        if state.enabled == enable {
+            return Ok(ActionResultStatus::NoChange);
+        }
+        let mut settings = self.catalog.settings().clone();
+        if enable {
+            settings.disabled_mcp_servers.retain(|held| held != server);
+            // A union-merged key cannot be un-set by writing one layer: every
+            // layer that lists it has to stop listing it.
+            let _ = crate::settings::remove_from_union_lists(
+                self.catalog.user_dir(),
+                self.catalog.cwd(),
+                "disabledMcpServers",
+                server,
+            );
+        } else {
+            settings.disabled_mcp_servers.push(server.to_string());
+            self.persist(&serde_json::json!({
+                "disabledMcpServers": settings.disabled_mcp_servers,
+            }));
+        }
+        self.catalog.reload(settings);
+        self.config_changed();
+        Ok(ActionResultStatus::Applied)
+    }
+
+    /// Write a settings patch where it takes effect. A failure is not a refusal:
+    /// the change is in force either way, and the client is told what stands.
+    fn persist(&mut self, patch: &serde_json::Value) {
+        if self.catalog.user_dir().as_os_str().is_empty() {
+            return;
+        }
+        let _ = crate::settings::upsert_scoped_settings(
+            self.catalog.user_dir(),
+            self.catalog.cwd(),
+            patch,
+        );
+    }
+
+    /// Say that the configuration moved, once, with its new revision.
+    fn config_changed(&mut self) {
+        self.config.revision = self.config.revision.saturating_add(1);
+        let config = self.config_snapshot();
+        self.publish(
+            Box::new(AppEventPayload::ConfigChanged(
+                crate::app::event::ConfigChanged { config },
+            )),
+            None,
+        );
+    }
+
+    fn session_changed(&mut self) {
+        self.session.updated_at = now_millis();
+        let session = self.session.clone();
+        self.publish(
+            Box::new(AppEventPayload::SessionUpdated(
+                crate::app::event::SessionUpdated { session },
+            )),
+            None,
+        );
+    }
+
+    /// `turn/interrupt`: idempotent, and aimed at a turn this epoch minted, so a
+    /// late interrupt cannot cancel the next one.
+    fn serve_interrupt(
+        &mut self,
+        conversation_id: &ConversationId,
+        turn_id: crate::app::ids::TurnId,
+    ) -> Result<AppReply, AppError> {
+        use crate::app_server::protocol::error::ProtocolErrorKind;
+        if self.conversations.key(conversation_id).is_none() {
+            return Err(AppError::Refused(ProtocolErrorKind::ConversationNotFound));
+        }
+        match self.turns.interrupt(&turn_id) {
+            crate::app::turn::Interrupted::Asked => Ok(AppReply::Interrupted {
+                turn_id,
+                accepted: true,
+            }),
+            crate::app::turn::Interrupted::Already => Ok(AppReply::Interrupted {
+                turn_id,
+                accepted: false,
+            }),
+            crate::app::turn::Interrupted::Unknown => {
+                Err(AppError::Refused(ProtocolErrorKind::TurnClosed))
+            }
+        }
+    }
+
+    /// `interaction/respond`: the run is stopped on a prompt the actor holds, so
+    /// the answer reaches it without a transport request id to correlate.
+    fn serve_respond(
+        &mut self,
+        interaction_id: crate::app::ids::InteractionId,
+        activation: crate::app::snapshot::ActivationKind,
+        decision: crate::app::snapshot::InteractionDecision,
+    ) -> Result<AppReply, AppError> {
+        use crate::app::interaction::{InteractionChange, InteractionMsg};
+        use crate::app_server::protocol::error::ProtocolErrorKind;
+        let (reply, answer) = oneshot::channel();
+        let changes = self.interactions.handle(
+            InteractionMsg::Respond {
+                id: interaction_id,
+                activation,
+                at: std::time::Instant::now(),
+                decision,
+                reply,
+            },
+            &mut self.mint,
+        );
+        let item_id = changes.iter().find_map(|change| match change {
+            InteractionChange::Resolved { item, .. } => item.clone(),
+            _ => None,
+        });
+        self.announce_interactions(changes);
+        match crate::app::answer::Answer::new(answer, Err(ProtocolErrorKind::InteractionClosed))
+            .now()
+        {
+            Ok(()) => Ok(AppReply::Responded { item_id }),
+            Err(kind) => Err(AppError::Refused(kind)),
+        }
+    }
+
+    /// `queue/reclaimTail`: pull the newest entry back, or lose the race to the
+    /// barrier that already absorbed it. One race, one winner.
+    fn serve_reclaim(
+        &mut self,
+        conversation_id: &ConversationId,
+        expected_revision: Option<u64>,
+    ) -> Result<AppReply, AppError> {
+        use crate::app_server::protocol::error::ProtocolErrorKind;
+        let Some(conversation) = self.conversations.key(conversation_id).cloned() else {
+            return Err(AppError::Refused(ProtocolErrorKind::ConversationNotFound));
+        };
+        let (revision, _) = self.queue.stand(&conversation);
+        if let Some(expected) = expected_revision
+            && expected != revision
+        {
+            return Err(AppError::Refused(ProtocolErrorKind::StaleRevision));
+        }
+        let (reply, answer) = oneshot::channel();
+        let changes = self.queue.handle(
+            crate::app::queue::QueueMsg::ReclaimTail {
+                conversation: conversation.clone(),
+                reply,
+            },
+            &mut self.mint,
+        );
+        self.announce_queue(changes);
+        let outcome =
+            crate::app::answer::Answer::new(answer, crate::app::queue::Reclaim::Empty).now();
+        let (revision, _) = self.queue.stand(&conversation);
+        Ok(AppReply::Reclaimed {
+            outcome: Box::new(outcome),
+            revision,
+        })
+    }
+
+    /// `session/delete`: drop a persisted session that is not the open one.
+    fn serve_delete_session(
+        &mut self,
+        locator: &crate::app::snapshot::SessionLocator,
+    ) -> Result<AppReply, AppError> {
+        use crate::app::snapshot::SessionLocator;
+        use crate::app_server::protocol::error::ProtocolErrorKind;
+        if locator == &self.session.locator {
+            return Err(AppError::Refused(ProtocolErrorKind::BadArgument));
+        }
+        let home = self.catalog.home();
+        let path = match locator {
+            SessionLocator::Path { path } => path.clone(),
+            SessionLocator::Stem { stem } => {
+                crate::transcript::transcripts_dir(home).join(format!("{stem}.jsonl"))
+            }
+            // "the latest" is not a name for something to delete: a client that
+            // means one names it.
+            SessionLocator::Latest => {
+                return Err(AppError::Refused(ProtocolErrorKind::BadArgument));
+            }
+        };
+        if !path.exists() {
+            return Err(AppError::Refused(ProtocolErrorKind::SessionNotFound));
+        }
+        let deleted = std::fs::remove_file(&path).is_ok();
+        if deleted {
+            self.publish(
+                Box::new(AppEventPayload::SessionDeleted(
+                    crate::app::event::SessionDeleted {
+                        locator: locator.clone(),
+                    },
+                )),
+                None,
+            );
+        }
+        Ok(AppReply::Deleted {
+            locator: locator.clone(),
+            deleted,
+        })
     }
 
     fn query(&mut self, attachment: AttachmentId, query: AppQuery) -> Result<AppReply, AppError> {
@@ -1620,11 +2119,63 @@ impl Controller {
             Route::Nothing => Err(AppError::Refused(
                 crate::app_server::protocol::error::ProtocolErrorKind::BadArgument,
             )),
+            // The core owns the ledger half of a delivery and of a run; the
+            // waking half and the model itself need the engine, which the
+            // console still holds (B4 ruling ②, B7 closes it).
             Route::Deliver { .. } => Err(AppError::Unserved("conversation/submit delivery")),
             Route::Turn { .. } | Route::Shell { .. } => {
                 Err(AppError::Unserved("conversation/submit run"))
             }
-            Route::Command { .. } => Err(AppError::Unserved("action/execute")),
+            // A slash line is the same action a typed call makes, read by the
+            // same table (D146).
+            Route::Command { line, on } => {
+                let origin = self.conversations.id(&mut self.mint, &on);
+                self.serve_command_line(&line, &origin)
+            }
+        }
+    }
+
+    /// One command line, submitted through the composer.
+    ///
+    /// The composer's parser and a GUI's typed call produce the same
+    /// [`crate::app::command::Action`], so a leading slash cannot mean one thing
+    /// in one client and something else in another. A viewing command changes
+    /// nothing and says so: the view itself is a structured read each frontend
+    /// renders for itself.
+    fn serve_command_line(
+        &mut self,
+        line: &str,
+        origin: &ConversationId,
+    ) -> Result<AppReply, AppError> {
+        use crate::app::action::{Call, Command};
+        use crate::app::command::{ActionResult, ActionResultStatus, SubmitDisposition};
+        use crate::app_server::protocol::error::ProtocolErrorKind;
+        let skills: Vec<String> = self
+            .catalog
+            .skills()
+            .into_iter()
+            .map(|skill| skill.name)
+            .collect();
+        let unchanged = || {
+            Ok(AppReply::Submitted(SubmitDisposition::Applied {
+                result: ActionResult {
+                    status: ActionResultStatus::NoChange,
+                    revision: None,
+                    message: None,
+                },
+            }))
+        };
+        match crate::app::action::parse_in(line, &skills) {
+            Ok(Command::Act(action)) => self.serve_execute(origin, None, action),
+            Ok(Command::Read(_)) => unchanged(),
+            Ok(Command::Call(Call::Close)) => self.command(AppCommand::CloseSession),
+            Ok(Command::Call(Call::Resume(_))) => Err(AppError::Unserved("session/resume")),
+            Err(crate::app::action::ParseError::Unknown(_)) => {
+                Err(AppError::Refused(ProtocolErrorKind::ActionUnavailable))
+            }
+            Err(crate::app::action::ParseError::Usage { .. }) => {
+                Err(AppError::Refused(ProtocolErrorKind::BadArgument))
+            }
         }
     }
 
@@ -2639,27 +3190,44 @@ mod tests {
         }
     }
 
-    /// A mutation the core cannot serve yet is refused by name. The reply is
-    /// still a reply: the request is answered, never dropped.
+    /// Two methods are left, and they are the two that are not this actor's to
+    /// answer: one `AppCore` *is* one session, so starting or resuming another
+    /// replaces it rather than asking it. The transport owns that lifecycle
+    /// (B6). The reply is still a reply: the request is answered, never dropped.
     #[tokio::test]
-    async fn the_skeleton_refuses_by_name_what_it_does_not_serve_yet() {
+    async fn the_two_methods_that_choose_a_session_belong_to_the_transport() {
         let core = AppCore::start(SessionSetup::default());
         let (mut link, _) = attached(&core, "test").await;
-        link.request(AppRequest::Command {
-            id: RequestId(2),
-            command: AppCommand::ReclaimQueueTail {
-                conversation_id: crate::app::ids::ConversationId::new("conv_1"),
-                expected_revision: None,
-            },
-        })
-        .await
-        .unwrap_or_else(|error| panic!("{error}"));
-        match link.recv().await {
-            Some(AppFrame::Reply { id, result }) => {
-                assert_eq!(id, RequestId(2));
-                assert_eq!(result, Err(AppError::Unserved("queue/reclaimTail")));
-            }
-            other => panic!("expected a refusal, got {other:?}"),
+        for (id, command, name) in [
+            (
+                2,
+                AppCommand::StartSession {
+                    cwd: None,
+                    provider: None,
+                    model: None,
+                    thinking: None,
+                    permission_mode: None,
+                },
+                "session/start",
+            ),
+            (
+                3,
+                AppCommand::ResumeSession {
+                    locator: crate::app::snapshot::SessionLocator::Latest,
+                },
+                "session/resume",
+            ),
+        ] {
+            link.request(AppRequest::Command {
+                id: RequestId(id),
+                command,
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{error}"));
+            assert_eq!(
+                next_reply(&mut link, RequestId(id)).await,
+                Err(AppError::Unserved(name))
+            );
         }
     }
 
@@ -3062,6 +3630,476 @@ mod tests {
                 other => panic!("expected images, got {other:?}"),
             },
             other => panic!("expected a catalog, got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    async fn execute(
+        link: &mut AppLink,
+        id: u64,
+        origin: &ConversationId,
+        action: crate::app::command::Action,
+    ) -> Result<AppReply, AppError> {
+        link.request(AppRequest::Command {
+            id: RequestId(id),
+            command: AppCommand::Execute {
+                origin_conversation_id: origin.clone(),
+                precondition: None,
+                action,
+            },
+        })
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+        next_reply(link, RequestId(id)).await
+    }
+
+    fn applied(reply: Result<AppReply, AppError>) -> crate::app::command::ActionResultStatus {
+        use crate::app::command::SubmitDisposition;
+        match reply {
+            Ok(AppReply::Submitted(SubmitDisposition::Applied { result })) => result.status,
+            other => panic!("expected an applied action, got {other:?}"),
+        }
+    }
+
+    /// Every action the core owns outright, executed through `action/execute`:
+    /// it changes what the core publishes, it writes settings where they take
+    /// effect, and asking twice says nothing changed the second time.
+    #[tokio::test]
+    async fn the_actions_the_core_owns_are_executed_and_persisted() {
+        use crate::app::command::{Action, ActionResultStatus};
+        use crate::app::snapshot::{PermissionMode, PermissionRuleDecision, ThemeChoice};
+        let (core, home) = configured("execute");
+        let (mut link, snapshot) = attached(&core, "test").await;
+        let main = snapshot
+            .conversations
+            .active
+            .first()
+            .map(|summary| summary.id.clone())
+            .unwrap_or_else(|| panic!("main exists"));
+
+        assert_eq!(
+            applied(
+                execute(
+                    &mut link,
+                    2,
+                    &main,
+                    Action::ThemeSet {
+                        theme: ThemeChoice::Dark
+                    }
+                )
+                .await
+            ),
+            ActionResultStatus::Applied
+        );
+        assert_eq!(
+            applied(
+                execute(
+                    &mut link,
+                    3,
+                    &main,
+                    Action::ThemeSet {
+                        theme: ThemeChoice::Dark
+                    }
+                )
+                .await
+            ),
+            ActionResultStatus::NoChange,
+            "choosing what is already chosen changes nothing"
+        );
+        assert_eq!(
+            applied(
+                execute(
+                    &mut link,
+                    4,
+                    &main,
+                    Action::ThinkingSelect {
+                        level: ThinkingLevel::High
+                    }
+                )
+                .await
+            ),
+            ActionResultStatus::Applied
+        );
+        assert_eq!(
+            applied(
+                execute(
+                    &mut link,
+                    5,
+                    &main,
+                    Action::PermissionModeSet {
+                        mode: PermissionMode::Plan
+                    }
+                )
+                .await
+            ),
+            ActionResultStatus::Applied
+        );
+        assert_eq!(
+            applied(
+                execute(
+                    &mut link,
+                    6,
+                    &main,
+                    Action::ModelSelect {
+                        model: "opus".to_string()
+                    }
+                )
+                .await
+            ),
+            ActionResultStatus::Applied
+        );
+        assert_eq!(
+            applied(
+                execute(
+                    &mut link,
+                    7,
+                    &main,
+                    Action::PermissionRuleAdd {
+                        decision: PermissionRuleDecision::Deny,
+                        rule: "Bash(rm:*)".to_string(),
+                    }
+                )
+                .await
+            ),
+            ActionResultStatus::Applied
+        );
+        assert_eq!(
+            applied(
+                execute(
+                    &mut link,
+                    8,
+                    &main,
+                    Action::McpDisable {
+                        server: "docs".to_string()
+                    }
+                )
+                .await
+            ),
+            ActionResultStatus::Applied
+        );
+        assert_eq!(
+            applied(execute(&mut link, 9, &main, Action::SessionGarbageCollect).await),
+            ActionResultStatus::NoChange,
+            "there is nothing expired to clean"
+        );
+
+        match read(&mut link, 10, AppQuery::ReadConfig).await {
+            Ok(AppReply::Config(config)) => {
+                assert_eq!(config.theme, ThemeChoice::Dark);
+                assert_eq!(config.thinking, ThinkingLevel::High);
+                assert_eq!(config.permission_mode, PermissionMode::Plan);
+                assert_eq!(config.model, "opus");
+                assert!(
+                    config
+                        .permissions
+                        .iter()
+                        .any(|rule| rule.rule == "Bash(rm:*)"
+                            && rule.decision == PermissionRuleDecision::Deny)
+                );
+                assert_eq!(
+                    config
+                        .mcp_servers
+                        .iter()
+                        .map(|server| server.enabled)
+                        .collect::<Vec<_>>(),
+                    vec![false],
+                    "the server was turned off in settings, and the read says so"
+                );
+            }
+            other => panic!("expected a configuration, got {other:?}"),
+        }
+        let written = std::fs::read_to_string(home.join("bingo").join("settings.json"))
+            .unwrap_or_else(|error| panic!("{error}"));
+        assert!(
+            written.contains("\"theme\"") && written.contains("dark"),
+            "the choice was written where it takes effect: {written}"
+        );
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// An action that needs a model, a transcript rewrite or a network round
+    /// trip is refused by the same rule `action/list` publishes, rather than
+    /// letting the client find out by failing halfway.
+    #[tokio::test]
+    async fn an_action_that_needs_an_engine_is_refused_before_it_starts() {
+        use crate::app::command::Action;
+        let (core, home) = configured("engine");
+        let (mut link, snapshot) = attached(&core, "test").await;
+        let main = snapshot
+            .conversations
+            .active
+            .first()
+            .map(|summary| summary.id.clone())
+            .unwrap_or_else(|| panic!("main exists"));
+        for (id, action) in [
+            (2, Action::ConversationCompact { instructions: None }),
+            (3, Action::TeamStart { members: None }),
+            (
+                4,
+                Action::SkillInvoke {
+                    skill: "guide".to_string(),
+                    input: None,
+                },
+            ),
+        ] {
+            match execute(&mut link, id, &main, action).await {
+                Err(AppError::Refused(kind)) => assert_eq!(
+                    kind,
+                    crate::app_server::protocol::error::ProtocolErrorKind::ActionUnavailable
+                ),
+                other => panic!("expected a refusal, got {other:?}"),
+            }
+        }
+        match execute(
+            &mut link,
+            5,
+            &crate::app::ids::ConversationId::new("conv_nope"),
+            Action::SessionGarbageCollect,
+        )
+        .await
+        {
+            Err(AppError::Refused(kind)) => assert_eq!(
+                kind,
+                crate::app_server::protocol::error::ProtocolErrorKind::ConversationNotFound,
+                "an action carries the page it was submitted on"
+            ),
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// A stale precondition fails rather than overwriting a view somebody else
+    /// refreshed.
+    #[tokio::test]
+    async fn a_stale_precondition_loses_rather_than_overwrites() {
+        use crate::app::command::Action;
+        use crate::app::snapshot::{ResourceRevision, RevisionScope, ThemeChoice};
+        let (core, home) = configured("stale");
+        let (mut link, snapshot) = attached(&core, "test").await;
+        let main = snapshot
+            .conversations
+            .active
+            .first()
+            .map(|summary| summary.id.clone())
+            .unwrap_or_else(|| panic!("main exists"));
+        link.request(AppRequest::Command {
+            id: RequestId(2),
+            command: AppCommand::Execute {
+                origin_conversation_id: main,
+                precondition: Some(ResourceRevision {
+                    scope: RevisionScope::Config,
+                    revision: 999,
+                }),
+                action: Action::ThemeSet {
+                    theme: ThemeChoice::Light,
+                },
+            },
+        })
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+        match next_reply(&mut link, RequestId(2)).await {
+            Err(AppError::Refused(kind)) => assert_eq!(
+                kind,
+                crate::app_server::protocol::error::ProtocolErrorKind::StaleRevision
+            ),
+            other => panic!("expected a stale revision, got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// `turn/interrupt` asks a running turn to stop, is idempotent, and cannot
+    /// reach a turn this epoch never minted.
+    #[tokio::test]
+    async fn interrupting_asks_the_turn_that_was_named() {
+        let (core, home) = configured("interrupt");
+        let (mut link, snapshot) = attached(&core, "test").await;
+        let main = snapshot
+            .conversations
+            .active
+            .first()
+            .map(|summary| summary.id.clone())
+            .unwrap_or_else(|| panic!("main exists"));
+        let turns = core.turns();
+        let turn = turns
+            .open(
+                ConvKey::Main,
+                crate::app::snapshot::TurnOrigin::User,
+                Vec::new(),
+            )
+            .now()
+            .unwrap_or_else(|| panic!("a turn opens"));
+
+        link.request(AppRequest::Command {
+            id: RequestId(2),
+            command: AppCommand::Interrupt {
+                conversation_id: main.clone(),
+                turn_id: turn.clone(),
+            },
+        })
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+        match next_reply(&mut link, RequestId(2)).await {
+            Ok(AppReply::Interrupted { accepted, .. }) => assert!(accepted),
+            other => panic!("expected an interrupt, got {other:?}"),
+        }
+        assert!(
+            turns.view().is_interrupted(&turn),
+            "the run watches this to know it was asked to stop"
+        );
+
+        turns.close(
+            turn.clone(),
+            crate::app::snapshot::TurnStatus::Interrupted,
+            None,
+        );
+        settle(&core.control).await;
+        link.request(AppRequest::Command {
+            id: RequestId(3),
+            command: AppCommand::Interrupt {
+                conversation_id: main.clone(),
+                turn_id: turn,
+            },
+        })
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+        match next_reply(&mut link, RequestId(3)).await {
+            Ok(AppReply::Interrupted { accepted, .. }) => assert!(
+                !accepted,
+                "a turn that already ended is not interrupted again"
+            ),
+            other => panic!("expected an interrupt, got {other:?}"),
+        }
+        link.request(AppRequest::Command {
+            id: RequestId(4),
+            command: AppCommand::Interrupt {
+                conversation_id: main,
+                turn_id: crate::app::ids::TurnId::new("turn_nope"),
+            },
+        })
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+        match next_reply(&mut link, RequestId(4)).await {
+            Err(AppError::Refused(kind)) => assert_eq!(
+                kind,
+                crate::app_server::protocol::error::ProtocolErrorKind::TurnClosed
+            ),
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// `session/delete` drops a session that is not the open one, and refuses to
+    /// pull the floor out from under this one.
+    #[tokio::test]
+    async fn a_session_that_is_not_this_one_can_be_deleted() {
+        use crate::app::snapshot::SessionLocator;
+        let (core, home) = configured("delete");
+        let transcript = crate::transcript::create(&home, &home)
+            .unwrap_or_else(|error| panic!("transcript: {error}"));
+        let _ = transcript.append(&crate::api::types::Message::user_text("hi"));
+        let path = transcript.path().to_path_buf();
+        let (mut link, _) = attached(&core, "test").await;
+        link.request(AppRequest::Command {
+            id: RequestId(2),
+            command: AppCommand::DeleteSession {
+                locator: SessionLocator::Stem {
+                    stem: transcript.name(),
+                },
+            },
+        })
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+        match next_reply(&mut link, RequestId(2)).await {
+            Ok(AppReply::Deleted { deleted, .. }) => assert!(deleted),
+            other => panic!("expected a deletion, got {other:?}"),
+        }
+        assert!(!path.exists(), "the transcript is gone");
+        link.request(AppRequest::Command {
+            id: RequestId(3),
+            command: AppCommand::DeleteSession {
+                locator: SessionLocator::Latest,
+            },
+        })
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+        match next_reply(&mut link, RequestId(3)).await {
+            Err(AppError::Refused(kind)) => assert_eq!(
+                kind,
+                crate::app_server::protocol::error::ProtocolErrorKind::BadArgument,
+                "\"the latest\" is not a name for something to delete"
+            ),
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// A slash line submitted through the composer is the same action a typed
+    /// call makes, read by the same table.
+    #[tokio::test]
+    async fn a_slash_line_is_the_action_a_typed_call_would_have_made() {
+        use crate::app::command::{ComposerMode, Submission};
+        use crate::app::snapshot::ThemeChoice;
+        let (core, home) = configured("composer");
+        let (mut link, snapshot) = attached(&core, "test").await;
+        let main = snapshot
+            .conversations
+            .active
+            .first()
+            .map(|summary| summary.id.clone())
+            .unwrap_or_else(|| panic!("main exists"));
+        let submit = |text: &str| Submission::Composer {
+            mode: ComposerMode::Normal,
+            text: text.to_string(),
+            attachments: Vec::new(),
+        };
+        link.request(AppRequest::Command {
+            id: RequestId(2),
+            command: AppCommand::Submit {
+                conversation_id: main.clone(),
+                input: submit("/theme light"),
+            },
+        })
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(
+            applied(next_reply(&mut link, RequestId(2)).await),
+            crate::app::command::ActionResultStatus::Applied
+        );
+        match read(&mut link, 3, AppQuery::ReadConfig).await {
+            Ok(AppReply::Config(config)) => assert_eq!(config.theme, ThemeChoice::Light),
+            other => panic!("expected a configuration, got {other:?}"),
+        }
+
+        // A view changes nothing, and its text is each frontend's own.
+        link.request(AppRequest::Command {
+            id: RequestId(4),
+            command: AppCommand::Submit {
+                conversation_id: main.clone(),
+                input: submit("/status"),
+            },
+        })
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(
+            applied(next_reply(&mut link, RequestId(4)).await),
+            crate::app::command::ActionResultStatus::NoChange
+        );
+
+        link.request(AppRequest::Command {
+            id: RequestId(5),
+            command: AppCommand::Submit {
+                conversation_id: main,
+                input: submit("/nonesuch"),
+            },
+        })
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+        match next_reply(&mut link, RequestId(5)).await {
+            Err(AppError::Refused(kind)) => assert_eq!(
+                kind,
+                crate::app_server::protocol::error::ProtocolErrorKind::ActionUnavailable
+            ),
+            other => panic!("expected a refusal, got {other:?}"),
         }
         let _ = std::fs::remove_dir_all(&home);
     }

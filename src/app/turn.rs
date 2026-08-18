@@ -165,6 +165,9 @@ pub(crate) enum TurnChange {
 #[derive(Debug, Default)]
 pub struct TurnView {
     active: HashMap<ConvKey, TurnId>,
+    /// The turns somebody has asked to stop. The request is the core's; the
+    /// stopping is the runner's, which is what watches this.
+    interrupting: std::collections::HashSet<TurnId>,
 }
 
 impl TurnView {
@@ -176,6 +179,23 @@ impl TurnView {
     pub fn is_busy(&self, conversation: &ConvKey) -> bool {
         self.active.contains_key(conversation)
     }
+
+    /// Whether this turn has been asked to stop.
+    pub fn is_interrupted(&self, turn: &TurnId) -> bool {
+        self.interrupting.contains(turn)
+    }
+}
+
+/// What `turn/interrupt` found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Interrupted {
+    /// It is running, and has been asked to stop.
+    Asked,
+    /// It had already reached its terminal state; interrupting is idempotent
+    /// and a late one must not cancel the next turn.
+    Already,
+    /// No turn of that name in this epoch.
+    Unknown,
 }
 
 /// A run's hold on its turn.
@@ -377,6 +397,9 @@ impl Live {
 pub(crate) struct TurnRegistry {
     turns: HashMap<TurnId, Record>,
     active: HashMap<ConvKey, TurnId>,
+    /// The turns somebody asked to stop, kept for the epoch so a runner that
+    /// checks late still sees the request.
+    interrupting: std::collections::HashSet<TurnId>,
     view: watch::Sender<Arc<TurnView>>,
 }
 
@@ -387,6 +410,7 @@ pub(crate) fn attach(control: mpsc::UnboundedSender<Control>) -> (TurnRegistry, 
         TurnRegistry {
             turns: HashMap::new(),
             active: HashMap::new(),
+            interrupting: std::collections::HashSet::new(),
             view,
         },
         TurnHandle {
@@ -421,6 +445,21 @@ impl TurnRegistry {
         self.active.contains_key(conversation)
     }
 
+    /// Ask a running turn to stop. The terminal event still comes from whoever
+    /// closes it, so a client that saw `turn/started` is owed exactly one end
+    /// whether it was interrupted or not.
+    pub(crate) fn interrupt(&mut self, turn: &TurnId) -> Interrupted {
+        if !self.turns.contains_key(turn) {
+            return Interrupted::Unknown;
+        }
+        if !self.active.values().any(|active| active == turn) {
+            return Interrupted::Already;
+        }
+        self.interrupting.insert(turn.clone());
+        self.publish();
+        Interrupted::Asked
+    }
+
     pub(crate) fn active_turns(&self) -> Vec<Turn> {
         self.active
             .values()
@@ -432,6 +471,7 @@ impl TurnRegistry {
     fn publish(&mut self) {
         let view = TurnView {
             active: self.active.clone(),
+            interrupting: self.interrupting.clone(),
         };
         let _ = self.view.send(Arc::new(view));
     }

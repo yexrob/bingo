@@ -159,6 +159,25 @@ pub enum AppReply {
         next_offset: u64,
         eof: bool,
     },
+    /// A turn was asked to stop. `accepted` is false when it had already ended.
+    Interrupted {
+        turn_id: crate::app::ids::TurnId,
+        accepted: bool,
+    },
+    /// A prompt was answered, with the ordered item the resolution committed.
+    Responded {
+        item_id: Option<crate::app::ids::ItemId>,
+    },
+    /// What the pull-back found, and where the queue stands after it.
+    Reclaimed {
+        outcome: Box<crate::app::queue::Reclaim>,
+        revision: u64,
+    },
+    /// A persisted session was asked for by name and is gone.
+    Deleted {
+        locator: SessionLocator,
+        deleted: bool,
+    },
 }
 
 /// Why the core did not do it.

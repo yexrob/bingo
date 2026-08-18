@@ -717,7 +717,8 @@ pub const ACTIONS: &[ActionSpec] = &[
             ArgumentSpec::free("input", false, "what to pass it"),
         ],
         precondition: None,
-        requires: Requires::NOTHING,
+        // It opens a model turn.
+        requires: Requires::ENGINE,
         reach: Reach::Dynamic,
     },
     ActionSpec {
@@ -760,7 +761,7 @@ pub const ACTIONS: &[ActionSpec] = &[
             ArgumentSource::Crew,
         )],
         precondition: Some(RevisionScope::Team),
-        requires: Requires::NOTHING,
+        requires: Requires::ENGINE,
         reach: Reach::Command,
     },
     ActionSpec {
@@ -770,7 +771,7 @@ pub const ACTIONS: &[ActionSpec] = &[
         description: "write a starting chart and its agreement into the project",
         arguments: &[ArgumentSpec::free("name", true, "what to call the team")],
         precondition: Some(RevisionScope::Team),
-        requires: Requires::NOTHING,
+        requires: Requires::ENGINE,
         reach: Reach::Command,
     },
     ActionSpec {
@@ -780,7 +781,7 @@ pub const ACTIONS: &[ActionSpec] = &[
         description: "drop the crew's notes past their 30-day life",
         arguments: NO_ARGUMENTS,
         precondition: None,
-        requires: Requires::NOTHING,
+        requires: Requires::ENGINE,
         reach: Reach::Command,
     },
     ActionSpec {
@@ -820,7 +821,9 @@ pub const ACTIONS: &[ActionSpec] = &[
         description: "let the foreground command keep running out of the way",
         arguments: &[ArgumentSpec::free("itemId", true, "the command's item")],
         precondition: None,
-        requires: Requires::NOTHING,
+        // The handle on a running foreground command belongs to the run that
+        // started it, so promoting one needs the engine.
+        requires: Requires::ENGINE,
         // The terminal's gesture for this is a key on a running command's row,
         // not a typed line. A GUI gets it through `action/execute` like any
         // other.
