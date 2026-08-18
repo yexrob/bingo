@@ -2421,6 +2421,18 @@ fn every_action_round_trips() {
             "mode": "preview"
         })
     );
+    // The two the registry added (D146): `/team new` and `/team memory gc` were
+    // mutations the CLI had and the union did not.
+    assert_eq!(
+        to_value(&Action::TeamScaffold {
+            name: "crew".to_string()
+        }),
+        json!({"type": "teamScaffold", "name": "crew"})
+    );
+    assert_eq!(
+        to_value(&Action::TeamMemoryGarbageCollect),
+        json!({"type": "teamMemoryGarbageCollect"})
+    );
 }
 
 #[test]

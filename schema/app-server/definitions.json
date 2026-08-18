@@ -443,6 +443,40 @@
           "type": "object"
         },
         {
+          "description": "Write a starting chart and its agreement into the project (`/team new`).",
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "teamScaffold"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "name",
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Drop the crew's notes past their life (`/team memory gc`).",
+          "properties": {
+            "type": {
+              "enum": [
+                "teamMemoryGarbageCollect"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
           "properties": {
             "room": {
               "type": "string"

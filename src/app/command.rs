@@ -245,6 +245,11 @@ pub enum Action {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         member: Option<String>,
     },
+    /// Write a starting chart and its agreement into the project (`/team new`).
+    #[serde(rename_all = "camelCase")]
+    TeamScaffold { name: String },
+    /// Drop the crew's notes past their life (`/team memory gc`).
+    TeamMemoryGarbageCollect,
     #[serde(rename_all = "camelCase")]
     RoomJoin { room: String },
     #[serde(rename_all = "camelCase")]
@@ -287,9 +292,11 @@ impl Action {
                 ActionFamily::Mcp
             }
             Self::SkillInvoke { .. } => ActionFamily::Skill,
-            Self::TeamStart { .. } | Self::TeamAssign { .. } | Self::TeamStop { .. } => {
-                ActionFamily::Team
-            }
+            Self::TeamStart { .. }
+            | Self::TeamAssign { .. }
+            | Self::TeamStop { .. }
+            | Self::TeamScaffold { .. }
+            | Self::TeamMemoryGarbageCollect => ActionFamily::Team,
             Self::RoomJoin { .. } | Self::RoomLeave { .. } => ActionFamily::Room,
             Self::CommandPromote { .. } => ActionFamily::Command,
             Self::ThemeSet { .. } => ActionFamily::Settings,
@@ -320,6 +327,8 @@ impl Action {
             Self::TeamStart { .. } => "team.start",
             Self::TeamAssign { .. } => "team.assign",
             Self::TeamStop { .. } => "team.stop",
+            Self::TeamScaffold { .. } => "team.scaffold",
+            Self::TeamMemoryGarbageCollect => "team.memoryGc",
             Self::RoomJoin { .. } => "room.join",
             Self::RoomLeave { .. } => "room.leave",
             Self::CommandPromote { .. } => "command.promote",
@@ -554,6 +563,10 @@ pub(crate) mod tests {
                 task: "survey the crate".to_string(),
             },
             Action::TeamStop { member: None },
+            Action::TeamScaffold {
+                name: "crew".to_string(),
+            },
+            Action::TeamMemoryGarbageCollect,
             Action::RoomJoin {
                 room: "#design".to_string(),
             },
@@ -574,7 +587,7 @@ pub(crate) mod tests {
         let actions = every_action();
         assert_eq!(
             actions.len(),
-            26,
+            28,
             "the action union is a contract; adding a family is a decision"
         );
         let mut ids: Vec<String> = actions.iter().map(|a| a.id().0).collect();

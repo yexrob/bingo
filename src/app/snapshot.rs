@@ -147,6 +147,19 @@ pub enum ThemeChoice {
     Light,
 }
 
+impl ThemeChoice {
+    /// The wire form, which is also the CLI's `/theme` argument.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Dark => "dark",
+            Self::Light => "light",
+        }
+    }
+
+    pub const ALL: [Self; 3] = [Self::Auto, Self::Dark, Self::Light];
+}
+
 /// Syntax family of the resolved shell, so a frontend can render (and a model can
 /// be told) what a command line will be parsed as.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

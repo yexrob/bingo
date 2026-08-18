@@ -21,6 +21,7 @@
 // stdio transport in B6. Remove this allow when they arrive.
 #![allow(dead_code)]
 
+pub mod action;
 pub mod answer;
 pub mod attention;
 #[cfg(test)]
