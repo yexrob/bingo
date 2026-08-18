@@ -345,6 +345,11 @@ impl InputQueue {
         changes
     }
 
+    /// Every conversation that has a queue, for a sweep that must not miss one.
+    pub(crate) fn conversations(&self) -> Vec<ConvKey> {
+        self.conversations.keys().cloned().collect()
+    }
+
     pub(crate) fn count(&self, conversation: &ConvKey) -> u32 {
         self.conversations
             .get(conversation)

@@ -211,12 +211,15 @@ pub struct AppCore {
     queue: crate::app::queue::QueueHandle,
     submit: crate::app::submit::SubmitHandle,
     interactions: crate::app::interaction::InteractionHandle,
+    /// Whether the actor's loop is still running. Weak on purpose: holding it
+    /// must not be what keeps a session alive.
+    alive: controller::Alive,
 }
 
 impl AppCore {
     /// Start the session actor.
     pub fn start(setup: SessionSetup) -> Self {
-        let (control, registries) = controller::spawn(setup);
+        let (control, registries, alive) = controller::spawn(setup);
         Self {
             control,
             watch: registries.watch,
@@ -226,6 +229,7 @@ impl AppCore {
             queue: registries.queue,
             submit: registries.submit,
             interactions: registries.interactions,
+            alive,
         }
     }
 
@@ -262,6 +266,31 @@ impl AppCore {
     /// The prompts a run is stopped on.
     pub fn interactions(&self) -> crate::app::interaction::InteractionHandle {
         self.interactions.clone()
+    }
+
+    /// Whether the session actor's loop is still running.
+    pub fn is_running(&self) -> bool {
+        self.alive.upgrade().is_some()
+    }
+
+    /// Close the session and wait for the actor to finish settling.
+    ///
+    /// Everything open reaches a terminal state, the instances are released, and
+    /// the loop ends. What is left of the session after this is the handles the
+    /// process still holds — and they answer with their shutdown values rather
+    /// than blocking, because there is nobody left to answer them.
+    pub async fn close(&self) {
+        let (reply, done) = oneshot::channel();
+        if self
+            .control
+            .send(controller::Control::Close {
+                reason: crate::app::snapshot::SessionCloseReason::Requested,
+                reply,
+            })
+            .is_ok()
+        {
+            let _ = done.await;
+        }
     }
 
     /// Attach a frontend. The attachment sees no event until it takes a

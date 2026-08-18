@@ -198,7 +198,7 @@ pub async fn maybe_compact(
     {
         return false;
     }
-    compact(session, messages, notify).await
+    compact(session, messages, notify).await.is_some()
 }
 
 /// Recovery after the server rejected the request as too long. Takes the gate
@@ -222,7 +222,7 @@ pub async fn compact_after_overflow(
         session.compact_failures.fetch_add(1, Ordering::SeqCst);
         return false;
     }
-    let compacted = compact(session, messages, notify).await;
+    let compacted = compact(session, messages, notify).await.is_some();
     if compacted {
         gate.reset();
     }
@@ -261,11 +261,36 @@ pub async fn summarize_slice(session: &Session, messages: &[Message]) -> Option<
     summarize(session, messages).await.ok()
 }
 
+/// What one compaction did.
+///
+/// The numbers are the compactor's own: `before` and `after` are its local
+/// estimate of the history it replaced and the history it left, measured with
+/// the same ruler on both sides so the difference means something even where
+/// `count_tokens` is unavailable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CompactOutcome {
+    pub before: u64,
+    pub after: u64,
+    pub replaced: u32,
+    pub duration: std::time::Duration,
+}
+
+/// Which conversation a session's history belongs to. A subagent compacts its
+/// own; everything else is the console's.
+fn conversation_of(session: &Session) -> crate::ui::ConvKey {
+    match &session.instance {
+        Some(name) => crate::ui::ConvKey::Agent(name.clone()),
+        None => crate::ui::ConvKey::Main,
+    }
+}
+
 async fn compact(
     session: &Session,
     messages: &mut Vec<Message>,
     notify: CompactNotify<'_>,
-) -> bool {
+) -> Option<CompactOutcome> {
+    let started = std::time::Instant::now();
+    let before = estimate_tokens(&session.system, messages, &[]);
     let split = safe_split(messages, messages.len() - KEEP_RECENT);
 
     run_pre_compact(
@@ -288,7 +313,7 @@ async fn compact(
                     "context compaction returned an empty summary, history kept as-is".to_string()
                 }
             });
-            return false;
+            return None;
         }
     };
 
@@ -313,7 +338,29 @@ async fn compact(
     notify(format!(
         "context compacted: {split} earlier messages replaced by a summary"
     ));
-    true
+    let outcome = CompactOutcome {
+        before,
+        after: estimate_tokens(&session.system, messages, &[]),
+        replaced: split as u32,
+        duration: started.elapsed(),
+    };
+    // The summary is history now, so it is an item in the conversation whose
+    // history it replaced. The core stamps and publishes it; B4 gives the item
+    // the rest of its semantics.
+    session
+        .turns
+        .commit_item(
+            conversation_of(session),
+            None,
+            crate::app::snapshot::ItemBody::Compaction {
+                before_tokens: outcome.before,
+                after_tokens: outcome.after,
+                replaced_messages: outcome.replaced,
+                duration_ms: outcome.duration.as_millis().min(u128::from(u64::MAX)) as u64,
+            },
+        )
+        .await;
+    Some(outcome)
 }
 
 /// Quarter-token units for one text fragment: ASCII ≈ 4 chars/token, other

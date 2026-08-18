@@ -1402,4 +1402,163 @@ mod actor_tests {
             "it withdrew what it started"
         );
     }
+    /// The provider's own count and the turn's context measurement both arrive
+    /// as `turn/usageUpdated`, and neither is recomputed downstream.
+    #[tokio::test]
+    async fn usage_and_context_reach_the_turn_that_spent_them() {
+        let core = AppCore::start(SessionSetup::default());
+        let (mut link, _) = attached(&core).await;
+        let turns = core.turns();
+        let id = turns
+            .open(ConvKey::Main, TurnOrigin::User, Vec::new())
+            .await
+            .unwrap_or_else(|| panic!("main was idle"));
+        turns.report_event(
+            id.clone(),
+            EngineEvent::StopReason {
+                stop_reason: Some("end_turn".to_string()),
+                output_tokens: Some(4096),
+            },
+        );
+        turns.report_event(
+            id.clone(),
+            EngineEvent::ContextUsage(crate::context_usage::ContextUsage::new(
+                12_345, 128_000, 100_000,
+            )),
+        );
+        turns.close(id, TurnStatus::Completed, None);
+
+        let events = drain(&mut link).await;
+        let usage: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                AppEventPayload::TurnUsageUpdated(updated) => Some(updated.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(usage.len(), 2, "one per measurement: {events:?}");
+        assert_eq!(usage[0].usage.output_tokens, 4096);
+        assert!(
+            usage[0].usage.authoritative,
+            "the provider's own count outranks any local estimate"
+        );
+        let context = usage[1]
+            .context_usage
+            .unwrap_or_else(|| panic!("the context measurement travels whole"));
+        assert_eq!(
+            (context.used, context.window, context.trigger),
+            (12_345, 128_000, 100_000)
+        );
+    }
+
+    /// A compaction is an item in the conversation whose history it replaced,
+    /// carrying the compactor's own numbers (plan decision 9).
+    #[tokio::test]
+    async fn a_compaction_enters_the_conversation_as_an_item() {
+        let core = AppCore::start(SessionSetup::default());
+        let (mut link, _) = attached(&core).await;
+        let id = core
+            .turns()
+            .commit_item(
+                ConvKey::Main,
+                None,
+                ItemBody::Compaction {
+                    before_tokens: 90_000,
+                    after_tokens: 12_000,
+                    replaced_messages: 42,
+                    duration_ms: 1_500,
+                },
+            )
+            .await;
+        let events = drain(&mut link).await;
+        match events.as_slice() {
+            [AppEventPayload::ItemCompleted(changed)] => {
+                assert_eq!(changed.item.id, id);
+                assert_eq!(changed.item.status, ItemStatus::Completed);
+                assert!(matches!(
+                    changed.item.body,
+                    ItemBody::Compaction {
+                        before_tokens: 90_000,
+                        after_tokens: 12_000,
+                        replaced_messages: 42,
+                        duration_ms: 1_500,
+                    }
+                ));
+            }
+            other => panic!("expected one completed item, got {other:?}"),
+        }
+    }
+
+    /// Closing a session settles everything open and leaves nothing running: the
+    /// turn reaches a terminal state, the prompt fails closed, and the actor's
+    /// thread ends once the handles that kept it reachable are gone (D29's cycle,
+    /// which B2b left standing).
+    #[tokio::test]
+    async fn closing_a_session_settles_what_is_open_and_ends_the_thread() {
+        use crate::app::interaction::{OpenPrompt, Verdict};
+        use crate::app::snapshot::{InteractionPrompt, PermissionDecisionKind, ToolRequest};
+
+        let core = AppCore::start(SessionSetup::default());
+        assert!(core.is_running(), "the session runs on a thread of its own");
+        let (mut link, _) = attached(&core).await;
+        let turns = core.turns();
+        let _turn = turns
+            .open(ConvKey::Main, TurnOrigin::User, Vec::new())
+            .await
+            .unwrap_or_else(|| panic!("main was idle"));
+        let verdict = core.interactions().open(OpenPrompt {
+            conversation: ConvKey::Main,
+            turn: None,
+            item: None,
+            prompt: InteractionPrompt::Permission {
+                title: "Allow running Bash".to_string(),
+                reason: None,
+                tool: ToolRequest {
+                    name: "Bash".to_string(),
+                    input: serde_json::Value::Null,
+                },
+                preview: None,
+                decisions: vec![
+                    PermissionDecisionKind::AllowOnce,
+                    PermissionDecisionKind::Deny,
+                ],
+                session_scope: None,
+                allows_feedback: true,
+            },
+        });
+
+        core.close().await;
+        assert_eq!(
+            verdict.await,
+            Ok(Verdict::Cancelled),
+            "an unanswered prompt fails closed rather than hanging its run"
+        );
+
+        let events = drain(&mut link).await;
+        assert_eq!(
+            statuses(&events),
+            vec![TurnStatus::Interrupted],
+            "the running turn still reaches a terminal state: {events:?}"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, AppEventPayload::SessionClosed(_))),
+            "and the session says it closed"
+        );
+
+        // Nothing can be started in a session that is over.
+        assert_eq!(
+            core.attach(AttachRequest::new("late")).await.err(),
+            Some(crate::app::AppError::Stopped)
+        );
+        drop(link);
+        for _ in 0..200 {
+            if !core.is_running() {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        panic!("the session actor's thread outlived the session");
+    }
 }

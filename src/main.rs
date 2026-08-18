@@ -508,6 +508,10 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         persist_team_memory(&session, &home, &session.cwd());
     }
     crate::hooks::run_session_end(&session.settings.hooks, mode_str, &session.cwd()).await;
+    // The session actor is what everything else was reachable through, so it goes
+    // last: it interrupts whatever is still running, fails every pending prompt
+    // closed, and lets go of the instances that were holding it open (B3).
+    core.close().await;
     result
 }
 

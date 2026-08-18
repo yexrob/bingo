@@ -1308,6 +1308,27 @@ impl AgentRegistry {
     /// The order of the last two steps is the same contract the rooms keep: a
     /// caller that claims a run and then reads the roster cannot read the roster
     /// as it was before its own claim.
+    /// Let go of everything the instances hold, for a session that is closing.
+    ///
+    /// The `Arc<Session>` each entry keeps is one half of D29's cycle — the
+    /// registry holds the session, the session holds the handle that reaches the
+    /// registry — so releasing them here is what lets the actor's inbox close and
+    /// its thread end. Runs are aborted first: their turns are closed by the core
+    /// on the way out, and an aborted run cannot report into one anyway.
+    pub(crate) fn release(&mut self) {
+        for entry in self.inner.values_mut() {
+            if let Some(abort) = entry.abort.take() {
+                abort.abort();
+            }
+        }
+        self.inner.clear();
+        self.ask = None;
+        self.events = None;
+        self.share = None;
+        self.saver = None;
+        self.publish(Touched::Every);
+    }
+
     pub(crate) fn handle(&mut self, message: AgentMsg) {
         let (touched, answer) = self.apply(message);
         self.publish(touched);

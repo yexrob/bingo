@@ -23,16 +23,16 @@ use crate::app::conversation::{ConvKey, Conversations};
 use crate::app::event::{
     AgentChanged, AppEvent, AppEventPayload, EventMeta, InteractionCancelled, InteractionOpened,
     InteractionResolved, ItemChanged, ItemDelta, QueueItemAbsorbed, QueueItemAdded,
-    QueueItemRemoved, RoomChanged, TurnChanged, TurnRetrying, TurnRoundCompleted, TurnRoundStarted,
-    TurnUsageUpdated,
+    QueueItemRemoved, RoomChanged, SessionClosed, TurnChanged, TurnRetrying, TurnRoundCompleted,
+    TurnRoundStarted, TurnUsageUpdated,
 };
 use crate::app::ids::{
     AgentId, ConversationId, EpochId, IdMint, OperationId, RoomId, SessionId, now_millis,
 };
 use crate::app::snapshot::{
     AgentKind, AgentResource, AgentState, Collection, ConfigSnapshot, QueueEntry, RoomMode,
-    RoomResource, RuntimeCollections, ServerCapabilities, SessionSnapshot, SessionState,
-    SessionSummary, ThinkingLevel,
+    RoomResource, RuntimeCollections, ServerCapabilities, SessionCloseReason, SessionSnapshot,
+    SessionState, SessionSummary, ThinkingLevel,
 };
 use crate::app::turn::TurnChange;
 use crate::app::{
@@ -90,7 +90,20 @@ pub(crate) enum Control {
     Settle {
         reply: oneshot::Sender<()>,
     },
+    /// Close the session: settle what is open and end the loop.
+    Close {
+        reason: SessionCloseReason,
+        reply: oneshot::Sender<()>,
+    },
 }
+
+/// Proof that one session's thread is still running.
+///
+/// The thread holds the strong half and drops it on the way out, so a holder of
+/// the weak half can tell "the loop has ended" from "the loop is idle" without
+/// polling the thread table. A session that closed must leave nothing behind, and
+/// this is what says so.
+pub(crate) type Alive = std::sync::Weak<()>;
 
 /// Everything the actor owns, handed to it in one piece at startup.
 struct State {
@@ -122,7 +135,7 @@ pub(crate) struct Registries {
 /// of by everyone remembering. It costs one thread per session and buys a
 /// registry that is reachable from synchronous code — a render loop, a `Drop` —
 /// without a runtime in scope.
-pub(super) fn spawn(setup: SessionSetup) -> (mpsc::UnboundedSender<Control>, Registries) {
+pub(super) fn spawn(setup: SessionSetup) -> (mpsc::UnboundedSender<Control>, Registries, Alive) {
     let (control, inbox) = mpsc::unbounded_channel();
     let (watch, watch_handle) = crate::watch::attach(control.clone());
     let (channels, channel_handle) = crate::channels::attach(control.clone(), setup.channel_limits);
@@ -134,6 +147,8 @@ pub(super) fn spawn(setup: SessionSetup) -> (mpsc::UnboundedSender<Control>, Reg
     // The actor holds a weak handle to its own inbox: it hands strong clones to
     // the attachments it spawns, and a strong one of its own would keep the
     // queue open forever, so the loop could never end.
+    let running = std::sync::Arc::new(());
+    let alive = std::sync::Arc::downgrade(&running);
     let controller = Controller::new(
         setup,
         control.downgrade(),
@@ -148,7 +163,10 @@ pub(super) fn spawn(setup: SessionSetup) -> (mpsc::UnboundedSender<Control>, Reg
     );
     std::thread::Builder::new()
         .name("bingo-session".to_string())
-        .spawn(move || controller.run(inbox))
+        .spawn(move || {
+            let _running = running;
+            controller.run(inbox);
+        })
         .unwrap_or_else(|error| panic!("the session actor could not start: {error}"));
     (
         control,
@@ -161,6 +179,7 @@ pub(super) fn spawn(setup: SessionSetup) -> (mpsc::UnboundedSender<Control>, Reg
             submit: crate::app::submit::SubmitHandle::new(control_for_submit),
             interactions: interaction_handle,
         },
+        alive,
     )
 }
 
@@ -370,6 +389,13 @@ impl Controller {
                 Control::Settle { reply } => {
                     let _ = reply.send(());
                 }
+                Control::Close { reason, reply } => {
+                    self.close(reason);
+                    let _ = reply.send(());
+                    // Nothing more can happen in a session that is over, and the
+                    // loop ending is what releases the last of what it held.
+                    return;
+                }
             }
         }
     }
@@ -446,10 +472,22 @@ impl Controller {
         {
             return self.serve_submit(conversation_id, input);
         }
+        if matches!(command, AppCommand::CloseSession | AppCommand::Shutdown) {
+            // The reply goes out before the loop ends, which is why the closing
+            // itself is a control message rather than work done here: a request
+            // handler cannot both answer and stop the thread that answers.
+            if let Some(control) = self.control.upgrade() {
+                let (reply, _done) = oneshot::channel();
+                let _ = control.send(Control::Close {
+                    reason: SessionCloseReason::Requested,
+                    reply,
+                });
+            }
+            return Ok(AppReply::Accepted);
+        }
         Err(AppError::Unserved(match command {
             AppCommand::StartSession { .. } => "session/start",
             AppCommand::ResumeSession { .. } => "session/resume",
-            AppCommand::CloseSession => "session/close",
             AppCommand::DeleteSession { .. } => "session/delete",
             AppCommand::Execute { .. } => "action/execute",
             AppCommand::Interrupt { .. } => "turn/interrupt",
@@ -457,9 +495,10 @@ impl Controller {
             AppCommand::MarkRead { .. } => "conversation/markRead",
             AppCommand::ReclaimQueueTail { .. } => "queue/reclaimTail",
             AppCommand::RegisterAsset { .. } => "asset/registerPath",
-            AppCommand::Shutdown => "shutdown",
             // Answered above; the compiler is what keeps this exhaustive.
             AppCommand::Submit { .. } => "conversation/submit",
+            AppCommand::CloseSession => "session/close",
+            AppCommand::Shutdown => "shutdown",
         }))
     }
 
@@ -787,6 +826,53 @@ impl Controller {
             };
             self.publish(Box::new(payload), None);
         }
+    }
+
+    /// Close the session: settle everything open, in one order, and let go.
+    ///
+    /// The order is the contract. A turn that was running still reaches a
+    /// terminal state — `interrupted`, because that is what happened — so a
+    /// client that saw `turn/started` is never left waiting for its end. Pending
+    /// prompts fail closed rather than hanging their runs. Queued input is
+    /// dropped as `cleared`, because there is no turn left to drain it into.
+    ///
+    /// Then the actor lets go of the instances, which is what breaks D29's cycle:
+    /// the registry held an `Arc<Session>`, the session holds the handles that
+    /// reach this loop, and until one of them goes the inbox can never close.
+    fn close(&mut self, reason: SessionCloseReason) {
+        let changes = self
+            .turns
+            .close_all(crate::app::snapshot::TurnStatus::Interrupted);
+        self.announce_turn(changes);
+
+        let (reply, _cancelled) = oneshot::channel();
+        let changes = self.interactions.handle(
+            crate::app::interaction::InteractionMsg::CancelAll {
+                reason: crate::app::snapshot::InteractionCancelReason::SessionClosed,
+                abandoned_only: false,
+                reply,
+            },
+            &mut self.mint,
+        );
+        self.announce_interactions(changes);
+
+        for conversation in self.queue.conversations() {
+            let changes = self.queue.handle(
+                crate::app::queue::QueueMsg::Clear { conversation },
+                &mut self.mint,
+            );
+            self.announce_queue(changes);
+        }
+
+        self.agents.release();
+        self.session.state = SessionState::Closed;
+        self.publish(
+            Box::new(AppEventPayload::SessionClosed(SessionClosed {
+                session_id: self.session.id.clone(),
+                reason,
+            })),
+            None,
+        );
     }
 
     /// `conversation/submit`, as a client asks for it.
@@ -1237,14 +1323,19 @@ mod tests {
         let (mut link, _) = attached(&core, "test").await;
         link.request(AppRequest::Command {
             id: RequestId(2),
-            command: AppCommand::Shutdown,
+            command: AppCommand::MarkRead {
+                conversation_id: crate::app::ids::ConversationId::new("conv_1"),
+                last_item_id: None,
+                last_room_seq: None,
+                expected_revision: 0,
+            },
         })
         .await
         .unwrap_or_else(|error| panic!("{error}"));
         match link.recv().await {
             Some(AppFrame::Reply { id, result }) => {
                 assert_eq!(id, RequestId(2));
-                assert_eq!(result, Err(AppError::Unserved("shutdown")));
+                assert_eq!(result, Err(AppError::Unserved("conversation/markRead")));
             }
             other => panic!("expected a refusal, got {other:?}"),
         }
