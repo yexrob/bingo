@@ -739,47 +739,95 @@ impl Chat {
 
     // -- slash arguments ---------------------------------------------------
 
-    /// The one registry of argument-completion sources.
+    /// What the argument being typed can be.
     ///
-    /// Every arm reads the data its own handler validates against, so a
-    /// candidate the dropdown offers is a value the command accepts. `None`
-    /// means "this argument is free-form" (`/cd`, `/rename`, `/team message …`)
-    /// and no dropdown opens.
+    /// The command table says which argument the line is on and where its values
+    /// come from (D146); this reads them. The `match` that used to live here
+    /// knew five commands out of twenty-four, which is how `/join`'s own error
+    /// message came to promise a room typeahead that did not exist. `None` means
+    /// the argument is free text (`/cd`, `/rename`, a message to a colleague) and
+    /// no dropdown opens.
     pub(crate) fn arg_candidates(&self, ctx: &ArgContext<'_>) -> Option<Vec<ArgCandidate>> {
-        match (ctx.command, ctx.done.as_slice()) {
-            ("model", []) => Some(self.model_candidates()),
-            ("theme", []) => Some(
-                crate::tui::chat::THEME_LEVELS
-                    .iter()
-                    .map(|(name, desc)| ArgCandidate::new(*name, *desc))
-                    .collect(),
-            ),
-            ("think", []) => Some(
-                crate::tui::chat::THINK_LEVELS
-                    .iter()
-                    .map(|(name, desc)| ArgCandidate::new(*name, *desc))
-                    .collect(),
-            ),
-            ("resume", []) => Some(self.resume_candidates()),
-            // `/provider` is two-shaped: a bare argument switches provider, and
-            // `login`/`logout` take one. Offer both at the first token.
-            ("provider", []) => {
-                let mut items = vec![
-                    ArgCandidate::new("login", "authenticate a provider"),
-                    ArgCandidate::new("logout", "drop a provider's stored credentials"),
-                ];
-                items.extend(
-                    self.provider_order()
-                        .into_iter()
-                        .map(|name| ArgCandidate::new(name.clone(), self.provider_desc(&name))),
-                );
-                Some(items)
+        use crate::app::action::ArgumentSource;
+        use crate::app::snapshot::CatalogKind;
+        let spec = crate::app::action::command_spec(ctx.command)?;
+        let argument = crate::app::action::argument_at(spec, &ctx.done)?;
+        // The fixed words first, then the live list behind them: `/provider`
+        // offers `login` and `logout` as well as every provider's name.
+        let mut items: Vec<ArgCandidate> = argument
+            .choices
+            .iter()
+            .map(|(value, description)| ArgCandidate::new(*value, *description))
+            .collect();
+        match argument.source {
+            ArgumentSource::Fixed | ArgumentSource::Free => {}
+            ArgumentSource::Catalog(CatalogKind::Models) => items.extend(self.model_candidates()),
+            ArgumentSource::Catalog(CatalogKind::Providers) => {
+                // `login`/`logout` name a provider to authenticate, which
+                // `default` cannot be; a bare argument switches to one, which it
+                // can.
+                if ctx.done.is_empty() {
+                    items.extend(
+                        self.provider_order()
+                            .into_iter()
+                            .map(|name| ArgCandidate::new(name.clone(), self.provider_desc(&name))),
+                    );
+                } else {
+                    items.extend(self.login_provider_candidates());
+                }
             }
-            ("provider", ["login"] | ["logout"]) => Some(self.login_provider_candidates()),
-            // The registry itself, so a name the dropdown offers is a
-            // conversation that exists (D89).
-            _ => None,
+            ArgumentSource::Catalog(CatalogKind::McpServers) => items.extend(self.mcp_candidates()),
+            ArgumentSource::Catalog(CatalogKind::Skills) => items.extend(self.skill_candidates()),
+            ArgumentSource::Catalog(CatalogKind::Images) => {}
+            ArgumentSource::Resource(_) => {}
+            ArgumentSource::Sessions => items.extend(self.resume_candidates()),
+            ArgumentSource::Rooms => items.extend(self.room_candidates()),
+            ArgumentSource::Crew => items.extend(self.crew_candidates()),
         }
+        (!items.is_empty()).then_some(items)
+    }
+
+    /// The rooms this session has — the typeahead `/join`'s own usage line has
+    /// been promising.
+    fn room_candidates(&self) -> Vec<ArgCandidate> {
+        self.session
+            .channels
+            .list()
+            .into_iter()
+            .map(|room| {
+                let members = room.members.len();
+                ArgCandidate::new(room.name, format!("{members} in the room"))
+            })
+            .collect()
+    }
+
+    /// The instances the session is running, for `/team assign` and `/team stop`.
+    fn crew_candidates(&self) -> Vec<ArgCandidate> {
+        self.session
+            .agents
+            .list()
+            .into_iter()
+            .map(|agent| ArgCandidate::new(agent.name, agent.description))
+            .collect()
+    }
+
+    /// The configured MCP servers, from settings rather than from a connection:
+    /// a dropdown refreshed on every keystroke must not take a lock the connect
+    /// loop holds.
+    fn mcp_candidates(&self) -> Vec<ArgCandidate> {
+        let mut names: Vec<&String> = self.session.settings.mcp_servers.keys().collect();
+        names.sort();
+        names
+            .into_iter()
+            .map(|name| ArgCandidate::new(name.clone(), ""))
+            .collect()
+    }
+
+    fn skill_candidates(&self) -> Vec<ArgCandidate> {
+        crate::skills::load_skills(&self.session.home, &std::path::PathBuf::from(&self.cwd))
+            .into_iter()
+            .map(|skill| ArgCandidate::new(skill.name, skill.description))
+            .collect()
     }
 
     /// Model ids for the current provider, from the same three synchronous

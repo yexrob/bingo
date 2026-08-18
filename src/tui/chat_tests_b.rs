@@ -2406,21 +2406,24 @@ fn busy_dispatch_runs_instant_and_queues_the_rest() {
     let out = chat.slash_lines.join("\n");
     assert!(out.contains("✓ thinking level set: xhigh"), "{out}");
 
+    // /gc waits its turn now (D146): it deletes storage the running turn may be
+    // writing to, and it used to skip the queue only to refuse itself mid-turn —
+    // one rule written twice and obeyed once.
     chat.set_input("/gc");
     chat.submit();
+    assert!(chat.conv.busy, "queueing does not reset the active turn");
+    let queued = chat.main_queue().entries;
+    assert_eq!(queued.len(), 1);
+    assert_eq!(queued[0].text, "/gc");
+    assert!(queued[0].is_command());
     assert!(
-        chat.conv.busy,
-        "refused cleanup does not reset the active turn"
-    );
-    assert!(
-        chat.main_queue().is_empty(),
-        "refused cleanup is never queued"
-    );
-    assert!(
-        chat.slash_error_lines
+        !chat
+            .slash_error_lines
             .join("\n")
-            .contains("cannot clean session data mid-turn")
+            .contains("cannot clean session data mid-turn"),
+        "the queue is the refusal now"
     );
+    chat.session.queue.clear(crate::ui::ConvKey::Main);
 
     chat.set_input("/model deepseek-v4");
     chat.submit();

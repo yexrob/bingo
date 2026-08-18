@@ -239,7 +239,7 @@ impl super::Chat {
             });
         let result = crate::tui::slash::suggestions(
             &self.input,
-            SLASH_COMMANDS,
+            &crate::tui::slash::commands(),
             skills,
             // Full list: rendering windows around the selection (the old
             // hard cap made commands 6+ unreachable from a bare `/`).

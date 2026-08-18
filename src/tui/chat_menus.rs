@@ -563,10 +563,11 @@ impl super::Chat {
     }
 
     /// Enters the `/think` level selector: preselects the current level (off when unset).
-    fn open_think_menu(&mut self) {
+    pub(crate) fn open_think_menu(&mut self) {
         let current = self.session.runtime.thinking.borrow().clone();
         let current = current.as_deref().unwrap_or("off");
-        let current = THINK_LEVELS
+        let levels = crate::tui::chat::think_levels();
+        let current = levels
             .iter()
             .position(|(name, _)| *name == current)
             .unwrap_or(0);

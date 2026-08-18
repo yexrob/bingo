@@ -22,17 +22,6 @@ use crate::app::command::{ComposerMode, Submission};
 use crate::app::conversation::ConvKey;
 use crate::app::queue::{Enqueue, QueuedKind};
 
-/// Slash commands that execute immediately while a model turn is active: a
-/// settings knob applies before the next turn, and a read-only status view has
-/// nothing to wait for.
-///
-/// It is routing input rather than presentation, which is why it lives here: the
-/// core is what decides that a line bypasses the queue.
-pub const INSTANT_COMMANDS: &[&str] = &[
-    "think", "model", "provider", "theme", "images", "status", "context", "tasks", "help",
-    "skills", "config", "gc",
-];
-
 /// Who a composer line addresses when it opens with a sigil (D103).
 ///
 /// CC's `parseDirectMemberMessage` (2.1.88 `utils/directMemberMessage.ts`) is the
@@ -247,8 +236,9 @@ pub fn route(composed: Composed, origin: &Origin) -> Decision {
             }
         }
         Composed::Command(line) => {
-            let name = line.split_whitespace().next().unwrap_or("");
-            if origin.main_busy && !INSTANT_COMMANDS.contains(&name) {
+            // Which lines skip a running turn is the command table's answer, not
+            // a second list of names beside it (D146).
+            if origin.main_busy && !crate::app::action::is_instant(&line) {
                 queued(format!("/{line}"), QueuedKind::Command, false)
             } else {
                 Decision::Command {

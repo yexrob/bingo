@@ -185,8 +185,9 @@ fn footer_row(chat: &Chat, width: usize) -> Row {
     let model_name = chat.session.runtime.model.borrow().clone();
     let thinking = chat.session.runtime.thinking.borrow().clone();
     let (model, model_color) = if let Some(menu) = &chat.think_menu {
-        let level = crate::tui::chat::THINK_LEVELS
-            [menu.selected.min(crate::tui::chat::THINK_LEVELS.len() - 1)]
+        let level = crate::tui::chat::think_levels()[menu
+            .selected
+            .min(crate::tui::chat::think_levels().len() - 1)]
         .0;
         (format!("{model_name} · think {level} ▸"), theme.claude)
     } else {
@@ -841,7 +842,7 @@ mod tests {
     /// overflowing the canvas).
     #[test]
     fn suggestion_rows_cover_every_menu_state() {
-        use crate::tui::chat::{SlashSuggestion, THINK_LEVELS, ThinkMenu};
+        use crate::tui::chat::{SlashSuggestion, ThinkMenu, think_levels};
         use crate::tui::model_menu::{ModelChoice, ModelMenuModels};
         let theme = Theme::dark();
         let mut menu = ModelMenu {
@@ -1039,7 +1040,7 @@ mod tests {
         );
         assert_eq!(
             think_rows.len(),
-            THINK_LEVELS.len() + 1,
+            think_levels().len() + 1,
             "6 levels + a hint row"
         );
         assert!(

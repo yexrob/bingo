@@ -1684,11 +1684,13 @@ fn theme_picker_selects_and_applies() {
     chat.submit();
     let menu = chat.theme_menu.as_ref().expect("menu is open");
     assert_eq!(
-        THEME_LEVELS[menu.selected].0, "auto",
+        crate::tui::chat::theme_levels()[menu.selected].0,
+        "auto",
         "preselects the current level auto"
     );
     assert_eq!(
-        THEME_LEVELS[menu.current].0, "auto",
+        crate::tui::chat::theme_levels()[menu.current].0,
+        "auto",
         "● marks the current level"
     );
     // Esc cancels: state unchanged, menu closed.
@@ -1709,7 +1711,11 @@ fn theme_picker_selects_and_applies() {
     chat.submit();
     assert!(chat.on_key(KeyCode::Char('2'), KeyModifiers::empty()));
     let menu = chat.theme_menu.as_ref().expect("menu is open");
-    assert_eq!(THEME_LEVELS[menu.selected].0, "light", "2 jumps to light");
+    assert_eq!(
+        crate::tui::chat::theme_levels()[menu.selected].0,
+        "light",
+        "2 jumps to light"
+    );
     assert!(chat.on_key(KeyCode::Enter, KeyModifiers::empty()));
     assert!(chat.theme_menu.is_none(), "Enter closes the menu");
     assert_eq!(
@@ -1725,12 +1731,17 @@ fn theme_picker_selects_and_applies() {
     chat.submit();
     let menu = chat.theme_menu.as_ref().expect("menu is open");
     assert_eq!(
-        THEME_LEVELS[menu.current].0, "light",
+        crate::tui::chat::theme_levels()[menu.current].0,
+        "light",
         "● follows the active level"
     );
     assert!(chat.on_key(KeyCode::Up, KeyModifiers::empty()));
     let menu = chat.theme_menu.as_ref().expect("menu is open");
-    assert_eq!(THEME_LEVELS[menu.selected].0, "dark", "up to dark");
+    assert_eq!(
+        crate::tui::chat::theme_levels()[menu.selected].0,
+        "dark",
+        "up to dark"
+    );
     assert!(chat.on_key(KeyCode::Esc, KeyModifiers::empty()));
 
     // The shortcut path stays: /theme auto switches directly.
@@ -2627,7 +2638,8 @@ fn slash_think_sets_level_and_persists() {
     chat.submit();
     let menu = chat.think_menu.as_ref().expect("menu is open");
     assert_eq!(
-        THINK_LEVELS[menu.selected].0, "off",
+        crate::tui::chat::think_levels()[menu.selected].0,
+        "off",
         "preselects off when unset"
     );
     assert!(chat.on_key(KeyCode::Esc, KeyModifiers::empty()));
@@ -2818,7 +2830,7 @@ fn slash_menu_lists_commands_and_hides_with_args() {
     chat.input = "/".to_string();
     chat.update_slash_suggestions();
     assert!(
-        chat.slash_suggestions.len() >= SLASH_COMMANDS.len(),
+        chat.slash_suggestions.len() >= crate::app::action::COMMANDS.len(),
         "everything lands in state (including skill expansion; the render layer windows around the selection, so commands 6+ are reachable again)"
     );
     assert!(chat.slash_suggestions.iter().any(|s| s.name == "model"));
@@ -2849,61 +2861,35 @@ fn slash_menu_lists_commands_and_hides_with_args() {
     );
 }
 
-/// Dispatch completeness: every SLASH_COMMANDS entry has a `run_slash` arm, and every
-/// dispatch arm's primary name lives in the table (aliases normalize to a primary).
-/// The mirror list below must stay in sync with `run_slash`'s match arms — this test is the gate.
+/// Dispatch completeness: every command in the table is reachable through
+/// `run_slash`, and the terminal invents no name the table does not have.
+///
+/// The hand-kept mirror of `run_slash`'s match arms that used to live here is
+/// gone with the arms (D146): dispatch is a match on the parsed `Command`, so
+/// the compiler is what keeps it exhaustive, and the table is what decides
+/// which names exist.
 #[test]
 fn slash_dispatch_covers_every_table_entry() {
-    use std::collections::HashSet;
-    // run_slash match arms as (arm, primary); aliases share the primary's handler.
-    let dispatch: &[(&str, &str)] = &[
-        ("help", "help"),
-        ("?", "help"),
-        ("exit", "exit"),
-        ("quit", "exit"),
-        ("clear", "clear"),
-        ("reset", "clear"),
-        ("new", "clear"),
-        ("model", "model"),
-        ("cd", "cd"),
-        ("theme", "theme"),
-        ("images", "images"),
-        ("rename", "rename"),
-        ("resume", "resume"),
-        ("gc", "gc"),
-        ("share", "share"),
-        ("compact", "compact"),
-        ("status", "status"),
-        ("config", "config"),
-        ("context", "context"),
-        ("permissions", "permissions"),
-        ("mcp", "mcp"),
-        ("provider", "provider"),
-        ("think", "think"),
-        ("skills", "skills"),
-        ("tasks", "tasks"),
-        ("team", "team"),
-        ("join", "join"),
-        ("leave", "leave"),
-    ];
-    let table: HashSet<&str> = SLASH_COMMANDS.iter().map(|(n, _, _)| *n).collect();
-    let arms: HashSet<&str> = dispatch.iter().map(|(a, _)| *a).collect();
-    let primaries: HashSet<&str> = dispatch.iter().map(|(_, p)| *p).collect();
-    for name in &table {
-        assert!(
-            arms.contains(name),
-            "the registered command /{name} is missing a run_slash dispatch arm"
-        );
+    for spec in crate::app::action::COMMANDS {
+        for name in std::iter::once(spec.name).chain(spec.aliases.iter().copied()) {
+            let read = crate::app::action::parse(name);
+            assert!(
+                !matches!(read, Err(crate::app::action::ParseError::Unknown(_))),
+                "the registered command /{name} does not answer to its own name"
+            );
+        }
     }
-    for p in &primaries {
-        assert!(
-            table.contains(p),
-            "the dispatch arm /{p} is not in the SLASH_COMMANDS table"
-        );
-    }
+    let mut chat = test_chat();
+    chat.run_slash("nonesuch");
+    assert!(
+        chat.slash_error_lines
+            .join("\n")
+            .contains(crate::error::SLASH_ERROR_UNKNOWN_COMMAND),
+        "a name the table does not have is refused by name"
+    );
 }
 
-/// `/help` renders every SLASH_COMMANDS entry (title + one line each) with its hint,
+/// `/help` renders every table entry (title + one line each) with its hint,
 /// straight from the same table — the single source stays the only source.
 #[test]
 fn slash_help_lists_every_command_with_hint() {
@@ -2912,13 +2898,13 @@ fn slash_help_lists_every_command_with_hint() {
     let lines: Vec<&str> = chat.slash_info_lines.iter().map(String::as_str).collect();
     assert_eq!(
         lines.len(),
-        SLASH_COMMANDS.len() + 3,
-        "title + one row per command + sub-command line + key cross-link"
+        crate::app::action::COMMANDS.len() + 2,
+        "title + one row per command + key cross-link"
     );
     assert_eq!(lines[0], "available commands:");
     assert!(
-        lines.iter().any(|l| l.contains("/provider login")),
-        "sub-commands are discoverable"
+        lines.iter().any(|l| l.contains("login")),
+        "sub-commands are discoverable, and from the table's own hint now"
     );
     assert!(
         lines
@@ -2926,18 +2912,13 @@ fn slash_help_lists_every_command_with_hint() {
             .any(|l| l.contains("press ? on an empty input")),
         "cross-linked to the ? panel"
     );
-    for ((name, hint, desc), line) in SLASH_COMMANDS.iter().zip(&lines[1..]) {
-        let cmd = if hint.is_empty() {
-            format!("/{name}")
-        } else {
-            format!("/{name} {hint}")
-        };
+    for (spec, line) in crate::app::action::COMMANDS.iter().zip(&lines[1..]) {
         assert!(
-            line.contains(&cmd),
+            line.contains(&spec.usage()),
             "the row carries the command and its argument hint: {line}"
         );
         assert!(
-            line.ends_with(desc),
+            line.ends_with(spec.description),
             "the row ends with the description: {line}"
         );
     }
@@ -3364,7 +3345,8 @@ fn think_menu_navigates_and_confirms() {
     chat.submit();
     let menu = chat.think_menu.as_ref().expect("menu is open");
     assert_eq!(
-        THINK_LEVELS[menu.selected].0, "high",
+        crate::tui::chat::think_levels()[menu.selected].0,
+        "high",
         "preselects the current level"
     );
     // ↑ to medium, Enter confirms: runtime effect + persistence + menu closes.
@@ -3401,11 +3383,14 @@ fn think_menu_navigates_and_confirms() {
     let _ = std::fs::remove_dir_all(&home);
 }
 
-/// THINK_LEVELS (selector) matches the API layer's THINKING_LEVELS: off + all levels, in the same order.
+/// The think vocabulary (selector) matches the API layer's THINKING_LEVELS: off + all levels, in the same order.
 #[test]
 fn think_levels_match_api_levels() {
-    assert_eq!(THINK_LEVELS[0].0, "off");
-    let menu: Vec<&str> = THINK_LEVELS[1..].iter().map(|(n, _)| *n).collect();
+    assert_eq!(crate::tui::chat::think_levels()[0].0, "off");
+    let menu: Vec<&str> = crate::tui::chat::think_levels()[1..]
+        .iter()
+        .map(|(n, _)| *n)
+        .collect();
     assert_eq!(menu, crate::api::contract::THINKING_LEVELS.to_vec());
 }
 
@@ -3424,7 +3409,11 @@ fn think_menu_direct_jump_and_session_only() {
     // '3' jumps to medium (off=1, low=2, medium=3); digits are consumed, not typed.
     assert!(chat.on_key(KeyCode::Char('3'), KeyModifiers::empty()));
     let menu = chat.think_menu.as_ref().expect("menu is open");
-    assert_eq!(THINK_LEVELS[menu.selected].0, "medium", "3 jumps to medium");
+    assert_eq!(
+        crate::tui::chat::think_levels()[menu.selected].0,
+        "medium",
+        "3 jumps to medium"
+    );
     assert_eq!(
         chat.input, "",
         "digit keys are consumed by the menu, never reaching the input"
@@ -3432,7 +3421,11 @@ fn think_menu_direct_jump_and_session_only() {
     // '6' wraps-jumps to max; Enter persists.
     assert!(chat.on_key(KeyCode::Char('6'), KeyModifiers::empty()));
     let menu = chat.think_menu.as_ref().expect("menu is open");
-    assert_eq!(THINK_LEVELS[menu.selected].0, "max", "6 jumps to max");
+    assert_eq!(
+        crate::tui::chat::think_levels()[menu.selected].0,
+        "max",
+        "6 jumps to max"
+    );
     assert!(chat.on_key(KeyCode::Esc, KeyModifiers::empty()));
     assert_eq!(
         chat.session.runtime.thinking.borrow().as_deref(),

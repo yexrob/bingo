@@ -102,7 +102,7 @@ pub fn is_hidden_tool(name: &str) -> bool {
     )
 }
 
-pub use crate::tui::slash::{COMMANDS as SLASH_COMMANDS, SlashSuggestion};
+pub use crate::tui::slash::SlashSuggestion;
 
 /// Footer model badge: `{model} · think {level}` (off = no level shown, keeps it concise).
 pub fn model_footer_label(model: &str, thinking: Option<&str>) -> String {
@@ -130,7 +130,7 @@ impl ThinkMenu {
     /// Thin shell → core: built from selected/current and THINK_LEVELS (shared by key dispatch and rendering).
     pub fn picker(&self) -> crate::tui::picker::PickerModel {
         crate::tui::picker::PickerModel::new(
-            THINK_LEVELS
+            think_levels()
                 .iter()
                 .map(|(name, desc)| crate::tui::picker::PickerItem::new(*name, *name, *desc))
                 .collect(),
@@ -149,11 +149,11 @@ impl ThinkMenu {
 }
 
 /// `/theme` selector options (dark/light/auto; the ThemeSetting mapping lives in open_theme_menu).
-pub const THEME_LEVELS: &[(&str, &str)] = &[
-    ("dark", "dark theme"),
-    ("light", "light theme"),
-    ("auto", "follow the terminal background"),
-];
+/// The `/theme` vocabulary, from the one command table (D146). The picker draws
+/// the action's own argument choices rather than a second list beside them.
+pub fn theme_levels() -> crate::app::action::Choices {
+    crate::app::action::choices_for("theme.set", "theme")
+}
 
 /// `/theme` single-level selector state (thin shell, like ThinkMenu: fields public, logic delegated to PickerModel).
 #[derive(Clone)]
@@ -167,7 +167,7 @@ pub struct ThemeMenu {
 impl ThemeMenu {
     pub fn picker(&self) -> crate::tui::picker::PickerModel {
         crate::tui::picker::PickerModel::new(
-            THEME_LEVELS
+            theme_levels()
                 .iter()
                 .map(|(name, desc)| crate::tui::picker::PickerItem::new(*name, *name, *desc))
                 .collect(),
@@ -253,20 +253,10 @@ impl ProviderMenu {
 
 /// `/think` selector entries: level name + description (everything past off corresponds one-to-one with
 /// THINKING_LEVELS, in the same order; consistency is guaranteed by a test).
-pub const THINK_LEVELS: &[(&str, &str)] = &[
-    (
-        "off",
-        "no thinking parameter (compatible with DeepSeek etc.)",
-    ),
-    ("low", "adaptive thinking · effort low"),
-    ("medium", "adaptive thinking · effort medium"),
-    ("high", "adaptive thinking · effort high (recommended)"),
-    (
-        "xhigh",
-        "adaptive thinking · effort xhigh (recommended for coding/agentic work)",
-    ),
-    ("max", "adaptive thinking · effort max (deepest reasoning)"),
-];
+/// The `/think` vocabulary, from the one command table (D146).
+pub fn think_levels() -> crate::app::action::Choices {
+    crate::app::action::choices_for("thinking.select", "level")
+}
 
 /// Max visible rows in the dropdown (OVERLAY_MAX_ITEMS = 5).
 pub const SLASH_SUGGESTIONS_MAX: usize = 5;
@@ -2965,64 +2955,154 @@ impl Chat {
         // Any slash run closes the dropdown (Enter on a full input skips submit's clear-menu branch,
         // otherwise suggestion rows like `+ /model …` would linger below the input forever).
         self.clear_slash_suggestions();
-        let (cmd, arg) = match line.split_once(char::is_whitespace) {
-            Some((c, a)) => (c, a.trim()),
-            None => (line, ""),
+        let arg = match line.split_once(char::is_whitespace) {
+            Some((_, a)) => a.trim(),
+            None => "",
         };
-        match cmd {
-            "help" | "?" => self.slash_help(),
-            "exit" | "quit" => self.exit = true,
-            "clear" | "reset" | "new" => self.slash_clear(),
-            "model" => self.slash_model(arg),
-            "cd" => self.slash_cd(arg),
-            "theme" => self.slash_theme(arg),
-            "images" => self.slash_images(),
-            "rename" => self.slash_rename(arg),
-            "resume" => self.slash_resume(arg),
-            "gc" => self.slash_gc(),
-            "share" => self.slash_share(arg),
-            "compact" => self.slash_compact(on),
-            "status" => self.slash_status(),
-            "config" => self.slash_config(),
-            "context" => self.slash_context(),
-            "permissions" => self.slash_permissions(arg),
-            "mcp" => self.slash_mcp(arg),
-            "provider" => self.slash_provider(arg),
-            "think" => self.slash_think(arg),
-            "skills" => self.slash_skills(),
-            "tasks" => self.slash_tasks(),
-            "team" => self.slash_team(arg),
-            "join" => self.slash_join(arg),
-            "leave" => self.slash_leave(arg),
-            other => {
-                // Skill name (prompt Command: skills share the registry with built-in commands; typing
-                // /skill-name runs it; the full body never enters the context, see the marker comment below).
-                let skills = crate::skills::load_skills(
-                    &self.session.home,
-                    &std::path::PathBuf::from(&self.cwd),
-                );
-                if let Some(skill) = skills.iter().find(|s| s.name == other) {
-                    // Progressive disclosure: only the `✦ <skill name> [args]` marker is submitted; the model
-                    // reads the body on demand via the Skill tool pointer (`✦ name — read <path>`) + Read.
-                    let marker = if arg.is_empty() {
-                        format!("✦ {}", skill.name)
-                    } else {
-                        format!("✦ {} {}", skill.name, arg)
-                    };
-                    self.start_turn(marker, true);
-                    return true;
-                }
-                self.push_slash_error(format!(
-                    "[error] code={} msg=unknown command: /{other}. Type /help to see the available commands.",
-                    crate::error::SLASH_ERROR_UNKNOWN_COMMAND
-                ))
+        // What the line *is* comes from the one command table (D146): its names,
+        // its aliases, its argument grammar, and the skills this session has.
+        // What each branch then *does* is still the console's, until B7 sends
+        // these as `action/execute` frames instead.
+        let skills: Vec<String> =
+            crate::skills::load_skills(&self.session.home, &std::path::PathBuf::from(&self.cwd))
+                .into_iter()
+                .map(|skill| skill.name)
+                .collect();
+        let parsed = match crate::app::action::parse_in(line, &skills) {
+            Ok(parsed) => parsed,
+            Err(error) => {
+                let code = match error {
+                    crate::app::action::ParseError::Unknown(_) => {
+                        crate::error::SLASH_ERROR_UNKNOWN_COMMAND
+                    }
+                    crate::app::action::ParseError::Usage { .. } => {
+                        crate::error::SLASH_ERROR_BAD_ARGUMENT
+                    }
+                };
+                let hint = match error {
+                    crate::app::action::ParseError::Unknown(_) => {
+                        " Type /help to see the available commands."
+                    }
+                    crate::app::action::ParseError::Usage { .. } => "",
+                };
+                self.push_slash_error(format!("[error] code={code} msg={error}.{hint}"));
+                return true;
             }
-        }
+        };
+        self.run_command(parsed, arg, on);
         true
     }
 
+    /// Perform one parsed command. The arms are the terminal's half; the naming,
+    /// the grammar and the availability behind them are the registry's.
+    fn run_command(
+        &mut self,
+        parsed: crate::app::action::Command,
+        arg: &str,
+        on: &crate::ui::ConvKey,
+    ) {
+        use crate::app::action::{Call, Command, Read, TeamRead};
+        use crate::app::command::Action;
+        use crate::app::snapshot::{CatalogKind, ConfigSection, ResourceKind};
+        match parsed {
+            // -- reads: the state is structured, the view is the terminal's ----
+            Command::Read(Read::Commands) => self.slash_help(),
+            Command::Read(Read::Session) => self.slash_status(),
+            Command::Read(Read::Context) => self.slash_context(),
+            Command::Read(Read::Config(None)) => self.slash_config(),
+            Command::Read(Read::Config(Some(ConfigSection::Permissions))) => {
+                self.slash_permissions()
+            }
+            Command::Read(Read::Config(Some(ConfigSection::Mcp))) => self.slash_mcp(""),
+            Command::Read(Read::Config(Some(_))) => self.slash_config(),
+            Command::Read(Read::Catalog(CatalogKind::Models)) => self.open_model_menu(),
+            Command::Read(Read::Catalog(CatalogKind::Providers)) => self.slash_provider(""),
+            Command::Read(Read::Catalog(CatalogKind::Skills)) => self.slash_skills(),
+            Command::Read(Read::Catalog(CatalogKind::McpServers)) => self.slash_mcp(""),
+            Command::Read(Read::Catalog(CatalogKind::Images)) => self.slash_images(),
+            Command::Read(Read::Resource(ResourceKind::Tasks)) => self.slash_tasks(),
+            Command::Read(Read::Resource(_)) => self.slash_status(),
+            Command::Read(Read::Sessions) => self.slash_resume(""),
+            Command::Read(Read::Team(TeamRead::Chart)) => self.slash_team(""),
+            Command::Read(Read::Team(TeamRead::Status)) => self.slash_team("status"),
+            Command::Read(Read::Team(TeamRead::Validate)) => self.slash_team("validate"),
+            Command::Read(Read::Team(TeamRead::Norms)) => self.slash_team("norms"),
+            Command::Read(Read::Team(TeamRead::Memory)) => self.slash_team("memory"),
+            // A picker is that action's own argument choices; which surface
+            // shows them is the frontend's business.
+            Command::Read(Read::Options(action)) => match action.as_str() {
+                "theme.set" => self.open_theme_menu(),
+                _ => self.open_think_menu(),
+            },
+            // -- lifecycle ----------------------------------------------------
+            Command::Call(Call::Close) => self.exit = true,
+            Command::Call(Call::Resume(locator)) => {
+                let query = match &locator {
+                    crate::app::snapshot::SessionLocator::Stem { stem } => stem.clone(),
+                    _ => String::new(),
+                };
+                self.slash_resume(&query);
+            }
+            // -- actions ------------------------------------------------------
+            Command::Act(action) => match action {
+                Action::SessionReset => self.slash_clear(),
+                Action::SessionRename { name } => self.slash_rename(&name),
+                Action::SessionGarbageCollect => self.slash_gc(),
+                // B7 removes this: the flag text is re-read by the handler,
+                // which the registry has already parsed into the action.
+                Action::SessionShare { .. } => self.slash_share(arg),
+                Action::SessionChangeDirectory { path } => self.slash_cd(&path.to_string_lossy()),
+                Action::ConversationCompact { .. } => self.slash_compact(on),
+                // esc-esc owns the checkpoint selector; a typed line never
+                // reaches this arm.
+                Action::ConversationRewind { .. } => self.slash_status(),
+                Action::ModelSelect { model } => self.set_model(model),
+                Action::ProviderSelect { provider } => self.slash_provider(&provider),
+                // B7 removes this: `--device-auth` and `--manual <token>` are
+                // login mechanics the action does not carry.
+                Action::ProviderLogin { .. } | Action::ProviderLogout { .. } => {
+                    self.slash_provider(arg)
+                }
+                Action::ThinkingSelect { level } => self.slash_think(level.as_str()),
+                Action::PermissionModeSet { .. } => self.slash_status(),
+                Action::PermissionRuleAdd { decision, rule } => {
+                    self.permission_rule(decision, &rule, true)
+                }
+                Action::PermissionRuleRemove { decision, rule } => {
+                    self.permission_rule(decision, &rule, false)
+                }
+                // B7 removes this: the handler re-reads what the registry parsed.
+                Action::McpEnable { .. }
+                | Action::McpDisable { .. }
+                | Action::McpReconnect { .. } => self.slash_mcp(arg),
+                Action::SkillInvoke { skill, input } => {
+                    // Progressive disclosure: only the `✦ <skill name> [args]`
+                    // marker is submitted; the model reads the body on demand
+                    // through the Skill tool pointer and Read.
+                    let marker = match input {
+                        Some(input) => format!("✦ {skill} {input}"),
+                        None => format!("✦ {skill}"),
+                    };
+                    self.start_turn(marker, true);
+                }
+                // B7 removes this: `team_cmd` still reads its own sub-grammar.
+                Action::TeamStart { .. }
+                | Action::TeamAssign { .. }
+                | Action::TeamStop { .. }
+                | Action::TeamScaffold { .. }
+                | Action::TeamMemoryGarbageCollect => self.slash_team(arg),
+                Action::RoomJoin { room } => self.slash_join(&room),
+                Action::RoomLeave { room } => self.slash_leave(&room),
+                Action::CommandPromote { .. } => {}
+                Action::ThemeSet { theme } => {
+                    self.apply_theme(ThemeSetting::parse(Some(theme.as_str())));
+                }
+            },
+        }
+    }
+
     fn slash_help(&mut self) {
-        self.push_slash_info(crate::tui::slash::help_lines(SLASH_COMMANDS).join("\n"));
+        self.push_slash_info(crate::app::action::help_lines().join("\n"));
     }
 
     fn slash_cd(&mut self, arg: &str) {
@@ -3175,14 +3255,6 @@ impl Chat {
         self.push_slash_output("✓ conversation cleared; starting a new session.".to_string());
     }
 
-    fn slash_model(&mut self, arg: &str) {
-        if arg.is_empty() {
-            self.open_model_menu();
-            return;
-        }
-        self.set_model(arg.to_string());
-    }
-
     /// Switches the runtime model and persists it as the default (same path as /theme /think: writes the project layer).
     pub(crate) fn set_model(&mut self, model: String) {
         // Main's turn: the model is the console's setting (see `slash_cd`).
@@ -3253,24 +3325,6 @@ impl Chat {
         }
         names.extend(user_names);
         names
-    }
-
-    /// `/theme [dark|light|auto]`: no argument opens the level selector (picker-model.md commit B);
-    /// an argument takes the fast path (`/theme auto` keeps the explicit shortcut).
-    fn slash_theme(&mut self, arg: &str) {
-        if arg.is_empty() {
-            self.open_theme_menu();
-            return;
-        }
-        // A typo must not read as success: the old path silently parsed any
-        // junk as auto and announced "✓ theme switched: auto".
-        if !matches!(arg.trim(), "auto" | "dark" | "light") {
-            self.push_slash_error(format!(
-                "[error] code=BAD_ARGUMENT msg=unknown theme: {arg}. Choose from auto | dark | light"
-            ));
-            return;
-        }
-        self.apply_theme(ThemeSetting::parse(Some(arg)));
     }
 
     /// Width a diff body gets inside an activity's expanded content, once
@@ -3415,7 +3469,7 @@ impl Chat {
             selected: current,
             current,
         };
-        // Empty-table guard (THEME_LEVELS is a non-empty const; this defensive branch is unreachable).
+        // Empty-table guard (the theme vocabulary is never empty; this defensive branch is unreachable).
         if menu.picker().is_empty() {
             return;
         }
@@ -3665,7 +3719,9 @@ impl Chat {
         });
     }
 
-    fn slash_permissions(&mut self, arg: &str) {
+    /// The permission rules as they stand — the reading half of
+    /// `config/read`'s permissions section, rendered here.
+    fn slash_permissions(&mut self) {
         let rules = self
             .session
             .runtime
@@ -3673,34 +3729,42 @@ impl Chat {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone();
-        if arg.is_empty() {
-            let mut lines = vec!["permission rules (.bingo/settings.json):".to_string()];
-            for (name, list) in [
-                ("allow", &rules.allow),
-                ("deny", &rules.deny),
-                ("ask", &rules.ask),
-            ] {
-                if list.is_empty() {
-                    lines.push(format!("  {name}: (none)"));
-                } else {
-                    lines.push(format!("  {name}:"));
-                    for rule in list {
-                        lines.push(format!("    {rule}"));
-                    }
+        let mut lines = vec!["permission rules (.bingo/settings.json):".to_string()];
+        for (name, list) in [
+            ("allow", &rules.allow),
+            ("deny", &rules.deny),
+            ("ask", &rules.ask),
+        ] {
+            if list.is_empty() {
+                lines.push(format!("  {name}: (none)"));
+            } else {
+                lines.push(format!("  {name}:"));
+                for rule in list {
+                    lines.push(format!("    {rule}"));
                 }
             }
-            lines.push("usage: /permissions [allow|deny|ask] [rule, e.g. Skill(review:*)]".into());
-            self.push_slash_info(lines.join("\n"));
-            return;
         }
-        let Some((kind, rule)) = arg.split_once(char::is_whitespace) else {
-            self.push_slash_error("usage: /permissions [allow|deny|ask] [rule]".to_string());
-            return;
+        lines.push(
+            "usage: /permissions [allow|deny|ask] <rule, e.g. Skill(review:*)] · remove <allow|deny|ask> <rule>"
+                .into(),
+        );
+        self.push_slash_info(lines.join("\n"));
+    }
+
+    /// Add or drop one permission rule. The registry read the line; this applies
+    /// it to the live table and writes it back to the project layer.
+    pub(crate) fn permission_rule(
+        &mut self,
+        decision: crate::app::snapshot::PermissionRuleDecision,
+        rule: &str,
+        add: bool,
+    ) {
+        use crate::app::snapshot::PermissionRuleDecision;
+        let kind = match decision {
+            PermissionRuleDecision::Allow => "allow",
+            PermissionRuleDecision::Deny => "deny",
+            PermissionRuleDecision::Ask => "ask",
         };
-        if !["allow", "deny", "ask"].contains(&kind) || rule.is_empty() {
-            self.push_slash_error("usage: /permissions [allow|deny|ask] [rule]".to_string());
-            return;
-        }
         let mut rules = self
             .session
             .runtime
@@ -3708,13 +3772,23 @@ impl Chat {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone();
-        let list = match kind {
-            "allow" => &mut rules.allow,
-            "deny" => &mut rules.deny,
-            _ => &mut rules.ask,
+        let list = match decision {
+            PermissionRuleDecision::Allow => &mut rules.allow,
+            PermissionRuleDecision::Deny => &mut rules.deny,
+            PermissionRuleDecision::Ask => &mut rules.ask,
         };
-        if !list.iter().any(|r| r == rule) {
-            list.push(rule.to_string());
+        let held = list.iter().any(|held| held == rule);
+        match (add, held) {
+            (true, false) => list.push(rule.to_string()),
+            (false, true) => list.retain(|held| held != rule),
+            (true, true) => {}
+            (false, false) => {
+                self.push_slash_error(format!(
+                    "[error] code={} msg=no {kind} rule to remove: {rule}",
+                    crate::error::SLASH_ERROR_BAD_ARGUMENT
+                ));
+                return;
+            }
         }
         *self
             .session
@@ -3730,12 +3804,13 @@ impl Chat {
                 "ask": rules.ask,
             }
         });
+        let verb = if add { "added" } else { "removed" };
         match crate::settings::upsert_project_settings(&cwd, &patch) {
             Ok(()) => self.push_slash_output(format!(
-                "✓ added {kind} rule: {rule} (active now + written to .bingo/settings.json)"
+                "✓ {verb} {kind} rule: {rule} (active now + written to .bingo/settings.json)"
             )),
             Err(e) => self.push_slash_output(format!(
-                "✓ added {kind} rule: {rule} (active now); persistence failed: {e}"
+                "✓ {verb} {kind} rule: {rule} (active now); persistence failed: {e}"
             )),
         }
     }

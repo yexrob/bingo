@@ -28,11 +28,11 @@
 use std::path::PathBuf;
 
 use crate::app::command::{
-    Action, ActionArgument, ActionFamily, ActionId, ActionInfo, ArgumentKind, RewindTarget,
+    Action, ActionArgument, ActionFamily, ActionId, ActionInfo, ArgumentKind,
 };
 use crate::app::snapshot::{
     CatalogKind, ConfigSection, PermissionMode, PermissionRuleDecision, ResourceKind,
-    RevisionScope, RewindMode, SessionLocator, ThemeChoice, ThinkingLevel,
+    RevisionScope, SessionLocator, ThemeChoice, ThinkingLevel,
 };
 
 // ---------------------------------------------------------------------------
@@ -152,7 +152,10 @@ pub struct ArgumentSpec {
     pub required: bool,
     pub description: &'static str,
     pub source: ArgumentSource,
-    pub choices: &'static [&'static str],
+    /// The fixed values, each with the one-line description a picker shows.
+    /// `action/list` publishes the values; the descriptions are the terminal's
+    /// menu text, which is a projection.
+    pub choices: &'static [(&'static str, &'static str)],
 }
 
 impl ArgumentSpec {
@@ -182,7 +185,7 @@ impl ArgumentSpec {
         name: &'static str,
         required: bool,
         description: &'static str,
-        choices: &'static [&'static str],
+        choices: &'static [(&'static str, &'static str)],
     ) -> Self {
         Self {
             name,
@@ -200,13 +203,25 @@ impl ArgumentSpec {
         description: &'static str,
         source: ArgumentSource,
     ) -> Self {
+        Self::mixed(name, required, description, &[], source)
+    }
+
+    /// A few fixed words in front of a live list: `/provider` takes `login` and
+    /// `logout` as well as any provider's name.
+    const fn mixed(
+        name: &'static str,
+        required: bool,
+        description: &'static str,
+        choices: Choices,
+        source: ArgumentSource,
+    ) -> Self {
         Self {
             name,
             kind: ArgumentKind::Enumeration,
             required,
             description,
             source,
-            choices: &[],
+            choices,
         }
     }
 
@@ -216,7 +231,11 @@ impl ArgumentSpec {
             kind: self.kind,
             required: self.required,
             description: self.description.to_string(),
-            choices: self.choices.iter().map(|c| (*c).to_string()).collect(),
+            choices: self
+                .choices
+                .iter()
+                .map(|(value, _)| (*value).to_string())
+                .collect(),
         }
     }
 }
@@ -361,16 +380,76 @@ impl CommandSpec {
 // The action table
 // ---------------------------------------------------------------------------
 
-const THINKING_CHOICES: &[&str] = &["off", "low", "medium", "high", "xhigh", "max"];
-const THEME_CHOICES: &[&str] = &["auto", "dark", "light"];
-const PERMISSION_DECISIONS: &[&str] = &["allow", "deny", "ask"];
-const PERMISSION_MODES: &[&str] = &[
-    "default",
-    "acceptEdits",
-    "bypassPermissions",
-    "dontAsk",
-    "plan",
+/// The fixed argument vocabularies, each value beside the line a picker shows
+/// for it. They are checked against their own enums by a test below, so a level
+/// cannot be added to one and forgotten in the other.
+/// One fixed argument vocabulary: the value a user types, and the line a picker
+/// shows beside it.
+pub type Choices = &'static [(&'static str, &'static str)];
+
+const THINKING_CHOICES: Choices = &[
+    (
+        "off",
+        "no thinking parameter (compatible with DeepSeek etc.)",
+    ),
+    ("low", "adaptive thinking · effort low"),
+    ("medium", "adaptive thinking · effort medium"),
+    ("high", "adaptive thinking · effort high (recommended)"),
+    (
+        "xhigh",
+        "adaptive thinking · effort xhigh (recommended for coding/agentic work)",
+    ),
+    ("max", "adaptive thinking · effort max"),
 ];
+const THEME_CHOICES: Choices = &[
+    ("dark", "dark theme"),
+    ("light", "light theme"),
+    ("auto", "follow the terminal background"),
+];
+const PERMISSION_DECISIONS: Choices = &[
+    ("allow", "run it without asking"),
+    ("deny", "refuse it"),
+    ("ask", "ask every time"),
+];
+const PERMISSION_MODES: Choices = &[
+    ("default", "ask before anything risky"),
+    ("acceptEdits", "edit files without asking"),
+    ("bypassPermissions", "ask for nothing"),
+    ("dontAsk", "refuse rather than ask"),
+    ("plan", "plan without acting"),
+];
+const PERMISSION_EDITS: Choices = &[
+    ("allow", "run it without asking"),
+    ("deny", "refuse it"),
+    ("ask", "ask every time"),
+    ("remove", "drop a rule already there"),
+];
+const REWIND_MODES: Choices = &[
+    ("preview", "show the checkpoint without moving"),
+    ("apply", "go back to it"),
+];
+const MCP_OPERATIONS: Choices = &[
+    ("enable", "turn a configured server on"),
+    ("disable", "turn one off"),
+    ("reconnect", "reconnect one, or all of them"),
+];
+const PROVIDER_OPERATIONS: Choices = &[
+    ("login", "authenticate a provider"),
+    ("logout", "drop a provider's stored credentials"),
+];
+const TEAM_SUBCOMMANDS: Choices = &[
+    ("list", "the chart, and who is hired against it"),
+    ("start", "bring the crew up"),
+    ("status", "who is up, where, and on what"),
+    ("assign", "hand a member a piece of work"),
+    ("stop", "stand the crew down"),
+    ("validate", "check the chart"),
+    ("new", "write a starting chart"),
+    ("norms", "the agreement the crew works under"),
+    ("memory", "what the crew has written down"),
+];
+const SHARE_PUBLIC: Choices = &[("--public", "publish a public link")];
+const SHARE_OPEN: Choices = &[("--open", "open the result afterwards")];
 
 const NO_ARGUMENTS: &[ArgumentSpec] = &[];
 
@@ -412,8 +491,8 @@ pub const ACTIONS: &[ActionSpec] = &[
         label: "Share session",
         description: "export the session as HTML; --public publishes a link",
         arguments: &[
-            ArgumentSpec::choice("public", false, "publish a public link", &["--public"]),
-            ArgumentSpec::choice("open", false, "open the result afterwards", &["--open"]),
+            ArgumentSpec::choice("public", false, "publish a public link", SHARE_PUBLIC),
+            ArgumentSpec::choice("open", false, "open the result afterwards", SHARE_OPEN),
         ],
         precondition: None,
         requires: Requires::ENGINE,
@@ -452,11 +531,12 @@ pub const ACTIONS: &[ActionSpec] = &[
             "mode",
             false,
             "preview the checkpoint or apply it",
-            &["preview", "applied"],
+            REWIND_MODES,
         )],
         precondition: Some(RevisionScope::Conversation),
         requires: Requires::IDLE_ENGINE,
-        reach: Reach::Command,
+        // esc-esc opens the checkpoint selector; there is no typed line for it.
+        reach: Reach::Gesture,
     },
     ActionSpec {
         id: "model.select",
@@ -546,7 +626,8 @@ pub const ACTIONS: &[ActionSpec] = &[
         )],
         precondition: Some(RevisionScope::Config),
         requires: Requires::NOTHING,
-        reach: Reach::Command,
+        // shift+tab cycles the mode; there is no typed line for it.
+        reach: Reach::Gesture,
     },
     ActionSpec {
         id: "permission.ruleAdd",
@@ -762,6 +843,14 @@ pub const ACTIONS: &[ActionSpec] = &[
     },
 ];
 
+/// One argument's fixed vocabulary, by the action and argument that own it.
+/// A picker is that vocabulary drawn; there is no second copy of it.
+pub fn choices_for(action: &str, argument: &str) -> Choices {
+    action_spec(action)
+        .and_then(|spec| spec.arguments.iter().find(|arg| arg.name == argument))
+        .map_or(&[], |arg| arg.choices)
+}
+
 /// One action's metadata, by its stable id.
 pub fn action_spec(id: &str) -> Option<&'static ActionSpec> {
     ACTIONS.iter().find(|spec| spec.id == id)
@@ -827,37 +916,6 @@ pub const COMMANDS: &[CommandSpec] = &[
         parse: |rest| {
             Ok(Command::Act(Action::ConversationCompact {
                 instructions: optional(rest),
-            }))
-        },
-    },
-    CommandSpec {
-        name: "rewind",
-        aliases: &[],
-        hint: "[preview|apply]",
-        description: "go back to an earlier checkpoint",
-        family: ActionFamily::Conversation,
-        instant: false,
-        arguments: &[ArgumentSpec::choice(
-            "mode",
-            false,
-            "preview the checkpoint or apply it",
-            &["preview", "apply"],
-        )],
-        produces: &["conversation.rewind"],
-        parse: |rest| {
-            let mode = match rest.trim() {
-                "" | "preview" => RewindMode::Preview,
-                "apply" | "applied" => RewindMode::Applied,
-                _ => {
-                    return Err(ParseError::Usage {
-                        name: "rewind",
-                        usage: "[preview|apply]",
-                    });
-                }
-            };
-            Ok(Command::Act(Action::ConversationRewind {
-                target: RewindTarget::Latest,
-                mode,
             }))
         },
     },
@@ -958,8 +1016,8 @@ pub const COMMANDS: &[CommandSpec] = &[
         family: ActionFamily::Session,
         instant: false,
         arguments: &[
-            ArgumentSpec::choice("public", false, "publish a public link", &["--public"]),
-            ArgumentSpec::choice("open", false, "open the result afterwards", &["--open"]),
+            ArgumentSpec::choice("public", false, "publish a public link", SHARE_PUBLIC),
+            ArgumentSpec::choice("open", false, "open the result afterwards", SHARE_OPEN),
         ],
         produces: &["session.share"],
         parse: |rest| {
@@ -970,6 +1028,9 @@ pub const COMMANDS: &[CommandSpec] = &[
                 match token {
                     "--public" => public = true,
                     "--open" => open = true,
+                    // Local is the default; the flag predates it and stays
+                    // harmless rather than becoming an error.
+                    "--local" => {}
                     other if other.starts_with('-') => {
                         return Err(ParseError::Usage {
                             name: "share",
@@ -1031,39 +1092,12 @@ pub const COMMANDS: &[CommandSpec] = &[
                 "decision",
                 false,
                 "allow, deny, ask, or remove",
-                &["allow", "deny", "ask", "remove"],
+                PERMISSION_EDITS,
             ),
             ArgumentSpec::free("rule", false, "the rule, as Tool(content)"),
         ],
         produces: &["permission.ruleAdd", "permission.ruleRemove"],
         parse: parse_permissions,
-    },
-    CommandSpec {
-        name: "mode",
-        aliases: &[],
-        hint: "[default|acceptEdits|bypassPermissions|dontAsk|plan]",
-        description: "how much the session asks before acting",
-        family: ActionFamily::Permission,
-        instant: true,
-        arguments: &[ArgumentSpec::choice(
-            "mode",
-            false,
-            "the permission mode",
-            PERMISSION_MODES,
-        )],
-        produces: &["permission.mode"],
-        parse: |rest| match optional(rest) {
-            None => Ok(Command::Read(Read::Options(ActionId(
-                "permission.mode".to_string(),
-            )))),
-            Some(name) => match permission_mode(&name) {
-                Some(mode) => Ok(Command::Act(Action::PermissionModeSet { mode })),
-                None => Err(ParseError::Usage {
-                    name: "mode",
-                    usage: "[default|acceptEdits|bypassPermissions|dontAsk|plan]",
-                }),
-            },
-        },
     },
     CommandSpec {
         name: "theme",
@@ -1111,12 +1145,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         family: ActionFamily::Mcp,
         instant: true,
         arguments: &[
-            ArgumentSpec::choice(
-                "operation",
-                false,
-                "what to do",
-                &["enable", "disable", "reconnect"],
-            ),
+            ArgumentSpec::choice("operation", false, "what to do", MCP_OPERATIONS),
             ArgumentSpec::from(
                 "server",
                 false,
@@ -1135,10 +1164,11 @@ pub const COMMANDS: &[CommandSpec] = &[
         family: ActionFamily::Provider,
         instant: true,
         arguments: &[
-            ArgumentSpec::from(
+            ArgumentSpec::mixed(
                 "provider",
                 false,
                 "the provider name, or login/logout",
+                PROVIDER_OPERATIONS,
                 ArgumentSource::Catalog(CatalogKind::Providers),
             ),
             ArgumentSpec::from(
@@ -1208,15 +1238,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         family: ActionFamily::Team,
         instant: false,
         arguments: &[
-            ArgumentSpec::choice(
-                "subcommand",
-                false,
-                "what to do",
-                &[
-                    "list", "start", "status", "assign", "stop", "validate", "new", "norms",
-                    "memory",
-                ],
-            ),
+            ArgumentSpec::choice("subcommand", false, "what to do", TEAM_SUBCOMMANDS),
             ArgumentSpec::free("rest", false, "who, and what to say to them"),
         ],
         produces: &[
@@ -1294,6 +1316,24 @@ pub fn command_spec(name: &str) -> Option<&'static CommandSpec> {
         .find(|spec| spec.name == name || spec.aliases.contains(&name))
 }
 
+/// Which argument a half-typed line is on, given the tokens already finished.
+///
+/// A leading enumeration is a sub-command: what follows `/mcp enable` belongs to
+/// `enable`, and a first word that is none of them ends the line — which is how
+/// `/provider codex` stops offering arguments while `/provider login` keeps
+/// going. The terminal's argument dropdown reads this instead of a second table
+/// that knew five commands out of twenty-four.
+pub fn argument_at(spec: &CommandSpec, done: &[&str]) -> Option<&'static ArgumentSpec> {
+    if let Some(first) = spec.arguments.first()
+        && !first.choices.is_empty()
+        && let Some(head) = done.first()
+        && !first.choices.iter().any(|(value, _)| value == head)
+    {
+        return None;
+    }
+    spec.arguments.get(done.len())
+}
+
 /// Whether a command line runs while a turn is running rather than waiting
 /// behind it.
 ///
@@ -1304,24 +1344,26 @@ pub fn command_spec(name: &str) -> Option<&'static CommandSpec> {
 /// and `/gc` used to skip the queue and then refuse itself mid-turn, which is
 /// one rule written twice and obeyed once.
 pub fn is_instant(line: &str) -> bool {
-    match parse(line) {
+    let (name, rest) = split_name(line);
+    // A name the table does not know is a skill or a typo. A skill opens a turn
+    // and a typo's complaint can wait, so both take their place in the queue —
+    // which is what the old name list did by omission.
+    let Some(spec) = command_spec(name) else {
+        return false;
+    };
+    match (spec.parse)(rest) {
         Ok(Command::Read(_)) => true,
-        // An unreadable line is answered, not queued: the error belongs to the
-        // moment it was typed.
-        Err(_) => true,
-        Ok(_) => command_name(line)
-            .is_some_and(|name| command_spec(name).is_some_and(|spec| spec.instant)),
+        _ => spec.instant,
     }
 }
 
-/// The command word of a line, before any argument.
-fn command_name(line: &str) -> Option<&str> {
+/// A command line split into its name and everything after it.
+fn split_name(line: &str) -> (&str, &str) {
     let line = line.trim();
-    let name = match line.split_once(char::is_whitespace) {
-        Some((name, _)) => name,
-        None => line,
-    };
-    (!name.is_empty()).then_some(name)
+    match line.split_once(char::is_whitespace) {
+        Some((name, rest)) => (name, rest.trim()),
+        None => (line, ""),
+    }
 }
 
 /// Read one command line — everything after the leading slash, which the
@@ -1338,11 +1380,7 @@ pub fn parse(line: &str) -> Result<Command, ParseError> {
 /// thing in every client — and what turns the terminal's old "unknown command"
 /// fall-through into a typed [`Action::SkillInvoke`].
 pub fn parse_in(line: &str, skills: &[String]) -> Result<Command, ParseError> {
-    let line = line.trim();
-    let (name, rest) = match line.split_once(char::is_whitespace) {
-        Some((name, rest)) => (name, rest.trim()),
-        None => (line, ""),
-    };
+    let (name, rest) = split_name(line);
     if let Some(spec) = command_spec(name) {
         return (spec.parse)(rest);
     }
@@ -1620,6 +1658,8 @@ mod tests {
         assert_eq!(
             exceptions,
             vec![
+                ("conversation.rewind", Reach::Gesture),
+                ("permission.mode", Reach::Gesture),
                 ("skill.invoke", Reach::Dynamic),
                 ("command.promote", Reach::Gesture),
             ],
@@ -1853,6 +1893,11 @@ mod tests {
         );
         assert!(is_instant("?"), "an alias is the same command");
         assert!(is_instant("exit"), "leaving does not wait for a turn");
+        assert!(
+            !is_instant("guide the lexer"),
+            "a skill opens a turn, so it takes its place in the queue"
+        );
+        assert!(!is_instant("nonesuch"), "a typo's complaint can wait");
     }
 
     #[test]
@@ -1885,6 +1930,69 @@ mod tests {
             theme.published(bare).available,
             "a preference needs nothing"
         );
+    }
+
+    /// A fixed vocabulary and the enum it parses into are the same list. One
+    /// grew a level once and the other did not; this is what says so.
+    #[test]
+    fn the_fixed_vocabularies_are_their_own_enums() {
+        let values =
+            |choices: Choices| -> Vec<&str> { choices.iter().map(|(value, _)| *value).collect() };
+        assert_eq!(
+            values(THINKING_CHOICES),
+            ThinkingLevel::ALL.map(ThinkingLevel::as_str).to_vec()
+        );
+        assert_eq!(
+            values(PERMISSION_MODES),
+            PermissionMode::ALL.map(PermissionMode::as_str).to_vec()
+        );
+        let mut theme = values(THEME_CHOICES);
+        theme.sort_unstable();
+        let mut known = ThemeChoice::ALL.map(ThemeChoice::as_str).to_vec();
+        known.sort_unstable();
+        assert_eq!(theme, known, "the picker's order, the enum's membership");
+        for spec in COMMANDS {
+            for argument in spec.arguments {
+                for (value, description) in argument.choices {
+                    assert!(
+                        !value.is_empty() && !description.is_empty(),
+                        "/{} {} offers a nameless choice",
+                        spec.name,
+                        argument.name
+                    );
+                }
+            }
+        }
+    }
+
+    /// Which argument a half-typed line is on, for every shape the table has.
+    #[test]
+    fn a_sub_command_decides_which_arguments_come_next() {
+        let at = |name: &str, done: &[&str]| {
+            command_spec(name).and_then(|spec| argument_at(spec, done).map(|arg| arg.name))
+        };
+        assert_eq!(at("mcp", &[]), Some("operation"));
+        assert_eq!(at("mcp", &["enable"]), Some("server"));
+        assert_eq!(at("mcp", &["nonesuch"]), None);
+        assert_eq!(at("provider", &[]), Some("provider"));
+        assert_eq!(
+            at("provider", &["login"]),
+            Some("target"),
+            "a sub-command the old dropdown had to special-case"
+        );
+        assert_eq!(
+            at("provider", &["codex"]),
+            None,
+            "a provider name is the whole line"
+        );
+        assert_eq!(at("model", &[]), Some("model"));
+        assert_eq!(at("model", &["sonnet"]), None);
+        assert_eq!(
+            at("join", &[]),
+            Some("room"),
+            "the room typeahead /join's own error message promised"
+        );
+        assert_eq!(at("help", &[]), None);
     }
 
     #[test]

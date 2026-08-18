@@ -393,7 +393,7 @@ fn think_arguments_offer_the_level_table() {
     chat.set_input("/think ");
     assert_eq!(
         offered(&chat),
-        crate::tui::chat::THINK_LEVELS
+        crate::tui::chat::think_levels()
             .iter()
             .map(|(name, _)| (*name).to_string())
             .collect::<Vec<_>>()
@@ -411,6 +411,41 @@ fn theme_arguments_offer_the_theme_table() {
     assert_eq!(offered(&chat), vec!["dark", "light", "auto"]);
     chat.set_input("/theme li");
     assert_eq!(offered(&chat), vec!["light"]);
+}
+
+/// The typeahead `/join`'s own usage line has been promising since D89. The
+/// argument dropdown covered five commands out of twenty-four before the one
+/// table said where each argument's values come from (D146).
+#[test]
+fn room_arguments_offer_the_rooms_that_exist() {
+    let mut chat = test_chat();
+    let _ = chat
+        .session
+        .channels
+        .create(
+            "build",
+            vec!["main".to_string()],
+            crate::channels::ChannelMode::Free,
+        )
+        .now();
+    chat.set_input("/join ");
+    assert_eq!(offered(&chat), vec!["build"]);
+    chat.set_input("/leave bu");
+    assert_eq!(offered(&chat), vec!["build"]);
+}
+
+/// A sub-command decides which argument comes next, so `/mcp enable` offers
+/// servers where `/mcp` offers operations.
+#[test]
+fn mcp_arguments_walk_from_the_operation_to_the_server() {
+    let mut chat = test_chat();
+    chat.set_input("/mcp ");
+    assert_eq!(offered(&chat), vec!["enable", "disable", "reconnect"]);
+    chat.set_input("/mcp enable ");
+    assert!(
+        offered(&chat).is_empty(),
+        "the test session configures no MCP servers, and no dropdown opens over nothing"
+    );
 }
 
 /// `/provider` is two-shaped: the first token may be a subcommand or a
