@@ -179,6 +179,13 @@ fail-closed）；usage/context 接线 + `CompactOutcome`（决定 9）。
 > "at most one"——接受为已知限界（D141 已记）。③ `TurnOrigin{user|queue|peer|auto|shell}`
 > 与 `OperationKind` 是 B1 的自裁词表，B3/B5 需要时按加法扩展。
 
+> **B3 review 裁决（2026-08-19，Fable）**：① shift+tab 纳入 D81 守卫**保留**——键盘核准且授最宽
+> 权限，旧面只守数字与 Enter 是漏洞不是行为。② `SubmitRequest.main_busy: Option<bool>`（TUI 路径
+> 旁通）与 ~30 个直接设 conv.busy 的测试，B7 清零。③ `Route::Deliver` 回调用方执行、
+> `EngineEvent::{Warning,Inbound}` 被丢弃——归 B4 接管。④ "读者视图先于回执发布"的普遍化
+> 修复核准。附注：B3 顺手修了"shell 行排队后按散文 drain"的潜在缺陷；StreamRetry 扩展
+> 确认仅 engine 层，schema bundle 零改动（已亲验）。
+
 ### B4 · 协作域（L）
 agent/room conversations；walk/LineSource 提升（决定：单走查器）；房间消息 = message item；
 mail digest 入核（乙案）；delivery/ack 结构化状态（D137 语义：同事散文不结算 ack）；
