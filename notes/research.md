@@ -7195,3 +7195,185 @@ Four tests retargeted, none weakened:
 - The B2b活句柄 exception was not widened: nothing new reads state through `Arc<Session>` or the
   progress mutex beyond the monotonic counters `AgentFacts` already sampled.
 
+
+## D146 — one table for every command, and the reads that back it
+
+**What it lands.** B5 of the app-server campaign. The command surface stops being five
+hand-kept copies of one fact and becomes one table; the catalogs, the configuration and the
+runtime collections become reads a client can make; bytes become assets the server owns; and
+all but two of the methods the core was refusing by name are served.
+
+Five commits, four gates green after each. Baseline 1607 unit + 7 black-box → **1644 unit + 7
+black-box**; no test deleted, no assertion weakened (six retargeted, listed below).
+
+### There were five tables, not three
+
+The plan said "斜杠三表". Counting them found five, and they had drifted:
+
+| table | what it fed | how it had drifted |
+|---|---|---|
+| `tui::slash::COMMANDS` | `/help` and the dropdown | `/team`'s hint listed five of nine subcommands; `/provider login` was a hand-appended help line |
+| `app::submit::INSTANT_COMMANDS` | which lines skip a running turn | held names, not aliases: `/help` skipped the queue and `/?` did not |
+| the `match cmd` in `Chat::run_slash_on` | dispatch | the only place `?`, `quit`, `reset` and `new` existed |
+| the `match` in `Chat::arg_candidates` | argument completion | knew 5 commands of 24; `/join`'s own error promised a room typeahead that had been deleted |
+| a mirror of the dispatch arms in `chat_tests_a` | the gate between the first and the third | never checked the other two |
+
+`src/app/action.rs` is the one fact. A command has a name, the names it answers to, an argument
+grammar with where each argument's values come from, and a parser saying what its line *is*:
+
+```rust
+pub enum Command { Act(Action), Call(Call), Read(Read) }
+```
+
+Three arms because a CLI command has always had three shapes — it changes session state, it
+changes *which* session there is, or it shows something. Only the first is an `Action`, because
+a view's text is a projection and never a wire contract (spec "Typed actions").
+
+Two tables, bound by a completeness test rather than by hand: `COMMANDS` (24 entries) and
+`ACTIONS` (28). A command is not an action — `/team` is one command and five actions — so each
+command declares the action ids its parser can produce, and the test asserts the union is
+exactly the actions marked `Reach::Command`. Three actions are marked otherwise, each with its
+reason in the table: `skill.invoke` is `Dynamic` (a skill is a command called by its own name,
+which a static table cannot hold), `conversation.rewind` and `permission.mode` are `Gesture`
+(esc-esc and shift+tab), and so is `command.promote` (a key on a running row).
+
+**The queue rule became semantic.** Whether a line skips a running turn is now read off the
+line's meaning: a read has nothing to wait for; a mutation waits unless applying it before the
+next turn is the point of it. Two bugs fell out — `/?` stopped queueing while `/help` did not,
+and `/gc` stopped skipping the queue only to refuse itself mid-turn (one rule written twice and
+obeyed once).
+
+### What the CLI gained, and what the contract gained
+
+- `/permissions remove <allow|deny|ask> <rule>`: the wire had `permission.ruleRemove` and the
+  CLI had no way to say it.
+- `/provider login|logout`, `/team validate|new|norms|memory`: in the table's own hint now, so
+  `/help` and the dropdown list them.
+- the argument dropdown covers every command that takes an argument, including `/join` and
+  `/leave`.
+- `/theme` and `/think` pickers draw the same action's argument choices instead of a second
+  const list beside them.
+
+The action union grew by two — `team.scaffold` and `team.memoryGc`, mutations `/team new` and
+`/team memory gc` already performed. Types, regenerated bundle and fixtures in one commit, as
+the extension rule requires. `ArgumentSource` (where a live argument list comes from) stayed
+**inside the process**: `action/list` publishes the fixed choices, and a client that wants a
+live list reads the catalog itself. Known limit, stated rather than discovered.
+
+### The four read families
+
+`src/app/catalog.rs` answers **before a session exists** (Amendment #7), because that is the
+job `--inspect` had: settings plus two directories, no transcript, no system prompt, no MCP
+connect and no network. A provider that declared no models answers from its own day-old disk
+cache rather than asking the endpoint — a read must not have a side effect and must not hang.
+
+The endpoint table hands out the plaintext key beside the base URL (`provider_endpoint().0`).
+This module is the one place that drops it, publishing `configured / source / status`. A test
+serializes the provider page and asserts the key's own bytes are not in it.
+
+| family | served from | note |
+|---|---|---|
+| `catalog/read` | settings + presets + the family catalog (D73) + the model disk cache | MCP status and images are the live half a session adds |
+| `config/read` | the core's own `ConfigSnapshot` + `layer_paths`/`layer_keys` | which layer file contributed which keys |
+| `resource/read` | the same collections a session snapshot carries a bounded head of | tasks are still empty: the store is the session's, and B7 attaches it |
+| `queue/read`, `session/list` | the input queue; `transcript::list` | the directory read is the one blocking call this loop makes, bounded by what gc leaves |
+
+MCP connection state is **reported in** rather than read out (`AppCore::report_mcp`): the
+manager lives outside the actor, and "configured, not connected" is the honest answer until
+something says otherwise. `main.rs` now fills `SessionSetup` from the real session, so these
+answers are the real ones rather than an empty default.
+
+### Assets
+
+`<data>/assets/<epoch>/<asset_id>` — one directory per epoch, so two runs cannot collide and
+closing the session takes its assets with it (`AssetStore::clear`, called from the close path
+beside `agents.release()`).
+
+`asset/registerPath` reads the file, computes its SHA-256, classifies it **from the bytes**
+(an extension is a claim, which is what the expected-MIME check is for), checks both claims,
+and copies it in. The caller's path is never borrowed afterwards and never deleted. Ceilings:
+64 MiB per asset, 1 MiB per `asset/readChunk` — a third under the 8 MiB server frame after
+base64. The same store takes bytes the server itself produced, which is the artifact path for
+output too large for an item: bounded preview in the item, whole of it through the same read.
+
+Registered images are the `images` catalog, newest first.
+
+### `Unserved`, nearly zeroed
+
+Of the twenty methods that were refusing by name, eighteen are served. What is left, and why:
+
+| still refusing | reason | batch |
+|---|---|---|
+| `session/start`, `session/resume` | one `AppCore` *is* one session (spec "Resource model": one per connection), so starting or resuming another **replaces this actor** rather than asking it. The transport owns that lifecycle. | B6 |
+| `conversation/submit` — `Deliver` disposition | the waking half of a delivery needs a `Session` (B4 ruling ②) | B7 |
+| `conversation/submit` — `Turn`/`Shell` disposition | running a turn needs the engine. The B4 ruling named only `Deliver`; this is the same wall and is recorded here rather than left to be found. | B7 |
+
+`action/execute` runs the fourteen actions the core owns outright — theme, thinking, permission
+mode, permission rules, model, provider, provider logout, MCP enable/disable, `cd`, gc, room
+join/leave. The other fourteen need a model, a transcript rewrite or a network round trip;
+their spec says `Requires::ENGINE`, so `action/list` reports them unavailable **with a reason**
+and `action/execute` refuses them before they start. That is what `available` and
+`unavailableReason` are for, and it means a client is never told an action exists and then let
+fail halfway.
+
+### Verified, and how
+
+| what | where |
+|---|---|
+| metadata ↔ handler ↔ command entry, three ways | `app::action::tests::{every_action_has_exactly_one_spec, the_command_table_reaches_every_action_that_has_a_line, no_two_commands_answer_to_the_same_word}` |
+| aliases are the same command, queue included | `…::an_alias_is_the_same_command_as_its_name`, `…::a_read_never_waits_behind_a_turn` |
+| a skill is a command called by its own name | `…::a_skill_is_a_command_called_by_its_own_name` |
+| the fixed vocabularies are their own enums | `…::the_fixed_vocabularies_are_their_own_enums` |
+| which argument a half-typed line is on | `…::a_sub_command_decides_which_arguments_come_next` |
+| the dropdown draws the table; `/help` is the table | `tui::slash::tests::the_dropdown_draws_the_command_table`, `app::action::tests::help_is_the_table_and_nothing_else` |
+| the room typeahead, and `/mcp`'s two levels | `tui::chat::tests_d::{room_arguments_offer_the_rooms_that_exist, mcp_arguments_walk_from_the_operation_to_the_server}` |
+| catalogs before a session; no key on the wire | `app::catalog::tests::{the_catalogs_answer_with_no_session_at_all, a_provider_reports_presence_and_never_a_key}` |
+| configured is not connected | `…::an_mcp_server_is_configured_before_it_is_connected`, `app::controller::tests::a_catalog_reads_settings_and_takes_what_mcp_reports` |
+| config/read, action/list, resource/read, queue/read, session/list | `app::controller::tests::{the_configuration_says_where_it_came_from, the_actions_are_listed_with_what_can_run_now, the_runtime_collections_and_the_queue_are_paged, the_sessions_on_disk_are_listed}` |
+| asset round trip, byte for byte and by digest | `app::asset::tests::an_asset_comes_back_byte_for_byte`, `app::controller::tests::an_asset_is_registered_and_read_back_through_the_core` |
+| a claim that does not hold; cleanup at close | `app::asset::tests::{a_claim_that_does_not_hold_is_refused, closing_the_session_takes_its_assets_with_it}` |
+| every core-owned action, executed and persisted | `app::controller::tests::the_actions_the_core_owns_are_executed_and_persisted` |
+| an engine-bound action refused before it starts | `…::an_action_that_needs_an_engine_is_refused_before_it_starts` |
+| a stale precondition loses | `…::a_stale_precondition_loses_rather_than_overwrites` |
+| interrupt: asked, idempotent, unreachable turn | `…::interrupting_asks_the_turn_that_was_named` |
+| session/delete, and the open session's floor | `…::a_session_that_is_not_this_one_can_be_deleted` |
+| a slash line is the action a typed call makes | `…::a_slash_line_is_the_action_a_typed_call_would_have_made` |
+| what is left refusing, by name | `…::the_two_methods_that_choose_a_session_belong_to_the_transport` |
+
+Six tests retargeted, none weakened:
+
+- `tui::slash::tests::help_is_derived_from_registry` → `the_dropdown_draws_the_command_table`,
+  with `/help`'s own shape asserted where the table now lives;
+- `slash_dispatch_covers_every_table_entry` no longer mirrors the dispatch arms by hand — the
+  arms are a match on the parsed `Command`, so the compiler keeps it exhaustive and the test
+  asserts every registered name reads, and an unregistered one is refused by name;
+- `slash_help_lists_every_command_with_hint` expects one line fewer: the hand-appended
+  `/provider login` line is the table's own hint now;
+- `busy_dispatch_runs_instant_and_queues_the_rest` asserts `/gc` queues rather than refusing
+  itself mid-turn;
+- `theme_arguments_offer_the_theme_table` and the two think/theme picker tests read the
+  registry's choices;
+- `the_skeleton_refuses_by_name_what_it_does_not_serve_yet` →
+  `the_two_methods_that_choose_a_session_belong_to_the_transport`, which is what is left.
+
+### Not verified, and the boundaries kept
+
+- **No real terminal was driven.** The smoke list is B7's.
+- **The terminal's handlers still re-read some argument text.** `/share`'s flags, `/provider
+  login`'s `--device-auth`/`--manual`, `/mcp` and `/team`'s sub-grammar are parsed again inside
+  their handlers; each is marked `B7 removes this` at the dispatch site. The registry is what
+  decides *which* handler runs and whether the line is valid, so the tables cannot drift — but
+  those four bodies are still their own second reader until B7 sends them as `action/execute`.
+- **`provider.login` cannot express `--device-auth` or `--manual <token>`.** The wire action
+  carries only the provider name, and a pasted token is a credential that has no business in a
+  request. The flags stay terminal-local login mechanics; if a GUI needs them, they need a
+  design decision rather than a field.
+- **The core's config and the engine's runtime are two mirrors while both exist.** `/theme` and
+  friends applied through `action/execute` change the core's `ConfigSnapshot`; the console's
+  own handlers change `Session.runtime`. Nothing attaches the core in production yet, so the
+  two cannot be observed disagreeing — B7 makes the core's the only one.
+- **Session-scoped permission grants** (D81's `allowSession`) are not in `config/read`: they
+  live in the run that granted them. B7 brings them in.
+- **`resource/read` for tasks is always empty** — the task store is the session's, and the core
+  does not hold it yet.
+- **`session/delete` cannot delete the open session**, by refusal rather than by omission.
