@@ -771,10 +771,10 @@ pub(crate) fn spawn_agent_loop(
             if let Ok(mut progress) = progress.lock() {
                 progress.start_run();
             }
-            loop_registry.set_prompt(&name, prompt.clone()).now();
+            loop_registry.set_prompt(&name, prompt.clone()).await;
             loop_registry
                 .set_progress(&name, Some(progress.clone()))
-                .now();
+                .await;
             let sink = loop_registry.sink_for(&name);
             // The turn's brackets, and the reason they are a guard: an instance
             // is stopped by aborting its task, which unwinds this future without
@@ -801,7 +801,7 @@ pub(crate) fn spawn_agent_loop(
                 Ok(outcome) => {
                     let text = output.lock().unwrap_or_else(|e| e.into_inner()).clone();
                     let output_chars = text.chars().count();
-                    loop_registry.set_progress(&name, None).now();
+                    loop_registry.set_progress(&name, None).await;
                     watch.set_state(
                         run.0,
                         WatchState::Done,
@@ -838,7 +838,7 @@ pub(crate) fn spawn_agent_loop(
                     }
                 }
                 Err(e) => {
-                    loop_registry.set_progress(&name, None).now();
+                    loop_registry.set_progress(&name, None).await;
                     loop_registry.restore_inbox(&name, current_items);
                     watch.set_state(
                         run.0,
