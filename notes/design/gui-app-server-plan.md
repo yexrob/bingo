@@ -142,6 +142,15 @@ B2b：三 registry 收编为 actor 状态；agent run loop、看门狗、inbox p
 **验收**：四门绿；现有 agents/channels 域测试改挂 actor 接口后全绿；
 并发冒烟：N 个 agent run 并发下 seq 严格递增无洞（新测试）。
 
+> **B2a review 裁决（2026-08-18，Fable）**：① "首次快照切割前不投事件"（抑制而非缓冲）
+> 接受——是对规范的相容收紧，防止 actor 内存随慢前端增长；B6 须把"attachment 的通知流
+> 始于它的第一次快照读"写进协议文档。② "帧写失败即断开 attachment、actor 永不等待前端"
+> 接受为 actor 层最后手段；B6 的传输适配器负责规范要求的有界缓冲 + 写超时 + 尽力
+> CLIENT_TOO_SLOW，帧通道容量要给足。③ 流帧脚手架（MessageStart/BlockStop 等六变体）
+> 不跨入 EngineEvent 接受——framing 是 engine 内务，语义面（ToolUseStarted/StopReason）
+> 已全量过桥。附：`&EngineHost` 把"一 run 一 host"降为约定，B3 由 actor 落为强制；
+> `AppError::Unserved` 须于 B5 清零。
+
 ### B3 · 会话与 turn 行为（L）
 `conversation/submit` 全路由（composer 解析从 chat/bufferview 迁入）；queue/steer 仲裁
 （FIFO 前缀、吸收/回收一场竞态）；turn 生命周期**恰好一个终态**（error 不再替代终态——
