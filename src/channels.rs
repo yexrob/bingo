@@ -394,6 +394,37 @@ impl ChannelRegistry {
         out.sort_by(|a, b| a.name.cmp(&b.name));
         out
     }
+
+    /// Everything one room recorded after `seq`, in log order.
+    ///
+    /// The actor turns these into conversation items, and the diff is what makes
+    /// one path serve both cases: a post lands one entry behind the last one the
+    /// actor was told about, and a resumed session's replayed log lands its whole
+    /// history behind seq zero (B4's sidecar).
+    pub(crate) fn since(&self, room: &str, seq: u64) -> Vec<ChannelMessage> {
+        self.inner
+            .channels
+            .get(room)
+            .map(|ch| ch.log.iter().filter(|msg| msg.seq > seq).cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// Every open mention in every room, as `(room, mention)`.
+    pub(crate) fn open_mentions(&self) -> Vec<(String, Mention)> {
+        let mut out: Vec<(String, Mention)> = self
+            .inner
+            .channels
+            .iter()
+            .flat_map(|(name, ch)| {
+                ch.mentions
+                    .iter()
+                    .filter(|owed| owed.answered.is_none())
+                    .map(move |owed| (name.clone(), owed.clone()))
+            })
+            .collect();
+        out.sort_by(|a, b| (a.0.as_str(), a.1.seq).cmp(&(b.0.as_str(), b.1.seq)));
+        out
+    }
 }
 
 /// An answer held back until the view carrying its effect has been published.
@@ -474,6 +505,10 @@ const MAX_MAIN_ARRIVALS: usize = 256;
 /// the actor's one thread.
 pub struct ChannelRegistry {
     inner: Inner,
+    /// Messages main was handed since the actor last looked. Drained by the
+    /// actor, which turns each into an item in main's conversation at the moment
+    /// it arrived (D135) — the room half of `AgentRegistry::drain_delivered`.
+    delivered: Vec<MainDelivery>,
     /// Share persistence (Option semantics: behavior is unchanged when not attached; once attached, create/invite/kick/post sync snapshots).
     share: Option<Arc<crate::share::ShareStore>>,
     /// Where the attached document's disk writes happen — never here.
@@ -615,6 +650,7 @@ pub(crate) fn attach(
 ) -> (ChannelRegistry, ChannelHandle) {
     let (view, reader) = tokio::sync::watch::channel(Arc::new(ChannelView::default()));
     let registry = ChannelRegistry {
+        delivered: Vec::new(),
         inner: Inner {
             channels: HashMap::new(),
             main_mail: Vec::new(),
@@ -1161,7 +1197,22 @@ impl ChannelRegistry {
         while self.inner.main_arrivals.len() > MAX_MAIN_ARRIVALS {
             self.inner.main_arrivals.pop_front();
         }
+        self.delivered.push(MainDelivery {
+            from: from.to_string(),
+            text: text.to_string(),
+        });
     }
+
+    /// The messages main was handed since the last look.
+    pub(crate) fn drain_delivered(&mut self) -> Vec<MainDelivery> {
+        std::mem::take(&mut self.delivered)
+    }
+}
+
+/// One message main was handed, as the actor reads it back.
+pub(crate) struct MainDelivery {
+    pub from: String,
+    pub text: String,
 }
 
 /// How everything outside the actor reaches the rooms.

@@ -230,6 +230,14 @@ pub struct AgentStatus {
     /// invisible until the bill arrives.
     pub model: String,
     pub provider: String,
+    /// The thinking budget this instance runs with, which a definition or a
+    /// blueprint can pin per instance the same way it pins the model. `None` is
+    /// the level "off" rather than an unknown.
+    pub thinking: Option<String>,
+    /// Where this instance works. A sub-team node can sit in another directory
+    /// or another repository, so "which member is where" is not the session's
+    /// answer to give.
+    pub cwd: PathBuf,
     /// Elapsed time of the current run; absent while idle or stopped.
     pub elapsed: Option<Duration>,
     /// Cumulative output tokens reported by the current model run.
@@ -571,6 +579,10 @@ pub struct AgentRegistry {
     events: Option<crate::ui::EventSink>,
     /// Monotonic message id source (registry-wide, so ids never collide across instances).
     next_msg: u64,
+    /// Messages accepted since the actor last looked, in the order they were
+    /// accepted. Drained by the actor, which turns each into an item in the
+    /// receiver's conversation (B4).
+    delivered: Vec<Delivered>,
     /// Inbox generation: every accepted item advances this watch channel. Receivers wait on it
     /// between tool rounds so a busy agent does not depend on the sender reaching a boundary.
     inbox_tx: tokio::sync::watch::Sender<u64>,
@@ -1159,6 +1171,16 @@ impl AgentRegistry {
         // asked for until the run got round to reading it. Every sender comes
         // through here, so this is where the echo belongs; the absorbed prompt
         // repeats it and the console drops the repeat.
+        //
+        // The actor reads the same instant off `drain_delivered`: the message
+        // becomes an item in the receiver's conversation here, with the whole
+        // text rather than the ack's excerpt.
+        self.delivered.push(Delivered {
+            id,
+            from: from.to_string(),
+            to: name.to_string(),
+            text: message.to_string(),
+        });
         if let Some(sink) = self.sink_for(name) {
             sink.send(crate::ui::UiEvent::Mail {
                 from: from.to_string(),
@@ -1324,6 +1346,7 @@ impl AgentRegistry {
         self.inner.clear();
         self.ask = None;
         self.events = None;
+        self.delivered.clear();
         self.share = None;
         self.saver = None;
         self.publish(Touched::Every);
@@ -1519,6 +1542,7 @@ pub(crate) struct AgentFacts {
     pub state: AgentState,
     pub model: String,
     pub provider: String,
+    pub thinking: Option<String>,
     pub cwd: PathBuf,
     pub pending: u32,
     pub unacked: u32,
@@ -1527,7 +1551,59 @@ pub(crate) struct AgentFacts {
     pub tool_uses: u32,
 }
 
+/// One message the registry accepted, as the actor reads it back.
+///
+/// The whole text travels, not the ack's excerpt: this becomes the item the
+/// receiver's conversation keeps, and an item that said forty characters of what
+/// arrived would be a worse record than the one the model got.
+pub(crate) struct Delivered {
+    pub id: MsgId,
+    pub from: String,
+    pub to: String,
+    pub text: String,
+}
+
+/// Where one direct message stands, as the delivery resource names it.
+///
+/// The domain's own vocabulary is older and one step out: an `Ack` is `Queued`
+/// while it sits in the receiver's inbox and `Delivered` once the receiver's run
+/// folded it into a prompt. On the wire those are *delivered* and *read* — the
+/// two moments D135 separated, named for what each one means to the sender.
+pub(crate) struct DeliveryFact {
+    pub id: MsgId,
+    pub from: String,
+    pub to: String,
+    pub state: AckState,
+    pub follow_ups: u8,
+}
+
 impl AgentRegistry {
+    /// The messages accepted since the last look. Draining is the point: each
+    /// one becomes exactly one item.
+    pub(crate) fn drain_delivered(&mut self) -> Vec<Delivered> {
+        std::mem::take(&mut self.delivered)
+    }
+
+    /// Where every recorded message stands. Ordered by identifier, so a diff
+    /// against the last look is stable.
+    pub(crate) fn delivery_facts(&self) -> Vec<DeliveryFact> {
+        let mut out: Vec<DeliveryFact> = self
+            .inner
+            .iter()
+            .flat_map(|(name, entry)| {
+                entry.acks.iter().map(move |ack| DeliveryFact {
+                    id: ack.id,
+                    from: ack.from.clone(),
+                    to: name.clone(),
+                    state: ack.state.clone(),
+                    follow_ups: ack.follow_ups,
+                })
+            })
+            .collect();
+        out.sort_by_key(|fact| fact.id.0);
+        out
+    }
+
     /// What every instance stands at, for the actor to turn into events.
     pub(crate) fn facts(&self) -> Vec<AgentFacts> {
         let mut out: Vec<AgentFacts> = self
@@ -1548,6 +1624,7 @@ impl AgentRegistry {
                     state: entry.state,
                     model: entry.session.runtime.model.borrow().clone(),
                     provider: entry.session.runtime.provider.borrow().clone(),
+                    thinking: entry.session.runtime.thinking.borrow().clone(),
                     cwd: entry.session.cwd(),
                     pending: entry.inbox.len() as u32,
                     unacked: entry
@@ -1721,6 +1798,7 @@ pub(crate) fn attach(control: mpsc::UnboundedSender<Control>) -> (AgentRegistry,
         ask: None,
         events: None,
         next_msg: 1,
+        delivered: Vec::new(),
         inbox_tx,
         view,
     };
@@ -2205,6 +2283,8 @@ impl AgentHandle {
                     unacked: row.acks.iter().filter(|a| a.state.is_outstanding()).count(),
                     model: row.session.runtime.model.borrow().clone(),
                     provider: row.session.runtime.provider.borrow().clone(),
+                    thinking: row.session.runtime.thinking.borrow().clone(),
+                    cwd: row.session.cwd(),
                     elapsed: progress
                         .as_ref()
                         .and_then(|p| p.started_at.map(|started| started.elapsed())),

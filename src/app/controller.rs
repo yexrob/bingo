@@ -18,21 +18,25 @@
 
 use tokio::sync::{mpsc, oneshot};
 
+use crate::app::attention::Attention;
 use crate::app::command::{AppCommand, AppQuery};
-use crate::app::conversation::{ConvKey, Conversations};
+use crate::app::conversation::{ConvKey, Conversations, StalePage};
 use crate::app::event::{
-    AgentChanged, AppEvent, AppEventPayload, EventMeta, InteractionCancelled, InteractionOpened,
-    InteractionResolved, ItemChanged, ItemDelta, QueueItemAbsorbed, QueueItemAdded,
-    QueueItemRemoved, RoomChanged, SessionClosed, TurnChanged, TurnRetrying, TurnRoundCompleted,
-    TurnRoundStarted, TurnUsageUpdated,
+    AgentChanged, AppEvent, AppEventPayload, ConversationChanged, DeliveryChanged, EventMeta,
+    FeedbackRaised, InteractionCancelled, InteractionOpened, InteractionResolved, ItemChanged,
+    ItemDelta, QueueItemAbsorbed, QueueItemAdded, QueueItemRemoved, RoomChanged, SessionClosed,
+    TurnChanged, TurnRetrying, TurnRoundCompleted, TurnRoundStarted, TurnUsageUpdated,
 };
 use crate::app::ids::{
-    AgentId, ConversationId, EpochId, IdMint, OperationId, RoomId, SessionId, now_millis,
+    AgentId, ConversationId, DeliveryId, EpochId, FeedbackId, IdMint, ItemId, OperationId, RoomId,
+    SessionId, now_millis,
 };
 use crate::app::snapshot::{
-    AgentKind, AgentResource, AgentState, Collection, ConfigSnapshot, QueueEntry, RoomMode,
-    RoomResource, RuntimeCollections, ServerCapabilities, SessionCloseReason, SessionSnapshot,
-    SessionState, SessionSummary, ThinkingLevel,
+    AgentKind, AgentResource, AgentState, Collection, ConfigSnapshot, ConversationKind,
+    ConversationRunState, ConversationSummary, DeliveryResource, DeliveryState, Feedback, Item,
+    ItemBody, ItemStatus, NoticeLevel, Obligation, Page, QueueEntry, RoomMode, RoomResource,
+    RuntimeCollections, ServerCapabilities, SessionCloseReason, SessionSnapshot, SessionState,
+    SessionSummary, ThinkingLevel,
 };
 use crate::app::turn::TurnChange;
 use crate::app::{
@@ -244,8 +248,17 @@ struct Controller {
     /// The prompts a run is stopped on, and the guard that decides when a
     /// keystroke may answer one (B3).
     interactions: crate::app::interaction::InteractionRegistry,
-    /// Which conversations exist and what each one is called on the wire.
+    /// Which conversations exist, what each one holds, and what each is called
+    /// on the wire.
     conversations: Conversations,
+    /// How far the user has read each conversation, and what it owes them.
+    attention: Attention,
+    /// Warnings raised outside any single turn, still standing.
+    feedback: Vec<Feedback>,
+    /// Conversations whose summary may have moved this turn of the loop. Batched
+    /// because one message can move several facts about one conversation, and a
+    /// summary published per fact would say the same thing three times.
+    dirty: std::collections::BTreeSet<ConvKey>,
     /// A request is being answered: what it publishes waits for its reply.
     serving: bool,
     /// What the request in flight published, in the order it published it.
@@ -261,6 +274,16 @@ struct Controller {
 struct Told {
     agents: std::collections::HashMap<String, (AgentId, AgentSummary)>,
     rooms: std::collections::HashMap<String, (RoomId, RoomSummary)>,
+    /// Identifiers minted for a name before anything was published about it —
+    /// a conversation's `kind` names its instance or its room, and it may be the
+    /// first thing to ask.
+    agent_ids: std::collections::HashMap<String, AgentId>,
+    room_ids: std::collections::HashMap<String, RoomId>,
+    /// The last summary published for each conversation, so a change can be told
+    /// from a repeat.
+    conversations: std::collections::HashMap<ConvKey, ConversationSummary>,
+    /// Where each direct message was last reported to stand.
+    deliveries: std::collections::HashMap<u64, (DeliveryId, DeliveryState, u32)>,
 }
 
 /// What decides whether an instance's change is worth an event. Progress
@@ -277,6 +300,8 @@ struct AgentSummary {
 struct RoomSummary {
     members: Vec<String>,
     last_seq: u64,
+    unread: u32,
+    mentions: u32,
 }
 
 impl Controller {
@@ -334,6 +359,9 @@ impl Controller {
             queue: state.queue,
             interactions: state.interactions,
             conversations,
+            attention: Attention::default(),
+            feedback: Vec::new(),
+            dirty: std::collections::BTreeSet::new(),
             serving: false,
             deferred: Vec::new(),
             told: Told::default(),
@@ -364,11 +392,15 @@ impl Controller {
                 Control::Watch(message) => self.watch.handle(message),
                 Control::Channels(message) => {
                     self.channels.handle(message);
+                    self.absorb_posts();
+                    self.absorb_main_mail();
                     self.announce_rooms();
                 }
                 Control::Agents(message) => {
                     self.agents.handle(message);
+                    self.absorb_deliveries();
                     self.announce_agents();
+                    self.announce_deliveries();
                 }
                 Control::Turn(message) => {
                     let changes = self.turns.handle(message, &mut self.mint);
@@ -387,7 +419,9 @@ impl Controller {
                     let _ = reply.send(route);
                 }
                 Control::Settle { reply } => {
+                    self.announce_conversations();
                     let _ = reply.send(());
+                    continue;
                 }
                 Control::Close { reason, reply } => {
                     self.close(reason);
@@ -397,6 +431,9 @@ impl Controller {
                     return;
                 }
             }
+            // One summary per conversation per message, after everything that
+            // message moved.
+            self.announce_conversations();
         }
     }
 
@@ -472,6 +509,20 @@ impl Controller {
         {
             return self.serve_submit(conversation_id, input);
         }
+        if let AppCommand::MarkRead {
+            conversation_id,
+            last_item_id,
+            last_room_seq,
+            expected_revision,
+        } = &command
+        {
+            return self.serve_mark_read(
+                conversation_id,
+                last_item_id.as_ref(),
+                *last_room_seq,
+                *expected_revision,
+            );
+        }
         if matches!(command, AppCommand::CloseSession | AppCommand::Shutdown) {
             // The reply goes out before the loop ends, which is why the closing
             // itself is a control message rather than work done here: a request
@@ -492,9 +543,11 @@ impl Controller {
             AppCommand::Execute { .. } => "action/execute",
             AppCommand::Interrupt { .. } => "turn/interrupt",
             AppCommand::RespondInteraction { .. } => "interaction/respond",
-            AppCommand::MarkRead { .. } => "conversation/markRead",
+
             AppCommand::ReclaimQueueTail { .. } => "queue/reclaimTail",
             AppCommand::RegisterAsset { .. } => "asset/registerPath",
+            // Answered above; the compiler is what keeps this exhaustive.
+            AppCommand::MarkRead { .. } => "conversation/markRead",
             // Answered above; the compiler is what keeps this exhaustive.
             AppCommand::Submit { .. } => "conversation/submit",
             AppCommand::CloseSession => "session/close",
@@ -510,8 +563,20 @@ impl Controller {
                 Ok(AppReply::Session(Box::new(snapshot)))
             }
             AppQuery::ListSessions { .. } => Err(AppError::Unserved("session/list")),
-            AppQuery::ListConversations { .. } => Err(AppError::Unserved("conversation/list")),
-            AppQuery::ReadConversation { .. } => Err(AppError::Unserved("conversation/read")),
+            AppQuery::ListConversations { limit, .. } => {
+                let snapshot = self.conversation_list(limit);
+                self.cut(attachment, self.seq);
+                Ok(AppReply::Conversations(snapshot))
+            }
+            AppQuery::ReadConversation {
+                conversation_id,
+                cursor,
+                limit,
+            } => {
+                let snapshot = self.conversation_snapshot(&conversation_id, cursor, limit)?;
+                self.cut(attachment, snapshot.event_cursor);
+                Ok(AppReply::Conversation(Box::new(snapshot)))
+            }
             AppQuery::ReadQueue { .. } => Err(AppError::Unserved("queue/read")),
             AppQuery::ListActions { .. } => Err(AppError::Unserved("action/list")),
             AppQuery::ReadConfig => Err(AppError::Unserved("config/read")),
@@ -522,28 +587,172 @@ impl Controller {
     }
 
     /// The session as it stands, valid through the sequence number it was cut
-    /// at. The collections are empty because the skeleton owns nothing else yet
-    /// — not because the session has nothing.
-    fn session_snapshot(&self) -> SessionSnapshot {
+    /// at.
+    ///
+    /// The bounded halves are carried inline and the unbounded remainder is read
+    /// through the paginated methods (spec "Snapshots and recovery"). Tasks,
+    /// background commands, MCP state and operations are still empty: their
+    /// registries land with B5.
+    fn session_snapshot(&mut self) -> SessionSnapshot {
+        let keys: Vec<ConvKey> = self.conversations.keys().to_vec();
+        let count = keys.len() as u32;
+        let summaries: Vec<ConversationSummary> = keys
+            .into_iter()
+            .take(DEFAULT_PAGE as usize)
+            .map(|key| self.summarize(&key))
+            .collect();
+        let agents = self.agent_resources();
+        let rooms = self.room_resources();
+        let deliveries = self.delivery_resources();
+        let active_turns = self
+            .turns
+            .active_turns()
+            .into_iter()
+            .map(|mut turn| {
+                if let Some(key) = self.conversations.key(&turn.conversation_id).cloned() {
+                    turn.conversation_id = self.conversations.id(&mut self.mint, &key);
+                }
+                turn
+            })
+            .collect();
         SessionSnapshot {
             session: self.session.clone(),
             capabilities: self.capabilities,
-            conversations: empty_collection(),
-            active_turns: Vec::new(),
-            interactions: Vec::new(),
+            conversations: Collection {
+                revision: u64::from(count),
+                count,
+                active: summaries,
+            },
+            active_turns,
+            interactions: self.interactions.pending(),
             operations: Vec::new(),
             collections: RuntimeCollections {
-                agents: empty_collection(),
-                rooms: empty_collection(),
+                agents: Collection {
+                    revision: agents.len() as u64,
+                    count: agents.len() as u32,
+                    active: agents,
+                },
+                rooms: Collection {
+                    revision: rooms.len() as u64,
+                    count: rooms.len() as u32,
+                    active: rooms,
+                },
                 tasks: empty_collection(),
-                deliveries: empty_collection(),
+                deliveries: Collection {
+                    revision: deliveries.len() as u64,
+                    count: deliveries.len() as u32,
+                    active: deliveries,
+                },
                 background_commands: empty_collection(),
                 mcp_servers: Vec::new(),
             },
-            feedback: Vec::new(),
+            feedback: self.feedback.clone(),
             config: self.config.clone(),
             event_cursor: self.seq,
         }
+    }
+
+    /// One page of the session's conversations, in the order they were first
+    /// named.
+    fn conversation_list(
+        &mut self,
+        limit: Option<u32>,
+    ) -> crate::app::snapshot::Page<ConversationSummary> {
+        let limit = limit.unwrap_or(DEFAULT_PAGE) as usize;
+        let keys: Vec<ConvKey> = self.conversations.keys().to_vec();
+        let count = keys.len();
+        let items = keys
+            .into_iter()
+            .take(limit)
+            .map(|key| self.summarize(&key))
+            .collect();
+        Page {
+            items,
+            revision: count as u64,
+            next_cursor: None,
+        }
+    }
+
+    /// One conversation as it stands, valid through the sequence number it was
+    /// cut at. Reading it marks nothing (spec invariant #14).
+    fn conversation_snapshot(
+        &mut self,
+        id: &ConversationId,
+        cursor: Option<crate::app::snapshot::ItemCursor>,
+        limit: Option<u32>,
+    ) -> Result<crate::app::snapshot::ConversationSnapshot, AppError> {
+        let Some(key) = self.conversations.key(id).cloned() else {
+            return Err(AppError::Refused(
+                crate::app_server::protocol::error::ProtocolErrorKind::ConversationNotFound,
+            ));
+        };
+        let limit = limit.unwrap_or(DEFAULT_PAGE) as usize;
+        let items = self
+            .conversations
+            .page(&key, cursor.as_ref(), limit)
+            .map_err(|StalePage| {
+                AppError::Refused(crate::app_server::protocol::error::ProtocolErrorKind::StalePage)
+            })?;
+        let conversation = self.summarize(&key);
+        let history_generation = conversation.history_generation;
+        let active_turn = self
+            .turns
+            .active_turns()
+            .into_iter()
+            .find(|turn| Some(&key) == self.conversations.key(&turn.conversation_id))
+            .map(|mut turn| {
+                turn.conversation_id = conversation.id.clone();
+                turn
+            });
+        let mut origins =
+            |origin: &ConvKey| -> ConversationId { self.conversations.id(&mut self.mint, origin) };
+        let queue = self.queue.page(&key, &mut origins, DEFAULT_PAGE as usize);
+        let interactions = self
+            .interactions
+            .pending()
+            .into_iter()
+            .map(|mut pending| {
+                pending.conversation_id = conversation.id.clone();
+                pending
+            })
+            .collect();
+        Ok(crate::app::snapshot::ConversationSnapshot {
+            conversation,
+            items,
+            history_generation,
+            active_turn,
+            queue,
+            interactions,
+            context_usage: None,
+            event_cursor: self.seq,
+        })
+    }
+
+    /// `conversation/markRead`, the one thing that advances attention.
+    fn serve_mark_read(
+        &mut self,
+        id: &ConversationId,
+        last_item_id: Option<&ItemId>,
+        last_room_seq: Option<u64>,
+        expected_revision: u64,
+    ) -> Result<AppReply, AppError> {
+        let Some(key) = self.conversations.key(id).cloned() else {
+            return Err(AppError::Refused(
+                crate::app_server::protocol::error::ProtocolErrorKind::ConversationNotFound,
+            ));
+        };
+        let record = self.conversations.record_mut(&mut self.mint, &key);
+        // The revision is what makes this safe: a client marking a view it never
+        // saw would clear attention for content it has not shown.
+        if expected_revision != record.revision {
+            return Err(AppError::Refused(
+                crate::app_server::protocol::error::ProtocolErrorKind::StaleRevision,
+            ));
+        }
+        self.attention
+            .mark_read(&key, record, last_item_id, last_room_seq);
+        self.dirty.insert(key);
+        Ok(AppReply::Accepted)
     }
 
     /// Record where an attachment's snapshot cut fell. Everything at or below it
@@ -583,54 +792,117 @@ impl Controller {
         });
     }
 
+    /// Every instance as the contract names it.
+    fn agent_resources(&mut self) -> Vec<AgentResource> {
+        let facts = self.agents.facts();
+        facts
+            .into_iter()
+            .map(|fact| {
+                let id = self.agent_id(&fact.name);
+                let conversation_id = self.conversation_id(&ConvKey::Agent(fact.name.clone()));
+                AgentResource {
+                    id,
+                    name: fact.name,
+                    def: fact.def,
+                    description: fact.description,
+                    kind: match fact.kind {
+                        crate::agents::AgentKind::Crew => AgentKind::Crew,
+                        crate::agents::AgentKind::Hire => AgentKind::Hire,
+                    },
+                    state: agent_state(fact.state),
+                    model: fact.model,
+                    provider: fact.provider,
+                    thinking: thinking_level(fact.thinking.as_deref()),
+                    cwd: fact.cwd,
+                    conversation_id: Some(conversation_id),
+                    pending: fact.pending,
+                    unacked: fact.unacked,
+                    elapsed_ms: fact.elapsed_ms,
+                    output_tokens: fact.output_tokens,
+                    tool_uses: fact.tool_uses,
+                    last_active_at: now_millis(),
+                }
+            })
+            .collect()
+    }
+
+    /// Every room as the contract names it, attention included.
+    fn room_resources(&mut self) -> Vec<RoomResource> {
+        let facts = self.channels.facts();
+        facts
+            .into_iter()
+            .map(|fact| {
+                let key = ConvKey::Room(fact.name.clone());
+                let id = self.room_id(&fact.name);
+                let conversation_id = self.conversation_id(&key);
+                let record = self.conversations.record_mut(&mut self.mint, &key);
+                self.attention.seed(&key, record);
+                let standing = self.attention.standing(&key, record, Vec::new());
+                RoomResource {
+                    id,
+                    name: fact.name,
+                    topic: None,
+                    mode: match fact.mode {
+                        crate::channels::ChannelMode::Serial => RoomMode::Relay,
+                        crate::channels::ChannelMode::Free => RoomMode::Broadcast,
+                    },
+                    user_is_member: fact.members.iter().any(is_user),
+                    members: fact.members,
+                    conversation_id: Some(conversation_id),
+                    message_count: fact.message_count,
+                    last_seq: fact.last_seq,
+                    unread: standing.unread,
+                    mentions: standing.mentions,
+                }
+            })
+            .collect()
+    }
+
+    /// Every direct message the session has a record of.
+    fn delivery_resources(&mut self) -> Vec<DeliveryResource> {
+        self.agents
+            .delivery_facts()
+            .into_iter()
+            .map(|fact| DeliveryResource {
+                id: DeliveryId::new(format!("{}{}", DeliveryId::PREFIX, fact.id.0)),
+                from: fact.from,
+                to: fact.to,
+                private: true,
+                state: delivery_state(&fact.state),
+                message_item_id: None,
+                follow_ups: u32::from(fact.follow_ups),
+                max_follow_ups: u32::from(crate::agents::MAX_FOLLOW_UPS),
+                reason: match &fact.state {
+                    crate::agents::AckState::Dropped { reason } => Some(reason.clone()),
+                    _ => None,
+                },
+                updated_at: now_millis(),
+            })
+            .collect()
+    }
+
     /// Publish one event per instance whose state moved, and one per instance
     /// that is new. An instance that went away is not announced yet: `agent/gone`
-    /// is B4's, and inventing a shape for it here would be deciding the contract
-    /// from the implementation.
+    /// is not in the contract, and inventing a shape for it here would be
+    /// deciding it from the implementation.
     fn announce_agents(&mut self) {
-        let facts = self.agents.facts();
+        let resources = self.agent_resources();
         let mut changed = Vec::new();
-        for fact in facts {
+        for agent in resources {
             let summary = AgentSummary {
-                state: agent_state(fact.state),
-                pending: fact.pending,
-                unacked: fact.unacked,
+                state: agent.state,
+                pending: agent.pending,
+                unacked: agent.unacked,
             };
-            let known = self.told.agents.get(&fact.name);
+            let known = self.told.agents.get(&agent.name);
             if known.is_some_and(|(_, told)| told == &summary) {
                 continue;
             }
-            let id = match known {
-                Some((id, _)) => id.clone(),
-                None => self.mint.mint(),
-            };
             self.told
                 .agents
-                .insert(fact.name.clone(), (id.clone(), summary));
-            changed.push(AgentResource {
-                id,
-                name: fact.name,
-                def: fact.def,
-                description: fact.description,
-                kind: match fact.kind {
-                    crate::agents::AgentKind::Crew => AgentKind::Crew,
-                    crate::agents::AgentKind::Hire => AgentKind::Hire,
-                },
-                state: agent_state(fact.state),
-                model: fact.model,
-                provider: fact.provider,
-                // The instance's own thinking level and its conversation arrive
-                // with B4, which is where an agent gets a conversation at all.
-                thinking: ThinkingLevel::Off,
-                cwd: fact.cwd,
-                conversation_id: None,
-                pending: fact.pending,
-                unacked: fact.unacked,
-                elapsed_ms: fact.elapsed_ms,
-                output_tokens: fact.output_tokens,
-                tool_uses: fact.tool_uses,
-                last_active_at: now_millis(),
-            });
+                .insert(agent.name.clone(), (agent.id.clone(), summary));
+            self.dirty.insert(ConvKey::Agent(agent.name.clone()));
+            changed.push(agent);
         }
         for agent in changed {
             self.publish(
@@ -640,43 +912,26 @@ impl Controller {
         }
     }
 
-    /// Publish one event per room whose roster or head moved.
+    /// Publish one event per room whose roster, head or attention moved.
     fn announce_rooms(&mut self) {
-        let facts = self.channels.facts();
+        let resources = self.room_resources();
         let mut changed = Vec::new();
-        for fact in facts {
+        for room in resources {
             let summary = RoomSummary {
-                members: fact.members.clone(),
-                last_seq: fact.last_seq,
+                members: room.members.clone(),
+                last_seq: room.last_seq,
+                unread: room.unread,
+                mentions: room.mentions,
             };
-            let known = self.told.rooms.get(&fact.name);
+            let known = self.told.rooms.get(&room.name);
             if known.is_some_and(|(_, told)| told == &summary) {
                 continue;
             }
-            let id = match known {
-                Some((id, _)) => id.clone(),
-                None => self.mint.mint(),
-            };
             self.told
                 .rooms
-                .insert(fact.name.clone(), (id.clone(), summary));
-            changed.push(RoomResource {
-                id,
-                name: fact.name,
-                topic: None,
-                mode: match fact.mode {
-                    crate::channels::ChannelMode::Serial => RoomMode::Relay,
-                    crate::channels::ChannelMode::Free => RoomMode::Broadcast,
-                },
-                user_is_member: fact.members.iter().any(|m| m == crate::channels::USER_NAME),
-                members: fact.members,
-                conversation_id: None,
-                message_count: fact.message_count,
-                last_seq: fact.last_seq,
-                // Attention is the user's, and the user's cursors land with B4.
-                unread: 0,
-                mentions: 0,
-            });
+                .insert(room.name.clone(), (room.id.clone(), summary));
+            self.dirty.insert(ConvKey::Room(room.name.clone()));
+            changed.push(room);
         }
         for room in changed {
             self.publish(
@@ -699,11 +954,40 @@ impl Controller {
     /// is. Nothing else translates between the two.
     fn announce_turn(&mut self, changes: Vec<TurnChange>) {
         for change in changes {
+            // Three of these are not a payload at all: a completed item joins
+            // its conversation's log on the way out, inbound prose is read by
+            // the one walker before it becomes anything, and a warning is
+            // feedback rather than turn state.
             let payload = match change {
+                TurnChange::ItemCompleted {
+                    conversation,
+                    turn,
+                    item,
+                } => {
+                    self.commit(&conversation, turn, *item);
+                    continue;
+                }
+                TurnChange::Inbound {
+                    conversation,
+                    text,
+                    first,
+                    ..
+                } => {
+                    self.absorb_inbound(&conversation, &text, first);
+                    continue;
+                }
+                TurnChange::Warning {
+                    conversation, text, ..
+                } => {
+                    let id = self.conversation_id(&conversation);
+                    self.raise_feedback(Some(id), text);
+                    continue;
+                }
                 TurnChange::Started { conversation, turn } => {
                     let conversation_id = self.conversation_id(&conversation);
                     let mut turn = turn;
                     turn.conversation_id = conversation_id.clone();
+                    self.dirty.insert(conversation);
                     AppEventPayload::TurnStarted(TurnChanged {
                         conversation_id,
                         turn,
@@ -728,17 +1012,24 @@ impl Controller {
                     removed,
                     code,
                     reason,
-                } => AppEventPayload::TurnRetrying(TurnRetrying {
-                    conversation_id: self.conversation_id(&conversation),
-                    turn_id: turn,
-                    round,
-                    attempt,
-                    max_attempts,
-                    delay_ms,
-                    removed_item_ids: removed,
-                    code,
-                    reason,
-                }),
+                } => {
+                    // The checkpoint is authoritative: whatever the failed
+                    // attempt had already committed leaves the log with it, so a
+                    // later `conversation/read` cannot page an item the stream
+                    // said was withdrawn.
+                    self.withdraw(&conversation, &removed);
+                    AppEventPayload::TurnRetrying(TurnRetrying {
+                        conversation_id: self.conversation_id(&conversation),
+                        turn_id: turn,
+                        round,
+                        attempt,
+                        max_attempts,
+                        delay_ms,
+                        removed_item_ids: removed,
+                        code,
+                        reason,
+                    })
+                }
                 TurnChange::RoundCompleted {
                     conversation,
                     turn,
@@ -765,6 +1056,7 @@ impl Controller {
                     let conversation_id = self.conversation_id(&conversation);
                     let mut turn = turn;
                     turn.conversation_id = conversation_id.clone();
+                    self.dirty.insert(conversation);
                     AppEventPayload::TurnCompleted(TurnChanged {
                         conversation_id,
                         turn,
@@ -784,15 +1076,6 @@ impl Controller {
                     turn,
                     item,
                 } => AppEventPayload::ItemUpdated(ItemChanged {
-                    conversation_id: self.conversation_id(&conversation),
-                    turn_id: turn,
-                    item: *item,
-                }),
-                TurnChange::ItemCompleted {
-                    conversation,
-                    turn,
-                    item,
-                } => AppEventPayload::ItemCompleted(ItemChanged {
                     conversation_id: self.conversation_id(&conversation),
                     turn_id: turn,
                     item: *item,
@@ -990,17 +1273,17 @@ impl Controller {
                     let conversation_id = self.conversation_id(&conversation);
                     let mut interaction = *interaction;
                     interaction.conversation_id = conversation_id;
+                    self.dirty.insert(conversation);
                     AppEventPayload::InteractionOpened(InteractionOpened { interaction })
                 }
                 InteractionChange::Committed {
                     conversation,
                     turn,
                     item,
-                } => AppEventPayload::ItemCompleted(ItemChanged {
-                    conversation_id: self.conversation_id(&conversation),
-                    turn_id: turn,
-                    item: *item,
-                }),
+                } => {
+                    self.commit(&conversation, turn, *item);
+                    continue;
+                }
                 InteractionChange::Resolved {
                     conversation,
                     id,
@@ -1016,11 +1299,14 @@ impl Controller {
                     conversation,
                     id,
                     reason,
-                } => AppEventPayload::InteractionCancelled(InteractionCancelled {
-                    interaction_id: id,
-                    conversation_id: self.conversation_id(&conversation),
-                    reason,
-                }),
+                } => {
+                    self.dirty.insert(conversation.clone());
+                    AppEventPayload::InteractionCancelled(InteractionCancelled {
+                        interaction_id: id,
+                        conversation_id: self.conversation_id(&conversation),
+                        reason,
+                    })
+                }
             };
             self.publish(Box::new(payload), None);
         }
@@ -1041,6 +1327,7 @@ impl Controller {
                     steer_eligible,
                 } => {
                     let conversation_id = self.conversation_id(&conversation);
+                    self.dirty.insert(conversation);
                     let origin_conversation_id = self.conversation_id(&entry.on);
                     AppEventPayload::QueueItemAdded(QueueItemAdded {
                         conversation_id,
@@ -1061,19 +1348,19 @@ impl Controller {
                     revision,
                     id,
                     reason,
-                } => AppEventPayload::QueueItemRemoved(QueueItemRemoved {
-                    conversation_id: self.conversation_id(&conversation),
-                    revision,
-                    queue_id: id,
-                    reason,
-                }),
+                } => {
+                    self.dirty.insert(conversation.clone());
+                    AppEventPayload::QueueItemRemoved(QueueItemRemoved {
+                        conversation_id: self.conversation_id(&conversation),
+                        revision,
+                        queue_id: id,
+                        reason,
+                    })
+                }
                 QueueChange::AbsorbedItem { conversation, item } => {
                     let turn_id = item.turn_id.clone();
-                    AppEventPayload::ItemCompleted(ItemChanged {
-                        conversation_id: self.conversation_id(&conversation),
-                        turn_id,
-                        item: *item,
-                    })
+                    self.commit(&conversation, turn_id, *item);
+                    continue;
                 }
                 QueueChange::Absorbed {
                     conversation,
@@ -1093,6 +1380,424 @@ impl Controller {
         }
     }
 
+    // -- Conversations, items and attention ---------------------------------
+
+    /// Put one completed item in its conversation's log and publish it.
+    ///
+    /// Every item a client ever sees comes through here, whichever registry
+    /// produced it: a turn's assistant message, a room post, a colleague's
+    /// message, a permission receipt. One door means the log a `conversation/read`
+    /// pages is the same history the stream described.
+    fn commit(
+        &mut self,
+        conversation: &ConvKey,
+        turn: Option<crate::app::ids::TurnId>,
+        item: Item,
+    ) {
+        let conversation_id = self.conversation_id(conversation);
+        let by_user = crate::app::attention::authored_by_user(&item);
+        self.conversations
+            .append(&mut self.mint, conversation, item.clone());
+        if by_user {
+            // The user's own words, and their own arrival in a room, are read by
+            // definition — the same thing the domain says when a post advances
+            // the sender's own cursor and an invite seats a late joiner at the
+            // head.
+            let record = self.conversations.record_mut(&mut self.mint, conversation);
+            self.attention.mark_all_read(conversation, record);
+        }
+        self.dirty.insert(conversation.clone());
+        self.publish(
+            Box::new(AppEventPayload::ItemCompleted(ItemChanged {
+                conversation_id,
+                turn_id: turn,
+                item,
+            })),
+            None,
+        );
+    }
+
+    /// Take back exactly the items a retry checkpoint withdrew.
+    fn withdraw(&mut self, conversation: &ConvKey, removed: &[ItemId]) {
+        if removed.is_empty() {
+            return;
+        }
+        let record = self.conversations.record_mut(&mut self.mint, conversation);
+        let before = record.items.len();
+        record.items.retain(|item| !removed.contains(&item.id));
+        if record.items.len() != before {
+            self.dirty.insert(conversation.clone());
+        }
+    }
+
+    /// A completed item the core built itself, minted and committed in one step.
+    fn commit_body(&mut self, conversation: &ConvKey, body: ItemBody) -> ItemId {
+        let id: ItemId = self.mint.mint();
+        let now = now_millis();
+        let item = Item {
+            id: id.clone(),
+            status: ItemStatus::Completed,
+            turn_id: None,
+            started_at: Some(now),
+            completed_at: Some(now),
+            body,
+        };
+        self.commit(conversation, None, item);
+        id
+    }
+
+    /// The room posts recorded since the last look become items in the room's
+    /// conversation.
+    ///
+    /// A room post is a completed message item with no turn (spec "Item"): there
+    /// is no synthetic room turn and no second representation of the same fact.
+    /// Membership entries are items too — they are in the room's log, they take a
+    /// sequence number, and a client that had to infer a join from a roster diff
+    /// would be reading the room twice.
+    fn absorb_posts(&mut self) {
+        let facts = self.channels.facts();
+        for fact in facts {
+            let seen = self
+                .told
+                .rooms
+                .get(&fact.name)
+                .map_or(0, |(_, told)| told.last_seq);
+            if fact.last_seq <= seen {
+                continue;
+            }
+            let room_id = self.room_id(&fact.name);
+            let conversation = ConvKey::Room(fact.name.clone());
+            for message in self.channels.since(&fact.name, seen) {
+                let mentions = crate::channels::mention_tokens(&message.text);
+                let id: ItemId = self.mint.mint();
+                let at = message.at.saturating_mul(1_000);
+                let item = Item {
+                    id,
+                    status: ItemStatus::Completed,
+                    turn_id: None,
+                    started_at: Some(at),
+                    completed_at: Some(at),
+                    body: ItemBody::RoomMessage {
+                        room_id: room_id.clone(),
+                        from: message.from.clone(),
+                        text: message.text.clone(),
+                        room_seq: message.seq,
+                        mentions,
+                    },
+                };
+                self.commit(&conversation, None, item);
+            }
+        }
+    }
+
+    /// The messages main was handed since the last look become items in main's
+    /// conversation, at the moment they arrived (D135).
+    fn absorb_main_mail(&mut self) {
+        for handed in self.channels.drain_delivered() {
+            self.commit_body(
+                &ConvKey::Main,
+                ItemBody::PeerMessage {
+                    from: handed.from,
+                    to: None,
+                    text: handed.text,
+                    delivery_id: None,
+                },
+            );
+        }
+    }
+
+    /// The messages an instance was handed since the last look become items in
+    /// that instance's conversation, with the delivery record they belong to.
+    fn absorb_deliveries(&mut self) {
+        for handed in self.agents.drain_delivered() {
+            let delivery = DeliveryId::new(format!("{}{}", DeliveryId::PREFIX, handed.id.0));
+            let conversation = ConvKey::Agent(handed.to.clone());
+            self.commit_body(
+                &conversation,
+                ItemBody::PeerMessage {
+                    from: handed.from,
+                    to: Some(handed.to),
+                    text: handed.text,
+                    delivery_id: Some(delivery),
+                },
+            );
+        }
+    }
+
+    /// Publish one event per direct message whose state moved.
+    ///
+    /// D137 is what the domain enforces and this only reports: a colleague's turn
+    /// prose never settles the sender's acknowledgement, so a record only reaches
+    /// `answered` when a message came back.
+    fn announce_deliveries(&mut self) {
+        let facts = self.agents.delivery_facts();
+        let mut changed = Vec::new();
+        for fact in facts {
+            let state = delivery_state(&fact.state);
+            let follow_ups = u32::from(fact.follow_ups);
+            let known = self.told.deliveries.get(&fact.id.0);
+            if known.is_some_and(|(_, told, chases)| *told == state && *chases == follow_ups) {
+                continue;
+            }
+            let id = match known {
+                Some((id, ..)) => id.clone(),
+                None => DeliveryId::new(format!("{}{}", DeliveryId::PREFIX, fact.id.0)),
+            };
+            self.told
+                .deliveries
+                .insert(fact.id.0, (id.clone(), state, follow_ups));
+            changed.push(DeliveryResource {
+                id,
+                from: fact.from,
+                to: fact.to,
+                private: true,
+                state,
+                message_item_id: None,
+                follow_ups,
+                max_follow_ups: u32::from(crate::agents::MAX_FOLLOW_UPS),
+                reason: match &fact.state {
+                    crate::agents::AckState::Dropped { reason } => Some(reason.clone()),
+                    _ => None,
+                },
+                updated_at: now_millis(),
+            });
+        }
+        for delivery in changed {
+            self.publish(
+                Box::new(AppEventPayload::DeliveryChanged(DeliveryChanged {
+                    delivery,
+                })),
+                None,
+            );
+        }
+    }
+
+    /// Raise one warning as feedback with a stable code.
+    fn raise_feedback(&mut self, conversation: Option<ConversationId>, message: String) {
+        let feedback = Feedback {
+            id: self.mint.mint::<FeedbackId>(),
+            level: NoticeLevel::Warning,
+            code: crate::error::RUNTIME_WARNING.to_string(),
+            message,
+            detail: None,
+            conversation_id: conversation,
+            raised_at: now_millis(),
+            expires_at: None,
+        };
+        self.feedback.push(feedback.clone());
+        // Bounded on purpose: a session that warned a thousand times is a session
+        // with a problem, not a session whose snapshot should carry a thousand
+        // warnings.
+        while self.feedback.len() > MAX_FEEDBACK {
+            self.feedback.remove(0);
+        }
+        self.publish(
+            Box::new(AppEventPayload::FeedbackRaised(FeedbackRaised { feedback })),
+            None,
+        );
+    }
+
+    /// Read one inbound block with the one walker and commit what it names.
+    fn absorb_inbound(&mut self, conversation: &ConvKey, text: &str, first: bool) {
+        let who = match conversation {
+            ConvKey::Agent(name) => name.clone(),
+            _ => crate::channels::MAIN_NAME.to_string(),
+        };
+        let at = now_millis();
+        for filed in crate::app::projection::inbound(&who, text, at / 1_000, first) {
+            let code = match filed.target {
+                crate::app::projection::Target::Intake => "intake",
+                _ => "runtime",
+            };
+            self.commit_body(
+                conversation,
+                ItemBody::Notice {
+                    code: code.to_string(),
+                    level: NoticeLevel::Info,
+                    text: filed.post.text,
+                },
+            );
+        }
+    }
+
+    /// The identifier this instance answers to, minted the first time it is
+    /// named.
+    fn agent_id(&mut self, name: &str) -> AgentId {
+        if let Some((id, _)) = self.told.agents.get(name) {
+            return id.clone();
+        }
+        if let Some(id) = self.told.agent_ids.get(name) {
+            return id.clone();
+        }
+        let id: AgentId = self.mint.mint();
+        self.told.agent_ids.insert(name.to_string(), id.clone());
+        id
+    }
+
+    /// The identifier this room answers to, minted the first time it is named.
+    fn room_id(&mut self, name: &str) -> RoomId {
+        if let Some((id, _)) = self.told.rooms.get(name) {
+            return id.clone();
+        }
+        if let Some(id) = self.told.room_ids.get(name) {
+            return id.clone();
+        }
+        let id: RoomId = self.mint.mint();
+        self.told.room_ids.insert(name.to_string(), id.clone());
+        id
+    }
+
+    /// Publish one summary per conversation whose state moved, and one per
+    /// conversation that is new.
+    ///
+    /// The revision is the count of summaries published: a client that carries it
+    /// back on `markRead` is naming the exact view it was looking at.
+    fn announce_conversations(&mut self) {
+        if self.dirty.is_empty() {
+            return;
+        }
+        let dirty: Vec<ConvKey> = std::mem::take(&mut self.dirty).into_iter().collect();
+        let mut changed = Vec::new();
+        for key in dirty {
+            let summary = self.summarize(&key);
+            let told = self.told.conversations.get(&key);
+            if told.is_some_and(|told| same_summary(told, &summary)) {
+                continue;
+            }
+            let created = told.is_none();
+            let mut summary = summary;
+            summary.revision = told.map_or(1, |told| told.revision.saturating_add(1));
+            let record = self.conversations.record_mut(&mut self.mint, &key);
+            record.revision = summary.revision;
+            record.announced = true;
+            self.told.conversations.insert(key.clone(), summary.clone());
+            changed.push((created, summary));
+        }
+        for (created, conversation) in changed {
+            let changed = ConversationChanged { conversation };
+            self.publish(
+                Box::new(if created {
+                    AppEventPayload::ConversationCreated(changed)
+                } else {
+                    AppEventPayload::ConversationUpdated(changed)
+                }),
+                None,
+            );
+        }
+    }
+
+    /// One conversation as it stands, attention included.
+    fn summarize(&mut self, key: &ConvKey) -> ConversationSummary {
+        let id = self.conversation_id(key);
+        let kind = match key {
+            ConvKey::Main => ConversationKind::Main,
+            ConvKey::Agent(name) => ConversationKind::Agent {
+                agent_id: self.agent_id(name),
+            },
+            ConvKey::Room(name) => ConversationKind::Room {
+                room_id: self.room_id(name),
+            },
+        };
+        let obligations = self.obligations(key);
+        let is_member = match key {
+            ConvKey::Room(name) => self
+                .channels
+                .facts()
+                .into_iter()
+                .any(|room| &room.name == name && room.members.iter().any(is_user)),
+            _ => true,
+        };
+        let active_turn_id = self.turns.active_turns().into_iter().find_map(|turn| {
+            (self.conversations.key(&turn.conversation_id) == Some(key)).then_some(turn.id)
+        });
+        let run_state = match key {
+            ConvKey::Room(_) => ConversationRunState::Passive,
+            _ if active_turn_id.is_some() => ConversationRunState::Running,
+            ConvKey::Agent(name) => match self
+                .agents
+                .facts()
+                .into_iter()
+                .find(|fact| &fact.name == name)
+            {
+                Some(fact) if fact.state == crate::agents::AgentState::Stopped => {
+                    ConversationRunState::Stopped
+                }
+                Some(fact) if fact.state == crate::agents::AgentState::Running => {
+                    ConversationRunState::Running
+                }
+                _ => ConversationRunState::Idle,
+            },
+            ConvKey::Main => ConversationRunState::Idle,
+        };
+        let (queue_revision, queue_count) = self.queue.stand(key);
+        let pending_interactions = self.interactions.pending_in(key);
+        let record = self.conversations.record_mut(&mut self.mint, key);
+        let last_item_id = record.last_item_id();
+        let history_generation = record.history_generation;
+        let last_activity_at = record.last_activity_at;
+        let revision = record.revision;
+        // A conversation nobody has opened starts read: its past is not news.
+        self.attention.seed(key, record);
+        let standing = self.attention.standing(key, record, obligations);
+        ConversationSummary {
+            id,
+            kind,
+            title: key.title(),
+            revision,
+            history_generation,
+            run_state,
+            active_turn_id,
+            unread: standing.unread,
+            mentions: standing.mentions,
+            read_cursor: standing.read_cursor,
+            last_item_id,
+            obligations: standing.obligations,
+            is_member,
+            queue_revision,
+            queue_count,
+            pending_interactions,
+            last_activity_at,
+        }
+    }
+
+    /// What this conversation is waiting on the user for, read from the
+    /// registries rather than inferred from prose.
+    fn obligations(&self, key: &ConvKey) -> Vec<Obligation> {
+        let mut owed = Vec::new();
+        match key {
+            ConvKey::Room(name) => {
+                for (room, mention) in self.channels.open_mentions() {
+                    if &room != name {
+                        continue;
+                    }
+                    if mention.to == crate::channels::USER_NAME
+                        || mention.to == crate::channels::ALL_NAME
+                    {
+                        owed.push(crate::app::attention::mention_debt(
+                            &mention.from,
+                            mention.at.saturating_mul(1_000),
+                        ));
+                    }
+                }
+            }
+            ConvKey::Agent(name) => {
+                for fact in self.agents.delivery_facts() {
+                    if &fact.to != name || fact.from != crate::channels::USER_NAME {
+                        continue;
+                    }
+                    if fact.state.is_outstanding() {
+                        owed.push(crate::app::attention::unanswered(name, now_millis()));
+                    }
+                }
+            }
+            ConvKey::Main => {}
+        }
+        if self.interactions.pending_in(key) > 0 {
+            owed.push(crate::app::attention::awaiting_user(now_millis()));
+        }
+        owed
+    }
+
     fn deliver(&mut self, attachment: AttachmentId, frame: AppFrame) {
         self.attachments
             .retain(|open| open.id != attachment || send(open, frame.clone()));
@@ -1107,6 +1812,59 @@ impl Controller {
 /// read again — the transport's own backpressure policy is B6's.
 fn send(attachment: &Attachment, frame: AppFrame) -> bool {
     attachment.frames.try_send(frame).is_ok()
+}
+
+/// How many standing warnings a snapshot carries. A session that warned a
+/// thousand times has a problem; its snapshot should not.
+const MAX_FEEDBACK: usize = 32;
+
+/// How much of a collection a read carries when the caller names no limit.
+const DEFAULT_PAGE: u32 = 100;
+
+/// A member entry that is the human.
+fn is_user(member: &String) -> bool {
+    member == crate::channels::USER_NAME
+}
+
+/// Where a message stands, in the vocabulary the wire uses.
+///
+/// The translation is deliberate. The domain's `Queued` means "in the receiver's
+/// inbox, unread", which on the wire is **delivered**; the domain's `Delivered`
+/// means "folded into the receiver's prompt", which on the wire is **read**.
+/// Those are exactly D135's two moments, named for what each one means to the
+/// sender. The wire's `queued` — accepted but not yet in an inbox — cannot happen
+/// while delivery is one step.
+fn delivery_state(state: &crate::agents::AckState) -> DeliveryState {
+    match state {
+        crate::agents::AckState::Queued => DeliveryState::Delivered,
+        crate::agents::AckState::Delivered { .. } => DeliveryState::Read,
+        crate::agents::AckState::Answered { .. } => DeliveryState::Answered,
+        crate::agents::AckState::Dropped { .. } => DeliveryState::Dropped,
+    }
+}
+
+/// Whether two summaries say the same thing. The revision is excluded because it
+/// is what this decides: a summary that changed gets the next one.
+fn same_summary(told: &ConversationSummary, fresh: &ConversationSummary) -> bool {
+    let mut fresh = fresh.clone();
+    fresh.revision = told.revision;
+    // The last-activity stamp moves with the log, and the log moving is already
+    // a change; comparing the clock itself would make every equal summary differ.
+    fresh.last_activity_at = told.last_activity_at;
+    &fresh == told
+}
+
+/// The domain's thinking selection, as the contract names it. Absent is the
+/// level "off" rather than an unknown, which is what makes a snapshot always
+/// answer the question.
+fn thinking_level(level: Option<&str>) -> ThinkingLevel {
+    match level {
+        None => ThinkingLevel::Off,
+        Some(level) => ThinkingLevel::ALL
+            .into_iter()
+            .find(|known| known.as_str() == level)
+            .unwrap_or(ThinkingLevel::Off),
+    }
 }
 
 /// The domain's instance state, as the contract names it.
@@ -1309,10 +2067,15 @@ mod tests {
         assert_eq!(snapshot.session.title, "Notes");
         assert_eq!(snapshot.config.model, "sonnet");
         assert_eq!(snapshot.session.state, SessionState::Active);
-        assert!(
-            snapshot.conversations.active.is_empty() && snapshot.active_turns.is_empty(),
-            "the skeleton owns no conversations yet, and says so rather than inventing one"
-        );
+        assert!(snapshot.active_turns.is_empty(), "nothing is running yet");
+        match snapshot.conversations.active.as_slice() {
+            [main] => {
+                assert_eq!(main.kind, crate::app::snapshot::ConversationKind::Main);
+                assert_eq!(main.unread, 0);
+                assert!(main.obligations.is_empty());
+            }
+            other => panic!("a session has exactly one conversation to start with: {other:?}"),
+        }
     }
 
     /// A mutation the core cannot serve yet is refused by name. The reply is
@@ -1323,11 +2086,9 @@ mod tests {
         let (mut link, _) = attached(&core, "test").await;
         link.request(AppRequest::Command {
             id: RequestId(2),
-            command: AppCommand::MarkRead {
+            command: AppCommand::ReclaimQueueTail {
                 conversation_id: crate::app::ids::ConversationId::new("conv_1"),
-                last_item_id: None,
-                last_room_seq: None,
-                expected_revision: 0,
+                expected_revision: None,
             },
         })
         .await
@@ -1335,9 +2096,76 @@ mod tests {
         match link.recv().await {
             Some(AppFrame::Reply { id, result }) => {
                 assert_eq!(id, RequestId(2));
-                assert_eq!(result, Err(AppError::Unserved("conversation/markRead")));
+                assert_eq!(result, Err(AppError::Unserved("queue/reclaimTail")));
             }
             other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+
+    /// Reading a conversation never marks it read; only `markRead` does, and it
+    /// names the revision it believed it was looking at (spec invariant #14).
+    #[tokio::test]
+    async fn marking_read_names_the_view_it_was_looking_at() {
+        let core = AppCore::start(SessionSetup::default());
+        let (mut link, snapshot) = attached(&core, "test").await;
+        let main = snapshot
+            .conversations
+            .active
+            .first()
+            .map(|summary| summary.id.clone())
+            .unwrap_or_else(|| panic!("main exists"));
+        let revision = snapshot
+            .conversations
+            .active
+            .first()
+            .map(|summary| summary.revision)
+            .unwrap_or_default();
+
+        link.request(AppRequest::Command {
+            id: RequestId(2),
+            command: AppCommand::MarkRead {
+                conversation_id: main.clone(),
+                last_item_id: None,
+                last_room_seq: None,
+                expected_revision: revision.saturating_add(7),
+            },
+        })
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+        match next_reply(&mut link, RequestId(2)).await {
+            Err(AppError::Refused(kind)) => assert_eq!(
+                kind,
+                crate::app_server::protocol::error::ProtocolErrorKind::StaleRevision,
+                "a view the client never saw cannot clear attention"
+            ),
+            other => panic!("expected a stale revision, got {other:?}"),
+        }
+
+        link.request(AppRequest::Command {
+            id: RequestId(3),
+            command: AppCommand::MarkRead {
+                conversation_id: main,
+                last_item_id: None,
+                last_room_seq: None,
+                expected_revision: revision,
+            },
+        })
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(
+            next_reply(&mut link, RequestId(3)).await,
+            Ok(AppReply::Accepted)
+        );
+    }
+
+    /// The reply to `id`, skipping whatever the core said on the way.
+    async fn next_reply(link: &mut AppLink, id: RequestId) -> Result<AppReply, AppError> {
+        loop {
+            match link.recv().await {
+                Some(AppFrame::Reply { id: seen, result }) if seen == id => return result,
+                Some(_) => {}
+                None => panic!("the core closed"),
+            }
         }
     }
 

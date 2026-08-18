@@ -334,6 +334,14 @@ impl InteractionRegistry {
         changes
     }
 
+    /// How many prompts one conversation is stopped on.
+    pub(crate) fn pending_in(&self, conversation: &ConvKey) -> u32 {
+        self.open
+            .iter()
+            .filter(|held| &held.conversation == conversation)
+            .count() as u32
+    }
+
     /// Everything open, for a snapshot.
     pub(crate) fn pending(&self) -> Vec<Interaction> {
         self.open

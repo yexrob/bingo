@@ -22,6 +22,9 @@
 #![allow(dead_code)]
 
 pub mod answer;
+pub mod attention;
+#[cfg(test)]
+mod collab_tests;
 pub mod command;
 pub mod controller;
 pub mod conversation;
@@ -120,6 +123,8 @@ pub enum AppReply {
     Session(Box<SessionSnapshot>),
     /// A conversation cut, valid through its `event_cursor`.
     Conversation(Box<ConversationSnapshot>),
+    /// One page of the session's conversations.
+    Conversations(crate::app::snapshot::Page<crate::app::snapshot::ConversationSummary>),
     /// What the core did with a submission. The caller never chose it.
     Submitted(crate::app::command::SubmitDisposition),
 }

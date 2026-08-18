@@ -356,6 +356,45 @@ impl InputQueue {
             .map_or(0, |queue| queue.entries.len() as u32)
     }
 
+    /// Where one conversation's queue stands: the revision a client pages it at,
+    /// and how much is on it.
+    pub(crate) fn stand(&self, conversation: &ConvKey) -> (u64, u32) {
+        self.conversations
+            .get(conversation)
+            .map_or((0, 0), |queue| (queue.revision, queue.entries.len() as u32))
+    }
+
+    /// One page of a conversation's queue, as a snapshot carries it.
+    pub(crate) fn page(
+        &self,
+        conversation: &ConvKey,
+        origins: &mut dyn FnMut(&ConvKey) -> crate::app::ids::ConversationId,
+        limit: usize,
+    ) -> crate::app::snapshot::Page<crate::app::snapshot::QueueEntry> {
+        let queue = self.conversations.get(conversation);
+        let revision = queue.map_or(0, |queue| queue.revision);
+        let entries = queue.map(|queue| queue.entries.as_slice()).unwrap_or(&[]);
+        let eligible = eligible_prefix(entries);
+        let items = entries
+            .iter()
+            .take(limit)
+            .enumerate()
+            .map(|(index, entry)| crate::app::snapshot::QueueEntry {
+                id: entry.id.clone(),
+                origin_conversation_id: origins(&entry.on),
+                text: entry.text.clone(),
+                attachments: entry.attachments.clone(),
+                steer_eligible: index < eligible,
+                queued_at: entry.queued_at,
+            })
+            .collect();
+        crate::app::snapshot::Page {
+            items,
+            revision,
+            next_cursor: None,
+        }
+    }
+
     fn publish(&mut self) {
         let _ = self.view.send(Arc::new(QueueView {
             conversations: self.conversations.clone(),

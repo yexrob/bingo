@@ -140,6 +140,25 @@ pub(crate) enum TurnChange {
         turn: Option<TurnId>,
         item: Box<Item>,
     },
+    /// Prose entering this conversation from outside its own turn: the prompt a
+    /// run opened with, and every batch of mail it absorbed at a round boundary.
+    /// The actor reads it with the one walker and commits the items it names,
+    /// which is why the text travels rather than an item — attribution is
+    /// `app::projection`'s, not this registry's.
+    Inbound {
+        conversation: ConvKey,
+        turn: TurnId,
+        text: String,
+        /// This is the task the instance was created for, the one shape a
+        /// continuation's mail can never be.
+        first: bool,
+    },
+    /// Something went wrong that did not end the run.
+    Warning {
+        conversation: ConvKey,
+        turn: TurnId,
+        text: String,
+    },
 }
 
 /// What a reader can see of the turns in flight, without asking.
@@ -327,6 +346,9 @@ struct Record {
     /// The next round has not announced itself yet: the first content that
     /// belongs to it does.
     round_pending: bool,
+    /// An inbound block has already arrived on this turn, so the next one is a
+    /// continuation's mail rather than the task the run opened with.
+    saw_inbound: bool,
 }
 
 /// The items one attempt is building.
@@ -449,6 +471,7 @@ impl TurnRegistry {
                         claimed: false,
                         live: Live::default(),
                         round_pending: true,
+                        saw_inbound: false,
                     },
                 );
                 self.active.insert(conversation.clone(), id.clone());
@@ -724,11 +747,21 @@ impl TurnRegistry {
                     usage: record.turn.usage,
                 });
             }
-            // Warnings become `feedback/raised` with B5's feedback registry, and
-            // inbound prose becomes a peer item with B4's collaboration model.
-            // Reporting either as something else here would be inventing a shape
-            // the contract already names.
-            EngineEvent::Warning(_) | EngineEvent::Inbound(_) => {}
+            EngineEvent::Inbound(text) => {
+                let first = !record.saw_inbound && record.turn.round == 0;
+                record.saw_inbound = true;
+                changes.push(TurnChange::Inbound {
+                    conversation,
+                    turn: turn.clone(),
+                    text,
+                    first,
+                });
+            }
+            EngineEvent::Warning(text) => changes.push(TurnChange::Warning {
+                conversation,
+                turn: turn.clone(),
+                text,
+            }),
         }
         changes
     }
@@ -1243,12 +1276,24 @@ mod actor_tests {
     }
 
     /// Every turn event this link saw, in order, once the actor has settled.
+    /// Everything the core said, minus the conversation summaries.
+    ///
+    /// A summary is republished whenever anything in the conversation moves, so
+    /// it accompanies most of what these tests assert. It belongs to the
+    /// attention family rather than the turn's, and it is asserted where it is
+    /// the subject (`app::attention`, `app::controller`).
     async fn drain(link: &mut crate::app::AppLink) -> Vec<AppEventPayload> {
         let mut seen = Vec::new();
         while let Ok(Some(frame)) =
             tokio::time::timeout(std::time::Duration::from_millis(200), link.recv()).await
         {
-            if let AppFrame::Event(event) = frame {
+            if let AppFrame::Event(event) = frame
+                && !matches!(
+                    event.payload,
+                    AppEventPayload::ConversationCreated(_)
+                        | AppEventPayload::ConversationUpdated(_)
+                )
+            {
                 seen.push(event.payload);
             }
         }

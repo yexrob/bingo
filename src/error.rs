@@ -23,6 +23,10 @@ pub const SLASH_ERROR_BAD_ARGUMENT: &str = "BAD_ARGUMENT";
 /// The turn's task ended without reporting an outcome (a panic inside the spawn).
 /// Distinct from `SERVER_ERROR`: nothing was wrong upstream, the harness lost the turn.
 pub const TURN_LOST: &str = "TURN_LOST";
+/// Something went wrong inside a run that did not end it — the engine's own
+/// warning, raised as feedback so a frontend branches on the code rather than on
+/// the sentence.
+pub const RUNTIME_WARNING: &str = "RUNTIME_WARNING";
 
 /// Stable app-server codes (`notes/design/gui-app-server.md` §Errors): the
 /// JSON-RPC `error.data.bingoCode` a client branches on. They live here rather

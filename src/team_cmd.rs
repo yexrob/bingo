@@ -151,14 +151,26 @@ fn list(session: &Arc<Session>, cwd: &Path) -> Vec<String> {
         out.push("  runtime zone: not up (/team start to bring it up)".to_string());
     } else {
         out.push(format!("  runtime zone ({} instances)", running.len()));
+        let here = session.cwd();
         for a in &running {
-            out.push(format!(
+            // Each member is its own session: the engine, the thinking budget and
+            // the directory are the instance's answer, not this session's, and a
+            // sub-team node genuinely sits somewhere else. Only the parts that
+            // differ are printed, so the common case stays one short line.
+            let mut line = format!(
                 "  {} · {} · {} @ {}",
                 a.name,
                 state_mark(a.state),
                 a.model,
                 a.provider
-            ));
+            );
+            if let Some(thinking) = a.thinking.as_deref() {
+                line.push_str(&format!(" · thinking {thinking}"));
+            }
+            if a.cwd != here {
+                line.push_str(&format!(" · {}", a.cwd.display()));
+            }
+            out.push(line);
         }
     }
     // Hires are listed apart from the crew, never among it: they are not in the blueprint,

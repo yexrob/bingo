@@ -475,6 +475,34 @@ pub(crate) fn pair_lane(agent: &str, history: &[Message], stamps: &[u64]) -> Vec
         .collect()
 }
 
+/// One inbound block → the pieces it puts in the receiver's conversation.
+///
+/// `intake` says whether this is the task that created the instance, which is
+/// the one shape a continuation's mail can never be — the same flag the walk
+/// carries over a whole history, applied to the one message this is.
+///
+/// **Every direct message is dropped here** (D135). A DM reaches a conversation
+/// twice: once when it is delivered, and again inside the prompt the run
+/// absorbs. The delivery is the one that happened at the moment somebody sent
+/// it, so it is the one that stays — this copy would arrive whenever the
+/// receiver got round to reading it, which for a busy instance is minutes later.
+/// What is left is everything that never passed through a delivery: the spawn
+/// task, a room relay, a chase, the task reminder.
+pub(crate) fn inbound(who: &str, text: &str, at: u64, intake: bool) -> Vec<Filed> {
+    let mut protagonist = Protagonist::of(who);
+    protagonist.spawned = intake;
+    let history = [Message {
+        role: ApiRole::User,
+        content: vec![ContentBlock::Text {
+            text: text.to_string(),
+        }],
+    }];
+    walk(protagonist, &history, &[at])
+        .into_iter()
+        .filter(|filed| !matches!(&filed.target, Target::Dm(_)))
+        .collect()
+}
+
 /// Scaffolding that no counterpart wrote: the runtime talking to itself.
 ///
 /// These are recognised so they cannot fall through to the unmarked-prose rule

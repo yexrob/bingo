@@ -678,8 +678,8 @@ mod actor_tests {
             .open(ConvKey::Main, TurnOrigin::User, Vec::new())
             .await
             .unwrap_or_else(|| panic!("main was idle"));
-        // The turn's own `turn/started` is already on its way; the ordering this
-        // test is about is the submission's.
+        // The turn's own `turn/started` is already on its way, with the summary
+        // its start moved; the ordering this test is about is the submission's.
         match link.recv().await {
             Some(AppFrame::Event(event)) => {
                 assert!(matches!(event.payload, AppEventPayload::TurnStarted(_)));
@@ -700,34 +700,51 @@ mod actor_tests {
         .await
         .unwrap_or_else(|error| panic!("{error}"));
 
-        let queue_id = match link.recv().await {
-            Some(AppFrame::Reply {
-                result:
-                    Ok(AppReply::Submitted(SubmitDisposition::Queued {
-                        queue_id,
-                        steer_eligible,
-                        ..
-                    })),
-                ..
-            }) => {
-                assert!(!steer_eligible, "a command cannot travel to a running turn");
-                queue_id
-            }
-            other => panic!("the reply comes first, got {other:?}"),
-        };
-        match link.recv().await {
-            Some(AppFrame::Event(event)) => match &event.payload {
-                AppEventPayload::QueueItemAdded(added) => {
-                    assert_eq!(added.entry.id, queue_id);
-                    assert_eq!(
-                        added.entry.origin_conversation_id,
-                        ConversationId::new("conv_1"),
-                        "the entry keeps the page it was submitted on"
-                    );
+        let queue_id = loop {
+            match link.recv().await {
+                Some(AppFrame::Reply {
+                    result:
+                        Ok(AppReply::Submitted(SubmitDisposition::Queued {
+                            queue_id,
+                            steer_eligible,
+                            ..
+                        })),
+                    ..
+                }) => {
+                    assert!(!steer_eligible, "a command cannot travel to a running turn");
+                    break queue_id;
                 }
-                other => panic!("expected the queue event, got {other:?}"),
-            },
-            other => panic!("expected an event after the reply, got {other:?}"),
+                // Whatever the turn's own start left in flight is not this
+                // request's; what must not appear before the reply is the queue
+                // event the request caused.
+                Some(AppFrame::Event(event)) => assert!(
+                    !matches!(event.payload, AppEventPayload::QueueItemAdded(_)),
+                    "the reply comes before the event it caused"
+                ),
+                other => panic!("the reply comes first, got {other:?}"),
+            }
+        };
+        // The queue event follows the reply. A conversation summary may follow
+        // it in the same batch — the queue moving is a change to the summary —
+        // so the assertion is on order, not on adjacency.
+        loop {
+            match link.recv().await {
+                Some(AppFrame::Event(event)) => match &event.payload {
+                    AppEventPayload::QueueItemAdded(added) => {
+                        assert_eq!(added.entry.id, queue_id);
+                        assert_eq!(
+                            added.entry.origin_conversation_id,
+                            ConversationId::new("conv_1"),
+                            "the entry keeps the page it was submitted on"
+                        );
+                        break;
+                    }
+                    AppEventPayload::ConversationUpdated(_)
+                    | AppEventPayload::ConversationCreated(_) => {}
+                    other => panic!("expected the queue event, got {other:?}"),
+                },
+                other => panic!("expected an event after the reply, got {other:?}"),
+            }
         }
         core.turns()
             .close(turn, crate::app::snapshot::TurnStatus::Completed, None);
