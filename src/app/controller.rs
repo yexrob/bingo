@@ -1,0 +1,568 @@
+//! The session actor: one loop, one ordering point.
+//!
+//! Everything that changes application state passes through this loop, one
+//! message at a time. That is what makes a sequence number mean something: `seq`
+//! is stamped where the change happens, not where a transport later serializes
+//! it, so two frontends reading the same stream read the same history.
+//!
+//! Two barriers hold the frontends together:
+//!
+//! - **Attachment.** A new attachment sees no event until it has taken a
+//!   snapshot cut. Events before the cut are suppressed rather than buffered:
+//!   the snapshot it is about to take already contains them, and replaying them
+//!   would state the same fact twice.
+//! - **The cut.** A snapshot is built and its `event_cursor` stamped inside one
+//!   turn of this loop, so nothing can be sequenced between the snapshot and the
+//!   reply frame carrying it. Every event that attachment receives afterwards
+//!   has `seq > event_cursor` (spec "Snapshots and recovery").
+
+use tokio::sync::{mpsc, oneshot};
+
+use crate::app::command::{AppCommand, AppQuery};
+use crate::app::event::{AppEvent, AppEventPayload, EventMeta};
+use crate::app::ids::{EpochId, IdMint, OperationId, SessionId, now_millis};
+use crate::app::snapshot::{
+    Collection, ConfigSnapshot, RuntimeCollections, ServerCapabilities, SessionSnapshot,
+    SessionState, SessionSummary,
+};
+use crate::app::{
+    AppError, AppFrame, AppLink, AppReply, AppRequest, AttachRequest, FRAME_CAPACITY,
+    REQUEST_CAPACITY, SessionSetup,
+};
+
+/// How many messages may wait on the actor. Engine tasks publish through here,
+/// so it is sized for a burst of stream deltas rather than for a single caller.
+const CONTROL_CAPACITY: usize = 256;
+
+/// What reaches the actor. Attachments, their requests, and the engine's
+/// publications are one queue on purpose: the order they arrive in is the order
+/// the session happened in.
+pub(super) enum Control {
+    Attach {
+        request: AttachRequest,
+        reply: oneshot::Sender<Result<AppLink, AppError>>,
+    },
+    Request {
+        attachment: AttachmentId,
+        request: AppRequest,
+    },
+    Detach {
+        attachment: AttachmentId,
+    },
+    Publish {
+        payload: Box<AppEventPayload>,
+        caused_by: Option<OperationId>,
+    },
+}
+
+/// Start the actor and return the handle everything reaches it by.
+pub(super) fn spawn(setup: SessionSetup) -> mpsc::Sender<Control> {
+    let (control, inbox) = mpsc::channel(CONTROL_CAPACITY);
+    // The actor holds a weak handle to its own inbox: it hands strong clones to
+    // the attachments it spawns, and a strong one of its own would keep the
+    // queue open forever, so the loop could never end.
+    let controller = Controller::new(setup, control.downgrade());
+    tokio::spawn(controller.run(inbox));
+    control
+}
+
+/// One attached frontend, as the actor knows it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct AttachmentId(u64);
+
+struct Attachment {
+    id: AttachmentId,
+    /// What this frontend calls itself; it appears in diagnostics only.
+    #[allow(dead_code)]
+    label: String,
+    frames: mpsc::Sender<AppFrame>,
+    /// The cut this attachment reads events against. `None` until it has taken
+    /// one, and until then it receives no event at all.
+    cursor: Option<u64>,
+}
+
+struct Controller {
+    mint: IdMint,
+    session: SessionSummary,
+    capabilities: ServerCapabilities,
+    config: ConfigSnapshot,
+    /// The last sequence number stamped. Strictly increasing, gapless, scoped to
+    /// this epoch.
+    seq: u64,
+    attachments: Vec<Attachment>,
+    next_attachment: u64,
+    control: mpsc::WeakSender<Control>,
+}
+
+impl Controller {
+    fn new(setup: SessionSetup, control: mpsc::WeakSender<Control>) -> Self {
+        let epoch = EpochId::mint();
+        let mut mint = IdMint::new(epoch.clone());
+        let id: SessionId = mint.mint();
+        let now = now_millis();
+        let session = SessionSummary {
+            id,
+            epoch,
+            title: setup.title,
+            state: SessionState::Active,
+            cwd: setup.cwd.clone(),
+            locator: setup.locator,
+            provider: setup.provider.clone(),
+            model: setup.model.clone(),
+            thinking: setup.thinking,
+            permission_mode: setup.permission_mode,
+            created_at: now,
+            updated_at: now,
+            resumed: setup.resumed,
+        };
+        let config = ConfigSnapshot {
+            revision: 1,
+            model: setup.model,
+            provider: setup.provider,
+            thinking: setup.thinking,
+            permission_mode: setup.permission_mode,
+            theme: setup.theme,
+            cwd: setup.cwd,
+            shell: setup.shell,
+            shell_dialect: setup.shell_dialect,
+            // Settings layers, permission rules, and MCP state are read by
+            // `config/read`, which lands with B5. An empty list here says "not
+            // read yet" and never says "none configured": nothing reads it.
+            permissions: Vec::new(),
+            layers: Vec::new(),
+            mcp_servers: Vec::new(),
+        };
+        Self {
+            mint,
+            session,
+            capabilities: setup.capabilities,
+            config,
+            seq: 0,
+            attachments: Vec::new(),
+            next_attachment: 0,
+            control,
+        }
+    }
+
+    async fn run(mut self, mut inbox: mpsc::Receiver<Control>) {
+        while let Some(message) = inbox.recv().await {
+            match message {
+                Control::Attach { request, reply } => {
+                    let _ = reply.send(self.attach(request));
+                }
+                Control::Request {
+                    attachment,
+                    request,
+                } => self.serve(attachment, request),
+                Control::Detach { attachment } => {
+                    self.attachments.retain(|open| open.id != attachment);
+                }
+                Control::Publish { payload, caused_by } => self.publish(payload, caused_by),
+            }
+        }
+    }
+
+    fn attach(&mut self, request: AttachRequest) -> Result<AppLink, AppError> {
+        let Some(control) = self.control.upgrade() else {
+            return Err(AppError::Stopped);
+        };
+        let (frames, incoming) = mpsc::channel(FRAME_CAPACITY);
+        let (requests, mut outgoing) = mpsc::channel(REQUEST_CAPACITY);
+        let id = AttachmentId(self.next_attachment);
+        self.next_attachment = self.next_attachment.saturating_add(1);
+        self.attachments.push(Attachment {
+            id,
+            label: request.label,
+            frames,
+            cursor: None,
+        });
+        // One forwarder per attachment: it tags each request with the
+        // attachment that sent it, keeps that attachment's requests in the order
+        // they were written, and tells the actor when the frontend is gone.
+        tokio::spawn(async move {
+            while let Some(request) = outgoing.recv().await {
+                if control
+                    .send(Control::Request {
+                        attachment: id,
+                        request,
+                    })
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            let _ = control.send(Control::Detach { attachment: id }).await;
+        });
+        Ok(AppLink {
+            requests,
+            frames: incoming,
+        })
+    }
+
+    fn serve(&mut self, attachment: AttachmentId, request: AppRequest) {
+        let (id, result) = match request {
+            AppRequest::Command { id, command } => (id, self.command(command)),
+            AppRequest::Query { id, query } => (id, self.query(attachment, query)),
+        };
+        self.deliver(attachment, AppFrame::Reply { id, result });
+    }
+
+    /// Mutations land with B3 (turns and queue), B4 (collaboration), and B5
+    /// (actions). The skeleton refuses them by name rather than accepting work
+    /// it cannot do.
+    fn command(&mut self, command: AppCommand) -> Result<AppReply, AppError> {
+        Err(AppError::Unserved(match command {
+            AppCommand::StartSession { .. } => "session/start",
+            AppCommand::ResumeSession { .. } => "session/resume",
+            AppCommand::CloseSession => "session/close",
+            AppCommand::DeleteSession { .. } => "session/delete",
+            AppCommand::Submit { .. } => "conversation/submit",
+            AppCommand::Execute { .. } => "action/execute",
+            AppCommand::Interrupt { .. } => "turn/interrupt",
+            AppCommand::RespondInteraction { .. } => "interaction/respond",
+            AppCommand::MarkRead { .. } => "conversation/markRead",
+            AppCommand::ReclaimQueueTail { .. } => "queue/reclaimTail",
+            AppCommand::RegisterAsset { .. } => "asset/registerPath",
+            AppCommand::Shutdown => "shutdown",
+        }))
+    }
+
+    fn query(&mut self, attachment: AttachmentId, query: AppQuery) -> Result<AppReply, AppError> {
+        match query {
+            AppQuery::ReadSession => {
+                let snapshot = self.session_snapshot();
+                self.cut(attachment, snapshot.event_cursor);
+                Ok(AppReply::Session(Box::new(snapshot)))
+            }
+            AppQuery::ListSessions { .. } => Err(AppError::Unserved("session/list")),
+            AppQuery::ListConversations { .. } => Err(AppError::Unserved("conversation/list")),
+            AppQuery::ReadConversation { .. } => Err(AppError::Unserved("conversation/read")),
+            AppQuery::ReadQueue { .. } => Err(AppError::Unserved("queue/read")),
+            AppQuery::ListActions { .. } => Err(AppError::Unserved("action/list")),
+            AppQuery::ReadConfig => Err(AppError::Unserved("config/read")),
+            AppQuery::ReadCatalog { .. } => Err(AppError::Unserved("catalog/read")),
+            AppQuery::ReadResource { .. } => Err(AppError::Unserved("resource/read")),
+            AppQuery::ReadAssetChunk { .. } => Err(AppError::Unserved("asset/readChunk")),
+        }
+    }
+
+    /// The session as it stands, valid through the sequence number it was cut
+    /// at. The collections are empty because the skeleton owns nothing else yet
+    /// — not because the session has nothing.
+    fn session_snapshot(&self) -> SessionSnapshot {
+        SessionSnapshot {
+            session: self.session.clone(),
+            capabilities: self.capabilities,
+            conversations: empty_collection(),
+            active_turns: Vec::new(),
+            interactions: Vec::new(),
+            operations: Vec::new(),
+            collections: RuntimeCollections {
+                agents: empty_collection(),
+                rooms: empty_collection(),
+                tasks: empty_collection(),
+                deliveries: empty_collection(),
+                background_commands: empty_collection(),
+                mcp_servers: Vec::new(),
+            },
+            feedback: Vec::new(),
+            config: self.config.clone(),
+            event_cursor: self.seq,
+        }
+    }
+
+    /// Record where an attachment's snapshot cut fell. Everything at or below it
+    /// is that attachment's past.
+    fn cut(&mut self, attachment: AttachmentId, cursor: u64) {
+        if let Some(open) = self
+            .attachments
+            .iter_mut()
+            .find(|open| open.id == attachment)
+        {
+            open.cursor = Some(cursor);
+        }
+    }
+
+    /// Stamp one event and hand it to every attachment whose cut it is after.
+    fn publish(&mut self, payload: Box<AppEventPayload>, caused_by: Option<OperationId>) {
+        self.seq = self.seq.saturating_add(1);
+        let event = AppEvent {
+            meta: EventMeta {
+                seq: self.seq,
+                ts: now_millis(),
+                session_id: self.session.id.clone(),
+                caused_by,
+            },
+            payload: *payload,
+        };
+        self.attachments.retain(|open| match open.cursor {
+            // Not cut yet, or already covered by the cut it took: the snapshot
+            // states this, so the stream does not have to.
+            None => true,
+            Some(cursor) if event.meta.seq <= cursor => true,
+            Some(_) => send(open, AppFrame::Event(Box::new(event.clone()))),
+        });
+    }
+
+    fn deliver(&mut self, attachment: AttachmentId, frame: AppFrame) {
+        self.attachments
+            .retain(|open| open.id != attachment || send(open, frame.clone()));
+    }
+}
+
+/// Write one frame, or say the attachment is over.
+///
+/// The actor never waits on a frontend: it is the whole process's ordering
+/// point, and a blocked write here would stop every other conversation. A
+/// frontend that has stopped reading loses its attachment and must attach and
+/// read again — the transport's own backpressure policy is B6's.
+fn send(attachment: &Attachment, frame: AppFrame) -> bool {
+    attachment.frames.try_send(frame).is_ok()
+}
+
+fn empty_collection<T>() -> Collection<T> {
+    Collection {
+        revision: 0,
+        count: 0,
+        active: Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::event::CatalogChanged;
+    use crate::app::snapshot::CatalogKind;
+    use crate::app::{AppCore, AppPublisher, RequestId};
+
+    fn catalog(revision: u64) -> AppEventPayload {
+        AppEventPayload::CatalogChanged(CatalogChanged {
+            catalog: CatalogKind::Models,
+            revision,
+        })
+    }
+
+    fn revision_of(frame: &AppFrame) -> u64 {
+        match frame {
+            AppFrame::Event(event) => match &event.payload {
+                AppEventPayload::CatalogChanged(changed) => changed.revision,
+                other => panic!("expected a catalog event, got {other:?}"),
+            },
+            other => panic!("expected an event, got {other:?}"),
+        }
+    }
+
+    async fn publish(publisher: &AppPublisher, revision: u64) {
+        publisher
+            .publish(catalog(revision), None)
+            .await
+            .unwrap_or_else(|error| panic!("{error}"));
+    }
+
+    /// Attach, then take the cut every attachment starts from.
+    async fn attached(core: &AppCore, label: &str) -> (AppLink, SessionSnapshot) {
+        let mut link = core
+            .attach(AttachRequest::new(label))
+            .await
+            .unwrap_or_else(|error| panic!("{error}"));
+        link.request(AppRequest::Query {
+            id: RequestId(1),
+            query: AppQuery::ReadSession,
+        })
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+        match link.recv().await {
+            Some(AppFrame::Reply {
+                result: Ok(AppReply::Session(snapshot)),
+                ..
+            }) => (link, *snapshot),
+            other => panic!("expected a session snapshot, got {other:?}"),
+        }
+    }
+
+    /// The one ordering point has to hold under every producer at once: N agent
+    /// runs publishing concurrently still make one history, with no number
+    /// skipped and none repeated.
+    #[tokio::test]
+    async fn concurrent_producers_still_make_one_gapless_sequence() {
+        const PRODUCERS: u64 = 8;
+        const EACH: u64 = 25;
+        let core = AppCore::start(SessionSetup::default());
+        let (mut link, snapshot) = attached(&core, "test").await;
+        assert_eq!(snapshot.event_cursor, 0, "nothing has happened yet");
+
+        let mut runs = Vec::new();
+        for producer in 0..PRODUCERS {
+            let publisher = core.publisher();
+            runs.push(tokio::spawn(async move {
+                for step in 0..EACH {
+                    publish(&publisher, producer * EACH + step).await;
+                }
+            }));
+        }
+        for run in runs {
+            run.await.unwrap_or_else(|error| panic!("{error}"));
+        }
+
+        let mut seen = Vec::new();
+        for _ in 0..(PRODUCERS * EACH) {
+            match link.recv().await {
+                Some(AppFrame::Event(event)) => seen.push(event.meta.seq),
+                other => panic!("expected an event, got {other:?}"),
+            }
+        }
+        assert_eq!(
+            seen,
+            (1..=PRODUCERS * EACH).collect::<Vec<_>>(),
+            "sequence numbers are strictly increasing and gapless, in arrival order"
+        );
+    }
+
+    /// The cut is a barrier, not a hint: what happened before it is in the
+    /// snapshot, so the stream starts strictly after it.
+    #[tokio::test]
+    async fn a_snapshot_cut_suppresses_what_it_already_contains() {
+        let core = AppCore::start(SessionSetup::default());
+        let publisher = core.publisher();
+        let mut link = core
+            .attach(AttachRequest::new("test"))
+            .await
+            .unwrap_or_else(|error| panic!("{error}"));
+        for revision in 0..3 {
+            publish(&publisher, revision).await;
+        }
+
+        link.request(AppRequest::Query {
+            id: RequestId(7),
+            query: AppQuery::ReadSession,
+        })
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+        let cursor = match link.recv().await {
+            Some(AppFrame::Reply {
+                id,
+                result: Ok(AppReply::Session(snapshot)),
+            }) => {
+                assert_eq!(id, RequestId(7), "the reply names the request it answers");
+                snapshot.event_cursor
+            }
+            other => panic!("expected the snapshot first, got {other:?}"),
+        };
+        assert_eq!(cursor, 3, "the cut names the last event it contains");
+
+        publish(&publisher, 99).await;
+        match link.recv().await {
+            Some(AppFrame::Event(event)) => {
+                assert_eq!(
+                    event.meta.seq,
+                    cursor + 1,
+                    "the first event after a cut is the next one, never a replay"
+                );
+                assert!(event.meta.ts > 0, "the actor stamps the instant it decided");
+            }
+            other => panic!("expected the event after the cut, got {other:?}"),
+        }
+    }
+
+    /// Two frontends attach at different moments and each reads from its own
+    /// cut. Neither is told the other's past.
+    #[tokio::test]
+    async fn two_attachments_read_from_their_own_cursors() {
+        let core = AppCore::start(SessionSetup::default());
+        let publisher = core.publisher();
+        let (mut early, early_snapshot) = attached(&core, "early").await;
+        assert_eq!(early_snapshot.event_cursor, 0);
+        publish(&publisher, 1).await;
+        publish(&publisher, 2).await;
+
+        let (mut late, late_snapshot) = attached(&core, "late").await;
+        assert_eq!(late_snapshot.event_cursor, 2, "the second cut is later");
+        publish(&publisher, 3).await;
+
+        let mut seen = Vec::new();
+        for _ in 0..3 {
+            match early.recv().await {
+                Some(frame) => seen.push(revision_of(&frame)),
+                None => panic!("the early attachment closed"),
+            }
+        }
+        assert_eq!(seen, vec![1, 2, 3], "the early attachment saw all three");
+        match late.recv().await {
+            Some(frame) => assert_eq!(
+                revision_of(&frame),
+                3,
+                "the late attachment starts after its own cut"
+            ),
+            None => panic!("the late attachment closed"),
+        }
+    }
+
+    /// Every identifier comes from the actor, inside one epoch.
+    #[tokio::test]
+    async fn the_session_is_identified_by_the_epoch_that_minted_it() {
+        let core = AppCore::start(SessionSetup {
+            title: "Notes".to_string(),
+            provider: "default".to_string(),
+            model: "sonnet".to_string(),
+            ..SessionSetup::default()
+        });
+        let (_link, snapshot) = attached(&core, "test").await;
+        assert!(snapshot.session.id.as_str().starts_with(SessionId::PREFIX));
+        assert!(snapshot.session.epoch.as_str().starts_with(EpochId::PREFIX));
+        assert_eq!(snapshot.session.title, "Notes");
+        assert_eq!(snapshot.config.model, "sonnet");
+        assert_eq!(snapshot.session.state, SessionState::Active);
+        assert!(
+            snapshot.conversations.active.is_empty() && snapshot.active_turns.is_empty(),
+            "the skeleton owns no conversations yet, and says so rather than inventing one"
+        );
+    }
+
+    /// A mutation the core cannot serve yet is refused by name. The reply is
+    /// still a reply: the request is answered, never dropped.
+    #[tokio::test]
+    async fn the_skeleton_refuses_by_name_what_it_does_not_serve_yet() {
+        let core = AppCore::start(SessionSetup::default());
+        let (mut link, _) = attached(&core, "test").await;
+        link.request(AppRequest::Command {
+            id: RequestId(2),
+            command: AppCommand::Shutdown,
+        })
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+        match link.recv().await {
+            Some(AppFrame::Reply { id, result }) => {
+                assert_eq!(id, RequestId(2));
+                assert_eq!(result, Err(AppError::Unserved("shutdown")));
+            }
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+
+    /// A frontend that stops reading loses its attachment rather than stalling
+    /// the core. It sees the frames it was already handed, then the end.
+    #[tokio::test]
+    async fn a_frontend_that_stops_reading_loses_its_attachment() {
+        let core = AppCore::start(SessionSetup::default());
+        let publisher = core.publisher();
+        let (mut link, _) = attached(&core, "silent").await;
+        // One frame channel over, plus the whole control queue: when the last
+        // publish is accepted, up to `CONTROL_CAPACITY` of them may still be
+        // waiting, so the margin is what makes the overflow a fact rather than a
+        // race with the reader below.
+        let published = (FRAME_CAPACITY + CONTROL_CAPACITY + 8) as u64;
+        for revision in 0..published {
+            publish(&publisher, revision).await;
+        }
+        let mut delivered = 0;
+        while let Some(frame) = link.recv().await {
+            assert_eq!(revision_of(&frame), delivered);
+            delivered += 1;
+        }
+        assert_eq!(
+            delivered, FRAME_CAPACITY as u64,
+            "what fit was delivered; the rest closed the attachment instead of blocking the core"
+        );
+    }
+}

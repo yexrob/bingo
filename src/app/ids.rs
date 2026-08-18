@@ -1,14 +1,18 @@
-//! Server-owned opaque resource identifiers.
+//! Server-owned opaque resource identifiers, and the mint that issues them.
 //!
 //! Every identifier a client sees is minted by the server, opaque, non-empty, and
 //! unique within its resource type and one server epoch (spec "Lifecycle and
 //! ordering invariants" #2). Clients never choose one. The wire form is a bare
-//! JSON string; the prefix below is the shape the minting side (B2) writes and
-//! the only thing this module promises about the interior — a client that parses
-//! past it is reading an implementation detail.
-// The contract lands before its caller: the actor that mints these (B2) is the
-// first consumer. Remove this allow when it arrives.
+//! JSON string; the prefix below is the shape [`IdMint`] writes and the only
+//! thing this module promises about the interior — a client that parses past it
+//! is reading an implementation detail.
+// Most identifier types are contract ahead of their first minting site: the
+// resources they name land with B3/B4. Remove this allow when they arrive.
 #![allow(dead_code)]
+
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -16,6 +20,26 @@ use serde::{Deserialize, Serialize};
 /// Wall-clock instant, milliseconds since the Unix epoch. Stamped by the actor
 /// when it sequences the event, not when a transport serializes it.
 pub type UnixMillis = u64;
+
+/// Now, in the one unit every timestamp on the wire uses. A clock before the
+/// Unix epoch reads as the epoch rather than failing: a timestamp is annotation,
+/// and no event is worth losing to a misconfigured system clock.
+pub fn now_millis() -> UnixMillis {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |since| {
+            since.as_millis().min(u128::from(u64::MAX)) as u64
+        })
+}
+
+/// A minted identifier type: what it is prefixed with, and how a minted body
+/// becomes one. Implemented for every type below, so [`IdMint`] can issue any of
+/// them without a method per resource.
+pub trait OpaqueId: Sized {
+    const PREFIX: &'static str;
+
+    fn from_minted(body: String) -> Self;
+}
 
 macro_rules! opaque_ids {
     ($( $(#[$meta:meta])* $name:ident => $prefix:literal ),+ $(,)?) => {
@@ -48,6 +72,14 @@ macro_rules! opaque_ids {
             impl From<&str> for $name {
                 fn from(value: &str) -> Self {
                     Self(value.to_string())
+                }
+            }
+
+            impl OpaqueId for $name {
+                const PREFIX: &'static str = $prefix;
+
+                fn from_minted(body: String) -> Self {
+                    Self(body)
                 }
             }
         )+
@@ -88,6 +120,55 @@ opaque_ids! {
     FeedbackId => "fb_",
 }
 
+impl EpochId {
+    /// A fresh epoch. One per running core, distinct from every other epoch this
+    /// process minted: two cores alive at once must not hand out the same
+    /// identifier space.
+    pub fn mint() -> Self {
+        static ORDINAL: AtomicU64 = AtomicU64::new(0);
+        let ordinal = ORDINAL.fetch_add(1, Ordering::Relaxed);
+        Self(format!("{}{}_{ordinal}", Self::PREFIX, now_millis()))
+    }
+}
+
+/// The identifier mint: one epoch, one counter per resource type.
+///
+/// It lives inside the actor and is used from nowhere else. An identifier states
+/// the order a resource was created in, so it comes from the same single place
+/// the event sequence does — a second minting site would be a second ordering.
+///
+/// Identifiers carry no epoch stamp of their own: the protocol scopes every
+/// identifier to the epoch it advertises and a restart invalidates all of them
+/// at once (spec "Snapshots and recovery"), so repeating the epoch in every
+/// identifier of every frame would pay for a guard the connection already owes
+/// once at `initialize`.
+#[derive(Debug)]
+pub struct IdMint {
+    epoch: EpochId,
+    counters: HashMap<&'static str, u64>,
+}
+
+impl IdMint {
+    pub fn new(epoch: EpochId) -> Self {
+        Self {
+            epoch,
+            counters: HashMap::new(),
+        }
+    }
+
+    pub fn epoch(&self) -> &EpochId {
+        &self.epoch
+    }
+
+    /// The next identifier of one type. Counters are per type, so `conv_1` and
+    /// `turn_1` coexist and neither is ever reused within the epoch.
+    pub fn mint<T: OpaqueId>(&mut self) -> T {
+        let counter = self.counters.entry(T::PREFIX).or_insert(0);
+        *counter = counter.saturating_add(1);
+        T::from_minted(format!("{}{counter}", T::PREFIX))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -116,6 +197,45 @@ mod tests {
             16,
             "identifier types are a contract; adding one is a decision"
         );
+    }
+
+    #[test]
+    fn minted_identifiers_are_unique_within_a_type_and_independent_across_types() {
+        let mut mint = IdMint::new(EpochId::mint());
+        let conversations: Vec<ConversationId> = (0..3).map(|_| mint.mint()).collect();
+        let turns: Vec<TurnId> = (0..3).map(|_| mint.mint()).collect();
+
+        assert_eq!(
+            conversations,
+            vec![
+                ConversationId::new("conv_1"),
+                ConversationId::new("conv_2"),
+                ConversationId::new("conv_3"),
+            ]
+        );
+        assert_eq!(
+            turns,
+            vec![
+                TurnId::new("turn_1"),
+                TurnId::new("turn_2"),
+                TurnId::new("turn_3"),
+            ],
+            "one counter per type: a turn does not consume a conversation's number"
+        );
+        for id in &conversations {
+            assert!(id.as_str().starts_with(ConversationId::PREFIX));
+        }
+    }
+
+    #[test]
+    fn every_epoch_is_its_own_identifier_space() {
+        let first = EpochId::mint();
+        let second = EpochId::mint();
+        assert_ne!(
+            first, second,
+            "two cores in one process must not share an epoch, whatever the clock says"
+        );
+        assert!(first.as_str().starts_with(EpochId::PREFIX));
     }
 
     #[test]
