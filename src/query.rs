@@ -343,8 +343,8 @@ pub fn stdin_ask() -> Arc<AskFn> {
 /// permissions and questions through stdin.
 ///
 /// A headless run prints an answer rather than showing a conversation, so most
-/// of what a run reports has no surface here. B8 replaces this with `--print` as
-/// a thin `AppCore` client.
+/// of what a run reports has no surface here. A shim: B8 removes this when
+/// `--print` becomes a thin `AppCore` client.
 pub fn headless_hooks() -> EngineHost {
     EngineHost {
         events: EngineEvents::new(|event| match event {

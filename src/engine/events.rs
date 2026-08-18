@@ -187,7 +187,7 @@ impl EngineEvents {
 
     /// The warning callback tool assembly and the compactor were written
     /// against. They take a callback because they are called from outside a run
-    /// as well; B3 moves them behind the actor with everything else.
+    /// as well; a shim, and B3 removes this when they move behind the actor.
     pub fn warn_sink(&self) -> impl Fn(String) + Send + 'static + use<> {
         let sink = self.sink.clone();
         move |message| (sink)(EngineEvent::Warning(message))

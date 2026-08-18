@@ -208,7 +208,9 @@ impl AppCore {
         answer.await.map_err(|_| AppError::Stopped)?
     }
 
-    /// The ingress engine work publishes through.
+    /// The ingress engine work publishes through. A shim while the engine still
+    /// runs outside the actor: B2b and B3 remove this as `EngineEvent` becomes
+    /// the actor's own inbox.
     pub fn publisher(&self) -> AppPublisher {
         AppPublisher {
             control: self.control.clone(),

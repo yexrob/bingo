@@ -153,8 +153,8 @@ fn subagent_hooks(
     // an instance's page is built by the code that builds main's rather than by
     // a second store polled per frame (D134).
     //
-    // A shim, like `tui_hooks`: the translation into `UiEvent` is what B7
-    // removes when the console reads `AppFrame` instead.
+    // A shim, like `tui_hooks`: B7 removes this when the console reads
+    // `AppFrame` instead of translating an engine report into a `UiEvent`.
     let events = events.unwrap_or_else(crate::ui::EventSink::detached);
     let text_output = output.text;
     let progress_output = output.progress;

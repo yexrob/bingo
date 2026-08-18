@@ -6513,3 +6513,134 @@ snapshot and no socket to write a frame, so the only evidence they are *right* i
 say what the spec says. No generated TypeScript has been compiled from the bundle, and no
 client has read it. The schema is `bundleVersion: 1` and unpublished; per the plan it stays
 experimental until the parity ledger and the black-box scenarios are green in B8.
+
+## D142 — one ordering point, and a report that says everything
+
+**What it lands.** `AppCore` (`src/app/mod.rs`, `src/app/controller.rs`): one session actor,
+one `tokio` task, one queue. Attachment, event sequencing, the snapshot barrier, and the
+identifier mint. And `EngineEvent` (`src/engine/events.rs`), which replaces `UiHooks` —
+deleted — as the boundary between a run and whoever is hosting it.
+
+### The actor
+
+**Ordering.** `EventMeta{seq, ts}` is stamped inside the loop, at the moment state changes.
+`seq` starts at 1, is strictly increasing and gapless within one epoch; `ts` is unix
+milliseconds from the same instant. Nothing else in the process assigns either, so N agent
+runs publishing at once still make one history — the concurrency test asserts exactly that,
+with eight producers and no number skipped or repeated.
+
+**The barrier, stated so it can be tested.** An attachment receives *no* event until it has
+taken a snapshot cut. Events before the cut are **suppressed, not buffered**: the snapshot it
+is about to take already contains them, so queueing them would state the same fact twice and
+buffering them would make the actor's memory a function of how slowly a frontend reads. The
+cut itself is one turn of the loop — the snapshot is built, its `event_cursor` stamped, and
+the reply frame written before anything else can be sequenced — so the first event any
+attachment sees afterwards has `seq == event_cursor + 1`. Two attachments cutting at
+different moments each read from their own cursor; neither is told the other's past.
+
+**Replies travel on the frame channel**, not on a oneshot beside it. Invariant #3 ("an
+accepted request response is written before the first event caused solely by that request")
+is a statement about *order*, and two channels cannot state which came first. `AppFrame` is
+therefore `Reply | Event`, and `AppRequest` carries a caller-chosen `RequestId` the reply
+echoes.
+
+**`AppLink` keeps the spec's shape** — `requests: mpsc::Sender<AppRequest>`,
+`frames: mpsc::Receiver<AppFrame>` — so each attachment gets one small forwarder task that
+tags its requests with the attachment they came from and tells the actor when the frontend is
+gone. The alternative, an attachment id the client carries in every request, lets one
+attachment name another's.
+
+**A slow frontend loses its attachment.** The actor never awaits a frame write: it is the
+whole process's ordering point, and blocking it on one reader would stall every conversation.
+`try_send` failure — full or closed — drops the attachment, which then has to attach and read
+again. That is the spec's own load posture ("it does not claim that the blocked client
+received the final frames"); the transport's backpressure and its `CLIENT_TOO_SLOW` notice
+are B6's.
+
+**Identifiers carry no epoch stamp.** `IdMint` issues `conv_1`, `turn_1`, … from one counter
+per type, inside the actor. Embedding the epoch in every identifier (`conv_<epoch>_1`) was
+considered and dropped: the protocol already scopes every identifier to the epoch it
+advertises and invalidates all of them on restart, so the guard belongs once at `initialize`
+(B6), not in every identifier of every frame. `EpochId::mint` does carry a process ordinal, so
+two cores alive in one process never share an identifier space.
+
+**Smaller decisions.** The actor holds a `WeakSender` to its own inbox — it hands strong
+clones to attachments and publishers, and a strong one of its own would keep the queue open
+forever, so the loop could never end. `AppFrame::Event` is boxed because it is the common
+frame and every attachment gets a copy. `AppError::Unserved(method)` is how the skeleton
+refuses the twenty requests whose handlers land in B3–B5: a refusal by name, not a silent
+drop and not an answer invented out of state it does not hold.
+
+### `EngineEvent`
+
+**Two halves, because `UiHooks` was two things.** `EngineEvent` is the *report*: twelve
+variants, one way, complete. `EngineRequests` is the *question*: `ask`, `ask_question`,
+`steer`, `live` — four handles that each block a run on an answer produced elsewhere.
+
+**Why the questions did not become variants** on the same channel: each needs a reply, so the
+enum would need a oneshot in every variant plus a loop somewhere to service it — which is
+precisely what the actor does in B3 when interactions become `interaction/respond` and
+`queue/reclaimTail`. Building a smaller version of that inside a shim would be a second
+answer to the same question, and the plan's shim policy forbids exactly that. They keep their
+handle shape, moved next to the events and marked as what they are.
+
+**The v1 defect this closes.** The old JSON protocol forwarded text and dropped the rest.
+`EngineEvent` carries the reasoning delta, the tool-argument JSON (`ToolInputDelta` — nothing
+renders it, and it is the only measure of output while the model is otherwise silent), the
+provider's own `output_tokens`, and the whole `ContextUsage` measurement. What a receiver
+does with a field is the receiver's business; the engine no longer decides that a frontend
+"only needs the text".
+
+**What does not cross.** Six `StreamEvent` variants — `MessageStart`, `TextStart`,
+`ThinkingStart`, `SignatureDelta`, `BlockStop`, `Done`, and `ApiError` — describe how the
+bytes were framed, not what happened in the run. Their reader is the accumulator in
+`query_turn`, and an API error is raised as an error rather than reported as progress. A test
+pins that ruling in both directions.
+
+**The sink is a callback, not a channel.** `EngineEvents` wraps
+`Arc<dyn Fn(EngineEvent) + Send + Sync>`, so the engine reports where the thing happened and
+an event cannot be reordered against anything the same task sends by another route. A channel
+would have added a pump task between the engine and the console, and `UiEvent::TurnEnd` —
+sent directly by the caller after `run_query` returns — could then overtake the deltas ahead
+of it. When the actor owns the engine (B2b), the sink it installs is a send into the actor's
+queue, which is the same shape from the engine's side.
+
+**One loosening, recorded.** `run_query` and friends now take `&EngineHost` where they took
+`&mut UiHooks`. The `&mut` used to make "one host, one run" a compile-time fact; it no longer
+is. Every caller still builds a host per turn, and a shared sink is what the actor wants — but
+nothing enforces it until the actor does.
+
+### Shims (each marked in the code with the batch that removes it)
+
+| Where | What it is | Leaves with |
+|---|---|---|
+| `ui::tui_hooks` | `EngineEvent` → `UiEvent` for the console | B7 (TUI reads `AppFrame`) |
+| `tool::agent::subagent_hooks` | `EngineEvent` → `UiEvent` for an instance's page | B7 |
+| `query::headless_hooks` | `EngineEvent` → stdout/stderr | B8 (`--print` becomes an `AppCore` client) |
+| `EngineEvents::warn_sink` | the `dyn Fn(String)` callback `assemble_tools` and the compactor were written against | B3 |
+| `AppCore::publisher` | the actor's only ingress until engine tasks feed it | B2b/B3 |
+
+The three adapters are call-site translations only: no logic moved into them, and the TUI's
+behavior is unchanged — same events, same order, same token accounting (the four callbacks
+that shared a `Mutex` for the round's output estimate now share one closure and one helper).
+
+**Verified.** Four gates green (`cargo fmt --all -- --check`, `cargo check --locked
+--all-targets`, `cargo clippy --locked --all-targets -- -D warnings`, `cargo test --locked
+--all-targets`) plus `scripts/check_discipline.sh`. Tests 1539 → **1550** (1543 unit + 7
+black-box): eleven new, none deleted — six for the actor (gapless sequence under eight
+concurrent producers; the cut suppressing what it contains; two attachments on their own
+cursors; the session identified by its epoch; refusal by name; a frontend that stops reading
+losing its attachment), two for the mint, three for the event boundary. Every existing TUI,
+agent, query, steer and compaction test passes unchanged against the new interface, which is
+the evidence that the shims changed nothing.
+
+**Not verified.** No real terminal was driven. The actor has no production caller: nothing
+attaches to it, nothing publishes into it, and it has never sequenced a real turn — the
+concurrency and barrier tests drive it directly. `EngineEvent` and `AppEvent` are not
+connected to each other yet; the translation between them is B3's, and it is the step that
+will say whether the twelve variants are the right twelve.
+
+**Left to B2b.** The three registries (`agents`, `channels`, `watch`) are untouched, still
+`Arc<Mutex<…>>` shared with engine tasks. Agent run loops, the mention watchdog, and the
+inbox pulse still run outside the actor. Until they move, the actor's "single ordering point"
+is true of the events it publishes and not yet of the state the session actually keeps.
