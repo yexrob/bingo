@@ -1,6 +1,23 @@
 use super::tests_a::*;
 use super::*;
 use crate::tui::test_util::body;
+
+/// One instance in the registry, ready to be drawn. `insert` is a question the
+/// actor answers once the roster carries it, so a row drawn straight after this
+/// is a row of a member that exists.
+fn hire(chat: &Chat, name: &str, description: &str) {
+    chat.session
+        .agents
+        .insert(
+            name,
+            crate::agents::AgentKind::Hire,
+            None,
+            description.into(),
+            chat.session.clone(),
+        )
+        .now();
+}
+
 use base64::Engine;
 use serde_json::json;
 #[test]
@@ -2517,16 +2534,7 @@ async fn queued_slashes_drain_through_run_slash() {
 #[test]
 fn running_agents_leave_the_arrows_to_history() {
     let mut chat = test_chat();
-    chat.session
-        .agents
-        .insert(
-            "scout",
-            crate::agents::AgentKind::Hire,
-            None,
-            "research".into(),
-            chat.session.clone(),
-        )
-        .now();
+    hire(&chat, "scout", "research");
     chat.refresh_conversations();
     chat.history.record("earlier prompt");
     assert!(chat.input.is_empty());
@@ -2563,26 +2571,8 @@ fn running_agents_leave_the_arrows_to_history() {
 #[test]
 fn the_background_dialog_lists_opens_details_and_stops_agents() {
     let mut chat = test_chat();
-    chat.session
-        .agents
-        .insert(
-            "alpha",
-            crate::agents::AgentKind::Hire,
-            None,
-            "first agent".into(),
-            chat.session.clone(),
-        )
-        .now();
-    chat.session
-        .agents
-        .insert(
-            "scout",
-            crate::agents::AgentKind::Hire,
-            None,
-            "inspect the code".into(),
-            chat.session.clone(),
-        )
-        .now();
+    hire(&chat, "alpha", "first agent");
+    hire(&chat, "scout", "inspect the code");
     chat.session
         .agents
         .set_prompt("scout", "Find the rendering seam".into())
@@ -2653,16 +2643,7 @@ fn the_background_dialog_lists_opens_details_and_stops_agents() {
     );
 
     // Enter opens the detail on the selected row.
-    chat.session
-        .agents
-        .insert(
-            "scout",
-            crate::agents::AgentKind::Hire,
-            None,
-            "inspect the code".into(),
-            chat.session.clone(),
-        )
-        .now();
+    hire(&chat, "scout", "inspect the code");
     chat.session
         .agents
         .set_prompt("scout", "Find the rendering seam".into())
@@ -3136,16 +3117,7 @@ fn task_lines_use_checkbox_glyphs() {
 #[test]
 fn task_lines_name_a_live_owner_and_what_blocks_the_row() {
     let mut chat = chat_with_history("todo");
-    chat.session
-        .agents
-        .insert(
-            "scout",
-            crate::agents::AgentKind::Hire,
-            None,
-            "test instance".into(),
-            chat.session.clone(),
-        )
-        .now();
+    hire(&chat, "scout", "test instance");
     chat.tasks_visible = true;
     chat.tasks_cache = vec![
         TodoItem {

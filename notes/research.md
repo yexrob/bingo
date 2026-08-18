@@ -6644,3 +6644,186 @@ will say whether the twelve variants are the right twelve.
 `Arc<Mutex<…>>` shared with engine tasks. Agent run loops, the mention watchdog, and the
 inbox pulse still run outside the actor. Until they move, the actor's "single ordering point"
 is true of the events it publishes and not yet of the state the session actually keeps.
+
+---
+
+## D143 — the registries stop being shared
+
+**What it lands.** The three collaboration registries — `watch`, `channels`, `agents` — are
+no longer `Arc<Mutex<…>>` tables anyone with an `Arc<Session>` could reach and mutate in
+whatever order they happened to take the lock in. They are state of the one session actor
+(`src/app/controller.rs`), and everything else reaches them through a handle. `Session` holds
+three handles where it held three `Arc`s; the tables themselves have no locks left in them.
+
+Three commits, one registry each, four gates green after every one.
+
+### The ownership graph, after
+
+```text
+                       AppCore  ──────────────┐
+                          │                   │ (handles keep it alive)
+              Control (one unbounded queue)   │
+                          ▼                   │
+   ┌────────────── session actor thread ──────┴─────────────────┐
+   │  Controller: seq/ts, attachments, snapshot cut, mint       │
+   │  WatchRegistry     ChannelRegistry     AgentRegistry       │  ← no locks
+   └───┬──────────────────┬───────────────────┬────────────────-┘
+       │ replacement      │ replacement       │ replacement snapshots
+       ▼ snapshots        ▼                   ▼            (tokio::sync::watch)
+   WatchHandle       ChannelHandle       AgentHandle   ──►  Session { watch, channels, agents }
+```
+
+**The actor runs on a thread of its own, not on the runtime.** That is what makes "the actor
+never awaits while it holds the session's state" a fact about the type rather than a rule
+everyone has to remember: `Controller::run` is not a future and cannot await anything. It
+also lets a synchronous caller — a render pass, a key handler, a `Drop` — reach a registry
+with no runtime in scope, which the terminal front end still needs until B7. `Control::Attach`
+carries the caller's `tokio::runtime::Handle` for the one thing the actor still spawns, the
+attachment's request forwarder.
+
+**Its inbox is unbounded.** Half its callers cannot wait, and a bounded queue could only block
+them (impossible) or drop their message (a lost state transition). Unbounded also removes the
+deadlock class an ordering point invites: nobody ever waits to be heard.
+
+### Three shapes, and the rule that picks one
+
+The split is the campaign's own, drawn by `engine::events` in D142 and reused here.
+
+- **A report** is an ordered send that nobody waits on. `set_state`, `feed_content`,
+  `emit_signal`, `register_*`, `mark_seen`, `deliver_to_main`, `restore_inbox`, `touch`,
+  `mark_idle`, `set_run_watch`, `attach_share`, `set_events`, …
+- **A question** carries the channel its answer returns on. `post`, `invite`, `kick`,
+  `create`, `deliver`, `deposit`, `finish`, `flush_pending`, `take_running`, `stop`,
+  `remove`, `claim_name`, `next_run`, `follow_up`, `accepts_run`, `consume_notifications`, …
+- **A listing** borrows a replacement snapshot the actor republishes after every change:
+  `list`, `log_of`, `info`, `row_snapshot`, `owed_in`, `standing_of`, `view_of`, `acks_of`,
+  `snapshot`, `has_wake_notifications`, `main_mail_len`, `is_member`, `session_of`, …
+
+Two calls that answer with nothing are questions anyway — `insert` and `set_prompt` /
+`set_progress` — because what a caller does next is draw the instance or open its rooms, and
+a listing taken before the change landed would not have it in it. `touch` stayed a report for
+the opposite reason: it fires per stream delta, and an activity stamp is the one thing here
+nobody waits on.
+
+**`Answer<T>`** (`src/app/answer.rs`) is how a question comes back, and it is taken two ways:
+`.await` where the caller is an engine task, `.now()` at the terminal front end's synchronous
+seams — the composer's `#room` send, `/join`, `/leave`, `x` on a roster row, the per-frame
+mail drain — where it blocks exactly where it used to block on the registry's mutex. That is
+sound for one structural reason and only that one: the actor is on a thread of its own and
+never waits back, so the wait is bounded by the arithmetic queued ahead of it. `Answer` is
+`#[must_use]`: the message is sent when the `Answer` is built, so dropping one silently turns
+a question into a report. **B7 removes the blocking half**, when the TUI becomes an
+attachment and its writes become submissions.
+
+### The read models
+
+Per-frame readers do not round-trip. Each registry publishes an `Arc<View>` on a
+`tokio::sync::watch` channel — a replacement snapshot, never a delta, because a reader that
+missed three changes wants the world and not three diffs to apply in order.
+
+| Registry | View | Republication |
+|---|---|---|
+| `watch` | rows (id, label, kind, state, detail, payload, `born`) + the set of owners with a wake waiting | whole, on every change |
+| `channels` | `BTreeMap<room, Arc<RoomView>>` (members, mode, seq, frozen, log, mentions, seen, watch id) + main-mail depth | the changed room's `Arc` only; the rest are reused |
+| `agents` | `BTreeMap<name, Arc<AgentRow>>` (def, description, prompt, state, kind, history, stamps, inbox, acks, `last_active`, **`Arc<Session>`**, **`Arc<Mutex<AgentProgress>>`**) | the changed instance's `Arc` only |
+
+**What the views deliberately do not freeze.** `elapsed_ms` is computed at read time from a
+stored `Instant`; the agent row carries the session and the progress cell as *handles*, so
+`list()` still samples the model, the provider, the permission mode, the token count and the
+tool count live. A snapshot that copied those would have stopped the clock on a running turn —
+the one visible regression this refactor could have shipped, and the reason the row's shape is
+what it is. The sorted maps also mean a listing arrives in name order without any reader
+imposing one.
+
+**Two ordering contracts.** The view is published **before** the broadcast that announces the
+change (watch), and **before** the answer to the question that caused it (channels, agents).
+So a surface woken by an event, or a caller that posts and then reads the room, can never read
+a world older than the thing that woke it.
+
+### The danger zones, one by one
+
+- **Deadlock.** Ingress never blocks (unbounded queue) and the actor never awaits (not a
+  future). An engine task waiting on a receipt waits on a thread that is doing arithmetic.
+  The new concurrency test is the assertion: six runs depositing and posting at once, under a
+  30-second timeout, all finish.
+- **`std::sync::Mutex` across an await.** None added. The locks that remain are outside the
+  state machine and are never held across one: `AgentProgress` (a counter the run task writes
+  per token — funnelling it through the actor would be actor traffic per token), `ShareStore`'s
+  own document lock, and `Session::cwd`.
+- **Watchdogs.** The mention chase (`tool::channel`) and the ack chase (`tool::agent`) still
+  run as their own tasks with their own timers; what changed is that each round is now an
+  awaited question rather than a lock acquisition. Their timers did **not** move into the
+  actor: a timer inside the loop would be the actor waiting on a clock. Two `start_paused`
+  tests had to stop asserting on the clock and start asserting on the work — with the actor
+  off the runtime, tokio's auto-advance can reach a deadline before the round it triggered
+  has landed.
+- **`query.rs`'s turn hot path.** `InboxWake::take` is async and awaits `take_running`;
+  `restore` stays a report. Both travel the one queue, so the inbox pulse keeps its order.
+  `drain_main_mail` is awaited at the same seam it was drained at.
+- **`spawn_tree`'s two phases.** `spawn_members` claims and inserts every member (questions,
+  so each has landed), then `open_rooms` reads `agents.list()`. Because a question is answered
+  after the view carrying it is published, the roster the rooms are built from contains
+  everyone. `a_parents_room_holds_members_from_below` and friends pass unchanged.
+- **Share persistence.** `store.persist()` no longer runs where the change happens. A
+  `ShareSaver` thread owns the disk write and coalesces a burst into one, because the process's
+  one ordering point must never be found waiting on a file.
+
+### The events
+
+Registry changes now reach the event stream. After a message to the instances, the actor
+publishes `agent/changed` for every instance whose state, inbox depth or unanswered count
+moved; after a message to the rooms, `room/changed` for every room whose roster or head moved.
+Identifiers are minted once per name and kept for the epoch, so a client that sees `agent_3`
+twice has seen the same instance twice. Progress counters are deliberately not a trigger — a
+token count moving is not a state transition.
+
+**Left blank on purpose** (B4's, and inventing shapes for them here would be deciding the
+contract from the implementation): an agent's `conversationId` and `thinking`, a room's
+`unread` and `mentions`, the "went away" event for either, and any typed event for a watch
+row — the B1 review already ruled that `command/changed` is a contract addition B4 makes.
+
+### Verified
+
+Four gates green after each of the three commits: `cargo fmt --all -- --check`,
+`cargo check --locked --all-targets`, `cargo clippy --locked --all-targets -- -D warnings`,
+`cargo test --locked --all-targets`.
+
+Tests **1550 → 1553** (1546 unit + 7 black-box): three new — two for `Answer` (the same answer
+awaited and blocked on; a gone actor answering rather than panicking) and the concurrency
+test above. **None deleted, and not one assertion weakened.** Every existing agents, channels,
+watch, team, tool and TUI test passes against the new access surface, which is the evidence
+that @-debt, ack settlement (D137: a colleague's prose settles nothing), serial staleness,
+D63's `notify_owner` line and spawn≠wake all still mean what they meant.
+
+What did change in tests is *when* they look: a report is not waited on, so a synchronous test
+that reports and then reads the view calls `settle_now()`, and an async one `settle().await`.
+Eleven such barriers were added. They are test scaffolding, not a behaviour change — every
+one sits between a call and an assertion that used to be separated by a mutex release.
+
+The suite was run eight times end to end to shake out ordering flakes; it is stable at ~3.9s.
+`rewind::tests::a_file_past_the_size_cap_is_refused_rather_than_stored` failed once under
+load and passes 5/5 in isolation — the environmental class the plan already names, and it
+touches nothing this batch changed.
+
+### Not verified, and the one thing that got worse
+
+No real terminal was driven; the TUI's behaviour is asserted only by its own tests. Nothing
+attaches to the actor in production yet, so `agent/changed` and `room/changed` are published
+into a stream with no reader outside the new test.
+
+**The thread that does not exit.** `AgentRegistry` holds an `Arc<Session>` per instance and
+`Session` holds the handles, so a session that ever registered an instance keeps its own actor
+alive: the queue never closes and the thread parks forever. The cycle is not new — `Session`
+and `Arc<AgentRegistry>` have pointed at each other since D29, and both objects already leaked
+— but until now it leaked memory rather than a thread. In production there is one session, so
+it is one parked thread for the life of the process. It is B3's to fix, where `session/close`
+gives a session an end and the actor a reason to stop.
+
+### Left to B3/B4
+
+The engine still calls the registries from outside; `EngineEvent` and `AppEvent` are still not
+connected (D142's note stands). Agent run loops, the two watchdogs and the turn lifecycle are
+still engine tasks rather than actor-owned operations. The registries' place in
+`SessionSnapshot` is still `empty_collection()` — a reader gets them from the views or from
+nothing, and B4 is where a snapshot starts carrying them along with the attention cursors and
+the room sidecar.

@@ -87,15 +87,19 @@ pub struct Session {
     pub quiet: bool,
     /// Consecutive auto-compact failure count (circuit breaker: skip after MAX_COMPACT_FAILURES).
     pub compact_failures: Arc<std::sync::atomic::AtomicU64>,
-    /// Watchable registry (command/agent status observation and notifications).
+    /// Background work — commands, agent runs, room operations — as the session
+    /// actor holds it (B2b). A handle, not a table: the state is the actor's,
+    /// and every change here is a message on its one queue.
     pub watch: crate::watch::WatchHandle,
     /// Task store (shared by the Task tool family + TUI task panel + reminder injection).
     pub tasks: Arc<crate::tasks::TaskStore>,
     /// Task panel expand signal (subscribed by the TUI loop).
     pub expand_tasks: watch::Sender<bool>,
-    /// Sub-agent instance registry (continuation/lifecycle; sub-sessions share the same table).
+    /// The subagent instances (continuation/lifecycle). A handle on the session
+    /// actor's state; a sub-session carries a clone, so main and every instance
+    /// reach one table through one queue.
     pub agents: crate::agents::AgentHandle,
-    /// Agent channel registry (experimental; sub-sessions share the same table).
+    /// The rooms, and the main agent's inbox. The same shape as `agents`.
     pub channels: crate::channels::ChannelHandle,
     /// This session's instance name (sub-agents = Some(registry name); main session None,
     /// channel member name main).

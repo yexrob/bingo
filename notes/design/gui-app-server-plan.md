@@ -142,6 +142,11 @@ B2b：三 registry 收编为 actor 状态；agent run loop、看门狗、inbox p
 **验收**：四门绿；现有 agents/channels 域测试改挂 actor 接口后全绿；
 并发冒烟：N 个 agent run 并发下 seq 严格递增无洞（新测试）。
 
+> **B2b 落地记（2026-08-18）**：三注册表已收编为 actor 私有状态（D143，三提交）。三个形状：
+> report（有序发送不等回执）/ question（`Answer<T>`，`.await` 或前端同步接缝上的 `.now()`）/
+> listing（`tokio::sync::watch` 替换式快照）。actor 改跑独立线程（结构性保证"处理消息期间不 await"），
+> 收件箱改无界（同步调用方无法等待）。`Answer::now()` 的阻塞半边标记为 shim，B7 移除。
+
 > **B2a review 裁决（2026-08-18，Fable）**：① "首次快照切割前不投事件"（抑制而非缓冲）
 > 接受——是对规范的相容收紧，防止 actor 内存随慢前端增长；B6 须把"attachment 的通知流
 > 始于它的第一次快照读"写进协议文档。② "帧写失败即断开 attachment、actor 永不等待前端"

@@ -7,10 +7,13 @@
 //! it hands out ([`snapshot`]). [`controller`] is the single actor that turns
 //! one into the others.
 //!
-//! B2a lands the actor's skeleton: attachment, sequencing, the snapshot cut, and
-//! the identifier mint. The state it sequences is still a session's own metadata
-//! and empty collections — conversations, turns, and items arrive with B3, the
-//! collaboration registries with B2b.
+//! B2a landed the actor's skeleton: attachment, sequencing, the snapshot cut,
+//! and the identifier mint. B2b gave it its first state — the three
+//! collaboration registries ([`crate::watch`], [`crate::channels`],
+//! [`crate::agents`]), which stopped being `Arc<Mutex<…>>` tables anyone could
+//! reach and became this loop's own. Conversations, turns, and items arrive with
+//! B3; a registry's place in a snapshot, and the attention cursors that go with
+//! it, with B4.
 //!
 //! Design: `notes/design/gui-app-server.md` (with its amendments) and
 //! `notes/design/gui-app-server-plan.md`.
@@ -211,7 +214,7 @@ impl AppCore {
         }
     }
 
-    /// The watch registry: background commands, agent runs, room operations.
+    /// Background work: commands, agent runs, room operations.
     pub fn watch(&self) -> crate::watch::WatchHandle {
         self.watch.clone()
     }
@@ -242,8 +245,10 @@ impl AppCore {
     }
 
     /// The ingress engine work publishes through. A shim while the engine still
-    /// runs outside the actor: B2b and B3 remove this as `EngineEvent` becomes
-    /// the actor's own inbox.
+    /// runs outside the actor: B3 removes this as `EngineEvent` becomes the
+    /// actor's own inbox. The registries no longer need it — they are the
+    /// actor's state now, and the events they cause are stamped where they
+    /// happen.
     pub fn publisher(&self) -> AppPublisher {
         AppPublisher {
             control: self.control.clone(),
