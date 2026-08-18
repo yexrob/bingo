@@ -89,6 +89,9 @@ pub(crate) enum Control {
     Mail(crate::app::mail::MailMsg),
     /// Work that is not a turn, starting, reporting, or ending.
     Operation(crate::app::operation::OperationMsg),
+    /// What the MCP manager stands at. Connection state is the manager's, and it
+    /// lives outside the actor, so it is reported in rather than read out.
+    Mcp(Vec<crate::app::snapshot::McpServerState>),
     /// One submission, read and routed.
     Submit {
         request: Box<crate::app::submit::SubmitRequest>,
@@ -195,6 +198,56 @@ pub(super) fn spawn(setup: SessionSetup) -> (mpsc::UnboundedSender<Control>, Reg
     )
 }
 
+/// The permission rules settings declares. Session-scoped grants (D81's
+/// `allowSession`) live in the run that granted them and reach the core in B7.
+fn rules_of(settings: &crate::settings::Settings) -> Vec<crate::app::snapshot::PermissionRule> {
+    use crate::app::snapshot::{PermissionRule, PermissionRuleDecision};
+    let mut out = Vec::new();
+    for (decision, list) in [
+        (PermissionRuleDecision::Allow, &settings.permissions.allow),
+        (PermissionRuleDecision::Deny, &settings.permissions.deny),
+        (PermissionRuleDecision::Ask, &settings.permissions.ask),
+    ] {
+        out.extend(list.iter().map(|rule| PermissionRule {
+            decision,
+            rule: rule.clone(),
+            session_scoped: false,
+        }));
+    }
+    out
+}
+
+/// Which settings file contributed which keys, so a frontend can say where a
+/// value came from without reading the files itself.
+fn layers_of(
+    catalog: &crate::app::catalog::CatalogSource,
+) -> Vec<crate::app::snapshot::ConfigLayer> {
+    crate::settings::layer_paths(catalog.user_dir(), catalog.cwd())
+        .into_iter()
+        .map(|path| crate::app::snapshot::ConfigLayer {
+            keys: crate::settings::layer_keys(&path),
+            path,
+        })
+        .collect()
+}
+
+/// The transcript the open session is reading, when its locator names a path.
+fn open_path(locator: &crate::app::snapshot::SessionLocator) -> std::path::PathBuf {
+    match locator {
+        crate::app::snapshot::SessionLocator::Path { path } => path.clone(),
+        _ => std::path::PathBuf::new(),
+    }
+}
+
+/// When a file was last written, in the same unit every other timestamp uses.
+fn modified_millis(path: &std::path::Path) -> crate::app::ids::UnixMillis {
+    std::fs::metadata(path)
+        .and_then(|meta| meta.modified())
+        .ok()
+        .and_then(|at| at.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0, |since| since.as_millis() as u64)
+}
+
 /// Wait until everything already sent has been applied.
 pub(crate) async fn settle(control: &mpsc::UnboundedSender<Control>) {
     let (reply, answer) = oneshot::channel();
@@ -234,6 +287,12 @@ struct Controller {
     session: SessionSummary,
     capabilities: ServerCapabilities,
     config: ConfigSnapshot,
+    /// Settings, the two directories and the endpoint table, as the catalogs and
+    /// the effective configuration are read from them (B5).
+    catalog: crate::app::catalog::CatalogSource,
+    /// What the MCP manager last reported. Empty until something has connected,
+    /// which is the honest answer for a session that has not.
+    mcp: Vec<crate::app::snapshot::McpServerState>,
     /// The last sequence number stamped. Strictly increasing, gapless, scoped to
     /// this epoch.
     seq: u64,
@@ -352,18 +411,17 @@ impl Controller {
             cwd: setup.cwd,
             shell: setup.shell,
             shell_dialect: setup.shell_dialect,
-            // Settings layers, permission rules, and MCP state are read by
-            // `config/read`, which lands with B5. An empty list here says "not
-            // read yet" and never says "none configured": nothing reads it.
-            permissions: Vec::new(),
-            layers: Vec::new(),
-            mcp_servers: Vec::new(),
+            permissions: rules_of(setup.catalog.settings()),
+            layers: layers_of(&setup.catalog),
+            mcp_servers: setup.catalog.mcp_servers(None),
         };
         Self {
             mint,
             session,
             capabilities: setup.capabilities,
             config,
+            catalog: setup.catalog,
+            mcp: Vec::new(),
             seq: 0,
             attachments: Vec::new(),
             next_attachment: 0,
@@ -455,6 +513,7 @@ impl Controller {
                     let changes = self.operations.handle(message, &mut self.mint);
                     self.announce_operations(changes);
                 }
+                Control::Mcp(states) => self.report_mcp(states),
                 Control::Submit { request, reply } => {
                     let route = self.submit(*request);
                     let _ = reply.send(route);
@@ -603,7 +662,9 @@ impl Controller {
                 self.cut(attachment, snapshot.event_cursor);
                 Ok(AppReply::Session(Box::new(snapshot)))
             }
-            AppQuery::ListSessions { .. } => Err(AppError::Unserved("session/list")),
+            AppQuery::ListSessions { cursor, limit } => {
+                Ok(AppReply::Sessions(self.session_list(cursor, limit)))
+            }
             AppQuery::ListConversations { limit, .. } => {
                 let snapshot = self.conversation_list(limit);
                 self.cut(attachment, self.seq);
@@ -618,13 +679,174 @@ impl Controller {
                 self.cut(attachment, snapshot.event_cursor);
                 Ok(AppReply::Conversation(Box::new(snapshot)))
             }
-            AppQuery::ReadQueue { .. } => Err(AppError::Unserved("queue/read")),
-            AppQuery::ListActions { .. } => Err(AppError::Unserved("action/list")),
-            AppQuery::ReadConfig => Err(AppError::Unserved("config/read")),
-            AppQuery::ReadCatalog { .. } => Err(AppError::Unserved("catalog/read")),
-            AppQuery::ReadResource { .. } => Err(AppError::Unserved("resource/read")),
+            AppQuery::ReadQueue {
+                conversation_id,
+                limit,
+                ..
+            } => {
+                let Some(conversation) = self.conversations.key(&conversation_id).cloned() else {
+                    return Err(AppError::Refused(
+                        crate::app_server::protocol::error::ProtocolErrorKind::ConversationNotFound,
+                    ));
+                };
+                let (_, count) = self.queue.stand(&conversation);
+                let limit = limit.map_or(DEFAULT_PAGE as usize, |limit| limit.max(1) as usize);
+                let Self {
+                    queue,
+                    conversations,
+                    mint,
+                    ..
+                } = self;
+                let entries =
+                    queue.page(&conversation, &mut |key| conversations.id(mint, key), limit);
+                Ok(AppReply::Queue { entries, count })
+            }
+            AppQuery::ListActions {
+                origin_conversation_id,
+            } => {
+                if let Some(id) = &origin_conversation_id
+                    && self.conversations.key(id).is_none()
+                {
+                    return Err(AppError::Refused(
+                        crate::app_server::protocol::error::ProtocolErrorKind::ConversationNotFound,
+                    ));
+                }
+                Ok(AppReply::Actions {
+                    actions: crate::app::action::published(self.availability()),
+                    revision: self.config.revision,
+                })
+            }
+            AppQuery::ReadConfig => Ok(AppReply::Config(Box::new(self.config_snapshot()))),
+            AppQuery::ReadCatalog {
+                catalog,
+                provider,
+                cursor,
+                limit,
+            } => Ok(AppReply::Catalog(Box::new(self.catalog.page(
+                catalog,
+                provider.as_deref(),
+                cursor.as_deref(),
+                limit,
+                &crate::app::catalog::Live {
+                    mcp: (!self.mcp.is_empty()).then_some(self.mcp.as_slice()),
+                    images: &[],
+                },
+            )))),
+            AppQuery::ReadResource {
+                resource,
+                cursor,
+                limit,
+            } => Ok(AppReply::Resource(Box::new(self.resource_page(
+                resource,
+                cursor.as_deref(),
+                limit,
+            )))),
             AppQuery::ReadAssetChunk { .. } => Err(AppError::Unserved("asset/readChunk")),
         }
+    }
+
+    /// Take what the MCP manager reports, and say so once it has changed.
+    fn report_mcp(&mut self, states: Vec<crate::app::snapshot::McpServerState>) {
+        if self.mcp == states {
+            return;
+        }
+        self.mcp = states;
+        self.config.revision = self.config.revision.saturating_add(1);
+        let config = self.config_snapshot();
+        self.publish(
+            Box::new(AppEventPayload::ConfigChanged(
+                crate::app::event::ConfigChanged { config },
+            )),
+            None,
+        );
+        self.publish(
+            Box::new(AppEventPayload::CatalogChanged(
+                crate::app::event::CatalogChanged {
+                    catalog: crate::app::snapshot::CatalogKind::McpServers,
+                    revision: self.config.revision,
+                },
+            )),
+            None,
+        );
+    }
+
+    /// What decides whether an action can run right now.
+    fn availability(&self) -> crate::app::action::Availability {
+        crate::app::action::Availability {
+            console_busy: self.turns.is_busy(&ConvKey::Main),
+            // The engine half — a model, a transcript rewrite, a network round
+            // trip — is still the console's until B7 attaches it here.
+            engine_attached: false,
+        }
+    }
+
+    /// The effective configuration, with the parts that are read rather than
+    /// held: the settings layers that contributed, and what MCP stands at.
+    fn config_snapshot(&self) -> ConfigSnapshot {
+        let mut config = self.config.clone();
+        config.layers = layers_of(&self.catalog);
+        config.mcp_servers = self
+            .catalog
+            .mcp_servers((!self.mcp.is_empty()).then_some(self.mcp.as_slice()));
+        config
+    }
+
+    /// One page of one runtime collection. The lists are the same ones a session
+    /// snapshot carries; this is how a client reads past the bounded head of them.
+    fn resource_page(
+        &mut self,
+        resource: crate::app::snapshot::ResourceKind,
+        cursor: Option<&str>,
+        limit: Option<u32>,
+    ) -> crate::app::snapshot::ResourcePage {
+        use crate::app::catalog::page;
+        use crate::app::snapshot::{ResourceKind, ResourcePage};
+        match resource {
+            ResourceKind::Agents => {
+                ResourcePage::Agents(page(self.agent_resources(), cursor, limit))
+            }
+            ResourceKind::Rooms => ResourcePage::Rooms(page(self.room_resources(), cursor, limit)),
+            ResourceKind::Tasks => ResourcePage::Tasks(page(Vec::new(), cursor, limit)),
+            ResourceKind::Deliveries => {
+                ResourcePage::Deliveries(page(self.delivery_resources(), cursor, limit))
+            }
+            ResourceKind::BackgroundCommands => {
+                ResourcePage::BackgroundCommands(page(self.command_resources(), cursor, limit))
+            }
+        }
+    }
+
+    /// The sessions on disk, newest first, with the open one marked.
+    ///
+    /// Reading a directory is the one blocking call this loop makes, and it is
+    /// bounded by what `bingo gc` leaves behind.
+    fn session_list(
+        &self,
+        cursor: Option<String>,
+        limit: Option<u32>,
+    ) -> Page<crate::app::snapshot::SessionListEntry> {
+        use crate::app::snapshot::{SessionListEntry, SessionLocator};
+        let home = self.catalog.home();
+        let entries: Vec<SessionListEntry> = crate::transcript::list(home)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|transcript| {
+                let path = transcript.path().to_path_buf();
+                let locator = SessionLocator::Stem {
+                    stem: transcript.name(),
+                };
+                SessionListEntry {
+                    open: locator == self.session.locator
+                        || path == open_path(&self.session.locator),
+                    title: transcript.name(),
+                    cwd: self.session.cwd.clone(),
+                    updated_at: modified_millis(&path),
+                    message_count: transcript.line_count().unwrap_or(0) as u32,
+                    locator,
+                }
+            })
+            .collect();
+        crate::app::catalog::page(entries, cursor.as_deref(), limit)
     }
 
     /// The session as it stands, valid through the sequence number it was cut
@@ -2412,6 +2634,287 @@ mod tests {
             next_reply(&mut link, RequestId(3)).await,
             Ok(AppReply::Accepted)
         );
+    }
+
+    /// A core whose settings and directories are real, so the reads have
+    /// something to read.
+    fn configured(tag: &str) -> (AppCore, std::path::PathBuf) {
+        let home = std::env::temp_dir().join(format!("bingo-reads-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let _ = std::fs::create_dir_all(home.join("bingo"));
+        let _ = std::fs::write(
+            home.join("bingo").join("settings.json"),
+            r#"{"apiKey": "sk-test", "permissions": {"allow": ["Bash(cargo test:*)"]},
+                "mcpServers": {"docs": {"command": "docs-server"}}}"#,
+        );
+        let settings = crate::settings::load_settings(&home, &home)
+            .unwrap_or_else(|error| panic!("settings: {error}"));
+        let core = AppCore::start(SessionSetup {
+            model: "sonnet".to_string(),
+            provider: "default".to_string(),
+            catalog: crate::app::catalog::CatalogSource::load(&home, &home, &home, settings),
+            ..SessionSetup::default()
+        });
+        (core, home)
+    }
+
+    async fn read(link: &mut AppLink, id: u64, query: AppQuery) -> Result<AppReply, AppError> {
+        link.request(AppRequest::Query {
+            id: RequestId(id),
+            query,
+        })
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+        next_reply(link, RequestId(id)).await
+    }
+
+    /// `config/read` answers out of settings: the effective selection, the rules
+    /// that are in force, and which layer file contributed what.
+    #[tokio::test]
+    async fn the_configuration_says_where_it_came_from() {
+        let (core, home) = configured("config");
+        let (mut link, _) = attached(&core, "test").await;
+        match read(&mut link, 2, AppQuery::ReadConfig).await {
+            Ok(AppReply::Config(config)) => {
+                assert_eq!(config.model, "sonnet");
+                assert_eq!(
+                    config
+                        .permissions
+                        .iter()
+                        .map(|rule| rule.rule.as_str())
+                        .collect::<Vec<_>>(),
+                    vec!["Bash(cargo test:*)"]
+                );
+                assert!(
+                    config
+                        .layers
+                        .iter()
+                        .any(|layer| layer.keys.iter().any(|key| key == "permissions")),
+                    "the layer that carries the rules is named: {:?}",
+                    config.layers
+                );
+                assert_eq!(
+                    config
+                        .mcp_servers
+                        .iter()
+                        .map(|server| (server.name.as_str(), server.status))
+                        .collect::<Vec<_>>(),
+                    vec![("docs", crate::app::snapshot::McpStatus::Disconnected)],
+                    "configured is not connected"
+                );
+            }
+            other => panic!("expected a configuration, got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// `catalog/read` is answerable from the same state, and what MCP reports
+    /// lands in both the catalog and the configuration.
+    #[tokio::test]
+    async fn a_catalog_reads_settings_and_takes_what_mcp_reports() {
+        let (core, home) = configured("catalog");
+        let (mut link, _) = attached(&core, "test").await;
+        match read(
+            &mut link,
+            2,
+            AppQuery::ReadCatalog {
+                catalog: CatalogKind::Providers,
+                provider: None,
+                cursor: None,
+                limit: None,
+            },
+        )
+        .await
+        {
+            Ok(AppReply::Catalog(catalog)) => match *catalog {
+                crate::app::snapshot::Catalog::Providers(page) => assert_eq!(
+                    page.items.first().map(|info| info.name.as_str()),
+                    Some("default")
+                ),
+                other => panic!("expected providers, got {other:?}"),
+            },
+            other => panic!("expected a catalog, got {other:?}"),
+        }
+
+        core.report_mcp(vec![crate::app::snapshot::McpServerState {
+            name: "docs".to_string(),
+            enabled: true,
+            status: crate::app::snapshot::McpStatus::Connected,
+            tools: 3,
+            error: None,
+        }]);
+        settle(&core.control).await;
+        match read(
+            &mut link,
+            3,
+            AppQuery::ReadCatalog {
+                catalog: CatalogKind::McpServers,
+                provider: None,
+                cursor: None,
+                limit: None,
+            },
+        )
+        .await
+        {
+            Ok(AppReply::Catalog(catalog)) => match *catalog {
+                crate::app::snapshot::Catalog::McpServers(page) => {
+                    assert_eq!(
+                        page.items[0].status,
+                        crate::app::snapshot::McpStatus::Connected
+                    );
+                    assert_eq!(page.items[0].tools, 3);
+                }
+                other => panic!("expected servers, got {other:?}"),
+            },
+            other => panic!("expected a catalog, got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// `action/list` publishes the registry, and availability is answered from
+    /// the state the core is actually in.
+    #[tokio::test]
+    async fn the_actions_are_listed_with_what_can_run_now() {
+        let (core, home) = configured("actions");
+        let (mut link, _) = attached(&core, "test").await;
+        match read(
+            &mut link,
+            2,
+            AppQuery::ListActions {
+                origin_conversation_id: None,
+            },
+        )
+        .await
+        {
+            Ok(AppReply::Actions { actions, .. }) => {
+                assert_eq!(actions.len(), crate::app::action::ACTIONS.len());
+                let theme = actions
+                    .iter()
+                    .find(|info| info.id.as_str() == "theme.set")
+                    .unwrap_or_else(|| panic!("theme.set is published"));
+                assert!(theme.available, "a preference needs nothing");
+                assert_eq!(
+                    theme
+                        .arguments
+                        .first()
+                        .map(|argument| argument.choices.as_slice()),
+                    Some(["dark".to_string(), "light".to_string(), "auto".to_string()].as_slice()),
+                    "the argument schema comes from the same table"
+                );
+                let compact = actions
+                    .iter()
+                    .find(|info| info.id.as_str() == "conversation.compact")
+                    .unwrap_or_else(|| panic!("compact is published"));
+                assert!(
+                    !compact.available && compact.unavailable_reason.is_some(),
+                    "an action that needs an engine says so rather than failing later"
+                );
+            }
+            other => panic!("expected actions, got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// `resource/read` pages the same collections a session snapshot carries a
+    /// bounded head of, and `queue/read` reads one conversation's queue.
+    #[tokio::test]
+    async fn the_runtime_collections_and_the_queue_are_paged() {
+        let (core, home) = configured("resources");
+        let (mut link, snapshot) = attached(&core, "test").await;
+        let main = snapshot
+            .conversations
+            .active
+            .first()
+            .map(|summary| summary.id.clone())
+            .unwrap_or_else(|| panic!("main exists"));
+        match read(
+            &mut link,
+            2,
+            AppQuery::ReadResource {
+                resource: crate::app::snapshot::ResourceKind::Rooms,
+                cursor: None,
+                limit: None,
+            },
+        )
+        .await
+        {
+            Ok(AppReply::Resource(page)) => match *page {
+                crate::app::snapshot::ResourcePage::Rooms(rooms) => {
+                    assert!(rooms.items.is_empty(), "no rooms yet, and that is a page");
+                    assert_eq!(rooms.next_cursor, None);
+                }
+                other => panic!("expected rooms, got {other:?}"),
+            },
+            other => panic!("expected a resource page, got {other:?}"),
+        }
+        match read(
+            &mut link,
+            3,
+            AppQuery::ReadQueue {
+                conversation_id: main,
+                cursor: None,
+                limit: None,
+            },
+        )
+        .await
+        {
+            Ok(AppReply::Queue { entries, count }) => {
+                assert_eq!(count, 0);
+                assert!(entries.items.is_empty());
+            }
+            other => panic!("expected a queue, got {other:?}"),
+        }
+        match read(
+            &mut link,
+            4,
+            AppQuery::ReadQueue {
+                conversation_id: crate::app::ids::ConversationId::new("conv_nope"),
+                cursor: None,
+                limit: None,
+            },
+        )
+        .await
+        {
+            Err(AppError::Refused(kind)) => assert_eq!(
+                kind,
+                crate::app_server::protocol::error::ProtocolErrorKind::ConversationNotFound
+            ),
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// `session/list` reads the transcripts on disk and marks the open one.
+    #[tokio::test]
+    async fn the_sessions_on_disk_are_listed() {
+        let (core, home) = configured("sessions");
+        let transcript = crate::transcript::create(&home, &home)
+            .unwrap_or_else(|error| panic!("transcript: {error}"));
+        let _ = transcript.append(&crate::api::types::Message::user_text("hi"));
+        let (mut link, _) = attached(&core, "test").await;
+        match read(
+            &mut link,
+            2,
+            AppQuery::ListSessions {
+                cursor: None,
+                limit: None,
+            },
+        )
+        .await
+        {
+            Ok(AppReply::Sessions(page)) => {
+                assert_eq!(
+                    page.items
+                        .iter()
+                        .map(|entry| entry.title.as_str())
+                        .collect::<Vec<_>>(),
+                    vec![transcript.name().as_str()]
+                );
+                assert!(page.items[0].message_count >= 1);
+            }
+            other => panic!("expected sessions, got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     /// The reply to `id`, skipping whatever the core said on the way.

@@ -24,6 +24,7 @@
 pub mod action;
 pub mod answer;
 pub mod attention;
+pub mod catalog;
 #[cfg(test)]
 mod collab_tests;
 pub mod command;
@@ -131,6 +132,32 @@ pub enum AppReply {
     Conversations(crate::app::snapshot::Page<crate::app::snapshot::ConversationSummary>),
     /// What the core did with a submission. The caller never chose it.
     Submitted(crate::app::command::SubmitDisposition),
+    /// One page of the sessions on disk.
+    Sessions(crate::app::snapshot::Page<crate::app::snapshot::SessionListEntry>),
+    /// One page of a conversation's queue, and how much is on it.
+    Queue {
+        entries: crate::app::snapshot::Page<crate::app::snapshot::QueueEntry>,
+        count: u32,
+    },
+    /// What every action is called, and which of them can run right now.
+    Actions {
+        actions: Vec<crate::app::command::ActionInfo>,
+        revision: u64,
+    },
+    /// The effective configuration.
+    Config(Box<crate::app::snapshot::ConfigSnapshot>),
+    /// One page of one catalog.
+    Catalog(Box<crate::app::snapshot::Catalog>),
+    /// One page of one runtime collection.
+    Resource(Box<crate::app::snapshot::ResourcePage>),
+    /// A registered asset.
+    Asset(Box<crate::app::snapshot::AssetRecord>),
+    /// One bounded chunk of an asset's bytes, base64.
+    AssetChunk {
+        data: String,
+        next_offset: u64,
+        eof: bool,
+    },
 }
 
 /// Why the core did not do it.
@@ -151,11 +178,7 @@ pub enum AppError {
 }
 
 /// The session metadata the core is started with.
-///
-/// The skeleton is handed what it reports; B3 fills this from the real session
-/// and its settings, which is also when the empty collections below stop being
-/// empty.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct SessionSetup {
     pub title: String,
     pub cwd: PathBuf,
@@ -173,6 +196,9 @@ pub struct SessionSetup {
     /// moment the actor starts.
     pub channel_limits: crate::channels::ChannelLimits,
     pub capabilities: ServerCapabilities,
+    /// Settings, the two directories, and the endpoint table: what the catalogs
+    /// and the effective configuration are read from (B5).
+    pub catalog: crate::app::catalog::CatalogSource,
 }
 
 impl Default for SessionSetup {
@@ -190,6 +216,7 @@ impl Default for SessionSetup {
             shell_dialect: ShellDialect::Unknown,
             resumed: false,
             channel_limits: crate::channels::ChannelLimits::default(),
+            catalog: crate::app::catalog::CatalogSource::default(),
             capabilities: ServerCapabilities {
                 multi_conversation: true,
                 reasoning: true,
@@ -290,6 +317,13 @@ impl AppCore {
     /// The asynchronous work that is not a turn.
     pub fn operations(&self) -> crate::app::operation::OperationHandle {
         self.operations.clone()
+    }
+
+    /// Tell the core what the MCP manager stands at. Connection state belongs to
+    /// the manager, which lives outside the actor; the catalogs answer
+    /// "configured, not connected" until something says otherwise.
+    pub fn report_mcp(&self, states: Vec<crate::app::snapshot::McpServerState>) {
+        let _ = self.control.send(controller::Control::Mcp(states));
     }
 
     /// Whether the session actor's loop is still running.

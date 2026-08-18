@@ -114,7 +114,7 @@ pub fn first_line(markdown: &str) -> String {
 /// User-level skills directory: `$XDG_CONFIG_HOME/bingo/skills` (mirrors the config convention in main.rs).
 /// Tests must not depend on the ambient XDG_CONFIG_HOME (CI runners may set it): the home
 /// parameter is the sole source of truth under test.
-fn user_skills_dir(home: &Path) -> PathBuf {
+pub(crate) fn user_skills_dir(home: &Path) -> PathBuf {
     #[cfg(not(test))]
     let config = std::env::var("XDG_CONFIG_HOME")
         .map(PathBuf::from)

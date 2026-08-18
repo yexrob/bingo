@@ -377,8 +377,57 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         &runtime.provider.borrow().clone(),
         &client.models(),
     ));
+    // What the core reports about this session. The frontends still drive it
+    // themselves (B7 attaches them), but `config/read` and `catalog/read` answer
+    // out of this from the moment the actor starts.
     let core = crate::app::AppCore::start(crate::app::SessionSetup {
+        title: transcript
+            .as_ref()
+            .map(crate::transcript::Transcript::name)
+            .unwrap_or_default(),
+        cwd: project_dir.clone(),
+        locator: match transcript.as_ref() {
+            Some(t) => crate::app::snapshot::SessionLocator::Path {
+                path: t.path().to_path_buf(),
+            },
+            None => crate::app::snapshot::SessionLocator::Latest,
+        },
+        provider: runtime.provider.borrow().clone(),
+        model: model.clone(),
+        thinking: crate::app::snapshot::ThinkingLevel::ALL
+            .into_iter()
+            .find(|level| Some(level.as_str()) == settings.thinking_level.as_deref())
+            .unwrap_or(crate::app::snapshot::ThinkingLevel::Off),
+        permission_mode: match permission_mode {
+            PermissionMode::Default => crate::app::snapshot::PermissionMode::Default,
+            PermissionMode::AcceptEdits => crate::app::snapshot::PermissionMode::AcceptEdits,
+            PermissionMode::BypassPermissions => {
+                crate::app::snapshot::PermissionMode::BypassPermissions
+            }
+            PermissionMode::DontAsk => crate::app::snapshot::PermissionMode::DontAsk,
+            PermissionMode::Plan => crate::app::snapshot::PermissionMode::Plan,
+        },
+        theme: crate::app::snapshot::ThemeChoice::ALL
+            .into_iter()
+            .find(|theme| Some(theme.as_str()) == settings.theme.as_deref())
+            .unwrap_or(crate::app::snapshot::ThemeChoice::Auto),
+        shell: crate::platform::shell().to_string(),
+        shell_dialect: match crate::platform::shell_dialect() {
+            crate::platform::ShellDialect::Posix => crate::app::snapshot::ShellDialect::Posix,
+            crate::platform::ShellDialect::PowerShell => {
+                crate::app::snapshot::ShellDialect::Powershell
+            }
+            crate::platform::ShellDialect::Cmd => crate::app::snapshot::ShellDialect::Cmd,
+            crate::platform::ShellDialect::Unknown => crate::app::snapshot::ShellDialect::Unknown,
+        },
+        resumed: cli.continue_,
         channel_limits: crate::channels::ChannelLimits::from_settings(&settings),
+        catalog: crate::app::catalog::CatalogSource::load(
+            &home,
+            &user_dir,
+            &project_dir,
+            settings.clone(),
+        ),
         ..Default::default()
     });
     let session = Arc::new(Session {
