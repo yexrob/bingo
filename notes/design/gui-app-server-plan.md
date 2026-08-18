@@ -149,6 +149,13 @@ B2b：三 registry 收编为 actor 状态；agent run loop、看门狗、inbox p
 fail-closed）；usage/context 接线 + `CompactOutcome`（决定 9）。
 **验收**：四门绿 + 规范 §Verification "Core behavior tests" 前六族场景测试绿。
 
+> **B1 review 裁决（2026-08-18，Fable）**：① 后台命令的 watch 迁移须有 typed 通知——B4 给契约
+> 增补 `command/changed`（parity ledger "typed resource updates" 行要求之，resource/read 轮询
+> 不满足）；契约扩展流程 = 改类型 + 重生成 bundle + 补 fixtures，一个提交内完成。
+> ② ResponseFrame 的 "exactly one of result/error" 在 Rust 构造器强制、schema 只表达
+> "at most one"——接受为已知限界（D141 已记）。③ `TurnOrigin{user|queue|peer|auto|shell}`
+> 与 `OperationKind` 是 B1 的自裁词表，B3/B5 需要时按加法扩展。
+
 ### B4 · 协作域（L）
 agent/room conversations；walk/LineSource 提升（决定：单走查器）；房间消息 = message item；
 mail digest 入核（乙案）；delivery/ack 结构化状态（D137 语义：同事散文不结算 ack）；
