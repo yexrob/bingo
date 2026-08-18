@@ -72,11 +72,15 @@ impl JsonSchema for JsonRpcVersion {
 
 /// Correlates one wire request with its reply. It correlates transport calls
 /// only: application resources are named by their own server-minted IDs.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(untagged)]
 pub enum RequestId {
     Number(i64),
     Text(String),
+    /// JSON-RPC's null id, which a reply carries when the request it answers
+    /// could not be read at all — a parse error or a frame that is JSON but not
+    /// a request has no id to echo.
+    Null,
 }
 
 impl From<i64> for RequestId {
@@ -192,6 +196,19 @@ mod tests {
         assert!(serde_json::from_value::<JsonRpcVersion>(serde_json::json!("2.0")).is_ok());
         assert!(serde_json::from_value::<JsonRpcVersion>(serde_json::json!("1.0")).is_err());
         assert!(serde_json::from_value::<JsonRpcVersion>(serde_json::json!(2.0)).is_err());
+    }
+
+    /// A reply to a line that could not be read has no id to echo, and JSON-RPC
+    /// says what that reply carries instead.
+    #[test]
+    fn a_reply_to_an_unreadable_line_carries_the_null_id() {
+        assert_eq!(
+            serde_json::to_value(RequestId::Null).unwrap_or_else(|error| panic!("{error}")),
+            serde_json::json!(null)
+        );
+        let decoded: RequestId = serde_json::from_value(serde_json::json!(null))
+            .unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(decoded, RequestId::Null);
     }
 
     #[test]

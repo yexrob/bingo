@@ -41,6 +41,13 @@ pub struct EventMeta {
     pub session_id: SessionId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub caused_by: Option<OperationId>,
+    /// Set only when a transport merged a run of adjacent append deltas for one
+    /// item into this frame: the `seq` that run began at. Every event from
+    /// `coalescedFrom` through `seq` is represented here, so a client checking
+    /// for gaps still reads a gapless stream. The core never sets it — merging
+    /// is the transport's, and this is how it stays honest about what it did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coalesced_from: Option<u64>,
 }
 
 /// One sequenced application event.
@@ -443,6 +450,7 @@ mod tests {
             ts: 1_760_000_000_000,
             session_id: SessionId::new("sess_1"),
             caused_by: None,
+            coalesced_from: None,
         };
         assert_eq!(
             serde_json::to_value(&meta).unwrap_or_else(|error| panic!("{error}")),
@@ -453,5 +461,27 @@ mod tests {
         )
         .unwrap_or_else(|error| panic!("{error}"));
         assert_eq!(decoded, meta);
+    }
+
+    /// A merged frame says which run it stands for, so "seq 5 then seq 8" is a
+    /// coalesced append rather than three events a client lost.
+    #[test]
+    fn a_coalesced_frame_names_the_run_it_stands_for() {
+        let meta = EventMeta {
+            seq: 108,
+            ts: 1_760_000_000_000,
+            session_id: SessionId::new("sess_1"),
+            caused_by: None,
+            coalesced_from: Some(105),
+        };
+        assert_eq!(
+            serde_json::to_value(&meta).unwrap_or_else(|error| panic!("{error}")),
+            serde_json::json!({
+                "seq": 108,
+                "ts": 1_760_000_000_000u64,
+                "sessionId": "sess_1",
+                "coalescedFrom": 105
+            })
+        );
     }
 }

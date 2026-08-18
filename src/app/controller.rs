@@ -1637,6 +1637,9 @@ impl Controller {
                 ts: now_millis(),
                 session_id: self.session.id.clone(),
                 caused_by,
+                // Merging is the transport's, never the ordering point's: an
+                // event leaves here standing for exactly itself.
+                coalesced_from: None,
             },
             payload: *payload,
         };

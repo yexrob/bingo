@@ -725,6 +725,7 @@ fn event_meta() -> EventMeta {
         ts: TS,
         session_id: SessionId::new("sess_1"),
         caused_by: None,
+        coalesced_from: None,
     }
 }
 
@@ -1987,6 +1988,69 @@ fn an_error_frame_carries_every_identifier_it_can() {
     let data = expected["error"].clone();
     let decoded: RpcError = from_value(data);
     assert_eq!(decoded, error);
+}
+
+/// A line that could not be read has no id to echo, and JSON-RPC says the reply
+/// carries null rather than inventing one.
+#[test]
+fn a_parse_error_answers_with_the_null_id() {
+    use crate::app_server::protocol::envelope::RequestId;
+    use crate::app_server::protocol::error::PARSE_ERROR;
+    let frame = ResponseFrame::error(
+        RequestId::Null,
+        RpcError::standard(PARSE_ERROR, "Invalid JSON was received."),
+    );
+    assert_eq!(
+        to_value(&frame),
+        json!({
+            "jsonrpc": "2.0",
+            "id": null,
+            "error": {"code": -32700, "message": "Invalid JSON was received."}
+        })
+    );
+}
+
+/// A transport that merged a run of appends says so, so "seq 105 then seq 108"
+/// reads as one coalesced frame rather than three lost events.
+#[test]
+fn a_coalesced_delta_frame_names_the_run_it_stands_for() {
+    let notification = ServerNotification::ItemTextDelta(NotificationParams::new(
+        EventMeta {
+            seq: 108,
+            ts: TS,
+            session_id: SessionId::new("sess_1"),
+            caused_by: None,
+            coalesced_from: Some(105),
+        },
+        ItemDelta {
+            conversation_id: ConversationId::new("conv_main"),
+            turn_id: Some(TurnId::new("turn_9")),
+            item_id: ItemId::new("item_12"),
+            delta_seq: 4,
+            delta: "I will run the tests".to_string(),
+        },
+    ));
+    let frame = NotificationFrame::new(notification.clone());
+    let expected = json!({
+        "jsonrpc": "2.0",
+        "method": "item/textDelta",
+        "params": {
+            "event": {
+                "seq": 108,
+                "ts": TS,
+                "sessionId": "sess_1",
+                "coalescedFrom": 105
+            },
+            "conversationId": "conv_main",
+            "turnId": "turn_9",
+            "itemId": "item_12",
+            "deltaSeq": 4,
+            "delta": "I will run the tests"
+        }
+    });
+    assert_eq!(to_value(&frame), expected);
+    let decoded: NotificationFrame = from_value(expected);
+    assert_eq!(decoded, frame);
 }
 
 // ---------------------------------------------------------------------------

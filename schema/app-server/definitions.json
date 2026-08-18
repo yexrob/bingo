@@ -2474,6 +2474,15 @@
             }
           ]
         },
+        "coalescedFrom": {
+          "description": "Set only when a transport merged a run of adjacent append deltas for one item into this frame: the `seq` that run began at. Every event from `coalescedFrom` through `seq` is represented here, so a client checking for gaps still reads a gapless stream. The core never sets it — merging is the transport's, and this is how it stays honest about what it did.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "seq": {
           "format": "uint64",
           "minimum": 0.0,
@@ -5108,6 +5117,10 @@
         },
         {
           "type": "string"
+        },
+        {
+          "description": "JSON-RPC's null id, which a reply carries when the request it answers could not be read at all — a parse error or a frame that is JSON but not a request has no id to echo.",
+          "type": "null"
         }
       ],
       "description": "Correlates one wire request with its reply. It correlates transport calls only: application resources are named by their own server-minted IDs."
