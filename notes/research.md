@@ -7024,3 +7024,174 @@ and the collaboration item model is B4's. `SessionSnapshot` still hands out
 comes back to the caller to perform, because delivery needs `Session` and the actor does not
 have one — B4 moves it. `AppError::Unserved` still covers `conversation/submit`'s turn, shell
 and command routes, plus delivery; B5 and B7 clear it.
+
+## D145 — the collaboration domain moves in: items, attention, and rooms that survive
+
+**What it lands.** B4 of the app-server campaign. The core stopped being a stream with
+identities in it and became a place conversations live: a room post and a colleague's message
+are *items* in a conversation, the user has read cursors the frontends share, and a session's
+rooms come back after a restart for the first time.
+
+Six commits, four gates green after each. Baseline 1582 unit + 7 black-box → **1607 unit + 7
+black-box**; no test deleted, no assertion weakened (four retargeted, all noted below).
+
+### The one walker
+
+`tui::perspective` became `src/app/projection.rs`, and the parser it reads with came along:
+`line_source`, `Post`/`PostKind`, `THINKING_ROW`, `tool_call_line`, plus `tool_glyph` and
+`display_tool_name` (which `tool/agent.rs` was already reaching into `tui::activities` for).
+Who said what is application truth. D130 and D132 each cost a round of realigning an agent's
+page with main's because attribution had drifted; a second walker written against the wire
+would have been the third.
+
+The byte contract holds by construction: the walk only reads.
+
+### Everything is an item
+
+| what happens | what it becomes |
+|---|---|
+| a room post, and a join or a leave | `RoomMessage` item, no turn, with the room's own `seq` |
+| a direct message, at the moment it is delivered | `PeerMessage` item in the receiver's conversation |
+| `EngineEvent::Inbound` | read by `projection::inbound`; the DM it repeats is dropped (D135), the scaffolding becomes a `Notice` |
+| `EngineEvent::Warning` | `feedback/raised` with `RUNTIME_WARNING` |
+
+The last two were being dropped by the turn registry (B3's note). Membership entries are items
+too, and that is the point: they are in the room's log, they take a sequence number, and a
+client that had to infer a join from a roster diff would be reading the room twice.
+
+Room posts reach the actor as a **diff** against the last sequence it was told about
+(`ChannelRegistry::since`). One path serves both cases — a post lands one entry behind the
+watermark, a replayed sidecar lands its whole history behind zero.
+
+`conversation/read` and `conversation/list` are served. An item cursor is bound to its
+`historyGeneration`; a continuation across a rewrite is `STALE_PAGE` rather than a mixed
+history.
+
+### Delivery state, and the translation that matters
+
+`delivery/changed` reports every direct message. The domain's vocabulary is one step out from
+the wire's, deliberately:
+
+| domain `AckState` | wire `DeliveryState` | why |
+|---|---|---|
+| `Queued` | `delivered` | it is in the receiver's inbox — D135's *landing* |
+| `Delivered { run }` | `read` | it was folded into the receiver's prompt — D135's *reading* |
+| `Answered { run }` | `answered` | |
+| `Dropped { reason }` | `dropped` | |
+
+The wire's `queued` — accepted but not yet in an inbox — cannot happen while delivery is one
+step. **D137 is untouched and now observable**: `reads_turn_text` still refuses to let a
+colleague's turn prose settle an ack, and the test asserts it through the event stream.
+
+### Attention
+
+`src/app/attention.rs`. Unread is **derived, not counted** — D88's rule kept, for its reason:
+a counter fed by events can drift from the thing it counts and a cursor cannot. What is stored
+is one cursor per conversation; every badge is a subtraction against the log.
+
+- `conversation/markRead` is the only thing that moves one, and it carries the revision the
+  client believed it was looking at. Reading and prefetching mark nothing (invariant #14).
+- The user's own words, and their own arrival in a room, are read by definition — the same
+  thing the domain says when a post advances the sender's cursor and an invite seats a late
+  joiner at the head.
+- Main is not counted (D103): its flow is the screen the user is already sitting in front of.
+- Obligations are read from the registries rather than stored: an open `@`, a message the user
+  sent that nobody answered, a prompt waiting on them.
+
+### 乙案: both frontends wake main the same way
+
+The digest debounce left `chat_tail::digest_mail` for `src/app/mail.rs`. The quiet window, the
+deadline, urgency and the idle gates — main's own turn, main's own queue — are one answer the
+core gives. The console keeps its own half: ringing the attention channel, and running the
+turn, which needs the engine B7 moves.
+
+Two changes fell out. Urgency became the **batch's** rather than a re-read of the one-shot
+flag, so the ring and the wake stopped competing for it. And the window is wall-clock instead
+of the console's frame counter, which is what makes it answerable to a client with no frames.
+
+`MAIL_WAITING` feedback is raised while a batch waits and cleared when it drains — the
+"reading the mail" state a GUI shows.
+
+### Rooms that survive
+
+`<data>/rooms/<stem>.rooms.jsonl`, append-only NDJSON, one object per fact. Nothing is
+rewritten; replay is a fold in order, so the only line a crash can damage is the last one.
+Its own directory, because the transcript sweep selects on `*.jsonl` and would have collected
+a sidecar as a session; gc takes it with the transcript.
+
+Four records — the room and its roster, each log entry, each member's read cursor and spend,
+and the user's own cursor in the room's sequence. Two absences are deliberate:
+
+- **Mentions** are re-derived by replaying the posts through the rule that opened them, so
+  what an `@` owes has one authority however the log arrived.
+- **An agent conversation's history** is that instance's transcript, walked rather than
+  duplicated — so attention on an agent conversation does not survive a restart. Stated in the
+  spec rather than left to be discovered.
+
+Per-member `seen` had to be persisted: without it a resumed member bounces on the whole
+replayed log, which is exactly the flood the serial rule exists to prevent.
+
+The format is written into `notes/design/gui-app-server.md` beside the wire it neighbours.
+
+### The contract grew by one
+
+`command/changed` (B1 review ruling ①). A background command's transitions were a label-only
+watch string; polling `resource/read` is not a typed resource update. Type, regenerated schema
+bundle and fixture in one commit, as the extension rule requires. Exit status stays absent —
+the watch table records a state and a line about it, and `0` would be invented.
+
+`OperationRegistry` landed with it, because team startup is an operation: accepted work that is
+not a turn, with progress and **exactly one terminal state**. `spawn_tree` opens one after
+validation (a bad chart fails before an operation exists for it) and closes it either way; a
+session that ends cancels what is still running.
+
+`AgentStatus` grew `thinking` and `cwd` (Amendment #5). They are printed by `/team status` for
+the members they differ on rather than left as dead fields — each member is its own session,
+and a sub-team node genuinely sits somewhere else.
+
+### Verified, and how
+
+| scenario | where |
+|---|---|
+| room post = message item, no turn, membership included | `app::collab_tests::a_room_post_is_a_message_item_with_no_turn` |
+| DM becomes an item at delivery, with its record | `…::a_direct_message_becomes_an_item_when_it_is_delivered` |
+| D137: peer prose settles nothing | `…::a_peers_turn_prose_does_not_settle_the_message_it_was_sent` |
+| the three voices, and the DM the prompt repeats | `…::an_absorbed_prompt_is_read_by_the_one_walker`, `app::projection::tests::the_walk_names_every_counterpart_the_markers_can_name` |
+| warning → feedback with a stable code | `…::a_warning_from_a_run_is_feedback_with_a_stable_code` |
+| history paging + stale generation | `…::a_room_conversation_pages_its_own_history`, `app::conversation::tests` |
+| reading marks nothing; markRead names its view | `…::reading_a_room_never_marks_it_read`, `app::controller::tests::marking_read_names_the_view_it_was_looking_at` |
+| `@` debt opened and settled, in the summary | `…::a_mention_the_user_owes_is_an_obligation_until_they_speak` |
+| **resume: rooms, unread and the `@` ledger** | `…::a_resumed_session_comes_back_to_its_rooms_and_its_unread_marks` (golden) |
+| sidecar format, truncation, missing file | `app::roomlog::tests` |
+| the wake window | `app::mail::tests` + the console's own three in `tui::chat_tests_f` |
+| `command/changed` | `…::a_background_command_reports_its_transitions_as_a_resource` |
+| serial staleness bounce, D63 `wakes_owner`, D64 markers | unchanged in `channels::tests`, `tool::agent_tests` |
+
+Four tests retargeted, none weakened:
+
+- `the_skeleton_refuses_by_name_what_it_does_not_serve_yet` asks `queue/reclaimTail` now, because
+  `conversation/markRead` is served;
+- `the_session_is_identified_by_the_epoch_that_minted_it` asserts main's conversation instead of
+  asserting there is none;
+- two ordering tests (`app::submit`, `app::turn`) skip conversation summaries, which now
+  accompany most of what they assert and belong to the attention family;
+- the console's three debounce tests drive the core's clock with `rewind` instead of the frame
+  counter, keeping every assertion.
+
+### Not verified, and the boundaries kept
+
+- **No real terminal was driven.** The smoke list is B7's.
+- **`Route::Deliver` still comes back to the caller.** The core now owns the *ledger* half —
+  `agents.deliver` and `channels.post` already run inside the actor, which is why the item and
+  the delivery record are published there — but the *wake* half (`flush_agent_inbox`,
+  `deliver_post`'s chase and watch registration) needs a `Session`. Splitting one action across
+  two places would be worse than keeping it whole, so `conversation/submit` still answers
+  `Unserved` for a delivery and B7 closes it.
+- **Attention on an agent conversation does not survive a restart** (see above).
+- **`BackgroundCommandResource.exit_code` is always absent** — the watch table has no exit
+  status to report.
+- Nothing attaches to the actor in production yet, so every event published here still goes
+  into a stream with no reader outside the tests.
+- The B2b活句柄 exception was not widened: nothing new reads state through `Arc<Session>` or the
+  progress mutex beyond the monotonic counters `AgentFacts` already sampled.
+
