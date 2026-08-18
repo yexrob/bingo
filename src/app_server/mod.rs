@@ -6,17 +6,29 @@
 
 pub mod protocol;
 pub mod schema;
+pub mod session;
+pub mod stdio;
 
 use crate::error::ErrorCode;
 
 #[derive(Debug, thiserror::Error)]
 pub enum AppServerError {
-    /// The transport is not implemented yet. Named rather than silently
-    /// accepting a connection it cannot serve.
-    #[error(
-        "app-server serve mode lands in a later batch; run `bingo app-server generate-schema --out <dir>`"
-    )]
-    ServeUnavailable,
+    /// A client line ran past the negotiated ceiling. The stream cannot be
+    /// framed past it, so the connection ends rather than guessing where the
+    /// next frame begins.
+    #[error("a client frame exceeded the {limit}-byte ceiling")]
+    FrameTooLarge { limit: usize },
+    /// Bounded backpressure and the write timeout both ran out. The transport is
+    /// already unusable; the notice sent before this is best-effort only.
+    #[error("the client is not reading fast enough to stay attached")]
+    ClientTooSlow,
+    /// stdin stopped being UTF-8, or stdout stopped accepting frames.
+    #[error("the app-server stream cannot be framed: {detail}")]
+    Framing { detail: String },
+    /// Where bingo keeps its state, or where the process is standing, could not
+    /// be resolved. Nothing was served.
+    #[error("cannot resolve where bingo keeps its state: {detail}")]
+    Bootstrap { detail: String },
     #[error("cannot write the schema bundle to {path}: {source}")]
     Output {
         path: std::path::PathBuf,
@@ -35,7 +47,10 @@ pub enum AppServerError {
 impl ErrorCode for AppServerError {
     fn error_code(&self) -> &'static str {
         match self {
-            Self::ServeUnavailable => crate::error::SLASH_ERROR_BAD_ARGUMENT,
+            Self::FrameTooLarge { .. } => crate::error::FRAME_TOO_LARGE,
+            Self::ClientTooSlow => crate::error::CLIENT_TOO_SLOW,
+            Self::Framing { .. } => crate::error::TRANSPORT_FAILED,
+            Self::Bootstrap { .. } => "CONFIG_INVALID",
             Self::SchemaConflict { .. } => "SERVER_ERROR",
             Self::Output { .. } | Self::Json(_) => "STORAGE_ERROR",
         }

@@ -320,8 +320,17 @@ session and conversation snapshots and are answered by
   work and resolves permissions fail-closed before persistence and exit.
 
 A malformed but bounded JSON line receives the standard JSON-RPC parse error and
-does not mutate application state. Oversized, non-UTF-8, or otherwise unframeable
-input closes the transport.
+does not mutate application state. Its reply carries the null id, because a line
+that could not be read has no id to echo. Oversized, non-UTF-8, or otherwise
+unframeable input closes the transport.
+
+Exit status is part of the contract:
+
+| Status | Meaning |
+| --- | --- |
+| 0 | The connection ended cleanly — EOF or `shutdown` — after the shutdown policy ran. |
+| 1 | The transport failed, with the CLI's stable `[error] code=… msg=…` line on stderr: `FRAME_TOO_LARGE` for a client line past the ceiling, `TRANSPORT_FAILED` for input that is not UTF-8 or a stdout that stopped accepting frames, `CLIENT_TOO_SLOW` when bounded backpressure and the write timeout both ran out. |
+| 2 | The usual CLI usage error, before any connection exists. |
 
 Stdio is the only required initial transport. A local socket can be added later as a
 shallow adapter if live reconnect becomes a real requirement. WebSocket and
@@ -339,7 +348,24 @@ Use standard JSON-RPC 2.0 envelopes instead of repeating `protocolVersion` and
 ```
 
 No session events are emitted before `initialized`. The negotiated major and
-capabilities remain fixed for the connection.
+capabilities remain fixed for the connection. Nothing else is served between the
+two: a request other than `initialize` that arrives before the `initialized`
+notification fails with `NOT_INITIALIZED`.
+
+**An attachment's notification stream begins at its first snapshot read.** Events
+sequenced at or before that snapshot's `eventCursor` are suppressed for that
+attachment rather than buffered — the snapshot it just received already states
+them, and replaying them would state the same fact twice. A connection that has
+initialized but has not yet read a snapshot therefore receives no notifications
+at all, and the server's memory does not grow with a frontend that never reads.
+`session/start` and `session/resume` answer with a session snapshot, so a
+session's stream begins where its first snapshot ends.
+
+The epoch `initialize` announces is the connection's. `session/start` and
+`session/resume` replace the session actor, and the snapshot each answers with
+carries that session's own epoch; every resource identifier minted under the
+previous epoch is invalid from that moment, which is why a session is named
+across epochs by its transcript locator and never by an old `sessionId`.
 
 The server reports feature capabilities rather than making clients infer them
 from model/provider names. Experimental methods require an explicit client
@@ -754,9 +780,19 @@ structured feedback. Only framing corruption, incompatible initialization,
 stdout failure, or unrecoverable core corruption closes the connection.
 
 Both inbound and outbound queues are bounded. Adjacent append deltas for the
-same item may be coalesced before a sequence number is assigned. Lifecycle,
-interaction, replacement snapshot, and terminal events are never selectively
-dropped while the connection remains healthy. If bounded backpressure and a
+same item may be coalesced before the frame carrying them is written.
+
+**A coalesced frame says so.** `EventMeta.coalescedFrom` is the sequence number
+the merged run began at and the frame's own `seq` is where it ended; everything
+between is that item's appends, whose text this frame carries whole and whose
+last `deltaSeq` it reports. A client checking for gaps therefore still reads a
+gapless stream, and one concatenating deltas still reads the exact text. Only
+text and reasoning appends for one item are merged, and only when they were
+already adjacent in the outbound queue — which is what makes them adjacent in the
+stream.
+
+Lifecycle, interaction, replacement snapshot, and terminal events are never
+selectively dropped while the connection remains healthy. If bounded backpressure and a
 write timeout cannot recover, the transport is already unusable: a
 `CLIENT_TOO_SLOW` error is best-effort only. The server closes the transport,
 interrupts active work through the normal shutdown path, and persists what it

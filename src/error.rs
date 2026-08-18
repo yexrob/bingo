@@ -71,6 +71,10 @@ pub const FRAME_TOO_LARGE: &str = "FRAME_TOO_LARGE";
 /// Bounded backpressure and the write timeout both ran out; best-effort only,
 /// because the transport is already unusable.
 pub const CLIENT_TOO_SLOW: &str = "CLIENT_TOO_SLOW";
+/// The stdio stream stopped being framable — bytes that are not UTF-8, or a
+/// stdout that will not take frames. It is the connection that failed, not a
+/// request, so it has no JSON-RPC number: it is the process's exit code.
+pub const TRANSPORT_FAILED: &str = "TRANSPORT_FAILED";
 
 /// Stable error code: `SCREAMING_SNAKE` (e.g. `CONFIG_INVALID`).
 pub trait ErrorCode {
@@ -549,7 +553,7 @@ mod tests {
             Box::new(ShareError::SessionNotFound("x".into())),
             Box::new(StorageError::HomeUnavailable),
             Box::new(UpdateError::Http { status: 503 }),
-            Box::new(crate::app_server::AppServerError::ServeUnavailable),
+            Box::new(crate::app_server::AppServerError::ClientTooSlow),
         ];
         assert_eq!(
             samples.len(),

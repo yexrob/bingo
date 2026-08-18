@@ -180,8 +180,9 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         crate::update::run_update(&home, check).await?;
         return Ok(());
     }
-    // The app-server needs no session state to publish its own contract, and it
-    // cannot serve one yet.
+    // The app-server owns its own startup: it resolves its directories, and the
+    // session it serves is the one a client asks for rather than one this
+    // function builds on the way past.
     if let Some(Command::AppServer { command }) = cli.command {
         match command {
             Some(AppServerCommand::GenerateSchema { out }) => {
@@ -193,7 +194,10 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 );
                 return Ok(());
             }
-            None => return Err(crate::app_server::AppServerError::ServeUnavailable.into()),
+            None => {
+                crate::app_server::stdio::serve().await?;
+                return Ok(());
+            }
         }
     }
     let project_dir = std::env::current_dir()?;
