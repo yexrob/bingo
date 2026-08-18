@@ -6411,3 +6411,105 @@ by the suite, and the un-gated startup (share attach, team auto-start, team-memo
 persistence) is now on the *same* path the whole suite already covered, so nothing new
 was written for it. Nothing was built in `src/app/` — B0 is a deletion, and the contract
 is B1's.
+
+## D141 — the contract, before anything can bend it
+
+**What it declares.** `src/app/` holds the core's vocabulary: sixteen opaque identifier
+types (`ids.rs`), the resources and snapshots it hands out (`snapshot.rs`), the
+thirty-seven semantic events it publishes (`event.rs`), and the mutations it accepts
+(`command.rs` — `AppCommand`, `Submission`, the five-state `SubmitDisposition`, and a
+twenty-six-variant `Action` union whose families are the spec's). `src/app_server/protocol/`
+holds the wire: the JSON-RPC envelope, the twenty-three-method taxonomy with a params and a
+result type each, the thirty-seven notifications, and nineteen declared application errors.
+`schema.rs` publishes all of it as a ninety-file Draft 7 bundle under `schema/app-server/`.
+
+**One shape per fact.** The wire does not define its own conversation summary, item, or
+turn — it carries the core's. A GUI and the TUI therefore read the same struct, and "is this
+unread" has one answer in this process rather than two that can drift. The cost is that
+`crate::app::snapshot` carries serde and schemars derives, which is a wire concern sitting
+in a core module; the alternative was a translation layer nobody would keep honest.
+
+For the same reason `AppEvent` and `AppCommand` have **no** serialization at all. Their
+payload structs do (the notifications are those structs), but the kernel enums themselves
+would otherwise serialize as `{"type":"turnStarted",…}` — a second encoding of a fact the
+wire already encodes as `turn/started`, and a second contract to keep true. `ServerNotification::from(AppEvent)`
+is the whole adapter, and a fixture asserts the method name each one lands on.
+
+**Serialization decisions the spec left to the implementer**, with their reasons:
+
+- **Adjacent tagging** (`tag = "method", content = "params"`) for both `ClientRequest` and
+  `ServerNotification` — that is exactly JSON-RPC's own shape, so the enum *is* the frame
+  body rather than something mapped onto it.
+- **Internal `type` tag** for every resource union, and the item body **flattened** beside
+  its envelope, which is the shape the spec's own example prints
+  (`{"id":"item_12","type":"assistantMessage","status":"streaming"}`).
+- **camelCase by per-variant `rename_all`**, never by the container's `rename_all_fields`.
+  Serde honours the container form; **schemars 0.8 ignores it**, so the published schema
+  would have named `scope_id` while the server writes `scopeId` — a contract that lies in
+  the one place a client trusts most. `published_property_names_are_camel_case` fails on any
+  underscore in any published property, whatever caused it.
+- **Absent rather than null** for optional fields (`skip_serializing_if` plus `default`, so
+  the reverse direction holds too). Frames are cheaper and a client's "field missing" and
+  "field null" collapse into one case.
+- **The result union is untagged on the way out and method-directed on the way back.** A
+  JSON-RPC response does not repeat its method, so `ResponseResult::from_value(method, value)`
+  takes the method the caller sent — which is what a real client has in hand. An untagged
+  `Deserialize` would have guessed, and guessed wrong between similar results.
+- **`ResponseFrame` carries `result` and `error` as two optionals** rather than a flattened
+  enum. Schemars gives an externally tagged enum `additionalProperties: false` per branch,
+  which through a flatten produces a schema that rejects the server's own frames. Two
+  constructors are the only way to build one, so "exactly one of" still holds in Rust; the
+  published schema states it only as "at most one of each".
+- **Identifiers are bare JSON strings** with a documented prefix and a uniqueness test. The
+  spec named five (`conv_`/`turn_`/`item_`/`int_`/`op_`/`asset_`); the rest are chosen here:
+  `epoch_`, `sess_`, `queue_`, `agent_`, `room_`, `task_`, `dm_`, `cmd_`, `scope_`, `fb_`.
+  Minting is B2's; this batch only fixes the shape and the prefix each one will wear.
+- **Error numbers start at -32001**, and -32008/-32009 stay unassigned so `TURN_CLOSED` keeps
+  the -32010 the spec printed by hand. `BAD_ARGUMENT` reuses the standard -32602. The
+  `bingoCode` values are registered in `src/error.rs` beside the existing stable codes — one
+  registry, not a protocol-local copy — and `AppServerError` joins the boxed-exit registry
+  (13 → 14).
+- **The bundle hoists shared definitions.** Ninety files: a manifest, one `definitions.json`,
+  five envelopes, forty-six method schemas, thirty-seven notification schemas. Inlining
+  definitions per file worked and cost 940K, where a renamed field landed as a dozen
+  identical diffs; hoisting them behind `../definitions.json#/definitions/X` cuts it to
+  ~230K and one. `$id`s are `urn:bingo:app-server:v1:<name>` — a URN rather than a URL,
+  because the project owns no schema host.
+
+**Two real bugs the fixtures caught, both invisible by reading.** `ItemBody::ToolCall`
+carried a `status` of its own, which **flattening silently collided with the item's own
+`status`** — one of the two would have been lost on every tool call. It is gone: whether a
+call succeeded is the item's status (`completed`/`failed`/`cancelled`), and a second answer
+to that question is a second answer that can disagree. And the `rename_all_fields` trap
+above, which the first generated schema exposed and a fixture then pinned.
+
+**What it deliberately does not do.** No actor, no transport, no TUI, no `src/query.rs`: the
+modules are mounted and uncalled, each carrying an `allow(dead_code)` with the batch that
+removes it named in the comment. `bingo app-server` without `generate-schema` fails with
+`BAD_ARGUMENT` and says the serve mode lands later, rather than accepting a connection it
+cannot answer. `guide.md` and the READMEs are untouched — per the plan the documentation
+batch is B8, and there is no user-visible behavior to describe yet beyond that one refusal.
+
+**One gap in the spec, reported rather than filled.** The parity ledger requires
+"agent/task/**command** watch transitions" to be typed resource updates, and the snapshot
+carries `backgroundCommands` — but the notification table has no `command/changed`. A
+thirty-eighth notification was drafted and then dropped: the table is the contract, and
+inventing an entry is exactly what §5 says not to do alone. B4 should either add it or say
+why polling `resource/read` is enough.
+
+**Verified.** Four gates green (`cargo fmt --all -- --check`, `cargo check --locked
+--all-targets`, `cargo clippy --locked --all-targets -- -D warnings`, `cargo test --locked
+--all-targets`), plus `scripts/check_discipline.sh`. Tests 1500 → **1539** (1532 unit + 7
+black-box): 38 new unit tests and one black-box case, none deleted. About 170 exact-JSON
+fixtures — every request, result, notification, and declared error, plus every item body,
+disposition, interaction prompt and decision, action, catalog, and resource page — each
+asserted equal to a `json!` literal in both directions. Additive evolution is pinned by a
+test that feeds unknown fields into a request, a notification, and a result.
+`cargo run -- app-server generate-schema --out /tmp/x` reproduces the committed bundle byte
+for byte, and the drift guard compares them on every run.
+
+**Not verified.** Nothing constructs these types at runtime — there is no actor to fill a
+snapshot and no socket to write a frame, so the only evidence they are *right* is that they
+say what the spec says. No generated TypeScript has been compiled from the bundle, and no
+client has read it. The schema is `bundleVersion: 1` and unpublished; per the plan it stays
+experimental until the parity ledger and the black-box scenarios are green in B8.
