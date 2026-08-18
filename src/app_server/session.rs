@@ -93,6 +93,15 @@ pub fn start(boot: &Bootstrap, wanted: &Wanted) -> Result<Started, Refusal> {
             format!("cannot create a transcript: {error}"),
         )
     })?;
+    // Opened now rather than at the first thing written to it: the session a
+    // client just started is one `session/list` can name and `session/resume`
+    // can find, and holding it is what stops a second process writing it.
+    transcript.activate().map_err(|error| {
+        Refusal::new(
+            ProtocolErrorKind::BadArgument,
+            format!("cannot open the transcript: {error}"),
+        )
+    })?;
     assemble(boot, wanted, &cwd, Some(transcript), false)
 }
 

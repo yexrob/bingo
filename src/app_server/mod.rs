@@ -25,6 +25,14 @@ pub enum AppServerError {
     /// stdin stopped being UTF-8, or stdout stopped accepting frames.
     #[error("the app-server stream cannot be framed: {detail}")]
     Framing { detail: String },
+    /// The client and this build did not agree on how to talk. The refusal was
+    /// written before this; the connection cannot continue, because the two
+    /// non-recoverable initialization failures are exactly the ones a client
+    /// cannot usefully retry on the same connection.
+    #[error("initialization failed: {}", .kind.message())]
+    Initialization {
+        kind: crate::app_server::protocol::error::ProtocolErrorKind,
+    },
     /// Where bingo keeps its state, or where the process is standing, could not
     /// be resolved. Nothing was served.
     #[error("cannot resolve where bingo keeps its state: {detail}")]
@@ -50,6 +58,7 @@ impl ErrorCode for AppServerError {
             Self::FrameTooLarge { .. } => crate::error::FRAME_TOO_LARGE,
             Self::ClientTooSlow => crate::error::CLIENT_TOO_SLOW,
             Self::Framing { .. } => crate::error::TRANSPORT_FAILED,
+            Self::Initialization { kind } => kind.bingo_code(),
             Self::Bootstrap { .. } => "CONFIG_INVALID",
             Self::SchemaConflict { .. } => "SERVER_ERROR",
             Self::Output { .. } | Self::Json(_) => "STORAGE_ERROR",

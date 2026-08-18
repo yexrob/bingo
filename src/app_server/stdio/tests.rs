@@ -264,7 +264,16 @@ async fn initialization_fails_rather_than_pretending_to_agree() {
         let frame = client.call(json!(1), "initialize", params).await;
         assert_eq!(error_code(&frame), expected, "{label}: {frame}");
         assert!(frame.get("result").is_none(), "{label}: {frame}");
-        let _ = client.finish().await;
+        // The two the contract calls non-recoverable end the connection: a
+        // client cannot usefully retry either one on it.
+        let fatal = matches!(expected, "PROTOCOL_UNSUPPORTED" | "CAPABILITY_REQUIRED");
+        match client.finish().await {
+            Err(AppServerError::Initialization { kind }) => {
+                assert!(fatal, "{label}: this one should have been recoverable");
+                assert_eq!(kind.bingo_code(), expected, "{label}");
+            }
+            other => assert!(!fatal, "{label}: expected the connection to end: {other:?}"),
+        }
     }
 }
 
@@ -568,17 +577,17 @@ async fn a_session_is_resumed_by_the_name_it_keeps_across_epochs() {
     let started = client.call(json!(2), "session/start", json!({})).await;
     let first = started["result"]["snapshot"]["session"].clone();
     let stem = first["title"].as_str().unwrap_or_default().to_string();
-    // Starting a session does not yet write its file; listing it is what proves
-    // there is something to resume.
+    // A started session is one the client can name again: `session/list` shows
+    // it, and the locator it shows is what `session/resume` takes.
     let listed = client.call(json!(3), "session/list", json!({})).await;
-    let known = listed["result"]["sessions"]["items"]
-        .as_array()
-        .map(|items| {
-            items
-                .iter()
-                .any(|entry| entry["locator"] == json!({"type": "stem", "stem": stem}))
-        })
-        .unwrap_or(false);
+    assert!(
+        listed["result"]["sessions"]["items"]
+            .as_array()
+            .is_some_and(|items| items.iter().any(|entry| entry["locator"]
+                == json!({"type": "stem", "stem": stem})
+                && entry["open"] == json!(true))),
+        "the open session is listed and says it is open: {listed}"
+    );
 
     let resumed = client
         .call(
@@ -587,16 +596,12 @@ async fn a_session_is_resumed_by_the_name_it_keeps_across_epochs() {
             json!({"locator": {"type": "stem", "stem": stem}}),
         )
         .await;
-    if known {
-        let session = &resumed["result"]["snapshot"]["session"];
-        assert_eq!(session["resumed"], json!(true));
-        assert_ne!(
-            session["epoch"], first["epoch"],
-            "replacing the actor mints a new epoch, and the old identifiers die with it"
-        );
-    } else {
-        assert_eq!(error_code(&resumed), "SESSION_NOT_FOUND");
-    }
+    let session = &resumed["result"]["snapshot"]["session"];
+    assert_eq!(session["resumed"], json!(true), "{resumed}");
+    assert_ne!(
+        session["epoch"], first["epoch"],
+        "replacing the actor mints a new epoch, and the old identifiers die with it"
+    );
     let missing = client
         .call(
             json!(5),

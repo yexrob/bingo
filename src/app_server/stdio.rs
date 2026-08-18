@@ -717,14 +717,14 @@ impl Connection {
         // sides know is the one that holds for the connection.
         if params.protocol.major != PROTOCOL_MAJOR || params.protocol.min_minor > PROTOCOL_MINOR {
             return self
-                .refused(id, ProtocolErrorKind::ProtocolUnsupported)
+                .refused_fatally(id, ProtocolErrorKind::ProtocolUnsupported)
                 .await;
         }
         // A controlling client must be able to answer a prompt. Failing here is
         // the alternative to silently auto-denying one that has not happened yet.
         if !params.capabilities.interaction_response {
             return self
-                .refused(id, ProtocolErrorKind::CapabilityRequired)
+                .refused_fatally(id, ProtocolErrorKind::CapabilityRequired)
                 .await;
         }
         if params
@@ -734,7 +734,7 @@ impl Connection {
             .any(|name| !EXPERIMENTAL.contains(&name.as_str()))
         {
             return self
-                .refused(id, ProtocolErrorKind::CapabilityRequired)
+                .refused_fatally(id, ProtocolErrorKind::CapabilityRequired)
                 .await;
         }
         let result = InitializeResult {
@@ -1023,6 +1023,18 @@ impl Connection {
     ) -> Result<Flow, AppServerError> {
         let error = self.application_error(kind);
         self.fail(id, error).await
+    }
+
+    /// Say no, and end the connection. Only initialization does this: the two
+    /// failures it can have are the ones the contract declares non-recoverable,
+    /// and a client cannot usefully retry either on the same connection.
+    async fn refused_fatally(
+        &mut self,
+        id: RequestId,
+        kind: ProtocolErrorKind,
+    ) -> Result<Flow, AppServerError> {
+        self.refused(id, kind).await?;
+        Err(AppServerError::Initialization { kind })
     }
 
     /// A declared error, told which session it happened in.
