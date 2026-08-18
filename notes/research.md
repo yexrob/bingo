@@ -6827,3 +6827,200 @@ still engine tasks rather than actor-owned operations. The registries' place in
 `SessionSnapshot` is still `empty_collection()` — a reader gets them from the views or from
 nothing, and B4 is where a snapshot starts carrying them along with the attention cursors and
 the room sidecar.
+
+---
+
+## D144 — the session's behaviour moves in: turns, queue, routing, prompts
+
+**What it lands.** B3 of the app-server campaign. Four things the terminal front end used to
+own are the actor's now, and the console reads them rather than holding them: the **turn
+lifecycle**, the **input queue**, the **submission path**, and the **prompts a run stops on**.
+A session also has an end for the first time, which is what pays off D143's parked thread.
+
+Five commits, four gates green after each. Baseline 1546 unit + 7 black-box → **1582 unit + 7
+black-box**; no test was deleted and none had an assertion weakened (two were retargeted, both
+noted below).
+
+### What the core owns after this
+
+```text
+   ┌──────────────────────── session actor thread ──────────────────────────┐
+   │ Controller: seq/ts · attachments · snapshot cut · mint · conversations │
+   │                                                                        │
+   │  TurnRegistry      InputQueue      InteractionRegistry                 │
+   │  turns + the       FIFO + the      the oneshot a run                   │
+   │  items one         barrier/pull-   is waiting on, and                  │
+   │  attempt made      back race       D81's guard                         │
+   │                                                                        │
+   │  WatchRegistry     ChannelRegistry     AgentRegistry     (D143)        │
+   └────────────────────────────────────────────────────────────────────────┘
+        ▲ report            ▲ question (Answer<T>)        ▼ listing (watch)
+   EngineEvent from a run   submit / respond / reclaim    Session { turns, queue,
+                                                          submit, interactions, … }
+```
+
+`ConvKey` moved out of `src/ui.rs` into `src/app/conversation.rs` beside the map that turns it
+into the `ConversationId` a client sees. A conversation is the core's resource; a key that
+named one thing in the front end and another in the core would have been two vocabularies for
+one idea.
+
+### A turn ends once, whatever ends the run
+
+`TurnRegistry` mints the turn, holds the items the attempt in flight produced, and decides that
+**the first terminal state wins**. That is the v1 bug closed: an error raised on the way out is
+a second fact about the turn, never a substitute for its terminal event (spec invariant #5).
+
+A run that is *aborted* executes no line of its own — which is how an instance is stopped — so
+the closing cannot be a statement in the run. `TurnGuard::drop` closes the turn, and the actor
+is what refuses the second close. `TurnBrackets` in `tool/agent.rs` became that guard; main's
+turn and the `!` shell turn each got one.
+
+Rounds have no event of their own in the engine: a round starts when a request goes out, and
+what proves it went out is the first thing that came back, so `turn/roundStarted` is published
+by the first content of the round.
+
+**Retry checkpoints.** `EngineEvent::StreamRetry` gained `attempt / max_attempts / delay_ms /
+discarded_output` and now travels on *every* attempt rather than only on the ones that had
+drawn something — a client counting attempts must not be short one. `discarded_output` is what
+the console gates its rollback on, so its behaviour is unchanged. The actor withdraws exactly
+the items the attempt started and names them in `turn/retrying`; the next attempt mints new
+identifiers, and a removed one is never reused. This is an engine-internal type: the wire's
+`TurnRetrying` already carried these fields from B1, so no schema regeneration was owed.
+
+**One host, one run** (the B2a review's note). A host bound to a turn claims it at the top of
+`run_query` / `run_bash_command`; the actor refuses the second claim, because two runs
+reporting into one turn's item stream would interleave two attempts into one history. An
+unbound host — headless `--print`, an embedded call, a test — has no shared turn state to
+corrupt and needs no claim.
+
+### The queue, and one race with one winner
+
+`src/steer.rs` is gone, folded into `src/app/queue.rs`: the queue and the channel that
+projected it were one thing described twice, and the projection is what could drift.
+`Conversation::queued` and `Chat::steer` are gone with it; the console reads a replacement
+snapshot.
+
+Eligibility is a **prefix**, computed where the entries are: a command, a shell line, or
+anything carrying an attachment cannot travel to a running turn, and neither can anything
+queued behind one. The composer's `rearm_steer` disappeared — there is nothing left to re-arm.
+
+The tool barrier and the `↑` pull-back are **one race with one winner** because both happen
+inside the actor (invariant #9). Absorption removes the entries in the same step that hands
+them to the turn, so a pull-back arriving after it finds nothing to pull; it publishes the item
+the input became *before* the `queue/itemAbsorbed` that names it, because the item is what the
+model read. The absorbed ledger is cleared at each drain: the next turn's pull-back must not be
+told it lost a race it never ran.
+
+`SteerFn` became async, matching `AskFn`: the barrier awaits the actor instead of blocking a
+worker thread on it.
+
+### One submission path
+
+`compose` says what a line *is* — shell, command, direct send, prose — and `route` says what
+happens to it; both are `src/app/submit.rs`, and both the console and `conversation/submit`
+go through them. `parse_direct_send` and `DirectTarget` moved out of `tui/bufferview.rs`;
+`INSTANT_COMMANDS` moved out of `tui/slash.rs`, because "this line bypasses the queue" is a
+routing decision, not a presentation one.
+
+`Chat::submit` now resolves its own terminal shorthand — paste placeholders, image paths —
+asks the core, and performs what comes back. The rules are unchanged: prose on main runs or
+queues, prose elsewhere is delivered, a direct send never waits behind main's turn, the
+console's commands and shell are the console's wherever the screen is, and the page a line was
+typed on travels with it (D135/D135a).
+
+One latent defect fixed on the way: a shell line queued behind a busy turn used to drain as
+*prose*, sending the command to the model instead of running it. It queues as a shell line now.
+
+**Reply before event.** `conversation/submit` exposed a violation of invariant #3 — the
+handler published the queue event before the reply frame carrying its disposition. Everything a
+request handler publishes is now held until its reply is out. This is also what makes a
+snapshot cut taken inside a request sound.
+
+### The prompts, and D81 where the answer is
+
+`InteractionRegistry` holds the oneshot the run is waiting on. `ui::modal_ask`, `AskRequest`
+and `DialogAction` are gone; `Chat::pending_ask` is the core's identity for the prompt plus a
+render model built from it, and every key answers through the handle. `ui::PermissionRequest`
+survives as the render model and `PermissionRequest::of` is the only thing that knows both
+shapes.
+
+- **Advertised decisions only.** `allowSession` must name the scope the server itself derived
+  and verified; a client that names anything else is asking for a promise the gate cannot keep.
+  The `ScopeId` is minted by the registry, not composed by whoever built the prompt.
+- **The guard is enforced where the answer is held.** It holds back keyboard *approval* of a
+  permission prompt and nothing else — pointer approval, denial, cancellation and every
+  non-confirming key stay immediate. `respond_at` carries the instant the key landed, so the
+  guard is testable without sleeping.
+- **Answered once.** A late or repeated response is refused with `INTERACTION_CLOSED` and
+  cannot reach a later prompt. Cancellation fails closed: the run is told no rather than left
+  waiting.
+- The resolution commits its ordered item — a question answer, or a permission receipt that is
+  explicitly excluded from model input — *before* `interaction/resolved` names it.
+
+**A behaviour tightening, deliberately.** `shift+tab` (the session-option shortcut) was never
+covered by the old surface's guard because the guard lived in the two key branches that
+happened to call it. It *is* a keyboard approval, so the core guards it now. One test's key
+timing moved past the window; its assertion is unchanged.
+
+### The close path, and D143's parked thread
+
+`AppCore::close` settles what is open in one order: running turns reach `interrupted` (a client
+that saw `turn/started` is never left waiting for its end), pending prompts fail closed, queued
+input is dropped as `cleared`. Then `AgentRegistry::release` drops the `Arc<Session>` each
+instance held — the half of D29's cycle that kept the actor's inbox open — and the loop
+returns. `main.rs` closes the core after the session-end hooks.
+
+A session proves its own thread ended: the thread holds the strong half of an `Arc<()>` and the
+core a weak one, so `is_running()` distinguishes "the loop has ended" from "the loop is idle"
+without a test counting threads.
+
+### Usage, context, and compaction
+
+`ContextUsage` and the provider's own `StopReason.output_tokens` reach the turn as
+`turn/usageUpdated`; neither is recomputed downstream. `compact.rs` states a `CompactOutcome
+{ before, after, replaced, duration }` and commits it as a compaction item in the conversation
+whose history it replaced — a subagent compacts its own, everything else is the console's. The
+numbers are the compactor's own local estimate, measured with the same ruler on both sides so
+the difference means something where `count_tokens` is unavailable.
+
+### An ordering bug this found
+
+Every registry answers a question *after* publishing its reader view. Two tests were flaky
+before that: a caller woken by a reply could read a view older than the answer it had just
+been given. `watch`, `channels` and `agents` already did this; `turns`, `queue` and
+`interactions` do now.
+
+### Verified, and how
+
+Four gates green on every commit. The six core-behaviour families the spec names:
+
+| family | where |
+| --- | --- |
+| submission disposition | `app::submit::actor_tests` (idle runs, busy queues, unknown conversation refused, reply-before-event) |
+| page-origin preservation | `app::submit::tests`, `tui::chat::tests_f::a_queued_command_acts_on_the_page_it_was_typed_on` |
+| FIFO barrier + tail-reclaim race | `app::queue::tests` (prefix, attachment, one winner, ledger cleared at drain) |
+| retry checkpoint | `app::turn::tests` + `actor_tests::a_retry_publishes_the_checkpoint_it_replaced` |
+| exactly one terminal state | `app::turn::tests::a_turn_reaches_exactly_one_terminal_state`, `actor_tests::{an_aborted_run_still_closes_its_turn_exactly_once, an_error_does_not_substitute_for_the_terminal_event}` |
+| interaction lifecycle | `app::interaction::tests` (guard timing, advertised scope, late reply, fail-closed, abandoned-only sweep) |
+
+Two tests were retargeted rather than weakened: the B2a skeleton's "refused by name" now asks
+`conversation/markRead` because `shutdown` is served, and `shift_tab_takes_the_session_option`
+presses past the guard the core now applies to it.
+
+### Not verified
+
+No real terminal was driven — the TUI's behaviour is still asserted only by its own tests, and
+the smoke list is B7's. Nothing attaches to the actor in production, so every event published
+here goes into a stream with no reader outside the tests. `--print` still runs its own host
+(B8). One environmental note: the suite is stable at ~4s, but a hung test during development
+made the whole run look slow — the hang was the shift+tab guard, not the harness.
+
+### Left to B4/B5
+
+`AppEventPayload::{Warning → feedback/raised, Inbound → peer item}` are still dropped by the
+turn registry rather than published as something they are not: the feedback registry is B5's
+and the collaboration item model is B4's. `SessionSnapshot` still hands out
+`empty_collection()`; conversations, attention and the room sidecar are B4's. `Route::Deliver`
+comes back to the caller to perform, because delivery needs `Session` and the actor does not
+have one — B4 moves it. `AppError::Unserved` still covers `conversation/submit`'s turn, shell
+and command routes, plus delivery; B5 and B7 clear it.
