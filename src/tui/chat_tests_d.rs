@@ -295,14 +295,10 @@ fn mention_esc_closes_the_layer_and_keeps_the_text() {
 #[test]
 fn permission_dialog_keeps_the_mention_dropdown_closed() {
     let (mut chat, root) = project_chat("ask");
-    let (tx, _rx) = oneshot::channel();
-    chat.pending_ask = Some((
-        PermissionRequest::new(
-            "Bash",
-            "Allow running Bash?",
-            vec!["Yes".into(), "No".into()],
-        ),
-        tx,
+    chat.stub_ask(PermissionRequest::new(
+        "Bash",
+        "Allow running Bash?",
+        vec!["Yes".into(), "No".into()],
     ));
 
     chat.set_input("@chat");

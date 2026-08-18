@@ -452,6 +452,7 @@ impl TurnRegistry {
                     },
                 );
                 self.active.insert(conversation.clone(), id.clone());
+                self.publish();
                 let _ = reply.send(Some(id));
                 vec![TurnChange::Started { conversation, turn }]
             }

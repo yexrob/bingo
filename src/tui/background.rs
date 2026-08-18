@@ -1759,14 +1759,10 @@ mod tests {
         assert!(chat.dialog.is_some());
         chat.dialog = None;
 
-        let (tx, _rx) = tokio::sync::oneshot::channel();
-        chat.pending_ask = Some((
-            crate::ui::PermissionRequest::new(
-                "Allow Bash",
-                "cargo test",
-                vec![crate::ui::ASK_YES.into(), crate::ui::ASK_NO.into()],
-            ),
-            tx,
+        chat.stub_ask(crate::ui::PermissionRequest::new(
+            "Allow Bash",
+            "cargo test",
+            vec![crate::ui::ASK_YES.into(), crate::ui::ASK_NO.into()],
         ));
         chat.open_background_dialog();
         assert!(chat.dialog.is_none(), "the question keeps the screen");

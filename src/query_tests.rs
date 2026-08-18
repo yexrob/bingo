@@ -642,6 +642,7 @@ fn test_session_at(home: std::path::PathBuf, cwd: std::path::PathBuf) -> Arc<Ses
         turns: core.turns(),
         queue: core.queue(),
         submit: core.submit(),
+        interactions: core.interactions(),
         instance: None,
         attachments: crate::api::image::Attachments::new(),
     })
@@ -721,6 +722,7 @@ fn test_session_with_client_and_failures(
         turns: core.turns(),
         queue: core.queue(),
         submit: core.submit(),
+        interactions: core.interactions(),
         instance: None,
         attachments: crate::api::image::Attachments::new(),
     })
@@ -1456,6 +1458,7 @@ async fn bash_command_executes_without_model_query() {
         turns: core.turns(),
         queue: core.queue(),
         submit: core.submit(),
+        interactions: core.interactions(),
         instance: None,
         attachments: crate::api::image::Attachments::new(),
     });
@@ -2086,6 +2089,7 @@ async fn bash_command_refuses_interactive_tty_commands() {
         turns: core.turns(),
         queue: core.queue(),
         submit: core.submit(),
+        interactions: core.interactions(),
         instance: None,
         attachments: crate::api::image::Attachments::new(),
     });

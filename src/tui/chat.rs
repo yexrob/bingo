@@ -5,7 +5,7 @@
 //! which builds transcript blocks ([`crate::tui::statics::Block`]) laid out by
 //! [`crate::tui::statics::layout`] into display-agnostic styled row documents, mapped to
 //! terminal rows by [`crate::tui::view`].
-//! Events arrive from channels (`UiEvent` / `AskRequest`); keyboard/mouse come in via
+//! Events arrive from channels (`UiEvent`); keyboard/mouse come in via
 //! [`Chat::on_key`] / [`Chat::doc_click`].
 
 use std::collections::{HashMap, HashSet};
@@ -14,7 +14,7 @@ use std::sync::Arc;
 use crossterm::event::{KeyCode, KeyModifiers};
 use ratatui::style::Color;
 use rsmarkdown_core::{MarkdownProcessor, Renderer};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
 
 use crate::budget::MAX_RESULT_CHARS;
 use crate::permission::PermissionMode;
@@ -29,7 +29,7 @@ use crate::tui::line::{Line, SegStyle, text_width, wrap_words};
 use crate::tui::markdown::MarkdownRenderer;
 use crate::tui::notify::{Attention, Notifier, Title};
 use crate::tui::theme::{Theme, ThemeSetting};
-use crate::ui::{AskRequest, DialogAction, ImageMeta, PermissionRequest, UiEvent};
+use crate::ui::{ImageMeta, PermissionRequest, UiEvent};
 use crate::watch::WatchState;
 
 pub use crate::tui::el::{ClickTarget, Row};
@@ -684,9 +684,7 @@ pub struct Chat {
     /// The console's own sink, bound to main. Every other conversation's
     /// producer holds one bound to itself (`AgentHandle::sink_for`).
     pub(super) events: crate::ui::EventSink,
-    pub asks: mpsc::UnboundedSender<AskRequest>,
     pub(crate) events_rx: mpsc::UnboundedReceiver<crate::ui::Addressed>,
-    pub(crate) asks_rx: mpsc::UnboundedReceiver<AskRequest>,
     /// The conversation on screen. Everything the running turn writes lives
     /// here; everything the console owns stays on `Chat`.
     pub conv: crate::tui::conversation::Conversation,
@@ -795,14 +793,13 @@ pub struct Chat {
     /// Input of the last submitted model turn (#18 full-screen error state reruns it on Enter=retry).
     pub last_prompt: String,
     pub cwd: String,
-    /// Permission prompt: request + result receipt.
-    pub pending_ask: Option<(PermissionRequest, oneshot::Sender<DialogAction>)>,
+    /// The prompt on screen: the core's identity for it, and the render model
+    /// built from it. The answer belongs to the actor (B3); this is the view.
+    pub pending_ask: Option<(crate::app::ids::InteractionId, PermissionRequest)>,
     /// Dialog focus row (0..=options.len(); == options.len() = free-text input).
     pub(crate) ask_focus: usize,
     /// Buffer for free-form input: AskUserQuestion's Other, or a refusal's feedback.
     pub(crate) ask_other: String,
-    /// When the pending dialog first appeared (D81 type-ahead guard).
-    pub(crate) ask_opened_at: Option<std::time::Instant>,
     /// ctrl+e: the pre-approval preview is showing in full, not bounded.
     pub(crate) ask_expanded: bool,
     /// Task-list disk snapshot cache (refreshed each tick).
@@ -1056,8 +1053,6 @@ impl Chat {
         session: Arc<Session>,
         events: crate::ui::EventSink,
         events_rx: mpsc::UnboundedReceiver<crate::ui::Addressed>,
-        asks: mpsc::UnboundedSender<AskRequest>,
-        asks_rx: mpsc::UnboundedReceiver<AskRequest>,
         theme: Theme,
         theme_setting: ThemeSetting,
         detected_background: Option<bool>,
@@ -1134,9 +1129,7 @@ impl Chat {
         Self {
             session,
             events,
-            asks,
             events_rx,
-            asks_rx,
             conv: crate::tui::conversation::Conversation::new(context_usage),
             parked: HashMap::new(),
             active: crate::ui::ConvKey::Main,
@@ -1179,7 +1172,6 @@ impl Chat {
             pending_ask: None,
             ask_focus: 0,
             ask_other: String::new(),
-            ask_opened_at: None,
             ask_expanded: false,
             tasks_cache: Vec::new(),
             processor: MarkdownProcessor::default(),
@@ -2553,6 +2545,99 @@ impl Chat {
             }
         }
         self.run_slash(line)
+    }
+
+    /// Put a prompt on screen without a run behind it, for a test whose subject
+    /// is what the dialog does to the surface around it rather than what
+    /// answering it does.
+    #[cfg(test)]
+    pub(crate) fn stub_ask(&mut self, request: PermissionRequest) {
+        self.pending_ask = Some((crate::app::ids::InteractionId::new("int_stub"), request));
+    }
+
+    /// Open a real prompt in the core and put it on screen. The receiver is the
+    /// verdict the run would have been given.
+    #[cfg(test)]
+    pub(crate) fn open_test_prompt(
+        &mut self,
+        prompt: crate::app::snapshot::InteractionPrompt,
+    ) -> tokio::sync::oneshot::Receiver<crate::app::interaction::Verdict> {
+        let verdict = self
+            .session
+            .interactions
+            .open(crate::app::interaction::OpenPrompt {
+                conversation: crate::ui::ConvKey::Main,
+                turn: None,
+                item: None,
+                prompt,
+            });
+        self.drain_asks();
+        verdict
+    }
+
+    /// AskUserQuestion's shape: the model's own options plus the free-text row.
+    #[cfg(test)]
+    pub(crate) fn open_test_question(
+        &mut self,
+        title: &str,
+        question: &str,
+        options: &[(&str, Option<&str>)],
+    ) -> tokio::sync::oneshot::Receiver<crate::app::interaction::Verdict> {
+        self.open_test_prompt(crate::app::snapshot::InteractionPrompt::Question {
+            title: title.to_string(),
+            question: question.to_string(),
+            options: options
+                .iter()
+                .enumerate()
+                .map(
+                    |(index, (label, description))| crate::app::snapshot::QuestionOption {
+                        id: index.to_string(),
+                        label: (*label).to_string(),
+                        description: description.map(str::to_string),
+                    },
+                )
+                .collect(),
+            allows_free_text: true,
+        })
+    }
+
+    /// The permission gate's shape, with the session option offered only when a
+    /// rule was derived for it.
+    #[cfg(test)]
+    pub(crate) fn open_test_permission(
+        &mut self,
+        tool: &str,
+        reason: &str,
+        command: Option<&str>,
+        scope: Option<&str>,
+    ) -> tokio::sync::oneshot::Receiver<crate::app::interaction::Verdict> {
+        use crate::app::snapshot::PermissionDecisionKind;
+        let mut decisions = vec![PermissionDecisionKind::AllowOnce];
+        if scope.is_some() {
+            decisions.push(PermissionDecisionKind::AllowSession);
+        }
+        decisions.push(PermissionDecisionKind::Deny);
+        self.open_test_prompt(crate::app::snapshot::InteractionPrompt::Permission {
+            title: format!("Allow running {tool}"),
+            reason: Some(reason.to_string()),
+            tool: crate::app::snapshot::ToolRequest {
+                name: tool.to_string(),
+                input: command
+                    .map(|command| serde_json::json!({ "command": command }))
+                    .unwrap_or(serde_json::Value::Null),
+            },
+            preview: command.map(
+                |command| crate::app::snapshot::InteractionPreview::Command {
+                    command: command.to_string(),
+                },
+            ),
+            decisions,
+            session_scope: scope.map(|label| crate::app::snapshot::SessionScope {
+                id: crate::app::ids::ScopeId::new(""),
+                label: label.to_string(),
+            }),
+            allows_feedback: true,
+        })
     }
 
     /// Put a line straight on the console's queue, for a test that wants one

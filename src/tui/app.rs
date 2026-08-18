@@ -1155,14 +1155,10 @@ mod tests {
         );
 
         // With a question on screen the key is inert.
-        let (tx, _rx) = tokio::sync::oneshot::channel();
-        chat.pending_ask = Some((
-            crate::ui::PermissionRequest::new(
-                "Allow Bash",
-                "cargo test",
-                vec![crate::ui::ASK_YES.into(), crate::ui::ASK_NO.into()],
-            ),
-            tx,
+        chat.stub_ask(crate::ui::PermissionRequest::new(
+            "Allow Bash",
+            "cargo test",
+            vec![crate::ui::ASK_YES.into(), crate::ui::ASK_NO.into()],
         ));
         dispatch_key(&mut chat, key(KeyCode::Char('o'), KeyModifiers::CONTROL));
         assert!(

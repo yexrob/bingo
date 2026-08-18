@@ -21,9 +21,10 @@ use tokio::sync::{mpsc, oneshot};
 use crate::app::command::{AppCommand, AppQuery};
 use crate::app::conversation::{ConvKey, Conversations};
 use crate::app::event::{
-    AgentChanged, AppEvent, AppEventPayload, EventMeta, ItemChanged, ItemDelta, QueueItemAbsorbed,
-    QueueItemAdded, QueueItemRemoved, RoomChanged, TurnChanged, TurnRetrying, TurnRoundCompleted,
-    TurnRoundStarted, TurnUsageUpdated,
+    AgentChanged, AppEvent, AppEventPayload, EventMeta, InteractionCancelled, InteractionOpened,
+    InteractionResolved, ItemChanged, ItemDelta, QueueItemAbsorbed, QueueItemAdded,
+    QueueItemRemoved, RoomChanged, TurnChanged, TurnRetrying, TurnRoundCompleted, TurnRoundStarted,
+    TurnUsageUpdated,
 };
 use crate::app::ids::{
     AgentId, ConversationId, EpochId, IdMint, OperationId, RoomId, SessionId, now_millis,
@@ -78,6 +79,8 @@ pub(crate) enum Control {
     Turn(crate::app::turn::TurnMsg),
     /// An input queue accepting, absorbing, draining, or losing an entry.
     Queue(crate::app::queue::QueueMsg),
+    /// A prompt opening, being answered, or being closed.
+    Interaction(crate::app::interaction::InteractionMsg),
     /// One submission, read and routed.
     Submit {
         request: Box<crate::app::submit::SubmitRequest>,
@@ -89,6 +92,16 @@ pub(crate) enum Control {
     },
 }
 
+/// Everything the actor owns, handed to it in one piece at startup.
+struct State {
+    watch: crate::watch::WatchRegistry,
+    channels: crate::channels::ChannelRegistry,
+    agents: crate::agents::AgentRegistry,
+    turns: crate::app::turn::TurnRegistry,
+    queue: crate::app::queue::InputQueue,
+    interactions: crate::app::interaction::InteractionRegistry,
+}
+
 /// What the actor hands out at startup: one handle per registry it owns.
 pub(crate) struct Registries {
     pub watch: crate::watch::WatchHandle,
@@ -97,6 +110,7 @@ pub(crate) struct Registries {
     pub turns: crate::app::turn::TurnHandle,
     pub queue: crate::app::queue::QueueHandle,
     pub submit: crate::app::submit::SubmitHandle,
+    pub interactions: crate::app::interaction::InteractionHandle,
 }
 
 /// Start the actor and return the handle everything reaches it by.
@@ -115,6 +129,7 @@ pub(super) fn spawn(setup: SessionSetup) -> (mpsc::UnboundedSender<Control>, Reg
     let (agents, agent_handle) = crate::agents::attach(control.clone());
     let (turns, turn_handle) = crate::app::turn::attach(control.clone());
     let (queue, queue_handle) = crate::app::queue::attach(control.clone());
+    let (interactions, interaction_handle) = crate::app::interaction::attach(control.clone());
     let control_for_submit = control.clone();
     // The actor holds a weak handle to its own inbox: it hands strong clones to
     // the attachments it spawns, and a strong one of its own would keep the
@@ -122,11 +137,14 @@ pub(super) fn spawn(setup: SessionSetup) -> (mpsc::UnboundedSender<Control>, Reg
     let controller = Controller::new(
         setup,
         control.downgrade(),
-        watch,
-        channels,
-        agents,
-        turns,
-        queue,
+        State {
+            watch,
+            channels,
+            agents,
+            turns,
+            queue,
+            interactions,
+        },
     );
     std::thread::Builder::new()
         .name("bingo-session".to_string())
@@ -141,6 +159,7 @@ pub(super) fn spawn(setup: SessionSetup) -> (mpsc::UnboundedSender<Control>, Reg
             turns: turn_handle,
             queue: queue_handle,
             submit: crate::app::submit::SubmitHandle::new(control_for_submit),
+            interactions: interaction_handle,
         },
     )
 }
@@ -203,6 +222,9 @@ struct Controller {
     turns: crate::app::turn::TurnRegistry,
     /// The input queues, and the barrier/pull-back race they arbitrate (B3).
     queue: crate::app::queue::InputQueue,
+    /// The prompts a run is stopped on, and the guard that decides when a
+    /// keystroke may answer one (B3).
+    interactions: crate::app::interaction::InteractionRegistry,
     /// Which conversations exist and what each one is called on the wire.
     conversations: Conversations,
     /// A request is being answered: what it publishes waits for its reply.
@@ -239,15 +261,7 @@ struct RoomSummary {
 }
 
 impl Controller {
-    fn new(
-        setup: SessionSetup,
-        control: mpsc::WeakUnboundedSender<Control>,
-        watch: crate::watch::WatchRegistry,
-        channels: crate::channels::ChannelRegistry,
-        agents: crate::agents::AgentRegistry,
-        turns: crate::app::turn::TurnRegistry,
-        queue: crate::app::queue::InputQueue,
-    ) -> Self {
+    fn new(setup: SessionSetup, control: mpsc::WeakUnboundedSender<Control>, state: State) -> Self {
         let epoch = EpochId::mint();
         let mut mint = IdMint::new(epoch.clone());
         let id: SessionId = mint.mint();
@@ -294,11 +308,12 @@ impl Controller {
             attachments: Vec::new(),
             next_attachment: 0,
             control,
-            watch,
-            channels,
-            agents,
-            turns,
-            queue,
+            watch: state.watch,
+            channels: state.channels,
+            agents: state.agents,
+            turns: state.turns,
+            queue: state.queue,
+            interactions: state.interactions,
             conversations,
             serving: false,
             deferred: Vec::new(),
@@ -343,6 +358,10 @@ impl Controller {
                 Control::Queue(message) => {
                     let changes = self.queue.handle(message, &mut self.mint);
                     self.announce_queue(changes);
+                }
+                Control::Interaction(message) => {
+                    let changes = self.interactions.handle(message, &mut self.mint);
+                    self.announce_interactions(changes);
                 }
                 Control::Submit { request, reply } => {
                     let route = self.submit(*request);
@@ -868,6 +887,56 @@ impl Controller {
                 .into_iter()
                 .map(|fact| fact.name)
                 .collect(),
+        }
+    }
+
+    /// Publish what the prompts changed. The ordered item a resolution committed
+    /// comes before the resolution that names it: the item is what the model or
+    /// the audit trail reads.
+    fn announce_interactions(&mut self, changes: Vec<crate::app::interaction::InteractionChange>) {
+        use crate::app::interaction::InteractionChange;
+        for change in changes {
+            let payload = match change {
+                InteractionChange::Opened {
+                    conversation,
+                    interaction,
+                } => {
+                    let conversation_id = self.conversation_id(&conversation);
+                    let mut interaction = *interaction;
+                    interaction.conversation_id = conversation_id;
+                    AppEventPayload::InteractionOpened(InteractionOpened { interaction })
+                }
+                InteractionChange::Committed {
+                    conversation,
+                    turn,
+                    item,
+                } => AppEventPayload::ItemCompleted(ItemChanged {
+                    conversation_id: self.conversation_id(&conversation),
+                    turn_id: turn,
+                    item: *item,
+                }),
+                InteractionChange::Resolved {
+                    conversation,
+                    id,
+                    decision,
+                    item,
+                } => AppEventPayload::InteractionResolved(InteractionResolved {
+                    interaction_id: id,
+                    conversation_id: self.conversation_id(&conversation),
+                    decision,
+                    item_id: item,
+                }),
+                InteractionChange::Cancelled {
+                    conversation,
+                    id,
+                    reason,
+                } => AppEventPayload::InteractionCancelled(InteractionCancelled {
+                    interaction_id: id,
+                    conversation_id: self.conversation_id(&conversation),
+                    reason,
+                }),
+            };
+            self.publish(Box::new(payload), None);
         }
     }
 

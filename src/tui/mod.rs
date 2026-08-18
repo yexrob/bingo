@@ -314,22 +314,22 @@ pub async fn run_tui_session(
     }
 
     let (events_tx, events_rx) = mpsc::unbounded_channel();
-    let (asks_tx, asks_rx) = mpsc::unbounded_channel();
     let events = crate::ui::EventSink::new(crate::ui::ConvKey::Main, events_tx);
-    // Subagents have no modal of their own; point them at this one so their permission
-    // requests reach the user instead of being auto-denied — and no event channel
-    // of their own either, so their turns stream onto this one (D134).
+    // Subagents have no modal of their own; point them at the console's one so their
+    // permission requests reach the user instead of being auto-denied — and no event
+    // channel of their own either, so their turns stream onto this one (D134).
     session
         .agents
-        .attach_ask(crate::ui::modal_ask(asks_tx.clone()));
+        .attach_ask(crate::app::interaction::permission_ask(
+            session.interactions.clone(),
+            crate::ui::ConvKey::Main,
+        ));
     session.agents.set_events(events.clone());
     let theme_setting = ThemeSetting::parse(session.settings.theme.as_deref());
     let mut chat = Chat::new(
         session.clone(),
         events,
         events_rx,
-        asks_tx,
-        asks_rx,
         Theme::for_terminal(theme_setting, detected_background),
         theme_setting,
         detected_background,

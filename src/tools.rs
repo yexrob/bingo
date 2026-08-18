@@ -171,6 +171,7 @@ mod tests {
             turns: core.turns(),
             queue: core.queue(),
             submit: core.submit(),
+            interactions: core.interactions(),
             instance: None,
             attachments: crate::api::image::Attachments::new(),
         })

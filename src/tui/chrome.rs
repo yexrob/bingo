@@ -732,10 +732,10 @@ mod tests {
 
         chat.conv.busy = true;
         chat.push_warning("mcp connection failed".to_string());
-        let (tx, _rx) = tokio::sync::oneshot::channel();
-        chat.pending_ask = Some((
-            crate::ui::PermissionRequest::new("t", "q", vec!["a".into()]),
-            tx,
+        chat.stub_ask(crate::ui::PermissionRequest::new(
+            "t",
+            "q",
+            vec!["a".into()],
         ));
         chat.set_input("a\nb\nc");
         chat.help_visible = true;

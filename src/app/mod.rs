@@ -27,6 +27,7 @@ pub mod controller;
 pub mod conversation;
 pub mod event;
 pub mod ids;
+pub mod interaction;
 pub mod queue;
 pub mod snapshot;
 pub mod submit;
@@ -209,6 +210,7 @@ pub struct AppCore {
     turns: crate::app::turn::TurnHandle,
     queue: crate::app::queue::QueueHandle,
     submit: crate::app::submit::SubmitHandle,
+    interactions: crate::app::interaction::InteractionHandle,
 }
 
 impl AppCore {
@@ -223,6 +225,7 @@ impl AppCore {
             turns: registries.turns,
             queue: registries.queue,
             submit: registries.submit,
+            interactions: registries.interactions,
         }
     }
 
@@ -254,6 +257,11 @@ impl AppCore {
     /// The one submission path.
     pub fn submit(&self) -> crate::app::submit::SubmitHandle {
         self.submit.clone()
+    }
+
+    /// The prompts a run is stopped on.
+    pub fn interactions(&self) -> crate::app::interaction::InteractionHandle {
+        self.interactions.clone()
     }
 
     /// Attach a frontend. The attachment sees no event until it takes a

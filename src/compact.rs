@@ -811,10 +811,9 @@ mod tests {
         let estimate = estimate_tokens(&session.system, &messages, &[]);
 
         let (events_tx, mut events_rx) = tokio::sync::mpsc::unbounded_channel();
-        let (asks_tx, _asks_rx) = tokio::sync::mpsc::unbounded_channel();
         let ui = crate::ui::tui_hooks(
             crate::ui::EventSink::new(crate::ui::ConvKey::Main, events_tx),
-            asks_tx,
+            session.interactions.clone(),
             crate::query::no_steer(),
             crate::live::LiveBash::detached(),
         );

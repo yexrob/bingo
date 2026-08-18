@@ -499,13 +499,10 @@ mod tests {
         let mut session = (*crate::tui::test_util::test_session()).clone();
         session.home = home.to_path_buf();
         let (events, events_rx) = tokio::sync::mpsc::unbounded_channel();
-        let (asks, asks_rx) = tokio::sync::mpsc::unbounded_channel();
         let mut chat = Chat::new(
             Arc::new(session),
             crate::ui::EventSink::new(crate::ui::ConvKey::Main, events),
             events_rx,
-            asks,
-            asks_rx,
             crate::tui::theme::Theme::dark(),
             crate::tui::theme::ThemeSetting::Auto,
             None,

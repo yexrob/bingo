@@ -51,6 +51,7 @@ pub fn test_session() -> Arc<Session> {
         turns: core.turns(),
         queue: core.queue(),
         submit: core.submit(),
+        interactions: core.interactions(),
         instance: None,
         attachments: crate::api::image::Attachments::new(),
     })
@@ -82,7 +83,6 @@ pub fn body(line: &crate::tui::line::Line, images: bool) -> crate::tui::line::Li
 /// A [`Chat`] sized to the given terminal (dark theme, offline session).
 pub fn chat_at(width: usize, height: usize) -> Chat {
     let (events_tx, events_rx) = tokio::sync::mpsc::unbounded_channel();
-    let (asks_tx, asks_rx) = tokio::sync::mpsc::unbounded_channel();
     let session = test_session();
     let events = crate::ui::EventSink::new(crate::ui::ConvKey::Main, events_tx);
     session.agents.set_events(events.clone());
@@ -90,8 +90,6 @@ pub fn chat_at(width: usize, height: usize) -> Chat {
         session,
         events,
         events_rx,
-        asks_tx,
-        asks_rx,
         Theme::dark(),
         crate::tui::theme::ThemeSetting::Auto,
         None,

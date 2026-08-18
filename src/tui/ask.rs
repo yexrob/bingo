@@ -15,37 +15,40 @@ use crossterm::event::{KeyCode, KeyModifiers};
 
 use crate::ui::{AskKind, AskPreview};
 
-/// A dialog that appears under a keystroke already on its way must not answer
-/// it. The first moments of a permission prompt ignore confirmations, so a
-/// stray Enter approves nothing (CC's confirm delay).
-pub(crate) const ASK_CONFIRM_GUARD: std::time::Duration = std::time::Duration::from_millis(400);
-
 /// Bounded preview height, collapsed. A long diff would push the question and
 /// the options themselves off the screen — ctrl+e lifts the bound.
 const ASK_DIFF_ROWS: usize = 12;
 /// Bounded command height, collapsed (heredocs and `&&` chains run long).
 const ASK_COMMAND_ROWS: usize = 6;
 
+use crate::app::snapshot::{ActivationKind, InteractionCancelReason, InteractionDecision};
+
 impl super::Chat {
-    /// Drains the permission channel (one at a time: a new request is only accepted when none is pending).
+    /// Picks up the prompt the core has open (one at a time: a second question
+    /// waits until this one is settled).
+    ///
+    /// The prompt is the actor's; this is the console noticing it. B7 replaces
+    /// the poll with the `interaction/opened` frame the core already publishes.
     pub fn drain_asks(&mut self) -> bool {
-        if self.pending_ask.is_none()
-            && let Ok(request) = self.asks_rx.try_recv()
-        {
-            self.ask_focus = 0;
-            self.ask_other.clear();
-            self.ask_expanded = false;
-            // The guard runs from the moment the dialog exists, which is the
-            // moment the keystroke already in flight would land on it.
-            self.ask_opened_at = Some(std::time::Instant::now());
-            self.pending_ask = Some(request);
-            // The turn is blocked until this is answered, and the user may well
-            // be looking somewhere else by now (D79).
-            self.notify.attention(Attention::WaitingPermission);
-            self.notify.set_title(Title::WaitingPermission);
-            return true;
+        if self.pending_ask.is_some() {
+            return false;
         }
-        false
+        let view = self.session.interactions.view();
+        let Some(pending) = view.head() else {
+            return false;
+        };
+        self.ask_focus = 0;
+        self.ask_other.clear();
+        self.ask_expanded = false;
+        self.pending_ask = Some((
+            pending.interaction.id.clone(),
+            crate::ui::PermissionRequest::of(pending),
+        ));
+        // The turn is blocked until this is answered, and the user may well
+        // be looking somewhere else by now (D79).
+        self.notify.attention(Attention::WaitingPermission);
+        self.notify.set_title(Title::WaitingPermission);
+        true
     }
 
     /// Settles the permission dialogs a dead turn left behind (D80).
@@ -53,46 +56,30 @@ impl super::Chat {
     /// The dialog and the turn used to have separate lifetimes: an interrupt
     /// killed the task awaiting the answer and left the question on screen, so
     /// the footer went on saying `Waiting for permission…` and every 1-9 the
-    /// user pressed answered a corpse — the reply went into a dropped oneshot
-    /// and nothing happened. Cancelling here closes both ends: an explicit
-    /// `Cancel` on the wire (the receiver reads it as a deny — fail closed),
-    /// the requests still queued behind it emptied the same way, and one dim
-    /// line in the flow where the dialog was.
+    /// user pressed answered a corpse. Cancelling closes both ends — the core
+    /// fails the prompt closed, and one dim line goes in the flow where the
+    /// dialog was.
     ///
     /// `dead_only` keeps a background agent out of the foreground turn's
-    /// cleanup: subagents share this modal queue, so at turn end the only
-    /// requests that belong to the turn that just ended are the ones whose
-    /// receiver is already gone. An explicit interrupt takes everything,
-    /// because that is what the user asked for.
+    /// cleanup: subagents share this modal, so at turn end the only prompts that
+    /// belong to the turn that just ended are the ones whose run is already gone.
+    /// An explicit interrupt takes everything, because that is what the user
+    /// asked for.
     pub(crate) fn cancel_asks(&mut self, dead_only: bool) -> bool {
-        let mut cancelled = false;
-        let settle = |ask: crate::ui::AskRequest| {
-            let _ = ask.1.send(crate::ui::DialogAction::Cancel);
+        let reason = if dead_only {
+            InteractionCancelReason::TurnEnded
+        } else {
+            InteractionCancelReason::Interrupted
         };
-        if let Some(ask) = self.pending_ask.take() {
-            if dead_only && !ask.1.is_closed() {
-                self.pending_ask = Some(ask);
-            } else {
-                settle(ask);
-                cancelled = true;
-            }
-        }
-        // A request still in the channel has no row of its own yet; it is
-        // drained here so it cannot surface as a dialog for a turn that is
-        // already gone. Live ones go back in the same order they came out.
-        let mut keep = Vec::new();
-        while let Ok(ask) = self.asks_rx.try_recv() {
-            if dead_only && !ask.1.is_closed() {
-                keep.push(ask);
-            } else {
-                settle(ask);
-                cancelled = true;
-            }
-        }
-        for ask in keep {
-            let _ = self.asks.send(ask);
-        }
+        let cancelled = self
+            .session
+            .interactions
+            .cancel_all(reason, dead_only)
+            .now();
         if cancelled {
+            // What is on screen may have been one of them; the next drain picks
+            // up whatever is still open.
+            self.pending_ask = None;
             self.reset_ask_state();
             self.main_conv().drop_empty_stream_message();
             self.push_user_line(ASK_CANCELLED_TEXT.to_string());
@@ -107,19 +94,69 @@ impl super::Chat {
         self.ask_focus = 0;
         self.ask_other.clear();
         self.ask_expanded = false;
-        self.ask_opened_at = None;
     }
 
-    /// Whether a confirmation landing right now is type-ahead rather than an
-    /// answer. Permission prompts only: a wrong AskUserQuestion option costs a
-    /// round trip, a wrong approval runs a command.
-    fn confirm_guarded(&self, now: std::time::Instant) -> bool {
-        self.pending_ask
-            .as_ref()
-            .is_some_and(|(request, _)| request.kind == AskKind::Permission)
-            && self
-                .ask_opened_at
-                .is_some_and(|at| now.duration_since(at) < ASK_CONFIRM_GUARD)
+    /// The prompt on screen, if there is one.
+    fn ask_request(&self) -> Option<&crate::ui::PermissionRequest> {
+        self.pending_ask.as_ref().map(|(_, request)| request)
+    }
+
+    /// Answer the prompt on screen. `Some(false)` means the core refused the
+    /// answer — a keyboard approval inside D81's guard, which is swallowed
+    /// exactly as it was before the guard moved into the core.
+    fn answer(
+        &mut self,
+        activation: ActivationKind,
+        at: std::time::Instant,
+        decision: InteractionDecision,
+    ) -> bool {
+        let Some((id, _)) = &self.pending_ask else {
+            return false;
+        };
+        let accepted = self
+            .session
+            .interactions
+            .respond_at(id.clone(), activation, at, decision)
+            .now()
+            .is_ok();
+        if accepted {
+            self.pending_ask = None;
+            self.reset_ask_state();
+        }
+        accepted
+    }
+
+    /// The decision option `index` stands for on the prompt in hand.
+    fn decision_at(&self, index: usize) -> Option<InteractionDecision> {
+        let (id, request) = self.pending_ask.as_ref()?;
+        let _ = id;
+        if request.kind != AskKind::Permission {
+            return Some(InteractionDecision::Answer {
+                option_id: Some(index.to_string()),
+                text: None,
+            });
+        }
+        if request.session_option() == Some(index) {
+            let scope = self.open_scope()?;
+            return Some(InteractionDecision::AllowSession { scope_id: scope });
+        }
+        if index == 0 {
+            return Some(InteractionDecision::AllowOnce);
+        }
+        Some(InteractionDecision::Deny { feedback: None })
+    }
+
+    /// The scope identifier the core minted for this prompt's session rule.
+    fn open_scope(&self) -> Option<crate::app::ids::ScopeId> {
+        let (id, _) = self.pending_ask.as_ref()?;
+        let view = self.session.interactions.view();
+        let pending = view.iter().find(|p| &p.interaction.id == id)?;
+        match &pending.interaction.prompt {
+            crate::app::snapshot::InteractionPrompt::Permission { session_scope, .. } => {
+                session_scope.as_ref().map(|scope| scope.id.clone())
+            }
+            _ => None,
+        }
     }
 
     /// Dialog key input (Select semantics): digits/Enter confirm, ↑/↓ move the
@@ -146,7 +183,7 @@ impl super::Chat {
         modifiers: KeyModifiers,
         now: std::time::Instant,
     ) -> bool {
-        let Some((request, _)) = &self.pending_ask else {
+        let Some(request) = self.ask_request() else {
             return false;
         };
         let permission = request.kind == AskKind::Permission;
@@ -177,7 +214,7 @@ impl super::Chat {
             }
             KeyCode::Enter if in_other => {
                 let text = std::mem::take(&mut self.ask_other);
-                self.submit_ask_answer(text);
+                self.submit_ask_answer(text, now);
                 true
             }
             // shift+tab is CC's shortcut onto the session option, from anywhere
@@ -186,19 +223,18 @@ impl super::Chat {
             // behind an unanswered question is not what the press meant.
             KeyCode::BackTab if permission => {
                 if let Some(index) = self.session_option() {
-                    self.choose_ask_option(index);
+                    self.choose_ask_option_at(index, ActivationKind::Keyboard, now);
                 }
                 true
             }
             KeyCode::Char(c) if c.is_ascii_digit() && c != '0' => {
-                if self.confirm_guarded(now) {
-                    return true;
-                }
                 let index = (c as u8 - b'1') as usize;
                 if index < total {
                     self.ask_focus = index;
                     if !(index == options_len && free_text) {
-                        self.choose_ask_option(index);
+                        // The core is what refuses a premature approval; the key
+                        // is swallowed either way, exactly as it always was.
+                        self.choose_ask_option_at(index, ActivationKind::Keyboard, now);
                     }
                 }
                 true
@@ -220,31 +256,31 @@ impl super::Chat {
                 true
             }
             KeyCode::Enter => {
-                if self.confirm_guarded(now) {
-                    return true;
-                }
                 let focus = self.ask_focus;
                 if focus >= options_len && free_text {
                     let text = std::mem::take(&mut self.ask_other);
-                    self.submit_ask_answer(text);
+                    self.submit_ask_answer(text, now);
                 } else {
-                    self.choose_ask_option(focus);
+                    self.choose_ask_option_at(focus, ActivationKind::Keyboard, now);
                 }
                 true
             }
             // Esc denies plainly, from the option list and from the feedback row
-            // alike: the user is leaving, not composing.
+            // alike: the user is leaving, not composing. Dismissing is never
+            // premature, so it is never held back.
             KeyCode::Esc => {
-                let Some((request, tx)) = self.pending_ask.take() else {
+                let Some(request) = self.ask_request() else {
                     return true;
                 };
-                if request.kind == AskKind::Permission {
-                    self.push_ask_message(ASK_RECEIPT_NO.to_string());
-                } else if request.free_text {
-                    self.push_ask_message(ASK_DECLINED_TEXT.to_string());
+                let permission = request.kind == AskKind::Permission;
+                let free_text = request.free_text;
+                if self.answer(ActivationKind::Keyboard, now, InteractionDecision::Cancel) {
+                    if permission {
+                        self.push_ask_message(ASK_RECEIPT_NO.to_string());
+                    } else if free_text {
+                        self.push_ask_message(ASK_DECLINED_TEXT.to_string());
+                    }
                 }
-                let _ = tx.send(DialogAction::Cancel);
-                self.reset_ask_state();
                 true
             }
             _ => false,
@@ -253,14 +289,15 @@ impl super::Chat {
 
     /// Index of the "don't ask again this session" option, when it is offered.
     fn session_option(&self) -> Option<usize> {
-        self.pending_ask
-            .as_ref()
-            .and_then(|(request, _)| request.session_option())
+        self.ask_request()
+            .and_then(|request| request.session_option())
     }
 
     /// Click on a dialog option: a free-text row → enter input mode; anything else confirms.
+    ///
+    /// A pointer was aimed at the prompt that exists, so it is never premature.
     pub(crate) fn ask_click(&mut self, index: usize) {
-        let Some((request, _)) = &self.pending_ask else {
+        let Some(request) = self.ask_request() else {
             return;
         };
         let options_len = request.options.len();
@@ -269,7 +306,7 @@ impl super::Chat {
             self.ask_focus = index;
             return;
         }
-        self.choose_ask_option(index);
+        self.choose_ask_option_at(index, ActivationKind::Pointer, std::time::Instant::now());
     }
 
     /// AskUserQuestion answer text: header + one `· question → answer` line.
@@ -308,79 +345,95 @@ impl super::Chat {
 
     /// Submitting free text. Empty is not an answer: AskUserQuestion reads it as
     /// a decline, a permission prompt as the plain refusal it already is.
-    fn submit_ask_answer(&mut self, text: String) {
-        let permission = self
-            .pending_ask
-            .as_ref()
-            .is_some_and(|(request, _)| request.kind == AskKind::Permission);
+    fn submit_ask_answer(&mut self, text: String, now: std::time::Instant) {
+        let Some(request) = self.ask_request() else {
+            return;
+        };
+        let permission = request.kind == AskKind::Permission;
+        let free_text = request.free_text;
+        let question = request.question.clone();
         if text.trim().is_empty() {
-            if permission {
-                self.push_ask_message(ASK_RECEIPT_NO.to_string());
-            } else if self
-                .pending_ask
-                .as_ref()
-                .is_some_and(|(request, _)| request.free_text)
-            {
-                self.push_ask_message(ASK_DECLINED_TEXT.to_string());
+            if self.answer(ActivationKind::Keyboard, now, InteractionDecision::Cancel) {
+                if permission {
+                    self.push_ask_message(ASK_RECEIPT_NO.to_string());
+                } else if free_text {
+                    self.push_ask_message(ASK_DECLINED_TEXT.to_string());
+                }
             }
-            if let Some((_, tx)) = self.pending_ask.take() {
-                let _ = tx.send(DialogAction::Cancel);
-            }
-            self.reset_ask_state();
             return;
         }
-        if let Some((request, tx)) = self.pending_ask.take() {
-            if request.kind == AskKind::Permission {
+        let decision = if permission {
+            // The refusal carries a direction: it travels to the model inside
+            // the `<permission_error>`.
+            InteractionDecision::Deny {
+                feedback: Some(text.clone()),
+            }
+        } else {
+            InteractionDecision::Answer {
+                option_id: None,
+                text: Some(text.clone()),
+            }
+        };
+        if self.answer(ActivationKind::Keyboard, now, decision) {
+            if permission {
                 self.push_ask_message(format!("{}{}", ASK_RECEIPT_NO_PREFIX, text.trim()));
             } else {
-                let question = request.question.clone();
                 self.push_ask_message(Self::ask_answer_text(&question, &text));
             }
-            let _ = tx.send(DialogAction::Answer(text));
         }
-        self.reset_ask_state();
     }
 
-    /// Confirms option `index` (0-based; out of range = cancel).
-    pub(crate) fn choose_ask_option(&mut self, index: usize) {
-        let Some((request, _)) = &self.pending_ask else {
-            return;
+    /// Confirms option `index`, as `activation` at `at`. Returns whether the
+    /// core took the answer.
+    fn choose_ask_option_at(
+        &mut self,
+        index: usize,
+        activation: ActivationKind,
+        at: std::time::Instant,
+    ) -> bool {
+        let Some(request) = self.ask_request() else {
+            return false;
         };
         // The refusal option does not resolve the dialog: the user said no and
         // is about to say what to do instead. Empty submit or Esc from there is
         // still the plain refusal.
         if request.refusal_option() == Some(index) && !request.free_text {
             let options_len = request.options.len();
-            if let Some((request, _)) = &mut self.pending_ask {
+            if let Some((_, request)) = &mut self.pending_ask {
                 request.free_text = true;
             }
             self.ask_focus = options_len;
             self.ask_other.clear();
             self.dirty = true;
-            return;
+            return true;
         }
-        let receipt = request.kind.eq(&AskKind::Permission).then(|| {
-            if request.session_option() == Some(index) {
-                ASK_RECEIPT_SESSION
-            } else {
-                ASK_RECEIPT_YES
-            }
-        });
-        if let Some((request, tx)) = self.pending_ask.take() {
-            if index < request.options.len() {
-                if let Some(receipt) = receipt {
-                    self.push_ask_message(receipt.to_string());
-                } else if request.free_text {
-                    let question = request.question.clone();
-                    let answer = request.options[index].clone();
-                    self.push_ask_message(Self::ask_answer_text(&question, &answer));
+        if index >= request.options.len() {
+            return self.answer(activation, at, InteractionDecision::Cancel);
+        }
+        let permission = request.kind == AskKind::Permission;
+        let free_text = request.free_text;
+        let question = request.question.clone();
+        let label = request.options[index].clone();
+        let session = request.session_option() == Some(index);
+        let Some(decision) = self.decision_at(index) else {
+            return false;
+        };
+        if !self.answer(activation, at, decision) {
+            return false;
+        }
+        if permission {
+            self.push_ask_message(
+                if session {
+                    ASK_RECEIPT_SESSION
+                } else {
+                    ASK_RECEIPT_YES
                 }
-                let _ = tx.send(DialogAction::Confirm(index));
-            } else {
-                let _ = tx.send(DialogAction::Cancel);
-            }
+                .to_string(),
+            );
+        } else if free_text {
+            self.push_ask_message(Self::ask_answer_text(&question, &label));
         }
-        self.reset_ask_state();
+        true
     }
 
     /// Permission/ask block (PermissionDialog / AskUserQuestion):
@@ -388,7 +441,7 @@ impl super::Chat {
     /// numbered options (Select: `❯ n. label` focus marker, desc sub-row dim,
     /// free-text input) + shortcut hints.
     pub(crate) fn ask_el(&self, theme: &Theme) -> Option<El> {
-        let (request, _) = self.pending_ask.as_ref()?;
+        let (_, request) = self.pending_ask.as_ref()?;
         let permission = request.kind == AskKind::Permission;
         let mut parts: Vec<El> = Vec::new();
         let mut title = Line::styled("⏺ ", SegStyle::fg(theme.text));

@@ -188,7 +188,7 @@ impl Chat {
     /// with `{instance} · ` (tool/agent.rs, `subagent_hooks`), so the roster
     /// is the parser; main's own asks carry no such prefix and match nobody.
     pub(crate) fn asking_instance(&self) -> Option<String> {
-        let (request, _) = self.pending_ask.as_ref()?;
+        let (_, request) = self.pending_ask.as_ref()?;
         let head = request.question.split(" · ").next()?;
         self.tree_instances()
             .iter()

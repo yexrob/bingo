@@ -662,7 +662,7 @@ impl super::Chat {
         let live = self.live.clone();
         let session = self.session_for_turn();
         let events = self.events.clone();
-        let asks = self.asks.clone();
+        let interactions = self.session.interactions.clone();
         let images = self.resolve_images(&text);
         // Subscribe first, then reset: tokio watch's send does not update the value with no receivers —
         // after the previous spawn ends, all receivers are dropped; sending false first would silently
@@ -677,7 +677,7 @@ impl super::Chat {
         let steer = self.steering(turn.clone());
         let handle = tokio::spawn(async move {
             events.send(UiEvent::TurnStart);
-            let mut host = crate::ui::tui_hooks(events.clone(), asks, steer, live);
+            let mut host = crate::ui::tui_hooks(events.clone(), interactions, steer, live);
             let guard = turn.map(|turn| {
                 host = host.clone().bound(turns.clone(), turn.clone());
                 turns.guard(turn, crate::app::snapshot::TurnStatus::Failed)
@@ -821,7 +821,7 @@ impl super::Chat {
         let live = self.live.clone();
         let session = self.session_for_turn();
         let events = self.events.clone();
-        let asks = self.asks.clone();
+        let interactions = self.session.interactions.clone();
         // Same as start_turn: subscribe first, then reset (send does not update with no receivers).
         let cancel_rx = self.cancel_tx.subscribe();
         self.cancel_tx.send_replace(false);
@@ -830,7 +830,7 @@ impl super::Chat {
         let steer = self.steering(turn.clone());
         let handle = tokio::spawn(async move {
             events.send(UiEvent::TurnStart);
-            let mut host = crate::ui::tui_hooks(events.clone(), asks, steer, live);
+            let mut host = crate::ui::tui_hooks(events.clone(), interactions, steer, live);
             let guard = turn.map(|turn| {
                 host = host.clone().bound(turns.clone(), turn.clone());
                 turns.guard(turn, crate::app::snapshot::TurnStatus::Failed)
@@ -2115,7 +2115,7 @@ impl super::Chat {
             || self.slash_error_at.is_some()
             || self.notice_until.is_some()
             || !self.events_rx.is_empty()
-            || !self.asks_rx.is_empty()
+            || !self.session.interactions.view().is_empty()
             // Mail landing in a fully idle session is the one thing that has to
             // wake the clock rather than ride an event: nothing else is
             // happening, and the digest window has to be able to expire (D98).

@@ -316,14 +316,8 @@ fn age_the_turn(chat: &mut Chat) {
 #[test]
 fn a_waiting_permission_prompt_rings() {
     let mut chat = chat_with_bell();
-    let (tx, _rx) = tokio::sync::oneshot::channel();
-    chat.asks
-        .send((
-            PermissionRequest::new("Allow running Bash", "cargo build", vec!["Allow".into()]),
-            tx,
-        ))
-        .unwrap();
-    assert!(chat.drain_asks(), "the request is accepted");
+    let _verdict = chat.open_test_permission("Bash", "cargo build", Some("cargo build"), None);
+    assert!(chat.pending_ask.is_some(), "the request is accepted");
     assert_eq!(
         emitted(&mut chat),
         "\x07\x1b]2;✳ bingo — waiting for permission\x07",
@@ -332,13 +326,7 @@ fn a_waiting_permission_prompt_rings() {
 
     // A second request cannot be accepted while one is pending, so it cannot
     // ring either — the modal is already on screen.
-    let (tx2, _rx2) = tokio::sync::oneshot::channel();
-    chat.asks
-        .send((
-            PermissionRequest::new("Allow running Bash", "cargo test", vec!["Allow".into()]),
-            tx2,
-        ))
-        .unwrap();
+    let _second = chat.open_test_permission("Bash", "cargo test", Some("cargo test"), None);
     assert!(!chat.drain_asks());
     assert!(
         emitted(&mut chat).is_empty(),
@@ -416,14 +404,8 @@ fn only_a_flow_level_failure_announces_itself() {
 #[test]
 fn the_default_chat_is_silent_on_every_trigger() {
     let mut chat = crate::tui::test_util::chat_at(80, 24);
-    let (tx, _rx) = tokio::sync::oneshot::channel();
-    chat.asks
-        .send((
-            PermissionRequest::new("Allow running Bash", "cargo build", vec!["Allow".into()]),
-            tx,
-        ))
-        .unwrap();
-    assert!(chat.drain_asks());
+    let _verdict = chat.open_test_permission("Bash", "cargo build", Some("cargo build"), None);
+    assert!(chat.pending_ask.is_some());
     chat.apply_event(UiEvent::TurnStart);
     age_the_turn(&mut chat);
     chat.apply_event(UiEvent::TurnEnd);
@@ -592,14 +574,8 @@ fn esc_clears_info_lines_without_ending_the_turn() {
 #[test]
 fn an_interrupt_settles_the_dialog_it_leaves_behind() {
     let mut chat = test_chat();
-    let (tx, mut rx) = tokio::sync::oneshot::channel();
-    chat.asks
-        .send((
-            PermissionRequest::new("Allow running Bash", "rm -rf /", vec!["Allow".into()]),
-            tx,
-        ))
-        .unwrap();
-    assert!(chat.drain_asks());
+    let verdict = chat.open_test_permission("Bash", "rm -rf /", Some("rm -rf /"), None);
+    assert!(chat.pending_ask.is_some());
     chat.conv.busy = true;
     assert!(chrome_text(&chat).contains("Waiting for permission…"));
 
@@ -610,8 +586,8 @@ fn an_interrupt_settles_the_dialog_it_leaves_behind() {
     );
     assert!(chat.pending_ask.is_none(), "the dialog went with the turn");
     assert_eq!(
-        rx.try_recv(),
-        Ok(DialogAction::Cancel),
+        verdict.blocking_recv(),
+        Ok(crate::app::interaction::Verdict::Cancelled),
         "the waiting side is told, not left hanging"
     );
     assert!(
@@ -624,9 +600,7 @@ fn an_interrupt_settles_the_dialog_it_leaves_behind() {
         "the block settles as cancelled: {flow}"
     );
 
-    // The keys that answered the dialog are ordinary composer keys again, and
-    // the dropped receiver is never sent to a second time.
-    drop(rx);
+    // The keys that answered the dialog are ordinary composer keys again.
     assert!(chat.on_key(KeyCode::Char('1'), KeyModifiers::empty()));
     assert_eq!(chat.input, "1", "the digit is text now, not an answer");
     assert!(chat.on_key(KeyCode::Enter, KeyModifiers::empty()));
@@ -644,23 +618,11 @@ fn an_interrupt_settles_the_dialog_it_leaves_behind() {
 #[test]
 fn turn_end_settles_the_asks_whose_turn_is_gone() {
     let mut chat = test_chat();
-    let (dead_tx, dead_rx) = tokio::sync::oneshot::channel();
-    let (live_tx, _live_rx) = tokio::sync::oneshot::channel();
-    chat.asks
-        .send((
-            PermissionRequest::new("Allow running Bash", "cargo test", vec!["Allow".into()]),
-            dead_tx,
-        ))
-        .unwrap();
-    chat.asks
-        .send((
-            PermissionRequest::new("Allow running Edit", "src/main.rs", vec!["Allow".into()]),
-            live_tx,
-        ))
-        .unwrap();
-    assert!(chat.drain_asks(), "the first request is on screen");
+    let dead = chat.open_test_permission("Bash", "cargo test", Some("cargo test"), None);
+    let _live = chat.open_test_permission("Edit", "src/main.rs", None, None);
+    assert!(chat.pending_ask.is_some(), "the first request is on screen");
     chat.conv.busy = true;
-    drop(dead_rx); // the turn awaiting the answer is gone
+    drop(dead); // the turn awaiting the answer is gone
 
     chat.apply_event(UiEvent::TurnEnd);
 
@@ -677,7 +639,7 @@ fn turn_end_settles_the_asks_whose_turn_is_gone() {
     assert!(
         chat.pending_ask
             .as_ref()
-            .is_some_and(|(r, _)| r.title == "Allow running Edit"),
+            .is_some_and(|(_, request)| request.title == "Allow running Edit"),
         "and surfaces next"
     );
 }
@@ -708,34 +670,41 @@ use crate::tui::chat::{
 };
 use crate::ui::{ASK_NO, ASK_YES, ASK_YES_SESSION};
 
-/// Drive a real permission prompt through `modal_ask`: what the tests read is
-/// the dialog the gate's own hook builds, not one a test assembled by hand.
-/// The request is on the queue as soon as this returns; the future settles when
-/// the dialog does.
-fn gate_asks(
-    chat: &Chat,
+/// Drive a real permission prompt through the gate's own path: the run asks,
+/// the core holds the answer, and the console picks it up from the view.
+async fn gate_asks(
+    chat: &mut Chat,
     tool: &str,
     reason: &str,
     input: &serde_json::Value,
     scope: Option<&str>,
     diff: Option<&str>,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = AskOutcome> + Send>> {
-    let ask = crate::ui::modal_ask(chat.asks.clone());
-    ask(&crate::query::AskContext {
+) -> tokio::task::JoinHandle<AskOutcome> {
+    let ask = crate::app::interaction::permission_ask(
+        chat.session.interactions.clone(),
+        crate::ui::ConvKey::Main,
+    );
+    let pending = ask(&crate::query::AskContext {
         tool,
         reason,
         input,
         cwd: &std::env::temp_dir(),
         scope,
         diff,
-    })
+    });
+    let run = tokio::spawn(pending);
+    for _ in 0..500 {
+        if chat.drain_asks() {
+            return run;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+    }
+    panic!("the prompt never reached the console");
 }
 
-/// A dialog opened `now`, with the type-ahead guard already behind it.
-fn past_guard(chat: &mut Chat) -> std::time::Instant {
-    let opened = std::time::Instant::now();
-    chat.ask_opened_at = Some(opened);
-    opened + crate::tui::chat::ask::ASK_CONFIRM_GUARD + std::time::Duration::from_millis(1)
+/// A dialog whose type-ahead guard is already behind it.
+fn past_guard() -> std::time::Instant {
+    std::time::Instant::now() + crate::app::interaction::CONFIRM_GUARD
 }
 
 /// The approval prompt is CC's, word for word, and it shows the command before
@@ -745,14 +714,14 @@ async fn the_approval_prompt_offers_the_three_options_verbatim() {
     let mut chat = test_chat();
     let input = json!({ "command": "cargo test --locked" });
     let verdict = gate_asks(
-        &chat,
+        &mut chat,
         "Bash",
         "Bash needs permission",
         &input,
         Some("Bash(cargo:*)"),
         None,
-    );
-    assert!(chat.drain_asks());
+    )
+    .await;
     let flow = visible(&mut chat, 100, 40);
     assert!(flow.contains("Allow running Bash"), "{flow}");
     assert!(flow.contains(&format!("1. {ASK_YES}")), "{flow}");
@@ -763,9 +732,12 @@ async fn the_approval_prompt_offers_the_three_options_verbatim() {
         "the command is on screen before it is approved: {flow}"
     );
 
-    let now = past_guard(&mut chat);
+    let now = past_guard();
     assert!(chat.on_key_at(KeyCode::Char('1'), KeyModifiers::empty(), now));
-    assert_eq!(verdict.await, AskOutcome::Allow);
+    assert_eq!(
+        verdict.await.unwrap_or_else(|error| panic!("{error}")),
+        AskOutcome::Allow
+    );
     assert!(
         visible(&mut chat, 100, 40).contains(ASK_RECEIPT_YES),
         "the choice stays in the flow after the dialog goes"
@@ -778,11 +750,17 @@ async fn the_approval_prompt_offers_the_three_options_verbatim() {
 async fn enter_inside_the_guard_window_answers_nothing() {
     let mut chat = test_chat();
     let input = json!({ "command": "rm -rf build" });
-    let verdict = gate_asks(&chat, "Bash", "Bash needs permission", &input, None, None);
-    assert!(chat.drain_asks());
+    let verdict = gate_asks(
+        &mut chat,
+        "Bash",
+        "Bash needs permission",
+        &input,
+        None,
+        None,
+    )
+    .await;
 
     let opened = std::time::Instant::now();
-    chat.ask_opened_at = Some(opened);
     assert!(
         chat.on_key_at(KeyCode::Enter, KeyModifiers::empty(), opened),
         "the key is swallowed by the dialog"
@@ -792,11 +770,10 @@ async fn enter_inside_the_guard_window_answers_nothing() {
         "but it answers nothing: the question is still open"
     );
 
-    let now =
-        opened + crate::tui::chat::ask::ASK_CONFIRM_GUARD + std::time::Duration::from_millis(1);
+    let now = opened + crate::app::interaction::CONFIRM_GUARD;
     assert!(chat.on_key_at(KeyCode::Enter, KeyModifiers::empty(), now));
     assert_eq!(
-        verdict.await,
+        verdict.await.unwrap_or_else(|error| panic!("{error}")),
         AskOutcome::Allow,
         "past the window it confirms"
     );
@@ -810,22 +787,34 @@ async fn shift_tab_takes_the_session_option() {
     let mut chat = test_chat();
     let input = json!({ "command": "cargo build" });
     let verdict = gate_asks(
-        &chat,
+        &mut chat,
         "Bash",
         "Bash needs permission",
         &input,
         Some("Bash(cargo:*)"),
         None,
-    );
-    assert!(chat.drain_asks());
+    )
+    .await;
     chat.ask_focus = 2;
-    assert!(chat.on_key(KeyCode::BackTab, KeyModifiers::empty()));
-    assert_eq!(verdict.await, AskOutcome::AllowSession);
+    // shift+tab confirms, so D81's guard covers it exactly as it covers a digit
+    // and Enter: the core holds back every keyboard approval, not a chosen few.
+    assert!(chat.on_key_at(KeyCode::BackTab, KeyModifiers::empty(), past_guard()));
+    assert_eq!(
+        verdict.await.unwrap_or_else(|error| panic!("{error}")),
+        AskOutcome::AllowSession
+    );
     assert!(visible(&mut chat, 100, 40).contains(ASK_RECEIPT_SESSION));
 
     let mode = chat.session.permission_mode;
-    let verdict = gate_asks(&chat, "Bash", "Bash needs permission", &input, None, None);
-    assert!(chat.drain_asks());
+    let verdict = gate_asks(
+        &mut chat,
+        "Bash",
+        "Bash needs permission",
+        &input,
+        None,
+        None,
+    )
+    .await;
     let flow = visible(&mut chat, 100, 40);
     assert!(
         !flow.contains(ASK_YES_SESSION),
@@ -837,7 +826,7 @@ async fn shift_tab_takes_the_session_option() {
         chat.session.permission_mode, mode,
         "and the permission mode behind it did not cycle"
     );
-    drop(verdict);
+    verdict.abort();
 }
 
 /// The refusal option collects what to do instead, and the model reads it.
@@ -845,10 +834,17 @@ async fn shift_tab_takes_the_session_option() {
 async fn a_refusal_collects_feedback_for_the_model() {
     let mut chat = test_chat();
     let input = json!({ "command": "git push --force" });
-    let verdict = gate_asks(&chat, "Bash", "Bash needs permission", &input, None, None);
-    assert!(chat.drain_asks());
+    let verdict = gate_asks(
+        &mut chat,
+        "Bash",
+        "Bash needs permission",
+        &input,
+        None,
+        None,
+    )
+    .await;
 
-    let now = past_guard(&mut chat);
+    let now = past_guard();
     assert!(chat.on_key_at(KeyCode::Char('2'), KeyModifiers::empty(), now));
     assert!(
         chat.pending_ask.is_some(),
@@ -859,7 +855,7 @@ async fn a_refusal_collects_feedback_for_the_model() {
     }
     assert!(chat.on_key_at(KeyCode::Enter, KeyModifiers::empty(), now));
     assert_eq!(
-        verdict.await,
+        verdict.await.unwrap_or_else(|error| panic!("{error}")),
         AskOutcome::Deny {
             feedback: Some("open a PR".to_string())
         }
@@ -875,28 +871,58 @@ async fn a_refusal_collects_feedback_for_the_model() {
 async fn esc_and_an_empty_feedback_submit_are_both_a_plain_deny() {
     let mut chat = test_chat();
     let input = json!({ "command": "rm -rf /" });
-    let verdict = gate_asks(&chat, "Bash", "Bash needs permission", &input, None, None);
-    assert!(chat.drain_asks());
+    let verdict = gate_asks(
+        &mut chat,
+        "Bash",
+        "Bash needs permission",
+        &input,
+        None,
+        None,
+    )
+    .await;
     assert!(chat.on_key(KeyCode::Esc, KeyModifiers::empty()));
-    assert_eq!(verdict.await, AskOutcome::Deny { feedback: None });
+    assert_eq!(
+        verdict.await.unwrap_or_else(|error| panic!("{error}")),
+        AskOutcome::Deny { feedback: None }
+    );
     assert!(visible(&mut chat, 100, 40).contains(ASK_RECEIPT_NO));
 
     // Empty submit from the feedback row.
-    let verdict = gate_asks(&chat, "Bash", "Bash needs permission", &input, None, None);
-    assert!(chat.drain_asks());
-    let now = past_guard(&mut chat);
+    let verdict = gate_asks(
+        &mut chat,
+        "Bash",
+        "Bash needs permission",
+        &input,
+        None,
+        None,
+    )
+    .await;
+    let now = past_guard();
     assert!(chat.on_key_at(KeyCode::Char('2'), KeyModifiers::empty(), now));
     assert!(chat.on_key_at(KeyCode::Enter, KeyModifiers::empty(), now));
-    assert_eq!(verdict.await, AskOutcome::Deny { feedback: None });
+    assert_eq!(
+        verdict.await.unwrap_or_else(|error| panic!("{error}")),
+        AskOutcome::Deny { feedback: None }
+    );
 
     // Esc from the feedback row.
-    let verdict = gate_asks(&chat, "Bash", "Bash needs permission", &input, None, None);
-    assert!(chat.drain_asks());
-    let now = past_guard(&mut chat);
+    let verdict = gate_asks(
+        &mut chat,
+        "Bash",
+        "Bash needs permission",
+        &input,
+        None,
+        None,
+    )
+    .await;
+    let now = past_guard();
     assert!(chat.on_key_at(KeyCode::Char('2'), KeyModifiers::empty(), now));
     assert!(chat.on_key_at(KeyCode::Char('x'), KeyModifiers::empty(), now));
     assert!(chat.on_key_at(KeyCode::Esc, KeyModifiers::empty(), now));
-    assert_eq!(verdict.await, AskOutcome::Deny { feedback: None });
+    assert_eq!(
+        verdict.await.unwrap_or_else(|error| panic!("{error}")),
+        AskOutcome::Deny { feedback: None }
+    );
 }
 
 /// An edit is approved against the change it would make, computed without
@@ -926,21 +952,24 @@ async fn an_edit_prompt_shows_the_change_it_would_make_without_making_it() {
 
     let mut chat = test_chat();
     let verdict = gate_asks(
-        &chat,
+        &mut chat,
         "Edit",
         "Edit needs permission (destructive)",
         &input,
         Some("Edit(/tmp/)"),
         Some(&diff),
-    );
-    assert!(chat.drain_asks());
+    )
+    .await;
     let flow = visible(&mut chat, 100, 40);
     assert!(flow.contains("-beta"), "the removal is shown: {flow}");
     assert!(flow.contains("+delta"), "the addition is shown: {flow}");
 
-    let now = past_guard(&mut chat);
+    let now = past_guard();
     assert!(chat.on_key_at(KeyCode::Enter, KeyModifiers::empty(), now));
-    assert_eq!(verdict.await, AskOutcome::Allow);
+    assert_eq!(
+        verdict.await.unwrap_or_else(|error| panic!("{error}")),
+        AskOutcome::Allow
+    );
     assert_eq!(
         std::fs::read_to_string(&file).unwrap(),
         before,
@@ -959,14 +988,14 @@ async fn ctrl_e_toggles_the_bounded_preview() {
         .join("\n");
     let input = json!({ "command": command });
     let verdict = gate_asks(
-        &chat,
+        &mut chat,
         "Bash",
         "Bash needs permission",
         &input,
         Some("Bash(echo:*)"),
         None,
-    );
-    assert!(chat.drain_asks());
+    )
+    .await;
 
     let flow = visible(&mut chat, 100, 40);
     assert!(flow.contains("$ echo line6"), "{flow}");
@@ -988,7 +1017,7 @@ async fn ctrl_e_toggles_the_bounded_preview() {
         !visible(&mut chat, 100, 40).contains("$ echo line9"),
         "and folds back"
     );
-    drop(verdict);
+    verdict.abort();
 }
 
 /// AskUserQuestion shares the queue and the keys, and none of D81 reaches it:
@@ -999,16 +1028,25 @@ async fn ask_user_question_keeps_its_own_shape() {
     let (events_tx, _events_rx) = tokio::sync::mpsc::unbounded_channel();
     let ui = crate::ui::tui_hooks(
         crate::ui::EventSink::new(crate::ui::ConvKey::Main, events_tx),
-        chat.asks.clone(),
+        chat.session.interactions.clone(),
         crate::query::no_steer(),
         chat.live.clone(),
     );
-    let answer = (ui.requests.ask_question)(
+    let answer = tokio::spawn((ui.requests.ask_question)(
         "Tech stack".to_string(),
         "Which library?".to_string(),
         vec![("A".to_string(), None), ("B".to_string(), None)],
+    ));
+    for _ in 0..500 {
+        if chat.drain_asks() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+    }
+    assert!(
+        chat.pending_ask.is_some(),
+        "the question reached the console"
     );
-    assert!(chat.drain_asks());
     let flow = visible(&mut chat, 100, 40);
     assert!(flow.contains("1. A") && flow.contains("2. B"), "{flow}");
     assert!(
@@ -1019,7 +1057,10 @@ async fn ask_user_question_keeps_its_own_shape() {
 
     // No guard: the answer lands on the first press, as it always did.
     assert!(chat.on_key(KeyCode::Char('2'), KeyModifiers::empty()));
-    assert_eq!(answer.await, Some(crate::query::AskAnswer::Option(1)));
+    assert_eq!(
+        answer.await.unwrap_or_else(|error| panic!("{error}")),
+        Some(crate::query::AskAnswer::Option(1))
+    );
     let flow = visible(&mut chat, 100, 40);
     assert!(flow.contains("· Which library? → B"), "{flow}");
     assert!(
@@ -1395,14 +1436,8 @@ fn a_pending_prompt_keeps_the_title_it_needs() {
     let mut chat = chat_with_bell();
     chat.apply_event(UiEvent::TurnStart);
     let _ = emitted(&mut chat);
-    let (tx, _rx) = tokio::sync::oneshot::channel();
-    chat.asks
-        .send((
-            PermissionRequest::new("Allow running Bash", "cargo build", vec!["Allow".into()]),
-            tx,
-        ))
-        .unwrap();
-    assert!(chat.drain_asks());
+    let _verdict = chat.open_test_permission("Bash", "cargo build", Some("cargo build"), None);
+    assert!(chat.pending_ask.is_some());
     let _ = emitted(&mut chat);
     for _ in 0..200 {
         chat.tick();

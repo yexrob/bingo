@@ -405,6 +405,7 @@ impl InputQueue {
                 let position = (queue.entries.len() - 1) as u32;
                 let revision = queue.revision;
                 let steer_eligible = eligible_prefix(&queue.entries) > position as usize;
+                self.publish();
                 let _ = reply.send(Placement {
                     id,
                     position,
@@ -427,6 +428,7 @@ impl InputQueue {
                 let queue = self.queue(&conversation);
                 let take = eligible_prefix(&queue.entries);
                 if take == 0 {
+                    self.publish();
                     let _ = reply.send(Vec::new());
                     return Vec::new();
                 }
@@ -465,6 +467,7 @@ impl InputQueue {
                         text: entry.text.clone(),
                     });
                 }
+                self.publish();
                 let _ = reply.send(items);
                 changes
             }
@@ -488,6 +491,7 @@ impl InputQueue {
                 queue.revision = queue.revision.saturating_add(1);
                 let revision = queue.revision;
                 let id = entry.id.clone();
+                self.publish();
                 let _ = reply.send(Reclaim::Pulled(Box::new(entry)));
                 vec![QueueChange::Removed {
                     conversation,
@@ -506,6 +510,7 @@ impl InputQueue {
                     // belongs to the turn that just ended, and the next turn's
                     // pull-back must not be told it lost a race it never ran.
                     queue.absorbed.clear();
+                    self.publish();
                     let _ = reply.send(None);
                     return Vec::new();
                 }
@@ -514,6 +519,7 @@ impl InputQueue {
                 queue.revision = queue.revision.saturating_add(1);
                 let revision = queue.revision;
                 let id = entry.id.clone();
+                self.publish();
                 let _ = reply.send(Some(entry));
                 vec![QueueChange::Removed {
                     conversation,

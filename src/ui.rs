@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
 
 use crate::engine::events::{EngineEvent, EngineEvents, EngineHost, EngineRequests};
 use crate::query::ToolCallDone;
@@ -19,20 +19,6 @@ pub struct ImageMeta {
     pub cols: usize,
     pub rows: usize,
     pub bytes: Vec<u8>,
-}
-
-/// Permission prompt: request + result receipt.
-pub type AskRequest = (PermissionRequest, oneshot::Sender<DialogAction>);
-
-/// Permission dialog result.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DialogAction {
-    /// Option `index` (0-based) confirmed.
-    Confirm(usize),
-    /// AskUserQuestion's Other free-form input submitted.
-    Answer(String),
-    /// Dialog cancelled with Esc.
-    Cancel,
 }
 
 /// What approving a permission request would actually do, rendered above the
@@ -327,53 +313,64 @@ pub enum UiEvent {
     },
 }
 
-/// Permission prompt backed by the TUI modal. Shared by `tui_hooks` and the subagent prompt
-/// surface attached to the registry, so a subagent's request lands in the same modal queue.
-pub fn modal_ask(asks: mpsc::UnboundedSender<AskRequest>) -> Arc<crate::query::AskFn> {
-    use crate::query::AskOutcome;
-    Arc::new(move |ask| {
-        let mut options = vec![ASK_YES.to_string()];
-        if ask.scope.is_some() {
-            options.push(ASK_YES_SESSION.to_string());
-        }
-        options.push(ASK_NO.to_string());
-        let mut request =
-            PermissionRequest::new(format!("Allow running {}", ask.tool), ask.reason, options);
-        request.kind = AskKind::Permission;
-        request.scope = ask.scope.map(str::to_string);
-        request.preview = ask_preview(ask);
-        let session_option = request.session_option();
-        let (tx, rx) = oneshot::channel();
-        if asks.send((request, tx)).is_err() {
-            return Box::pin(async { AskOutcome::Deny { feedback: None } });
-        }
-        Box::pin(async move {
-            match rx.await {
-                Ok(DialogAction::Confirm(0)) => AskOutcome::Allow,
-                Ok(DialogAction::Confirm(index)) if Some(index) == session_option => {
-                    AskOutcome::AllowSession
+/// One open prompt, as the dialog draws it.
+///
+/// The prompt itself is the core's since B3 — the actor holds the answer and
+/// enforces the confirmation guard. This is its render model, and the conversion
+/// below is the only thing that knows both shapes.
+impl PermissionRequest {
+    pub fn of(pending: &crate::app::interaction::Pending) -> Self {
+        use crate::app::snapshot::{InteractionPreview, InteractionPrompt};
+        match &pending.interaction.prompt {
+            InteractionPrompt::Permission {
+                title,
+                reason,
+                preview,
+                session_scope,
+                ..
+            } => {
+                let mut options = vec![ASK_YES.to_string()];
+                if session_scope.is_some() {
+                    options.push(ASK_YES_SESSION.to_string());
                 }
-                Ok(DialogAction::Answer(feedback)) => AskOutcome::Deny {
-                    feedback: Some(feedback),
-                },
-                // The refusal option, Esc, and a dialog the turn outlived all
-                // land here: fail closed, and say nothing on the user's behalf.
-                _ => AskOutcome::Deny { feedback: None },
+                options.push(ASK_NO.to_string());
+                let mut request =
+                    Self::new(title.clone(), reason.clone().unwrap_or_default(), options);
+                request.kind = AskKind::Permission;
+                request.scope = session_scope.as_ref().map(|scope| scope.label.clone());
+                request.preview = preview.as_ref().map(|preview| match preview {
+                    InteractionPreview::Command { command } => AskPreview::Command(command.clone()),
+                    InteractionPreview::Diff { diff } => AskPreview::Diff(diff.clone()),
+                });
+                request
             }
-        })
-    })
-}
-
-/// The preview rows: a file change shows the diff it would make, anything
-/// carrying a shell command shows the command.
-fn ask_preview(ask: &crate::query::AskContext<'_>) -> Option<AskPreview> {
-    if let Some(diff) = ask.diff {
-        return Some(AskPreview::Diff(diff.to_string()));
+            InteractionPrompt::Question {
+                title,
+                question,
+                options,
+                ..
+            } => {
+                let mut request = Self::new(title.clone(), question.clone(), Vec::new());
+                request.free_text = true;
+                request.options = options.iter().map(|option| option.label.clone()).collect();
+                request.descriptions = options
+                    .iter()
+                    .map(|option| option.description.clone())
+                    .collect();
+                request
+            }
+            InteractionPrompt::Confirmation {
+                title,
+                detail,
+                confirm_label,
+            } => {
+                let mut request =
+                    Self::new(title.clone(), detail.clone(), vec![confirm_label.clone()]);
+                request.kind = AskKind::Permission;
+                request
+            }
+        }
     }
-    ask.input
-        .get("command")
-        .and_then(|v| v.as_str())
-        .map(|command| AskPreview::Command(command.to_string()))
 }
 
 /// Translate one run's [`EngineEvent`]s onto the TUI's channels.
@@ -383,7 +380,7 @@ fn ask_preview(ask: &crate::query::AskContext<'_>) -> Option<AskPreview> {
 /// `AppLink` and the translation goes with it.
 pub fn tui_hooks(
     events: EventSink,
-    asks: mpsc::UnboundedSender<AskRequest>,
+    interactions: crate::app::interaction::InteractionHandle,
     steer: Arc<crate::query::SteerFn>,
     live: Arc<crate::live::LiveBash>,
 ) -> EngineHost {
@@ -391,7 +388,6 @@ pub fn tui_hooks(
     // attempt's output is withdrawn) and by each round boundary. The provider's
     // own count replaces it whenever one arrives.
     let round_tokens = Arc::new(std::sync::Mutex::new((0u64, None::<usize>)));
-    let ask_asks = asks.clone();
     EngineHost::new(
         EngineEvents::new(move |event| match event {
             EngineEvent::TextDelta { index, text } => {
@@ -480,28 +476,8 @@ pub fn tui_hooks(
             EngineEvent::Inbound(_) => {}
         }),
         EngineRequests {
-            ask: modal_ask(ask_asks),
-            ask_question: Arc::new(move |title, question, options| {
-                let mut request = PermissionRequest::new(title, question, Vec::new());
-                request.free_text = true;
-                request.options = options.iter().map(|(l, _d)| l.clone()).collect();
-                request.descriptions = options.into_iter().map(|(_l, d)| d).collect();
-                let (tx, rx) = oneshot::channel();
-                if asks.send((request, tx)).is_err() {
-                    return Box::pin(async { None });
-                }
-                Box::pin(async move {
-                    match rx.await {
-                        Ok(DialogAction::Confirm(index)) => {
-                            Some(crate::query::AskAnswer::Option(index))
-                        }
-                        Ok(DialogAction::Answer(text)) => {
-                            Some(crate::query::AskAnswer::Other(text))
-                        }
-                        Ok(DialogAction::Cancel) | Err(_) => None,
-                    }
-                })
-            }),
+            ask: crate::app::interaction::permission_ask(interactions.clone(), ConvKey::Main),
+            ask_question: crate::app::interaction::question_ask(interactions, ConvKey::Main),
             steer,
             live,
         },
@@ -528,10 +504,10 @@ mod tests {
     #[test]
     fn tui_hooks_emit_live_token_samples_before_final_usage() {
         let (events_tx, mut events_rx) = mpsc::unbounded_channel();
-        let (asks_tx, _asks_rx) = mpsc::unbounded_channel();
+        let core = crate::app::AppCore::start(Default::default());
         let ui = tui_hooks(
             EventSink::new(ConvKey::Main, events_tx),
-            asks_tx,
+            core.interactions(),
             crate::query::no_steer(),
             crate::live::LiveBash::detached(),
         );
@@ -582,28 +558,45 @@ mod tests {
         ));
     }
 
-    /// AskUserQuestion's TUI hook: requests go through the permission modal
-    /// (title/question/options); confirm → Some(index), Esc cancel → None.
+    /// AskUserQuestion's TUI hook: the question becomes an interaction the core
+    /// holds, and the answer comes back through it.
     #[tokio::test]
     async fn ask_question_hook_maps_confirm_and_cancel() {
+        use crate::app::snapshot::{ActivationKind, InteractionDecision};
+
         let (events_tx, _events_rx) = mpsc::unbounded_channel();
-        let (asks_tx, mut asks_rx) = mpsc::unbounded_channel();
+        let core = crate::app::AppCore::start(Default::default());
+        let interactions = core.interactions();
         let ui = tui_hooks(
             EventSink::new(ConvKey::Main, events_tx),
-            asks_tx,
+            interactions.clone(),
             crate::query::no_steer(),
             crate::live::LiveBash::detached(),
         );
 
-        let fut = (ui.requests.ask_question)(
+        /// The prompt the core has open, once it does.
+        async fn opened(
+            interactions: &crate::app::interaction::InteractionHandle,
+        ) -> crate::app::interaction::Pending {
+            for _ in 0..200 {
+                if let Some(pending) = interactions.view().head() {
+                    return pending.clone();
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            }
+            panic!("the prompt never opened");
+        }
+
+        let fut = tokio::spawn((ui.requests.ask_question)(
             "Tech stack".to_string(),
             "Which library?".to_string(),
             vec![
                 ("A".to_string(), None),
                 ("B".to_string(), Some("faster".to_string())),
             ],
-        );
-        let (request, tx) = asks_rx.try_recv().expect("modal request was sent");
+        ));
+        let pending = opened(&interactions).await;
+        let request = PermissionRequest::of(&pending);
         assert_eq!(request.title, "Tech stack");
         assert_eq!(request.question, "Which library?");
         assert_eq!(request.options, vec!["A", "B"]);
@@ -611,31 +604,67 @@ mod tests {
             request.free_text,
             "AskUserQuestion requests carry Other free-text input"
         );
-        tx.send(DialogAction::Confirm(1)).unwrap();
         assert_eq!(
-            fut.await,
+            pending.remaining_guard(),
+            std::time::Duration::ZERO,
+            "a question has no confirmation guard: D81 is the permission gate's"
+        );
+        assert_eq!(
+            interactions
+                .respond(
+                    pending.interaction.id.clone(),
+                    ActivationKind::Keyboard,
+                    InteractionDecision::Answer {
+                        option_id: Some("1".to_string()),
+                        text: None,
+                    },
+                )
+                .await,
+            Ok(())
+        );
+        assert_eq!(
+            fut.await.unwrap_or_else(|error| panic!("{error}")),
             Some(crate::query::AskAnswer::Option(1)),
             "press 2 selects B"
         );
 
-        let fut = (ui.requests.ask_question)(
+        let fut = tokio::spawn((ui.requests.ask_question)(
             "t".to_string(),
             "q?".to_string(),
             vec![("a".to_string(), None)],
-        );
-        let (_request, tx) = asks_rx.try_recv().expect("second modal request");
-        tx.send(DialogAction::Cancel).unwrap();
-        assert_eq!(fut.await, None, "Esc cancels → no answer");
-
-        let fut = (ui.requests.ask_question)(
-            "t".to_string(),
-            "q?".to_string(),
-            vec![("a".to_string(), None)],
-        );
-        let (_request, tx) = asks_rx.try_recv().expect("third modal request");
-        tx.send(DialogAction::Answer("custom".into())).unwrap();
+        ));
+        let pending = opened(&interactions).await;
+        let _ = interactions
+            .respond(
+                pending.interaction.id,
+                ActivationKind::Keyboard,
+                InteractionDecision::Cancel,
+            )
+            .await;
         assert_eq!(
-            fut.await,
+            fut.await.unwrap_or_else(|error| panic!("{error}")),
+            None,
+            "Esc cancels → no answer"
+        );
+
+        let fut = tokio::spawn((ui.requests.ask_question)(
+            "t".to_string(),
+            "q?".to_string(),
+            vec![("a".to_string(), None)],
+        ));
+        let pending = opened(&interactions).await;
+        let _ = interactions
+            .respond(
+                pending.interaction.id,
+                ActivationKind::Keyboard,
+                InteractionDecision::Answer {
+                    option_id: None,
+                    text: Some("custom".to_string()),
+                },
+            )
+            .await;
+        assert_eq!(
+            fut.await.unwrap_or_else(|error| panic!("{error}")),
             Some(crate::query::AskAnswer::Other("custom".to_string())),
             "Other free-text answer is backfilled"
         );

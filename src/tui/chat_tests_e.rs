@@ -202,14 +202,10 @@ fn ctrl_g_requests_the_editor_unless_a_dialog_is_up() {
     assert!(chat.open_editor, "the host is asked to open the editor");
 
     chat.open_editor = false;
-    let (tx, _rx) = oneshot::channel();
-    chat.pending_ask = Some((
-        PermissionRequest::new(
-            "Bash",
-            "Allow running Bash?",
-            vec!["Yes".into(), "No".into()],
-        ),
-        tx,
+    chat.stub_ask(PermissionRequest::new(
+        "Bash",
+        "Allow running Bash?",
+        vec!["Yes".into(), "No".into()],
     ));
     assert!(ctrl(&mut chat, 'g'));
     assert!(
@@ -583,20 +579,16 @@ fn both_diff_surfaces_render_the_same_gutter() {
 
     // Surface 1: the pre-approval preview inside the permission dialog.
     let mut chat = test_chat();
-    let (tx, _rx) = tokio::sync::oneshot::channel();
-    chat.pending_ask = Some((
-        crate::ui::PermissionRequest {
-            title: "Edit file".into(),
-            question: "Make this edit?".into(),
-            options: vec!["Yes".into()],
-            descriptions: vec![None],
-            free_text: false,
-            kind: crate::ui::AskKind::Permission,
-            preview: Some(crate::ui::AskPreview::Diff(DIFF.to_string())),
-            scope: None,
-        },
-        tx,
-    ));
+    chat.stub_ask(crate::ui::PermissionRequest {
+        title: "Edit file".into(),
+        question: "Make this edit?".into(),
+        options: vec!["Yes".into()],
+        descriptions: vec![None],
+        free_text: false,
+        kind: crate::ui::AskKind::Permission,
+        preview: Some(crate::ui::AskPreview::Diff(DIFF.to_string())),
+        scope: None,
+    });
     let dialog = visible(&mut chat, 120, 40);
     assert!(dialog.contains("3 3  keep"), "preview gutter: {dialog}");
     assert!(dialog.contains("4   -gone"), "preview removal: {dialog}");

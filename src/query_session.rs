@@ -110,6 +110,9 @@ pub struct Session {
     /// The one submission path: what a composer line is and where it goes are
     /// the core's to decide, not a front end's (B3).
     pub submit: crate::app::submit::SubmitHandle,
+    /// The prompts a run is stopped on: permission and question alike, with the
+    /// oneshot that answers them held by the actor rather than by a surface (B3).
+    pub interactions: crate::app::interaction::InteractionHandle,
     /// This session's instance name (sub-agents = Some(registry name); main session None,
     /// channel member name main).
     pub instance: Option<String>,

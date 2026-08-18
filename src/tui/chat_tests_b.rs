@@ -1097,11 +1097,8 @@ fn ask_answer_message_flushes_like_normal_message() {
     assert_eq!(chat.flushed_segments, 2, "welcome card + the user's input");
 
     // Answer one question (through the real event path).
-    let (tx, _rx) = oneshot::channel();
-    let mut request =
-        PermissionRequest::new("Tech stack", "Which library?", vec!["A".into(), "B".into()]);
-    request.free_text = true;
-    chat.pending_ask = Some((request, tx));
+    let _verdict =
+        chat.open_test_question("Tech stack", "Which library?", &[("A", None), ("B", None)]);
     chat.ask_focus = 0;
     assert!(
         chat.ask_key(KeyCode::Enter, KeyModifiers::empty()),
@@ -1146,11 +1143,8 @@ fn ask_answer_message_flushes_like_normal_message() {
 fn ask_answer_message_persists_across_turn_end() {
     let mut chat = test_chat();
     chat.conv.messages.push(msg(Role::User, "hi"));
-    let (tx, _rx) = oneshot::channel();
-    let mut request =
-        PermissionRequest::new("Tech stack", "Which library?", vec!["A".into(), "B".into()]);
-    request.free_text = true;
-    chat.pending_ask = Some((request, tx));
+    let _verdict =
+        chat.open_test_question("Tech stack", "Which library?", &[("A", None), ("B", None)]);
     chat.ask_focus = 1;
     assert!(
         chat.ask_key(KeyCode::Enter, KeyModifiers::empty()),
@@ -1299,10 +1293,7 @@ fn a_tool_in_flight_pins_the_stream_to_its_own_message() {
 
 /// Answers a pending free-text question by confirming its first option.
 fn answer_pending_ask(chat: &mut Chat) {
-    let (tx, _rx) = oneshot::channel();
-    let mut request = PermissionRequest::new("Tech stack", "Which library?", vec!["A".into()]);
-    request.free_text = true;
-    chat.pending_ask = Some((request, tx));
+    let _verdict = chat.open_test_question("Tech stack", "Which library?", &[("A", None)]);
     chat.ask_focus = 0;
     assert!(
         chat.ask_key(KeyCode::Enter, KeyModifiers::empty()),
@@ -1317,11 +1308,8 @@ fn answer_pending_ask(chat: &mut Chat) {
 fn ask_answer_message_survives_error_path() {
     let mut chat = test_chat();
     chat.conv.messages.push(msg(Role::User, "hi"));
-    let (tx, _rx) = oneshot::channel();
-    let mut request =
-        PermissionRequest::new("Tech stack", "Which library?", vec!["A".into(), "B".into()]);
-    request.free_text = true;
-    chat.pending_ask = Some((request, tx));
+    let _verdict =
+        chat.open_test_question("Tech stack", "Which library?", &[("A", None), ("B", None)]);
     chat.ask_focus = 0;
     assert!(
         chat.ask_key(KeyCode::Enter, KeyModifiers::empty()),
@@ -1559,10 +1547,10 @@ fn settled_stops_before_permission_block() {
     chat.build_rows(100);
     assert_eq!(chat.doc.settled, welcome, "streaming message dynamic");
     // A permission block appears → the boundary stays put (ask blocks never settle).
-    let (tx, _rx) = tokio::sync::oneshot::channel();
-    chat.pending_ask = Some((
-        PermissionRequest::new("Allow running Bash", "cargo build", vec!["Allow".into()]),
-        tx,
+    chat.stub_ask(PermissionRequest::new(
+        "Allow running Bash",
+        "cargo build",
+        vec!["Allow".into()],
     ));
     chat.build_rows(100);
     assert_eq!(chat.doc.settled, welcome, "ask block not settled");
@@ -1581,14 +1569,10 @@ fn settled_stops_before_permission_block() {
 #[test]
 fn permission_request_renders_with_clickable_options() {
     let mut chat = test_chat();
-    let (tx, _rx) = oneshot::channel();
-    chat.pending_ask = Some((
-        PermissionRequest::new(
-            "Allow running Bash",
-            "cargo build",
-            vec!["Allow".into(), "Deny".into()],
-        ),
-        tx,
+    chat.stub_ask(PermissionRequest::new(
+        "Allow running Bash",
+        "cargo build",
+        vec!["Allow".into(), "Deny".into()],
     ));
     chat.build_rows(100);
     let joined: String = chat
@@ -1623,12 +1607,11 @@ fn permission_request_renders_with_clickable_options() {
 #[test]
 fn ask_question_renders_other_and_answers_free_text() {
     let mut chat = test_chat();
-    let (tx, mut rx) = oneshot::channel();
-    let mut request =
-        PermissionRequest::new("Tech stack", "Which library?", vec!["A".into(), "B".into()]);
-    request.free_text = true;
-    request.descriptions = vec![None, Some("faster".to_string())];
-    chat.pending_ask = Some((request, tx));
+    let verdict = chat.open_test_question(
+        "Tech stack",
+        "Which library?",
+        &[("A", None), ("B", Some("faster"))],
+    );
     chat.build_rows(100);
     let joined: String = chat
         .doc
@@ -1670,7 +1653,13 @@ fn ask_question_renders_other_and_answers_free_text() {
         "submit"
     );
     assert!(chat.pending_ask.is_none(), "dialog closed");
-    assert_eq!(rx.try_recv(), Ok(DialogAction::Answer("serde".to_string())));
+    assert_eq!(
+        verdict.blocking_recv(),
+        Ok(crate::app::interaction::Verdict::Answer {
+            option: None,
+            text: Some("serde".to_string())
+        })
+    );
     // The answer enters the message flow: an ordinary user message (Q&A echo).
     let answer = chat
         .conv
@@ -1707,18 +1696,18 @@ fn ask_question_renders_other_and_answers_free_text() {
 #[test]
 fn ask_other_empty_submit_cancels() {
     let mut chat = test_chat();
-    let (tx, mut rx) = oneshot::channel();
-    let mut request =
-        PermissionRequest::new("Tech stack", "Which library?", vec!["A".into(), "B".into()]);
-    request.free_text = true;
-    chat.pending_ask = Some((request, tx));
+    let verdict =
+        chat.open_test_question("Tech stack", "Which library?", &[("A", None), ("B", None)]);
     chat.ask_focus = 2;
     assert!(
         chat.ask_key(KeyCode::Enter, KeyModifiers::empty()),
         "empty Other submit"
     );
     assert!(chat.pending_ask.is_none());
-    assert_eq!(rx.try_recv(), Ok(DialogAction::Cancel));
+    assert_eq!(
+        verdict.blocking_recv(),
+        Ok(crate::app::interaction::Verdict::Cancelled)
+    );
     // A decline also enters the message flow (an ordinary user message).
     let declined = chat
         .conv
@@ -1744,11 +1733,8 @@ fn ask_other_empty_submit_cancels() {
 #[test]
 fn ask_arrow_keys_move_focus() {
     let mut chat = test_chat();
-    let (tx, mut rx) = oneshot::channel();
-    let mut request =
-        PermissionRequest::new("Tech stack", "Which library?", vec!["A".into(), "B".into()]);
-    request.free_text = true;
-    chat.pending_ask = Some((request, tx));
+    let verdict =
+        chat.open_test_question("Tech stack", "Which library?", &[("A", None), ("B", None)]);
     assert!(chat.ask_key(KeyCode::Down, KeyModifiers::empty()), "↓ to B");
     assert_eq!(chat.ask_focus, 1);
     assert!(
@@ -1770,7 +1756,13 @@ fn ask_arrow_keys_move_focus() {
         chat.ask_key(KeyCode::Enter, KeyModifiers::empty()),
         "Enter selects B"
     );
-    assert_eq!(rx.try_recv(), Ok(DialogAction::Confirm(1)));
+    assert_eq!(
+        verdict.blocking_recv(),
+        Ok(crate::app::interaction::Verdict::Answer {
+            option: Some(1),
+            text: None
+        })
+    );
     let answer = chat
         .conv
         .messages
@@ -3653,20 +3645,7 @@ fn switch_provider_refuses_while_busy() {
 #[test]
 fn ask_other_input_does_not_swallow_modifier_chords() {
     let mut chat = test_chat();
-    let (tx, _rx) = tokio::sync::oneshot::channel();
-    chat.pending_ask = Some((
-        crate::ui::PermissionRequest {
-            title: "choose".into(),
-            question: "pick one".into(),
-            options: vec!["A".into()],
-            descriptions: vec![None],
-            free_text: true,
-            kind: crate::ui::AskKind::Question,
-            preview: None,
-            scope: None,
-        },
-        tx,
-    ));
+    let _verdict = chat.open_test_question("choose", "pick one", &[("A", None)]);
     chat.ask_focus = 1; // the Other input slot
     assert!(chat.ask_key(KeyCode::Char('h'), KeyModifiers::empty()));
     assert_eq!(chat.ask_other, "h");

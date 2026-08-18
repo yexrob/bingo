@@ -39,7 +39,6 @@ pub(super) fn settled_segments(chat: &Chat) -> usize {
 pub(super) fn test_chat_home(home: std::path::PathBuf) -> Chat {
     let _ = std::fs::create_dir_all(&home);
     let (events_tx, events_rx) = mpsc::unbounded_channel();
-    let (asks_tx, asks_rx) = mpsc::unbounded_channel();
     let core = crate::app::AppCore::start(Default::default());
     let session = Arc::new(Session {
         client: crate::api::client::Client::new(
@@ -65,6 +64,7 @@ pub(super) fn test_chat_home(home: std::path::PathBuf) -> Chat {
         turns: core.turns(),
         queue: core.queue(),
         submit: core.submit(),
+        interactions: core.interactions(),
         instance: None,
         attachments: crate::api::image::Attachments::new(),
     });
@@ -76,8 +76,6 @@ pub(super) fn test_chat_home(home: std::path::PathBuf) -> Chat {
         session,
         crate::ui::EventSink::new(crate::ui::ConvKey::Main, events_tx),
         events_rx,
-        asks_tx,
-        asks_rx,
         Theme::dark(),
         crate::tui::theme::ThemeSetting::Auto,
         None,
@@ -1101,17 +1099,15 @@ async fn bash_submit_runs_command_and_ends_turn() {
         turns: core.turns(),
         queue: core.queue(),
         submit: core.submit(),
+        interactions: core.interactions(),
         instance: None,
         attachments: crate::api::image::Attachments::new(),
     });
     let (events_tx, events_rx) = mpsc::unbounded_channel();
-    let (asks_tx, asks_rx) = mpsc::unbounded_channel();
     let mut chat = Chat::new(
         session,
         crate::ui::EventSink::new(crate::ui::ConvKey::Main, events_tx),
         events_rx,
-        asks_tx,
-        asks_rx,
         Theme::dark(),
         crate::tui::theme::ThemeSetting::Auto,
         None,
