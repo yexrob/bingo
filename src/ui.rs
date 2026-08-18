@@ -2,15 +2,15 @@
 //!
 //! Nothing here may depend on a terminal library: [`UiEvent`] and the dialog
 //! transport types are what a TUI, a GUI or a test harness all consume, and
-//! [`tui_hooks`] is the adapter that turns [`UiHooks`] callbacks into channel
+//! [`tui_hooks`] is the adapter that turns an engine run's reports into channel
 //! traffic. Front-end implementations live outside this module.
 
 use std::sync::Arc;
 
 use tokio::sync::{mpsc, oneshot};
 
-use crate::api::contract::StreamEvent;
-use crate::query::{ToolCallDone, UiHooks};
+use crate::engine::events::{EngineEvent, EngineEvents, EngineHost, EngineRequests};
+use crate::query::ToolCallDone;
 use crate::watch::WatchState;
 
 /// A loaded image payload: target cell size plus renderer-ready PNG bytes.
@@ -398,166 +398,155 @@ fn ask_preview(ask: &crate::query::AskContext<'_>) -> Option<AskPreview> {
         .map(|command| AskPreview::Command(command.to_string()))
 }
 
-/// Wire query's UiHooks to the TUI channels.
+/// Translate one run's [`EngineEvent`]s onto the TUI's channels.
+///
+/// A shim: the console still consumes `UiEvent`, so this is where an engine
+/// report becomes one. B7 removes this — the TUI reads `AppFrame` from an
+/// `AppLink` and the translation goes with it.
 pub fn tui_hooks(
     events: EventSink,
     asks: mpsc::UnboundedSender<AskRequest>,
     steer: crate::steer::SteerQueue,
     live: Arc<crate::live::LiveBash>,
-) -> UiHooks {
-    let tool_events = events.clone();
-    let steer_events = events.clone();
-    let ready_events = events.clone();
-    let retry_events = events.clone();
-    let round_events = events.clone();
-    let context_events = events.clone();
-    let warn_events = events.clone();
-    let ask_asks = asks.clone();
+) -> EngineHost {
+    // Live output-token estimate for the footer, reset by a retry (the failed
+    // attempt's output is withdrawn) and by each round boundary. The provider's
+    // own count replaces it whenever one arrives.
     let round_tokens = Arc::new(std::sync::Mutex::new((0u64, None::<usize>)));
-    let event_round_tokens = round_tokens.clone();
-    let retry_round_tokens = round_tokens.clone();
-    UiHooks {
-        on_event: Box::new(move |event| match event {
-            StreamEvent::TextDelta { index, text } => {
-                let tokens = {
-                    let mut state = event_round_tokens.lock().unwrap_or_else(|e| e.into_inner());
-                    if state.1.is_some_and(|previous| previous > *index) {
-                        state.0 = 0;
-                    }
-                    state.1 = Some(*index);
-                    state.0 = state.0.saturating_add(crate::compact::text_units(text));
-                    state.0.div_ceil(4)
-                };
-                events.send(UiEvent::TextDelta(text.clone()));
+    let steer_events = events.clone();
+    let ask_asks = asks.clone();
+    EngineHost {
+        events: EngineEvents::new(move |event| match event {
+            EngineEvent::TextDelta { index, text } => {
+                let tokens = accumulate(&round_tokens, index, &text);
+                events.send(UiEvent::TextDelta(text));
                 events.send(UiEvent::OutputTokens {
                     tokens,
                     authoritative: false,
                 });
             }
-            StreamEvent::ThinkingDelta { index, thinking } => {
-                let tokens = {
-                    let mut state = event_round_tokens.lock().unwrap_or_else(|e| e.into_inner());
-                    if state.1.is_some_and(|previous| previous > *index) {
-                        state.0 = 0;
-                    }
-                    state.1 = Some(*index);
-                    state.0 = state.0.saturating_add(crate::compact::text_units(thinking));
-                    state.0.div_ceil(4)
-                };
-                events.send(UiEvent::ThinkingDelta(thinking.clone()));
+            EngineEvent::ThinkingDelta { index, thinking } => {
+                let tokens = accumulate(&round_tokens, index, &thinking);
+                events.send(UiEvent::ThinkingDelta(thinking));
                 events.send(UiEvent::OutputTokens {
                     tokens,
                     authoritative: false,
                 });
             }
-            StreamEvent::InputJsonDelta {
+            EngineEvent::ToolInputDelta {
                 index,
                 partial_json,
             } => {
-                let tokens = {
-                    let mut state = event_round_tokens.lock().unwrap_or_else(|e| e.into_inner());
-                    if state.1.is_some_and(|previous| previous > *index) {
-                        state.0 = 0;
-                    }
-                    state.1 = Some(*index);
-                    state.0 = state
-                        .0
-                        .saturating_add(crate::compact::text_units(partial_json));
-                    state.0.div_ceil(4)
-                };
+                // Nothing renders a half-built argument, but it is output the
+                // model paid for, so the footer counts it.
+                let tokens = accumulate(&round_tokens, index, &partial_json);
                 events.send(UiEvent::OutputTokens {
                     tokens,
                     authoritative: false,
                 });
             }
-            StreamEvent::ToolUseStart { name, .. } => {
-                events.send(UiEvent::ToolStart { name: name.clone() });
+            EngineEvent::ToolUseStarted { name, .. } => {
+                events.send(UiEvent::ToolStart { name });
             }
-            StreamEvent::StopReason {
+            EngineEvent::StopReason {
                 output_tokens: Some(tokens),
                 ..
             } => {
-                let mut state = event_round_tokens.lock().unwrap_or_else(|e| e.into_inner());
+                let mut state = round_tokens.lock().unwrap_or_else(|e| e.into_inner());
                 state.0 = tokens.saturating_mul(4);
                 events.send(UiEvent::OutputTokens {
-                    tokens: *tokens,
+                    tokens,
                     authoritative: true,
                 });
             }
-            _ => {}
-        }),
-        on_stream_retry: Box::new(move || {
-            *retry_round_tokens.lock().unwrap_or_else(|e| e.into_inner()) = (0, None);
-            retry_events.send(UiEvent::StreamRetry);
-        }),
-        on_context_usage: Arc::new(move |usage| {
-            context_events.send(UiEvent::ContextUsage(usage));
-        }),
-        on_tool_ready: Box::new(move |tool_call_id, name, input, standalone| {
-            ready_events.send(UiEvent::ToolReady {
+            EngineEvent::StopReason { .. } => {}
+            EngineEvent::StreamRetry => {
+                *round_tokens.lock().unwrap_or_else(|e| e.into_inner()) = (0, None);
+                events.send(UiEvent::StreamRetry);
+            }
+            EngineEvent::ContextUsage(usage) => {
+                events.send(UiEvent::ContextUsage(usage));
+            }
+            EngineEvent::ToolReady {
                 tool_call_id,
                 name,
                 input,
                 standalone,
-            });
-        }),
-        on_tool_done: Box::new(move |done| {
-            tool_events.send(UiEvent::ToolDone(crate::query::ToolCallDone {
-                tool_call_id: done.tool_call_id.clone(),
-                name: done.name.clone(),
-                summary: done.summary.clone(),
-                output: done.output.clone(),
-                status: done.status,
-                diff: done.diff.clone(),
-                duration_ms: done.duration_ms,
-            }));
-        }),
-        on_round_end: Box::new(move || {
-            *round_tokens.lock().unwrap_or_else(|e| e.into_inner()) = (0, None);
-            round_events.send(UiEvent::RoundEnd);
-        }),
-        on_warning: Box::new(move |message| {
-            warn_events.send(UiEvent::Warning(message));
-        }),
-        // Main's inbound is the composer: the console put the line in its own
-        // transcript before the turn ever started, and echoing it here would
-        // print it twice.
-        on_inbound: Box::new(|_| {}),
-        // Take and announce in one step, under the queue's own lock: whoever takes the
-        // items owns them, and the composer learns of it from the same act. Splitting
-        // the two would open a window in which an item is in the request and still
-        // pending on screen.
-        steer: Arc::new(move || {
-            let items = steer.take();
-            if !items.is_empty() {
-                steer_events.send(UiEvent::Steered {
-                    items: items.clone(),
+            } => {
+                events.send(UiEvent::ToolReady {
+                    tool_call_id,
+                    name,
+                    input,
+                    standalone,
                 });
             }
-            items
-        }),
-        live,
-        ask: modal_ask(ask_asks),
-        ask_question: Arc::new(move |title, question, options| {
-            let mut request = PermissionRequest::new(title, question, Vec::new());
-            request.free_text = true;
-            request.options = options.iter().map(|(l, _d)| l.clone()).collect();
-            request.descriptions = options.into_iter().map(|(_l, d)| d).collect();
-            let (tx, rx) = oneshot::channel();
-            if asks.send((request, tx)).is_err() {
-                return Box::pin(async { None });
+            EngineEvent::ToolDone(done) => {
+                events.send(UiEvent::ToolDone(done));
             }
-            Box::pin(async move {
-                match rx.await {
-                    Ok(DialogAction::Confirm(index)) => {
-                        Some(crate::query::AskAnswer::Option(index))
-                    }
-                    Ok(DialogAction::Answer(text)) => Some(crate::query::AskAnswer::Other(text)),
-                    Ok(DialogAction::Cancel) | Err(_) => None,
-                }
-            })
+            EngineEvent::RoundEnd => {
+                *round_tokens.lock().unwrap_or_else(|e| e.into_inner()) = (0, None);
+                events.send(UiEvent::RoundEnd);
+            }
+            EngineEvent::Warning(message) => {
+                events.send(UiEvent::Warning(message));
+            }
+            // Main's inbound is the composer: the console put the line in its
+            // own transcript before the turn ever started, and echoing it here
+            // would print it twice.
+            EngineEvent::Inbound(_) => {}
         }),
+        requests: EngineRequests {
+            ask: modal_ask(ask_asks),
+            ask_question: Arc::new(move |title, question, options| {
+                let mut request = PermissionRequest::new(title, question, Vec::new());
+                request.free_text = true;
+                request.options = options.iter().map(|(l, _d)| l.clone()).collect();
+                request.descriptions = options.into_iter().map(|(_l, d)| d).collect();
+                let (tx, rx) = oneshot::channel();
+                if asks.send((request, tx)).is_err() {
+                    return Box::pin(async { None });
+                }
+                Box::pin(async move {
+                    match rx.await {
+                        Ok(DialogAction::Confirm(index)) => {
+                            Some(crate::query::AskAnswer::Option(index))
+                        }
+                        Ok(DialogAction::Answer(text)) => {
+                            Some(crate::query::AskAnswer::Other(text))
+                        }
+                        Ok(DialogAction::Cancel) | Err(_) => None,
+                    }
+                })
+            }),
+            // Take and announce in one step, under the queue's own lock: whoever takes the
+            // items owns them, and the composer learns of it from the same act. Splitting
+            // the two would open a window in which an item is in the request and still
+            // pending on screen.
+            steer: Arc::new(move || {
+                let items = steer.take();
+                if !items.is_empty() {
+                    steer_events.send(UiEvent::Steered {
+                        items: items.clone(),
+                    });
+                }
+                items
+            }),
+            live,
+        },
     }
+}
+
+/// The running estimate of a round's output: characters seen so far, in tokens.
+/// A block index that moves backwards means a new message started, so the count
+/// starts over.
+fn accumulate(state: &std::sync::Mutex<(u64, Option<usize>)>, index: usize, text: &str) -> u64 {
+    let mut state = state.lock().unwrap_or_else(|e| e.into_inner());
+    if state.1.is_some_and(|previous| previous > index) {
+        state.0 = 0;
+    }
+    state.1 = Some(index);
+    state.0 = state.0.saturating_add(crate::compact::text_units(text));
+    state.0.div_ceil(4)
 }
 
 #[cfg(test)]
@@ -568,15 +557,15 @@ mod tests {
     fn tui_hooks_emit_live_token_samples_before_final_usage() {
         let (events_tx, mut events_rx) = mpsc::unbounded_channel();
         let (asks_tx, _asks_rx) = mpsc::unbounded_channel();
-        let mut ui = tui_hooks(
+        let ui = tui_hooks(
             EventSink::new(ConvKey::Main, events_tx),
             asks_tx,
             crate::steer::SteerQueue::new(),
             crate::live::LiveBash::detached(),
         );
 
-        (ui.on_context_usage)(crate::context_usage::ContextUsage::new(
-            12_345, 128_000, 100_000,
+        ui.events.emit(EngineEvent::ContextUsage(
+            crate::context_usage::ContextUsage::new(12_345, 128_000, 100_000),
         ));
         assert!(matches!(
             events_rx.try_recv(),
@@ -584,7 +573,7 @@ mod tests {
                 if usage.used == 12_345 && usage.window == 128_000
         ));
 
-        (ui.on_event)(&StreamEvent::TextDelta {
+        ui.events.emit(EngineEvent::TextDelta {
             index: 0,
             text: "abcdefghijkl".to_string(),
         });
@@ -598,10 +587,10 @@ mod tests {
             })
         ));
 
-        (ui.on_stream_retry)();
+        ui.events.emit(EngineEvent::StreamRetry);
         assert!(matches!(next(&mut events_rx), Ok(UiEvent::StreamRetry)));
 
-        (ui.on_event)(&StreamEvent::StopReason {
+        ui.events.emit(EngineEvent::StopReason {
             stop_reason: Some("end_turn".to_string()),
             output_tokens: Some(10),
         });
@@ -627,7 +616,7 @@ mod tests {
             crate::live::LiveBash::detached(),
         );
 
-        let fut = (ui.ask_question)(
+        let fut = (ui.requests.ask_question)(
             "Tech stack".to_string(),
             "Which library?".to_string(),
             vec![
@@ -650,7 +639,7 @@ mod tests {
             "press 2 selects B"
         );
 
-        let fut = (ui.ask_question)(
+        let fut = (ui.requests.ask_question)(
             "t".to_string(),
             "q?".to_string(),
             vec![("a".to_string(), None)],
@@ -659,7 +648,7 @@ mod tests {
         tx.send(DialogAction::Cancel).unwrap();
         assert_eq!(fut.await, None, "Esc cancels → no answer");
 
-        let fut = (ui.ask_question)(
+        let fut = (ui.requests.ask_question)(
             "t".to_string(),
             "q?".to_string(),
             vec![("a".to_string(), None)],

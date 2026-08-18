@@ -673,10 +673,9 @@ impl super::Chat {
         self.cancel_tx.send_replace(false);
         let handle = tokio::spawn(async move {
             events.send(UiEvent::TurnStart);
-            let mut ui = crate::ui::tui_hooks(events.clone(), asks, steer, live);
-            let history = Self::load_history(&session, &mut ui.on_warning);
-            let result =
-                run_query(&session, history, &text, &images, &mut ui, Some(cancel_rx)).await;
+            let host = crate::ui::tui_hooks(events.clone(), asks, steer, live);
+            let history = Self::load_history(&session, &mut host.events.warn_sink());
+            let result = run_query(&session, history, &text, &images, &host, Some(cancel_rx)).await;
             match result {
                 Ok(outcome) => {
                     Self::finish_turn(&events, &session, &outcome).await;
@@ -749,16 +748,11 @@ impl super::Chat {
         self.cancel_tx.send_replace(false);
         let handle = tokio::spawn(async move {
             events.send(UiEvent::TurnStart);
-            let mut ui = crate::ui::tui_hooks(events.clone(), asks, steer, live);
-            let history = Self::load_history(&session, &mut ui.on_warning);
-            let result = crate::query::run_bash_command(
-                &session,
-                &command,
-                history,
-                &mut ui,
-                Some(cancel_rx),
-            )
-            .await;
+            let host = crate::ui::tui_hooks(events.clone(), asks, steer, live);
+            let history = Self::load_history(&session, &mut host.events.warn_sink());
+            let result =
+                crate::query::run_bash_command(&session, &command, history, &host, Some(cancel_rx))
+                    .await;
             match result {
                 Ok(outcome) => {
                     Self::finish_turn(&events, &session, &outcome).await;

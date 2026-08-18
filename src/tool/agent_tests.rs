@@ -1828,7 +1828,7 @@ async fn a_subagents_turn_streams_as_addressed_events() {
         true,
         true,
     );
-    let mut ui = subagent_hooks(
+    let ui = subagent_hooks(
         SubagentOutput {
             text: output.clone(),
             progress,
@@ -1840,37 +1840,42 @@ async fn a_subagents_turn_streams_as_addressed_events() {
         "worker".into(),
         None,
     );
-    (ui.on_event)(&crate::api::contract::StreamEvent::ThinkingDelta {
-        index: 0,
-        thinking: "first ".into(),
-    });
-    (ui.on_event)(&crate::api::contract::StreamEvent::ThinkingDelta {
-        index: 0,
-        thinking: "phase".into(),
-    });
-    (ui.on_tool_ready)(
-        "test-tool".into(),
-        "Read".into(),
-        serde_json::json!({"file_path": "a"}),
-        false,
-    );
-    (ui.on_event)(&crate::api::contract::StreamEvent::ThinkingDelta {
-        index: 0,
-        thinking: "second phase".into(),
-    });
-    (ui.on_tool_done)(&crate::query::ToolCallDone {
+    ui.events
+        .emit_stream(&crate::api::contract::StreamEvent::ThinkingDelta {
+            index: 0,
+            thinking: "first ".into(),
+        });
+    ui.events
+        .emit_stream(&crate::api::contract::StreamEvent::ThinkingDelta {
+            index: 0,
+            thinking: "phase".into(),
+        });
+    ui.events.emit(EngineEvent::ToolReady {
         tool_call_id: "test-tool".into(),
         name: "Read".into(),
-        summary: "a".into(),
-        output: "one line".into(),
-        status: crate::query::ToolCallStatus::Done,
-        diff: None,
-        duration_ms: 4,
+        input: serde_json::json!({"file_path": "a"}),
+        standalone: false,
     });
-    (ui.on_event)(&crate::api::contract::StreamEvent::TextDelta {
-        index: 0,
-        text: "the answer".into(),
-    });
+    ui.events
+        .emit_stream(&crate::api::contract::StreamEvent::ThinkingDelta {
+            index: 0,
+            thinking: "second phase".into(),
+        });
+    ui.events
+        .emit(EngineEvent::ToolDone(crate::query::ToolCallDone {
+            tool_call_id: "test-tool".into(),
+            name: "Read".into(),
+            summary: "a".into(),
+            output: "one line".into(),
+            status: crate::query::ToolCallStatus::Done,
+            diff: None,
+            duration_ms: 4,
+        }));
+    ui.events
+        .emit_stream(&crate::api::contract::StreamEvent::TextDelta {
+            index: 0,
+            text: "the answer".into(),
+        });
 
     let events = drain(&mut rx);
     let thinking: Vec<&String> = events
@@ -1930,7 +1935,7 @@ async fn subagent_retry_restores_the_current_attempt_checkpoint() {
         true,
         true,
     );
-    let mut ui = subagent_hooks(
+    let ui = subagent_hooks(
         SubagentOutput {
             text: output.clone(),
             progress: progress.clone(),
@@ -1942,33 +1947,36 @@ async fn subagent_retry_restores_the_current_attempt_checkpoint() {
         "worker".into(),
         None,
     );
-    (ui.on_event)(&crate::api::contract::StreamEvent::TextDelta {
-        index: 0,
-        text: "committed".into(),
+    ui.events
+        .emit_stream(&crate::api::contract::StreamEvent::TextDelta {
+            index: 0,
+            text: "committed".into(),
+        });
+    ui.events.emit(EngineEvent::ToolReady {
+        tool_call_id: "test-tool".into(),
+        name: "Read".into(),
+        input: serde_json::json!({"file_path":"a"}),
+        standalone: false,
     });
-    (ui.on_tool_ready)(
-        "test-tool".into(),
-        "Read".into(),
-        serde_json::json!({"file_path":"a"}),
-        false,
-    );
-    (ui.on_round_end)();
-    (ui.on_event)(&crate::api::contract::StreamEvent::TextDelta {
-        index: 0,
-        text: "partial".into(),
+    ui.events.emit(EngineEvent::RoundEnd);
+    ui.events
+        .emit_stream(&crate::api::contract::StreamEvent::TextDelta {
+            index: 0,
+            text: "partial".into(),
+        });
+    ui.events.emit(EngineEvent::ToolReady {
+        tool_call_id: "test-tool".into(),
+        name: "Bash".into(),
+        input: serde_json::json!({"command":"bad"}),
+        standalone: false,
     });
-    (ui.on_tool_ready)(
-        "test-tool".into(),
-        "Bash".into(),
-        serde_json::json!({"command":"bad"}),
-        false,
-    );
-    (ui.on_stream_retry)();
-    (ui.on_warning)("Reconnecting... 2/10".into());
-    (ui.on_event)(&crate::api::contract::StreamEvent::TextDelta {
-        index: 0,
-        text: "answer".into(),
-    });
+    ui.events.emit(EngineEvent::StreamRetry);
+    ui.events.warn("Reconnecting... 2/10");
+    ui.events
+        .emit_stream(&crate::api::contract::StreamEvent::TextDelta {
+            index: 0,
+            text: "answer".into(),
+        });
 
     assert_eq!(
         &*output.lock().unwrap_or_else(|e| e.into_inner()),
@@ -2015,7 +2023,7 @@ async fn subagent_progress_accumulates_tokens_tools_and_recent_activity() {
         true,
         true,
     );
-    let mut ui = subagent_hooks(
+    let ui = subagent_hooks(
         SubagentOutput {
             text: output,
             progress: progress.clone(),
@@ -2027,26 +2035,28 @@ async fn subagent_progress_accumulates_tokens_tools_and_recent_activity() {
         "worker".into(),
         None,
     );
-    (ui.on_event)(&crate::api::contract::StreamEvent::StopReason {
-        stop_reason: Some("tool_use".into()),
-        output_tokens: Some(12),
+    ui.events
+        .emit_stream(&crate::api::contract::StreamEvent::StopReason {
+            stop_reason: Some("tool_use".into()),
+            output_tokens: Some(12),
+        });
+    ui.events.emit(EngineEvent::ToolReady {
+        tool_call_id: "test-tool".into(),
+        name: "Read".into(),
+        input: serde_json::json!({"file_path":"src/main.rs"}),
+        standalone: false,
     });
-    (ui.on_tool_ready)(
-        "test-tool".into(),
-        "Read".into(),
-        serde_json::json!({"file_path":"src/main.rs"}),
-        false,
-    );
-    (ui.on_event)(&crate::api::contract::StreamEvent::StopReason {
-        stop_reason: Some("end_turn".into()),
-        output_tokens: Some(7),
+    ui.events
+        .emit_stream(&crate::api::contract::StreamEvent::StopReason {
+            stop_reason: Some("end_turn".into()),
+            output_tokens: Some(7),
+        });
+    ui.events.emit(EngineEvent::ToolReady {
+        tool_call_id: "test-tool".into(),
+        name: "Bash".into(),
+        input: serde_json::json!({"command":"cargo check"}),
+        standalone: false,
     });
-    (ui.on_tool_ready)(
-        "test-tool".into(),
-        "Bash".into(),
-        serde_json::json!({"command":"cargo check"}),
-        false,
-    );
     let progress = progress.lock().unwrap_or_else(|e| e.into_inner());
     assert_eq!(progress.output_tokens, 19);
     assert_eq!(progress.tool_uses, 2);
@@ -2078,7 +2088,7 @@ async fn subagent_hooks_touch_activity_on_stream_and_tool_signals() {
         true,
         true,
     );
-    let mut ui = subagent_hooks(
+    let ui = subagent_hooks(
         SubagentOutput {
             text: Arc::new(Mutex::new(String::new())),
             progress: Arc::new(Mutex::new(crate::agents::AgentProgress::default())),
@@ -2092,33 +2102,35 @@ async fn subagent_hooks_touch_activity_on_stream_and_tool_signals() {
     );
     let inserted = session.agents.list()[0].last_active;
     std::thread::sleep(std::time::Duration::from_millis(2));
-    (ui.on_event)(&crate::api::contract::StreamEvent::TextDelta {
-        index: 0,
-        text: "hi".into(),
-    });
+    ui.events
+        .emit_stream(&crate::api::contract::StreamEvent::TextDelta {
+            index: 0,
+            text: "hi".into(),
+        });
     let streamed = session.agents.list()[0].last_active;
     assert!(streamed > inserted);
 
     std::thread::sleep(std::time::Duration::from_millis(2));
-    (ui.on_tool_ready)(
-        "test-tool".into(),
-        "Read".into(),
-        serde_json::json!({"file_path": "a"}),
-        false,
-    );
+    ui.events.emit(EngineEvent::ToolReady {
+        tool_call_id: "test-tool".into(),
+        name: "Read".into(),
+        input: serde_json::json!({"file_path": "a"}),
+        standalone: false,
+    });
     let ready = session.agents.list()[0].last_active;
     assert!(ready > streamed);
 
     std::thread::sleep(std::time::Duration::from_millis(2));
-    (ui.on_tool_done)(&crate::query::ToolCallDone {
-        tool_call_id: "test-tool".into(),
-        name: "Read".into(),
-        summary: String::new(),
-        output: String::new(),
-        status: crate::query::ToolCallStatus::Done,
-        diff: None,
-        duration_ms: 1,
-    });
+    ui.events
+        .emit(EngineEvent::ToolDone(crate::query::ToolCallDone {
+            tool_call_id: "test-tool".into(),
+            name: "Read".into(),
+            summary: String::new(),
+            output: String::new(),
+            status: crate::query::ToolCallStatus::Done,
+            diff: None,
+            duration_ms: 1,
+        }));
     assert!(session.agents.list()[0].last_active > ready);
 }
 
@@ -2170,7 +2182,7 @@ async fn subagent_ask_forwards_to_attached_prompt() {
         scope: Some("Write(/tmp/)"),
         diff: None,
     };
-    assert!((ui.ask)(&request).await.allowed());
+    assert!((ui.requests.ask)(&request).await.allowed());
     assert_eq!(
         seen.lock().unwrap_or_else(|e| e.into_inner()).as_slice(),
         ["Write|worker · Write needs permission|Write(/tmp/)"],
@@ -2191,7 +2203,7 @@ async fn subagent_ask_forwards_to_attached_prompt() {
         None,
     );
     assert_eq!(
-        (ui.ask)(&request).await,
+        (ui.requests.ask)(&request).await,
         crate::query::AskOutcome::Deny { feedback: None }
     );
 }

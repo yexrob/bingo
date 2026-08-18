@@ -9,12 +9,12 @@ use crate::steer::SteerQueue;
 
 /// Headless hooks wired to a steer channel holding `items`, plus the channel itself:
 /// whether it is empty afterwards is whether the barrier took them.
-fn steering_hooks(items: Vec<crate::steer::SteerItem>) -> (UiHooks, Arc<SteerQueue>) {
+fn steering_hooks(items: Vec<crate::steer::SteerItem>) -> (EngineHost, Arc<SteerQueue>) {
     let queue = Arc::new(SteerQueue::new());
     queue.rearm(items);
     let source = Arc::clone(&queue);
     let mut ui = headless_hooks();
-    ui.steer = Arc::new(move || source.take());
+    ui.requests.steer = Arc::new(move || source.take());
     (ui, queue)
 }
 
@@ -29,11 +29,11 @@ async fn steering_lands_after_the_tool_results_of_the_same_message() {
     ])
     .await;
     let session = test_session(base_url, None);
-    let (mut ui, queue) = steering_hooks(vec![crate::steer::SteerItem {
+    let (ui, queue) = steering_hooks(vec![crate::steer::SteerItem {
         id: 7,
         text: "use tabs".into(),
     }]);
-    let outcome = run_query(&session, Vec::new(), "go", &[], &mut ui, None)
+    let outcome = run_query(&session, Vec::new(), "go", &[], &ui, None)
         .await
         .unwrap();
 
@@ -75,11 +75,11 @@ async fn steering_lands_after_the_tool_results_of_the_same_message() {
 async fn a_turn_without_tools_never_reaches_a_barrier() {
     let base_url = spawn_api(vec![text_turn("hi", "end_turn")]).await;
     let session = test_session(base_url, None);
-    let (mut ui, queue) = steering_hooks(vec![crate::steer::SteerItem {
+    let (ui, queue) = steering_hooks(vec![crate::steer::SteerItem {
         id: 1,
         text: "wait".into(),
     }]);
-    run_query(&session, Vec::new(), "go", &[], &mut ui, None)
+    run_query(&session, Vec::new(), "go", &[], &ui, None)
         .await
         .unwrap();
     assert!(
@@ -94,7 +94,7 @@ async fn a_turn_without_tools_never_reaches_a_barrier() {
 async fn an_interrupted_turn_takes_nothing_from_the_queue() {
     let base_url = spawn_api(vec![bash_tool_turn("tu_1", "sleep 5")]).await;
     let session = test_session(base_url, None);
-    let (mut ui, queue) = steering_hooks(vec![crate::steer::SteerItem {
+    let (ui, queue) = steering_hooks(vec![crate::steer::SteerItem {
         id: 1,
         text: "stop that".into(),
     }]);
@@ -102,7 +102,7 @@ async fn an_interrupted_turn_takes_nothing_from_the_queue() {
     let handle = tokio::spawn({
         let session = session.clone();
         async move {
-            let outcome = run_query(&session, Vec::new(), "go", &[], &mut ui, Some(rx)).await;
+            let outcome = run_query(&session, Vec::new(), "go", &[], &ui, Some(rx)).await;
             (outcome, ui)
         }
     });

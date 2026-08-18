@@ -757,9 +757,9 @@ async fn retryable_stream_api_error_retries_then_succeeds() {
     ])
     .await;
     let session = test_session(base_url, None);
-    let mut ui = headless_hooks();
+    let ui = headless_hooks();
 
-    let outcome = run_query(&session, Vec::new(), "go", &[], &mut ui, None)
+    let outcome = run_query(&session, Vec::new(), "go", &[], &ui, None)
         .await
         .unwrap();
 
@@ -779,9 +779,9 @@ async fn non_retryable_stream_api_error_fails_without_retrying() {
     )])
     .await;
     let session = test_session(base_url, None);
-    let mut ui = headless_hooks();
+    let ui = headless_hooks();
 
-    let error = run_query(&session, Vec::new(), "go", &[], &mut ui, None)
+    let error = run_query(&session, Vec::new(), "go", &[], &ui, None)
         .await
         .unwrap_err();
 
@@ -798,9 +798,9 @@ async fn retryable_stream_api_error_stops_after_ten_retries() {
         .collect();
     let base_url = spawn_api(responses).await;
     let session = test_session(base_url, None);
-    let mut ui = headless_hooks();
+    let ui = headless_hooks();
 
-    let error = run_query(&session, Vec::new(), "go", &[], &mut ui, None)
+    let error = run_query(&session, Vec::new(), "go", &[], &ui, None)
         .await
         .unwrap_err();
 
@@ -822,13 +822,13 @@ async fn anthropic_overflow_compacts_and_retries_once() {
     ])
     .await;
     let session = test_session(base_url, None);
-    let mut ui = headless_hooks();
+    let ui = headless_hooks();
     let outcome = run_query(
         &session,
         overflow_history(),
         "current request",
         &[],
-        &mut ui,
+        &ui,
         None,
     )
     .await
@@ -865,13 +865,13 @@ async fn openai_overflow_compacts_and_retries_once() {
     ])
     .await;
     let session = test_session_with_client(openai_test_client(base_url), None);
-    let mut ui = headless_hooks();
+    let ui = headless_hooks();
     let outcome = run_query(
         &session,
         overflow_history(),
         "current request",
         &[],
-        &mut ui,
+        &ui,
         None,
     )
     .await
@@ -913,13 +913,13 @@ async fn repeated_overflow_stops_after_one_retry_and_increments_breaker() {
     ])
     .await;
     let session = test_session(base_url, None);
-    let mut ui = headless_hooks();
+    let ui = headless_hooks();
     let error = run_query(
         &session,
         overflow_history(),
         "current request",
         &[],
-        &mut ui,
+        &ui,
         None,
     )
     .await
@@ -955,13 +955,13 @@ async fn successful_overflow_compaction_resets_previous_failures() {
     .await;
     let client = crate::api::client::Client::new("k".into(), base_url);
     let session = test_session_with_client_and_failures(client, None, 1);
-    let mut ui = headless_hooks();
+    let ui = headless_hooks();
     let error = run_query(
         &session,
         overflow_history(),
         "current request",
         &[],
-        &mut ui,
+        &ui,
         None,
     )
     .await
@@ -1008,13 +1008,13 @@ async fn overflow_compaction_resets_the_token_gate() {
     )
     .await;
     let session = test_session(base_url, None);
-    let mut ui = headless_hooks();
+    let ui = headless_hooks();
     run_query(
         &session,
         overflow_history(),
         "current request",
         &[],
-        &mut ui,
+        &ui,
         None,
     )
     .await
@@ -1044,8 +1044,8 @@ async fn declared_max_tokens_reaches_the_request() {
     })
     .unwrap();
     let session = test_session_with_client(client, None);
-    let mut ui = headless_hooks();
-    run_query(&session, Vec::new(), "go", &[], &mut ui, None)
+    let ui = headless_hooks();
+    run_query(&session, Vec::new(), "go", &[], &ui, None)
         .await
         .unwrap();
 
@@ -1060,14 +1060,16 @@ async fn declared_max_tokens_reaches_the_request() {
     );
 }
 
-fn capturing_hooks() -> (UiHooks, Arc<std::sync::Mutex<Vec<String>>>) {
+fn capturing_hooks() -> (EngineHost, Arc<std::sync::Mutex<Vec<String>>>) {
     let warnings = Arc::new(std::sync::Mutex::new(Vec::new()));
     let seen = Arc::clone(&warnings);
-    let mut ui = headless_hooks();
-    ui.on_warning = Box::new(move |message| {
-        seen.lock().unwrap_or_else(|e| e.into_inner()).push(message);
+    let mut host = headless_hooks();
+    host.events = crate::engine::events::EngineEvents::new(move |event| {
+        if let crate::engine::events::EngineEvent::Warning(message) = event {
+            seen.lock().unwrap_or_else(|e| e.into_inner()).push(message);
+        }
     });
-    (ui, warnings)
+    (host, warnings)
 }
 
 /// Compaction is invisible to the TUI and to a JSON client if it writes
@@ -1085,13 +1087,13 @@ async fn compaction_reports_itself_through_the_ui_hook() {
     ])
     .await;
     let session = test_session(base_url, None);
-    let (mut ui, warnings) = capturing_hooks();
+    let (ui, warnings) = capturing_hooks();
     run_query(
         &session,
         overflow_history(),
         "current request",
         &[],
-        &mut ui,
+        &ui,
         None,
     )
     .await
@@ -1120,13 +1122,13 @@ async fn overflow_compaction_failure_increments_breaker_without_retrying_request
     ])
     .await;
     let session = test_session(base_url, None);
-    let (mut ui, warnings) = capturing_hooks();
+    let (ui, warnings) = capturing_hooks();
     let error = run_query(
         &session,
         overflow_history(),
         "current request",
         &[],
-        &mut ui,
+        &ui,
         None,
     )
     .await
@@ -1190,8 +1192,8 @@ async fn running_agent_absorbs_a_batch_at_the_next_tool_round() {
         session.clone(),
     );
     session.agents.next_run("worker");
-    let mut ui = headless_hooks();
-    let tools = crate::tools::assemble_tools(&session, &mut ui.on_warning).await;
+    let ui = headless_hooks();
+    let tools = crate::tools::assemble_tools(&session, &mut ui.events.warn_sink()).await;
     let ctx = tool_context(&session, &ui).unwrap_or_else(|e| panic!("{e}"));
     let run = tokio::spawn({
         let session = session.clone();
@@ -1199,7 +1201,7 @@ async fn running_agent_absorbs_a_batch_at_the_next_tool_round() {
             query_loop(
                 &session,
                 vec![Message::user_text("initial")],
-                &mut ui,
+                &ui,
                 &tools,
                 &ctx,
                 None,
@@ -1440,8 +1442,8 @@ async fn bash_command_executes_without_model_query() {
         instance: None,
         attachments: crate::api::image::Attachments::new(),
     });
-    let mut ui = headless_hooks();
-    let outcome = run_bash_command(&session, "printf '%s' 'a<b&c>'", Vec::new(), &mut ui, None)
+    let ui = headless_hooks();
+    let outcome = run_bash_command(&session, "printf '%s' 'a<b&c>'", Vec::new(), &ui, None)
         .await
         .unwrap();
     assert!(!outcome.aborted);
@@ -1493,8 +1495,8 @@ async fn interrupt_backfills_placeholder_tool_results() {
     let handle = tokio::spawn({
         let session = session.clone();
         async move {
-            let mut ui = headless_hooks();
-            run_query(&session, Vec::new(), "go", &[], &mut ui, Some(rx)).await
+            let ui = headless_hooks();
+            run_query(&session, Vec::new(), "go", &[], &ui, Some(rx)).await
         }
     });
     tokio::time::sleep(std::time::Duration::from_millis(400)).await;
@@ -1606,8 +1608,8 @@ async fn interrupted_turn(prefix: String, transcript: Transcript) -> QueryOutcom
     let handle = tokio::spawn({
         let session = session.clone();
         async move {
-            let mut ui = headless_hooks();
-            run_query(&session, Vec::new(), "go", &[], &mut ui, Some(rx)).await
+            let ui = headless_hooks();
+            run_query(&session, Vec::new(), "go", &[], &ui, Some(rx)).await
         }
     });
     tokio::time::sleep(std::time::Duration::from_millis(400)).await;
@@ -1720,8 +1722,8 @@ async fn content_free_completed_turn_retries_without_recording_it() {
     ])
     .await;
     let session = test_session(base_url, None);
-    let mut ui = headless_hooks();
-    let outcome = run_query(&session, Vec::new(), "go", &[], &mut ui, None)
+    let ui = headless_hooks();
+    let outcome = run_query(&session, Vec::new(), "go", &[], &ui, None)
         .await
         .unwrap();
 
@@ -1745,8 +1747,8 @@ async fn unclosed_thinking_empty_turn_retries_without_recording_it() {
     ])
     .await;
     let session = test_session(base_url, None);
-    let mut ui = headless_hooks();
-    let outcome = run_query(&session, Vec::new(), "go", &[], &mut ui, None)
+    let ui = headless_hooks();
+    let outcome = run_query(&session, Vec::new(), "go", &[], &ui, None)
         .await
         .unwrap();
 
@@ -1780,8 +1782,8 @@ async fn repeated_empty_turn_completes_silently_without_recording_assistant() {
     ])
     .await;
     let session = test_session(base_url, Some(transcript.clone()));
-    let mut ui = headless_hooks();
-    let outcome = run_query(&session, Vec::new(), "go", &[], &mut ui, None)
+    let ui = headless_hooks();
+    let outcome = run_query(&session, Vec::new(), "go", &[], &ui, None)
         .await
         .unwrap();
 
@@ -1807,8 +1809,8 @@ async fn unclosed_text_max_tokens_recovers_with_truncated_history() {
     ])
     .await;
     let session = test_session(base_url, None);
-    let mut ui = headless_hooks();
-    let outcome = run_query(&session, Vec::new(), "go", &[], &mut ui, None)
+    let ui = headless_hooks();
+    let outcome = run_query(&session, Vec::new(), "go", &[], &ui, None)
         .await
         .unwrap();
 
@@ -1848,8 +1850,8 @@ async fn max_tokens_recovery_keeps_truncated_assistant_in_history() {
     ])
     .await;
     let session = test_session(base_url, None);
-    let mut ui = headless_hooks();
-    let outcome = run_query(&session, Vec::new(), "go", &[], &mut ui, None)
+    let ui = headless_hooks();
+    let outcome = run_query(&session, Vec::new(), "go", &[], &ui, None)
         .await
         .unwrap();
 
@@ -1898,8 +1900,8 @@ async fn thinking_only_max_tokens_turn_recovers_instead_of_reading_as_empty() {
     ])
     .await;
     let session = test_session(base_url, None);
-    let mut ui = headless_hooks();
-    let outcome = run_query(&session, Vec::new(), "go", &[], &mut ui, None)
+    let ui = headless_hooks();
+    let outcome = run_query(&session, Vec::new(), "go", &[], &ui, None)
         .await
         .unwrap();
 
@@ -1945,8 +1947,8 @@ async fn silence_twice_over_completes_the_turn_instead_of_failing() {
     ])
     .await;
     let session = test_session(base_url, None);
-    let mut ui = headless_hooks();
-    let outcome = run_query(&session, Vec::new(), "go", &[], &mut ui, None)
+    let ui = headless_hooks();
+    let outcome = run_query(&session, Vec::new(), "go", &[], &ui, None)
         .await
         .unwrap();
 
@@ -2066,8 +2068,8 @@ async fn bash_command_refuses_interactive_tty_commands() {
         instance: None,
         attachments: crate::api::image::Attachments::new(),
     });
-    let mut ui = headless_hooks();
-    let outcome = run_bash_command(&session, "htop", Vec::new(), &mut ui, None)
+    let ui = headless_hooks();
+    let outcome = run_bash_command(&session, "htop", Vec::new(), &ui, None)
         .await
         .unwrap();
     let ContentBlock::Text { text } = &outcome.messages[1].content[0] else {

@@ -11,7 +11,8 @@ use crate::tool::executor::cancel_requested;
 use crate::tool::{Tool, tool_params};
 
 use crate::api::providers::{RETRY_INITIAL_DELAY, RETRY_MAX_DELAY, backoff_delay, jitter_unit};
-use crate::query::{InboxWake, QueryError, RECONNECT_WARNING_PREFIX, Session, UiHooks};
+use crate::engine::events::{EngineEvent, EngineHost};
+use crate::query::{InboxWake, QueryError, RECONNECT_WARNING_PREFIX, Session};
 
 /// A retry restarts the entire model response, so the failed attempt is discarded before any
 /// assistant content or tool call is committed to history.
@@ -147,7 +148,7 @@ async fn one_turn(
     session: &Arc<Session>,
     messages: &[Message],
     tools: &[Box<dyn Tool>],
-    ui: &mut UiHooks,
+    host: &EngineHost,
     mut cancel: Option<&mut watch::Receiver<bool>>,
     mut inbox: Option<&mut InboxWake>,
 ) -> Result<Turn, OneTurnError> {
@@ -255,7 +256,7 @@ async fn one_turn(
         {
             inbox.output_chars += text.chars().count();
         }
-        (ui.on_event)(&event);
+        host.events.emit_stream(&event);
         emitted_output |= matches!(
             &event,
             StreamEvent::TextDelta { text, .. } if !text.is_empty()
@@ -286,7 +287,12 @@ async fn one_turn(
                         name: name.clone(),
                         input: input.clone(),
                     });
-                    (ui.on_tool_ready)(id.clone(), name.clone(), input.clone(), false);
+                    host.events.emit(EngineEvent::ToolReady {
+                        tool_call_id: id.clone(),
+                        name: name.clone(),
+                        input: input.clone(),
+                        standalone: false,
+                    });
                 }
             }
             _ => {}
@@ -305,7 +311,7 @@ pub(super) async fn one_turn_with_stream_retries(
     session: &Arc<Session>,
     messages: &[Message],
     tools: &[Box<dyn Tool>],
-    ui: &mut UiHooks,
+    host: &EngineHost,
     mut cancel: Option<&mut watch::Receiver<bool>>,
     mut inbox: Option<&mut InboxWake>,
 ) -> Result<Turn, QueryError> {
@@ -317,7 +323,7 @@ pub(super) async fn one_turn_with_stream_retries(
             session,
             messages,
             tools,
-            ui,
+            host,
             cancel.as_deref_mut(),
             inbox.as_deref_mut(),
         )
@@ -335,10 +341,10 @@ pub(super) async fn one_turn_with_stream_retries(
                     if let Some(inbox) = inbox.as_deref_mut() {
                         inbox.output_chars = inbox_output_chars;
                     }
-                    (ui.on_stream_retry)();
+                    host.events.emit(EngineEvent::StreamRetry);
                 }
                 if retries > 1 {
-                    (ui.on_warning)(format!(
+                    host.events.warn(format!(
                         "{RECONNECT_WARNING_PREFIX}{retries}/{max}",
                         max = policy.max_retries
                     ));
@@ -364,11 +370,11 @@ pub(super) async fn retry_after_overflow(
     session: &Arc<Session>,
     messages: &[Message],
     tools: &[Box<dyn Tool>],
-    ui: &mut UiHooks,
+    host: &EngineHost,
     cancel: Option<&mut watch::Receiver<bool>>,
     inbox: Option<&mut InboxWake>,
 ) -> Result<Turn, QueryError> {
-    match one_turn_with_stream_retries(session, messages, tools, ui, cancel, inbox).await {
+    match one_turn_with_stream_retries(session, messages, tools, host, cancel, inbox).await {
         Err(error @ QueryError::Client(ClientError::ContextOverflow { .. })) => {
             session
                 .compact_failures

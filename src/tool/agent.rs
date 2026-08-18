@@ -9,7 +9,8 @@ use crate::agents::{
 use crate::api::contract::SystemBlock;
 use crate::api::types::Message;
 use crate::channels::ChannelRegistry;
-use crate::query::{Session, UiHooks};
+use crate::engine::events::{EngineEvent, EngineEvents, EngineHost, EngineRequests};
+use crate::query::Session;
 use crate::tool::{Tool, ToolContext, ToolError, ToolResult, parse_input};
 use crate::ui::UiEvent;
 use crate::watch::{NotifyCondition, WatchId, WatchKind, WatchRegistry, WatchState};
@@ -146,226 +147,225 @@ fn subagent_hooks(
     id: WatchId,
     instance: String,
     ask: Option<Arc<crate::query::AskFn>>,
-) -> UiHooks {
+) -> EngineHost {
     // `output.text` stays the flat reply — what the spawn returns and what
     // `spoke` is judged on. Everything the *screen* needs travels as events, so
     // an instance's page is built by the code that builds main's rather than by
     // a second store polled per frame (D134).
+    //
+    // A shim, like `tui_hooks`: the translation into `UiEvent` is what B7
+    // removes when the console reads `AppFrame` instead.
     let events = events.unwrap_or_else(crate::ui::EventSink::detached);
-    let tool_events = events.clone();
-    let done_events = events.clone();
-    let retry_events = events.clone();
-    let round_events = events.clone();
-    let warn_events = events.clone();
-    let inbound_events = events.clone();
-    let usage_events = events.clone();
-    let tool_progress = output.progress.clone();
-    let retry_text = output.text.clone();
-    let retry_progress = output.progress.clone();
-    let round_text = output.text.clone();
-    let round_progress = output.progress.clone();
     let text_output = output.text;
     let progress_output = output.progress;
     let registry = cell.registry.clone();
-    let event_registry = registry.clone();
-    let event_instance = instance.clone();
-    let tool_registry = registry.clone();
-    let tool_instance = instance.clone();
-    let done_registry = registry.clone();
-    let done_instance = instance.clone();
     let warn_instance = instance.clone();
+    let event_instance = instance.clone();
     let round_units = Arc::new(Mutex::new(0u64));
-    let retry_units = round_units.clone();
-    let event_round_units = round_units.clone();
     let attempt_checkpoint = Arc::new(Mutex::new(AttemptCheckpoint::default()));
-    let retry_checkpoint = attempt_checkpoint.clone();
-    let round_checkpoint = attempt_checkpoint.clone();
-    let event_cell = cell.clone();
-    let retry_cell = cell.clone();
-    let round_cell = cell.clone();
-    UiHooks {
-        on_event: Box::new(move |event| {
+    EngineHost {
+        events: EngineEvents::new(move |event| {
             let tokens = match event {
-                crate::api::contract::StreamEvent::TextDelta { text, .. } => {
-                    event_registry.touch(&event_instance);
+                EngineEvent::TextDelta { text, .. } => {
+                    registry.touch(&event_instance);
                     let tokens = {
-                        let mut units = event_round_units.lock().unwrap_or_else(|e| e.into_inner());
-                        *units = units.saturating_add(crate::compact::text_units(text));
+                        let mut units = round_units.lock().unwrap_or_else(|e| e.into_inner());
+                        *units = units.saturating_add(crate::compact::text_units(&text));
                         units.div_ceil(4)
                     };
                     if let Ok(mut output) = text_output.lock() {
-                        output.push_str(text);
+                        output.push_str(&text);
                         events.send(UiEvent::TextDelta(text.clone()));
-                        event_cell.record_chars(text.chars().count());
+                        cell.record_chars(text.chars().count());
                         // Feed produced text into the condition engine (notify_on hit → signal notification).
-                        watch.feed_content(id, text);
+                        watch.feed_content(id, &text);
                     }
                     tokens
                 }
-                crate::api::contract::StreamEvent::ThinkingDelta { thinking, .. } => {
-                    event_registry.touch(&event_instance);
-                    events.send(UiEvent::ThinkingDelta(thinking.clone()));
-                    let mut units = event_round_units.lock().unwrap_or_else(|e| e.into_inner());
-                    *units = units.saturating_add(crate::compact::text_units(thinking));
+                EngineEvent::ThinkingDelta { thinking, .. } => {
+                    registry.touch(&event_instance);
+                    let tokens = {
+                        let mut units = round_units.lock().unwrap_or_else(|e| e.into_inner());
+                        *units = units.saturating_add(crate::compact::text_units(&thinking));
+                        units.div_ceil(4)
+                    };
+                    events.send(UiEvent::ThinkingDelta(thinking));
+                    tokens
+                }
+                EngineEvent::ToolInputDelta { partial_json, .. } => {
+                    let mut units = round_units.lock().unwrap_or_else(|e| e.into_inner());
+                    *units = units.saturating_add(crate::compact::text_units(&partial_json));
                     units.div_ceil(4)
                 }
-                crate::api::contract::StreamEvent::InputJsonDelta { partial_json, .. } => {
-                    let mut units = event_round_units.lock().unwrap_or_else(|e| e.into_inner());
-                    *units = units.saturating_add(crate::compact::text_units(partial_json));
-                    units.div_ceil(4)
-                }
-                crate::api::contract::StreamEvent::ToolUseStart { name, .. } => {
-                    events.send(UiEvent::ToolStart { name: name.clone() });
+                EngineEvent::ToolUseStarted { name, .. } => {
+                    events.send(UiEvent::ToolStart { name });
                     return;
                 }
-                crate::api::contract::StreamEvent::StopReason {
+                EngineEvent::StopReason {
                     output_tokens: Some(tokens),
                     ..
                 } => {
-                    *event_round_units.lock().unwrap_or_else(|e| e.into_inner()) =
+                    *round_units.lock().unwrap_or_else(|e| e.into_inner()) =
                         tokens.saturating_mul(4);
                     if let Ok(mut progress) = progress_output.lock() {
-                        progress.add_output_tokens(*tokens);
+                        progress.add_output_tokens(tokens);
                     }
                     events.send(UiEvent::OutputTokens {
-                        tokens: *tokens,
+                        tokens,
                         authoritative: true,
                     });
                     return;
                 }
-                _ => return,
+                EngineEvent::StreamRetry => {
+                    *round_units.lock().unwrap_or_else(|e| e.into_inner()) = 0;
+                    events.send(UiEvent::StreamRetry);
+                    let checkpoint = attempt_checkpoint
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .clone();
+                    if let Ok(mut text) = text_output.lock() {
+                        text.truncate(checkpoint.text_len);
+                    }
+                    cell.set_chars(checkpoint.produced_chars);
+                    if let Ok(mut progress) = progress_output.lock() {
+                        progress.restore_attempt(
+                            checkpoint.output_tokens,
+                            checkpoint.tool_uses,
+                            checkpoint.recent_activity,
+                        );
+                    }
+                    return;
+                }
+                // The surface D89 left this hook waiting for: an instance's page
+                // has a footer of its own now, and it reports the instance's
+                // window rather than borrowing main's.
+                EngineEvent::ContextUsage(usage) => {
+                    events.send(UiEvent::ContextUsage(usage));
+                    return;
+                }
+                EngineEvent::ToolReady {
+                    tool_call_id,
+                    name,
+                    input,
+                    standalone,
+                } => {
+                    registry.touch(&event_instance);
+                    // The progress line is a label and stays one; the call itself goes
+                    // on the channel, because the page builds its rows from the call.
+                    let glyph = crate::tui::activities::tool_glyph(&name);
+                    let shown = crate::tui::activities::display_tool_name(&name);
+                    let summary = crate::query::summarize_input(&name, &input);
+                    let activity = if summary.is_empty() {
+                        format!("{glyph}{shown}")
+                    } else {
+                        format!("{glyph}{shown}({summary})")
+                    };
+                    events.send(UiEvent::ToolReady {
+                        tool_call_id,
+                        name,
+                        input,
+                        standalone,
+                    });
+                    if let Ok(mut progress) = progress_output.lock() {
+                        progress.record_tool(activity);
+                    }
+                    return;
+                }
+                EngineEvent::ToolDone(done) => {
+                    registry.touch(&event_instance);
+                    events.send(UiEvent::ToolDone(done));
+                    return;
+                }
+                EngineEvent::RoundEnd => {
+                    *round_units.lock().unwrap_or_else(|e| e.into_inner()) = 0;
+                    events.send(UiEvent::RoundEnd);
+                    let (output_tokens, tool_uses, recent_activity) = progress_output
+                        .lock()
+                        .map(|progress| {
+                            (
+                                progress.output_tokens,
+                                progress.tool_uses,
+                                progress.recent_activity.clone(),
+                            )
+                        })
+                        .unwrap_or_default();
+                    *attempt_checkpoint.lock().unwrap_or_else(|e| e.into_inner()) =
+                        AttemptCheckpoint {
+                            text_len: text_output.lock().map_or(0, |text| text.len()),
+                            produced_chars: cell.chars(),
+                            output_tokens,
+                            tool_uses,
+                            recent_activity,
+                        };
+                    return;
+                }
+                // A reconnect notice used to be spliced into the instance's own prose,
+                // where it read as something the agent had said. It is a warning about
+                // the stream, so it takes the tier every other warning takes — wearing
+                // the name of whose stream it is about, because the tier is shared and
+                // an unattributed "Reconnecting…" on a page the user is not watching
+                // reads as the console's own (D134a).
+                EngineEvent::Warning(message) => {
+                    events.send(UiEvent::Warning(format!("@{warn_instance} · {message}")));
+                    return;
+                }
+                EngineEvent::Inbound(text) => {
+                    events.send(UiEvent::Inbound(text));
+                    return;
+                }
+                EngineEvent::StopReason { .. } => return,
             };
             events.send(UiEvent::OutputTokens {
                 tokens,
                 authoritative: false,
             });
         }),
-        on_stream_retry: Box::new(move || {
-            *retry_units.lock().unwrap_or_else(|e| e.into_inner()) = 0;
-            retry_events.send(UiEvent::StreamRetry);
-            let checkpoint = retry_checkpoint
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .clone();
-            if let Ok(mut text) = retry_text.lock() {
-                text.truncate(checkpoint.text_len);
-            }
-            retry_cell.set_chars(checkpoint.produced_chars);
-            if let Ok(mut progress) = retry_progress.lock() {
-                progress.restore_attempt(
-                    checkpoint.output_tokens,
-                    checkpoint.tool_uses,
-                    checkpoint.recent_activity,
-                );
-            }
-        }),
-        // The surface D89 left this hook waiting for: an instance's page has a
-        // footer of its own now, and it reports the instance's window rather
-        // than borrowing main's.
-        on_context_usage: Arc::new(move |usage| {
-            usage_events.send(UiEvent::ContextUsage(usage));
-        }),
-        on_tool_ready: Box::new(move |tool_call_id, name, input, standalone| {
-            tool_registry.touch(&tool_instance);
-            // The progress line is a label and stays one; the call itself goes
-            // on the channel, because the page builds its rows from the call.
-            let glyph = crate::tui::activities::tool_glyph(&name);
-            let shown = crate::tui::activities::display_tool_name(&name);
-            let summary = crate::query::summarize_input(&name, &input);
-            let activity = if summary.is_empty() {
-                format!("{glyph}{shown}")
-            } else {
-                format!("{glyph}{shown}({summary})")
-            };
-            tool_events.send(UiEvent::ToolReady {
-                tool_call_id,
-                name,
-                input,
-                standalone,
-            });
-            if let Ok(mut progress) = tool_progress.lock() {
-                progress.record_tool(activity);
-            }
-        }),
-        on_tool_done: Box::new(move |done| {
-            done_registry.touch(&done_instance);
-            done_events.send(UiEvent::ToolDone(done.clone()));
-        }),
-        on_round_end: Box::new(move || {
-            *round_units.lock().unwrap_or_else(|e| e.into_inner()) = 0;
-            round_events.send(UiEvent::RoundEnd);
-            let (output_tokens, tool_uses, recent_activity) = round_progress
-                .lock()
-                .map(|progress| {
-                    (
-                        progress.output_tokens,
-                        progress.tool_uses,
-                        progress.recent_activity.clone(),
-                    )
+        requests: EngineRequests {
+            // A subagent has no prompt surface of its own, so its Ask decisions are forwarded to
+            // the session that owns the UI, stamped with the instance name. Auto-denying here
+            // would fail the tool call as "user denied" without the user ever being asked — and
+            // auto-allowing under bypassPermissions would silently clear the safety-check gate
+            // that is supposed to survive bypass.
+            ask: std::sync::Arc::new(move |request| {
+                // No prompt surface attached: both real entry points (TUI, headless) attach one at
+                // startup, so this is the embedded/test path — fall back to denying.
+                let Some(ask) = ask.clone() else {
+                    return Box::pin(async { crate::query::AskOutcome::Deny { feedback: None } });
+                };
+                // The forwarded request is rebuilt from owned copies: the borrowed
+                // one cannot cross into the future that waits on the gate lock.
+                let tool = request.tool.to_string();
+                let reason = format!("{instance} · {}", request.reason);
+                let input = request.input.clone();
+                let cwd = request.cwd.to_path_buf();
+                let scope = request.scope.map(str::to_string);
+                let diff = request.diff.map(str::to_string);
+                Box::pin(async move {
+                    let _serialized = ask_gate().lock().await;
+                    ask(&crate::query::AskContext {
+                        tool: &tool,
+                        reason: &reason,
+                        input: &input,
+                        cwd: &cwd,
+                        scope: scope.as_deref(),
+                        diff: diff.as_deref(),
+                    })
+                    .await
                 })
-                .unwrap_or_default();
-            *round_checkpoint.lock().unwrap_or_else(|e| e.into_inner()) = AttemptCheckpoint {
-                text_len: round_text.lock().map_or(0, |text| text.len()),
-                produced_chars: round_cell.chars(),
-                output_tokens,
-                tool_uses,
-                recent_activity,
-            };
-        }),
-        // A reconnect notice used to be spliced into the instance's own prose,
-        // where it read as something the agent had said. It is a warning about
-        // the stream, so it takes the tier every other warning takes — wearing
-        // the name of whose stream it is about, because the tier is shared and
-        // an unattributed "Reconnecting…" on a page the user is not watching
-        // reads as the console's own (D134a).
-        on_warning: Box::new(move |message| {
-            warn_events.send(UiEvent::Warning(format!("@{warn_instance} · {message}")));
-        }),
-        on_inbound: Box::new(move |text| {
-            inbound_events.send(UiEvent::Inbound(text.to_string()));
-        }),
-        // A subagent has no prompt surface of its own, so its Ask decisions are forwarded to
-        // the session that owns the UI, stamped with the instance name. Auto-denying here
-        // would fail the tool call as "user denied" without the user ever being asked — and
-        // auto-allowing under bypassPermissions would silently clear the safety-check gate
-        // that is supposed to survive bypass.
-        // A subagent is steered through its own inbox (`absorb_inbox`), drained at the
-        // top of every round; the composer's channel belongs to the foreground turn.
-        steer: crate::query::no_steer(),
-        // A subagent's shell output belongs to its own transcript, not to the main
-        // view's tail: its commands are not the foreground turn's commands, and its
-        // rows are not the rows ctrl+b talks about (D84).
-        live: crate::live::LiveBash::detached(),
-        ask: std::sync::Arc::new(move |request| {
-            // No prompt surface attached: both real entry points (TUI, headless) attach one at
-            // startup, so this is the embedded/test path — fall back to denying.
-            let Some(ask) = ask.clone() else {
-                return Box::pin(async { crate::query::AskOutcome::Deny { feedback: None } });
-            };
-            // The forwarded request is rebuilt from owned copies: the borrowed
-            // one cannot cross into the future that waits on the gate lock.
-            let tool = request.tool.to_string();
-            let reason = format!("{instance} · {}", request.reason);
-            let input = request.input.clone();
-            let cwd = request.cwd.to_path_buf();
-            let scope = request.scope.map(str::to_string);
-            let diff = request.diff.map(str::to_string);
-            Box::pin(async move {
-                let _serialized = ask_gate().lock().await;
-                ask(&crate::query::AskContext {
-                    tool: &tool,
-                    reason: &reason,
-                    input: &input,
-                    cwd: &cwd,
-                    scope: scope.as_deref(),
-                    diff: diff.as_deref(),
-                })
-                .await
-            })
-        }),
-        // AskUserQuestion is not assembled for subagents (see `assemble_tools`); if one ever
-        // reaches here, treat it as unanswered rather than blocking on a modal.
-        ask_question: std::sync::Arc::new(|_title, _question, _options| Box::pin(async { None })),
+            }),
+            // AskUserQuestion is not assembled for subagents (see `assemble_tools`); if one ever
+            // reaches here, treat it as unanswered rather than blocking on a modal.
+            ask_question: std::sync::Arc::new(|_title, _question, _options| {
+                Box::pin(async { None })
+            }),
+            // A subagent is steered through its own inbox (`absorb_inbox`), drained at the
+            // top of every round; the composer's channel belongs to the foreground turn.
+            steer: crate::query::no_steer(),
+            // A subagent's shell output belongs to its own transcript, not to the main
+            // view's tail: its commands are not the foreground turn's commands, and its
+            // rows are not the rows ctrl+b talks about (D84).
+            live: crate::live::LiveBash::detached(),
+        },
     }
 }
 
@@ -782,7 +782,7 @@ pub(crate) fn spawn_agent_loop(
             // one an abort cannot swallow — and a conversation left `busy`
             // forever is a spinner that never stops.
             let turn = sink.clone().map(TurnBrackets::open);
-            let mut ui = subagent_hooks(
+            let host = subagent_hooks(
                 SubagentOutput {
                     text: output.clone(),
                     progress,
@@ -795,7 +795,7 @@ pub(crate) fn spawn_agent_loop(
                 loop_registry.ask_fn(),
             );
             let outcome =
-                crate::query::run_query(&session, history, &prompt, &images, &mut ui, None).await;
+                crate::query::run_query(&session, history, &prompt, &images, &host, None).await;
             drop(turn);
             match outcome {
                 Ok(outcome) => {
@@ -1345,7 +1345,7 @@ impl Tool for AgentTool {
             .set_progress(&name, Some(progress.clone()));
         let sink = self.session.agents.sink_for(&name);
         let turn = sink.clone().map(TurnBrackets::open);
-        let mut ui = subagent_hooks(
+        let host = subagent_hooks(
             SubagentOutput {
                 text: output.clone(),
                 progress,
@@ -1363,7 +1363,7 @@ impl Tool for AgentTool {
             Vec::new(),
             &params.prompt,
             &images,
-            &mut ui,
+            &host,
             None,
         )
         .await;

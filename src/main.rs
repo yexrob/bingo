@@ -23,6 +23,7 @@ mod budget;
 mod channels;
 mod compact;
 mod context_usage;
+mod engine;
 mod error;
 mod experience;
 mod hooks;
@@ -483,9 +484,8 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             // Subagents borrow the same stdin prompt (serialized in the Agent tool), so a
             // background instance can still ask rather than having the call auto-denied.
             session.agents.attach_ask(crate::query::stdin_ask());
-            let mut ui = headless_hooks();
-            let outcome =
-                run_query(&session, initial_messages, &prompt, &[], &mut ui, None).await?;
+            let host = headless_hooks();
+            let outcome = run_query(&session, initial_messages, &prompt, &[], &host, None).await?;
             let cwd = session.cwd();
             extract_memory(&session, &outcome.messages, &home, &cwd).await;
         } else {

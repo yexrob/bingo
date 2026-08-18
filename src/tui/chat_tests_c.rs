@@ -1000,7 +1000,7 @@ async fn ask_user_question_keeps_its_own_shape() {
         chat.steer.clone(),
         chat.live.clone(),
     );
-    let answer = (ui.ask_question)(
+    let answer = (ui.requests.ask_question)(
         "Tech stack".to_string(),
         "Which library?".to_string(),
         vec![("A".to_string(), None), ("B".to_string(), None)],

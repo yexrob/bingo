@@ -166,10 +166,10 @@ fn summary_prompt(old: &[Message], budget: u64) -> String {
     prompt
 }
 
-/// Where compaction reports itself. The three surfaces already differ on how a
-/// notice is shown (TUI warning row, headless stderr, JSON `warning` event) and
-/// `UiHooks::on_warning` is the one channel all three implement, so compaction
-/// borrows it rather than writing stderr underneath a TUI that owns the screen.
+/// Where compaction reports itself. The surfaces differ on how a notice is shown
+/// (TUI warning row, headless stderr) and `EngineEvent::Warning` is the one
+/// channel both implement, so compaction borrows it rather than writing stderr
+/// underneath a TUI that owns the screen.
 /// The manual `/compact` path reports through its own slash events and passes a
 /// no-op.
 pub type CompactNotify<'a> = &'a mut (dyn Fn(String) + Send + 'a);
@@ -463,7 +463,7 @@ pub async fn check_and_compact(
     };
 
     // Per-turn progress, and only for the stream-to-stderr host: the TUI reads
-    // the same number off `UiHooks::on_context_usage` every turn, in the footer
+    // the same number off `EngineEvent::ContextUsage` every turn, in the footer
     // that also colours it — a warning row per turn would say it twice.
     if tokens > 0 && !session.quiet {
         eprintln!("[bingo] context: {tokens} tokens");
@@ -812,7 +812,7 @@ mod tests {
 
         let (events_tx, mut events_rx) = tokio::sync::mpsc::unbounded_channel();
         let (asks_tx, _asks_rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut ui = crate::ui::tui_hooks(
+        let ui = crate::ui::tui_hooks(
             crate::ui::EventSink::new(crate::ui::ConvKey::Main, events_tx),
             asks_tx,
             crate::steer::SteerQueue::new(),
@@ -820,8 +820,14 @@ mod tests {
         );
 
         let mut gate = gate_reading(warning_at.saturating_sub(1), estimate);
-        let quiet =
-            check_and_compact(&session, &mut messages, &mut gate, &[], &mut ui.on_warning).await;
+        let quiet = check_and_compact(
+            &session,
+            &mut messages,
+            &mut gate,
+            &[],
+            &mut ui.events.warn_sink(),
+        )
+        .await;
         assert_eq!(quiet, warning_at - 1);
         assert!(
             events_rx.try_recv().is_err(),
@@ -829,8 +835,14 @@ mod tests {
         );
 
         let mut gate = gate_reading(warning_at, estimate);
-        let tokens =
-            check_and_compact(&session, &mut messages, &mut gate, &[], &mut ui.on_warning).await;
+        let tokens = check_and_compact(
+            &session,
+            &mut messages,
+            &mut gate,
+            &[],
+            &mut ui.events.warn_sink(),
+        )
+        .await;
         assert_eq!(tokens, warning_at);
         match events_rx.try_recv() {
             Ok(crate::ui::Addressed {

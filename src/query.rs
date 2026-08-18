@@ -5,10 +5,10 @@ use thiserror::Error;
 use tokio::sync::watch;
 
 use crate::api::client::ClientError;
-use crate::api::contract::StreamEvent;
 use crate::api::types::{ContentBlock, Message, Role};
 use crate::budget::MAX_RESULT_CHARS;
 use crate::compact::{TokenGate, check_and_compact, compact_after_overflow};
+use crate::engine::events::{EngineEvent, EngineEvents, EngineHost, EngineRequests};
 use crate::error::ErrorCode;
 use crate::hooks::{run_post_tool_use, run_pre_tool_use, run_stop_hooks, run_user_prompt_submit};
 use crate::permission::{PermissionBehavior, PermissionMode, can_use_tool};
@@ -165,7 +165,7 @@ fn task_reminder_turn_distances(messages: &[Message]) -> (u64, u64) {
 async fn maybe_inject_task_reminder(
     session: &Session,
     messages: &mut Vec<Message>,
-    ui: &mut UiHooks,
+    host: &EngineHost,
 ) {
     let (since_management, since_reminder) = task_reminder_turn_distances(messages);
     if since_management < TASK_REMINDER_TURNS || since_reminder < TASK_REMINDER_TURNS {
@@ -194,7 +194,7 @@ mention this reminder to the user."
             .join("\n");
         text.push_str(&format!("\n\nHere are the existing tasks:\n\n{list}"));
     }
-    record(session, messages, Message::user_text(text), ui);
+    record(session, messages, Message::user_text(text), host);
 }
 
 pub use crate::query_session::{Runtime, Session};
@@ -291,11 +291,6 @@ pub type AskQuestionFn = dyn Fn(
     + Send
     + Sync;
 
-/// One measurement travels: used tokens, the window the footer shows, and the
-/// trigger the compactor obeys — a receiver that recomputed any of them from its
-/// own model handle would be a second ruler.
-pub type ContextUsageFn = dyn Fn(crate::context_usage::ContextUsage) + Send + Sync;
-
 /// Prefix of the in-stream reconnect progress warning (`Reconnecting... N/M`); the TUI and
 /// subagent views key replacement of stale progress notices off this prefix.
 pub const RECONNECT_WARNING_PREFIX: &str = "Reconnecting... ";
@@ -313,41 +308,6 @@ pub type SteerFn = dyn Fn() -> Vec<crate::steer::SteerItem> + Send + Sync;
 /// protocol, and subagents, whose messages arrive through their own inbox instead.
 pub fn no_steer() -> Arc<SteerFn> {
     Arc::new(Vec::new)
-}
-
-/// UI hooks: stream events, tool completion, permission prompts, non-fatal warnings.
-pub struct UiHooks {
-    pub on_event: Box<dyn FnMut(&StreamEvent) + Send>,
-    pub on_stream_retry: Box<dyn Fn() + Send>,
-    pub on_context_usage: Arc<ContextUsageFn>,
-    /// Callback when a tool block is complete (including input): the fold decision needs
-    /// the input (Bash command classification). standalone=true: non-model tools like the
-    /// `!` command — summary only, not part of a fold group.
-    pub on_tool_ready: Box<dyn Fn(String, String, serde_json::Value, bool) + Send>,
-    pub on_tool_done: Box<dyn Fn(&ToolCallDone) + Send>,
-    /// One model response and all its tools finished: fold groups close per batch;
-    /// the next turn's tools open a new group.
-    pub on_round_end: Box<dyn Fn() + Send>,
-    pub on_warning: Box<dyn Fn(String) + Send>,
-    /// Prose entering this conversation from outside its own turn: the prompt a
-    /// run opens with, and every batch of mail a running instance absorbs at a
-    /// round boundary. The console files it into the receiver's transcript —
-    /// without it an agent's page would show the answers and never the
-    /// questions. Main's is a no-op: the console typed its prompt and already
-    /// holds it.
-    pub on_inbound: Box<dyn Fn(&str) + Send>,
-    /// Mid-turn steering: drained at each tool barrier of a turn that is continuing.
-    /// [`no_steer`] for hosts with no composer, which leaves the turn exactly as it was.
-    pub steer: Arc<SteerFn>,
-    /// Foreground liveness (D84): the running shell command's output tail, and the
-    /// ctrl+b that moves it to the background. [`crate::live::LiveBash::detached`]
-    /// for hosts with no foreground surface — nothing is published and nothing can
-    /// be promoted.
-    pub live: Arc<crate::live::LiveBash>,
-    /// Permission prompt: tool name + reason → whether allowed (async: the TUI modal may wait for the user).
-    pub ask: Arc<AskFn>,
-    /// AskUserQuestion tool: title + question + options → selected index (async modal).
-    pub ask_question: Arc<AskQuestionFn>,
 }
 
 /// Headless permission prompt (stderr question, stdin answer). Shared by `headless_hooks` and
@@ -379,66 +339,72 @@ pub fn stdin_ask() -> Arc<AskFn> {
     })
 }
 
-/// Default headless hooks: text deltas to stdout; permissions via stdin interaction.
-pub fn headless_hooks() -> UiHooks {
-    UiHooks {
-        on_event: Box::new(|event| {
-            if let StreamEvent::TextDelta { text, .. } = event {
+/// The headless host: the model's prose on stdout, everything else on stderr,
+/// permissions and questions through stdin.
+///
+/// A headless run prints an answer rather than showing a conversation, so most
+/// of what a run reports has no surface here. B8 replaces this with `--print` as
+/// a thin `AppCore` client.
+pub fn headless_hooks() -> EngineHost {
+    EngineHost {
+        events: EngineEvents::new(|event| match event {
+            EngineEvent::TextDelta { text, .. } => {
                 let _ = std::io::stdout().write_all(text.as_bytes());
                 let _ = std::io::stdout().flush();
             }
+            EngineEvent::Warning(message) => eprintln!("[bingo] warning: {message}"),
+            _ => {}
         }),
-        on_stream_retry: Box::new(|| {}),
-        on_context_usage: Arc::new(|_| {}),
-        on_tool_ready: Box::new(|_tool_call_id, _name, _input, _standalone| {}),
-        on_tool_done: Box::new(|_| {}),
-        on_round_end: Box::new(|| {}),
-        on_warning: Box::new(|message| eprintln!("[bingo] warning: {message}")),
-        // A headless run prints the model's answer, not the conversation around it.
-        on_inbound: Box::new(|_| {}),
-        // No composer behind a headless run: nothing can be typed mid-turn.
-        steer: no_steer(),
-        // Nor a screen to tail a command on, nor a key to press to background it.
-        live: crate::live::LiveBash::detached(),
-        ask: stdin_ask(),
-        ask_question: Arc::new(|title, question, options| {
-            Box::pin(async move {
-                eprintln!("[bingo] {title}: {question}");
-                for (i, (label, desc)) in options.iter().enumerate() {
-                    match desc {
-                        Some(d) if !d.is_empty() => {
-                            eprintln!("  {}. {label} ({d})", i + 1)
-                        }
-                        _ => eprintln!("  {}. {label}", i + 1),
-                    }
-                }
-                eprintln!(
-                    "  {}. Other (free text)\nChoose [1-{}] or type text directly (Enter = skip): ",
-                    options.len() + 1,
-                    options.len() + 1
-                );
-                let answer = tokio::task::spawn_blocking(move || {
-                    let mut line = String::new();
-                    if let Err(e) = std::io::stdin().lock().read_line(&mut line) {
-                        eprintln!("[bingo] warning: cannot read answer from stdin: {e}");
-                    }
-                    line.trim().to_string()
-                })
-                .await
-                .unwrap_or_default();
-                if let Ok(n) = answer.parse::<usize>()
-                    && let Some(i) = n.checked_sub(1)
-                    && i < options.len()
-                {
-                    Some(AskAnswer::Option(i))
-                } else if answer.is_empty() {
-                    None
-                } else {
-                    Some(AskAnswer::Other(answer))
-                }
-            })
-        }),
+        requests: EngineRequests {
+            ask: stdin_ask(),
+            ask_question: headless_ask_question(),
+            // No composer behind a headless run: nothing can be typed mid-turn.
+            steer: no_steer(),
+            // Nor a screen to tail a command on, nor a key to press to background it.
+            live: crate::live::LiveBash::detached(),
+        },
     }
+}
+
+/// The stdin question prompt: the model's options, numbered, plus free text.
+fn headless_ask_question() -> Arc<AskQuestionFn> {
+    Arc::new(|title, question, options| {
+        Box::pin(async move {
+            eprintln!("[bingo] {title}: {question}");
+            for (i, (label, desc)) in options.iter().enumerate() {
+                match desc {
+                    Some(d) if !d.is_empty() => {
+                        eprintln!("  {}. {label} ({d})", i + 1)
+                    }
+                    _ => eprintln!("  {}. {label}", i + 1),
+                }
+            }
+            eprintln!(
+                "  {}. Other (free text)\nChoose [1-{}] or type text directly (Enter = skip): ",
+                options.len() + 1,
+                options.len() + 1
+            );
+            let answer = tokio::task::spawn_blocking(move || {
+                let mut line = String::new();
+                if let Err(e) = std::io::stdin().lock().read_line(&mut line) {
+                    eprintln!("[bingo] warning: cannot read answer from stdin: {e}");
+                }
+                line.trim().to_string()
+            })
+            .await
+            .unwrap_or_default();
+            if let Ok(n) = answer.parse::<usize>()
+                && let Some(i) = n.checked_sub(1)
+                && i < options.len()
+            {
+                Some(AskAnswer::Option(i))
+            } else if answer.is_empty() {
+                None
+            } else {
+                Some(AskAnswer::Other(answer))
+            }
+        })
+    })
 }
 
 use crate::query_turn::{one_turn_with_stream_retries, retry_after_overflow};
@@ -753,18 +719,21 @@ fn tool_http() -> Result<reqwest::Client, QueryError> {
 }
 
 /// Tool execution context (cwd/registry/http shared by tool pool assembly and execution).
-pub(crate) fn tool_context(session: &Session, ui: &UiHooks) -> Result<ToolContext, QueryError> {
+pub(crate) fn tool_context(
+    session: &Session,
+    host: &EngineHost,
+) -> Result<ToolContext, QueryError> {
     Ok(ToolContext {
         cwd: session.cwd(),
         home: session.home.clone(),
         watch: session.watch.clone(),
-        live: ui.live.clone(),
+        live: host.requests.live.clone(),
         http: tool_http()?,
         tasks: session.tasks.clone(),
         hooks: session.settings.hooks.clone(),
         permission_mode: permission_mode_str(session.permission_mode).to_string(),
         expand_tasks: session.expand_tasks.clone(),
-        ask_question: ui.ask_question.clone(),
+        ask_question: host.requests.ask_question.clone(),
         instance: session.instance.clone(),
         rewind: session.runtime.rewind.clone(),
         // Session-scoped, like `rewind`: a subagent inherits the parent's handle in
@@ -828,7 +797,7 @@ fn record_interrupt(
     messages: &mut Vec<Message>,
     partial: Option<Message>,
     marker: &'static str,
-    ui: &mut UiHooks,
+    host: &EngineHost,
 ) -> &'static str {
     if let Some(partial) = partial {
         let content = interrupted_content(partial);
@@ -840,11 +809,11 @@ fn record_interrupt(
                     role: Role::Assistant,
                     content,
                 },
-                ui,
+                host,
             );
         }
     }
-    record(session, messages, Message::user_text(marker), ui);
+    record(session, messages, Message::user_text(marker), host);
     marker
 }
 
@@ -879,7 +848,7 @@ fn record_turn_open(
     session: &Session,
     messages: &mut Vec<Message>,
     message: Message,
-    ui: &mut UiHooks,
+    host: &EngineHost,
 ) {
     match session.runtime.transcript.borrow().clone() {
         Some(transcript) => match transcript
@@ -894,14 +863,14 @@ fn record_turn_open(
         },
         None => session.runtime.rewind.close(),
     }
-    record(session, messages, message, ui);
+    record(session, messages, message, host);
 }
 
-fn record(session: &Session, messages: &mut Vec<Message>, message: Message, ui: &mut UiHooks) {
+fn record(session: &Session, messages: &mut Vec<Message>, message: Message, host: &EngineHost) {
     if let Some(t) = session.runtime.transcript.borrow().clone()
         && let Err(e) = t.append(&message)
     {
-        (ui.on_warning)(format!("transcript append failed: {e}"));
+        host.events.warn(format!("transcript append failed: {e}"));
     }
     messages.push(message);
 }
@@ -909,11 +878,13 @@ fn record(session: &Session, messages: &mut Vec<Message>, message: Message, ui: 
 /// Publish the turn's context measurement. Every exit of the loop reports it, so
 /// the numbers are built in one place against the model in use right now — the
 /// window on screen and the trigger the compactor obeys come from one resolver.
-fn report_context_usage(session: &Session, ui: &UiHooks, tokens: u64) {
-    (ui.on_context_usage)(crate::context_usage::ContextUsage::for_model(
-        tokens,
-        &session.client.models(),
-        &session.runtime.model.borrow().clone(),
+fn report_context_usage(session: &Session, host: &EngineHost, tokens: u64) {
+    host.events.emit(EngineEvent::ContextUsage(
+        crate::context_usage::ContextUsage::for_model(
+            tokens,
+            &session.client.models(),
+            &session.runtime.model.borrow().clone(),
+        ),
     ));
 }
 
@@ -924,7 +895,7 @@ fn report_context_usage(session: &Session, ui: &UiHooks, tokens: u64) {
 async fn query_loop(
     session: &Arc<Session>,
     mut messages: Vec<Message>,
-    ui: &mut UiHooks,
+    host: &EngineHost,
     tools: &[Box<dyn Tool>],
     ctx: &ToolContext,
     mut cancel_rx: Option<watch::Receiver<bool>>,
@@ -944,7 +915,7 @@ async fn query_loop(
             if !items.is_empty() {
                 let (prompt, images) =
                     crate::tool::agent::absorb_inbox(&session.channels, &inbox.instance, &items);
-                (ui.on_inbound)(&prompt);
+                host.events.emit(EngineEvent::Inbound(prompt.clone()));
                 record(
                     session,
                     &mut messages,
@@ -954,7 +925,7 @@ async fn query_loop(
                         session.client.supports_images(),
                         &session.client.image_capable_providers(),
                     ),
-                    ui,
+                    host,
                 );
             }
         }
@@ -963,11 +934,11 @@ async fn query_loop(
             &mut messages,
             &mut gate,
             &tool_schemas,
-            &mut ui.on_warning,
+            &mut host.events.warn_sink(),
         )
         .await;
         // task_reminder: no Task tool for 10 turns + 10 turns since the last reminder.
-        maybe_inject_task_reminder(session, &mut messages, ui).await;
+        maybe_inject_task_reminder(session, &mut messages, host).await;
         // Recovery sweep: event-driven SendMessage claims idle recipients immediately, while
         // this catches mail left behind by a failed run or deposited through another path.
         crate::tool::agent::flush_agent_inbox(session, &ctx.watch);
@@ -1010,7 +981,7 @@ async fn query_loop(
                     "<task-notifications>\n{}\n</task-notifications>",
                     notes.join("\n")
                 )),
-                ui,
+                host,
             );
         }
         // The main agent's inbox (D98): room relays it is a member of, plus direct
@@ -1037,7 +1008,7 @@ async fn query_loop(
                     "{MAIL_BLOCK_OPEN}\n{}\n{MAIL_BLOCK_CLOSE}",
                     mail.join("\n")
                 )),
-                ui,
+                host,
             );
         }
         let context_tokens = gate.current(crate::compact::estimate_tokens(
@@ -1045,20 +1016,25 @@ async fn query_loop(
             &messages,
             &tool_schemas,
         ));
-        report_context_usage(session, ui, context_tokens);
+        report_context_usage(session, host, context_tokens);
         let turn = match one_turn_with_stream_retries(
             session,
             &messages,
             tools,
-            &mut *ui,
+            host,
             cancel_rx.as_mut(),
             inbox_wake.as_mut(),
         )
         .await
         {
             Err(error @ QueryError::Client(ClientError::ContextOverflow { .. })) => {
-                if !compact_after_overflow(session, &mut messages, &mut gate, &mut ui.on_warning)
-                    .await
+                if !compact_after_overflow(
+                    session,
+                    &mut messages,
+                    &mut gate,
+                    &mut host.events.warn_sink(),
+                )
+                .await
                 {
                     if let Some(inbox) = inbox_wake.as_mut() {
                         inbox.restore(session);
@@ -1069,7 +1045,7 @@ async fn query_loop(
                     session,
                     &messages,
                     tools,
-                    &mut *ui,
+                    host,
                     cancel_rx.as_mut(),
                     inbox_wake.as_mut(),
                 )
@@ -1092,7 +1068,7 @@ async fn query_loop(
                 &mut messages,
                 Some(turn.assistant),
                 INTERRUPT_MARKER,
-                ui,
+                host,
             );
             if !session.quiet {
                 println!();
@@ -1120,7 +1096,8 @@ async fn query_loop(
             if empty_retry_count == 0 {
                 empty_retry_count = 1;
                 if !session.quiet {
-                    (ui.on_warning)("model returned an empty response; retrying once".to_string());
+                    host.events
+                        .warn("model returned an empty response; retrying once".to_string());
                 }
                 continue;
             }
@@ -1139,7 +1116,7 @@ async fn query_loop(
                 &messages,
                 &tool_schemas,
             ));
-            report_context_usage(session, ui, context_tokens);
+            report_context_usage(session, host, context_tokens);
             return Ok(QueryOutcome {
                 messages,
                 end_reason: QueryEndReason::EmptyResponseRetried,
@@ -1150,19 +1127,19 @@ async fn query_loop(
         // The assistant message must enter history before branching: max_tokens recovery
         // and the Stop hook both need the model to see the truncated content, and a normal
         // end must hand the turn's conclusion to downstream.
-        record(session, &mut messages, turn.assistant, ui);
+        record(session, &mut messages, turn.assistant, host);
         if turn.tool_uses.is_empty() {
             // Output budget truncation recovery: inject a "continue" message and retry (max 3 times).
             if turn.stop_reason.as_deref() == Some("max_tokens")
                 && recovery_count < MAX_OUTPUT_TOKENS_RECOVERY_LIMIT
             {
                 recovery_count += 1;
-                (ui.on_round_end)();
+                host.events.emit(EngineEvent::RoundEnd);
                 record(
                     session,
                     &mut messages,
                     Message::user_text(MAX_TOKENS_RESUME_PROMPT),
-                    ui,
+                    host,
                 );
                 continue;
             }
@@ -1176,12 +1153,12 @@ async fn query_loop(
                 .await
             {
                 stop_hook_fired = true;
-                (ui.on_round_end)();
+                host.events.emit(EngineEvent::RoundEnd);
                 record(
                     session,
                     &mut messages,
                     Message::user_text(format!("(Stop hook blocked continuation)\n{blocking}")),
-                    ui,
+                    host,
                 );
                 continue;
             }
@@ -1198,7 +1175,7 @@ async fn query_loop(
                 &messages,
                 &tool_schemas,
             ));
-            report_context_usage(session, ui, context_tokens);
+            report_context_usage(session, host, context_tokens);
             return Ok(QueryOutcome {
                 messages,
                 end_reason,
@@ -1241,7 +1218,7 @@ async fn query_loop(
                     session.permission_mode,
                     &session.settings.hooks,
                     &session.runtime.permissions,
-                    &*ui.ask,
+                    &*host.requests.ask,
                     &ctx.cwd,
                 )
                 .await
@@ -1262,7 +1239,7 @@ async fn query_loop(
                     // Denied tools also need UI closure: the tool row shows "denied"
                     // instead of spinning forever.
                     let summary = summarize_input(&name, &input);
-                    (ui.on_tool_done)(&ToolCallDone {
+                    host.events.emit(EngineEvent::ToolDone(ToolCallDone {
                         tool_call_id: id,
                         name,
                         summary,
@@ -1270,7 +1247,7 @@ async fn query_loop(
                         status: ToolCallStatus::Error,
                         diff: None,
                         duration_ms: 0,
-                    });
+                    }));
                 }
                 PermissionBehavior::Ask => unreachable!("ask resolved by gate_tool"),
             }
@@ -1292,7 +1269,7 @@ async fn query_loop(
             };
             match outcome.result {
                 Ok(result) => {
-                    (ui.on_tool_done)(&ToolCallDone {
+                    host.events.emit(EngineEvent::ToolDone(ToolCallDone {
                         tool_call_id: outcome.tool_use_id.clone(),
                         name: name.clone(),
                         summary: summarize_input(name, input),
@@ -1304,7 +1281,7 @@ async fn query_loop(
                         },
                         diff: result.diff.clone(),
                         duration_ms: outcome.duration_ms,
-                    });
+                    }));
                     blocks.push(result_block(&outcome.tool_use_id, &result));
                     if !interrupted {
                         // PostToolUse exit 2 → stop continuing (the hook's blocking error semantics).
@@ -1322,7 +1299,7 @@ async fn query_loop(
                 Err(e) => {
                     // Failures also need UI closure: otherwise the tool row spins forever
                     // and the user never sees the failure.
-                    (ui.on_tool_done)(&ToolCallDone {
+                    host.events.emit(EngineEvent::ToolDone(ToolCallDone {
                         tool_call_id: outcome.tool_use_id.clone(),
                         name: name.clone(),
                         summary: summarize_input(name, input),
@@ -1330,7 +1307,7 @@ async fn query_loop(
                         status: ToolCallStatus::Error,
                         diff: None,
                         duration_ms: outcome.duration_ms,
-                    });
+                    }));
                     blocks.push(tool_result_error(
                         &outcome.tool_use_id,
                         format!("<tool_use_error>{e}</tool_use_error>"),
@@ -1349,7 +1326,7 @@ async fn query_loop(
                 if answered(&blocks, id) {
                     continue;
                 }
-                (ui.on_tool_done)(&ToolCallDone {
+                host.events.emit(EngineEvent::ToolDone(ToolCallDone {
                     tool_call_id: id.clone(),
                     name: name.clone(),
                     summary: summarize_input(name, input),
@@ -1357,7 +1334,7 @@ async fn query_loop(
                     status: ToolCallStatus::Interrupted,
                     diff: None,
                     duration_ms: 0,
-                });
+                }));
             }
         }
         // Fill every unanswered tool_use: returning early on the interrupt path would leave
@@ -1375,9 +1352,13 @@ async fn query_loop(
         // folded into a request that is never sent would be a message swallowed: those
         // stay in the composer's queue, where TurnEnd hands them to the next turn.
         if !interrupted && !stop_after_tools && !is_cancelled(&cancel_rx) {
-            blocks.extend((ui.steer)().iter().map(|item| ContentBlock::Text {
-                text: item.block_text(),
-            }));
+            blocks.extend(
+                (host.requests.steer)()
+                    .iter()
+                    .map(|item| ContentBlock::Text {
+                        text: item.block_text(),
+                    }),
+            );
         }
         record(
             session,
@@ -1386,13 +1367,18 @@ async fn query_loop(
                 role: Role::User,
                 content: blocks,
             },
-            ui,
+            host,
         );
         if interrupted {
             // The assistant message and every tool_result are already in history; all the
             // model still lacks is that the stop was the user's doing.
-            let marker =
-                record_interrupt(session, &mut messages, None, INTERRUPT_MARKER_TOOL_USE, ui);
+            let marker = record_interrupt(
+                session,
+                &mut messages,
+                None,
+                INTERRUPT_MARKER_TOOL_USE,
+                host,
+            );
             if !session.quiet {
                 println!();
             }
@@ -1401,7 +1387,7 @@ async fn query_loop(
                 &messages,
                 &tool_schemas,
             ));
-            report_context_usage(session, ui, context_tokens);
+            report_context_usage(session, host, context_tokens);
             return Ok(QueryOutcome {
                 messages,
                 end_reason: QueryEndReason::Completed,
@@ -1412,20 +1398,26 @@ async fn query_loop(
         // All tools in this batch are closed: RoundEnd only marks a batch boundary (image
         // warm-up etc.); fold groups are bounded by text — tools across turns stay in the
         // same fold group.
-        (ui.on_round_end)();
+        host.events.emit(EngineEvent::RoundEnd);
         if stop_after_tools || is_cancelled(&cancel_rx) {
             // The cancel landed between the last tool finishing and the next round: no
             // tool row was cut short, but the turn still stops on the user's word and the
             // model is owed the same marker. A Stop-hook halt is not an interrupt.
             let marker = is_cancelled(&cancel_rx).then(|| {
-                record_interrupt(session, &mut messages, None, INTERRUPT_MARKER_TOOL_USE, ui)
+                record_interrupt(
+                    session,
+                    &mut messages,
+                    None,
+                    INTERRUPT_MARKER_TOOL_USE,
+                    host,
+                )
             });
             let context_tokens = gate.current(crate::compact::estimate_tokens(
                 &session.system,
                 &messages,
                 &tool_schemas,
             ));
-            report_context_usage(session, ui, context_tokens);
+            report_context_usage(session, host, context_tokens);
             return Ok(QueryOutcome {
                 messages,
                 end_reason: if empty_retry_count > 0 {
@@ -1450,11 +1442,11 @@ pub async fn run_query(
     initial_messages: Vec<Message>,
     user_input: &str,
     images: &[crate::api::types::ImageAttachment],
-    ui: &mut UiHooks,
+    host: &EngineHost,
     cancel: Option<watch::Receiver<bool>>,
 ) -> Result<QueryOutcome, QueryError> {
-    let tools = crate::tools::assemble_tools(session, &mut ui.on_warning).await;
-    let ctx = tool_context(session, &*ui)?;
+    let tools = crate::tools::assemble_tools(session, &mut host.events.warn_sink()).await;
+    let ctx = tool_context(session, host)?;
 
     // UserPromptSubmit: the hook may block this submission.
     if run_user_prompt_submit(
@@ -1481,7 +1473,7 @@ pub async fn run_query(
         Some(recalled) => format!("{user_input}\n\n{recalled}"),
         None => user_input.to_string(),
     };
-    (ui.on_inbound)(&user_input);
+    host.events.emit(EngineEvent::Inbound(user_input.clone()));
     record_turn_open(
         session,
         &mut messages,
@@ -1491,9 +1483,9 @@ pub async fn run_query(
             session.client.supports_images(),
             &session.client.image_capable_providers(),
         ),
-        ui,
+        host,
     );
-    query_loop(session, messages, ui, &tools, &ctx, cancel).await
+    query_loop(session, messages, host, &tools, &ctx, cancel).await
 }
 
 /// BM25 recall over this project's committed experiences and extracted memory
@@ -1628,12 +1620,12 @@ pub async fn run_bash_command(
     session: &Arc<Session>,
     command: &str,
     history: Vec<Message>,
-    ui: &mut UiHooks,
+    host: &EngineHost,
     mut cancel: Option<watch::Receiver<bool>>,
 ) -> Result<QueryOutcome, QueryError> {
-    let tools = crate::tools::assemble_tools(session, &mut ui.on_warning).await;
+    let tools = crate::tools::assemble_tools(session, &mut host.events.warn_sink()).await;
     let tool_schemas = tool_params(&tools);
-    let ctx = tool_context(session, &*ui)?;
+    let ctx = tool_context(session, host)?;
     let mut messages = history;
 
     let tool_use_id = format!(
@@ -1644,12 +1636,17 @@ pub async fn run_bash_command(
     // UI tool activity (reuses the Tool fold/expand rows): emitted before the permission
     // gate (the tool row is visible during the permission modal, consistent with run_query's
     // "stream fully, then gate" order).
-    (ui.on_event)(&StreamEvent::ToolUseStart {
+    host.events.emit(EngineEvent::ToolUseStarted {
         index: 0,
         id: tool_use_id.clone(),
         name: "Bash".to_string(),
     });
-    (ui.on_tool_ready)(tool_use_id.clone(), "Bash".to_string(), input.clone(), true);
+    host.events.emit(EngineEvent::ToolReady {
+        tool_call_id: tool_use_id.clone(),
+        name: "Bash".to_string(),
+        input: input.clone(),
+        standalone: true,
+    });
 
     let Some(tool) = find_tool(&tools, "Bash") else {
         return Err(QueryError::Protocol("Bash tool not found".to_string()));
@@ -1663,7 +1660,7 @@ pub async fn run_bash_command(
             let err = format!("interactive command not allowed: {reason}");
             // Fold rows cannot be expanded after being persisted in inline mode — the
             // rejection reason is shown directly as a warning line.
-            (ui.on_warning)(err.clone());
+            host.events.warn(err.clone());
             (err, true, 0)
         }
         None => {
@@ -1678,7 +1675,7 @@ pub async fn run_bash_command(
                 session.permission_mode,
                 &session.settings.hooks,
                 &session.runtime.permissions,
-                &*ui.ask,
+                &*host.requests.ask,
                 &ctx.cwd,
             )
             .await;
@@ -1701,7 +1698,7 @@ pub async fn run_bash_command(
                         // The row must close with the turn: a tool left Running keeps its
                         // message from ever settling, and the session's whole flush prefix
                         // with it.
-                        (ui.on_tool_done)(&ToolCallDone {
+                        host.events.emit(EngineEvent::ToolDone(ToolCallDone {
                             tool_call_id: tool_use_id,
                             name: "Bash".to_string(),
                             summary: format!("$ {command}"),
@@ -1709,16 +1706,16 @@ pub async fn run_bash_command(
                             status: ToolCallStatus::Interrupted,
                             diff: None,
                             duration_ms: 0,
-                        });
-                        (ui.on_round_end)();
+                        }));
+                        host.events.emit(EngineEvent::RoundEnd);
                         let marker =
-                            record_interrupt(session, &mut messages, None, INTERRUPT_MARKER, ui);
+                            record_interrupt(session, &mut messages, None, INTERRUPT_MARKER, host);
                         let context_tokens = crate::compact::estimate_tokens(
                             &session.system,
                             &messages,
                             &tool_schemas,
                         );
-                        report_context_usage(session, ui, context_tokens);
+                        report_context_usage(session, host, context_tokens);
                         return Ok(QueryOutcome {
                             messages,
                             end_reason: QueryEndReason::Completed,
@@ -1744,7 +1741,7 @@ pub async fn run_bash_command(
             }
         }
     };
-    (ui.on_tool_done)(&ToolCallDone {
+    host.events.emit(EngineEvent::ToolDone(ToolCallDone {
         tool_call_id: tool_use_id,
         name: "Bash".to_string(),
         summary: format!("$ {command}"),
@@ -1756,8 +1753,8 @@ pub async fn run_bash_command(
         },
         diff: None,
         duration_ms,
-    });
-    (ui.on_round_end)();
+    }));
+    host.events.emit(EngineEvent::RoundEnd);
 
     // Command + output as a single user message. A fabricated assistant ToolUse is
     // deliberately avoided: in thinking mode the API requires every assistant message
@@ -1793,7 +1790,7 @@ pub async fn run_bash_command(
     if let Some(t) = session.runtime.transcript.borrow().clone() {
         for m in &added {
             if let Err(e) = t.append(m) {
-                (ui.on_warning)(format!("transcript append failed: {e}"));
+                host.events.warn(format!("transcript append failed: {e}"));
             }
         }
     }
@@ -1801,10 +1798,10 @@ pub async fn run_bash_command(
         // `respond` is off for three reasons; only the interrupt owes the model a marker
         // (the setting and the Stop hook are not the user pressing Esc).
         let marker = is_cancelled(&cancel)
-            .then(|| record_interrupt(session, &mut messages, None, INTERRUPT_MARKER, ui));
+            .then(|| record_interrupt(session, &mut messages, None, INTERRUPT_MARKER, host));
         let context_tokens =
             crate::compact::estimate_tokens(&session.system, &messages, &tool_schemas);
-        report_context_usage(session, ui, context_tokens);
+        report_context_usage(session, host, context_tokens);
         return Ok(QueryOutcome {
             messages,
             end_reason: QueryEndReason::Completed,
@@ -1812,7 +1809,7 @@ pub async fn run_bash_command(
             interrupt_marker: marker,
         });
     }
-    query_loop(session, messages, ui, &tools, &ctx, cancel).await
+    query_loop(session, messages, host, &tools, &ctx, cancel).await
 }
 
 /// Monotonic tool_use_id sequence for `!` commands (unique across turns, no clash with
