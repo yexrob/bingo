@@ -14,7 +14,7 @@
 //!
 //! - **A cold start** ([`agent_history`]). A conversation the console never saw
 //!   streaming — an instance restored from a session — has only its API
-//!   history. [`crate::tui::perspective::walk`] builds the store once, and
+//!   history. [`crate::app::projection::walk`] builds the store once, and
 //!   events append from there. Never per frame, and (D135) never while an
 //!   event for that conversation is still in the channel: the walk reads the
 //!   registry as it stands *now*, so a queued run that has already committed
@@ -43,16 +43,16 @@ use std::sync::Arc;
 
 use crate::agents::ToolAnswer;
 use crate::api::types::Message;
+use crate::app::projection::PostKind;
+use crate::app::projection::{Filed, Protagonist, Target, Work, walk};
 use crate::channels::USER_NAME;
 use crate::query::Session;
 use crate::tui::activities::{Activity, ActivityKind, EXPAND_HINT, ToolStatus};
-use crate::tui::buffer::PostKind;
 use crate::tui::chat::{
     Chat, Role, UiMessage, group_ready_tool, result_content, result_summary, skill_result_summary,
 };
 use crate::tui::conversation::Conversation;
 use crate::tui::line::Line;
-use crate::tui::perspective::{Filed, Protagonist, Target, Work, walk};
 use crate::tui::zoom::ZoomTarget;
 use crate::ui::ConvKey;
 

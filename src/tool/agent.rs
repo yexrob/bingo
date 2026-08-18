@@ -282,8 +282,8 @@ fn subagent_hooks(
                     registry.touch(&event_instance);
                     // The progress line is a label and stays one; the call itself goes
                     // on the channel, because the page builds its rows from the call.
-                    let glyph = crate::tui::activities::tool_glyph(&name);
-                    let shown = crate::tui::activities::display_tool_name(&name);
+                    let glyph = crate::app::projection::tool_glyph(&name);
+                    let shown = crate::app::projection::display_tool_name(&name);
                     let summary = crate::query::summarize_input(&name, &input);
                     let activity = if summary.is_empty() {
                         format!("{glyph}{shown}")

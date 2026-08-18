@@ -25,6 +25,7 @@
 
 use std::sync::Arc;
 
+use crate::app::projection::PostKind;
 use crate::channels::{USER_NAME, names};
 use crate::query::Session;
 
@@ -338,7 +339,7 @@ impl Buffers {
         let entry = self.said.entry(name.to_string()).or_default();
         if entry.history != history.len() {
             entry.history = history.len();
-            entry.authors = crate::tui::perspective::pair_lane(name, &history, &stamps)
+            entry.authors = crate::app::projection::pair_lane(name, &history, &stamps)
                 .into_iter()
                 .filter(|item| item.kind == PostKind::Said)
                 .map(|item| !item.you)
@@ -403,138 +404,6 @@ pub fn deliver(session: &Arc<Session>, target: SubmitTarget) -> Delivery {
                 Err(e) => Delivery::Rejected(e),
             }
         }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Extraction: a domain store's messages → posts
-//
-// These rules moved here from the retired workspace skin (D89). They are the
-// one place a stored conversation becomes displayable messages. The recognition
-// of what a stored line *is* lives in `line_source`, and the attribution walk
-// over it in `tui::perspective`; what stays here is the presentation each view
-// wants — one agent's whole record and its live turn (`zoom_posts`), a room's log
-// (`channel_posts`), and the settled elements a replay prints (`pair_replay`).
-// ---------------------------------------------------------------------------
-
-/// What a message row shows besides its text.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PostKind {
-    /// An ordinary message.
-    Said,
-    /// Wake-up scaffolding the runtime wrote into the instance's history — a
-    /// relayed channel message, a follow-up chase, the task reminder. Nobody
-    /// typed it, so it gets one dim line instead of a quoted block with a name
-    /// and an avatar over it.
-    Note,
-    /// A step of the agent's work — a tool call or a reasoning phase — shown
-    /// the way the main transcript shows it: one dim line under the agent's
-    /// name, kept after the turn lands (the history's ToolUse/Thinking blocks
-    /// re-render the same rows).
-    Process,
-}
-
-/// One rendered message.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Post {
-    pub from: String,
-    /// Written by the human sitting in front of the terminal.
-    pub you: bool,
-    /// Unix seconds; 0 when the source carries no clock.
-    pub at: u64,
-    pub text: String,
-    pub kind: PostKind,
-}
-
-/// What one line of a stored user-role message *is*, by the shape the runtime
-/// composed it in (`absorb_inbox`, the task reminder, the steer path).
-///
-/// **One parser, one walk.** The shapes are recognised here and nowhere else,
-/// and [`crate::tui::perspective::walk`] is the single reader that turns them
-/// into attributed posts. The zoom keeps every lane the walk files; the user's
-/// `@X` pair lane keeps the one lane it is in and drops the rest, which is why
-/// a room relay or a chase does not count as something the agent said to the
-/// user (D99) — it is not the user's conversation to read there.
-///
-/// Anything the runtime wraps in its own brackets is not a message somebody
-/// typed; `None` is prose, which is main's default voice (main is the one
-/// sender `direct_text` leaves unmarked).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum LineSource {
-    /// The human, under the D64 marker.
-    User,
-    /// A room message relayed into the agent's context. `body` is the relay's
-    /// own `from: text`, the one scaffolding shape that kept a sender's name.
-    Room { channel: String, body: String },
-    /// Main, labelled because a batch made the boundaries ambiguous. Unlike
-    /// every other bracketed shape this one carries a real instruction.
-    MainBatched { text: String },
-    /// An agent speaking directly to the main agent (D98's `SendMessage`).
-    /// Like [`LineSource::User`] it is a header line and the message is what
-    /// follows it — the sender is named because `main` hears from many.
-    Agent { name: String },
-    /// An automatic chase for a main message nobody answered. Carries no
-    /// instruction — only the fact that somebody is still waiting.
-    Chase,
-    /// The task reminder. A *block*, not a line: everything after it in the
-    /// same message belongs to it.
-    TaskReminder,
-}
-
-/// The scaffolding shapes, recognised once. See [`LineSource`].
-pub fn line_source(line: &str) -> Option<LineSource> {
-    let line = line.trim_end();
-    if line.starts_with(crate::query::TASK_REMINDER_MARKER) {
-        return Some(LineSource::TaskReminder);
-    }
-    if line == crate::tool::agent::DM_FROM_USER_MARKER {
-        return Some(LineSource::User);
-    }
-    if let Some(rest) = line.strip_prefix(crate::channels::AGENT_MESSAGE_PREFIX)
-        && let Some(name) = rest.strip_suffix(']')
-        && !name.is_empty()
-    {
-        return Some(LineSource::Agent {
-            name: name.to_string(),
-        });
-    }
-    if let Some(rest) = line.strip_prefix("[#")
-        && let Some((head, body)) = rest.split_once("] ")
-        && let Some((channel, _)) = head.split_once(' ')
-    {
-        return Some(LineSource::Room {
-            channel: channel.to_string(),
-            body: body.to_string(),
-        });
-    }
-    if let Some(rest) = line.strip_prefix("[follow-up ") {
-        // `[follow-up instruction] …` and `[follow-up 2/3] …` share a prefix and
-        // mean opposite things: the first is main talking, the second is the
-        // runtime reporting silence.
-        return Some(match rest.strip_prefix("instruction]") {
-            Some(text) => LineSource::MainBatched {
-                text: text.trim_start().to_string(),
-            },
-            None => LineSource::Chase,
-        });
-    }
-    None
-}
-
-/// The collapsed reasoning row, exactly the transcript's header: the phase is
-/// shown, the stream is not.
-pub(crate) const THINKING_ROW: &str = "✻ Thinking";
-
-/// A stored tool-use block → the transcript's call line (`⏺ Bash(git status)`),
-/// the same brick `on_tool_ready` builds the live tail from.
-pub(crate) fn tool_call_line(name: &str, input: &serde_json::Value) -> String {
-    let glyph = crate::tui::activities::tool_glyph(name);
-    let shown = crate::tui::activities::display_tool_name(name);
-    let summary = crate::query::summarize_input(name, input);
-    if summary.is_empty() {
-        format!("{glyph}{shown}")
-    } else {
-        format!("{glyph}{shown}({summary})")
     }
 }
 

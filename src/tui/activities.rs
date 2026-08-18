@@ -5,6 +5,7 @@
 //! Only the kinds bingo uses are kept (Thinking / Tool / Diff / Watch);
 //! SubAgent is presented by bingo as a Tool.
 
+use crate::app::projection::{display_tool_name, tool_glyph};
 use crate::tui::line::Line;
 use crate::tui::theme::Theme;
 use crate::watch::WatchState;
@@ -577,28 +578,6 @@ fn dot_style(status: ToolStatus, theme: &Theme) -> crate::tui::line::SegStyle {
         ToolStatus::Done => theme.tool_done(),
         ToolStatus::Error => theme.tool_error(),
         ToolStatus::Interrupted => theme.tool_interrupted(),
-    }
-}
-
-/// Tool-category icon: built-in `⏺` / MCP `◆` / Skill `✦`. Shape encodes
-/// category, colour encodes status (dot_style unchanged); agents have no tool
-/// row, their watch-row icon lives in [`watch_header`].
-pub fn tool_glyph(name: &str) -> &'static str {
-    if name.starts_with("mcp__") {
-        "◆ "
-    } else if name == "Skill" {
-        "✦ "
-    } else {
-        "⏺ "
-    }
-}
-
-/// The MCP full name `mcp__server__tool` displays as `server:tool`;
-/// permission rules still use the full name.
-pub fn display_tool_name(name: &str) -> String {
-    match name.strip_prefix("mcp__") {
-        Some(rest) => rest.replacen("__", ":", 1),
-        None => name.to_string(),
     }
 }
 

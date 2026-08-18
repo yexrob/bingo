@@ -74,7 +74,7 @@ pub struct Conversation {
     ///
     /// The very first user text in an instance's record is *intake* — the job it
     /// was dispatched with — and every one after it is somebody talking to it
-    /// ([`crate::tui::perspective::split_user_text`]). "First" cannot be read off
+    /// (`app::projection::split_user_text`). "First" cannot be read off
     /// the transcript, because `TurnStart` opens the turn's own message before
     /// the prompt arrives; a store that guessed from emptiness would file a
     /// spawn task as main speaking, and the same run would then render one way

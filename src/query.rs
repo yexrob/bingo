@@ -993,7 +993,7 @@ async fn query_loop(
         // The main agent's inbox (D98): room relays it is a member of, plus direct
         // messages an agent sent it, batched at turn boundaries, in order. One
         // store, one drain, one block — the marker on each line says which kind
-        // it is, and `buffer::line_source` is what reads those markers back.
+        // it is, and `app::projection::line_source` is what reads those markers back.
         //
         // Guarded on the main session: the registry is shared with every
         // subagent, so an unguarded drain let a subagent's own turn boundary eat

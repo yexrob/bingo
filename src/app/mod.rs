@@ -28,6 +28,7 @@ pub mod conversation;
 pub mod event;
 pub mod ids;
 pub mod interaction;
+pub mod projection;
 pub mod queue;
 pub mod snapshot;
 pub mod submit;

@@ -60,7 +60,6 @@ pub mod math;
 pub mod model_menu;
 pub mod motion;
 pub mod notify;
-pub mod perspective;
 pub mod picker;
 pub(crate) mod roster;
 pub mod slash;

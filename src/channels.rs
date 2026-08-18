@@ -427,7 +427,7 @@ struct Inner {
     /// What the transcript owes the screen about that inbox (D106), kept beside
     /// it rather than inside it: [`Inner::main_mail`] is a byte contract with
     /// the model — the marker on each line is what
-    /// [`crate::tui::buffer::line_source`] reads back — and a renderer that had
+    /// [`crate::app::projection::line_source`] reads back — and a renderer that had
     /// to un-format it would be reading the model's mail over its shoulder.
     ///
     /// One entry per direct message that landed for `main`, drained by whatever
@@ -571,7 +571,7 @@ fn format_main_line(channel: &str, msg: &ChannelMessage) -> String {
 /// The shape is [`crate::tool::agent::DM_FROM_USER_MARKER`]'s, with the sender
 /// named — the one thing that marker never had to carry, because the human is
 /// the only human. A receiver hears from many agents, so this marker names
-/// which. [`crate::tui::buffer::line_source`] is the single parser of the shape.
+/// which. [`crate::app::projection::line_source`] is the single parser of the shape.
 ///
 /// D137 gave it its second producer. It was main's alone while main was the
 /// only thing an agent could write to; now any instance can be written to by

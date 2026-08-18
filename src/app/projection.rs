@@ -1,6 +1,17 @@
 //! The attribution projection (D96): who said what, recovered from one agent's
 //! own history.
 //!
+//! **One walker, both frontends.** This was `tui::perspective` until B4. It is
+//! not a terminal concern: who said what is application truth, and a second
+//! walker written against the wire would be a second answer to it — the D130 and
+//! D132 lesson, which cost two rounds of realigning an agent's page with main's.
+//! The recognition of what a stored line *is* ([`line_source`]) moved here with
+//! it, because a parser and its one reader are one thing.
+//!
+//! **The byte contract.** Nothing here writes: the walk reads a history the
+//! runtime already composed and never alters a byte the model can see. A change
+//! to a marker's spelling belongs where the marker is written.
+//!
 //! **What this is.** For any participant X, a walk over X's transcript that
 //! files each piece of it under the counterpart it belongs to — the user, main,
 //! a room relay, or the intake X was handed. Nothing above it groups any more:
@@ -10,7 +21,7 @@
 //! **Why the split is work rather than a filter.** The sender is not a field.
 //! `InboxItem::Direct` carries a real `from`, but `absorb_inbox` renders the
 //! batch into one flat prompt string and the name is gone: what survives is a
-//! set of literal markers, which [`crate::tui::buffer::line_source`] is the
+//! set of literal markers, which [`line_source`] is the
 //! single parser for. Recovering who said what is therefore a walk, and [`walk`]
 //! is it.
 //!
@@ -58,7 +69,158 @@
 use crate::agents::ToolAnswer;
 use crate::api::types::{ContentBlock, Message, Role as ApiRole};
 use crate::channels::{MAIN_NAME, USER_NAME};
-use crate::tui::buffer::{LineSource, Post, PostKind, THINKING_ROW, line_source, tool_call_line};
+
+// ---------------------------------------------------------------------------
+// What a stored line is, and what a walked one becomes
+//
+// These came from `tui::buffer` with the walk (B4). They are the walk's own
+// vocabulary — the shapes it recognises and the rows it files — and a parser
+// living one module away from its only reader was an invitation for a second
+// one to appear.
+// ---------------------------------------------------------------------------
+
+/// What a message row shows besides its text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PostKind {
+    /// An ordinary message.
+    Said,
+    /// Wake-up scaffolding the runtime wrote into the instance's history — a
+    /// relayed channel message, a follow-up chase, the task reminder. Nobody
+    /// typed it, so it gets one dim line instead of a quoted block with a name
+    /// and an avatar over it.
+    Note,
+    /// A step of the agent's work — a tool call or a reasoning phase — shown
+    /// the way the main transcript shows it: one dim line under the agent's
+    /// name, kept after the turn lands (the history's ToolUse/Thinking blocks
+    /// re-render the same rows).
+    Process,
+}
+
+/// One rendered message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Post {
+    pub from: String,
+    /// Written by the human sitting in front of the terminal.
+    pub you: bool,
+    /// Unix seconds; 0 when the source carries no clock.
+    pub at: u64,
+    pub text: String,
+    pub kind: PostKind,
+}
+
+/// What one line of a stored user-role message *is*, by the shape the runtime
+/// composed it in (`absorb_inbox`, the task reminder, the steer path).
+///
+/// **One parser, one walk.** The shapes are recognised here and nowhere else,
+/// and [`walk`] is the single reader that turns them
+/// into attributed posts. The zoom keeps every lane the walk files; the user's
+/// `@X` pair lane keeps the one lane it is in and drops the rest, which is why
+/// a room relay or a chase does not count as something the agent said to the
+/// user (D99) — it is not the user's conversation to read there.
+///
+/// Anything the runtime wraps in its own brackets is not a message somebody
+/// typed; `None` is prose, which is main's default voice (main is the one
+/// sender `direct_text` leaves unmarked).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LineSource {
+    /// The human, under the D64 marker.
+    User,
+    /// A room message relayed into the agent's context. `body` is the relay's
+    /// own `from: text`, the one scaffolding shape that kept a sender's name.
+    Room { channel: String, body: String },
+    /// Main, labelled because a batch made the boundaries ambiguous. Unlike
+    /// every other bracketed shape this one carries a real instruction.
+    MainBatched { text: String },
+    /// An agent speaking directly to the main agent (D98's `SendMessage`).
+    /// Like [`LineSource::User`] it is a header line and the message is what
+    /// follows it — the sender is named because `main` hears from many.
+    Agent { name: String },
+    /// An automatic chase for a main message nobody answered. Carries no
+    /// instruction — only the fact that somebody is still waiting.
+    Chase,
+    /// The task reminder. A *block*, not a line: everything after it in the
+    /// same message belongs to it.
+    TaskReminder,
+}
+
+/// The scaffolding shapes, recognised once. See [`LineSource`].
+pub fn line_source(line: &str) -> Option<LineSource> {
+    let line = line.trim_end();
+    if line.starts_with(crate::query::TASK_REMINDER_MARKER) {
+        return Some(LineSource::TaskReminder);
+    }
+    if line == crate::tool::agent::DM_FROM_USER_MARKER {
+        return Some(LineSource::User);
+    }
+    if let Some(rest) = line.strip_prefix(crate::channels::AGENT_MESSAGE_PREFIX)
+        && let Some(name) = rest.strip_suffix(']')
+        && !name.is_empty()
+    {
+        return Some(LineSource::Agent {
+            name: name.to_string(),
+        });
+    }
+    if let Some(rest) = line.strip_prefix("[#")
+        && let Some((head, body)) = rest.split_once("] ")
+        && let Some((channel, _)) = head.split_once(' ')
+    {
+        return Some(LineSource::Room {
+            channel: channel.to_string(),
+            body: body.to_string(),
+        });
+    }
+    if let Some(rest) = line.strip_prefix("[follow-up ") {
+        // `[follow-up instruction] …` and `[follow-up 2/3] …` share a prefix and
+        // mean opposite things: the first is main talking, the second is the
+        // runtime reporting silence.
+        return Some(match rest.strip_prefix("instruction]") {
+            Some(text) => LineSource::MainBatched {
+                text: text.trim_start().to_string(),
+            },
+            None => LineSource::Chase,
+        });
+    }
+    None
+}
+
+/// The collapsed reasoning row, exactly the transcript's header: the phase is
+/// shown, the stream is not.
+pub(crate) const THINKING_ROW: &str = "✻ Thinking";
+
+/// Tool-category icon: built-in `⏺` / MCP `◆` / Skill `✦`. Shape encodes
+/// category, colour encodes status; agents have no tool row, their watch-row
+/// icon lives in `tui::activities::watch_header`.
+pub fn tool_glyph(name: &str) -> &'static str {
+    if name.starts_with("mcp__") {
+        "◆ "
+    } else if name == "Skill" {
+        "✦ "
+    } else {
+        "⏺ "
+    }
+}
+
+/// The MCP full name `mcp__server__tool` displays as `server:tool`;
+/// permission rules still use the full name.
+pub fn display_tool_name(name: &str) -> String {
+    match name.strip_prefix("mcp__") {
+        Some(rest) => rest.replacen("__", ":", 1),
+        None => name.to_string(),
+    }
+}
+
+/// A stored tool-use block → the transcript's call line (`⏺ Bash(git status)`),
+/// the same brick `on_tool_ready` builds the live tail from.
+pub(crate) fn tool_call_line(name: &str, input: &serde_json::Value) -> String {
+    let glyph = tool_glyph(name);
+    let shown = display_tool_name(name);
+    let summary = crate::query::summarize_input(name, input);
+    if summary.is_empty() {
+        format!("{glyph}{shown}")
+    } else {
+        format!("{glyph}{shown}({summary})")
+    }
+}
 
 /// Where one piece of a user-role message belongs.
 #[derive(Debug, Clone, PartialEq, Eq)]

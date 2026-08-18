@@ -547,8 +547,8 @@ fn a_direct_message_to_main_carries_the_sender_into_the_inbox() {
     assert_eq!(mail.len(), 1);
     let mut lines = mail[0].lines();
     assert_eq!(
-        crate::tui::buffer::line_source(lines.next().unwrap_or_default()),
-        Some(crate::tui::buffer::LineSource::Agent {
+        crate::app::projection::line_source(lines.next().unwrap_or_default()),
+        Some(crate::app::projection::LineSource::Agent {
             name: "scout".to_string()
         }),
         "the marker is a header line, the way [DM from user] is: {mail:?}"
