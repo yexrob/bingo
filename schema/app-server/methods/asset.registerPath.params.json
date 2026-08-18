@@ -1,0 +1,27 @@
+{
+  "$id": "urn:bingo:app-server:v1:asset.registerPath.params",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "description": "Registration validates the file and snapshots its bytes into server-owned storage. The caller's path is never borrowed later and never deleted; a GUI holding clipboard bytes writes its own temporary file and may remove it once this succeeds.",
+  "properties": {
+    "expectedMime": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "expectedSha256": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "path": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "path"
+  ],
+  "title": "AssetRegisterPathParams",
+  "type": "object"
+}

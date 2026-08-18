@@ -1,0 +1,35 @@
+{
+  "$id": "urn:bingo:app-server:v1:envelope.clientNotification",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "description": "A client notification frame. `initialized` is the only one.",
+  "oneOf": [
+    {
+      "properties": {
+        "method": {
+          "enum": [
+            "initialized"
+          ],
+          "type": "string"
+        },
+        "params": {
+          "$ref": "../definitions.json#/definitions/InitializedParams"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "type": "object"
+    }
+  ],
+  "properties": {
+    "jsonrpc": {
+      "$ref": "../definitions.json#/definitions/JsonRpcVersion"
+    }
+  },
+  "required": [
+    "jsonrpc"
+  ],
+  "title": "ClientNotificationFrame",
+  "type": "object"
+}

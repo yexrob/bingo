@@ -1,0 +1,27 @@
+{
+  "$id": "urn:bingo:app-server:v1:interaction.cancelled.params",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "description": "One notification's params: the event header, then the body's own fields.",
+  "properties": {
+    "conversationId": {
+      "$ref": "../definitions.json#/definitions/ConversationId"
+    },
+    "event": {
+      "$ref": "../definitions.json#/definitions/EventMeta"
+    },
+    "interactionId": {
+      "$ref": "../definitions.json#/definitions/InteractionId"
+    },
+    "reason": {
+      "$ref": "../definitions.json#/definitions/InteractionCancelReason"
+    }
+  },
+  "required": [
+    "conversationId",
+    "event",
+    "interactionId",
+    "reason"
+  ],
+  "title": "NotificationParams_for_InteractionCancelled",
+  "type": "object"
+}

@@ -1,0 +1,23 @@
+{
+  "$id": "urn:bingo:app-server:v1:action.list.result",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "properties": {
+    "actions": {
+      "items": {
+        "$ref": "../definitions.json#/definitions/ActionInfo"
+      },
+      "type": "array"
+    },
+    "revision": {
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "actions",
+    "revision"
+  ],
+  "title": "ActionListResult",
+  "type": "object"
+}

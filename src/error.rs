@@ -24,6 +24,47 @@ pub const SLASH_ERROR_BAD_ARGUMENT: &str = "BAD_ARGUMENT";
 /// Distinct from `SERVER_ERROR`: nothing was wrong upstream, the harness lost the turn.
 pub const TURN_LOST: &str = "TURN_LOST";
 
+/// Stable app-server codes (`notes/design/gui-app-server.md` §Errors): the
+/// JSON-RPC `error.data.bingoCode` a client branches on. They live here rather
+/// than in the protocol module because there is one code registry, not one per
+/// exit; `crate::app_server::protocol::ProtocolErrorKind` maps each to its
+/// JSON-RPC number, scope, and recoverability, and its drift guard asserts the
+/// pairing.
+/// The client asked for a protocol major this build does not speak.
+pub const PROTOCOL_UNSUPPORTED: &str = "PROTOCOL_UNSUPPORTED";
+/// The client cannot answer interactions, so it may not control a session.
+pub const CAPABILITY_REQUIRED: &str = "CAPABILITY_REQUIRED";
+/// A call arrived before `initialize` completed.
+pub const NOT_INITIALIZED: &str = "NOT_INITIALIZED";
+/// `initialize` arrived twice on one connection.
+pub const ALREADY_INITIALIZED: &str = "ALREADY_INITIALIZED";
+/// A session-scoped call arrived with no session open.
+pub const NO_ACTIVE_SESSION: &str = "NO_ACTIVE_SESSION";
+pub const SESSION_NOT_FOUND: &str = "SESSION_NOT_FOUND";
+pub const CONVERSATION_NOT_FOUND: &str = "CONVERSATION_NOT_FOUND";
+/// The turn already reached its terminal state.
+pub const TURN_CLOSED: &str = "TURN_CLOSED";
+/// The item cursor was issued under an older `historyGeneration`.
+pub const STALE_PAGE: &str = "STALE_PAGE";
+/// The precondition revision no longer matches the resource.
+pub const STALE_REVISION: &str = "STALE_REVISION";
+/// Keyboard approval arrived inside the confirmation guard (D81).
+pub const INTERACTION_NOT_READY: &str = "INTERACTION_NOT_READY";
+/// The interaction was already answered or cancelled.
+pub const INTERACTION_CLOSED: &str = "INTERACTION_CLOSED";
+/// A decision the server did not advertise for this prompt.
+pub const INTERACTION_INVALID_DECISION: &str = "INTERACTION_INVALID_DECISION";
+/// The action exists but is not available in this state.
+pub const ACTION_UNAVAILABLE: &str = "ACTION_UNAVAILABLE";
+pub const ASSET_NOT_FOUND: &str = "ASSET_NOT_FOUND";
+/// The path was unreadable, or its type or digest did not match.
+pub const ASSET_REJECTED: &str = "ASSET_REJECTED";
+/// A frame exceeded the negotiated ceiling.
+pub const FRAME_TOO_LARGE: &str = "FRAME_TOO_LARGE";
+/// Bounded backpressure and the write timeout both ran out; best-effort only,
+/// because the transport is already unusable.
+pub const CLIENT_TOO_SLOW: &str = "CLIENT_TOO_SLOW";
+
 /// Stable error code: `SCREAMING_SNAKE` (e.g. `CONFIG_INVALID`).
 pub trait ErrorCode {
     fn error_code(&self) -> &'static str;
@@ -167,6 +208,7 @@ fn downcast_error_code(err: &(dyn std::error::Error + 'static)) -> Option<&'stat
         crate::share::ShareError,
         crate::storage::StorageError,
         crate::update::UpdateError,
+        crate::app_server::AppServerError,
     )
 }
 
@@ -500,11 +542,12 @@ mod tests {
             Box::new(ShareError::SessionNotFound("x".into())),
             Box::new(StorageError::HomeUnavailable),
             Box::new(UpdateError::Http { status: 503 }),
+            Box::new(crate::app_server::AppServerError::ServeUnavailable),
         ];
         assert_eq!(
             samples.len(),
-            13,
-            "the boxed exit should have 13 registered types: new ErrorCode implementors must be \
+            14,
+            "the boxed exit should have 14 registered types: new ErrorCode implementors must be \
              `downcast_error_code` macro registration + an instance in this test; missing either turns CI red"
         );
         for e in &samples {

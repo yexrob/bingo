@@ -1,0 +1,39 @@
+{
+  "$id": "urn:bingo:app-server:v1:conversation.markRead.params",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "description": "Called only once content is actually visible. Prefetch and resynchronization cannot clear unread or mention state, because reading never does.",
+  "properties": {
+    "conversationId": {
+      "$ref": "../definitions.json#/definitions/ConversationId"
+    },
+    "expectedRevision": {
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "lastItemId": {
+      "anyOf": [
+        {
+          "$ref": "../definitions.json#/definitions/ItemId"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "lastRoomSeq": {
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "conversationId",
+    "expectedRevision"
+  ],
+  "title": "ConversationMarkReadParams",
+  "type": "object"
+}

@@ -1,0 +1,25 @@
+{
+  "$id": "urn:bingo:app-server:v1:asset.readChunk.result",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "properties": {
+    "data": {
+      "description": "Base64, bounded well below the server frame ceiling.",
+      "type": "string"
+    },
+    "eof": {
+      "type": "boolean"
+    },
+    "nextOffset": {
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "data",
+    "eof",
+    "nextOffset"
+  ],
+  "title": "AssetReadChunkResult",
+  "type": "object"
+}

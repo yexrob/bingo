@@ -1,0 +1,19 @@
+{
+  "$id": "urn:bingo:app-server:v1:interaction.opened.params",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "description": "One notification's params: the event header, then the body's own fields.",
+  "properties": {
+    "event": {
+      "$ref": "../definitions.json#/definitions/EventMeta"
+    },
+    "interaction": {
+      "$ref": "../definitions.json#/definitions/Interaction"
+    }
+  },
+  "required": [
+    "event",
+    "interaction"
+  ],
+  "title": "NotificationParams_for_InteractionOpened",
+  "type": "object"
+}

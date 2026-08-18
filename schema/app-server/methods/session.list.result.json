@@ -1,0 +1,14 @@
+{
+  "$id": "urn:bingo:app-server:v1:session.list.result",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "properties": {
+    "sessions": {
+      "$ref": "../definitions.json#/definitions/Page_for_SessionListEntry"
+    }
+  },
+  "required": [
+    "sessions"
+  ],
+  "title": "SessionListResult",
+  "type": "object"
+}

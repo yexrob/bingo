@@ -1,0 +1,14 @@
+{
+  "$id": "urn:bingo:app-server:v1:session.read.result",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "properties": {
+    "snapshot": {
+      "$ref": "../definitions.json#/definitions/SessionSnapshot"
+    }
+  },
+  "required": [
+    "snapshot"
+  ],
+  "title": "SessionReadResult",
+  "type": "object"
+}

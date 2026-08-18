@@ -16,6 +16,7 @@ use crate::transcript::{Transcript, create as create_transcript, latest as lates
 mod agents;
 mod api;
 mod app;
+mod app_server;
 mod auth;
 mod bm25;
 mod budget;
@@ -126,6 +127,21 @@ enum Command {
         #[arg(long)]
         check: bool,
     },
+    /// The GUI app-server (JSON-RPC 2.0 over NDJSON on stdio)
+    AppServer {
+        #[command(subcommand)]
+        command: Option<AppServerCommand>,
+    },
+}
+
+#[derive(Debug, clap::Subcommand)]
+enum AppServerCommand {
+    /// Write the deterministic JSON Schema bundle for the app-server protocol
+    GenerateSchema {
+        /// Output directory (the committed bundle lives in `schema/app-server`)
+        #[arg(long)]
+        out: PathBuf,
+    },
 }
 
 /// Top-level exit (C exit mapping): all errors propagated to the top with `?` are
@@ -163,6 +179,22 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(Command::Update { check }) = cli.command {
         crate::update::run_update(&home, check).await?;
         return Ok(());
+    }
+    // The app-server needs no session state to publish its own contract, and it
+    // cannot serve one yet.
+    if let Some(Command::AppServer { command }) = cli.command {
+        match command {
+            Some(AppServerCommand::GenerateSchema { out }) => {
+                let written = crate::app_server::schema::generate(&out)?;
+                eprintln!(
+                    "[bingo] wrote {} schema files to {}",
+                    written.len(),
+                    out.display()
+                );
+                return Ok(());
+            }
+            None => return Err(crate::app_server::AppServerError::ServeUnavailable.into()),
+        }
     }
     let project_dir = std::env::current_dir()?;
     let user_dir = std::env::var("XDG_CONFIG_HOME")

@@ -1,0 +1,14 @@
+{
+  "$id": "urn:bingo:app-server:v1:asset.registerPath.result",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "properties": {
+    "asset": {
+      "$ref": "../definitions.json#/definitions/AssetRecord"
+    }
+  },
+  "required": [
+    "asset"
+  ],
+  "title": "AssetRegisterPathResult",
+  "type": "object"
+}

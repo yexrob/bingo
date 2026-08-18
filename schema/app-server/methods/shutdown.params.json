@@ -1,0 +1,7 @@
+{
+  "$id": "urn:bingo:app-server:v1:shutdown.params",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "description": "EOF does the same thing. The shutdown policy interrupts active work and resolves interactions fail-closed before persistence and exit.",
+  "title": "ShutdownParams",
+  "type": "object"
+}

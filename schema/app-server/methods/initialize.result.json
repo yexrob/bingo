@@ -1,0 +1,26 @@
+{
+  "$id": "urn:bingo:app-server:v1:initialize.result",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "properties": {
+    "capabilities": {
+      "$ref": "../definitions.json#/definitions/ServerCapabilities"
+    },
+    "limits": {
+      "$ref": "../definitions.json#/definitions/FrameLimits"
+    },
+    "protocol": {
+      "$ref": "../definitions.json#/definitions/ProtocolVersion"
+    },
+    "server": {
+      "$ref": "../definitions.json#/definitions/ServerInfo"
+    }
+  },
+  "required": [
+    "capabilities",
+    "limits",
+    "protocol",
+    "server"
+  ],
+  "title": "InitializeResult",
+  "type": "object"
+}

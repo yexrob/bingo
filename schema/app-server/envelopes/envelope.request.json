@@ -1,0 +1,435 @@
+{
+  "$id": "urn:bingo:app-server:v1:envelope.request",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "description": "A client request frame.",
+  "oneOf": [
+    {
+      "properties": {
+        "method": {
+          "enum": [
+            "initialize"
+          ],
+          "type": "string"
+        },
+        "params": {
+          "$ref": "../definitions.json#/definitions/InitializeParams"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
+            "shutdown"
+          ],
+          "type": "string"
+        },
+        "params": {
+          "$ref": "../definitions.json#/definitions/ShutdownParams"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
+            "session/list"
+          ],
+          "type": "string"
+        },
+        "params": {
+          "$ref": "../definitions.json#/definitions/SessionListParams"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
+            "session/start"
+          ],
+          "type": "string"
+        },
+        "params": {
+          "$ref": "../definitions.json#/definitions/SessionStartParams"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
+            "session/resume"
+          ],
+          "type": "string"
+        },
+        "params": {
+          "$ref": "../definitions.json#/definitions/SessionResumeParams"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
+            "session/read"
+          ],
+          "type": "string"
+        },
+        "params": {
+          "$ref": "../definitions.json#/definitions/SessionReadParams"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
+            "session/close"
+          ],
+          "type": "string"
+        },
+        "params": {
+          "$ref": "../definitions.json#/definitions/SessionCloseParams"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
+            "session/delete"
+          ],
+          "type": "string"
+        },
+        "params": {
+          "$ref": "../definitions.json#/definitions/SessionDeleteParams"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
+            "conversation/list"
+          ],
+          "type": "string"
+        },
+        "params": {
+          "$ref": "../definitions.json#/definitions/ConversationListParams"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
+            "conversation/read"
+          ],
+          "type": "string"
+        },
+        "params": {
+          "$ref": "../definitions.json#/definitions/ConversationReadParams"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
+            "conversation/markRead"
+          ],
+          "type": "string"
+        },
+        "params": {
+          "$ref": "../definitions.json#/definitions/ConversationMarkReadParams"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
+            "conversation/submit"
+          ],
+          "type": "string"
+        },
+        "params": {
+          "$ref": "../definitions.json#/definitions/ConversationSubmitParams"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
+            "turn/interrupt"
+          ],
+          "type": "string"
+        },
+        "params": {
+          "$ref": "../definitions.json#/definitions/TurnInterruptParams"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
+            "queue/read"
+          ],
+          "type": "string"
+        },
+        "params": {
+          "$ref": "../definitions.json#/definitions/QueueReadParams"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
+            "queue/reclaimTail"
+          ],
+          "type": "string"
+        },
+        "params": {
+          "$ref": "../definitions.json#/definitions/QueueReclaimTailParams"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
+            "interaction/respond"
+          ],
+          "type": "string"
+        },
+        "params": {
+          "$ref": "../definitions.json#/definitions/InteractionRespondParams"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
+            "action/list"
+          ],
+          "type": "string"
+        },
+        "params": {
+          "$ref": "../definitions.json#/definitions/ActionListParams"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
+            "action/execute"
+          ],
+          "type": "string"
+        },
+        "params": {
+          "$ref": "../definitions.json#/definitions/ActionExecuteParams"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
+            "config/read"
+          ],
+          "type": "string"
+        },
+        "params": {
+          "$ref": "../definitions.json#/definitions/ConfigReadParams"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
+            "catalog/read"
+          ],
+          "type": "string"
+        },
+        "params": {
+          "$ref": "../definitions.json#/definitions/CatalogReadParams"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
+            "resource/read"
+          ],
+          "type": "string"
+        },
+        "params": {
+          "$ref": "../definitions.json#/definitions/ResourceReadParams"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
+            "asset/registerPath"
+          ],
+          "type": "string"
+        },
+        "params": {
+          "$ref": "../definitions.json#/definitions/AssetRegisterPathParams"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
+            "asset/readChunk"
+          ],
+          "type": "string"
+        },
+        "params": {
+          "$ref": "../definitions.json#/definitions/AssetReadChunkParams"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "type": "object"
+    }
+  ],
+  "properties": {
+    "id": {
+      "$ref": "../definitions.json#/definitions/RequestId"
+    },
+    "jsonrpc": {
+      "$ref": "../definitions.json#/definitions/JsonRpcVersion"
+    }
+  },
+  "required": [
+    "id",
+    "jsonrpc"
+  ],
+  "title": "RequestFrame",
+  "type": "object"
+}

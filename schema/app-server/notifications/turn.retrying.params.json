@@ -1,0 +1,68 @@
+{
+  "$id": "urn:bingo:app-server:v1:turn.retrying.params",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "description": "One notification's params: the event header, then the body's own fields.",
+  "properties": {
+    "attempt": {
+      "description": "Attempts made so far, including the one that just failed.",
+      "format": "uint32",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "code": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "conversationId": {
+      "$ref": "../definitions.json#/definitions/ConversationId"
+    },
+    "delayMs": {
+      "description": "How long the core waits before the next attempt.",
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "event": {
+      "$ref": "../definitions.json#/definitions/EventMeta"
+    },
+    "maxAttempts": {
+      "format": "uint32",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "reason": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "removedItemIds": {
+      "items": {
+        "$ref": "../definitions.json#/definitions/ItemId"
+      },
+      "type": "array"
+    },
+    "round": {
+      "format": "uint32",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "turnId": {
+      "$ref": "../definitions.json#/definitions/TurnId"
+    }
+  },
+  "required": [
+    "attempt",
+    "conversationId",
+    "delayMs",
+    "event",
+    "maxAttempts",
+    "removedItemIds",
+    "round",
+    "turnId"
+  ],
+  "title": "NotificationParams_for_TurnRetrying",
+  "type": "object"
+}

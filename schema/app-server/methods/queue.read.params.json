@@ -1,0 +1,28 @@
+{
+  "$id": "urn:bingo:app-server:v1:queue.read.params",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "properties": {
+    "conversationId": {
+      "$ref": "../definitions.json#/definitions/ConversationId"
+    },
+    "cursor": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "limit": {
+      "format": "uint32",
+      "minimum": 0.0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "conversationId"
+  ],
+  "title": "QueueReadParams",
+  "type": "object"
+}

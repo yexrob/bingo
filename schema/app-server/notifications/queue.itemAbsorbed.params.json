@@ -1,0 +1,42 @@
+{
+  "$id": "urn:bingo:app-server:v1:queue.itemAbsorbed.params",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "description": "One notification's params: the event header, then the body's own fields.",
+  "properties": {
+    "conversationId": {
+      "$ref": "../definitions.json#/definitions/ConversationId"
+    },
+    "event": {
+      "$ref": "../definitions.json#/definitions/EventMeta"
+    },
+    "itemId": {
+      "allOf": [
+        {
+          "$ref": "../definitions.json#/definitions/ItemId"
+        }
+      ],
+      "description": "The conversation item the absorbed input became."
+    },
+    "queueId": {
+      "$ref": "../definitions.json#/definitions/QueueId"
+    },
+    "revision": {
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "turnId": {
+      "$ref": "../definitions.json#/definitions/TurnId"
+    }
+  },
+  "required": [
+    "conversationId",
+    "event",
+    "itemId",
+    "queueId",
+    "revision",
+    "turnId"
+  ],
+  "title": "NotificationParams_for_QueueItemAbsorbed",
+  "type": "object"
+}

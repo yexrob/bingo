@@ -161,3 +161,36 @@ fn non_tty_errors_use_the_stable_single_line_contract() {
     assert_eq!(stderr.lines().count(), 1);
     assert!(!stderr.contains('\u{1b}'));
 }
+
+#[test]
+fn the_app_server_publishes_its_schema_and_refuses_to_serve_yet() {
+    let root = TempDir::new("app-server");
+    let out = root.path().join("schema");
+
+    let generated = run(
+        &root,
+        &[
+            "app-server",
+            "generate-schema",
+            "--out",
+            &out.to_string_lossy(),
+        ],
+    );
+    assert!(generated.status.success());
+    assert!(
+        generated.stdout.is_empty(),
+        "the app-server's stdout is protocol frames only; progress goes to stderr"
+    );
+    let manifest = fs::read_to_string(out.join("manifest.json")).expect("the manifest is written");
+    assert!(manifest.contains("\"conversation/submit\""));
+    assert!(manifest.contains("\"turn/retrying\""));
+
+    // Serving is a later batch, and says so rather than accepting a connection
+    // it cannot answer.
+    let served = run(&root, &["app-server"]);
+    assert!(!served.status.success());
+    assert!(served.stdout.is_empty());
+    let stderr = String::from_utf8(served.stderr).expect("error output must be UTF-8");
+    assert!(stderr.contains("[error] code=BAD_ARGUMENT msg="));
+    assert!(stderr.contains("app-server serve mode lands in a later batch"));
+}

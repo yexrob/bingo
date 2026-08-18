@@ -1,0 +1,14 @@
+{
+  "$id": "urn:bingo:app-server:v1:session.resume.result",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "properties": {
+    "snapshot": {
+      "$ref": "../definitions.json#/definitions/SessionSnapshot"
+    }
+  },
+  "required": [
+    "snapshot"
+  ],
+  "title": "SessionResumeResult",
+  "type": "object"
+}

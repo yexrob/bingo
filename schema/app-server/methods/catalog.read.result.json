@@ -1,0 +1,14 @@
+{
+  "$id": "urn:bingo:app-server:v1:catalog.read.result",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "properties": {
+    "catalog": {
+      "$ref": "../definitions.json#/definitions/Catalog"
+    }
+  },
+  "required": [
+    "catalog"
+  ],
+  "title": "CatalogReadResult",
+  "type": "object"
+}

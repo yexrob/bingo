@@ -1,0 +1,14 @@
+{
+  "$id": "urn:bingo:app-server:v1:conversation.read.result",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "properties": {
+    "snapshot": {
+      "$ref": "../definitions.json#/definitions/ConversationSnapshot"
+    }
+  },
+  "required": [
+    "snapshot"
+  ],
+  "title": "ConversationReadResult",
+  "type": "object"
+}

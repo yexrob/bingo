@@ -1,0 +1,22 @@
+{
+  "$id": "urn:bingo:app-server:v1:initialize.params",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "properties": {
+    "capabilities": {
+      "$ref": "../definitions.json#/definitions/ClientCapabilities"
+    },
+    "client": {
+      "$ref": "../definitions.json#/definitions/ClientInfo"
+    },
+    "protocol": {
+      "$ref": "../definitions.json#/definitions/ProtocolRange"
+    }
+  },
+  "required": [
+    "capabilities",
+    "client",
+    "protocol"
+  ],
+  "title": "InitializeParams",
+  "type": "object"
+}

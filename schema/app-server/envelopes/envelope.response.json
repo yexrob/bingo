@@ -1,0 +1,39 @@
+{
+  "$id": "urn:bingo:app-server:v1:envelope.response",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "description": "A server response frame: exactly one of `result` or `error`, which the two constructors are the only way to build.\n\nIt serializes; it does not deserialize. A result's shape is decided by the method that was called, which the frame does not repeat — a client decodes it with [`ResponseResult::from_value`] against the request it sent, and so does the fixture suite.",
+  "properties": {
+    "error": {
+      "anyOf": [
+        {
+          "$ref": "../definitions.json#/definitions/RpcError"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "id": {
+      "$ref": "../definitions.json#/definitions/RequestId"
+    },
+    "jsonrpc": {
+      "$ref": "../definitions.json#/definitions/JsonRpcVersion"
+    },
+    "result": {
+      "anyOf": [
+        {
+          "$ref": "../definitions.json#/definitions/ResponseResult"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "required": [
+    "id",
+    "jsonrpc"
+  ],
+  "title": "ResponseFrame",
+  "type": "object"
+}
