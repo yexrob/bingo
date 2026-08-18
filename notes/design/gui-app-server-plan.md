@@ -233,6 +233,13 @@ stdio JSON-RPC 循环（framing、initialize 协商、有界队列、delta 合�
 > 退出码 0/1/2 已定义并测试。engine 未接：text/tool/permission/retry/steer 场景显式留 B7，
 > 两个测试文件头部各自写明。
 
+> **B6 review 裁决（2026-08-19，Fable）**：① `EventMeta.coalescedFrom` **核准**——actor 赋 seq
+> 与传输层合并只有靠 span 字段兼得 gapless 检测，规范已载、fixtures 已锁；`RequestId::Null`
+> 是 JSON-RPC 合规修复，核准。② session/start 即建 transcript 文件与 TUI 的分歧：B8 统一为
+> 单一行为（parity ledger 分类，不留前端分叉）。③ pipelined-close 拒绝语义核准（refusal
+> 而非沉默）。④ **行数债务**：`controller.rs` 4214 行是战役自产——B7/B8 必须拆到 4000 线下；
+> `chat.rs` 预期随 B7 拆 shim 自然缩减；B8 终审 discipline gate 须绿或由用户显式豁免。
+
 ### B7 · TUI 重接（L）
 Chat/App 管线换 AppLink 帧，删全部 shim；TuiEvent 本地化；按键动作走同一 Action registry；
 渲染层不动（写 once 不变量、statics、页引擎照旧）。
