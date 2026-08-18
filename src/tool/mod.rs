@@ -36,7 +36,7 @@ pub struct ToolContext {
     /// User home directory (the Experience tools locate the user-level experience root here).
     pub home: PathBuf,
     /// Watchable registry (background task lifecycle and notifications).
-    pub watch: std::sync::Arc<crate::watch::WatchRegistry>,
+    pub watch: crate::watch::WatchHandle,
     /// Foreground liveness (D84): where a running shell command publishes its
     /// output tail, and where the host's ctrl+b reaches it. Defaults to a
     /// detached handle — a host with no foreground surface sees no difference.

@@ -527,7 +527,7 @@ mod tests {
     fn ctx_at(home: &Path, cwd: &std::path::Path) -> ToolContext {
         ToolContext {
             cwd: cwd.to_path_buf(),
-            watch: crate::watch::WatchRegistry::new(),
+            watch: crate::app::AppCore::start(Default::default()).watch(),
             live: Default::default(),
             http: reqwest::Client::new(),
             tasks: Arc::new(crate::tasks::TaskStore::new(home, "test")),

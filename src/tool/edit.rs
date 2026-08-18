@@ -119,7 +119,7 @@ mod tests {
         let context = ToolContext {
             cwd: root.clone(),
             home: std::env::temp_dir(),
-            watch: crate::watch::WatchRegistry::new(),
+            watch: crate::app::AppCore::start(Default::default()).watch(),
             live: Default::default(),
             http: reqwest::Client::new(),
             tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), "test")),
@@ -164,7 +164,7 @@ mod tests {
                 &ToolContext {
                     cwd: Default::default(),
                     home: std::env::temp_dir(),
-                    watch: crate::watch::WatchRegistry::new(),
+                    watch: crate::app::AppCore::start(Default::default()).watch(),
                     live: Default::default(),
                     http: reqwest::Client::new(),
                     tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(
@@ -200,7 +200,7 @@ mod tests {
                 &ToolContext {
                     cwd: Default::default(),
                     home: std::env::temp_dir(),
-                    watch: crate::watch::WatchRegistry::new(),
+                    watch: crate::app::AppCore::start(Default::default()).watch(),
                     live: Default::default(),
                     http: reqwest::Client::new(),
                     tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(

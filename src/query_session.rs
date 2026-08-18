@@ -88,7 +88,7 @@ pub struct Session {
     /// Consecutive auto-compact failure count (circuit breaker: skip after MAX_COMPACT_FAILURES).
     pub compact_failures: Arc<std::sync::atomic::AtomicU64>,
     /// Watchable registry (command/agent status observation and notifications).
-    pub watch: Arc<crate::watch::WatchRegistry>,
+    pub watch: crate::watch::WatchHandle,
     /// Task store (shared by the Task tool family + TUI task panel + reminder injection).
     pub tasks: Arc<crate::tasks::TaskStore>,
     /// Task panel expand signal (subscribed by the TUI loop).

@@ -391,7 +391,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         user_config_dir: user_dir.clone(),
         quiet: !cli.print,
         compact_failures: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
-        watch: crate::watch::WatchRegistry::new(),
+        watch: crate::app::AppCore::start(Default::default()).watch(),
         tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(&home, &task_list_key)),
         expand_tasks: expand_tx,
         agents: crate::agents::AgentRegistry::new(),

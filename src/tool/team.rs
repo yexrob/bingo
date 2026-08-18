@@ -769,7 +769,7 @@ mod tests {
             user_config_dir: root.join("home").join(".config"),
             quiet: true,
             compact_failures: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            watch: crate::watch::WatchRegistry::new(),
+            watch: crate::app::AppCore::start(Default::default()).watch(),
             tasks: Arc::new(crate::tasks::TaskStore::new(&root, "t")),
             expand_tasks: tokio::sync::watch::channel(false).0,
             agents: crate::agents::AgentRegistry::new(),

@@ -13,7 +13,7 @@ use crate::engine::events::{EngineEvent, EngineEvents, EngineHost, EngineRequest
 use crate::query::Session;
 use crate::tool::{Tool, ToolContext, ToolError, ToolResult, parse_input};
 use crate::ui::UiEvent;
-use crate::watch::{NotifyCondition, WatchId, WatchKind, WatchRegistry, WatchState};
+use crate::watch::{NotifyCondition, WatchHandle, WatchId, WatchKind, WatchState};
 
 use crate::tool::address::{self, Address};
 use crate::tool::agent_notes::{CHANNEL_NOTE, SUBAGENT_NOTE};
@@ -143,7 +143,7 @@ fn subagent_hooks(
     output: SubagentOutput,
     events: Option<crate::ui::EventSink>,
     cell: Arc<AgentCell>,
-    watch: Arc<WatchRegistry>,
+    watch: WatchHandle,
     id: WatchId,
     instance: String,
     ask: Option<Arc<crate::query::AskFn>>,
@@ -372,7 +372,7 @@ fn subagent_hooks(
 /// Start every idle recipient that has mail waiting. `AgentRegistry::flush_pending` claims the
 /// full inbox atomically, so concurrent dispatchers cannot double-start an instance and every
 /// item present at the receiver's claim point becomes one prompt.
-pub(crate) fn flush_agent_inbox(session: &Arc<Session>, watch: &Arc<WatchRegistry>) {
+pub(crate) fn flush_agent_inbox(session: &Arc<Session>, watch: &WatchHandle) {
     for wake in session.agents.flush_pending() {
         if !session.agents.accepts_run(&wake.name, wake.run) {
             session.agents.restore_inbox(&wake.name, wake.items);
@@ -415,7 +415,7 @@ pub(crate) fn flush_agent_inbox(session: &Arc<Session>, watch: &Arc<WatchRegistr
 /// be worse than no chase at all.
 pub(crate) fn spawn_ack_watchdog(
     session: Arc<Session>,
-    watch: Arc<WatchRegistry>,
+    watch: WatchHandle,
     agent: String,
     id: MsgId,
     timeout: std::time::Duration,
@@ -682,7 +682,7 @@ fn non_empty(text: String) -> String {
 /// flow staples rows and prints `●` for dispatches only, so a delivery or a
 /// continuation must not claim the bit.
 fn register_run_watch(
-    watch: &Arc<WatchRegistry>,
+    watch: &WatchHandle,
     label: String,
     cell: Arc<AgentCell>,
     conditions: Vec<NotifyCondition>,
@@ -727,7 +727,7 @@ pub(crate) fn wakes_owner(items: &[InboxItem]) -> bool {
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_agent_loop(
     registry: Arc<AgentRegistry>,
-    watch: Arc<WatchRegistry>,
+    watch: WatchHandle,
     name: String,
     session: Arc<Session>,
     history: Vec<Message>,

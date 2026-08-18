@@ -4,11 +4,14 @@
 //! state transitions are broadcast to the TUI, and terminal notifications are queued
 //! for injection into the main agent's context.
 
-use std::collections::{HashMap, VecDeque};
-use std::sync::{Arc, Mutex};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, mpsc, oneshot};
+
+use crate::app::controller::Control;
 
 /// Watchable lifecycle state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -315,151 +318,292 @@ struct Entry {
     dispatch: bool,
 }
 
-struct Inner {
-    next_id: u64,
-    entries: HashMap<WatchId, Entry>,
-    notifications: VecDeque<Notification>,
+/// One watchable as a reader sees it. The registry's own [`Entry`] carries the
+/// condition machinery too; a reader never needs it, so it stops here.
+#[derive(Debug, Clone)]
+struct Row {
+    id: WatchId,
+    label: String,
+    kind: WatchKind,
+    state: WatchState,
+    detail: Option<String>,
+    payload: Option<serde_json::Value>,
+    born: Instant,
 }
 
-/// Session-level watch registry (Session holds the Arc).
+/// The replacement snapshot the registry publishes after every change.
+///
+/// A surface that draws background work reads it once per frame, and reading it
+/// costs a channel borrow rather than a round trip to the actor — which is the
+/// whole point: the actor is the process's one ordering point, and a render loop
+/// asking it a question sixty times a second would put the frame rate in front of
+/// the session's own work.
+#[derive(Debug, Default)]
+pub struct WatchView {
+    /// Every entry still held, oldest first (ids are handed out in sequence, so
+    /// sorting by id is start order — the order a list of background work reads
+    /// in).
+    rows: Vec<Row>,
+    /// Which sessions have a wake notification waiting. Presence, not content:
+    /// the content is taken by [`WatchHandle::consume_notifications`], which is
+    /// a question and goes to the actor.
+    wakes: HashSet<Option<String>>,
+}
+
+/// What the actor is told about a watchable, and what it is asked.
+///
+/// The split is the campaign's own (`engine::events`): a **report** travels one
+/// way and its sender does not wait for it, so it can be sent from a render
+/// loop, a `Drop`, or a synchronous event sink; a **question** carries the
+/// channel its answer comes back on, so its caller has to be able to wait.
+pub enum WatchMsg {
+    Register(Box<Registration>),
+    Feed {
+        id: WatchId,
+        text: String,
+    },
+    Signal {
+        id: WatchId,
+        signal: String,
+        detail: Option<String>,
+    },
+    SetState {
+        id: WatchId,
+        state: WatchState,
+        detail: Option<String>,
+        payload: Option<serde_json::Value>,
+    },
+    MatchConditions {
+        id: WatchId,
+        reply: oneshot::Sender<Vec<String>>,
+    },
+    IsTerminal {
+        id: WatchId,
+        reply: oneshot::Sender<bool>,
+    },
+    Consume {
+        owner: Option<String>,
+        reply: oneshot::Sender<Vec<String>>,
+    },
+    /// What the actor is holding, for the bookkeeping tests that used to read
+    /// the registry's fields directly. Nothing outside a test asks.
+    #[cfg(test)]
+    Probe {
+        id: WatchId,
+        reply: oneshot::Sender<Probe>,
+    },
+}
+
+/// The registry's own bookkeeping, as a test reads it.
+#[cfg(test)]
+#[derive(Debug, Default)]
+pub struct Probe {
+    /// How many entries the registry still holds, terminal ones included.
+    pub entries: usize,
+    /// Lines buffered for the probed entry's next condition match.
+    pub feed_buffer: usize,
+    /// Lines ever fed to it (what `LinesOver` counts).
+    pub total_lines: usize,
+    /// Conditions it is still matching against.
+    pub conditions: usize,
+}
+
+/// One watchable, as it is handed to the actor. The identifier is already minted:
+/// registration has to answer synchronously (a background command is registered
+/// from the middle of a tool call), so the mint lives on the handle and the actor
+/// is told which id this entry has rather than asked for one.
+pub struct Registration {
+    id: WatchId,
+    label: String,
+    kind: WatchKind,
+    poll: WatchPoll,
+    conditions: Vec<NotifyCondition>,
+    owner: Option<String>,
+    notify_owner: bool,
+    dispatch: bool,
+}
+
+/// The watch registry's state, owned by the session actor.
+///
+/// Nothing here is behind a lock, because nothing else can reach it: every
+/// change arrives as a [`WatchMsg`] on the actor's one inbox and is applied by
+/// the actor's one thread. What used to be "a mutex per registry, in whatever
+/// order the callers happened to take them" is now one order for the whole
+/// session.
 pub struct WatchRegistry {
-    inner: Mutex<Inner>,
-    tx: broadcast::Sender<WatchEvent>,
+    entries: HashMap<WatchId, Entry>,
+    notifications: VecDeque<Notification>,
+    events: broadcast::Sender<WatchEvent>,
+    view: tokio::sync::watch::Sender<Arc<WatchView>>,
+}
+
+/// Build the registry and the handle everything reaches it by.
+pub(crate) fn attach(control: mpsc::UnboundedSender<Control>) -> (WatchRegistry, WatchHandle) {
+    let (events, _) = broadcast::channel(256);
+    let (view, reader) = tokio::sync::watch::channel(Arc::new(WatchView::default()));
+    let registry = WatchRegistry {
+        entries: HashMap::new(),
+        notifications: VecDeque::new(),
+        events: events.clone(),
+        view,
+    };
+    let handle = WatchHandle {
+        control,
+        events,
+        view: reader,
+        next_id: Arc::new(AtomicU64::new(1)),
+    };
+    (registry, handle)
 }
 
 impl WatchRegistry {
-    pub fn new() -> Arc<Self> {
-        let (tx, _) = broadcast::channel(256);
-        Arc::new(Self {
-            inner: Mutex::new(Inner {
-                next_id: 1,
-                entries: HashMap::new(),
-                notifications: VecDeque::new(),
-            }),
-            tx,
-        })
-    }
-
-    /// Register and configure notification conditions (content increments fed via
-    /// feed_content are matched against the conditions → signals).
-    pub fn register_with_conditions(
-        self: &Arc<Self>,
-        watchable: Box<dyn Watchable>,
-        conditions: Vec<NotifyCondition>,
-        owner: Option<String>,
-    ) -> WatchId {
-        // Not a dispatch: everything on this path — background commands,
-        // channel operations, ack chases — is machinery, not an `Agent` call.
-        self.register_addressed(watchable, conditions, owner, true, false)
-    }
-
-    /// Register a watch that may keep its terminal states to itself (D98).
+    /// Apply one message.
     ///
-    /// `notify_owner: false` means the run exists — it broadcasts and it is
-    /// drawn — but its end enqueues nothing for the session that owns it, so
-    /// nothing wakes and nothing is injected. That is the shape of a run the
-    /// user started by writing to the agent directly.
-    pub fn register_addressed(
-        self: &Arc<Self>,
-        watchable: Box<dyn Watchable>,
-        conditions: Vec<NotifyCondition>,
-        owner: Option<String>,
-        notify_owner: bool,
-        dispatch: bool,
-    ) -> WatchId {
-        let poll = watchable.poll();
-        let label = watchable.label();
-        let kind = watchable.kind();
-        let id = {
-            let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-            let id = WatchId(inner.next_id);
-            inner.next_id += 1;
-            inner.entries.insert(
+    /// The order of the last two steps is the contract a reader depends on: the
+    /// view is published **before** the broadcast that announces the change, so
+    /// a surface woken by the event and then reading the view can never read a
+    /// world older than the event that woke it.
+    pub(crate) fn handle(&mut self, message: WatchMsg) {
+        let event = self.apply(message);
+        self.publish();
+        if let Some(event) = event {
+            let _ = self.events.send(event);
+        }
+    }
+
+    fn apply(&mut self, message: WatchMsg) -> Option<WatchEvent> {
+        match message {
+            WatchMsg::Register(registration) => self.register(*registration),
+            WatchMsg::Feed { id, text } => {
+                self.feed_content(id, &text);
+                None
+            }
+            WatchMsg::Signal { id, signal, detail } => self.emit_signal(id, signal, detail),
+            WatchMsg::SetState {
                 id,
-                Entry {
-                    label: label.clone(),
-                    kind,
-                    state: poll.state,
-                    detail: poll.detail.clone(),
-                    payload: poll.payload.clone(),
-                    born: Instant::now(),
-                    conditions: conditions.into_iter().map(ConditionState::new).collect(),
-                    feed_buffer: Vec::new(),
-                    total_lines: 0,
-                    owner: owner.clone(),
-                    notify_owner,
-                    dispatch,
-                },
-            );
-            id
-        };
+                state,
+                detail,
+                payload,
+            } => self.set_state(id, state, detail, payload),
+            WatchMsg::MatchConditions { id, reply } => {
+                let _ = reply.send(self.match_conditions(id));
+                None
+            }
+            WatchMsg::IsTerminal { id, reply } => {
+                let _ = reply.send(
+                    self.entries
+                        .get(&id)
+                        .is_none_or(|entry| entry.state.is_terminal()),
+                );
+                None
+            }
+            WatchMsg::Consume { owner, reply } => {
+                let notes = self.consume_notifications(owner.as_deref());
+                let _ = reply.send(notes);
+                None
+            }
+            #[cfg(test)]
+            WatchMsg::Probe { id, reply } => {
+                let entry = self.entries.get(&id);
+                let _ = reply.send(Probe {
+                    entries: self.entries.len(),
+                    feed_buffer: entry.map_or(0, |entry| entry.feed_buffer.len()),
+                    total_lines: entry.map_or(0, |entry| entry.total_lines),
+                    conditions: entry.map_or(0, |entry| entry.conditions.len()),
+                });
+                None
+            }
+        }
+    }
+
+    /// Republish the reader's snapshot. Replacement, never a delta: a slow reader
+    /// that missed three changes wants the world, not three diffs it has to
+    /// apply in order.
+    fn publish(&self) {
+        let mut rows: Vec<Row> = self
+            .entries
+            .iter()
+            .map(|(id, entry)| Row {
+                id: *id,
+                label: entry.label.clone(),
+                kind: entry.kind,
+                state: entry.state,
+                detail: entry.detail.clone(),
+                payload: entry.payload.clone(),
+                born: entry.born,
+            })
+            .collect();
+        rows.sort_by_key(|row| row.id.0);
+        let wakes = self
+            .notifications
+            .iter()
+            .filter(|note| note.state.is_terminal() || note.signal.is_some())
+            .map(|note| note.owner.clone())
+            .collect();
+        let _ = self.view.send(Arc::new(WatchView { rows, wakes }));
+    }
+
+    fn register(&mut self, registration: Registration) -> Option<WatchEvent> {
+        let Registration {
+            id,
+            label,
+            kind,
+            poll,
+            conditions,
+            owner,
+            notify_owner,
+            dispatch,
+        } = registration;
+        self.entries.insert(
+            id,
+            Entry {
+                label: label.clone(),
+                kind,
+                state: poll.state,
+                detail: poll.detail.clone(),
+                payload: poll.payload.clone(),
+                born: Instant::now(),
+                conditions: conditions.into_iter().map(ConditionState::new).collect(),
+                feed_buffer: Vec::new(),
+                total_lines: 0,
+                owner: owner.clone(),
+                notify_owner,
+                dispatch,
+            },
+        );
         // Initial state is force-broadcast (set_state's idempotency would swallow a state equal to the entry's).
         let notified = notify_owner && (poll.state.is_terminal() || poll.state == WatchState::Idle);
         let notifies_main = notified && owner.is_none();
         if notified {
-            self.inner
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .notifications
-                .push_back(Notification {
-                    id,
-                    label: label.clone(),
-                    state: poll.state,
-                    detail: poll.detail.clone(),
-                    payload: poll.payload.clone(),
-                    signal: None,
-                    owner,
-                });
+            self.notifications.push_back(Notification {
+                id,
+                label: label.clone(),
+                state: poll.state,
+                detail: poll.detail.clone(),
+                payload: poll.payload.clone(),
+                signal: None,
+                owner,
+            });
         }
-        let _ = self.tx.send(WatchEvent {
+        Some(WatchEvent {
             id,
             label,
             kind,
             state: poll.state,
-            detail: poll.detail.clone(),
-            payload: poll.payload.clone(),
+            detail: poll.detail,
+            payload: poll.payload,
             signal: None,
             elapsed_ms: 0,
             notifies_main,
             dispatch,
-        });
-        let interval = watchable.check_interval();
-        if let Some(interval) = interval {
-            let registry = self.clone();
-            let watchable = Arc::new(watchable);
-            tokio::spawn(async move {
-                let mut ticker = tokio::time::interval(interval);
-                loop {
-                    ticker.tick().await;
-                    // Externally set to terminal (e.g. subagent done): stop polling, don't overwrite.
-                    if registry.is_terminal(id) {
-                        break;
-                    }
-                    let p = watchable.poll();
-                    if let Some(sig) = p.signal.clone() {
-                        registry.emit_signal(id, sig, p.detail.clone());
-                    }
-                    // Condition matching: this round's fed content hits a notification condition → signal.
-                    for sig in registry.match_conditions(id) {
-                        registry.emit_signal(id, sig, p.detail.clone());
-                    }
-                    let terminal = p.state.is_terminal();
-                    registry.set_state(id, p.state, p.detail, p.payload);
-                    if terminal {
-                        break;
-                    }
-                }
-            });
-        }
-        id
+        })
     }
 
     /// The implementer feeds content increments (a line or a text block): the condition
     /// engine matches against the notification conditions; hits are aggregated into a
     /// signal triggered by the polling tick.
-    pub fn feed_content(&self, id: WatchId, text: &str) {
-        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        let Some(entry) = inner.entries.get_mut(&id) else {
+    fn feed_content(&mut self, id: WatchId, text: &str) {
+        let Some(entry) = self.entries.get_mut(&id) else {
             return;
         };
         entry.total_lines += text.lines().count();
@@ -473,9 +617,8 @@ impl WatchRegistry {
 
     /// Match this round's fed content against the notification conditions; returns the
     /// hit signals (incremental conditions matched one by one, aggregated).
-    pub fn match_conditions(&self, id: WatchId) -> Vec<String> {
-        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        let Some(entry) = inner.entries.get_mut(&id) else {
+    fn match_conditions(&mut self, id: WatchId) -> Vec<String> {
+        let Some(entry) = self.entries.get_mut(&id) else {
             return Vec::new();
         };
         let buffer = std::mem::take(&mut entry.feed_buffer);
@@ -492,49 +635,41 @@ impl WatchRegistry {
     /// Condition signal: the implementer calls this when a condition is met (e.g. an
     /// error in the log); goes into the notification queue + broadcast unconditionally
     /// (doesn't change state).
-    pub fn emit_signal(&self, id: WatchId, signal: String, detail: Option<String>) {
+    fn emit_signal(
+        &mut self,
+        id: WatchId,
+        signal: String,
+        detail: Option<String>,
+    ) -> Option<WatchEvent> {
         // Single-signal cap: any long text fed by callers is cut off here.
         let signal = truncate_chars(&signal, MAX_SIGNAL_CHARS);
-        let (label, kind, state, entry_detail, notifies_main, dispatch) = {
-            let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-            let Some(entry) = inner.entries.get_mut(&id) else {
-                return;
-            };
-            let label = entry.label.clone();
-            let kind = entry.kind;
-            let state = entry.state;
-            let dispatch = entry.dispatch;
-            if let Some(d) = &detail {
-                entry.detail = Some(d.clone());
-            }
-            let entry_detail = entry.detail.clone();
-            let owner = entry.owner.clone();
-            let notify_owner = entry.notify_owner;
-            let notifies_main = notify_owner && owner.is_none();
-            if notify_owner {
-                inner.notifications.push_back(Notification {
-                    id,
-                    label: label.clone(),
-                    state,
-                    detail,
-                    payload: None,
-                    signal: Some(signal.clone()),
-                    owner,
-                });
-            }
-            (label, kind, state, entry_detail, notifies_main, dispatch)
-        };
-        let elapsed_ms = {
-            let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-            inner
-                .entries
-                .get(&id)
-                .map(|e| e.born.elapsed().as_millis() as u64)
-                .unwrap_or(0)
-        };
+        let entry = self.entries.get_mut(&id)?;
+        let label = entry.label.clone();
+        let kind = entry.kind;
+        let state = entry.state;
+        let dispatch = entry.dispatch;
+        if let Some(d) = &detail {
+            entry.detail = Some(d.clone());
+        }
+        let entry_detail = entry.detail.clone();
+        let elapsed_ms = entry.born.elapsed().as_millis() as u64;
+        let owner = entry.owner.clone();
+        let notify_owner = entry.notify_owner;
+        let notifies_main = notify_owner && owner.is_none();
+        if notify_owner {
+            self.notifications.push_back(Notification {
+                id,
+                label: label.clone(),
+                state,
+                detail,
+                payload: None,
+                signal: Some(signal.clone()),
+                owner,
+            });
+        }
         // Broadcast the real state and detail (used to be hardcoded Running/None, which
         // made the TUI display inconsistent with the state).
-        let _ = self.tx.send(WatchEvent {
+        Some(WatchEvent {
             id,
             label,
             kind,
@@ -545,78 +680,58 @@ impl WatchRegistry {
             elapsed_ms,
             notifies_main,
             dispatch,
-        });
-    }
-
-    /// Whether the polling loop should stop: already terminal, or the entry was reaped
-    /// (polling after reaping would only spin idly).
-    pub fn is_terminal(&self, id: WatchId) -> bool {
-        let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        inner.entries.get(&id).is_none_or(|e| e.state.is_terminal())
+        })
     }
 
     /// The implementer updates state proactively (no interval, or immediate changes outside polling).
     /// Only broadcasts on state transitions: same state + same detail is idempotently skipped.
-    pub fn set_state(
-        &self,
+    fn set_state(
+        &mut self,
         id: WatchId,
         state: WatchState,
         detail: Option<String>,
         payload: Option<serde_json::Value>,
-    ) {
-        let (label, kind, notifies_main, dispatch) = {
-            let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-            let Some(entry) = inner.entries.get_mut(&id) else {
-                return;
-            };
-            // Terminal freeze: non-terminal updates after Done/Failed (e.g. a polling
-            // Running) no longer overwrite.
-            if entry.state.is_terminal() && !state.is_terminal() {
-                return;
-            }
-            if entry.state == state && entry.detail == detail {
-                return;
-            }
-            entry.state = state;
-            entry.detail = detail.clone();
-            entry.payload = payload.clone();
-            let label = entry.label.clone();
-            let kind = entry.kind;
-            let dispatch = entry.dispatch;
-            let owner = entry.owner.clone();
-            let notify = entry.notify_owner && (state.is_terminal() || state == WatchState::Idle);
-            let notifies_main = notify && owner.is_none();
-            if state.is_terminal() {
-                // After terminal, no more content feeding or condition matching: compact
-                // the entry and free the buffers.
-                entry.feed_buffer = Vec::new();
-                entry.conditions = Vec::new();
-            }
-            if notify {
-                inner.notifications.push_back(Notification {
-                    id,
-                    label: label.clone(),
-                    state,
-                    detail: detail.clone(),
-                    payload: payload.clone(),
-                    signal: None,
-                    owner,
-                });
-            }
-            if state.is_terminal() {
-                prune_terminal_entries(&mut inner);
-            }
-            (label, kind, notifies_main, dispatch)
-        };
-        let elapsed_ms = {
-            let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-            inner
-                .entries
-                .get(&id)
-                .map(|e| e.born.elapsed().as_millis() as u64)
-                .unwrap_or(0)
-        };
-        let _ = self.tx.send(WatchEvent {
+    ) -> Option<WatchEvent> {
+        let entry = self.entries.get_mut(&id)?;
+        // Terminal freeze: non-terminal updates after Done/Failed (e.g. a polling
+        // Running) no longer overwrite.
+        if entry.state.is_terminal() && !state.is_terminal() {
+            return None;
+        }
+        if entry.state == state && entry.detail == detail {
+            return None;
+        }
+        entry.state = state;
+        entry.detail = detail.clone();
+        entry.payload = payload.clone();
+        let label = entry.label.clone();
+        let kind = entry.kind;
+        let dispatch = entry.dispatch;
+        let owner = entry.owner.clone();
+        let elapsed_ms = entry.born.elapsed().as_millis() as u64;
+        let notify = entry.notify_owner && (state.is_terminal() || state == WatchState::Idle);
+        let notifies_main = notify && owner.is_none();
+        if state.is_terminal() {
+            // After terminal, no more content feeding or condition matching: compact
+            // the entry and free the buffers.
+            entry.feed_buffer = Vec::new();
+            entry.conditions = Vec::new();
+        }
+        if notify {
+            self.notifications.push_back(Notification {
+                id,
+                label: label.clone(),
+                state,
+                detail: detail.clone(),
+                payload: payload.clone(),
+                signal: None,
+                owner,
+            });
+        }
+        if state.is_terminal() {
+            prune_terminal_entries(&mut self.entries);
+        }
+        Some(WatchEvent {
             id,
             label,
             kind,
@@ -627,59 +742,19 @@ impl WatchRegistry {
             elapsed_ms,
             notifies_main,
             dispatch,
-        });
-    }
-
-    pub fn subscribe(&self) -> broadcast::Receiver<WatchEvent> {
-        self.tx.subscribe()
-    }
-
-    /// Snapshot of every watchable the registry still holds, **oldest first**.
-    ///
-    /// The entries live in a map, so the order has to be imposed rather than
-    /// observed: ids are handed out in sequence, so sorting by id is start
-    /// order, which is the order a list of background work reads in.
-    pub fn snapshot(&self) -> Vec<WatchSnapshot> {
-        let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        let mut out: Vec<WatchSnapshot> = inner
-            .entries
-            .iter()
-            .map(|(id, e)| WatchSnapshot {
-                id: *id,
-                label: e.label.clone(),
-                kind: e.kind,
-                state: e.state,
-                detail: e.detail.clone(),
-                payload: e.payload.clone(),
-                elapsed_ms: e.born.elapsed().as_millis() as u64,
-            })
-            .collect();
-        out.sort_by_key(|snapshot| snapshot.id.0);
-        out
-    }
-
-    /// Whether there are unconsumed wake notifications (terminal or signal) — used to
-    /// trigger an extra automatic turn after a turn ends.
-    pub fn has_wake_notifications(&self, owner: Option<&str>) -> bool {
-        let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        inner
-            .notifications
-            .iter()
-            .filter(|n| n.owner.as_deref() == owner)
-            .any(|n| n.state.is_terminal() || n.signal.is_some())
+        })
     }
 
     /// Take out the notifications pending injection into the model (merges adjacent Idle
     /// entries with the same id into one round summary).
-    pub fn consume_notifications(&self, owner: Option<&str>) -> Vec<String> {
-        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+    fn consume_notifications(&mut self, owner: Option<&str>) -> Vec<String> {
         // Only this session's notifications are taken; everyone else's keep their order in
         // the queue for their own turn boundary.
         let (mine, others): (VecDeque<Notification>, VecDeque<Notification>) =
-            std::mem::take(&mut inner.notifications)
+            std::mem::take(&mut self.notifications)
                 .into_iter()
                 .partition(|n| n.owner.as_deref() == owner);
-        inner.notifications = others;
+        self.notifications = others;
         let mut mine = mine;
         let mut out: Vec<String> = Vec::new();
         // (id, label, round count, latest detail)
@@ -715,12 +790,235 @@ impl WatchRegistry {
     }
 }
 
+/// How everything outside the actor reaches the watch registry.
+///
+/// The method names and their meanings are the ones the registry has always had.
+/// What changed is who owns the state and how a call gets there: a report is an
+/// ordered send that nobody waits on, a question is a send plus the answer coming
+/// back, and a listing is a borrow of the published snapshot.
+#[derive(Clone)]
+pub struct WatchHandle {
+    control: mpsc::UnboundedSender<Control>,
+    events: broadcast::Sender<WatchEvent>,
+    view: tokio::sync::watch::Receiver<Arc<WatchView>>,
+    /// Identifiers are minted here rather than by the actor: registration has to
+    /// answer on the spot, and a number is the one thing about a watchable that
+    /// nothing else has to agree on first.
+    next_id: Arc<AtomicU64>,
+}
+
+impl WatchHandle {
+    fn report(&self, message: WatchMsg) {
+        let _ = self.control.send(Control::Watch(message));
+    }
+
+    /// Ask the actor something, or `None` if it is gone.
+    async fn ask<T>(&self, build: impl FnOnce(oneshot::Sender<T>) -> WatchMsg) -> Option<T> {
+        let (reply, answer) = oneshot::channel();
+        self.control.send(Control::Watch(build(reply))).ok()?;
+        answer.await.ok()
+    }
+
+    /// Register and configure notification conditions (content increments fed via
+    /// feed_content are matched against the conditions → signals).
+    pub fn register_with_conditions(
+        &self,
+        watchable: Box<dyn Watchable>,
+        conditions: Vec<NotifyCondition>,
+        owner: Option<String>,
+    ) -> WatchId {
+        // Not a dispatch: everything on this path — background commands,
+        // channel operations, ack chases — is machinery, not an `Agent` call.
+        self.register_addressed(watchable, conditions, owner, true, false)
+    }
+
+    /// Register a watch that may keep its terminal states to itself (D98).
+    ///
+    /// `notify_owner: false` means the run exists — it broadcasts and it is
+    /// drawn — but its end enqueues nothing for the session that owns it, so
+    /// nothing wakes and nothing is injected. That is the shape of a run the
+    /// user started by writing to the agent directly.
+    pub fn register_addressed(
+        &self,
+        watchable: Box<dyn Watchable>,
+        conditions: Vec<NotifyCondition>,
+        owner: Option<String>,
+        notify_owner: bool,
+        dispatch: bool,
+    ) -> WatchId {
+        // Polling happens on the caller's side of the boundary, never inside the
+        // actor: `poll` is the implementer's own code and may read a file, a
+        // child process, or a lock, and the actor must not wait on any of them.
+        let poll = watchable.poll();
+        let label = watchable.label();
+        let kind = watchable.kind();
+        let interval = watchable.check_interval();
+        let id = WatchId(self.next_id.fetch_add(1, Ordering::Relaxed));
+        self.report(WatchMsg::Register(Box::new(Registration {
+            id,
+            label,
+            kind,
+            poll,
+            conditions,
+            owner,
+            notify_owner,
+            dispatch,
+        })));
+        if let Some(interval) = interval {
+            let registry = self.clone();
+            let watchable = Arc::new(watchable);
+            tokio::spawn(async move {
+                let mut ticker = tokio::time::interval(interval);
+                loop {
+                    ticker.tick().await;
+                    // Externally set to terminal (e.g. subagent done): stop polling, don't overwrite.
+                    if registry.is_terminal(id).await {
+                        break;
+                    }
+                    let p = watchable.poll();
+                    if let Some(sig) = p.signal.clone() {
+                        registry.emit_signal(id, sig, p.detail.clone());
+                    }
+                    // Condition matching: this round's fed content hits a notification condition → signal.
+                    for sig in registry.match_conditions(id).await {
+                        registry.emit_signal(id, sig, p.detail.clone());
+                    }
+                    let terminal = p.state.is_terminal();
+                    registry.set_state(id, p.state, p.detail, p.payload);
+                    if terminal {
+                        break;
+                    }
+                }
+            });
+        }
+        id
+    }
+
+    /// Feed a content increment (a line or a text block) to the condition engine.
+    pub fn feed_content(&self, id: WatchId, text: &str) {
+        self.report(WatchMsg::Feed {
+            id,
+            text: text.to_string(),
+        });
+    }
+
+    /// Match this round's fed content against the notification conditions; returns the
+    /// hit signals (incremental conditions matched one by one, aggregated).
+    pub async fn match_conditions(&self, id: WatchId) -> Vec<String> {
+        self.ask(|reply| WatchMsg::MatchConditions { id, reply })
+            .await
+            .unwrap_or_default()
+    }
+
+    /// Condition signal: the implementer calls this when a condition is met (e.g. an
+    /// error in the log); goes into the notification queue + broadcast unconditionally
+    /// (doesn't change state).
+    pub fn emit_signal(&self, id: WatchId, signal: String, detail: Option<String>) {
+        self.report(WatchMsg::Signal { id, signal, detail });
+    }
+
+    /// Whether the polling loop should stop: already terminal, or the entry was reaped
+    /// (polling after reaping would only spin idly). A question rather than a read of
+    /// the published view, because a poller that keeps running for one more tick is a
+    /// process still touching a file the session has finished with.
+    pub async fn is_terminal(&self, id: WatchId) -> bool {
+        self.ask(|reply| WatchMsg::IsTerminal { id, reply })
+            .await
+            .unwrap_or(true)
+    }
+
+    /// The implementer updates state proactively (no interval, or immediate changes outside polling).
+    /// Only broadcasts on state transitions: same state + same detail is idempotently skipped.
+    pub fn set_state(
+        &self,
+        id: WatchId,
+        state: WatchState,
+        detail: Option<String>,
+        payload: Option<serde_json::Value>,
+    ) {
+        self.report(WatchMsg::SetState {
+            id,
+            state,
+            detail,
+            payload,
+        });
+    }
+
+    pub fn subscribe(&self) -> broadcast::Receiver<WatchEvent> {
+        self.events.subscribe()
+    }
+
+    /// Snapshot of every watchable the registry still holds, **oldest first**.
+    ///
+    /// Read from the published view, so a render loop costs a borrow. `elapsed_ms`
+    /// is computed here rather than stored: a duration frozen at publication time
+    /// would stop a running command's clock between state changes.
+    pub fn snapshot(&self) -> Vec<WatchSnapshot> {
+        self.view
+            .borrow()
+            .rows
+            .iter()
+            .map(|row| WatchSnapshot {
+                id: row.id,
+                label: row.label.clone(),
+                kind: row.kind,
+                state: row.state,
+                detail: row.detail.clone(),
+                payload: row.payload.clone(),
+                elapsed_ms: row.born.elapsed().as_millis() as u64,
+            })
+            .collect()
+    }
+
+    /// Whether there are unconsumed wake notifications (terminal or signal) — used to
+    /// trigger an extra automatic turn after a turn ends.
+    pub fn has_wake_notifications(&self, owner: Option<&str>) -> bool {
+        self.view
+            .borrow()
+            .wakes
+            .contains(&owner.map(str::to_string))
+    }
+
+    /// Take out the notifications pending injection into the model (merges adjacent Idle
+    /// entries with the same id into one round summary).
+    pub async fn consume_notifications(&self, owner: Option<&str>) -> Vec<String> {
+        let owner = owner.map(str::to_string);
+        self.ask(|reply| WatchMsg::Consume { owner, reply })
+            .await
+            .unwrap_or_default()
+    }
+
+    /// Wait until everything already sent has been applied.
+    ///
+    /// A report does not wait for its receipt, so a caller that reports and then
+    /// reads the published view needs a way to say "after that". Production code
+    /// rarely needs it — the view is republished before the broadcast that would
+    /// prompt a read — but a test that asserts on state it just reported does.
+    #[cfg(test)]
+    pub async fn settle(&self) {
+        crate::app::controller::settle(&self.control).await;
+    }
+
+    /// The same barrier for a synchronous test, which has no runtime to await on.
+    #[cfg(test)]
+    pub fn settle_now(&self) {
+        crate::app::controller::settle_now(&self.control);
+    }
+
+    /// The registry's own bookkeeping, for the tests that assert on it.
+    #[cfg(test)]
+    pub async fn probe(&self, id: WatchId) -> Probe {
+        self.ask(|reply| WatchMsg::Probe { id, reply })
+            .await
+            .unwrap_or_default()
+    }
+}
+
 /// Terminal entry reaping: keep only the most recent MAX_TERMINAL_ENTRIES terminal entries
 /// (entries don't grow monotonically in long sessions; notifications hold their own copies,
 /// so reaping loses no content).
-fn prune_terminal_entries(inner: &mut Inner) {
-    let mut terminal: Vec<(WatchId, Instant)> = inner
-        .entries
+fn prune_terminal_entries(entries: &mut HashMap<WatchId, Entry>) {
+    let mut terminal: Vec<(WatchId, Instant)> = entries
         .iter()
         .filter(|(_, e)| e.state.is_terminal())
         .map(|(id, e)| (*id, e.born))
@@ -731,7 +1029,7 @@ fn prune_terminal_entries(inner: &mut Inner) {
     terminal.sort_by_key(|(_, born)| *born);
     let drop_count = terminal.len() - MAX_TERMINAL_ENTRIES;
     for (id, _) in terminal.into_iter().take(drop_count) {
-        inner.entries.remove(&id);
+        entries.remove(&id);
     }
 }
 
@@ -767,8 +1065,7 @@ fn format_notification(id: WatchId, label: String, count: u32, last: String) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::AtomicUsize;
 
     struct FakeWatch {
         label: &'static str,
@@ -793,8 +1090,8 @@ mod tests {
         }
     }
 
-    fn watch() -> Arc<WatchRegistry> {
-        WatchRegistry::new()
+    fn watch() -> WatchHandle {
+        crate::app::AppCore::start(Default::default()).watch()
     }
 
     #[tokio::test]
@@ -822,8 +1119,8 @@ mod tests {
         assert_eq!(ev.label, "watch -n 2 ls");
     }
 
-    #[test]
-    fn set_state_idempotent_and_notifies() {
+    #[tokio::test]
+    async fn set_state_idempotent_and_notifies() {
         let reg = watch();
         let id = reg.register_with_conditions(
             Box::new(FakeWatch {
@@ -841,17 +1138,20 @@ mod tests {
             None,
         );
         reg.set_state(id, WatchState::Running, None, None);
+        reg.settle().await;
         assert_eq!(reg.snapshot()[0].state, WatchState::Running);
         reg.set_state(id, WatchState::Idle, Some("round 1".into()), None);
+        reg.settle().await;
         assert_eq!(reg.snapshot()[0].state, WatchState::Idle);
         reg.set_state(id, WatchState::Done, Some("ok".into()), None);
+        reg.settle().await;
         let snaps = reg.snapshot();
         assert_eq!(snaps[0].state, WatchState::Done);
         assert_eq!(snaps[0].label, "l");
     }
 
-    #[test]
-    fn notifications_merge_consecutive_idle_rounds() {
+    #[tokio::test]
+    async fn notifications_merge_consecutive_idle_rounds() {
         let reg = watch();
         let id = reg.register_with_conditions(
             Box::new(FakeWatch {
@@ -871,15 +1171,15 @@ mod tests {
         reg.set_state(id, WatchState::Idle, Some("round 1".into()), None);
         reg.set_state(id, WatchState::Idle, Some("round 2".into()), None);
         reg.set_state(id, WatchState::Done, Some("fin".into()), None);
-        let notes = reg.consume_notifications(None);
+        let notes = reg.consume_notifications(None).await;
         assert_eq!(notes.len(), 2, "{notes:?}");
         assert!(notes[0].contains("2 rounds done"), "merged: {}", notes[0]);
         assert!(notes[1].contains("fin"), "terminal: {}", notes[1]);
-        assert!(reg.consume_notifications(None).is_empty(), "consumed");
+        assert!(reg.consume_notifications(None).await.is_empty(), "consumed");
     }
 
-    #[test]
-    fn terminal_state_is_frozen_against_poll_override() {
+    #[tokio::test]
+    async fn terminal_state_is_frozen_against_poll_override() {
         // Regression: after the subagent finishes (Done), a polling Running must not overwrite.
         let reg = watch();
         let id = reg.register_with_conditions(
@@ -904,6 +1204,7 @@ mod tests {
             Some("produced 33 chars".into()),
             None,
         );
+        reg.settle().await;
         assert_eq!(reg.snapshot()[0].state, WatchState::Done, "frozen");
     }
 
@@ -943,8 +1244,8 @@ mod tests {
         assert!(cs.match_buffer(&[], 9).is_none(), "fires once");
     }
 
-    #[test]
-    fn feed_content_drives_condition_signals() {
+    #[tokio::test]
+    async fn feed_content_drives_condition_signals() {
         // End to end: feed_content → match_conditions (the polling-tick path).
         let reg = watch();
         let id = reg.register_with_conditions(
@@ -963,29 +1264,34 @@ mod tests {
             None,
         );
         reg.feed_content(id, "INFO line");
-        assert!(reg.match_conditions(id).is_empty(), "no hit yet");
+        assert!(reg.match_conditions(id).await.is_empty(), "no hit yet");
         reg.feed_content(id, "boom happened");
-        let signals = reg.match_conditions(id);
+        let signals = reg.match_conditions(id).await;
         assert_eq!(signals.len(), 1, "{signals:?}");
         assert!(signals[0].contains("boom"), "{}", signals[0]);
         // Buffer cleared: another match yields no signal
-        assert!(reg.match_conditions(id).is_empty(), "buffer drained");
+        assert!(reg.match_conditions(id).await.is_empty(), "buffer drained");
     }
 
     /// D98: a run registered as none of its owner's business exists in every
     /// way except one — it broadcasts, it is drawn, it is recorded — but it
     /// enqueues nothing, so nothing wakes and nothing is injected.
-    #[test]
-    fn an_unaddressed_run_enqueues_nothing_for_its_owner() {
+    #[tokio::test]
+    async fn an_unaddressed_run_enqueues_nothing_for_its_owner() {
         let reg = watch();
         let quiet = reg.register_addressed(running_watch("dm run"), Vec::new(), None, false, false);
+        // The registration's own broadcast is the actor's, so it lands after the
+        // report reaches it; settle first and this subscription starts where the
+        // test means it to.
+        reg.settle().await;
         let mut events = reg.subscribe();
         reg.set_state(quiet, WatchState::Done, Some("done".into()), None);
+        reg.settle().await;
         assert!(
             !reg.has_wake_notifications(None),
             "its end is not addressed to the main session"
         );
-        assert!(reg.consume_notifications(None).is_empty());
+        assert!(reg.consume_notifications(None).await.is_empty());
         let event = events.try_recv().unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(event.state, WatchState::Done, "the broadcast still happens");
         assert_eq!(event.label, "dm run");
@@ -994,18 +1300,20 @@ mod tests {
         let quiet =
             reg.register_addressed(running_watch("dm run 2"), Vec::new(), None, false, false);
         reg.emit_signal(quiet, "found error".into(), None);
+        reg.settle().await;
         assert!(!reg.has_wake_notifications(None), "no signal either");
 
         // And the default is unchanged.
         let loud = reg.register_with_conditions(running_watch("dispatch"), Vec::new(), None);
         reg.set_state(loud, WatchState::Done, Some("done".into()), None);
+        reg.settle().await;
         assert!(reg.has_wake_notifications(None));
     }
 
     /// The registry is shared by main and every subagent, so notifications are addressed:
     /// each session consumes only its own, and everyone else's keep their place in the queue.
-    #[test]
-    fn notifications_are_consumed_by_their_owner_only() {
+    #[tokio::test]
+    async fn notifications_are_consumed_by_their_owner_only() {
         let reg = watch();
         let main_watch = reg.register_with_conditions(running_watch("main task"), Vec::new(), None);
         let sub = reg.register_with_conditions(
@@ -1015,6 +1323,7 @@ mod tests {
         );
         reg.set_state(main_watch, WatchState::Done, Some("done".into()), None);
         reg.set_state(sub, WatchState::Done, Some("done".into()), None);
+        reg.settle().await;
 
         assert!(
             reg.has_wake_notifications(None),
@@ -1023,16 +1332,17 @@ mod tests {
         assert!(reg.has_wake_notifications(Some("worker")));
 
         // The subagent's turn boundary takes only its own; main's stays queued.
-        let mine = reg.consume_notifications(Some("worker"));
+        let mine = reg.consume_notifications(Some("worker")).await;
         assert_eq!(mine.len(), 1, "{mine:?}");
         assert!(mine[0].contains("sub task"), "{mine:?}");
+        reg.settle().await;
         assert!(!reg.has_wake_notifications(Some("worker")), "consumed");
         assert!(
             reg.has_wake_notifications(None),
             "main's notification was not taken"
         );
 
-        let main_notes = reg.consume_notifications(None);
+        let main_notes = reg.consume_notifications(None).await;
         assert_eq!(main_notes.len(), 1, "{main_notes:?}");
         assert!(main_notes[0].contains("main task"), "{main_notes:?}");
     }
@@ -1070,12 +1380,12 @@ mod tests {
         );
     }
 
-    #[test]
-    fn emit_signal_truncates_long_text() {
+    #[tokio::test]
+    async fn emit_signal_truncates_long_text() {
         let reg = watch();
         let id = reg.register_with_conditions(running_watch("noisy"), Vec::new(), None);
         reg.emit_signal(id, "x".repeat(10_000), None);
-        let notes = reg.consume_notifications(None);
+        let notes = reg.consume_notifications(None).await;
         assert!(notes.iter().any(|n| n.contains("[truncated]")), "{notes:?}");
         assert!(
             notes
@@ -1086,8 +1396,8 @@ mod tests {
     }
 
     /// S6 regression: an undrained feed buffer must not grow unboundedly.
-    #[test]
-    fn feed_buffer_is_bounded_without_drain() {
+    #[tokio::test]
+    async fn feed_buffer_is_bounded_without_drain() {
         let reg = watch();
         let id = reg.register_with_conditions(
             running_watch("flood"),
@@ -1097,29 +1407,19 @@ mod tests {
         for i in 0..(MAX_FEED_BUFFER_LINES * 3) {
             reg.feed_content(id, &format!("line {i}\n"));
         }
-        let buffered = {
-            let inner = reg.inner.lock().unwrap_or_else(|e| e.into_inner());
-            inner
-                .entries
-                .get(&id)
-                .map(|e| e.feed_buffer.len())
-                .unwrap_or(0)
-        };
+        let probe = reg.probe(id).await;
         assert!(
-            buffered <= MAX_FEED_BUFFER_LINES,
-            "buffer {buffered} lines should be bounded"
+            probe.feed_buffer <= MAX_FEED_BUFFER_LINES,
+            "buffer {} lines should be bounded",
+            probe.feed_buffer
         );
         // The cumulative line count is still tracked faithfully (the LinesOver semantics).
-        let total = {
-            let inner = reg.inner.lock().unwrap_or_else(|e| e.into_inner());
-            inner.entries.get(&id).map(|e| e.total_lines).unwrap_or(0)
-        };
-        assert_eq!(total, MAX_FEED_BUFFER_LINES * 3);
+        assert_eq!(probe.total_lines, MAX_FEED_BUFFER_LINES * 3);
     }
 
     /// S6 regression: buffers are freed after terminal, and terminal entries don't accumulate unboundedly.
-    #[test]
-    fn terminal_entries_are_compacted_and_pruned() {
+    #[tokio::test]
+    async fn terminal_entries_are_compacted_and_pruned() {
         let reg = watch();
         let id = reg.register_with_conditions(
             running_watch("done"),
@@ -1128,34 +1428,26 @@ mod tests {
         );
         reg.feed_content(id, "some output\n");
         reg.set_state(id, WatchState::Done, Some("ok".into()), None);
-        {
-            let inner = reg.inner.lock().unwrap_or_else(|e| e.into_inner());
-            let entry = inner.entries.get(&id).unwrap_or_else(|| unreachable!());
-            assert!(
-                entry.feed_buffer.is_empty(),
-                "terminal state releases the buffer"
-            );
-            assert!(
-                entry.conditions.is_empty(),
-                "terminal state releases conditions"
-            );
-        }
+        let probe = reg.probe(id).await;
+        assert_eq!(probe.feed_buffer, 0, "terminal state releases the buffer");
+        assert_eq!(probe.conditions, 0, "terminal state releases conditions");
         for _ in 0..(MAX_TERMINAL_ENTRIES * 2) {
             let extra = reg.register_with_conditions(running_watch("x"), Vec::new(), None);
             reg.set_state(extra, WatchState::Done, Some("ok".into()), None);
         }
-        {
-            let inner = reg.inner.lock().unwrap_or_else(|e| e.into_inner());
-            assert!(
-                inner.entries.len() <= MAX_TERMINAL_ENTRIES + 1,
-                "terminal entries should be reaped, currently {}",
-                inner.entries.len()
-            );
-        }
-        // A reaped entry must stop the polling loop — no idle spinning.
-        assert!(reg.is_terminal(id), "a reaped entry counts as terminal");
+        let probe = reg.probe(id).await;
         assert!(
-            reg.is_terminal(WatchId(999_999)),
+            probe.entries <= MAX_TERMINAL_ENTRIES + 1,
+            "terminal entries should be reaped, currently {}",
+            probe.entries
+        );
+        // A reaped entry must stop the polling loop — no idle spinning.
+        assert!(
+            reg.is_terminal(id).await,
+            "a reaped entry counts as terminal"
+        );
+        assert!(
+            reg.is_terminal(WatchId(999_999)).await,
             "a missing entry counts as terminal"
         );
     }
@@ -1193,7 +1485,7 @@ mod tests {
             .unwrap_or_else(|_| unreachable!())
             .unwrap_or_else(|_| unreachable!());
         assert_eq!(ev.signal.as_deref(), Some("found error: boom"));
-        let notes = reg.consume_notifications(None);
+        let notes = reg.consume_notifications(None).await;
         assert!(
             notes
                 .iter()
@@ -1262,6 +1554,7 @@ mod tests {
             }
         }
         assert!(seen.contains(&WatchState::Done), "{seen:?}");
+        reg.settle().await;
         assert_eq!(reg.snapshot()[0].state, WatchState::Done);
         let _ = id;
     }

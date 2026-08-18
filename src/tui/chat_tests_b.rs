@@ -231,6 +231,7 @@ async fn terminal_watch_event_triggers_auto_turn_when_idle() {
     chat.drain_events();
     assert!(!chat.conv.busy);
     watch.set_state(id, WatchState::Done, Some("done".into()), None);
+    watch.settle().await;
     chat.events.send(UiEvent::WatchEvent {
         label: "Agent: long task".into(),
         kind: crate::watch::WatchKind::Agent,
@@ -258,12 +259,13 @@ async fn a_terminal_event_with_no_notification_for_main_wakes_nothing() {
     let watch = chat.session.watch.clone();
     let id = watch.register_addressed(Box::new(FakeWatchable), Vec::new(), None, false, false);
     watch.set_state(id, WatchState::Done, Some("done".into()), None);
+    watch.settle().await;
     assert!(
         !watch.has_wake_notifications(None),
         "the run's end was never addressed to main"
     );
     assert!(
-        watch.consume_notifications(None).is_empty(),
+        watch.consume_notifications(None).await.is_empty(),
         "and there is nothing to inject either"
     );
     chat.events.send(UiEvent::WatchEvent {
@@ -322,6 +324,7 @@ async fn signal_triggers_auto_turn_even_while_typing() {
     });
     chat.drain_events();
     watch.emit_signal(id, "found error: ERROR boom".into(), None);
+    watch.settle().await;
     chat.events.send(UiEvent::WatchEvent {
         label: "tail -f app.log".into(),
         kind: crate::watch::WatchKind::Command,
@@ -374,6 +377,7 @@ async fn turn_end_triggers_auto_turn_when_wake_notification_pending() {
         Some("done".into()),
         None,
     );
+    watch.settle().await;
     assert!(watch.has_wake_notifications(None), "notification queued");
     chat.drain_events();
     assert!(chat.conv.busy, "still busy, no auto turn mid-turn");

@@ -77,7 +77,7 @@ fn parent_session() -> (Arc<Session>, Arc<crate::api::client::Client>) {
         user_config_dir: std::env::temp_dir().join(".config"),
         quiet: true,
         compact_failures: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-        watch: crate::watch::WatchRegistry::new(),
+        watch: crate::app::AppCore::start(Default::default()).watch(),
         tasks: Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), "test")),
         expand_tasks: tokio::sync::watch::channel(false).0,
         agents: AgentRegistry::new(),
@@ -1172,7 +1172,7 @@ async fn unacknowledged_message_is_chased_three_times_then_reported() {
         1 + MAX_FOLLOW_UPS as usize,
         "one follow-up per round, in the inbox with the original"
     );
-    let notes = session.watch.consume_notifications(None);
+    let notes = session.watch.consume_notifications(None).await;
     assert!(
         notes
             .iter()
@@ -1224,7 +1224,7 @@ async fn a_receiver_that_reads_and_says_nothing_is_still_chased() {
         "read-but-silent is still chased to the end"
     );
     assert_eq!(session.agents.list()[0].pending, MAX_FOLLOW_UPS as usize);
-    let notes = session.watch.consume_notifications(None);
+    let notes = session.watch.consume_notifications(None).await;
     assert!(
         notes.iter().any(|n| n.contains("still has not replied")),
         "silence is eventually reported to main: {notes:?}"
@@ -1268,7 +1268,7 @@ async fn an_acknowledged_message_reports_nothing() {
         "an on-time reply does not trigger chasing"
     );
     assert!(
-        session.watch.consume_notifications(None).is_empty(),
+        session.watch.consume_notifications(None).await.is_empty(),
         "no news, no nagging main"
     );
     assert!(
@@ -1816,7 +1816,7 @@ async fn a_subagents_turn_streams_as_addressed_events() {
     let output = Arc::new(Mutex::new(String::new()));
     let (sink, mut rx) = worker_sink();
     let progress = Arc::new(Mutex::new(crate::agents::AgentProgress::default()));
-    let watch = crate::watch::WatchRegistry::new();
+    let watch = crate::app::AppCore::start(Default::default()).watch();
     let registry = AgentRegistry::new();
     let cell = Arc::new(AgentCell::new(registry.clone()));
     let id = register_run_watch(
@@ -1923,7 +1923,7 @@ async fn subagent_retry_restores_the_current_attempt_checkpoint() {
     let output = Arc::new(Mutex::new(String::new()));
     let (sink, mut rx) = worker_sink();
     let progress = Arc::new(Mutex::new(crate::agents::AgentProgress::default()));
-    let watch = crate::watch::WatchRegistry::new();
+    let watch = crate::app::AppCore::start(Default::default()).watch();
     let registry = AgentRegistry::new();
     let cell = Arc::new(AgentCell::new(registry.clone()));
     let id = register_run_watch(
@@ -2012,7 +2012,7 @@ async fn subagent_progress_accumulates_tokens_tools_and_recent_activity() {
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .start_run();
-    let watch = crate::watch::WatchRegistry::new();
+    let watch = crate::app::AppCore::start(Default::default()).watch();
     let registry = AgentRegistry::new();
     let id = register_run_watch(
         &watch,
@@ -2077,7 +2077,7 @@ async fn subagent_hooks_touch_activity_on_stream_and_tool_signals() {
         "work".into(),
         session.clone(),
     );
-    let watch = crate::watch::WatchRegistry::new();
+    let watch = crate::app::AppCore::start(Default::default()).watch();
     let registry = session.agents.clone();
     let id = register_run_watch(
         &watch,
@@ -2150,7 +2150,7 @@ async fn subagent_ask_forwards_to_attached_prompt() {
             ));
         Box::pin(async { crate::query::AskOutcome::Allow })
     });
-    let watch = crate::watch::WatchRegistry::new();
+    let watch = crate::app::AppCore::start(Default::default()).watch();
     let registry = AgentRegistry::new();
     let id = register_run_watch(
         &watch,

@@ -959,7 +959,8 @@ async fn query_loop(
         // turn carries over to the next turn.
         let mut notes = session
             .watch
-            .consume_notifications(session.instance.as_deref());
+            .consume_notifications(session.instance.as_deref())
+            .await;
         // Named rather than swept silently: without this main's next SendMessage to a
         // released hire fails with "no subagent named …", which reads as a bug rather than
         // as the lifetime it agreed to.

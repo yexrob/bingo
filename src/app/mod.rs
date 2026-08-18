@@ -183,17 +183,28 @@ impl Default for SessionSetup {
 /// sequence number happens inside it, and everything else — provider streams,
 /// tool runs, agent loops — re-enters it before changing state. Dropping the
 /// last handle and every link stops it.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct AppCore {
-    control: mpsc::Sender<controller::Control>,
+    control: mpsc::UnboundedSender<controller::Control>,
+    /// The registries the actor owns, as the rest of the process reaches them.
+    /// Each is a handle on the same inbox — cloning one keeps the actor alive,
+    /// which is why a session outlives the `AppCore` value it was started from.
+    watch: crate::watch::WatchHandle,
 }
 
 impl AppCore {
-    /// Start the session actor on the current runtime.
+    /// Start the session actor.
     pub fn start(setup: SessionSetup) -> Self {
+        let (control, registries) = controller::spawn(setup);
         Self {
-            control: controller::spawn(setup),
+            control,
+            watch: registries.watch,
         }
+    }
+
+    /// The watch registry: background commands, agent runs, room operations.
+    pub fn watch(&self) -> crate::watch::WatchHandle {
+        self.watch.clone()
     }
 
     /// Attach a frontend. The attachment sees no event until it takes a
@@ -202,8 +213,11 @@ impl AppCore {
     pub async fn attach(&self, request: AttachRequest) -> Result<AppLink, AppError> {
         let (reply, answer) = oneshot::channel();
         self.control
-            .send(controller::Control::Attach { request, reply })
-            .await
+            .send(controller::Control::Attach {
+                request,
+                runtime: tokio::runtime::Handle::current(),
+                reply,
+            })
             .map_err(|_| AppError::Stopped)?;
         answer.await.map_err(|_| AppError::Stopped)?
     }
@@ -225,11 +239,11 @@ impl AppCore {
 /// sequence number or a timestamp — those are the actor's to stamp.
 #[derive(Debug, Clone)]
 pub struct AppPublisher {
-    control: mpsc::Sender<controller::Control>,
+    control: mpsc::UnboundedSender<controller::Control>,
 }
 
 impl AppPublisher {
-    pub async fn publish(
+    pub fn publish(
         &self,
         payload: crate::app::event::AppEventPayload,
         caused_by: Option<OperationId>,
@@ -239,7 +253,6 @@ impl AppPublisher {
                 payload: Box::new(payload),
                 caused_by,
             })
-            .await
             .map_err(|_| AppError::Stopped)
     }
 }

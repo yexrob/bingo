@@ -30,16 +30,22 @@ use crate::app::{
     REQUEST_CAPACITY, SessionSetup,
 };
 
-/// How many messages may wait on the actor. Engine tasks publish through here,
-/// so it is sized for a burst of stream deltas rather than for a single caller.
-const CONTROL_CAPACITY: usize = 256;
-
-/// What reaches the actor. Attachments, their requests, and the engine's
-/// publications are one queue on purpose: the order they arrive in is the order
-/// the session happened in.
-pub(super) enum Control {
+/// What reaches the actor. Attachments, their requests, the engine's
+/// publications and every registry change are one queue on purpose: the order
+/// they arrive in is the order the session happened in.
+///
+/// The queue is unbounded, which is a decision rather than an oversight. Half the
+/// callers cannot wait — a render loop, a synchronous event sink, a `Drop` — and
+/// a bounded queue would have to either block them (impossible) or drop their
+/// message (a lost state transition). Unbounded means enqueueing never blocks and
+/// never fails while the actor lives, which also removes the whole deadlock class
+/// the ordering point would otherwise invite: nobody waits to be heard.
+pub(crate) enum Control {
     Attach {
         request: AttachRequest,
+        /// The runtime the attachment's request forwarder runs on. The actor has
+        /// no runtime of its own, and the frontend that attaches always does.
+        runtime: tokio::runtime::Handle,
         reply: oneshot::Sender<Result<AppLink, AppError>>,
     },
     Request {
@@ -53,22 +59,69 @@ pub(super) enum Control {
         payload: Box<AppEventPayload>,
         caused_by: Option<OperationId>,
     },
+    /// A change to, or a question about, the watch registry.
+    Watch(crate::watch::WatchMsg),
+    /// Answered once everything queued ahead of it has been applied.
+    Settle {
+        reply: oneshot::Sender<()>,
+    },
+}
+
+/// What the actor hands out at startup: one handle per registry it owns.
+pub(crate) struct Registries {
+    pub watch: crate::watch::WatchHandle,
 }
 
 /// Start the actor and return the handle everything reaches it by.
-pub(super) fn spawn(setup: SessionSetup) -> mpsc::Sender<Control> {
-    let (control, inbox) = mpsc::channel(CONTROL_CAPACITY);
+///
+/// The loop runs on a thread of its own rather than on the runtime, and that is
+/// the invariant made structural: an actor that is not a future cannot await
+/// anything while it holds the session's state, so "the actor never waits on a
+/// frontend, an engine task, or the disk" is enforced by the type system instead
+/// of by everyone remembering. It costs one thread per session and buys a
+/// registry that is reachable from synchronous code — a render loop, a `Drop` —
+/// without a runtime in scope.
+pub(super) fn spawn(setup: SessionSetup) -> (mpsc::UnboundedSender<Control>, Registries) {
+    let (control, inbox) = mpsc::unbounded_channel();
+    let (watch, watch_handle) = crate::watch::attach(control.clone());
     // The actor holds a weak handle to its own inbox: it hands strong clones to
     // the attachments it spawns, and a strong one of its own would keep the
     // queue open forever, so the loop could never end.
-    let controller = Controller::new(setup, control.downgrade());
-    tokio::spawn(controller.run(inbox));
-    control
+    let controller = Controller::new(setup, control.downgrade(), watch);
+    std::thread::Builder::new()
+        .name("bingo-session".to_string())
+        .spawn(move || controller.run(inbox))
+        .unwrap_or_else(|error| panic!("the session actor could not start: {error}"));
+    (
+        control,
+        Registries {
+            watch: watch_handle,
+        },
+    )
+}
+
+/// Wait until everything already sent has been applied.
+pub(crate) async fn settle(control: &mpsc::UnboundedSender<Control>) {
+    let (reply, answer) = oneshot::channel();
+    if control.send(Control::Settle { reply }).is_ok() {
+        let _ = answer.await;
+    }
+}
+
+/// The same barrier for a caller with no runtime to await on — a synchronous
+/// test. Calling it from inside the runtime would block a worker, so it is not
+/// offered outside tests.
+#[cfg(test)]
+pub(crate) fn settle_now(control: &mpsc::UnboundedSender<Control>) {
+    let (reply, answer) = oneshot::channel();
+    if control.send(Control::Settle { reply }).is_ok() {
+        let _ = answer.blocking_recv();
+    }
 }
 
 /// One attached frontend, as the actor knows it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct AttachmentId(u64);
+pub(crate) struct AttachmentId(u64);
 
 struct Attachment {
     id: AttachmentId,
@@ -91,11 +144,19 @@ struct Controller {
     seq: u64,
     attachments: Vec<Attachment>,
     next_attachment: u64,
-    control: mpsc::WeakSender<Control>,
+    control: mpsc::WeakUnboundedSender<Control>,
+    /// Background work — commands, agent runs, room operations — as a state
+    /// machine. Actor-private since B2b: what used to be an `Arc<Mutex<…>>` every
+    /// task could reach is now reachable only through this loop.
+    watch: crate::watch::WatchRegistry,
 }
 
 impl Controller {
-    fn new(setup: SessionSetup, control: mpsc::WeakSender<Control>) -> Self {
+    fn new(
+        setup: SessionSetup,
+        control: mpsc::WeakUnboundedSender<Control>,
+        watch: crate::watch::WatchRegistry,
+    ) -> Self {
         let epoch = EpochId::mint();
         let mut mint = IdMint::new(epoch.clone());
         let id: SessionId = mint.mint();
@@ -141,14 +202,19 @@ impl Controller {
             attachments: Vec::new(),
             next_attachment: 0,
             control,
+            watch,
         }
     }
 
-    async fn run(mut self, mut inbox: mpsc::Receiver<Control>) {
-        while let Some(message) = inbox.recv().await {
+    fn run(mut self, mut inbox: mpsc::UnboundedReceiver<Control>) {
+        while let Some(message) = inbox.blocking_recv() {
             match message {
-                Control::Attach { request, reply } => {
-                    let _ = reply.send(self.attach(request));
+                Control::Attach {
+                    request,
+                    runtime,
+                    reply,
+                } => {
+                    let _ = reply.send(self.attach(request, runtime));
                 }
                 Control::Request {
                     attachment,
@@ -158,11 +224,19 @@ impl Controller {
                     self.attachments.retain(|open| open.id != attachment);
                 }
                 Control::Publish { payload, caused_by } => self.publish(payload, caused_by),
+                Control::Watch(message) => self.watch.handle(message),
+                Control::Settle { reply } => {
+                    let _ = reply.send(());
+                }
             }
         }
     }
 
-    fn attach(&mut self, request: AttachRequest) -> Result<AppLink, AppError> {
+    fn attach(
+        &mut self,
+        request: AttachRequest,
+        runtime: tokio::runtime::Handle,
+    ) -> Result<AppLink, AppError> {
         let Some(control) = self.control.upgrade() else {
             return Err(AppError::Stopped);
         };
@@ -179,20 +253,19 @@ impl Controller {
         // One forwarder per attachment: it tags each request with the
         // attachment that sent it, keeps that attachment's requests in the order
         // they were written, and tells the actor when the frontend is gone.
-        tokio::spawn(async move {
+        runtime.spawn(async move {
             while let Some(request) = outgoing.recv().await {
                 if control
                     .send(Control::Request {
                         attachment: id,
                         request,
                     })
-                    .await
                     .is_err()
                 {
                     return;
                 }
             }
-            let _ = control.send(Control::Detach { attachment: id }).await;
+            let _ = control.send(Control::Detach { attachment: id });
         });
         Ok(AppLink {
             requests,
@@ -353,10 +426,9 @@ mod tests {
         }
     }
 
-    async fn publish(publisher: &AppPublisher, revision: u64) {
+    fn publish(publisher: &AppPublisher, revision: u64) {
         publisher
             .publish(catalog(revision), None)
-            .await
             .unwrap_or_else(|error| panic!("{error}"));
     }
 
@@ -397,7 +469,7 @@ mod tests {
             let publisher = core.publisher();
             runs.push(tokio::spawn(async move {
                 for step in 0..EACH {
-                    publish(&publisher, producer * EACH + step).await;
+                    publish(&publisher, producer * EACH + step);
                 }
             }));
         }
@@ -430,7 +502,7 @@ mod tests {
             .await
             .unwrap_or_else(|error| panic!("{error}"));
         for revision in 0..3 {
-            publish(&publisher, revision).await;
+            publish(&publisher, revision);
         }
 
         link.request(AppRequest::Query {
@@ -451,7 +523,7 @@ mod tests {
         };
         assert_eq!(cursor, 3, "the cut names the last event it contains");
 
-        publish(&publisher, 99).await;
+        publish(&publisher, 99);
         match link.recv().await {
             Some(AppFrame::Event(event)) => {
                 assert_eq!(
@@ -473,12 +545,12 @@ mod tests {
         let publisher = core.publisher();
         let (mut early, early_snapshot) = attached(&core, "early").await;
         assert_eq!(early_snapshot.event_cursor, 0);
-        publish(&publisher, 1).await;
-        publish(&publisher, 2).await;
+        publish(&publisher, 1);
+        publish(&publisher, 2);
 
         let (mut late, late_snapshot) = attached(&core, "late").await;
         assert_eq!(late_snapshot.event_cursor, 2, "the second cut is later");
-        publish(&publisher, 3).await;
+        publish(&publisher, 3);
 
         let mut seen = Vec::new();
         for _ in 0..3 {
@@ -547,14 +619,17 @@ mod tests {
         let core = AppCore::start(SessionSetup::default());
         let publisher = core.publisher();
         let (mut link, _) = attached(&core, "silent").await;
-        // One frame channel over, plus the whole control queue: when the last
-        // publish is accepted, up to `CONTROL_CAPACITY` of them may still be
-        // waiting, so the margin is what makes the overflow a fact rather than a
-        // race with the reader below.
-        let published = (FRAME_CAPACITY + CONTROL_CAPACITY + 8) as u64;
+        // One frame channel over, and then some: enqueueing never blocks, so
+        // every one of these is accepted and the actor writes them out until the
+        // silent frontend's channel is full.
+        let published = (FRAME_CAPACITY + 8) as u64;
         for revision in 0..published {
-            publish(&publisher, revision).await;
+            publish(&publisher, revision);
         }
+        // The barrier is what makes the overflow a fact rather than a race with
+        // the reader below: by the time it answers, every publish above has been
+        // written or dropped.
+        settle(&core.control).await;
         let mut delivered = 0;
         while let Some(frame) = link.recv().await {
             assert_eq!(revision_of(&frame), delivered);

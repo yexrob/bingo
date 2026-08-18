@@ -787,7 +787,7 @@ async fn run_streaming(
     timeout: Option<Duration>,
     output_max_chars: usize,
     cell: Arc<BashCell>,
-    watch: std::sync::Arc<crate::watch::WatchRegistry>,
+    watch: crate::watch::WatchHandle,
     id: crate::watch::WatchId,
 ) -> Result<(String, i32), String> {
     let mut child = shell_command(command, cwd)
@@ -924,7 +924,7 @@ fn feed_bash_output(bytes: &[u8], output: &Arc<Mutex<BoundedOutput>>, sink: &Out
 struct OutputSink {
     cell: Arc<BashCell>,
     /// Set once the run is a background task.
-    task: Mutex<Option<(Arc<crate::watch::WatchRegistry>, crate::watch::WatchId)>>,
+    task: Mutex<Option<(crate::watch::WatchHandle, crate::watch::WatchId)>>,
     /// Set while the run is the foreground command of a host that shows a tail.
     tail: Mutex<Option<crate::live::TailBuffer>>,
 }
@@ -932,7 +932,7 @@ struct OutputSink {
 impl OutputSink {
     fn background(
         cell: Arc<BashCell>,
-        watch: Arc<crate::watch::WatchRegistry>,
+        watch: crate::watch::WatchHandle,
         id: crate::watch::WatchId,
     ) -> Self {
         Self {
@@ -972,7 +972,7 @@ impl OutputSink {
 
     /// The run became a background task: feed the condition engine from now on,
     /// and stop tailing (the rows it was painting are gone).
-    fn promote(&self, watch: Arc<crate::watch::WatchRegistry>, id: crate::watch::WatchId) {
+    fn promote(&self, watch: crate::watch::WatchHandle, id: crate::watch::WatchId) {
         *self.task.lock().unwrap_or_else(|e| e.into_inner()) = Some((watch, id));
         *self.tail.lock().unwrap_or_else(|e| e.into_inner()) = None;
     }
@@ -1157,7 +1157,7 @@ mod tests {
         let ctx = ToolContext {
             home: std::env::temp_dir(),
             cwd: std::env::temp_dir(),
-            watch: crate::watch::WatchRegistry::new(),
+            watch: crate::app::AppCore::start(Default::default()).watch(),
             live: Default::default(),
             http: reqwest::Client::new(),
             tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), "test")),
@@ -1184,7 +1184,7 @@ mod tests {
         let ctx = ToolContext {
             home: std::env::temp_dir(),
             cwd: std::env::temp_dir(),
-            watch: crate::watch::WatchRegistry::new(),
+            watch: crate::app::AppCore::start(Default::default()).watch(),
             live: Default::default(),
             http: reqwest::Client::new(),
             tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), "test")),
@@ -1213,7 +1213,7 @@ mod tests {
         let ctx = ToolContext {
             home: std::env::temp_dir(),
             cwd: std::env::temp_dir(),
-            watch: crate::watch::WatchRegistry::new(),
+            watch: crate::app::AppCore::start(Default::default()).watch(),
             live: Default::default(),
             http: reqwest::Client::new(),
             tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), "test")),
@@ -1238,7 +1238,7 @@ mod tests {
         let ctx = ToolContext {
             home: std::env::temp_dir(),
             cwd: std::env::temp_dir(),
-            watch: crate::watch::WatchRegistry::new(),
+            watch: crate::app::AppCore::start(Default::default()).watch(),
             live: Default::default(),
             http: reqwest::Client::new(),
             tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), "test")),
@@ -1280,7 +1280,7 @@ mod tests {
     async fn explicit_background_non_periodic_command_notifies() {
         use crate::watch::WatchState;
 
-        let watch = crate::watch::WatchRegistry::new();
+        let watch = crate::app::AppCore::start(Default::default()).watch();
         let ctx = ToolContext {
             home: std::env::temp_dir(),
             cwd: std::env::temp_dir(),
@@ -1318,7 +1318,7 @@ mod tests {
             }
         }
         assert!(done, "explicit background reaches Done");
-        let notes = watch.consume_notifications(None);
+        let notes = watch.consume_notifications(None).await;
         assert!(
             notes.iter().any(|n| n.contains("finished")),
             "output in notification: {notes:?}"
@@ -1327,7 +1327,7 @@ mod tests {
 
     #[tokio::test]
     async fn non_zero_exit_is_flagged_as_error() {
-        let watch = crate::watch::WatchRegistry::new();
+        let watch = crate::app::AppCore::start(Default::default()).watch();
         let ctx = ToolContext {
             home: std::env::temp_dir(),
             cwd: std::env::temp_dir(),
@@ -1360,7 +1360,7 @@ mod tests {
     async fn periodic_command_backgrounds_and_notifies() {
         use crate::watch::WatchState;
 
-        let watch = crate::watch::WatchRegistry::new();
+        let watch = crate::app::AppCore::start(Default::default()).watch();
         let ctx = ToolContext {
             home: std::env::temp_dir(),
             cwd: std::env::temp_dir(),
@@ -1400,7 +1400,7 @@ mod tests {
             }
         }
         assert!(done, "background bash reaches Done");
-        let notes = watch.consume_notifications(None);
+        let notes = watch.consume_notifications(None).await;
         assert!(
             notes.iter().any(|n| n.contains("tick")),
             "payload in notification: {notes:?}"
@@ -1556,7 +1556,7 @@ mod tests {
         let ctx = ToolContext {
             home: std::env::temp_dir(),
             cwd: std::env::temp_dir(),
-            watch: crate::watch::WatchRegistry::new(),
+            watch: crate::app::AppCore::start(Default::default()).watch(),
             live: Default::default(),
             http: reqwest::Client::new(),
             tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), "test")),
@@ -1652,7 +1652,7 @@ mod tests {
     /// notify_on no longer silently fails.
     #[tokio::test]
     async fn explicit_background_conditions_fire() {
-        let watch = crate::watch::WatchRegistry::new();
+        let watch = crate::app::AppCore::start(Default::default()).watch();
         let ctx = ToolContext {
             home: std::env::temp_dir(),
             cwd: std::env::temp_dir(),
@@ -1691,6 +1691,7 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(200)).await;
             if watch
                 .consume_notifications(None)
+                .await
                 .iter()
                 .any(|n| n.contains("BOOM_MARKER"))
             {
@@ -1710,7 +1711,7 @@ mod tests {
         let ctx = ToolContext {
             home: std::env::temp_dir(),
             cwd: std::env::temp_dir(),
-            watch: crate::watch::WatchRegistry::new(),
+            watch: crate::app::AppCore::start(Default::default()).watch(),
             live: Default::default(),
             http: reqwest::Client::new(),
             tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), "test")),
@@ -1736,7 +1737,7 @@ mod tests {
     /// D84's tests are about what the host sees and what ctrl+b does, and nothing
     /// else in the context participates.
     fn live_ctx(
-        watch: std::sync::Arc<crate::watch::WatchRegistry>,
+        watch: crate::watch::WatchHandle,
         live: std::sync::Arc<crate::live::LiveBash>,
     ) -> ToolContext {
         ToolContext {
@@ -1776,7 +1777,7 @@ mod tests {
     #[tokio::test]
     async fn a_foreground_command_streams_its_tail_while_it_runs() {
         let (live, seen) = recording_live();
-        let ctx = live_ctx(crate::watch::WatchRegistry::new(), live);
+        let ctx = live_ctx(crate::app::AppCore::start(Default::default()).watch(), live);
         let result = BashTool::new()
             .call(
                 // No loop keyword: `for`/`while`/`tail -f` are auto-backgrounded
@@ -1821,7 +1822,7 @@ mod tests {
     async fn ctrl_b_moves_a_running_command_to_the_background_without_restarting_it() {
         use crate::watch::WatchState;
 
-        let watch = crate::watch::WatchRegistry::new();
+        let watch = crate::app::AppCore::start(Default::default()).watch();
         let live = crate::live::LiveBash::detached();
         let ctx = live_ctx(watch.clone(), live.clone());
         let call = tokio::spawn(async move {
@@ -1861,7 +1862,7 @@ mod tests {
             }
         }
         assert!(done, "the promoted command finishes as a background task");
-        let notes = watch.consume_notifications(None);
+        let notes = watch.consume_notifications(None).await;
         assert!(
             notes.iter().any(|n| n.contains("after")),
             "the process was never restarted or killed: {notes:?}"
@@ -1884,7 +1885,7 @@ mod tests {
         ));
         let _ = std::fs::remove_file(&marker);
         let (live, seen) = recording_live();
-        let ctx = live_ctx(crate::watch::WatchRegistry::new(), live);
+        let ctx = live_ctx(crate::app::AppCore::start(Default::default()).watch(), live);
         let command = format!(
             "echo started; sleep 2; echo end > {}",
             marker.to_string_lossy()

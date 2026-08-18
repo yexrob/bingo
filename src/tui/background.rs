@@ -1133,11 +1133,15 @@ mod tests {
     }
 
     fn seed_shell(chat: &Chat, command: &str) -> WatchId {
-        chat.session.watch.register_with_conditions(
+        let id = chat.session.watch.register_with_conditions(
             Box::new(Shell(format!("$ {command}"))),
             Vec::new(),
             None,
-        )
+        );
+        // Registering is a report, not a question: wait for the actor to have
+        // applied it before the dialog reads the world.
+        chat.session.watch.settle_now();
+        id
     }
 
     fn texts(chat: &Chat) -> Vec<String> {
@@ -1669,6 +1673,7 @@ mod tests {
             Some("exit code 0".into()),
             Some(serde_json::json!("compiling bingo\nFinished in 3.2s")),
         );
+        chat.session.watch.settle_now();
         let text = view(&chat);
         assert!(text.contains("Status: done · exit code 0"), "{text}");
         assert!(text.contains("Finished in 3.2s"), "{text}");
