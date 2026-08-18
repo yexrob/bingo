@@ -70,7 +70,21 @@ pub enum EngineEvent {
     },
     /// The stream failed and is being retried from the last committed round.
     /// Everything the failed attempt produced is withdrawn.
-    StreamRetry,
+    ///
+    /// It travels on every attempt, including one that failed before saying
+    /// anything: the attempt happened, and a client counting them must not be
+    /// short one. `discarded_output` is what says whether there is a live tail to
+    /// withdraw — only a surface that drew something has anything to undo.
+    StreamRetry {
+        /// Attempts made so far, including the one that just failed.
+        attempt: u32,
+        max_attempts: u32,
+        /// How long the run waits before the next attempt.
+        delay_ms: u64,
+        discarded_output: bool,
+        code: Option<String>,
+        reason: Option<String>,
+    },
     /// The turn's context measurement: used tokens, the window the footer shows,
     /// and the trigger the compactor obeys. One measurement travels — a receiver
     /// that recomputed any of them from its own model handle would be a second
@@ -147,19 +161,35 @@ impl EngineEvent {
 
 /// Where a run's events go.
 ///
-/// A plain sink rather than a channel: the engine calls it where the thing
-/// happened, so an event cannot be reordered against anything the same task
-/// sends by another route. When the actor owns the engine (B2b), the sink it
-/// installs is a send into the actor's queue.
+/// Two places, and in this order: the session actor, which is where the report
+/// becomes application state, and then the frontend sink it was written against.
+/// The actor goes first because it is the ordering point — what it sequences is
+/// what happened — and the sink is a shim the terminal front end still needs
+/// until B7 reads `AppFrame` instead.
+///
+/// The sink is a plain function rather than a channel: the engine calls it where
+/// the thing happened, so an event cannot be reordered against anything the same
+/// task sends by another route.
 #[derive(Clone)]
 pub struct EngineEvents {
     sink: Arc<dyn Fn(EngineEvent) + Send + Sync>,
+    /// The turn this run reports into. `None` for a run with no session behind
+    /// it: a headless `--print`, an embedded call, a test.
+    turn: Option<RunBinding>,
+}
+
+/// What ties one run to the turn it reports into.
+#[derive(Clone)]
+pub struct RunBinding {
+    turns: crate::app::turn::TurnHandle,
+    turn: crate::app::ids::TurnId,
 }
 
 impl EngineEvents {
     pub fn new(sink: impl Fn(EngineEvent) + Send + Sync + 'static) -> Self {
         Self {
             sink: Arc::new(sink),
+            turn: None,
         }
     }
 
@@ -171,6 +201,11 @@ impl EngineEvents {
     }
 
     pub fn emit(&self, event: EngineEvent) {
+        if let Some(binding) = &self.turn {
+            binding
+                .turns
+                .report_event(binding.turn.clone(), event.clone());
+        }
         (self.sink)(event);
     }
 
@@ -216,10 +251,50 @@ pub struct EngineRequests {
 }
 
 /// What hosts one run: where its events go, and who answers its questions.
+///
+/// One host, one run. That was a convention until B3 and is a fact now: a host
+/// bound to a turn claims it at the start of the run, and the actor refuses the
+/// second claim — two runs reporting into one turn's item stream would interleave
+/// two attempts into one history.
 #[derive(Clone)]
 pub struct EngineHost {
     pub events: EngineEvents,
     pub requests: EngineRequests,
+    turn: Option<RunBinding>,
+}
+
+impl EngineHost {
+    pub fn new(events: EngineEvents, requests: EngineRequests) -> Self {
+        Self {
+            events,
+            requests,
+            turn: None,
+        }
+    }
+
+    /// Bind this host to the turn its run reports into.
+    pub fn bound(
+        mut self,
+        turns: crate::app::turn::TurnHandle,
+        turn: crate::app::ids::TurnId,
+    ) -> Self {
+        let binding = RunBinding { turns, turn };
+        self.events.turn = Some(binding.clone());
+        self.turn = Some(binding);
+        self
+    }
+
+    /// Take this host's one run. `false` means the turn already has one, and the
+    /// caller must not start a second.
+    pub async fn begin_run(&self) -> bool {
+        match &self.turn {
+            // An unbound host reports to nobody, so there is no shared turn state
+            // for a second run to corrupt: the claim is the actor's to enforce,
+            // and there is no actor here.
+            None => true,
+            Some(binding) => binding.turns.claim(binding.turn.clone()).await,
+        }
+    }
 }
 
 #[cfg(test)]

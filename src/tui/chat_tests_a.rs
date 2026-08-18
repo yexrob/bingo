@@ -62,6 +62,7 @@ pub(super) fn test_chat_home(home: std::path::PathBuf) -> Chat {
         expand_tasks: tokio::sync::watch::channel(false).0,
         agents: core.agents(),
         channels: core.channels(),
+        turns: core.turns(),
         instance: None,
         attachments: crate::api::image::Attachments::new(),
     });
@@ -1095,6 +1096,7 @@ async fn bash_submit_runs_command_and_ends_turn() {
         expand_tasks: tokio::sync::watch::channel(false).0,
         agents: core.agents(),
         channels: core.channels(),
+        turns: core.turns(),
         instance: None,
         attachments: crate::api::image::Attachments::new(),
     });

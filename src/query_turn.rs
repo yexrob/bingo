@@ -337,12 +337,19 @@ pub(super) async fn one_turn_with_stream_retries(
                 }
                 retries += 1;
                 let delay = policy.delay(retries, error.retry_after);
-                if error.emitted_output {
-                    if let Some(inbox) = inbox.as_deref_mut() {
-                        inbox.output_chars = inbox_output_chars;
-                    }
-                    host.events.emit(EngineEvent::StreamRetry);
+                if error.emitted_output
+                    && let Some(inbox) = inbox.as_deref_mut()
+                {
+                    inbox.output_chars = inbox_output_chars;
                 }
+                host.events.emit(EngineEvent::StreamRetry {
+                    attempt: retries,
+                    max_attempts: policy.max_retries,
+                    delay_ms: delay.as_millis().min(u128::from(u64::MAX)) as u64,
+                    discarded_output: error.emitted_output,
+                    code: None,
+                    reason: Some(error.message.clone()),
+                });
                 if retries > 1 {
                     host.events.warn(format!(
                         "{RECONNECT_WARNING_PREFIX}{retries}/{max}",

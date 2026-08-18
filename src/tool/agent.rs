@@ -6,11 +6,12 @@ use serde::Deserialize;
 use crate::agents::{AgentDef, AgentHandle, AgentKind, FollowUp, InboxItem, MAX_FOLLOW_UPS, MsgId};
 use crate::api::contract::SystemBlock;
 use crate::api::types::Message;
+use crate::app::snapshot::{TurnOrigin, TurnStatus};
 use crate::channels::ChannelHandle;
 use crate::engine::events::{EngineEvent, EngineEvents, EngineHost, EngineRequests};
 use crate::query::Session;
 use crate::tool::{Tool, ToolContext, ToolError, ToolResult, parse_input};
-use crate::ui::UiEvent;
+use crate::ui::{ConvKey, UiEvent};
 use crate::watch::{NotifyCondition, WatchHandle, WatchId, WatchKind, WatchState};
 
 use crate::tool::address::{self, Address};
@@ -101,18 +102,45 @@ struct SubagentOutput {
 
 /// `TurnStart` on the way in, `TurnEnd` on the way out — including the way out
 /// an aborted task takes, which runs no code of its own.
-struct TurnBrackets(crate::ui::EventSink);
+///
+/// Since B3 the same brackets open and close the core's turn: the guard inside
+/// closes it from its own `Drop`, so an aborted instance still reaches exactly
+/// one terminal state instead of leaving a turn running forever.
+struct TurnBrackets {
+    events: crate::ui::EventSink,
+    turn: Option<crate::app::turn::TurnGuard>,
+}
 
 impl TurnBrackets {
-    fn open(events: crate::ui::EventSink) -> Self {
+    fn open(
+        events: crate::ui::EventSink,
+        turns: &crate::app::turn::TurnHandle,
+        conversation: crate::ui::ConvKey,
+    ) -> Self {
         events.send(UiEvent::TurnStart);
-        Self(events)
+        let turn = turns
+            .open(conversation, TurnOrigin::Peer, Vec::new())
+            .now()
+            .map(|turn| turns.guard(turn, TurnStatus::Failed));
+        Self { events, turn }
+    }
+
+    /// The turn this run reports into, for the host it is about to build.
+    fn turn_id(&self) -> Option<crate::app::ids::TurnId> {
+        self.turn.as_ref().map(|guard| guard.turn().clone())
+    }
+
+    /// The run ended by returning rather than by being unwound.
+    fn finish(mut self, status: TurnStatus) {
+        if let Some(guard) = self.turn.take() {
+            guard.finish(status, None);
+        }
     }
 }
 
 impl Drop for TurnBrackets {
     fn drop(&mut self) {
-        self.0.send(UiEvent::TurnEnd);
+        self.events.send(UiEvent::TurnEnd);
     }
 }
 
@@ -161,8 +189,8 @@ fn subagent_hooks(
     let event_instance = instance.clone();
     let round_units = Arc::new(Mutex::new(0u64));
     let attempt_checkpoint = Arc::new(Mutex::new(AttemptCheckpoint::default()));
-    EngineHost {
-        events: EngineEvents::new(move |event| {
+    EngineHost::new(
+        EngineEvents::new(move |event| {
             let tokens = match event {
                 EngineEvent::TextDelta { text, .. } => {
                     registry.touch(&event_instance);
@@ -214,7 +242,11 @@ fn subagent_hooks(
                     });
                     return;
                 }
-                EngineEvent::StreamRetry => {
+                EngineEvent::StreamRetry {
+                    discarded_output: false,
+                    ..
+                } => return,
+                EngineEvent::StreamRetry { .. } => {
                     *round_units.lock().unwrap_or_else(|e| e.into_inner()) = 0;
                     events.send(UiEvent::StreamRetry);
                     let checkpoint = attempt_checkpoint
@@ -318,7 +350,7 @@ fn subagent_hooks(
                 authoritative: false,
             });
         }),
-        requests: EngineRequests {
+        EngineRequests {
             // A subagent has no prompt surface of its own, so its Ask decisions are forwarded to
             // the session that owns the UI, stamped with the instance name. Auto-denying here
             // would fail the tool call as "user denied" without the user ever being asked — and
@@ -364,7 +396,7 @@ fn subagent_hooks(
             // rows are not the rows ctrl+b talks about (D84).
             live: crate::live::LiveBash::detached(),
         },
-    }
+    )
 }
 
 /// Start every idle recipient that has mail waiting. `AgentHandle::flush_pending` claims the
@@ -781,8 +813,10 @@ pub(crate) fn spawn_agent_loop(
             // running another line. A `TurnEnd` sent on the way out is the only
             // one an abort cannot swallow — and a conversation left `busy`
             // forever is a spinner that never stops.
-            let turn = sink.clone().map(TurnBrackets::open);
-            let host = subagent_hooks(
+            let turn = sink
+                .clone()
+                .map(|sink| TurnBrackets::open(sink, &session.turns, ConvKey::Agent(name.clone())));
+            let mut host = subagent_hooks(
                 SubagentOutput {
                     text: output.clone(),
                     progress,
@@ -794,9 +828,18 @@ pub(crate) fn spawn_agent_loop(
                 name.clone(),
                 loop_registry.ask_fn(),
             );
+            if let Some(id) = turn.as_ref().and_then(TurnBrackets::turn_id) {
+                host = host.bound(session.turns.clone(), id);
+            }
             let outcome =
                 crate::query::run_query(&session, history, &prompt, &images, &host, None).await;
-            drop(turn);
+            if let Some(turn) = turn {
+                turn.finish(match &outcome {
+                    Ok(outcome) if outcome.aborted => TurnStatus::Interrupted,
+                    Ok(_) => TurnStatus::Completed,
+                    Err(_) => TurnStatus::Failed,
+                });
+            }
             match outcome {
                 Ok(outcome) => {
                     let text = output.lock().unwrap_or_else(|e| e.into_inner()).clone();
@@ -1199,6 +1242,7 @@ pub(crate) fn build_sub_session(
         expand_tasks: parent.expand_tasks.clone(),
         agents: parent.agents.clone(),
         channels: parent.channels.clone(),
+        turns: parent.turns.clone(),
         instance: Some(instance.to_string()),
         attachments: parent.attachments.clone(),
     }))
@@ -1358,8 +1402,10 @@ impl Tool for AgentTool {
             .set_progress(&name, Some(progress.clone()))
             .await;
         let sink = self.session.agents.sink_for(&name);
-        let turn = sink.clone().map(TurnBrackets::open);
-        let host = subagent_hooks(
+        let turn = sink.clone().map(|sink| {
+            TurnBrackets::open(sink, &self.session.turns, ConvKey::Agent(name.clone()))
+        });
+        let mut host = subagent_hooks(
             SubagentOutput {
                 text: output.clone(),
                 progress,
@@ -1371,6 +1417,9 @@ impl Tool for AgentTool {
             name.clone(),
             self.session.agents.ask_fn(),
         );
+        if let Some(turn_id) = turn.as_ref().and_then(TurnBrackets::turn_id) {
+            host = host.bound(self.session.turns.clone(), turn_id);
+        }
         let images = self.session.attachments.resolve(&params.prompt);
         let sync_run = crate::query::run_query(
             &sub_session,
@@ -1381,7 +1430,13 @@ impl Tool for AgentTool {
             None,
         )
         .await;
-        drop(turn);
+        if let Some(turn) = turn {
+            turn.finish(match &sync_run {
+                Ok(outcome) if outcome.aborted => TurnStatus::Interrupted,
+                Ok(_) => TurnStatus::Completed,
+                Err(_) => TurnStatus::Failed,
+            });
+        }
         self.session.agents.set_progress(&name, None).await;
         match sync_run {
             Ok(outcome) => {

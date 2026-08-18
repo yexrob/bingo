@@ -639,6 +639,7 @@ fn test_session_at(home: std::path::PathBuf, cwd: std::path::PathBuf) -> Arc<Ses
         expand_tasks: tokio::sync::watch::channel(false).0,
         agents: core.agents(),
         channels: core.channels(),
+        turns: core.turns(),
         instance: None,
         attachments: crate::api::image::Attachments::new(),
     })
@@ -715,6 +716,7 @@ fn test_session_with_client_and_failures(
         expand_tasks: tokio::sync::watch::channel(false).0,
         agents: core.agents(),
         channels: core.channels(),
+        turns: core.turns(),
         instance: None,
         attachments: crate::api::image::Attachments::new(),
     })
@@ -1447,6 +1449,7 @@ async fn bash_command_executes_without_model_query() {
         expand_tasks: tokio::sync::watch::channel(false).0,
         agents: core.agents(),
         channels: core.channels(),
+        turns: core.turns(),
         instance: None,
         attachments: crate::api::image::Attachments::new(),
     });
@@ -2074,6 +2077,7 @@ async fn bash_command_refuses_interactive_tty_commands() {
         expand_tasks: tokio::sync::watch::channel(false).0,
         agents: core.agents(),
         channels: core.channels(),
+        turns: core.turns(),
         instance: None,
         attachments: crate::api::image::Attachments::new(),
     });

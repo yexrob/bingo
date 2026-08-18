@@ -118,33 +118,11 @@ impl PermissionRequest {
 
 /// Which conversation an event, or a page, belongs to.
 ///
-/// Main is a key like any other (D134). It differs in exactly one way — it
-/// talks to the user by default — and that difference lives in the composer,
-/// not in the store.
-///
-/// `Room` never appears on an [`Addressed`] event: a room is a log, not a turn
-/// loop, so nothing streams into it. It is a key because the console keeps a
-/// store per *page*, and a room is one.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum ConvKey {
-    Main,
-    Agent(String),
-    Room(String),
-}
-
-impl ConvKey {
-    pub fn is_main(&self) -> bool {
-        matches!(self, ConvKey::Main)
-    }
-
-    /// The instance whose stream this addresses, if any.
-    pub fn agent(&self) -> Option<&str> {
-        match self {
-            ConvKey::Agent(name) => Some(name),
-            _ => None,
-        }
-    }
-}
+/// It lives in the application core now (B3): a conversation is the core's
+/// resource, and a key that named one thing here and another there would be two
+/// vocabularies for one idea. Re-exported because every front end still reaches
+/// it through this module.
+pub use crate::app::conversation::ConvKey;
 
 /// One [`UiEvent`] and the conversation that produced it.
 #[derive(Debug, Clone)]
@@ -415,8 +393,8 @@ pub fn tui_hooks(
     let round_tokens = Arc::new(std::sync::Mutex::new((0u64, None::<usize>)));
     let steer_events = events.clone();
     let ask_asks = asks.clone();
-    EngineHost {
-        events: EngineEvents::new(move |event| match event {
+    EngineHost::new(
+        EngineEvents::new(move |event| match event {
             EngineEvent::TextDelta { index, text } => {
                 let tokens = accumulate(&round_tokens, index, &text);
                 events.send(UiEvent::TextDelta(text));
@@ -460,9 +438,16 @@ pub fn tui_hooks(
                 });
             }
             EngineEvent::StopReason { .. } => {}
-            EngineEvent::StreamRetry => {
-                *round_tokens.lock().unwrap_or_else(|e| e.into_inner()) = (0, None);
-                events.send(UiEvent::StreamRetry);
+            // A retry that never got a word out has no live tail to withdraw:
+            // the console keeps the rows it drew for the round, because it drew
+            // none.
+            EngineEvent::StreamRetry {
+                discarded_output, ..
+            } => {
+                if discarded_output {
+                    *round_tokens.lock().unwrap_or_else(|e| e.into_inner()) = (0, None);
+                    events.send(UiEvent::StreamRetry);
+                }
             }
             EngineEvent::ContextUsage(usage) => {
                 events.send(UiEvent::ContextUsage(usage));
@@ -495,7 +480,7 @@ pub fn tui_hooks(
             // would print it twice.
             EngineEvent::Inbound(_) => {}
         }),
-        requests: EngineRequests {
+        EngineRequests {
             ask: modal_ask(ask_asks),
             ask_question: Arc::new(move |title, question, options| {
                 let mut request = PermissionRequest::new(title, question, Vec::new());
@@ -533,7 +518,7 @@ pub fn tui_hooks(
             }),
             live,
         },
-    }
+    )
 }
 
 /// The running estimate of a round's output: characters seen so far, in tokens.
@@ -587,7 +572,14 @@ mod tests {
             })
         ));
 
-        ui.events.emit(EngineEvent::StreamRetry);
+        ui.events.emit(EngineEvent::StreamRetry {
+            attempt: 1,
+            max_attempts: 10,
+            delay_ms: 1,
+            discarded_output: true,
+            code: None,
+            reason: None,
+        });
         assert!(matches!(next(&mut events_rx), Ok(UiEvent::StreamRetry)));
 
         ui.events.emit(EngineEvent::StopReason {

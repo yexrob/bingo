@@ -24,9 +24,11 @@
 pub mod answer;
 pub mod command;
 pub mod controller;
+pub mod conversation;
 pub mod event;
 pub mod ids;
 pub mod snapshot;
+pub mod turn;
 
 use std::path::PathBuf;
 
@@ -200,6 +202,7 @@ pub struct AppCore {
     watch: crate::watch::WatchHandle,
     channels: crate::channels::ChannelHandle,
     agents: crate::agents::AgentHandle,
+    turns: crate::app::turn::TurnHandle,
 }
 
 impl AppCore {
@@ -211,6 +214,7 @@ impl AppCore {
             watch: registries.watch,
             channels: registries.channels,
             agents: registries.agents,
+            turns: registries.turns,
         }
     }
 
@@ -227,6 +231,11 @@ impl AppCore {
     /// The subagent instances.
     pub fn agents(&self) -> crate::agents::AgentHandle {
         self.agents.clone()
+    }
+
+    /// The turns in flight.
+    pub fn turns(&self) -> crate::app::turn::TurnHandle {
+        self.turns.clone()
     }
 
     /// Attach a frontend. The attachment sees no event until it takes a

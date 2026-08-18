@@ -347,8 +347,8 @@ pub fn stdin_ask() -> Arc<AskFn> {
 /// of what a run reports has no surface here. A shim: B8 removes this when
 /// `--print` becomes a thin `AppCore` client.
 pub fn headless_hooks() -> EngineHost {
-    EngineHost {
-        events: EngineEvents::new(|event| match event {
+    EngineHost::new(
+        EngineEvents::new(|event| match event {
             EngineEvent::TextDelta { text, .. } => {
                 let _ = std::io::stdout().write_all(text.as_bytes());
                 let _ = std::io::stdout().flush();
@@ -356,7 +356,7 @@ pub fn headless_hooks() -> EngineHost {
             EngineEvent::Warning(message) => eprintln!("[bingo] warning: {message}"),
             _ => {}
         }),
-        requests: EngineRequests {
+        EngineRequests {
             ask: stdin_ask(),
             ask_question: headless_ask_question(),
             // No composer behind a headless run: nothing can be typed mid-turn.
@@ -364,7 +364,7 @@ pub fn headless_hooks() -> EngineHost {
             // Nor a screen to tail a command on, nor a key to press to background it.
             live: crate::live::LiveBash::detached(),
         },
-    }
+    )
 }
 
 /// The stdin question prompt: the model's options, numbered, plus free text.
@@ -1447,6 +1447,7 @@ pub async fn run_query(
     host: &EngineHost,
     cancel: Option<watch::Receiver<bool>>,
 ) -> Result<QueryOutcome, QueryError> {
+    claim_run(host).await?;
     let tools = crate::tools::assemble_tools(session, &mut host.events.warn_sink()).await;
     let ctx = tool_context(session, host)?;
 
@@ -1488,6 +1489,21 @@ pub async fn run_query(
         host,
     );
     query_loop(session, messages, host, &tools, &ctx, cancel).await
+}
+
+/// One host, one run (spec "Turn and round"; B3).
+///
+/// The host carries the turn its reports belong to, and the actor hands that turn
+/// to exactly one run. A second run on the same host would interleave two
+/// attempts into one item stream, so it is refused here rather than allowed to
+/// write a history nobody can read back.
+async fn claim_run(host: &EngineHost) -> Result<(), QueryError> {
+    if host.begin_run().await {
+        return Ok(());
+    }
+    Err(QueryError::Protocol(
+        "this run's turn already has a run".to_string(),
+    ))
 }
 
 /// BM25 recall over this project's committed experiences and extracted memory
@@ -1625,6 +1641,7 @@ pub async fn run_bash_command(
     host: &EngineHost,
     mut cancel: Option<watch::Receiver<bool>>,
 ) -> Result<QueryOutcome, QueryError> {
+    claim_run(host).await?;
     let tools = crate::tools::assemble_tools(session, &mut host.events.warn_sink()).await;
     let tool_schemas = tool_params(&tools);
     let ctx = tool_context(session, host)?;

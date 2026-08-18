@@ -399,6 +399,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         expand_tasks: expand_tx,
         agents: core.agents(),
         channels: core.channels(),
+        turns: core.turns(),
         instance: None,
         attachments: crate::api::image::Attachments::new(),
     });

@@ -671,11 +671,21 @@ impl super::Chat {
         // fail (the value stays true) and the new turn would be misread as interrupted during connection.
         let cancel_rx = self.cancel_tx.subscribe();
         self.cancel_tx.send_replace(false);
+        // The core's turn opens before the task that runs it, so the task cannot
+        // be aborted between the two and leave a run nobody accounted for. `.now()`
+        // is the synchronous seam this side of the console still has; B7 removes it.
+        let turn = self.open_core_turn(crate::app::snapshot::TurnOrigin::User);
+        let turns = self.session.turns.clone();
         let handle = tokio::spawn(async move {
             events.send(UiEvent::TurnStart);
-            let host = crate::ui::tui_hooks(events.clone(), asks, steer, live);
+            let mut host = crate::ui::tui_hooks(events.clone(), asks, steer, live);
+            let guard = turn.map(|turn| {
+                host = host.clone().bound(turns.clone(), turn.clone());
+                turns.guard(turn, crate::app::snapshot::TurnStatus::Failed)
+            });
             let history = Self::load_history(&session, &mut host.events.warn_sink());
             let result = run_query(&session, history, &text, &images, &host, Some(cancel_rx)).await;
+            Self::close_core_turn(guard, &result);
             match result {
                 Ok(outcome) => {
                     Self::finish_turn(&events, &session, &outcome).await;
@@ -693,6 +703,45 @@ impl super::Chat {
             }
         });
         Self::supervise_turn(self.events.clone(), handle);
+    }
+
+    /// Open main's turn in the core, or `None` when the core says one is already
+    /// running there.
+    ///
+    /// The console's own `busy` flag is still what gates a second submission
+    /// (B7 makes the core's answer the only gate); when the two disagree the run
+    /// goes ahead unbound rather than reporting into a turn it does not own.
+    pub(crate) fn open_core_turn(
+        &self,
+        origin: crate::app::snapshot::TurnOrigin,
+    ) -> Option<crate::app::ids::TurnId> {
+        self.session
+            .turns
+            .open(crate::ui::ConvKey::Main, origin, Vec::new())
+            .now()
+    }
+
+    /// Close main's turn with the state the run actually reached. A run that is
+    /// aborted instead of returning never gets here, and the guard's own `Drop`
+    /// closes the turn for it.
+    fn close_core_turn(
+        guard: Option<crate::app::turn::TurnGuard>,
+        result: &Result<crate::query::QueryOutcome, crate::query::QueryError>,
+    ) {
+        let Some(guard) = guard else { return };
+        match result {
+            Ok(outcome) if outcome.aborted => {
+                guard.finish(crate::app::snapshot::TurnStatus::Interrupted, None)
+            }
+            Ok(_) => guard.finish(crate::app::snapshot::TurnStatus::Completed, None),
+            Err(error) => guard.finish(
+                crate::app::snapshot::TurnStatus::Failed,
+                Some(crate::app::snapshot::TurnError {
+                    code: crate::error::map_error(error).to_string(),
+                    message: error.to_string(),
+                }),
+            ),
+        }
     }
 
     /// Turn-level error message with auth guidance for the current provider:
@@ -746,13 +795,20 @@ impl super::Chat {
         // Same as start_turn: subscribe first, then reset (send does not update with no receivers).
         let cancel_rx = self.cancel_tx.subscribe();
         self.cancel_tx.send_replace(false);
+        let turn = self.open_core_turn(crate::app::snapshot::TurnOrigin::Shell);
+        let turns = self.session.turns.clone();
         let handle = tokio::spawn(async move {
             events.send(UiEvent::TurnStart);
-            let host = crate::ui::tui_hooks(events.clone(), asks, steer, live);
+            let mut host = crate::ui::tui_hooks(events.clone(), asks, steer, live);
+            let guard = turn.map(|turn| {
+                host = host.clone().bound(turns.clone(), turn.clone());
+                turns.guard(turn, crate::app::snapshot::TurnStatus::Failed)
+            });
             let history = Self::load_history(&session, &mut host.events.warn_sink());
             let result =
                 crate::query::run_bash_command(&session, &command, history, &host, Some(cancel_rx))
                     .await;
+            Self::close_core_turn(guard, &result);
             match result {
                 Ok(outcome) => {
                     Self::finish_turn(&events, &session, &outcome).await;

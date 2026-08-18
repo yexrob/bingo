@@ -19,13 +19,20 @@
 use tokio::sync::{mpsc, oneshot};
 
 use crate::app::command::{AppCommand, AppQuery};
-use crate::app::event::{AgentChanged, AppEvent, AppEventPayload, EventMeta, RoomChanged};
-use crate::app::ids::{AgentId, EpochId, IdMint, OperationId, RoomId, SessionId, now_millis};
+use crate::app::conversation::{ConvKey, Conversations};
+use crate::app::event::{
+    AgentChanged, AppEvent, AppEventPayload, EventMeta, ItemChanged, ItemDelta, RoomChanged,
+    TurnChanged, TurnRetrying, TurnRoundCompleted, TurnRoundStarted, TurnUsageUpdated,
+};
+use crate::app::ids::{
+    AgentId, ConversationId, EpochId, IdMint, OperationId, RoomId, SessionId, now_millis,
+};
 use crate::app::snapshot::{
     AgentKind, AgentResource, AgentState, Collection, ConfigSnapshot, RoomMode, RoomResource,
     RuntimeCollections, ServerCapabilities, SessionSnapshot, SessionState, SessionSummary,
     ThinkingLevel,
 };
+use crate::app::turn::TurnChange;
 use crate::app::{
     AppError, AppFrame, AppLink, AppReply, AppRequest, AttachRequest, FRAME_CAPACITY,
     REQUEST_CAPACITY, SessionSetup,
@@ -66,6 +73,8 @@ pub(crate) enum Control {
     Channels(crate::channels::ChannelMsg),
     /// A change to, or a question about, the subagent instances.
     Agents(crate::agents::AgentMsg),
+    /// A turn opening, reporting, or ending.
+    Turn(crate::app::turn::TurnMsg),
     /// Answered once everything queued ahead of it has been applied.
     Settle {
         reply: oneshot::Sender<()>,
@@ -77,6 +86,7 @@ pub(crate) struct Registries {
     pub watch: crate::watch::WatchHandle,
     pub channels: crate::channels::ChannelHandle,
     pub agents: crate::agents::AgentHandle,
+    pub turns: crate::app::turn::TurnHandle,
 }
 
 /// Start the actor and return the handle everything reaches it by.
@@ -93,10 +103,11 @@ pub(super) fn spawn(setup: SessionSetup) -> (mpsc::UnboundedSender<Control>, Reg
     let (watch, watch_handle) = crate::watch::attach(control.clone());
     let (channels, channel_handle) = crate::channels::attach(control.clone(), setup.channel_limits);
     let (agents, agent_handle) = crate::agents::attach(control.clone());
+    let (turns, turn_handle) = crate::app::turn::attach(control.clone());
     // The actor holds a weak handle to its own inbox: it hands strong clones to
     // the attachments it spawns, and a strong one of its own would keep the
     // queue open forever, so the loop could never end.
-    let controller = Controller::new(setup, control.downgrade(), watch, channels, agents);
+    let controller = Controller::new(setup, control.downgrade(), watch, channels, agents, turns);
     std::thread::Builder::new()
         .name("bingo-session".to_string())
         .spawn(move || controller.run(inbox))
@@ -107,6 +118,7 @@ pub(super) fn spawn(setup: SessionSetup) -> (mpsc::UnboundedSender<Control>, Reg
             watch: watch_handle,
             channels: channel_handle,
             agents: agent_handle,
+            turns: turn_handle,
         },
     )
 }
@@ -165,6 +177,10 @@ struct Controller {
     /// The subagent instances: their state machine, their inboxes, their
     /// delivery records. Actor-private since B2b.
     agents: crate::agents::AgentRegistry,
+    /// The turns in flight and the items they are producing (B3).
+    turns: crate::app::turn::TurnRegistry,
+    /// Which conversations exist and what each one is called on the wire.
+    conversations: Conversations,
     /// What was last said about each instance and each room, so a change can be
     /// told from a repeat. Identifiers are minted once per name and kept for the
     /// epoch: a client that saw `agent_3` twice saw the same instance twice.
@@ -201,10 +217,12 @@ impl Controller {
         watch: crate::watch::WatchRegistry,
         channels: crate::channels::ChannelRegistry,
         agents: crate::agents::AgentRegistry,
+        turns: crate::app::turn::TurnRegistry,
     ) -> Self {
         let epoch = EpochId::mint();
         let mut mint = IdMint::new(epoch.clone());
         let id: SessionId = mint.mint();
+        let conversations = Conversations::new(&mut mint);
         let now = now_millis();
         let session = SessionSummary {
             id,
@@ -250,6 +268,8 @@ impl Controller {
             watch,
             channels,
             agents,
+            turns,
+            conversations,
             told: Told::default(),
         }
     }
@@ -283,6 +303,10 @@ impl Controller {
                 Control::Agents(message) => {
                     self.agents.handle(message);
                     self.announce_agents();
+                }
+                Control::Turn(message) => {
+                    let changes = self.turns.handle(message, &mut self.mint);
+                    self.announce_turn(changes);
                 }
                 Control::Settle { reply } => {
                     let _ = reply.send(());
@@ -537,6 +561,148 @@ impl Controller {
                 Box::new(AppEventPayload::RoomChanged(RoomChanged { room })),
                 None,
             );
+        }
+    }
+
+    /// The identifier this conversation answers to, minted the first time it is
+    /// named.
+    fn conversation_id(&mut self, key: &ConvKey) -> ConversationId {
+        self.conversations.id(&mut self.mint, key)
+    }
+
+    /// Publish what the turn registry changed, in the order it changed it.
+    ///
+    /// The registry answers in conversation *keys* because that is what a run and
+    /// a page know; the identifier a client sees is stamped here, where the mint
+    /// is. Nothing else translates between the two.
+    fn announce_turn(&mut self, changes: Vec<TurnChange>) {
+        for change in changes {
+            let payload = match change {
+                TurnChange::Started { conversation, turn } => {
+                    let conversation_id = self.conversation_id(&conversation);
+                    let mut turn = turn;
+                    turn.conversation_id = conversation_id.clone();
+                    AppEventPayload::TurnStarted(TurnChanged {
+                        conversation_id,
+                        turn,
+                    })
+                }
+                TurnChange::RoundStarted {
+                    conversation,
+                    turn,
+                    round,
+                } => AppEventPayload::TurnRoundStarted(TurnRoundStarted {
+                    conversation_id: self.conversation_id(&conversation),
+                    turn_id: turn,
+                    round,
+                }),
+                TurnChange::Retrying {
+                    conversation,
+                    turn,
+                    round,
+                    attempt,
+                    max_attempts,
+                    delay_ms,
+                    removed,
+                    code,
+                    reason,
+                } => AppEventPayload::TurnRetrying(TurnRetrying {
+                    conversation_id: self.conversation_id(&conversation),
+                    turn_id: turn,
+                    round,
+                    attempt,
+                    max_attempts,
+                    delay_ms,
+                    removed_item_ids: removed,
+                    code,
+                    reason,
+                }),
+                TurnChange::RoundCompleted {
+                    conversation,
+                    turn,
+                    round,
+                    usage,
+                } => AppEventPayload::TurnRoundCompleted(TurnRoundCompleted {
+                    conversation_id: self.conversation_id(&conversation),
+                    turn_id: turn,
+                    round,
+                    usage,
+                }),
+                TurnChange::Usage {
+                    conversation,
+                    turn,
+                    usage,
+                    context,
+                } => AppEventPayload::TurnUsageUpdated(TurnUsageUpdated {
+                    conversation_id: self.conversation_id(&conversation),
+                    turn_id: turn,
+                    usage,
+                    context_usage: context,
+                }),
+                TurnChange::Completed { conversation, turn } => {
+                    let conversation_id = self.conversation_id(&conversation);
+                    let mut turn = turn;
+                    turn.conversation_id = conversation_id.clone();
+                    AppEventPayload::TurnCompleted(TurnChanged {
+                        conversation_id,
+                        turn,
+                    })
+                }
+                TurnChange::ItemStarted {
+                    conversation,
+                    turn,
+                    item,
+                } => AppEventPayload::ItemStarted(ItemChanged {
+                    conversation_id: self.conversation_id(&conversation),
+                    turn_id: turn,
+                    item: *item,
+                }),
+                TurnChange::ItemUpdated {
+                    conversation,
+                    turn,
+                    item,
+                } => AppEventPayload::ItemUpdated(ItemChanged {
+                    conversation_id: self.conversation_id(&conversation),
+                    turn_id: turn,
+                    item: *item,
+                }),
+                TurnChange::ItemCompleted {
+                    conversation,
+                    turn,
+                    item,
+                } => AppEventPayload::ItemCompleted(ItemChanged {
+                    conversation_id: self.conversation_id(&conversation),
+                    turn_id: turn,
+                    item: *item,
+                }),
+                TurnChange::ItemTextDelta {
+                    conversation,
+                    turn,
+                    item,
+                    delta_seq,
+                    delta,
+                } => AppEventPayload::ItemTextDelta(ItemDelta {
+                    conversation_id: self.conversation_id(&conversation),
+                    turn_id: turn,
+                    item_id: item,
+                    delta_seq,
+                    delta,
+                }),
+                TurnChange::ItemReasoningDelta {
+                    conversation,
+                    turn,
+                    item,
+                    delta_seq,
+                    delta,
+                } => AppEventPayload::ItemReasoningDelta(ItemDelta {
+                    conversation_id: self.conversation_id(&conversation),
+                    turn_id: turn,
+                    item_id: item,
+                    delta_seq,
+                    delta,
+                }),
+            };
+            self.publish(Box::new(payload), None);
         }
     }
 

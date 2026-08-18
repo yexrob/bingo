@@ -101,6 +101,10 @@ pub struct Session {
     pub agents: crate::agents::AgentHandle,
     /// The rooms, and the main agent's inbox. The same shape as `agents`.
     pub channels: crate::channels::ChannelHandle,
+    /// The turns in flight, and the items they produce. A run opens one here and
+    /// closes it exactly once (B3); the handle is what makes the terminal state
+    /// the actor's fact rather than a message an abort could swallow.
+    pub turns: crate::app::turn::TurnHandle,
     /// This session's instance name (sub-agents = Some(registry name); main session None,
     /// channel member name main).
     pub instance: Option<String>,

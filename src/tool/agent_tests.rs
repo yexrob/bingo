@@ -83,6 +83,7 @@ fn parent_session() -> (Arc<Session>, Arc<crate::api::client::Client>) {
         expand_tasks: tokio::sync::watch::channel(false).0,
         agents: core.agents(),
         channels: core.channels(),
+        turns: core.turns(),
         instance: None,
         attachments: crate::api::image::Attachments::new(),
     });
@@ -2045,7 +2046,14 @@ async fn subagent_retry_restores_the_current_attempt_checkpoint() {
         input: serde_json::json!({"command":"bad"}),
         standalone: false,
     });
-    ui.events.emit(EngineEvent::StreamRetry);
+    ui.events.emit(EngineEvent::StreamRetry {
+        attempt: 1,
+        max_attempts: 10,
+        delay_ms: 1,
+        discarded_output: true,
+        code: None,
+        reason: None,
+    });
     ui.events.warn("Reconnecting... 2/10");
     ui.events
         .emit_stream(&crate::api::contract::StreamEvent::TextDelta {
