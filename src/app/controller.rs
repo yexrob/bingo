@@ -16,6 +16,8 @@
 //!   reply frame carrying it. Every event that attachment receives afterwards
 //!   has `seq > event_cursor` (spec "Snapshots and recovery").
 
+mod run;
+
 use tokio::sync::{mpsc, oneshot};
 
 use crate::app::attention::Attention;
@@ -92,6 +94,8 @@ pub(crate) enum Control {
     /// What the MCP manager stands at. Connection state is the manager's, and it
     /// lives outside the actor, so it is reported in rather than read out.
     Mcp(Vec<crate::app::snapshot::McpServerState>),
+    /// The engine this session runs its work on, handed over once on the way up.
+    Engine(crate::app::engine::Attached),
     /// One submission, read and routed.
     Submit {
         request: Box<crate::app::submit::SubmitRequest>,
@@ -342,6 +346,10 @@ struct Controller {
     mail_notice: Option<FeedbackId>,
     /// Accepted work that is not a turn: a team coming up, a login, a share.
     operations: crate::app::operation::OperationRegistry,
+    /// What runs a turn, a shell line, and the waking half of a delivery. `None`
+    /// until something attaches one, which is the difference between a session
+    /// that can be read and one that can run (B7).
+    engine: Option<crate::app::engine::Attached>,
     /// Conversations whose summary may have moved this turn of the loop. Batched
     /// because one message can move several facts about one conversation, and a
     /// summary published per fact would say the same thing three times.
@@ -457,6 +465,7 @@ impl Controller {
             mail: crate::app::mail::MailWake::default(),
             mail_notice: None,
             operations: crate::app::operation::OperationRegistry::default(),
+            engine: None,
             dirty: std::collections::BTreeSet::new(),
             serving: false,
             deferred: Vec::new(),
@@ -533,6 +542,7 @@ impl Controller {
                     self.announce_operations(changes);
                 }
                 Control::Mcp(states) => self.report_mcp(states),
+                Control::Engine(engine) => self.engine = Some(engine),
                 Control::Submit { request, reply } => {
                     let route = self.submit(*request);
                     let _ = reply.send(route);
@@ -1904,7 +1914,11 @@ impl Controller {
     /// a page know; the identifier a client sees is stamped here, where the mint
     /// is. Nothing else translates between the two.
     fn announce_turn(&mut self, changes: Vec<TurnChange>) {
+        let mut main_ended = false;
         for change in changes {
+            if let TurnChange::Completed { conversation, .. } = &change {
+                main_ended |= *conversation == ConvKey::Main;
+            }
             // Three of these are not a payload at all: a completed item joins
             // its conversation's log on the way out, inbound prose is read by
             // the one walker before it becomes anything, and a warning is
@@ -2060,6 +2074,12 @@ impl Controller {
             };
             self.publish(Box::new(payload), None);
         }
+        // The turn's own end is published before the next one starts: a client
+        // that reads `turn/completed` and then `turn/started` read them in the
+        // order they happened.
+        if main_ended {
+            self.drain_main();
+        }
     }
 
     /// Close the session: settle everything open, in one order, and let go.
@@ -2150,12 +2170,15 @@ impl Controller {
                 crate::app_server::protocol::error::ProtocolErrorKind::BadArgument,
             )),
             // The core owns the ledger half of a delivery and of a run; the
-            // waking half and the model itself need the engine, which the
-            // console still holds (B4 ruling ②, B7 closes it).
-            Route::Deliver { .. } => Err(AppError::Unserved("conversation/submit delivery")),
-            Route::Turn { .. } | Route::Shell { .. } => {
-                Err(AppError::Unserved("conversation/submit run"))
-            }
+            // model, the shell and the loop a deposit wakes are the engine's
+            // (B4 ruling ②, B5 ruling ①). `app/controller/run.rs` is the seam.
+            Route::Deliver {
+                target,
+                text,
+                addressed,
+            } => self.serve_deliver(target, text, addressed),
+            Route::Turn { text } => self.start_turn(text),
+            Route::Shell { command } => self.start_shell(command),
             // A slash line is the same action a typed call makes, read by the
             // same table (D146).
             Route::Command { line, on } => {
@@ -2464,6 +2487,16 @@ impl Controller {
     /// sequence number, and a client that had to infer a join from a roster diff
     /// would be reading the room twice.
     fn absorb_posts(&mut self) {
+        let _ = self.absorb_posts_into();
+    }
+
+    /// The same absorption, saying which item each post became.
+    ///
+    /// The user's own post needs its identifier back — `conversation/submit`
+    /// answers `Delivered { messageId }`, and the message is exactly the item
+    /// this commits.
+    fn absorb_posts_into(&mut self) -> Vec<(ConvKey, ItemId)> {
+        let mut committed = Vec::new();
         let facts = self.channels.facts();
         for fact in facts {
             let seen = self
@@ -2481,7 +2514,7 @@ impl Controller {
                 let id: ItemId = self.mint.mint();
                 let at = message.at.saturating_mul(1_000);
                 let item = Item {
-                    id,
+                    id: id.clone(),
                     status: ItemStatus::Completed,
                     turn_id: None,
                     started_at: Some(at),
@@ -2495,8 +2528,10 @@ impl Controller {
                     },
                 };
                 self.commit(&conversation, None, item);
+                committed.push((conversation.clone(), id));
             }
         }
+        committed
     }
 
     /// The messages main was handed since the last look become items in main's
@@ -2518,10 +2553,16 @@ impl Controller {
     /// The messages an instance was handed since the last look become items in
     /// that instance's conversation, with the delivery record they belong to.
     fn absorb_deliveries(&mut self) {
+        let _ = self.absorb_deliveries_into();
+    }
+
+    /// The same absorption, saying which item each message became.
+    fn absorb_deliveries_into(&mut self) -> Vec<(ConvKey, ItemId)> {
+        let mut committed = Vec::new();
         for handed in self.agents.drain_delivered() {
             let delivery = DeliveryId::new(format!("{}{}", DeliveryId::PREFIX, handed.id.0));
             let conversation = ConvKey::Agent(handed.to.clone());
-            self.commit_body(
+            let id = self.commit_body(
                 &conversation,
                 ItemBody::PeerMessage {
                     from: handed.from,
@@ -2530,7 +2571,9 @@ impl Controller {
                     delivery_id: Some(delivery),
                 },
             );
+            committed.push((conversation, id));
         }
+        committed
     }
 
     /// Publish one event per direct message whose state moved.

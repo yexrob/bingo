@@ -596,18 +596,58 @@ mod actor_tests {
         }
     }
 
+    /// A session that cannot run refuses to pretend it opened a turn.
+    ///
+    /// This is the whole difference an engine makes, and it is worth its own
+    /// test: the core answers everything else out of its own state, so "no
+    /// engine" has to be visible exactly here and nowhere else.
+    #[tokio::test]
+    async fn a_core_with_no_engine_refuses_the_run_rather_than_opening_it() {
+        let core = AppCore::start(SessionSetup::default());
+        let mut link = attached(&core).await;
+        assert_eq!(
+            submit(&mut link, 2, "run the tests").await,
+            Err(AppError::Refused(
+                crate::app_server::protocol::error::ProtocolErrorKind::ActionUnavailable
+            ))
+        );
+        assert!(
+            !core.turns().view().is_busy(&ConvKey::Main),
+            "a refused submission leaves no turn behind"
+        );
+    }
+
     /// Idle main runs the prose; busy main queues it. The caller asks the same
     /// question both times and the core answers differently, which is the point.
     #[tokio::test]
     async fn a_submission_starts_work_when_idle_and_queues_while_busy() {
         let core = AppCore::start(SessionSetup::default());
+        let engine = std::sync::Arc::new(crate::app::engine::Recorder::default());
+        core.attach_engine(engine.clone());
         let mut link = attached(&core).await;
-        assert_eq!(
-            submit(&mut link, 2, "run the tests").await,
-            Err(AppError::Unserved("conversation/submit run")),
-            "idle main runs it — the runner is still the console's until B7"
+        match submit(&mut link, 2, "run the tests").await {
+            Ok(AppReply::Submitted(SubmitDisposition::TurnStarted { turn_id })) => {
+                assert_eq!(
+                    engine.taken(),
+                    vec![crate::app::engine::Run::Turn {
+                        turn: turn_id,
+                        text: "run the tests".to_string(),
+                    }],
+                    "the turn the reply names is the turn the engine was handed"
+                );
+            }
+            other => panic!("idle main runs the prose, got {other:?}"),
+        }
+        core.turns().close(
+            core.turns()
+                .view()
+                .active(&ConvKey::Main)
+                .cloned()
+                .unwrap_or_else(|| panic!("the turn is running")),
+            crate::app::snapshot::TurnStatus::Completed,
+            None,
         );
-
+        // The close is a message on the same queue; the next `open` is behind it.
         let turn = core
             .turns()
             .open(ConvKey::Main, TurnOrigin::User, Vec::new())

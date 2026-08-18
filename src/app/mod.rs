@@ -31,6 +31,7 @@ mod collab_tests;
 pub mod command;
 pub mod controller;
 pub mod conversation;
+pub mod engine;
 pub mod event;
 pub mod ids;
 pub mod interaction;
@@ -339,6 +340,16 @@ impl AppCore {
     /// The asynchronous work that is not a turn.
     pub fn operations(&self) -> crate::app::operation::OperationHandle {
         self.operations.clone()
+    }
+
+    /// Give the core an engine.
+    ///
+    /// Until this is called the core answers everything it can answer out of its
+    /// own state and refuses, by name, the two things it cannot: a model turn and
+    /// the waking half of a delivery. Attaching is what turns a readable session
+    /// into a runnable one, and it happens once, on the way up.
+    pub fn attach_engine(&self, engine: crate::app::engine::Attached) {
+        let _ = self.control.send(controller::Control::Engine(engine));
     }
 
     /// Tell the core what the MCP manager stands at. Connection state belongs to

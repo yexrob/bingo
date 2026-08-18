@@ -1693,6 +1693,30 @@ pub struct Delivery {
     reply: oneshot::Sender<Result<MsgId, String>>,
 }
 
+impl Delivery {
+    /// One delivery and the answer to it, for a caller that is already inside the
+    /// actor and so cannot ask itself through [`AgentHandle::deliver`].
+    pub(crate) fn build(
+        name: &str,
+        from: &str,
+        message: &str,
+        ack_timeout: Option<Duration>,
+    ) -> (AgentMsg, oneshot::Receiver<Result<MsgId, String>>) {
+        let (reply, answer) = oneshot::channel();
+        (
+            AgentMsg::Deliver(Box::new(Self {
+                name: name.to_string(),
+                from: from.to_string(),
+                message: message.to_string(),
+                images: Vec::new(),
+                ack_timeout,
+                reply,
+            })),
+            answer,
+        )
+    }
+}
+
 /// What the actor is told about the instances, and what it is asked.
 pub enum AgentMsg {
     AttachShare(Arc<crate::share::ShareStore>),

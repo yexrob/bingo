@@ -21,7 +21,7 @@ use crate::channels::{ChannelMode, MAIN_NAME, USER_NAME};
 use crate::engine::events::EngineEvent;
 use crate::query::Session;
 
-fn test_session(core: &AppCore) -> Arc<Session> {
+pub(crate) fn test_session(core: &AppCore) -> Arc<Session> {
     Arc::new(Session {
         client: crate::api::client::Client::new("k".into(), "http://x".into()),
         runtime: crate::query::Runtime::new("m".into(), None, Default::default()),
