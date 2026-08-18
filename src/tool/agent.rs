@@ -8,7 +8,7 @@ use crate::agents::{
 };
 use crate::api::contract::SystemBlock;
 use crate::api::types::Message;
-use crate::channels::ChannelRegistry;
+use crate::channels::ChannelHandle;
 use crate::engine::events::{EngineEvent, EngineEvents, EngineHost, EngineRequests};
 use crate::query::Session;
 use crate::tool::{Tool, ToolContext, ToolError, ToolResult, parse_input};
@@ -567,7 +567,7 @@ fn direct_text(from: &str, text: &str, batched: bool) -> String {
 /// are annotated with their sources in order. Channel entries also advance the member's read
 /// cursor (messages enter its context with this turn).
 pub(crate) fn absorb_inbox(
-    channels: &Arc<ChannelRegistry>,
+    channels: &ChannelHandle,
     name: &str,
     items: &[InboxItem],
 ) -> (String, Vec<crate::api::types::ImageAttachment>) {

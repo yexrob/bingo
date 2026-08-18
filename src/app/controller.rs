@@ -61,6 +61,8 @@ pub(crate) enum Control {
     },
     /// A change to, or a question about, the watch registry.
     Watch(crate::watch::WatchMsg),
+    /// A change to, or a question about, the rooms.
+    Channels(crate::channels::ChannelMsg),
     /// Answered once everything queued ahead of it has been applied.
     Settle {
         reply: oneshot::Sender<()>,
@@ -70,6 +72,7 @@ pub(crate) enum Control {
 /// What the actor hands out at startup: one handle per registry it owns.
 pub(crate) struct Registries {
     pub watch: crate::watch::WatchHandle,
+    pub channels: crate::channels::ChannelHandle,
 }
 
 /// Start the actor and return the handle everything reaches it by.
@@ -84,10 +87,11 @@ pub(crate) struct Registries {
 pub(super) fn spawn(setup: SessionSetup) -> (mpsc::UnboundedSender<Control>, Registries) {
     let (control, inbox) = mpsc::unbounded_channel();
     let (watch, watch_handle) = crate::watch::attach(control.clone());
+    let (channels, channel_handle) = crate::channels::attach(control.clone(), setup.channel_limits);
     // The actor holds a weak handle to its own inbox: it hands strong clones to
     // the attachments it spawns, and a strong one of its own would keep the
     // queue open forever, so the loop could never end.
-    let controller = Controller::new(setup, control.downgrade(), watch);
+    let controller = Controller::new(setup, control.downgrade(), watch, channels);
     std::thread::Builder::new()
         .name("bingo-session".to_string())
         .spawn(move || controller.run(inbox))
@@ -96,6 +100,7 @@ pub(super) fn spawn(setup: SessionSetup) -> (mpsc::UnboundedSender<Control>, Reg
         control,
         Registries {
             watch: watch_handle,
+            channels: channel_handle,
         },
     )
 }
@@ -109,14 +114,14 @@ pub(crate) async fn settle(control: &mpsc::UnboundedSender<Control>) {
 }
 
 /// The same barrier for a caller with no runtime to await on — a synchronous
-/// test. Calling it from inside the runtime would block a worker, so it is not
-/// offered outside tests.
+/// test, or one of the terminal front end's synchronous seams.
 #[cfg(test)]
 pub(crate) fn settle_now(control: &mpsc::UnboundedSender<Control>) {
     let (reply, answer) = oneshot::channel();
-    if control.send(Control::Settle { reply }).is_ok() {
-        let _ = answer.blocking_recv();
-    }
+    let _ = control.send(Control::Settle { reply });
+    // The same wait `Answer::now` uses, and safe for the same reason: the actor
+    // is on a thread of its own and never waits back.
+    crate::app::answer::Answer::new(answer, ()).now();
 }
 
 /// One attached frontend, as the actor knows it.
@@ -149,6 +154,8 @@ struct Controller {
     /// machine. Actor-private since B2b: what used to be an `Arc<Mutex<…>>` every
     /// task could reach is now reachable only through this loop.
     watch: crate::watch::WatchRegistry,
+    /// The rooms, and the main agent's inbox. Actor-private since B2b.
+    channels: crate::channels::ChannelRegistry,
 }
 
 impl Controller {
@@ -156,6 +163,7 @@ impl Controller {
         setup: SessionSetup,
         control: mpsc::WeakUnboundedSender<Control>,
         watch: crate::watch::WatchRegistry,
+        channels: crate::channels::ChannelRegistry,
     ) -> Self {
         let epoch = EpochId::mint();
         let mut mint = IdMint::new(epoch.clone());
@@ -203,6 +211,7 @@ impl Controller {
             next_attachment: 0,
             control,
             watch,
+            channels,
         }
     }
 
@@ -225,6 +234,7 @@ impl Controller {
                 }
                 Control::Publish { payload, caused_by } => self.publish(payload, caused_by),
                 Control::Watch(message) => self.watch.handle(message),
+                Control::Channels(message) => self.channels.handle(message),
                 Control::Settle { reply } => {
                     let _ = reply.send(());
                 }

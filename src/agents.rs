@@ -1560,7 +1560,7 @@ mod tests {
             tasks: Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), "t")),
             expand_tasks: tokio::sync::watch::channel(false).0,
             agents: AgentRegistry::new(),
-            channels: crate::channels::ChannelRegistry::new(Default::default()),
+            channels: crate::app::AppCore::start(Default::default()).channels(),
             instance: None,
             attachments: crate::api::image::Attachments::new(),
         })

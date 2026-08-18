@@ -432,8 +432,13 @@ fn an_unnamed_room_line_mails_at_once_and_starts_the_clock() {
             vec![crate::channels::MAIN_NAME.into(), "scout".into()],
             crate::channels::ChannelMode::Free,
         )
+        .now()
         .unwrap_or_else(|e| panic!("{e}"));
-    let _ = chat.session.channels.post("scout", "crew", "fyi: started");
+    let _ = chat
+        .session
+        .channels
+        .post("scout", "crew", "fyi: started")
+        .now();
     assert!(
         chat.session.channels.has_main_mail(),
         "mailed at once, named or not"
@@ -444,7 +449,11 @@ fn an_unnamed_room_line_mails_at_once_and_starts_the_clock() {
     // A second line inside the window restarts it: the question and its answer
     // are one wake, not two.
     chat.tick += super::chat_tail::MAIL_QUIET_TICKS - 1;
-    let _ = chat.session.channels.post("scout", "crew", "@main look");
+    let _ = chat
+        .session
+        .channels
+        .post("scout", "crew", "@main look")
+        .now();
     assert!(!chat.digest_mail(), "still inside the restarted window");
     chat.tick += super::chat_tail::MAIL_QUIET_TICKS;
     assert!(chat.digest_mail(), "then digests once, both lines together");
@@ -506,7 +515,7 @@ fn the_ring_survives_a_turn_that_drained_the_mail_first() {
     chat.session
         .channels
         .deliver_to_main("scout", "blocked", None, true);
-    let drained = chat.session.channels.drain_main_mail();
+    let drained = chat.session.channels.drain_main_mail().now();
     assert_eq!(
         drained.len(),
         1,
@@ -528,7 +537,7 @@ fn a_direct_message_to_main_carries_the_sender_into_the_inbox() {
     chat.session
         .channels
         .deliver_to_main("scout", "the migration is done", None, false);
-    let mail = chat.session.channels.drain_main_mail();
+    let mail = chat.session.channels.drain_main_mail().now();
     assert_eq!(mail.len(), 1);
     let mut lines = mail[0].lines();
     assert_eq!(
@@ -1467,6 +1476,7 @@ fn a_message_from_an_agent_writes_no_line_and_counts_as_mail() {
         chat.session
             .channels
             .drain_main_mail()
+            .now()
             .iter()
             .any(|mail| mail.contains(body) && !mail.contains("lexer drops a token at EOF")),
         "the mail is the message, and the summary never entered it"
@@ -1488,6 +1498,7 @@ fn a_room_post_naming_the_user_rings_once_and_writes_nothing() {
             vec!["scout".to_string(), crate::channels::USER_NAME.to_string()],
             crate::channels::ChannelMode::Free,
         )
+        .now()
         .expect("room created");
     let settle = |chat: &mut Chat| {
         for _ in 0..16 {
@@ -1501,6 +1512,7 @@ fn a_room_post_naming_the_user_rings_once_and_writes_nothing() {
     chat.session
         .channels
         .post("scout", "dev-team", "@user should I deploy with --force?")
+        .now()
         .expect("posted");
     settle(&mut chat);
     assert!(
@@ -1519,6 +1531,7 @@ fn a_room_post_naming_the_user_rings_once_and_writes_nothing() {
     chat.session
         .channels
         .post("scout", "dev-team", "@user still waiting")
+        .now()
         .expect("posted");
     settle(&mut chat);
     assert!(
@@ -1533,6 +1546,7 @@ fn a_room_post_naming_the_user_rings_once_and_writes_nothing() {
     chat.session
         .channels
         .post("scout", "dev-team", "@user it shipped")
+        .now()
         .expect("posted");
     settle(&mut chat);
     assert!(
@@ -1544,6 +1558,7 @@ fn a_room_post_naming_the_user_rings_once_and_writes_nothing() {
     chat.session
         .channels
         .post("scout", "dev-team", "pushing the branch now")
+        .now()
         .expect("posted");
     settle(&mut chat);
     assert!(
@@ -1708,14 +1723,17 @@ fn a_room_page_names_every_speaker_without_avatars() {
             vec!["dev".to_string(), "qa".to_string()],
             crate::channels::ChannelMode::Free,
         )
+        .now()
         .expect("room");
     chat.session
         .channels
         .post("dev", "dev-team", "the lexer is fixed")
+        .now()
         .expect("posted");
     chat.session
         .channels
         .post("qa", "dev-team", "running the suite now")
+        .now()
         .expect("posted");
 
     chat.switch_to(Some(crate::tui::zoom::ZoomTarget::Room(
@@ -2265,10 +2283,12 @@ fn a_room_page_appends_what_was_posted_while_it_was_open() {
             vec!["dev".to_string()],
             crate::channels::ChannelMode::Free,
         )
+        .now()
         .expect("room");
     chat.session
         .channels
         .post("dev", "crew", "first")
+        .now()
         .expect("posted");
     chat.switch_to(Some(crate::tui::zoom::ZoomTarget::Room("crew".to_string())));
     assert_eq!(chat.conv.messages.len(), 1);
@@ -2276,6 +2296,7 @@ fn a_room_page_appends_what_was_posted_while_it_was_open() {
     chat.session
         .channels
         .post("dev", "crew", "second")
+        .now()
         .expect("posted");
     chat.sync_away();
     let texts: Vec<&String> = chat.conv.messages.iter().map(|m| &m.text).collect();

@@ -499,6 +499,10 @@ impl WatchRegistry {
             }
             WatchMsg::Consume { owner, reply } => {
                 let notes = self.consume_notifications(owner.as_deref());
+                // Published before the answer: a caller that takes the queue and
+                // then asks whether anything is waiting must not be told about
+                // what it just took.
+                self.publish();
                 let _ = reply.send(notes);
                 None
             }

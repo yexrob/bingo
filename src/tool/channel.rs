@@ -104,7 +104,7 @@ pub(crate) fn deliver_post(
     channel: &str,
     text: &str,
 ) -> Result<PostDelivery, String> {
-    match session.channels.post(from, channel, text)? {
+    match session.channels.post(from, channel, text).now()? {
         PostOutcome::Sent {
             seq,
             deliveries,
@@ -215,7 +215,7 @@ fn spawn_mention_watchdog(
         };
         for round in 1..=crate::agents::MAX_FOLLOW_UPS {
             tokio::time::sleep(MENTION_CHASE).await;
-            let Some(owed) = session.channels.open_mention(&channel, seq, &to) else {
+            let Some(owed) = session.channels.open_mention(&channel, seq, &to).await else {
                 return;
             };
             let waited = MENTION_CHASE * u32::from(round);
@@ -258,7 +258,12 @@ fn spawn_mention_watchdog(
             );
             flush_agent_inbox(&session, &watch);
         }
-        if session.channels.open_mention(&channel, seq, &to).is_some() {
+        if session
+            .channels
+            .open_mention(&channel, seq, &to)
+            .await
+            .is_some()
+        {
             let who = if everyone {
                 format!("nobody in #{channel}")
             } else {
@@ -429,6 +434,7 @@ Joins and departures are written into the room where everyone in it can see them
                 self.session
                     .channels
                     .create(&name, roster.clone(), mode)
+                    .await
                     .map_err(ToolError::failed)?;
                 let id = ctx.watch.register_with_conditions(
                     Box::new(ChannelWatch {
@@ -460,6 +466,7 @@ Joins and departures are written into the room where everyone in it can see them
                 self.session
                     .channels
                     .invite(&name, &member)
+                    .await
                     .map_err(ToolError::failed)?;
                 format!("{member} joined #{name} (listening from the current message head)")
             }
@@ -476,6 +483,7 @@ Joins and departures are written into the room where everyone in it can see them
                 self.session
                     .channels
                     .kick(&name, &member)
+                    .await
                     .map_err(ToolError::failed)?;
                 format!("{member} removed from #{name}")
             }
@@ -537,7 +545,7 @@ mod tests {
             tasks: Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), "t")),
             expand_tasks: tokio::sync::watch::channel(false).0,
             agents: AgentRegistry::new(),
-            channels: crate::channels::ChannelRegistry::new(Default::default()),
+            channels: crate::app::AppCore::start(Default::default()).channels(),
             instance: None,
             attachments: crate::api::image::Attachments::new(),
         })
@@ -686,7 +694,7 @@ mod tests {
             .unwrap();
         // The line named b, not main, so it waits in main's pen (v6); force
         // the age release to read it.
-        let mail = main.channels.drain_main_mail();
+        let mail = main.channels.drain_main_mail().await;
         assert_eq!(mail.len(), 1, "{mail:?}");
         assert!(mail[0].contains("a: @b hello"));
         // Non-member posts error out — refused by the addressing rules before

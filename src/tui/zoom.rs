@@ -209,6 +209,7 @@ mod tests {
                 members.iter().map(|m| m.to_string()).collect(),
                 ChannelMode::Free,
             )
+            .now()
             .unwrap_or_else(|e| panic!("{e}"));
     }
 
@@ -269,8 +270,13 @@ mod tests {
         chat.session
             .channels
             .invite("crew", "late")
+            .now()
             .unwrap_or_else(|e| panic!("{e}"));
-        let _ = chat.session.channels.post("zoe", "crew", "tests are green");
+        let _ = chat
+            .session
+            .channels
+            .post("zoe", "crew", "tests are green")
+            .now();
         chat.switch_to(Some(ZoomTarget::Room("crew".into())));
         let rows = page_rows(&mut chat);
         assert!(

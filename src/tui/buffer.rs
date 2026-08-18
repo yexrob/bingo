@@ -641,6 +641,7 @@ mod tests {
         session
             .channels
             .create(name, roster, ChannelMode::Free)
+            .now()
             .expect("room created");
     }
 
@@ -713,6 +714,7 @@ mod tests {
                 vec!["scout".to_string(), "zoe".to_string()],
                 ChannelMode::Free,
             )
+            .now()
             .expect("room created");
         let mut buffers = Buffers::new();
         buffers.refresh(&session, 1);
@@ -725,11 +727,16 @@ mod tests {
         session
             .channels
             .invite("parser", USER_NAME)
+            .now()
             .expect("joined");
         buffers.refresh(&session, 2);
         assert_eq!(ids(&buffers), vec!["@main", "#parser"], "joining lists it");
 
-        session.channels.kick("parser", USER_NAME).expect("left");
+        session
+            .channels
+            .kick("parser", USER_NAME)
+            .now()
+            .expect("left");
         buffers.refresh(&session, 3);
         assert_eq!(
             ids(&buffers),
@@ -897,6 +904,7 @@ mod tests {
                 vec!["scout".to_string(), USER_NAME.to_string()],
                 ChannelMode::Free,
             )
+            .now()
             .expect("channel created");
         let mut buffers = Buffers::new();
         buffers.refresh(&session, 1);
@@ -905,6 +913,7 @@ mod tests {
         session
             .channels
             .post("scout", "build", "landed the refactor")
+            .now()
             .expect("posted");
         buffers.refresh(&session, 2);
         assert_eq!(buffers.get(&id).map(Buffer::unread), Some(1));
@@ -917,6 +926,7 @@ mod tests {
         session
             .channels
             .post("scout", "build", "@user can you look at this")
+            .now()
             .expect("posted");
         buffers.refresh(&session, 3);
         assert_eq!(buffers.get(&id).map(Buffer::unread), Some(2));
@@ -1053,6 +1063,7 @@ mod tests {
                 vec!["scout".to_string(), USER_NAME.to_string()],
                 ChannelMode::Free,
             )
+            .await
             .expect("channel created");
         let target = SubmitTarget::Channel {
             channel: "build".to_string(),

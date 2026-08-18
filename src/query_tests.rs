@@ -637,7 +637,7 @@ fn test_session_at(home: std::path::PathBuf, cwd: std::path::PathBuf) -> Arc<Ses
         tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), "test")),
         expand_tasks: tokio::sync::watch::channel(false).0,
         agents: crate::agents::AgentRegistry::new(),
-        channels: crate::channels::ChannelRegistry::new(Default::default()),
+        channels: crate::app::AppCore::start(Default::default()).channels(),
         instance: None,
         attachments: crate::api::image::Attachments::new(),
     })
@@ -712,7 +712,7 @@ fn test_session_with_client_and_failures(
         tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), "test")),
         expand_tasks: tokio::sync::watch::channel(false).0,
         agents: crate::agents::AgentRegistry::new(),
-        channels: crate::channels::ChannelRegistry::new(Default::default()),
+        channels: crate::app::AppCore::start(Default::default()).channels(),
         instance: None,
         attachments: crate::api::image::Attachments::new(),
     })
@@ -1438,7 +1438,7 @@ async fn bash_command_executes_without_model_query() {
         tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), "test")),
         expand_tasks: tokio::sync::watch::channel(false).0,
         agents: crate::agents::AgentRegistry::new(),
-        channels: crate::channels::ChannelRegistry::new(Default::default()),
+        channels: crate::app::AppCore::start(Default::default()).channels(),
         instance: None,
         attachments: crate::api::image::Attachments::new(),
     });
@@ -2064,7 +2064,7 @@ async fn bash_command_refuses_interactive_tty_commands() {
         tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), "test")),
         expand_tasks: tokio::sync::watch::channel(false).0,
         agents: crate::agents::AgentRegistry::new(),
-        channels: crate::channels::ChannelRegistry::new(Default::default()),
+        channels: crate::app::AppCore::start(Default::default()).channels(),
         instance: None,
         attachments: crate::api::image::Attachments::new(),
     });

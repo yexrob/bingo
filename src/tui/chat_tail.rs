@@ -507,7 +507,7 @@ impl super::Chat {
         // Checked before the emptiness test: the drain and the bell are separate
         // readers, and a turn already running can absorb the message before this
         // ever sees the mail that asked for the ring.
-        let urgent = self.session.channels.take_main_mail_urgent();
+        let urgent = self.session.channels.take_main_mail_urgent().now();
         if urgent {
             self.notify
                 .attention(crate::tui::notify::Attention::AgentNotice);
@@ -1975,7 +1975,7 @@ impl super::Chat {
     /// that agent's zoom is visited. The wake and its debounce are untouched:
     /// this reads a mirror of the inbox, never the inbox itself.
     fn absorb_arrivals(&mut self) {
-        for arrival in self.session.channels.drain_main_arrivals() {
+        for arrival in self.session.channels.drain_main_arrivals().now() {
             *self.agent_mail.entry(arrival.from).or_insert(0) += 1;
             self.dirty = true;
         }

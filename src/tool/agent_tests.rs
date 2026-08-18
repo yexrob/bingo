@@ -81,7 +81,7 @@ fn parent_session() -> (Arc<Session>, Arc<crate::api::client::Client>) {
         tasks: Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), "test")),
         expand_tasks: tokio::sync::watch::channel(false).0,
         agents: AgentRegistry::new(),
-        channels: crate::channels::ChannelRegistry::new(Default::default()),
+        channels: crate::app::AppCore::start(Default::default()).channels(),
         instance: None,
         attachments: crate::api::image::Attachments::new(),
     });
@@ -935,12 +935,13 @@ async fn a_message_to_main_lands_in_the_inbox_under_the_sender_s_own_name() {
         .await
         .unwrap_or_else(|e| panic!("{e}"));
 
+    session.channels.settle().await;
     assert!(session.channels.has_main_mail());
     assert!(
-        !session.channels.take_main_mail_urgent(),
+        !session.channels.take_main_mail_urgent().await,
         "an ordinary message does not ring"
     );
-    let mail = session.channels.drain_main_mail();
+    let mail = session.channels.drain_main_mail().await;
     assert_eq!(
         mail,
         vec!["[message from @scout]\nthe migration is done".to_string()],
@@ -983,11 +984,13 @@ async fn a_summary_previews_the_message_without_entering_it() {
     .await
     .unwrap_or_else(|e| panic!("{e}"));
     assert_eq!(
-        session.channels.drain_main_arrivals()[0].summary.as_deref(),
+        session.channels.drain_main_arrivals().await[0]
+            .summary
+            .as_deref(),
         Some("migration done")
     );
     assert_eq!(
-        session.channels.drain_main_mail(),
+        session.channels.drain_main_mail().await,
         vec!["[message from @scout]\nthe migration is done".to_string()],
         "the model reads what was said to it, and nothing about the screen"
     );
@@ -1000,7 +1003,10 @@ async fn a_summary_previews_the_message_without_entering_it() {
     )
     .await
     .unwrap_or_else(|e| panic!("{e}"));
-    assert_eq!(session.channels.drain_main_arrivals()[0].summary, None);
+    assert_eq!(
+        session.channels.drain_main_arrivals().await[0].summary,
+        None
+    );
 
     // Main may still pass one: the field is off its schema, not out of the
     // parser — `deny_unknown_fields` would make a harmless word an error.
@@ -1035,7 +1041,7 @@ async fn urgent_is_a_subagent_to_main_flag_and_refused_elsewhere() {
         .await
         .unwrap_or_else(|e| panic!("{e}"));
     assert!(
-        session.channels.take_main_mail_urgent(),
+        session.channels.take_main_mail_urgent().await,
         "the bell is owed on arrival"
     );
 
@@ -1079,6 +1085,7 @@ async fn room_addressing_is_gated_and_checked() {
             vec!["scout".into()],
             crate::channels::ChannelMode::Free,
         )
+        .await
         .unwrap_or_else(|e| panic!("{e}"));
     let out = SendMessageTool::new(with_rooms)
         .call(serde_json::json!({"to": "#build", "message": "hi"}), &ctx)

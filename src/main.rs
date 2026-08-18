@@ -395,7 +395,11 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(&home, &task_list_key)),
         expand_tasks: expand_tx,
         agents: crate::agents::AgentRegistry::new(),
-        channels: crate::channels::ChannelRegistry::new(channel_limits),
+        channels: crate::app::AppCore::start(crate::app::SessionSetup {
+            channel_limits,
+            ..Default::default()
+        })
+        .channels(),
         instance: None,
         attachments: crate::api::image::Attachments::new(),
     });

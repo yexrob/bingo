@@ -96,7 +96,7 @@ pub struct Session {
     /// Sub-agent instance registry (continuation/lifecycle; sub-sessions share the same table).
     pub agents: Arc<crate::agents::AgentRegistry>,
     /// Agent channel registry (experimental; sub-sessions share the same table).
-    pub channels: Arc<crate::channels::ChannelRegistry>,
+    pub channels: crate::channels::ChannelHandle,
     /// This session's instance name (sub-agents = Some(registry name); main session None,
     /// channel member name main).
     pub instance: Option<String>,

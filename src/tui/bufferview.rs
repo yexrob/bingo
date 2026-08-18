@@ -194,7 +194,7 @@ impl Chat {
             },
             DirectTarget::Room(name) => {
                 if !self.session.channels.is_member(name, USER_NAME)
-                    && let Err(why) = self.session.channels.invite(name, USER_NAME)
+                    && let Err(why) = self.session.channels.invite(name, USER_NAME).now()
                 {
                     return Delivery::Rejected(why);
                 }
@@ -259,7 +259,7 @@ impl Chat {
             );
             return;
         };
-        match self.session.channels.invite(&room, USER_NAME) {
+        match self.session.channels.invite(&room, USER_NAME).now() {
             Ok(()) => {
                 self.refresh_conversations();
                 self.push_slash_info(format!("joined #{room}"));
@@ -274,7 +274,7 @@ impl Chat {
             self.push_slash_info("usage: /leave #room".to_string());
             return;
         };
-        match self.session.channels.kick(&room, USER_NAME) {
+        match self.session.channels.kick(&room, USER_NAME).now() {
             Ok(()) => {
                 self.refresh_conversations();
                 self.push_slash_info(format!("left #{room}"));
@@ -492,6 +492,7 @@ mod tests {
         chat.session
             .channels
             .create("build", vec!["scout".to_string()], ChannelMode::Free)
+            .await
             .expect("channel created");
         chat.refresh_conversations();
         assert!(
@@ -552,6 +553,7 @@ mod tests {
         chat.session
             .channels
             .create("build", vec![USER_NAME.to_string()], ChannelMode::Free)
+            .now()
             .expect("channel created");
         chat.refresh_conversations();
 

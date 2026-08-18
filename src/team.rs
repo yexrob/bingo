@@ -1301,18 +1301,18 @@ fn open_rooms(
                 crate::channels::USER_NAME.to_string(),
             ];
             roster.extend(live);
-            if let Err(e) = session.channels.create(&room.name, roster, room.mode) {
+            if let Err(e) = session.channels.create(&room.name, roster, room.mode).now() {
                 summary.failed.push((room.name.clone(), e));
                 continue;
             }
         } else {
             // Late joiners get no backlog; they listen from the current head.
             for member in live {
-                let _ = session.channels.invite(&room.name, &member);
+                let _ = session.channels.invite(&room.name, &member).now();
             }
         }
         if let Some(limit) = room.message_limit {
-            let _ = session.channels.set_message_limit(&room.name, limit);
+            let _ = session.channels.set_message_limit(&room.name, limit).now();
         }
     }
 }
@@ -1532,7 +1532,7 @@ mod tests {
     use std::sync::Arc;
 
     use crate::agents::AgentRegistry;
-    use crate::channels::{ChannelLimits, ChannelRegistry};
+    use crate::channels::ChannelLimits;
 
     fn tmp(name: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("bingo-team-{}-{}", name, std::process::id()));
@@ -1835,7 +1835,11 @@ mod tests {
             tasks: Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), "t")),
             expand_tasks: tokio::sync::watch::channel(false).0,
             agents: AgentRegistry::new(),
-            channels: ChannelRegistry::new(ChannelLimits::default()),
+            channels: crate::app::AppCore::start(crate::app::SessionSetup {
+                channel_limits: ChannelLimits::default(),
+                ..Default::default()
+            })
+            .channels(),
             instance: None,
             attachments: crate::api::image::Attachments::new(),
         })

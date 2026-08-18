@@ -381,6 +381,7 @@ mod tests {
                 vec![crate::channels::USER_NAME.into(), "scout".into()],
                 crate::channels::ChannelMode::Free,
             )
+            .now()
             .unwrap_or_else(|e| panic!("{e}"));
         chat.refresh_conversations();
         let rows = texts(&chat);
@@ -516,10 +517,12 @@ mod tests {
                 vec!["dev".to_string(), "qa".to_string()],
                 crate::channels::ChannelMode::Free,
             )
+            .now()
             .unwrap_or_else(|e| panic!("{e}"));
         chat.session
             .channels
             .post("qa", "build", "@dev is the lexer done?")
+            .now()
             .unwrap_or_else(|e| panic!("{e}"));
         chat.refresh_conversations();
 
@@ -532,6 +535,7 @@ mod tests {
         );
 
         chat.session.channels.mark_seen("dev", "build", 1);
+        chat.session.channels.settle_now();
         let read = texts(&chat);
         assert!(
             read.iter().any(|r| r.contains("@dev")
@@ -543,6 +547,7 @@ mod tests {
         chat.session
             .channels
             .post("dev", "build", "not yet, two cases left")
+            .now()
             .unwrap_or_else(|e| panic!("{e}"));
         let answered = texts(&chat);
         assert!(
@@ -568,6 +573,7 @@ mod tests {
                 ],
                 crate::channels::ChannelMode::Free,
             )
+            .now()
             .unwrap_or_else(|e| panic!("{e}"));
         chat.refresh_conversations();
         assert!(
@@ -580,6 +586,7 @@ mod tests {
         chat.session
             .channels
             .post("qa", "build", "@dev status?")
+            .now()
             .unwrap_or_else(|e| panic!("{e}"));
         let waiting = texts(&chat);
         assert!(
@@ -592,10 +599,12 @@ mod tests {
         chat.session
             .channels
             .post("qa", "build", "@all anyone?")
+            .now()
             .unwrap_or_else(|e| panic!("{e}"));
         chat.session
             .channels
             .post("dev", "build", "here")
+            .now()
             .unwrap_or_else(|e| panic!("{e}"));
         let quiet = texts(&chat);
         assert!(

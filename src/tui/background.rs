@@ -1108,6 +1108,7 @@ mod tests {
                 members.iter().map(|m| (*m).to_string()).collect(),
                 ChannelMode::Free,
             )
+            .now()
             .expect("room created");
     }
 
@@ -1693,6 +1694,7 @@ mod tests {
         chat.session
             .channels
             .post("scout", "build", "the parser is fixed")
+            .now()
             .expect("posted");
         chat.refresh_conversations();
         chat.open_background_dialog();

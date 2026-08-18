@@ -997,7 +997,7 @@ async fn query_loop(
             // v7: nothing is held back, so this is the same absorption every
             // other member does at its own tool boundary — a running main
             // steers on what landed while it worked.
-            session.channels.drain_main_mail()
+            session.channels.drain_main_mail().await
         } else {
             Vec::new()
         };

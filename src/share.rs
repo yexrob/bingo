@@ -257,6 +257,71 @@ impl ShareStore {
     }
 }
 
+/// Where a share document's disk writes happen.
+///
+/// The session actor updates the document in memory — a lock held for the length
+/// of a `push` — and then asks for a save. The write itself happens here, on a
+/// thread of its own, because the actor is the process's one ordering point and
+/// must never be found waiting on a file. A burst of changes coalesces into one
+/// write, which is also why this is a queue rather than a spawn per change.
+pub struct ShareSaver {
+    requests: std::sync::mpsc::Sender<SaveRequest>,
+}
+
+enum SaveRequest {
+    Save,
+    // Nothing in a running session asks; the tests that assert on the file do.
+    #[cfg_attr(not(test), allow(dead_code))]
+    /// Answered once the write that follows it has happened. The actor hands
+    /// this channel over rather than waiting on it — a barrier for whoever wants
+    /// one, never a pause in the session.
+    Flush(tokio::sync::oneshot::Sender<()>),
+}
+
+impl ShareSaver {
+    pub fn spawn(store: Arc<ShareStore>) -> Self {
+        let (requests, pending) = std::sync::mpsc::channel::<SaveRequest>();
+        // Named for the same reason the actor's thread is: a stack in a crash
+        // report should say whose work it was.
+        let _ = std::thread::Builder::new()
+            .name("bingo-share".to_string())
+            .spawn(move || {
+                while let Ok(request) = pending.recv() {
+                    // Everything asked for while the last write was running is
+                    // answered by the next one: the document is a snapshot, not
+                    // a log.
+                    let mut waiting = Vec::new();
+                    let mut queued = Some(request);
+                    while let Some(request) = queued.take() {
+                        if let SaveRequest::Flush(ack) = request {
+                            waiting.push(ack);
+                        }
+                        queued = pending.try_recv().ok();
+                    }
+                    store.persist();
+                    for ack in waiting {
+                        let _ = ack.send(());
+                    }
+                }
+            });
+        Self { requests }
+    }
+
+    /// Ask for the document as it now stands to reach the disk.
+    pub fn save(&self) {
+        let _ = self.requests.send(SaveRequest::Save);
+    }
+
+    /// Ask, and be told when it has.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn flush(&self, ack: tokio::sync::oneshot::Sender<()>) {
+        if self.requests.send(SaveRequest::Flush(ack)).is_err() {
+            // The writer is gone; nothing more will be written and the caller
+            // learns it from the dropped channel.
+        }
+    }
+}
+
 /// Atomic file write (tmp + rename; the unified share-output entry, shared by the CLI and /share).
 pub fn write_html_atomic(path: &Path, content: &str) -> Result<(), ShareError> {
     if let Some(parent) = path.parent()

@@ -60,7 +60,7 @@ pub(super) fn test_chat_home(home: std::path::PathBuf) -> Chat {
         tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(&home, "test")),
         expand_tasks: tokio::sync::watch::channel(false).0,
         agents: crate::agents::AgentRegistry::new(),
-        channels: crate::channels::ChannelRegistry::new(Default::default()),
+        channels: crate::app::AppCore::start(Default::default()).channels(),
         instance: None,
         attachments: crate::api::image::Attachments::new(),
     });
@@ -103,6 +103,7 @@ fn share_rebind_failure_detaches_the_previous_store() {
 
     chat.attach_share_to_transcript(Some(&destination));
 
+    chat.session.channels.settle_now();
     assert!(!chat.session.agents.has_share());
     assert!(!chat.session.channels.has_share());
     assert!(
@@ -1091,7 +1092,7 @@ async fn bash_submit_runs_command_and_ends_turn() {
         tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), "test")),
         expand_tasks: tokio::sync::watch::channel(false).0,
         agents: crate::agents::AgentRegistry::new(),
-        channels: crate::channels::ChannelRegistry::new(Default::default()),
+        channels: crate::app::AppCore::start(Default::default()).channels(),
         instance: None,
         attachments: crate::api::image::Attachments::new(),
     });

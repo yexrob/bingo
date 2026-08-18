@@ -18,6 +18,7 @@
 // stdio transport in B6. Remove this allow when they arrive.
 #![allow(dead_code)]
 
+pub mod answer;
 pub mod command;
 pub mod controller;
 pub mod event;
@@ -148,6 +149,9 @@ pub struct SessionSetup {
     pub shell_dialect: ShellDialect,
     /// The session resumed a persisted transcript rather than starting empty.
     pub resumed: bool,
+    /// Room budgets, which come from settings and are the registry's from the
+    /// moment the actor starts.
+    pub channel_limits: crate::channels::ChannelLimits,
     pub capabilities: ServerCapabilities,
 }
 
@@ -165,6 +169,7 @@ impl Default for SessionSetup {
             shell: String::new(),
             shell_dialect: ShellDialect::Unknown,
             resumed: false,
+            channel_limits: crate::channels::ChannelLimits::default(),
             capabilities: ServerCapabilities {
                 multi_conversation: true,
                 reasoning: true,
@@ -190,6 +195,7 @@ pub struct AppCore {
     /// Each is a handle on the same inbox — cloning one keeps the actor alive,
     /// which is why a session outlives the `AppCore` value it was started from.
     watch: crate::watch::WatchHandle,
+    channels: crate::channels::ChannelHandle,
 }
 
 impl AppCore {
@@ -199,12 +205,18 @@ impl AppCore {
         Self {
             control,
             watch: registries.watch,
+            channels: registries.channels,
         }
     }
 
     /// The watch registry: background commands, agent runs, room operations.
     pub fn watch(&self) -> crate::watch::WatchHandle {
         self.watch.clone()
+    }
+
+    /// The rooms, and the main agent's inbox.
+    pub fn channels(&self) -> crate::channels::ChannelHandle {
+        self.channels.clone()
     }
 
     /// Attach a frontend. The attachment sees no event until it takes a

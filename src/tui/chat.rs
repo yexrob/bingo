@@ -3079,7 +3079,7 @@ impl Chat {
             .join(format!("{}.json", transcript.name()));
         match crate::share::ShareStore::load_or_create(&path) {
             Ok(store) => {
-                self.session.channels.align_with_share(&store);
+                self.session.channels.align_with_share(store.clone());
                 self.session.agents.attach_share(store.clone());
                 self.session.channels.attach_share(store);
             }

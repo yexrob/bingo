@@ -218,6 +218,7 @@ fn a_leading_hash_offers_the_rooms_and_what_a_post_will_do() {
             vec![crate::channels::USER_NAME.to_string()],
             crate::channels::ChannelMode::Free,
         )
+        .now()
         .unwrap_or_else(|e| panic!("room: {e}"));
     chat.session
         .channels
@@ -226,6 +227,7 @@ fn a_leading_hash_offers_the_rooms_and_what_a_post_will_do() {
             vec!["scout".to_string()],
             crate::channels::ChannelMode::Free,
         )
+        .now()
         .unwrap_or_else(|e| panic!("room: {e}"));
 
     chat.set_input("#");
