@@ -139,8 +139,8 @@ pub enum Reclaim {
     /// It was still pending and is now out of the queue: the composer owns it.
     Pulled(Box<QueuedInput>),
     /// The barrier took it first. The pull-back is a no-op — the text is in the
-    /// request already.
-    Absorbed,
+    /// request already — and the entry it lost to is named.
+    Absorbed(QueueId),
     /// There was nothing to pull.
     Empty,
 }
@@ -524,11 +524,10 @@ impl InputQueue {
                     // Nothing pending. If a barrier just took the tail, the
                     // pull-back lost the race and must be a no-op rather than a
                     // fall-through to the history walk.
-                    let lost = !queue.absorbed.is_empty();
-                    let _ = reply.send(if lost {
-                        Reclaim::Absorbed
-                    } else {
-                        Reclaim::Empty
+                    let lost = queue.absorbed.last().cloned();
+                    let _ = reply.send(match lost {
+                        Some(id) => Reclaim::Absorbed(id),
+                        None => Reclaim::Empty,
                     });
                     return Vec::new();
                 };
@@ -775,9 +774,8 @@ mod tests {
         let (mut queue, mut mint) = queue();
         add(&mut queue, &mut mint, prose("use tabs"));
         assert_eq!(absorb(&mut queue, &mut mint).len(), 1);
-        assert_eq!(
-            reclaim(&mut queue, &mut mint),
-            Reclaim::Absorbed,
+        assert!(
+            matches!(reclaim(&mut queue, &mut mint), Reclaim::Absorbed(_)),
             "the barrier took it: the pull-back must be a no-op"
         );
 
@@ -799,7 +797,10 @@ mod tests {
         let (mut queue, mut mint) = queue();
         add(&mut queue, &mut mint, prose("use tabs"));
         let _ = absorb(&mut queue, &mut mint);
-        assert_eq!(reclaim(&mut queue, &mut mint), Reclaim::Absorbed);
+        assert!(matches!(
+            reclaim(&mut queue, &mut mint),
+            Reclaim::Absorbed(_)
+        ));
         assert_eq!(drain(&mut queue, &mut mint), None);
         assert_eq!(
             reclaim(&mut queue, &mut mint),

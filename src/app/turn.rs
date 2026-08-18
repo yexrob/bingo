@@ -180,6 +180,11 @@ impl TurnView {
         self.active.contains_key(conversation)
     }
 
+    /// How many turns are running anywhere. What a shutdown reports it stopped.
+    pub fn active_count(&self) -> usize {
+        self.active.len()
+    }
+
     /// Whether this turn has been asked to stop.
     pub fn is_interrupted(&self, turn: &TurnId) -> bool {
         self.interrupting.contains(turn)

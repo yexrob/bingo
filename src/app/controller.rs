@@ -1118,6 +1118,7 @@ impl Controller {
         expected_revision: Option<u64>,
     ) -> Result<AppReply, AppError> {
         use crate::app_server::protocol::error::ProtocolErrorKind;
+        use crate::app_server::protocol::requests::ReclaimOutcome;
         let Some(conversation) = self.conversations.key(conversation_id).cloned() else {
             return Err(AppError::Refused(ProtocolErrorKind::ConversationNotFound));
         };
@@ -1139,6 +1140,29 @@ impl Controller {
         let outcome =
             crate::app::answer::Answer::new(answer, crate::app::queue::Reclaim::Empty).now();
         let (revision, _) = self.queue.stand(&conversation);
+        // Reclaim and absorption are one race with one winner, and the outcome
+        // names which: the entry that came back, or the identifier of the one a
+        // barrier already took.
+        let outcome = match outcome {
+            crate::app::queue::Reclaim::Pulled(entry) => {
+                let origin_conversation_id = self.conversation_id(&entry.on);
+                ReclaimOutcome::Reclaimed {
+                    entry: QueueEntry {
+                        id: entry.id,
+                        origin_conversation_id,
+                        text: entry.text,
+                        attachments: entry.attachments,
+                        steer_eligible: false,
+                        queued_at: entry.queued_at,
+                    },
+                    revision,
+                }
+            }
+            crate::app::queue::Reclaim::Absorbed(queue_id) => {
+                ReclaimOutcome::AlreadyAbsorbed { queue_id }
+            }
+            crate::app::queue::Reclaim::Empty => ReclaimOutcome::Empty,
+        };
         Ok(AppReply::Reclaimed {
             outcome: Box::new(outcome),
             revision,
@@ -1608,8 +1632,11 @@ impl Controller {
                 self.channels.log_read(room, seq);
             }
         }
-        self.dirty.insert(key);
-        Ok(AppReply::Accepted)
+        self.dirty.insert(key.clone());
+        // The reader's own view comes back with the reply rather than only as
+        // the event that follows it: a client that just cleared a badge should
+        // not have to wait for a notification to know it is clear.
+        Ok(AppReply::Marked(Box::new(self.summarize(&key))))
     }
 
     /// Record where an attachment's snapshot cut fell. Everything at or below it
@@ -3284,10 +3311,15 @@ mod tests {
         })
         .await
         .unwrap_or_else(|error| panic!("{error}"));
-        assert_eq!(
-            next_reply(&mut link, RequestId(3)).await,
-            Ok(AppReply::Accepted)
-        );
+        // The reply is the reader's own view, so a client that just cleared a
+        // badge does not have to wait for a notification to know it is clear.
+        match next_reply(&mut link, RequestId(3)).await {
+            Ok(AppReply::Marked(summary)) => {
+                assert_eq!(summary.unread, 0);
+                assert_eq!(summary.mentions, 0);
+            }
+            other => panic!("expected the marked view, got {other:?}"),
+        }
     }
 
     /// A core whose settings and directories are real, so the reads have

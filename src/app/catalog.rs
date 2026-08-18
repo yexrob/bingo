@@ -27,7 +27,7 @@ use crate::app::snapshot::{
 use crate::settings::Settings;
 
 /// The reserved name of the endpoint configured at the top level of settings.
-const DEFAULT_PROVIDER: &str = "default";
+pub const DEFAULT_PROVIDER: &str = "default";
 
 /// Everything the catalogs are read from.
 ///

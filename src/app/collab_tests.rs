@@ -546,7 +546,18 @@ async fn reading_a_room_never_marks_it_read() {
             },
         )
         .await,
-        Ok(AppReply::Accepted)
+        Ok(AppReply::Marked(Box::new(ConversationSummary {
+            unread: 0,
+            mentions: 0,
+            read_cursor: Some(
+                again
+                    .conversation
+                    .last_item_id
+                    .clone()
+                    .unwrap_or_else(|| panic!("the room has an item to have read"))
+            ),
+            ..again.conversation.clone()
+        })))
     );
     let _ = drain(&mut link).await;
     let after = read_conversation(&mut link, &room, None)
@@ -615,13 +626,17 @@ async fn a_resumed_session_comes_back_to_its_rooms_and_its_unread_marks() {
                 11,
                 AppCommand::MarkRead {
                     conversation_id: room.clone(),
-                    last_item_id: Some(second),
+                    last_item_id: Some(second.clone()),
                     last_room_seq: Some(3),
                     expected_revision: snapshot.conversation.revision,
                 },
             )
             .await,
-            Ok(AppReply::Accepted),
+            Ok(AppReply::Marked(Box::new(ConversationSummary {
+                unread: 1,
+                read_cursor: Some(second.clone()),
+                ..snapshot.conversation.clone()
+            }))),
             "the client marked the view it had just read"
         );
         let _ = drain(&mut link).await;

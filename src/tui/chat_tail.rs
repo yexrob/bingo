@@ -1565,7 +1565,7 @@ impl super::Chat {
             // twice.
             match self.session.queue.reclaim_tail(self.active.clone()).now() {
                 crate::app::queue::Reclaim::Pulled(entry) => self.set_input(entry.text),
-                crate::app::queue::Reclaim::Absorbed | crate::app::queue::Reclaim::Empty => {}
+                crate::app::queue::Reclaim::Absorbed(_) | crate::app::queue::Reclaim::Empty => {}
             }
             self.dirty = true;
             return true;

@@ -164,13 +164,15 @@ pub enum AppReply {
         turn_id: crate::app::ids::TurnId,
         accepted: bool,
     },
+    /// A conversation's attention cursors moved, and this is where they stand.
+    Marked(Box<crate::app::snapshot::ConversationSummary>),
     /// A prompt was answered, with the ordered item the resolution committed.
     Responded {
         item_id: Option<crate::app::ids::ItemId>,
     },
     /// What the pull-back found, and where the queue stands after it.
     Reclaimed {
-        outcome: Box<crate::app::queue::Reclaim>,
+        outcome: Box<crate::app_server::protocol::requests::ReclaimOutcome>,
         revision: u64,
     },
     /// A persisted session was asked for by name and is gone.
@@ -358,13 +360,18 @@ impl AppCore {
     /// process still holds — and they answer with their shutdown values rather
     /// than blocking, because there is nobody left to answer them.
     pub async fn close(&self) {
+        self.close_with(crate::app::snapshot::SessionCloseReason::Requested)
+            .await;
+    }
+
+    /// Close the session and say why. A transport closing one session to open
+    /// another reports `Replaced`, which is what tells a client the identifiers
+    /// it was holding died of a replacement rather than of a request.
+    pub async fn close_with(&self, reason: crate::app::snapshot::SessionCloseReason) {
         let (reply, done) = oneshot::channel();
         if self
             .control
-            .send(controller::Control::Close {
-                reason: crate::app::snapshot::SessionCloseReason::Requested,
-                reply,
-            })
+            .send(controller::Control::Close { reason, reply })
             .is_ok()
         {
             let _ = done.await;
