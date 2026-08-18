@@ -416,7 +416,7 @@ impl super::Chat {
     ///
     /// Its history lives in the registry rather than in a transcript file, so
     /// the rewrite is read-summarise-write and the write is refused while a
-    /// turn is running ([`crate::agents::AgentRegistry::replace_history`]).
+    /// turn is running ([`crate::agents::AgentHandle::replace_history`]).
     fn compact_agent(&mut self, name: String) {
         let Some((history, _, state)) = self.session.agents.view_of(&name) else {
             self.push_slash_error(format!(
@@ -476,7 +476,7 @@ impl super::Chat {
             }
             let kept = messages.len().saturating_sub(1);
             let tokens = crate::compact::estimate_tokens(&session.system, &messages, &[]);
-            if !registry.replace_history(&name, messages) {
+            if !registry.replace_history(&name, messages).await {
                 unpin();
                 console.send(UiEvent::SlashError(format!(
                     "@{name} started a turn while it was being compacted; its context is unchanged."

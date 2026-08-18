@@ -150,6 +150,7 @@ mod tests {
     fn session_with(depth: usize, channels_on: bool) -> Arc<Session> {
         let mut settings = crate::settings::Settings::default();
         settings.experimental.agent_channels = channels_on;
+        let core = crate::app::AppCore::start(Default::default());
         std::sync::Arc::new(Session {
             client: crate::api::client::Client::new("k".into(), "https://example.com".into()),
             runtime: crate::query::Runtime::new("m".into(), None, Default::default()),
@@ -162,11 +163,11 @@ mod tests {
             user_config_dir: std::env::temp_dir().join(".config"),
             quiet: true,
             compact_failures: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            watch: crate::app::AppCore::start(Default::default()).watch(),
+            watch: core.watch(),
             tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), "test")),
             expand_tasks: tokio::sync::watch::channel(false).0,
-            agents: crate::agents::AgentRegistry::new(),
-            channels: crate::app::AppCore::start(Default::default()).channels(),
+            agents: core.agents(),
+            channels: core.channels(),
             instance: None,
             attachments: crate::api::image::Attachments::new(),
         })

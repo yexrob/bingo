@@ -2428,7 +2428,7 @@ impl super::Chat {
     /// tree's `k`, the dialog's `x`, the zoom's — so there is one path, one
     /// warning and one watch transition.
     pub(crate) fn stop_agent(&mut self, name: &str) {
-        match self.session.agents.stop(name) {
+        match self.session.agents.stop(name).now() {
             Ok((watch_id, dropped)) => {
                 if let Some(id) = watch_id {
                     self.session.watch.set_state(

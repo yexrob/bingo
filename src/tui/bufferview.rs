@@ -349,15 +349,18 @@ mod tests {
 
     /// An instance with history already behind it.
     fn seed_agent(chat: &Chat, name: &str, history: Vec<ApiMessage>) {
-        chat.session.agents.insert(
-            name,
-            AgentKind::Hire,
-            None,
-            "test instance".to_string(),
-            chat.session.clone(),
-        );
+        chat.session
+            .agents
+            .insert(
+                name,
+                AgentKind::Hire,
+                None,
+                "test instance".to_string(),
+                chat.session.clone(),
+            )
+            .now();
         if !history.is_empty() {
-            chat.session.agents.finish(name, history, 0);
+            chat.session.agents.finish(name, history, 0).now();
         }
     }
 
@@ -387,13 +390,16 @@ mod tests {
     #[test]
     fn team_output_lands_on_the_info_tier() {
         let mut chat = test_chat();
-        chat.session.agents.insert(
-            "dev",
-            AgentKind::Crew,
-            None,
-            "crew member".to_string(),
-            chat.session.clone(),
-        );
+        chat.session
+            .agents
+            .insert(
+                "dev",
+                AgentKind::Crew,
+                None,
+                "crew member".to_string(),
+                chat.session.clone(),
+            )
+            .now();
         chat.refresh_conversations();
         chat.run_slash("team");
 
@@ -440,7 +446,7 @@ mod tests {
             "nothing was written into main's history"
         );
 
-        let items = chat.session.agents.take_running("scout", 0);
+        let items = chat.session.agents.take_running("scout", 0).await;
         let (prompt, _) = crate::tool::agent::absorb_inbox(&chat.session.channels, "scout", &items);
         assert_eq!(
             prompt,

@@ -303,13 +303,17 @@ fn assign(session: &Arc<Session>, cwd: &Path, rest: String) -> Vec<String> {
     };
     let (team, dir) = (node.def.name.clone(), node.dir.clone());
     // The human typed the assignment, so it arrives under their name, not main's.
-    match session.agents.deliver(
-        member,
-        crate::channels::USER_NAME,
-        message,
-        Vec::new(),
-        None,
-    ) {
+    match session
+        .agents
+        .deliver(
+            member,
+            crate::channels::USER_NAME,
+            message,
+            Vec::new(),
+            None,
+        )
+        .now()
+    {
         Ok(_) => {
             // Use the same dispatcher as SendMessage so a slash-command assignment starts now.
             crate::tool::agent::flush_agent_inbox(session, &session.watch);
@@ -339,7 +343,7 @@ fn stop(session: &Arc<Session>, cwd: &Path) -> Vec<String> {
     };
     let mut stopped = Vec::new();
     for (_, m) in tree.members() {
-        if session.agents.stop(&m.name).is_ok() {
+        if session.agents.stop(&m.name).now().is_ok() {
             stopped.push(m.name.clone());
         }
     }
@@ -639,6 +643,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         let project = root.join("proj");
         std::fs::create_dir_all(project.join(".bingo/agents")).unwrap();
+        let core = crate::app::AppCore::start(Default::default());
         let s = Arc::new(Session {
             client: crate::api::client::Client::new("k".into(), "http://x".into()),
             runtime: crate::query::Runtime::new("m".into(), None, Default::default()),
@@ -651,11 +656,11 @@ mod tests {
             user_config_dir: root.join("home").join(".config"),
             quiet: true,
             compact_failures: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            watch: crate::app::AppCore::start(Default::default()).watch(),
+            watch: core.watch(),
             tasks: Arc::new(crate::tasks::TaskStore::new(&root, "t")),
             expand_tasks: tokio::sync::watch::channel(false).0,
-            agents: crate::agents::AgentRegistry::new(),
-            channels: crate::app::AppCore::start(Default::default()).channels(),
+            agents: core.agents(),
+            channels: core.channels(),
             instance: None,
             attachments: crate::api::image::Attachments::new(),
         });
@@ -796,13 +801,15 @@ mod tests {
         std::fs::write(project.join(".bingo/agents/qa.md"), "You are QA.\n").unwrap();
         let _ = new_team(&s, &project, "crew");
         let _ = start(&s, &project);
-        s.agents.insert(
-            "temp",
-            crate::agents::AgentKind::Hire,
-            None,
-            "one-off audit".into(),
-            s.clone(),
-        );
+        s.agents
+            .insert(
+                "temp",
+                crate::agents::AgentKind::Hire,
+                None,
+                "one-off audit".into(),
+                s.clone(),
+            )
+            .now();
 
         let out = list(&s, &project);
         let text = out.join("\n");

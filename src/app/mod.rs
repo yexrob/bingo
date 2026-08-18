@@ -196,6 +196,7 @@ pub struct AppCore {
     /// which is why a session outlives the `AppCore` value it was started from.
     watch: crate::watch::WatchHandle,
     channels: crate::channels::ChannelHandle,
+    agents: crate::agents::AgentHandle,
 }
 
 impl AppCore {
@@ -206,6 +207,7 @@ impl AppCore {
             control,
             watch: registries.watch,
             channels: registries.channels,
+            agents: registries.agents,
         }
     }
 
@@ -217,6 +219,11 @@ impl AppCore {
     /// The rooms, and the main agent's inbox.
     pub fn channels(&self) -> crate::channels::ChannelHandle {
         self.channels.clone()
+    }
+
+    /// The subagent instances.
+    pub fn agents(&self) -> crate::agents::AgentHandle {
+        self.agents.clone()
     }
 
     /// Attach a frontend. The attachment sees no event until it takes a

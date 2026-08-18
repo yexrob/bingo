@@ -3,9 +3,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use serde::Deserialize;
 
-use crate::agents::{
-    AgentDef, AgentKind, AgentRegistry, FollowUp, InboxItem, MAX_FOLLOW_UPS, MsgId,
-};
+use crate::agents::{AgentDef, AgentHandle, AgentKind, FollowUp, InboxItem, MAX_FOLLOW_UPS, MsgId};
 use crate::api::contract::SystemBlock;
 use crate::api::types::Message;
 use crate::channels::ChannelHandle;
@@ -369,12 +367,12 @@ fn subagent_hooks(
     }
 }
 
-/// Start every idle recipient that has mail waiting. `AgentRegistry::flush_pending` claims the
+/// Start every idle recipient that has mail waiting. `AgentHandle::flush_pending` claims the
 /// full inbox atomically, so concurrent dispatchers cannot double-start an instance and every
 /// item present at the receiver's claim point becomes one prompt.
 pub(crate) fn flush_agent_inbox(session: &Arc<Session>, watch: &WatchHandle) {
-    for wake in session.agents.flush_pending() {
-        if !session.agents.accepts_run(&wake.name, wake.run) {
+    for wake in session.agents.flush_pending().now() {
+        if !session.agents.accepts_run(&wake.name, wake.run).now() {
             session.agents.restore_inbox(&wake.name, wake.items);
             continue;
         }
@@ -441,7 +439,7 @@ pub(crate) fn spawn_ack_watchdog(
         };
         loop {
             tokio::time::sleep(timeout).await;
-            match session.agents.follow_up(&agent, id) {
+            match session.agents.follow_up(&agent, id).await {
                 FollowUp::Settled(crate::agents::AckState::Answered { run }) => {
                     if sent > 0 {
                         report(
@@ -726,7 +724,7 @@ pub(crate) fn wakes_owner(items: &[InboxItem]) -> bool {
 /// Returns the watch id of the first run.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_agent_loop(
-    registry: Arc<AgentRegistry>,
+    registry: AgentHandle,
     watch: WatchHandle,
     name: String,
     session: Arc<Session>,
@@ -758,7 +756,7 @@ pub(crate) fn spawn_agent_loop(
     let current_items_for_install = retry_items.clone();
     let handle = tokio::spawn(async move {
         let name = loop_name;
-        if !loop_registry.accepts_run(&name, first_run) {
+        if !loop_registry.accepts_run(&name, first_run).await {
             loop_registry.restore_inbox(&name, retry_items);
             return;
         }
@@ -773,8 +771,10 @@ pub(crate) fn spawn_agent_loop(
             if let Ok(mut progress) = progress.lock() {
                 progress.start_run();
             }
-            loop_registry.set_prompt(&name, prompt.clone());
-            loop_registry.set_progress(&name, Some(progress.clone()));
+            loop_registry.set_prompt(&name, prompt.clone()).now();
+            loop_registry
+                .set_progress(&name, Some(progress.clone()))
+                .now();
             let sink = loop_registry.sink_for(&name);
             // The turn's brackets, and the reason they are a guard: an instance
             // is stopped by aborting its task, which unwinds this future without
@@ -801,14 +801,17 @@ pub(crate) fn spawn_agent_loop(
                 Ok(outcome) => {
                     let text = output.lock().unwrap_or_else(|e| e.into_inner()).clone();
                     let output_chars = text.chars().count();
-                    loop_registry.set_progress(&name, None);
+                    loop_registry.set_progress(&name, None).now();
                     watch.set_state(
                         run.0,
                         WatchState::Done,
                         Some("done".to_string()),
                         Some(serde_json::json!(non_empty(text))),
                     );
-                    match loop_registry.finish(&name, outcome.messages, output_chars) {
+                    match loop_registry
+                        .finish(&name, outcome.messages, output_chars)
+                        .await
+                    {
                         Some(next) => {
                             history = next.history;
                             current_items = next.items;
@@ -835,7 +838,7 @@ pub(crate) fn spawn_agent_loop(
                     }
                 }
                 Err(e) => {
-                    loop_registry.set_progress(&name, None);
+                    loop_registry.set_progress(&name, None).now();
                     loop_registry.restore_inbox(&name, current_items);
                     watch.set_state(
                         run.0,
@@ -849,12 +852,16 @@ pub(crate) fn spawn_agent_loop(
             }
         }
     });
-    let _ = registry.set_abort_if_running(
-        &name,
-        first_run,
-        handle.abort_handle(),
-        current_items_for_install,
-    );
+    // Installed before the caller moves on: the run is already spawned, and an
+    // abort handle that arrived after a stop would be a stop that did nothing.
+    registry
+        .set_abort_if_running(
+            &name,
+            first_run,
+            handle.abort_handle(),
+            current_items_for_install,
+        )
+        .now();
     first_id
 }
 
@@ -894,7 +901,7 @@ impl AgentTool {
             .clone()
             .or_else(|| def.map(|d| d.name.clone()))
             .unwrap_or_else(|| "agent".to_string());
-        let name = self.session.agents.claim_name(&base);
+        let name = self.session.agents.claim_name(&base).now();
         let sub_session = self.build_sub_session(params, def, &name, cwd)?;
         let description = params
             .description
@@ -902,13 +909,16 @@ impl AgentTool {
             .unwrap_or_else(|| excerpt(&params.prompt));
         // Every spawn from this tool is a hire, never a member: the blueprint is the only
         // thing that makes a crew, and it is written by the user's confirmation alone (D53).
-        self.session.agents.insert(
-            &name,
-            AgentKind::Hire,
-            def.map(|d| d.name.clone()),
-            description.clone(),
-            sub_session.clone(),
-        );
+        self.session
+            .agents
+            .insert(
+                &name,
+                AgentKind::Hire,
+                def.map(|d| d.name.clone()),
+                description.clone(),
+                sub_session.clone(),
+            )
+            .now();
         record_hire(&self.session, cwd, &name, &description);
         Ok((name, description, sub_session))
     }
@@ -920,7 +930,7 @@ impl AgentTool {
     ) -> Result<ToolResult, ToolError> {
         let def = self.resolve_def(params)?;
         let (name, description, sub_session) = self.spawn_instance(params, def, &ctx.cwd)?;
-        let run = self.session.agents.next_run(&name);
+        let run = self.session.agents.next_run(&name).now();
         let conditions = params
             .notify_on
             .clone()
@@ -1197,11 +1207,11 @@ pub(crate) fn build_sub_session(
 /// Background agent progress: characters produced (for interval polling).
 struct AgentCell {
     chars: std::sync::atomic::AtomicUsize,
-    registry: Arc<AgentRegistry>,
+    registry: AgentHandle,
 }
 
 impl AgentCell {
-    fn new(registry: Arc<AgentRegistry>) -> Self {
+    fn new(registry: AgentHandle) -> Self {
         Self {
             chars: std::sync::atomic::AtomicUsize::new(0),
             registry,
@@ -1314,7 +1324,7 @@ impl Tool for AgentTool {
 
         let def = self.resolve_def(&params)?;
         let (name, description, sub_session) = self.spawn_instance(&params, def, &ctx.cwd)?;
-        let _ = self.session.agents.next_run(&name);
+        let _ = self.session.agents.next_run(&name).await;
 
         // Foreground sub-agents can also be watched: Running (characters produced) → Done/Failed.
         let cell = Arc::new(AgentCell::new(self.session.agents.clone()));
@@ -1339,10 +1349,14 @@ impl Tool for AgentTool {
         if let Ok(mut progress) = progress.lock() {
             progress.start_run();
         }
-        self.session.agents.set_prompt(&name, params.prompt.clone());
         self.session
             .agents
-            .set_progress(&name, Some(progress.clone()));
+            .set_prompt(&name, params.prompt.clone())
+            .await;
+        self.session
+            .agents
+            .set_progress(&name, Some(progress.clone()))
+            .await;
         let sink = self.session.agents.sink_for(&name);
         let turn = sink.clone().map(TurnBrackets::open);
         let host = subagent_hooks(
@@ -1368,7 +1382,7 @@ impl Tool for AgentTool {
         )
         .await;
         drop(turn);
-        self.session.agents.set_progress(&name, None);
+        self.session.agents.set_progress(&name, None).await;
         match sync_run {
             Ok(outcome) => {
                 let text = output.lock().unwrap_or_else(|e| e.into_inner()).clone();
@@ -1382,10 +1396,11 @@ impl Tool for AgentTool {
                 );
                 // On the synchronous path tools run serially, so queued messages never reach here;
                 // if one somehow does, hand it to the background loop (same continuation mechanism).
-                if let Some(next) =
-                    self.session
-                        .agents
-                        .finish(&name, outcome.messages, output_chars)
+                if let Some(next) = self
+                    .session
+                    .agents
+                    .finish(&name, outcome.messages, output_chars)
+                    .await
                 {
                     let (prompt, images) = absorb_inbox(&sub_session.channels, &name, &next.items);
                     let items = next.items;
@@ -1687,6 +1702,7 @@ impl SendMessageTool {
             .session
             .agents
             .deliver(agent, &self.sender(), &params.message, images, timeout)
+            .await
             .map_err(ToolError::failed)?;
         flush_agent_inbox(&self.session, &ctx.watch);
         let note = match timeout {
@@ -1913,7 +1929,7 @@ impl Tool for AgentControlTool {
             }
             AgentAction::Stop => {
                 let name = Self::require_agent(&params)?;
-                let (watch_id, dropped) = registry.stop(name).map_err(ToolError::failed)?;
+                let (watch_id, dropped) = registry.stop(name).await.map_err(ToolError::failed)?;
                 let lost = if dropped > 0 {
                     format!(", {dropped} undelivered instructions discarded")
                 } else {
@@ -1935,7 +1951,7 @@ impl Tool for AgentControlTool {
             AgentAction::Delete => {
                 let name = Self::require_agent(&params)?;
                 self.session.channels.remove_member_everywhere(name);
-                let (watch_id, dropped) = registry.remove(name).map_err(ToolError::failed)?;
+                let (watch_id, dropped) = registry.remove(name).await.map_err(ToolError::failed)?;
                 // The ack trail is removed with the instance, so this count is the sender's
                 // last chance to learn that queued instructions never landed.
                 let lost = if dropped > 0 {

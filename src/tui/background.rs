@@ -1091,13 +1091,16 @@ mod tests {
     }
 
     fn seed_agent(chat: &Chat, name: &str) {
-        chat.session.agents.insert(
-            name,
-            AgentKind::Crew,
-            None,
-            format!("{name}'s task"),
-            chat.session.clone(),
-        );
+        chat.session
+            .agents
+            .insert(
+                name,
+                AgentKind::Crew,
+                None,
+                format!("{name}'s task"),
+                chat.session.clone(),
+            )
+            .now();
     }
 
     fn seed_room(chat: &Chat, name: &str, members: &[&str]) {
@@ -1254,8 +1257,8 @@ mod tests {
         let text = view(&chat);
         assert!(text.contains("2 agents · 1 active shell"), "{text}");
 
-        chat.session.agents.stop("zoe").expect("stopped");
-        chat.session.agents.stop("scout").expect("stopped");
+        chat.session.agents.stop("zoe").now().expect("stopped");
+        chat.session.agents.stop("scout").now().expect("stopped");
         let text = view(&chat);
         assert!(
             text.contains("1 active shell") && !text.contains("agents"),
@@ -1273,7 +1276,7 @@ mod tests {
         seed_agent(&chat, "alpha");
         seed_agent(&chat, "zulu");
         chat.refresh_conversations();
-        chat.session.agents.stop("alpha").expect("stopped");
+        chat.session.agents.stop("alpha").now().expect("stopped");
         chat.open_background_dialog();
         let names: Vec<String> = chat
             .dialog_rows()
@@ -1291,7 +1294,7 @@ mod tests {
         );
 
         // With neither running, the one whose conversation moved last leads.
-        chat.session.agents.stop("zulu").expect("stopped");
+        chat.session.agents.stop("zulu").now().expect("stopped");
         chat.buffers
             .observe(BufferId::Dm("alpha".into()), 4, false, 9);
         let names: Vec<String> = chat
@@ -1350,7 +1353,7 @@ mod tests {
         seed_agent(&chat, "alpha");
         seed_agent(&chat, "zulu");
         chat.refresh_conversations();
-        chat.session.agents.stop("zulu").expect("stopped");
+        chat.session.agents.stop("zulu").now().expect("stopped");
         chat.open_background_dialog();
         assert_eq!(
             chat.dialog_selection(),
@@ -1364,7 +1367,7 @@ mod tests {
         );
 
         // alpha stops: zulu is no longer second, and the cursor is still on it.
-        chat.session.agents.stop("alpha").expect("stopped");
+        chat.session.agents.stop("alpha").now().expect("stopped");
         chat.buffers
             .observe(BufferId::Dm("zulu".into()), 2, false, 7);
         assert_eq!(
@@ -1570,7 +1573,7 @@ mod tests {
             "↑/↓ to select · Enter to view · f to foreground · x to stop · ←/Esc to close"
         );
 
-        chat.session.agents.stop("scout").expect("stopped");
+        chat.session.agents.stop("scout").now().expect("stopped");
         let hint = chat.dialog_hint();
         assert_eq!(
             hint, "↑/↓ to select · Enter to view · f to foreground · ←/Esc to close",
@@ -1614,16 +1617,21 @@ mod tests {
         seed_agent(&chat, "scout");
         chat.session
             .agents
-            .set_prompt("scout", "Find the rendering seam".into());
-        chat.session.agents.set_progress_snapshot(
-            "scout",
-            crate::agents::AgentProgress {
-                started_at: Some(std::time::Instant::now()),
-                output_tokens: 1234,
-                tool_uses: 2,
-                recent_activity: vec!["⏺ Read(src/lexer.rs)".into()],
-            },
-        );
+            .set_prompt("scout", "Find the rendering seam".into())
+            .now();
+        chat.session
+            .agents
+            .set_progress_snapshot(
+                "scout",
+                crate::agents::AgentProgress {
+                    started_at: Some(std::time::Instant::now()),
+                    output_tokens: 1234,
+                    tool_uses: 2,
+                    recent_activity: vec!["⏺ Read(src/lexer.rs)".into()],
+                },
+            )
+            .now();
+        chat.session.agents.settle_now();
         chat.refresh_conversations();
         chat.open_background_dialog();
         chat.background_dialog_key(KeyCode::Enter, KeyModifiers::NONE);

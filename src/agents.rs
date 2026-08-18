@@ -11,7 +11,11 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use tokio::sync::{mpsc, oneshot};
+
 use crate::api::types::Message;
+use crate::app::answer::Answer;
+use crate::app::controller::Control;
 use crate::query::Session;
 
 /// Definition source layer (D31 `/team list` badge; same-name first-wins across layers picks the project layer).
@@ -496,106 +500,114 @@ pub struct ToolAnswer {
     pub is_error: bool,
 }
 
-/// Session-level instance registry (Session holds the Arc; shared by child sessions).
-/// A single lock carries the state machine + inbox: the check-and-claim of delivery
-/// (deposit/deliver) and turn finalization (finish) happen atomically under one lock,
-/// so no wakeup is ever lost.
+/// One instance as a reader sees it.
+///
+/// Held behind an `Arc` in [`Roster`] so republishing one instance's change
+/// does not copy every other instance's history. The session and the progress
+/// cell travel as handles rather than as copies, because both are read *live*:
+/// a row's model, its permission mode and its token count all change without the
+/// registry hearing about it, and a snapshot that froze them would stop the
+/// clock on a running turn.
+struct AgentRow {
+    def: Option<String>,
+    description: String,
+    prompt: String,
+    state: AgentState,
+    kind: AgentKind,
+    last_active: Instant,
+    history: Vec<Message>,
+    stamps: Vec<u64>,
+    inbox: Vec<InboxItem>,
+    /// Read by the tests that assert the bridge record; no surface draws it
+    /// directly (the DM view reads it through the page walk).
+    #[cfg_attr(not(test), allow(dead_code))]
+    in_flight: Vec<(MsgId, String, String)>,
+    acks: Vec<Ack>,
+    session: Arc<Session>,
+    progress: Option<Arc<Mutex<AgentProgress>>>,
+}
+
+/// The replacement snapshot the registry publishes after every change.
+#[derive(Default)]
+pub struct Roster {
+    instances: std::collections::BTreeMap<String, Arc<AgentRow>>,
+    /// Whether a share document is attached.
+    #[cfg_attr(not(test), allow(dead_code))]
+    shared: bool,
+    /// The permission prompt subagents borrow, and the console channel their
+    /// turns are written to. Attached once by whoever owns the screen; a
+    /// headless run has neither and says so rather than inventing one.
+    ask: Option<Arc<crate::query::AskFn>>,
+    events: Option<crate::ui::EventSink>,
+}
+
+/// Which instances a change touched, so republishing can keep the rest.
+enum Touched {
+    None,
+    One(String),
+    Every,
+}
+
+/// The instance registry's state, owned by the session actor.
+///
+/// What used to be a single lock carrying the state machine and the inbox — so
+/// that the check-and-claim of delivery and turn finalization could not
+/// interleave — is now the actor's one loop, which gives the same atomicity
+/// across all three registries rather than within one.
 pub struct AgentRegistry {
-    inner: Mutex<HashMap<String, Entry>>,
+    inner: HashMap<String, Entry>,
     /// Share persistence (Option semantics: behavior is unchanged when not attached; once attached, insert/finish/stop sync snapshots).
-    share: Mutex<Option<Arc<crate::share::ShareStore>>>,
+    share: Option<Arc<crate::share::ShareStore>>,
+    /// Where the attached document's disk writes happen — never here.
+    saver: Option<crate::share::ShareSaver>,
     /// Permission prompt of the session that owns the UI. Subagents have none of their own, so
     /// they borrow this one; the registry is the single place every spawn path can reach it from
     /// (the Agent tool, channel delivery, and the TUI channel room alike).
-    ask: Mutex<Option<Arc<crate::query::AskFn>>>,
+    ask: Option<Arc<crate::query::AskFn>>,
     /// The console's event channel, attached by whichever front end owns the
     /// screen. Every spawn path reaches a run's UI through the registry already
     /// (`ask`), and a run's stream is the same kind of borrowing: the instance
     /// has no surface of its own, so it writes onto the surface that does.
-    events: Mutex<Option<crate::ui::EventSink>>,
+    events: Option<crate::ui::EventSink>,
     /// Monotonic message id source (registry-wide, so ids never collide across instances).
-    next_msg: std::sync::atomic::AtomicU64,
+    next_msg: u64,
     /// Inbox generation: every accepted item advances this watch channel. Receivers wait on it
     /// between tool rounds so a busy agent does not depend on the sender reaching a boundary.
     inbox_tx: tokio::sync::watch::Sender<u64>,
+    view: tokio::sync::watch::Sender<Arc<Roster>>,
 }
 
 impl AgentRegistry {
-    pub fn new() -> Arc<Self> {
-        let (inbox_tx, _) = tokio::sync::watch::channel(0);
-        Arc::new(Self {
-            inner: Mutex::new(HashMap::new()),
-            share: Mutex::new(None),
-            ask: Mutex::new(None),
-            events: Mutex::new(None),
-            next_msg: std::sync::atomic::AtomicU64::new(1),
-            inbox_tx,
-        })
-    }
-
-    pub fn subscribe_inbox(&self) -> tokio::sync::watch::Receiver<u64> {
-        self.inbox_tx.subscribe()
-    }
-
     fn notify_inbox(&self) {
         self.inbox_tx.send_modify(|generation| *generation += 1);
     }
 
-    fn mint_msg_id(&self) -> MsgId {
-        MsgId(
-            self.next_msg
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-        )
+    fn mint_msg_id(&mut self) -> MsgId {
+        let id = MsgId(self.next_msg);
+        self.next_msg += 1;
+        id
     }
 
     /// Replace share persistence for future instance changes.
-    pub fn attach_share(&self, store: Arc<crate::share::ShareStore>) {
-        *self.share.lock().unwrap_or_else(|e| e.into_inner()) = Some(store);
-    }
-
-    pub fn detach_share(&self) {
-        *self.share.lock().unwrap_or_else(|e| e.into_inner()) = None;
-    }
-
-    #[cfg(test)]
-    pub fn has_share(&self) -> bool {
-        self.share
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .is_some()
-    }
-
-    /// Attach the prompt surface subagents borrow (called once by whoever owns the UI).
-    pub fn attach_ask(&self, ask: Arc<crate::query::AskFn>) {
-        *self.ask.lock().unwrap_or_else(|e| e.into_inner()) = Some(ask);
-    }
-
-    pub fn ask_fn(&self) -> Option<Arc<crate::query::AskFn>> {
-        self.ask.lock().unwrap_or_else(|e| e.into_inner()).clone()
-    }
-
-    /// Attach the console's event channel (the front end does this once).
-    pub fn set_events(&self, events: crate::ui::EventSink) {
-        *self.events.lock().unwrap_or_else(|e| e.into_inner()) = Some(events);
+    fn attach_share(&mut self, store: Arc<crate::share::ShareStore>) {
+        self.saver = Some(crate::share::ShareSaver::spawn(store.clone()));
+        self.share = Some(store);
     }
 
     /// A sink bound to `name`'s conversation, or `None` with no front end
     /// attached — an embedded or headless run, whose turns nobody is watching.
-    pub fn sink_for(&self, name: &str) -> Option<crate::ui::EventSink> {
+    fn sink_for(&self, name: &str) -> Option<crate::ui::EventSink> {
         self.events
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
             .as_ref()
             .map(|sink| sink.bound_to(crate::ui::ConvKey::Agent(name.to_string())))
     }
 
     /// Write an instance's latest snapshot into the share document (no-op without a store).
     fn sync_share(&self, name: &str) {
-        let Some(store) = self.share.lock().unwrap_or_else(|e| e.into_inner()).clone() else {
+        let Some(store) = self.share.as_ref() else {
             return;
         };
-        let inner = self.lock();
-        let Some(entry) = inner.get(name) else {
+        let Some(entry) = self.inner.get(name) else {
             return;
         };
         store.upsert_agent(
@@ -605,18 +617,16 @@ impl AgentRegistry {
             entry.state,
             entry.history.clone(),
         );
-        store.persist();
-    }
-
-    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, Entry>> {
-        self.inner.lock().unwrap_or_else(|e| e.into_inner())
+        if let Some(saver) = &self.saver {
+            saver.save();
+        }
     }
 
     /// Claim an instance name: use the base name when free, otherwise append `-2`/`-3`…
     /// (so parallel same-name instances stay distinguishable).
     /// `main`/`user` are reserved for main and the user (channel member names),
     /// `all` for the broadcast mention token, and none are ever handed out.
-    pub fn claim_name(&self, base: &str) -> String {
+    fn claim_name(&self, base: &str) -> String {
         let base = if base.trim().is_empty() {
             "agent"
         } else {
@@ -628,14 +638,14 @@ impl AgentRegistry {
                 || name == crate::channels::ALL_NAME
                 || inner.contains_key(name)
         };
-        let inner = self.lock();
-        if !taken(&inner, base) {
+        let inner = &self.inner;
+        if !taken(inner, base) {
             return base.to_string();
         }
         let mut n = 2;
         loop {
             let candidate = format!("{base}-{n}");
-            if !taken(&inner, &candidate) {
+            if !taken(inner, &candidate) {
                 return candidate;
             }
             n += 1;
@@ -643,15 +653,15 @@ impl AgentRegistry {
     }
 
     /// Register a new instance (state=Running). The name must first go through claim_name.
-    pub fn insert(
-        &self,
+    fn insert(
+        &mut self,
         name: &str,
         kind: AgentKind,
         def: Option<String>,
         description: String,
         session: Arc<Session>,
     ) {
-        self.lock().insert(
+        self.inner.insert(
             name.to_string(),
             Entry {
                 def,
@@ -690,16 +700,15 @@ impl AgentRegistry {
     /// swapping under it would be a persona change mid-sentence. A stopped one comes back
     /// idle — `/team stop` promises start brings it back, and a definition that can never
     /// run again is not one that was refreshed.
-    pub fn refresh(
-        &self,
+    fn refresh(
+        &mut self,
         name: &str,
         def: Option<String>,
         description: String,
         session: Arc<Session>,
     ) -> Refresh {
         let outcome = {
-            let mut inner = self.lock();
-            let Some(entry) = inner.get_mut(name) else {
+            let Some(entry) = self.inner.get_mut(name) else {
                 return Refresh::Missing;
             };
             if entry.state == AgentState::Running {
@@ -740,8 +749,8 @@ impl AgentRegistry {
     /// still owed an answer to, and at least one run behind it (a hire the loop has not
     /// picked up yet is not finished, it is unstarted). A hire main stopped is released on
     /// the spot — it will never run again, and holding the name serves nobody.
-    pub fn release_hires(&self) -> Vec<String> {
-        let mut inner = self.lock();
+    fn release_hires(&mut self) -> Vec<String> {
+        let inner = &mut self.inner;
         if !inner
             .values()
             .any(|e| e.kind == AgentKind::Crew && e.state != AgentState::Stopped)
@@ -776,46 +785,22 @@ impl AgentRegistry {
         released
     }
 
-    pub fn set_prompt(&self, name: &str, prompt: String) {
-        if let Some(entry) = self.lock().get_mut(name) {
+    fn set_prompt(&mut self, name: &str, prompt: String) {
+        if let Some(entry) = self.inner.get_mut(name) {
             entry.prompt = prompt;
         }
     }
 
-    pub fn set_progress(&self, name: &str, progress: Option<Arc<Mutex<AgentProgress>>>) {
-        if let Some(entry) = self.lock().get_mut(name) {
+    fn set_progress(&mut self, name: &str, progress: Option<Arc<Mutex<AgentProgress>>>) {
+        if let Some(entry) = self.inner.get_mut(name) {
             entry.progress = progress;
         }
     }
 
-    #[cfg(test)]
-    pub fn set_progress_snapshot(&self, name: &str, progress: AgentProgress) {
-        self.set_progress(name, Some(Arc::new(Mutex::new(progress))));
-    }
-
-    pub fn touch(&self, name: &str) {
-        if let Some(entry) = self.lock().get_mut(name) {
+    fn touch(&mut self, name: &str) {
+        if let Some(entry) = self.inner.get_mut(name) {
             entry.last_active = Instant::now();
         }
-    }
-
-    /// Instance view data (None if the instance doesn't exist).
-    pub fn view_of(&self, name: &str) -> Option<AgentView> {
-        let inner = self.lock();
-        let entry = inner.get(name)?;
-        Some((entry.history.clone(), entry.stamps.clone(), entry.state))
-    }
-
-    /// Whether an instance belongs to the given project directory.
-    pub fn is_in_project(&self, name: &str, cwd: &Path) -> bool {
-        self.lock()
-            .get(name)
-            .is_some_and(|entry| entry.session.cwd() == cwd)
-    }
-
-    /// Instance depth (channel cohort check: only direct subagents with depth==1 may join a channel).
-    pub fn depth_of(&self, name: &str) -> Option<usize> {
-        self.lock().get(name).map(|e| e.session.depth)
     }
 
     /// The permission mode this instance runs under (D105).
@@ -825,10 +810,6 @@ impl AgentRegistry {
     /// mode and leaves the leader's alone (`PromptInput.tsx:1410-1447`; the
     /// field is declared "cycled independently via Shift+Tab when viewing",
     /// `InProcessTeammateTask/types.ts:44`).
-    pub fn permission_mode_of(&self, name: &str) -> Option<crate::permission::PermissionMode> {
-        self.lock().get(name).map(|e| e.session.permission_mode)
-    }
-
     /// Point an instance at a session carrying `mode`, and say whether that
     /// changed anything.
     ///
@@ -838,9 +819,8 @@ impl AgentRegistry {
     /// task store still point at the same state. The run **in flight** captured
     /// the old `Arc` and keeps its mode; the next one — a wake, a resume, a
     /// follow-up — reads this.
-    pub fn set_permission_mode(&self, name: &str, mode: crate::permission::PermissionMode) -> bool {
-        let mut inner = self.lock();
-        let Some(entry) = inner.get_mut(name) else {
+    fn set_permission_mode(&mut self, name: &str, mode: crate::permission::PermissionMode) -> bool {
+        let Some(entry) = self.inner.get_mut(name) else {
             return false;
         };
         if entry.session.permission_mode == mode {
@@ -860,10 +840,6 @@ impl AgentRegistry {
     /// transcript of that instance rather than the console's. Compacting
     /// through the console's own session would append the marker to the
     /// console's transcript, which is the wrong record.
-    pub fn session_of(&self, name: &str) -> Option<Arc<Session>> {
-        self.lock().get(name).map(|e| e.session.clone())
-    }
-
     /// Replace an instance's stored context with a rewritten one — `/compact`
     /// on its page, and nothing else.
     ///
@@ -873,10 +849,9 @@ impl AgentRegistry {
     /// overwritten by the very next round. The check reads the state under the
     /// same lock the write takes, so a run that starts between the console's
     /// look and its write loses the race rather than the work.
-    pub fn replace_history(&self, name: &str, history: Vec<Message>) -> bool {
+    fn replace_history(&mut self, name: &str, history: Vec<Message>) -> bool {
         let replaced = {
-            let mut inner = self.lock();
-            let Some(entry) = inner.get_mut(name) else {
+            let Some(entry) = self.inner.get_mut(name) else {
                 return false;
             };
             if entry.state == AgentState::Running {
@@ -901,15 +876,14 @@ impl AgentRegistry {
         replaced
     }
 
-    pub fn set_abort_if_running(
-        &self,
+    fn set_abort_if_running(
+        &mut self,
         name: &str,
         run: u64,
         abort: tokio::task::AbortHandle,
         items: Vec<InboxItem>,
     ) -> bool {
-        let mut inner = self.lock();
-        let Some(entry) = inner.get_mut(name) else {
+        let Some(entry) = self.inner.get_mut(name) else {
             abort.abort();
             return false;
         };
@@ -936,8 +910,8 @@ impl AgentRegistry {
     }
 
     /// Next run sequence number (starting at 1).
-    pub fn next_run(&self, name: &str) -> u64 {
-        match self.lock().get_mut(name) {
+    fn next_run(&mut self, name: &str) -> u64 {
+        match self.inner.get_mut(name) {
             Some(entry) => {
                 entry.runs += 1;
                 entry.last_active = Instant::now();
@@ -948,8 +922,8 @@ impl AgentRegistry {
     }
 
     /// Record the watch line of the current turn.
-    pub fn set_run_watch(&self, name: &str, id: crate::watch::WatchId) {
-        if let Some(entry) = self.lock().get_mut(name) {
+    fn set_run_watch(&mut self, name: &str, id: crate::watch::WatchId) {
+        if let Some(entry) = self.inner.get_mut(name) {
             entry.watch_id = Some(id);
         }
     }
@@ -961,15 +935,14 @@ impl AgentRegistry {
     /// `output_chars` is the final amount of text produced by this query. A message is answered
     /// only when text was produced after it entered the query; earlier prose cannot acknowledge a
     /// later instruction.
-    pub fn finish(
-        &self,
+    fn finish(
+        &mut self,
         name: &str,
         history: Vec<Message>,
         output_chars: usize,
     ) -> Option<Continuation> {
         let result = {
-            let mut inner = self.lock();
-            let entry = inner.get_mut(name)?;
+            let entry = self.inner.get_mut(name)?;
             entry.last_active = Instant::now();
             // Stamp the new tail with now: history normally only grows. Shorter
             // means it was rewritten (compaction) and the old clocks no longer
@@ -1010,11 +983,10 @@ impl AgentRegistry {
     /// holder and nothing else does. The caller starts each returned run;
     /// draining the inbox in one pass makes the batch boundary the receiver's
     /// actual claim point.
-    pub fn flush_pending(&self) -> Vec<Wake> {
+    fn flush_pending(&mut self) -> Vec<Wake> {
         let mut woken = Vec::new();
         {
-            let mut inner = self.lock();
-            for (name, entry) in inner.iter_mut() {
+            for (name, entry) in self.inner.iter_mut() {
                 if entry.state != AgentState::Idle || !inbox_wakes(entry) {
                     continue;
                 }
@@ -1039,10 +1011,9 @@ impl AgentRegistry {
 
     /// Put a direct message into one running instance's current query. Unlike a new run, this
     /// keeps the run number and records the output offset at which the message entered.
-    pub fn take_running(&self, name: &str, output_chars: usize) -> Vec<InboxItem> {
+    fn take_running(&mut self, name: &str, output_chars: usize) -> Vec<InboxItem> {
         let items = {
-            let mut inner = self.lock();
-            let Some(entry) = inner.get_mut(name) else {
+            let Some(entry) = self.inner.get_mut(name) else {
                 return Vec::new();
             };
             if entry.state != AgentState::Running || entry.inbox.is_empty() {
@@ -1064,12 +1035,11 @@ impl AgentRegistry {
 
     /// Turn failed before the claimed batch completed: restore it to the front of the inbox and
     /// make its direct-message receipts queued again so the recovery dispatcher can retry it.
-    pub fn restore_inbox(&self, name: &str, mut items: Vec<InboxItem>) {
+    fn restore_inbox(&mut self, name: &str, mut items: Vec<InboxItem>) {
         if items.is_empty() {
             return;
         }
-        let mut inner = self.lock();
-        let Some(entry) = inner.get_mut(name) else {
+        let Some(entry) = self.inner.get_mut(name) else {
             return;
         };
         if entry.state == AgentState::Stopped {
@@ -1099,21 +1069,20 @@ impl AgentRegistry {
         }
         items.append(&mut entry.inbox);
         entry.inbox = items;
-        drop(inner);
         self.notify_inbox();
     }
 
     /// A claimed idle run may be stopped before its task is spawned. Re-checking under the
     /// registry lock closes that gap without exposing the entry or holding the lock across spawn.
-    pub fn accepts_run(&self, name: &str, run: u64) -> bool {
-        self.lock()
+    fn accepts_run(&self, name: &str, run: u64) -> bool {
+        self.inner
             .get(name)
             .is_some_and(|entry| entry.state == AgentState::Running && entry.runs == run)
     }
 
     /// Turn failed: keep the pre-failure history, switch to Idle (retryable via SendMessage).
-    pub fn mark_idle(&self, name: &str) {
-        if let Some(entry) = self.lock().get_mut(name)
+    fn mark_idle(&mut self, name: &str) {
+        if let Some(entry) = self.inner.get_mut(name)
             && entry.state != AgentState::Stopped
         {
             entry.state = AgentState::Idle;
@@ -1126,8 +1095,8 @@ impl AgentRegistry {
     /// absorb the batch between tool rounds. `ack_timeout` records the wait the sender allowed
     /// before the acknowledgement is chased (see `follow_up`); it is a note on the record, not a
     /// timer — the caller owns the clock.
-    pub fn deliver(
-        &self,
+    fn deliver(
+        &mut self,
         name: &str,
         from: &str,
         message: &str,
@@ -1135,9 +1104,8 @@ impl AgentRegistry {
         ack_timeout: Option<Duration>,
     ) -> Result<MsgId, String> {
         let id = self.mint_msg_id();
-        let mut inner = self.lock();
-        let Some(entry) = inner.get_mut(name) else {
-            let known: Vec<String> = inner.keys().cloned().collect();
+        let Some(entry) = self.inner.get_mut(name) else {
+            let known: Vec<String> = self.inner.keys().cloned().collect();
             return Err(if known.is_empty() {
                 format!("no subagent named {name} (there are no instances right now)")
             } else {
@@ -1182,10 +1150,9 @@ impl AgentRegistry {
         // one place a message back can be observed, and without it a peer's
         // request stays outstanding until the chase gives up on an instance
         // that answered it properly (D137).
-        if let Some(sender) = inner.get_mut(from) {
+        if let Some(sender) = self.inner.get_mut(from) {
             settle_peer_acks(sender, name);
         }
-        drop(inner);
         // The receiver's page shows what it was told, when it was told (D135).
         // A running instance absorbs its mail at its next tool barrier, so
         // without this a user watching one could not see what main had just
@@ -1205,9 +1172,8 @@ impl AgentRegistry {
     /// Re-read one message's record and, while the sender is still owed an answer, put a follow-up
     /// in the receiver's inbox. Reading and enqueueing happen under the single registry lock, so a
     /// turn ending mid-check can never turn a just-answered message into a pointless nudge.
-    pub fn follow_up(&self, name: &str, id: MsgId) -> FollowUp {
-        let mut inner = self.lock();
-        let Some(entry) = inner.get_mut(name) else {
+    fn follow_up(&mut self, name: &str, id: MsgId) -> FollowUp {
+        let Some(entry) = self.inner.get_mut(name) else {
             return FollowUp::Gone;
         };
         let Some(ack) = entry.acks.iter_mut().find(|a| a.id == id) else {
@@ -1233,17 +1199,15 @@ impl AgentRegistry {
             waited,
             delivered,
         });
-        drop(inner);
         self.notify_inbox();
         FollowUp::Sent { round }
     }
 
     /// Queue a channel message. A stopped member is silently skipped — a broadcast doesn't fail
     /// because one member stopped. Returns whether it was accepted.
-    pub fn deposit(&self, name: &str, item: InboxItem) -> bool {
+    fn deposit(&mut self, name: &str, item: InboxItem) -> bool {
         {
-            let mut inner = self.lock();
-            let Some(entry) = inner.get_mut(name) else {
+            let Some(entry) = self.inner.get_mut(name) else {
                 return false;
             };
             if entry.state == AgentState::Stopped {
@@ -1260,70 +1224,15 @@ impl AgentRegistry {
         true
     }
 
-    /// Delivery records for one instance, newest last (None = no such instance).
-    pub fn acks_of(&self, name: &str) -> Option<Vec<Ack>> {
-        Some(self.lock().get(name)?.acks.clone())
-    }
-
-    /// Direct messages still sitting in the inbox, in order, each with its
-    /// sender.
-    ///
-    /// It had one production reader, the away page's echo of a message not yet
-    /// claimed. D134 replaced that for the *user's* own sends, which the console
-    /// echoes at the moment it delivers them — the same moment main's prompt
-    /// enters main's transcript. Main's dispatches and mail get no echo, so a
-    /// user watching a busy instance cannot see what main just asked it until
-    /// the run absorbs it at a barrier; that is a loss, named here rather than
-    /// papered over, and D135 is where the send paths merge and can close it.
-    /// What is left is the delivery assertion the tests make.
-    /// Direct messages claimed by the current run and not yet landed in
-    /// history. The registry's own bookkeeping, asserted here for the same
-    /// reason [`AgentRegistry::pending_of`] is.
-    #[cfg(test)]
-    pub fn in_flight_of(&self, name: &str) -> Vec<(String, String)> {
-        self.lock()
-            .get(name)
-            .map(|entry| {
-                entry
-                    .in_flight
-                    .iter()
-                    .map(|(_, from, text)| (from.clone(), text.clone()))
-                    .collect()
-            })
-            .unwrap_or_default()
-    }
-
-    #[cfg(test)]
-    pub fn pending_of(&self, name: &str) -> Vec<(String, String)> {
-        self.lock()
-            .get(name)
-            .map(|entry| {
-                entry
-                    .inbox
-                    .iter()
-                    .filter_map(|item| match item {
-                        InboxItem::Direct { from, text, .. } => Some((from.clone(), text.clone())),
-                        // A follow-up is the harness chasing an acknowledgement, not something
-                        // the sender wrote — rendering it as their pending message would lie.
-                        InboxItem::Channel { .. }
-                        | InboxItem::FollowUp { .. }
-                        | InboxItem::Unanswered { .. } => None,
-                    })
-                    .collect()
-            })
-            .unwrap_or_default()
-    }
-
     /// Stop: abort a running turn (abort), no longer accept commands; history is kept
     /// and listable. Returns the watch line of the aborted turn (the caller sets
     /// Cancelled); when idle/already stopped there is no active line, returns None (idempotent).
     /// Stopping discards the inbox, so every message still in it is recorded as dropped: a
     /// sender that only ever saw "queued" must be able to find out it was never delivered.
     /// Returns the watch line and how many messages died with it.
-    pub fn stop(&self, name: &str) -> Result<(Option<crate::watch::WatchId>, usize), String> {
+    fn stop(&mut self, name: &str) -> Result<(Option<crate::watch::WatchId>, usize), String> {
         let result = {
-            let mut inner = self.lock();
-            let Some(entry) = inner.get_mut(name) else {
+            let Some(entry) = self.inner.get_mut(name) else {
                 return Err(format!("no subagent named {name}"));
             };
             if entry.state == AgentState::Stopped {
@@ -1345,42 +1254,291 @@ impl AgentRegistry {
 
     /// Remove: stop first, then drop the entry (name released). The ack trail goes with it, so
     /// the dropped count is the sender's last chance to learn what was lost.
-    pub fn remove(&self, name: &str) -> Result<(Option<crate::watch::WatchId>, usize), String> {
+    fn remove(&mut self, name: &str) -> Result<(Option<crate::watch::WatchId>, usize), String> {
         let outcome = self.stop(name)?;
-        self.lock().remove(name);
+        self.inner.remove(name);
         Ok(outcome)
     }
+    /// Republish the reader's snapshot, keeping the `Arc` of every instance the
+    /// change did not touch: one instance's turn ending must not copy the
+    /// histories of all the others.
+    fn publish(&self, touched: Touched) {
+        let previous = self.view.borrow().clone();
+        let mut instances = std::collections::BTreeMap::new();
+        for (name, entry) in &self.inner {
+            let unchanged = match &touched {
+                Touched::None => true,
+                Touched::One(one) => one != name,
+                Touched::Every => false,
+            };
+            let reuse = unchanged
+                .then(|| previous.instances.get(name).cloned())
+                .flatten();
+            instances.insert(
+                name.clone(),
+                reuse.unwrap_or_else(|| {
+                    Arc::new(AgentRow {
+                        def: entry.def.clone(),
+                        description: entry.description.clone(),
+                        prompt: entry.prompt.clone(),
+                        state: entry.state,
+                        kind: entry.kind,
+                        last_active: entry.last_active,
+                        history: entry.history.clone(),
+                        stamps: entry.stamps.clone(),
+                        inbox: entry.inbox.clone(),
+                        in_flight: entry.in_flight.clone(),
+                        acks: entry.acks.clone(),
+                        session: entry.session.clone(),
+                        progress: entry.progress.clone(),
+                    })
+                }),
+            );
+        }
+        let _ = self.view.send(Arc::new(Roster {
+            instances,
+            shared: self.share.is_some(),
+            ask: self.ask.clone(),
+            events: self.events.clone(),
+        }));
+    }
 
-    /// Snapshot of all instances (sorted by name for stable list output).
-    pub fn list(&self) -> Vec<AgentStatus> {
-        let inner = self.lock();
-        let mut out: Vec<AgentStatus> = inner
+    /// Apply one message, republish what a reader sees, and only then answer.
+    ///
+    /// The order of the last two steps is the same contract the rooms keep: a
+    /// caller that claims a run and then reads the roster cannot read the roster
+    /// as it was before its own claim.
+    pub(crate) fn handle(&mut self, message: AgentMsg) {
+        let (touched, answer) = self.apply(message);
+        self.publish(touched);
+        if let Some(answer) = answer {
+            answer();
+        }
+    }
+
+    fn apply(&mut self, message: AgentMsg) -> (Touched, Option<Answered>) {
+        match message {
+            AgentMsg::AttachShare(store) => {
+                self.attach_share(store);
+                (Touched::None, None)
+            }
+            AgentMsg::DetachShare => {
+                self.share = None;
+                self.saver = None;
+                (Touched::None, None)
+            }
+            AgentMsg::AttachAsk(ask) => {
+                self.ask = Some(ask);
+                (Touched::None, None)
+            }
+            AgentMsg::SetEvents(events) => {
+                self.events = Some(events);
+                (Touched::None, None)
+            }
+            AgentMsg::ClaimName { base, reply } => {
+                let name = self.claim_name(&base);
+                (Touched::None, answered(reply, name))
+            }
+            AgentMsg::Insert(insertion) => {
+                let Insertion {
+                    name,
+                    kind,
+                    def,
+                    description,
+                    session,
+                    reply,
+                } = *insertion;
+                self.insert(&name, kind, def, description, session);
+                (Touched::One(name), answered(reply, ()))
+            }
+            AgentMsg::Refresh(refresh) => {
+                let Refreshing {
+                    name,
+                    def,
+                    description,
+                    session,
+                    reply,
+                } = *refresh;
+                let outcome = self.refresh(&name, def, description, session);
+                (Touched::One(name), answered(reply, outcome))
+            }
+            AgentMsg::ReleaseHires { reply } => {
+                let released = self.release_hires();
+                (Touched::Every, answered(reply, released))
+            }
+            AgentMsg::SetPrompt {
+                name,
+                prompt,
+                reply,
+            } => {
+                self.set_prompt(&name, prompt);
+                (Touched::One(name), answered(reply, ()))
+            }
+            AgentMsg::SetProgress {
+                name,
+                progress,
+                reply,
+            } => {
+                self.set_progress(&name, progress);
+                (Touched::One(name), answered(reply, ()))
+            }
+            AgentMsg::Touch { name } => {
+                self.touch(&name);
+                (Touched::One(name), None)
+            }
+            AgentMsg::SetPermissionMode { name, mode, reply } => {
+                let changed = self.set_permission_mode(&name, mode);
+                (Touched::One(name), answered(reply, changed))
+            }
+            AgentMsg::ReplaceHistory {
+                name,
+                history,
+                reply,
+            } => {
+                let replaced = self.replace_history(&name, history);
+                (Touched::One(name), answered(reply, replaced))
+            }
+            AgentMsg::SetAbortIfRunning(abort) => {
+                let Aborting {
+                    name,
+                    run,
+                    abort,
+                    items,
+                    reply,
+                } = *abort;
+                let armed = self.set_abort_if_running(&name, run, abort, items);
+                (Touched::One(name), answered(reply, armed))
+            }
+            AgentMsg::NextRun { name, reply } => {
+                let run = self.next_run(&name);
+                (Touched::One(name), answered(reply, run))
+            }
+            AgentMsg::SetRunWatch { name, id } => {
+                self.set_run_watch(&name, id);
+                (Touched::One(name), None)
+            }
+            AgentMsg::Finish {
+                name,
+                history,
+                output_chars,
+                reply,
+            } => {
+                let continuation = self.finish(&name, history, output_chars);
+                (Touched::One(name), answered(reply, continuation))
+            }
+            AgentMsg::FlushPending { reply } => {
+                let woken = self.flush_pending();
+                (Touched::Every, answered(reply, woken))
+            }
+            AgentMsg::TakeRunning {
+                name,
+                output_chars,
+                reply,
+            } => {
+                let items = self.take_running(&name, output_chars);
+                (Touched::One(name), answered(reply, items))
+            }
+            AgentMsg::RestoreInbox { name, items } => {
+                self.restore_inbox(&name, items);
+                (Touched::One(name), None)
+            }
+            AgentMsg::AcceptsRun { name, run, reply } => {
+                let accepts = self.accepts_run(&name, run);
+                (Touched::None, answered(reply, accepts))
+            }
+            AgentMsg::MarkIdle { name } => {
+                self.mark_idle(&name);
+                (Touched::One(name), None)
+            }
+            AgentMsg::Deliver(delivery) => {
+                let Delivery {
+                    name,
+                    from,
+                    message,
+                    images,
+                    ack_timeout,
+                    reply,
+                } = *delivery;
+                let id = self.deliver(&name, &from, &message, images, ack_timeout);
+                // The sender's own record changes too when a peer answers by
+                // writing back (D137), so no instance's snapshot can be reused.
+                (Touched::Every, answered(reply, id))
+            }
+            AgentMsg::FollowUp { name, id, reply } => {
+                let outcome = self.follow_up(&name, id);
+                (Touched::One(name), answered(reply, outcome))
+            }
+            AgentMsg::Deposit { name, item, reply } => {
+                let accepted = self.deposit(&name, item);
+                (Touched::One(name), answered(reply, accepted))
+            }
+            AgentMsg::Stop { name, reply } => {
+                let stopped = self.stop(&name);
+                (Touched::One(name), answered(reply, stopped))
+            }
+            AgentMsg::Remove { name, reply } => {
+                let removed = self.remove(&name);
+                (Touched::Every, answered(reply, removed))
+            }
+        }
+    }
+}
+
+/// One instance as the application event layer names it: everything an
+/// `AgentResource` carries except the server-minted identifier, which only the
+/// actor may stamp.
+///
+/// B4 gives the resource its conversation and its thinking level; what is here
+/// is what the registry itself knows.
+pub(crate) struct AgentFacts {
+    pub name: String,
+    pub def: Option<String>,
+    pub description: String,
+    pub kind: AgentKind,
+    pub state: AgentState,
+    pub model: String,
+    pub provider: String,
+    pub cwd: PathBuf,
+    pub pending: u32,
+    pub unacked: u32,
+    pub elapsed_ms: Option<u64>,
+    pub output_tokens: u64,
+    pub tool_uses: u32,
+}
+
+impl AgentRegistry {
+    /// What every instance stands at, for the actor to turn into events.
+    pub(crate) fn facts(&self) -> Vec<AgentFacts> {
+        let mut out: Vec<AgentFacts> = self
+            .inner
             .iter()
-            .map(|(name, e)| {
-                let progress = e.progress.as_ref().map(|progress| {
+            .map(|(name, entry)| {
+                let progress = entry.progress.as_ref().map(|progress| {
                     progress
                         .lock()
                         .unwrap_or_else(|err| err.into_inner())
                         .clone()
                 });
-                AgentStatus {
+                AgentFacts {
                     name: name.clone(),
-                    def: e.def.clone(),
-                    description: e.description.clone(),
-                    prompt: e.prompt.clone(),
-                    state: e.state,
-                    kind: e.kind,
-                    pending: e.inbox.len(),
-                    unacked: e.acks.iter().filter(|a| a.state.is_outstanding()).count(),
-                    model: e.session.runtime.model.borrow().clone(),
-                    provider: e.session.runtime.provider.borrow().clone(),
-                    elapsed: progress
+                    def: entry.def.clone(),
+                    description: entry.description.clone(),
+                    kind: entry.kind,
+                    state: entry.state,
+                    model: entry.session.runtime.model.borrow().clone(),
+                    provider: entry.session.runtime.provider.borrow().clone(),
+                    cwd: entry.session.cwd(),
+                    pending: entry.inbox.len() as u32,
+                    unacked: entry
+                        .acks
+                        .iter()
+                        .filter(|a| a.state.is_outstanding())
+                        .count() as u32,
+                    elapsed_ms: progress
                         .as_ref()
-                        .and_then(|p| p.started_at.map(|started| started.elapsed())),
+                        .and_then(|p| p.started_at.map(|at| at.elapsed().as_millis() as u64)),
                     output_tokens: progress.as_ref().map_or(0, |p| p.output_tokens),
-                    tool_uses: progress.as_ref().map_or(0, |p| p.tool_uses),
-                    recent_activity: progress.map_or_else(Vec::new, |p| p.recent_activity),
-                    last_active: e.last_active,
+                    tool_uses: progress.as_ref().map_or(0, |p| p.tool_uses) as u32,
                 }
             })
             .collect();
@@ -1388,6 +1546,672 @@ impl AgentRegistry {
         out
     }
 }
+
+/// An answer held back until the view carrying its effect has been published.
+type Answered = Box<dyn FnOnce()>;
+
+fn answered<T: 'static>(reply: oneshot::Sender<T>, value: T) -> Option<Answered> {
+    Some(Box::new(move || {
+        let _ = reply.send(value);
+    }))
+}
+
+/// A new instance, as it is handed to the actor. Boxed with the rest of the
+/// wide messages so one variant does not set the size of the whole enum.
+pub struct Insertion {
+    name: String,
+    kind: AgentKind,
+    def: Option<String>,
+    description: String,
+    session: Arc<Session>,
+    reply: oneshot::Sender<()>,
+}
+
+/// An instance being re-pointed at a freshly built session (D69).
+pub struct Refreshing {
+    name: String,
+    def: Option<String>,
+    description: String,
+    session: Arc<Session>,
+    reply: oneshot::Sender<Refresh>,
+}
+
+/// A run's abort handle, offered to the entry that owns the run.
+pub struct Aborting {
+    name: String,
+    run: u64,
+    abort: tokio::task::AbortHandle,
+    items: Vec<InboxItem>,
+    reply: oneshot::Sender<bool>,
+}
+
+/// One message written to an instance.
+pub struct Delivery {
+    name: String,
+    from: String,
+    message: String,
+    images: Vec<crate::api::types::ImageAttachment>,
+    ack_timeout: Option<Duration>,
+    reply: oneshot::Sender<Result<MsgId, String>>,
+}
+
+/// What the actor is told about the instances, and what it is asked.
+pub enum AgentMsg {
+    AttachShare(Arc<crate::share::ShareStore>),
+    DetachShare,
+    AttachAsk(Arc<crate::query::AskFn>),
+    SetEvents(crate::ui::EventSink),
+    ClaimName {
+        base: String,
+        reply: oneshot::Sender<String>,
+    },
+    Insert(Box<Insertion>),
+    Refresh(Box<Refreshing>),
+    ReleaseHires {
+        reply: oneshot::Sender<Vec<String>>,
+    },
+    SetPrompt {
+        name: String,
+        prompt: String,
+        reply: oneshot::Sender<()>,
+    },
+    SetProgress {
+        name: String,
+        progress: Option<Arc<Mutex<AgentProgress>>>,
+        reply: oneshot::Sender<()>,
+    },
+    Touch {
+        name: String,
+    },
+    SetPermissionMode {
+        name: String,
+        mode: crate::permission::PermissionMode,
+        reply: oneshot::Sender<bool>,
+    },
+    ReplaceHistory {
+        name: String,
+        history: Vec<Message>,
+        reply: oneshot::Sender<bool>,
+    },
+    SetAbortIfRunning(Box<Aborting>),
+    NextRun {
+        name: String,
+        reply: oneshot::Sender<u64>,
+    },
+    SetRunWatch {
+        name: String,
+        id: crate::watch::WatchId,
+    },
+    Finish {
+        name: String,
+        history: Vec<Message>,
+        output_chars: usize,
+        reply: oneshot::Sender<Option<Continuation>>,
+    },
+    FlushPending {
+        reply: oneshot::Sender<Vec<Wake>>,
+    },
+    TakeRunning {
+        name: String,
+        output_chars: usize,
+        reply: oneshot::Sender<Vec<InboxItem>>,
+    },
+    RestoreInbox {
+        name: String,
+        items: Vec<InboxItem>,
+    },
+    AcceptsRun {
+        name: String,
+        run: u64,
+        reply: oneshot::Sender<bool>,
+    },
+    MarkIdle {
+        name: String,
+    },
+    Deliver(Box<Delivery>),
+    FollowUp {
+        name: String,
+        id: MsgId,
+        reply: oneshot::Sender<FollowUp>,
+    },
+    Deposit {
+        name: String,
+        item: InboxItem,
+        reply: oneshot::Sender<bool>,
+    },
+    Stop {
+        name: String,
+        reply: oneshot::Sender<Result<(Option<crate::watch::WatchId>, usize), String>>,
+    },
+    Remove {
+        name: String,
+        reply: oneshot::Sender<Result<(Option<crate::watch::WatchId>, usize), String>>,
+    },
+}
+
+/// Build the registry and the handle everything reaches it by.
+pub(crate) fn attach(control: mpsc::UnboundedSender<Control>) -> (AgentRegistry, AgentHandle) {
+    let (inbox_tx, inbox) = tokio::sync::watch::channel(0);
+    let (view, reader) = tokio::sync::watch::channel(Arc::new(Roster::default()));
+    let registry = AgentRegistry {
+        inner: HashMap::new(),
+        share: None,
+        saver: None,
+        ask: None,
+        events: None,
+        next_msg: 1,
+        inbox_tx,
+        view,
+    };
+    let handle = AgentHandle {
+        control,
+        view: reader,
+        inbox,
+    };
+    (registry, handle)
+}
+
+/// How everything outside the actor reaches the instances.
+///
+/// The method names and their meanings are the ones the registry has always had:
+/// a report is an ordered send nobody waits on, a question is a send plus the
+/// answer coming back — `.await` from an engine task, `.now()` at the terminal
+/// front end's synchronous seams — and a listing is a borrow of the published
+/// snapshot.
+#[derive(Clone)]
+pub struct AgentHandle {
+    control: mpsc::UnboundedSender<Control>,
+    view: tokio::sync::watch::Receiver<Arc<Roster>>,
+    /// Inbox generation. Handed out rather than asked for: a run waits on it
+    /// between tool rounds, and a wait is not a question.
+    inbox: tokio::sync::watch::Receiver<u64>,
+}
+
+impl AgentHandle {
+    fn report(&self, message: AgentMsg) {
+        let _ = self.control.send(Control::Agents(message));
+    }
+
+    fn ask<T>(&self, build: impl FnOnce(oneshot::Sender<T>) -> AgentMsg, gone: T) -> Answer<T> {
+        let (reply, answer) = oneshot::channel();
+        let _ = self.control.send(Control::Agents(build(reply)));
+        Answer::new(answer, gone)
+    }
+
+    fn row<T>(&self, name: &str, read: impl FnOnce(&AgentRow) -> T) -> Option<T> {
+        self.view.borrow().instances.get(name).map(|row| read(row))
+    }
+
+    pub fn subscribe_inbox(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.inbox.clone()
+    }
+
+    /// Replace share persistence for future instance changes.
+    pub fn attach_share(&self, store: Arc<crate::share::ShareStore>) {
+        self.report(AgentMsg::AttachShare(store));
+    }
+
+    pub fn detach_share(&self) {
+        self.report(AgentMsg::DetachShare);
+    }
+
+    #[cfg(test)]
+    pub fn has_share(&self) -> bool {
+        self.view.borrow().shared
+    }
+
+    /// Attach the prompt surface subagents borrow (called once by whoever owns the UI).
+    pub fn attach_ask(&self, ask: Arc<crate::query::AskFn>) {
+        self.report(AgentMsg::AttachAsk(ask));
+    }
+
+    pub fn ask_fn(&self) -> Option<Arc<crate::query::AskFn>> {
+        self.view.borrow().ask.clone()
+    }
+
+    /// Attach the console's event channel (the front end does this once).
+    pub fn set_events(&self, events: crate::ui::EventSink) {
+        self.report(AgentMsg::SetEvents(events));
+    }
+
+    /// A sink bound to `name`'s conversation, or `None` with no front end
+    /// attached — an embedded or headless run, whose turns nobody is watching.
+    pub fn sink_for(&self, name: &str) -> Option<crate::ui::EventSink> {
+        self.view
+            .borrow()
+            .events
+            .as_ref()
+            .map(|sink| sink.bound_to(crate::ui::ConvKey::Agent(name.to_string())))
+    }
+
+    /// Claim an instance name: use the base name when free, otherwise append `-2`/`-3`…
+    pub fn claim_name(&self, base: &str) -> Answer<String> {
+        let base = base.to_string();
+        self.ask(
+            |reply| AgentMsg::ClaimName { base, reply },
+            "agent".to_string(),
+        )
+    }
+
+    /// Register a new instance (state=Running). The name must first go through
+    /// claim_name.
+    ///
+    /// A question rather than a report, though it answers with nothing: what a
+    /// caller does next is read the roster — `/team` opens the new member's
+    /// rooms, a spawn starts its first run — and a listing taken before the
+    /// insert had landed would not have it in it.
+    pub fn insert(
+        &self,
+        name: &str,
+        kind: AgentKind,
+        def: Option<String>,
+        description: String,
+        session: Arc<Session>,
+    ) -> Answer<()> {
+        let name = name.to_string();
+        self.ask(
+            |reply| {
+                AgentMsg::Insert(Box::new(Insertion {
+                    name,
+                    kind,
+                    def,
+                    description,
+                    session,
+                    reply,
+                }))
+            },
+            (),
+        )
+    }
+
+    /// Re-point an existing instance at a freshly built session (D69).
+    pub fn refresh(
+        &self,
+        name: &str,
+        def: Option<String>,
+        description: String,
+        session: Arc<Session>,
+    ) -> Answer<Refresh> {
+        let name = name.to_string();
+        self.ask(
+            |reply| {
+                AgentMsg::Refresh(Box::new(Refreshing {
+                    name,
+                    def,
+                    description,
+                    session,
+                    reply,
+                }))
+            },
+            Refresh::Missing,
+        )
+    }
+
+    /// Release the hires whose task is done, returning the names taken away.
+    pub fn release_hires(&self) -> Answer<Vec<String>> {
+        self.ask(|reply| AgentMsg::ReleaseHires { reply }, Vec::new())
+    }
+
+    /// Both of these are questions that answer with nothing, for the reason
+    /// `insert` is: what a caller does next is draw the instance, and a row
+    /// drawn before the change landed would show the run without its task.
+    pub fn set_prompt(&self, name: &str, prompt: String) -> Answer<()> {
+        let name = name.to_string();
+        self.ask(
+            |reply| AgentMsg::SetPrompt {
+                name,
+                prompt,
+                reply,
+            },
+            (),
+        )
+    }
+
+    pub fn set_progress(
+        &self,
+        name: &str,
+        progress: Option<Arc<Mutex<AgentProgress>>>,
+    ) -> Answer<()> {
+        let name = name.to_string();
+        self.ask(
+            |reply| AgentMsg::SetProgress {
+                name,
+                progress,
+                reply,
+            },
+            (),
+        )
+    }
+
+    #[cfg(test)]
+    pub fn set_progress_snapshot(&self, name: &str, progress: AgentProgress) -> Answer<()> {
+        self.set_progress(name, Some(Arc::new(Mutex::new(progress))))
+    }
+
+    pub fn touch(&self, name: &str) {
+        self.report(AgentMsg::Touch {
+            name: name.to_string(),
+        });
+    }
+
+    /// Instance view data (None if the instance doesn't exist).
+    pub fn view_of(&self, name: &str) -> Option<AgentView> {
+        self.row(name, |row| {
+            (row.history.clone(), row.stamps.clone(), row.state)
+        })
+    }
+
+    /// Whether an instance belongs to the given project directory.
+    pub fn is_in_project(&self, name: &str, cwd: &Path) -> bool {
+        self.row(name, |row| row.session.cwd() == cwd)
+            .unwrap_or(false)
+    }
+
+    /// Instance depth (channel cohort check: only direct subagents with depth==1 may join a channel).
+    pub fn depth_of(&self, name: &str) -> Option<usize> {
+        self.row(name, |row| row.session.depth)
+    }
+
+    /// The permission mode this instance runs under (D105).
+    pub fn permission_mode_of(&self, name: &str) -> Option<crate::permission::PermissionMode> {
+        self.row(name, |row| row.session.permission_mode)
+    }
+
+    /// Point an instance at a session carrying `mode`, and say whether that
+    /// changed anything.
+    pub fn set_permission_mode(
+        &self,
+        name: &str,
+        mode: crate::permission::PermissionMode,
+    ) -> Answer<bool> {
+        let name = name.to_string();
+        self.ask(
+            |reply| AgentMsg::SetPermissionMode { name, mode, reply },
+            false,
+        )
+    }
+
+    /// The session an instance runs on.
+    pub fn session_of(&self, name: &str) -> Option<Arc<Session>> {
+        self.row(name, |row| row.session.clone())
+    }
+
+    /// Replace an instance's stored context with a rewritten one — `/compact`
+    /// on its page, and nothing else. Refused while it is running.
+    pub fn replace_history(&self, name: &str, history: Vec<Message>) -> Answer<bool> {
+        let name = name.to_string();
+        self.ask(
+            |reply| AgentMsg::ReplaceHistory {
+                name,
+                history,
+                reply,
+            },
+            false,
+        )
+    }
+
+    pub fn set_abort_if_running(
+        &self,
+        name: &str,
+        run: u64,
+        abort: tokio::task::AbortHandle,
+        items: Vec<InboxItem>,
+    ) -> Answer<bool> {
+        let name = name.to_string();
+        self.ask(
+            |reply| {
+                AgentMsg::SetAbortIfRunning(Box::new(Aborting {
+                    name,
+                    run,
+                    abort,
+                    items,
+                    reply,
+                }))
+            },
+            false,
+        )
+    }
+
+    /// Next run sequence number (starting at 1).
+    pub fn next_run(&self, name: &str) -> Answer<u64> {
+        let name = name.to_string();
+        self.ask(|reply| AgentMsg::NextRun { name, reply }, 1)
+    }
+
+    /// Record the watch line of the current turn.
+    pub fn set_run_watch(&self, name: &str, id: crate::watch::WatchId) {
+        self.report(AgentMsg::SetRunWatch {
+            name: name.to_string(),
+            id,
+        });
+    }
+
+    /// Turn finished: store the latest history, and say whether the inbox
+    /// refilled while it ran.
+    pub fn finish(
+        &self,
+        name: &str,
+        history: Vec<Message>,
+        output_chars: usize,
+    ) -> Answer<Option<Continuation>> {
+        let name = name.to_string();
+        self.ask(
+            |reply| AgentMsg::Finish {
+                name,
+                history,
+                output_chars,
+                reply,
+            },
+            None,
+        )
+    }
+
+    /// Claim every idle instance holding mail (v7).
+    pub fn flush_pending(&self) -> Answer<Vec<Wake>> {
+        self.ask(|reply| AgentMsg::FlushPending { reply }, Vec::new())
+    }
+
+    /// Put a direct message into one running instance's current query.
+    pub fn take_running(&self, name: &str, output_chars: usize) -> Answer<Vec<InboxItem>> {
+        let name = name.to_string();
+        self.ask(
+            |reply| AgentMsg::TakeRunning {
+                name,
+                output_chars,
+                reply,
+            },
+            Vec::new(),
+        )
+    }
+
+    /// Turn failed before the claimed batch completed: restore it to the front of the inbox.
+    pub fn restore_inbox(&self, name: &str, items: Vec<InboxItem>) {
+        self.report(AgentMsg::RestoreInbox {
+            name: name.to_string(),
+            items,
+        });
+    }
+
+    /// A claimed idle run may be stopped before its task is spawned. Asking the
+    /// actor rather than the published roster is what closes that gap: the
+    /// answer is the state at the moment the question was served.
+    pub fn accepts_run(&self, name: &str, run: u64) -> Answer<bool> {
+        let name = name.to_string();
+        self.ask(|reply| AgentMsg::AcceptsRun { name, run, reply }, false)
+    }
+
+    /// Turn failed: keep the pre-failure history, switch to Idle (retryable via SendMessage).
+    pub fn mark_idle(&self, name: &str) {
+        self.report(AgentMsg::MarkIdle {
+            name: name.to_string(),
+        });
+    }
+
+    /// Queue a message for an instance. Returns the message id — the receipt the
+    /// sender uses to check the outcome later.
+    pub fn deliver(
+        &self,
+        name: &str,
+        from: &str,
+        message: &str,
+        images: Vec<crate::api::types::ImageAttachment>,
+        ack_timeout: Option<Duration>,
+    ) -> Answer<Result<MsgId, String>> {
+        let name = name.to_string();
+        let from = from.to_string();
+        let message = message.to_string();
+        self.ask(
+            |reply| {
+                AgentMsg::Deliver(Box::new(Delivery {
+                    name,
+                    from,
+                    message,
+                    images,
+                    ack_timeout,
+                    reply,
+                }))
+            },
+            Err(SESSION_ENDED.to_string()),
+        )
+    }
+
+    /// Re-read one message's record and, while the sender is still owed an
+    /// answer, put a follow-up in the receiver's inbox.
+    pub fn follow_up(&self, name: &str, id: MsgId) -> Answer<FollowUp> {
+        let name = name.to_string();
+        self.ask(
+            |reply| AgentMsg::FollowUp { name, id, reply },
+            FollowUp::Gone,
+        )
+    }
+
+    /// Queue a channel message. A stopped member is silently skipped.
+    pub fn deposit(&self, name: &str, item: InboxItem) -> Answer<bool> {
+        let name = name.to_string();
+        self.ask(|reply| AgentMsg::Deposit { name, item, reply }, false)
+    }
+
+    /// Delivery records for one instance, newest last (None = no such instance).
+    pub fn acks_of(&self, name: &str) -> Option<Vec<Ack>> {
+        self.row(name, |row| row.acks.clone())
+    }
+
+    /// Direct messages claimed by the current run and not yet landed in
+    /// history. The registry's own bookkeeping, asserted in tests for the same
+    /// reason [`AgentHandle::pending_of`] is.
+    #[cfg(test)]
+    pub fn in_flight_of(&self, name: &str) -> Vec<(String, String)> {
+        self.row(name, |row| {
+            row.in_flight
+                .iter()
+                .map(|(_, from, text)| (from.clone(), text.clone()))
+                .collect()
+        })
+        .unwrap_or_default()
+    }
+
+    /// Direct messages still sitting in the inbox, in order, each with its
+    /// sender.
+    #[cfg(test)]
+    pub fn pending_of(&self, name: &str) -> Vec<(String, String)> {
+        self.row(name, |row| {
+            row.inbox
+                .iter()
+                .filter_map(|item| match item {
+                    InboxItem::Direct { from, text, .. } => Some((from.clone(), text.clone())),
+                    // A follow-up is the harness chasing an acknowledgement, not something
+                    // the sender wrote — rendering it as their pending message would lie.
+                    InboxItem::Channel { .. }
+                    | InboxItem::FollowUp { .. }
+                    | InboxItem::Unanswered { .. } => None,
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+    }
+
+    /// Stop: abort a running turn, no longer accept commands; history is kept
+    /// and listable.
+    pub fn stop(
+        &self,
+        name: &str,
+    ) -> Answer<Result<(Option<crate::watch::WatchId>, usize), String>> {
+        let name = name.to_string();
+        self.ask(
+            |reply| AgentMsg::Stop { name, reply },
+            Err(SESSION_ENDED.to_string()),
+        )
+    }
+
+    /// Remove: stop first, then drop the entry (name released).
+    pub fn remove(
+        &self,
+        name: &str,
+    ) -> Answer<Result<(Option<crate::watch::WatchId>, usize), String>> {
+        let name = name.to_string();
+        self.ask(
+            |reply| AgentMsg::Remove { name, reply },
+            Err(SESSION_ENDED.to_string()),
+        )
+    }
+
+    /// Snapshot of all instances (sorted by name for stable list output).
+    pub fn list(&self) -> Vec<AgentStatus> {
+        // The instances are already in name order: the roster holds them in a
+        // sorted map so no reader has to impose one.
+        self.view
+            .borrow()
+            .instances
+            .iter()
+            .map(|(name, row)| {
+                // Sampled here rather than stored: a run's token count and its
+                // elapsed time move without the registry hearing about it, and a
+                // row that froze them would stop the clock on a live turn.
+                let progress = row.progress.as_ref().map(|progress| {
+                    progress
+                        .lock()
+                        .unwrap_or_else(|err| err.into_inner())
+                        .clone()
+                });
+                AgentStatus {
+                    name: name.clone(),
+                    def: row.def.clone(),
+                    description: row.description.clone(),
+                    prompt: row.prompt.clone(),
+                    state: row.state,
+                    kind: row.kind,
+                    pending: row.inbox.len(),
+                    unacked: row.acks.iter().filter(|a| a.state.is_outstanding()).count(),
+                    model: row.session.runtime.model.borrow().clone(),
+                    provider: row.session.runtime.provider.borrow().clone(),
+                    elapsed: progress
+                        .as_ref()
+                        .and_then(|p| p.started_at.map(|started| started.elapsed())),
+                    output_tokens: progress.as_ref().map_or(0, |p| p.output_tokens),
+                    tool_uses: progress.as_ref().map_or(0, |p| p.tool_uses),
+                    recent_activity: progress.map_or_else(Vec::new, |p| p.recent_activity),
+                    last_active: row.last_active,
+                }
+            })
+            .collect()
+    }
+
+    /// Wait until everything already sent has been applied.
+    #[cfg(test)]
+    pub async fn settle(&self) {
+        crate::app::controller::settle(&self.control).await;
+    }
+
+    /// The same barrier for a synchronous test.
+    #[cfg(test)]
+    pub fn settle_now(&self) {
+        crate::app::controller::settle_now(&self.control);
+    }
+}
+
+/// What a question answers with once the session is over. Unreachable while any
+/// handle lives, since the actor outlives them all.
+const SESSION_ENDED: &str = "the session has ended";
 
 /// Do two sessions put the same instance in front of the model — the words it runs under
 /// and the engine it runs on?
@@ -1544,6 +2368,7 @@ mod tests {
     }
 
     fn test_session() -> Arc<Session> {
+        let core = crate::app::AppCore::start(Default::default());
         Arc::new(Session {
             client: crate::api::client::Client::new("k".into(), "http://x".into()),
             runtime: crate::query::Runtime::new("m".into(), None, Default::default()),
@@ -1556,11 +2381,11 @@ mod tests {
             user_config_dir: std::env::temp_dir().join(".config"),
             quiet: true,
             compact_failures: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            watch: crate::app::AppCore::start(Default::default()).watch(),
+            watch: core.watch(),
             tasks: Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), "t")),
             expand_tasks: tokio::sync::watch::channel(false).0,
-            agents: AgentRegistry::new(),
-            channels: crate::app::AppCore::start(Default::default()).channels(),
+            agents: core.agents(),
+            channels: core.channels(),
             instance: None,
             attachments: crate::api::image::Attachments::new(),
         })
@@ -1568,17 +2393,19 @@ mod tests {
 
     #[test]
     fn list_reports_the_runtime_engine() {
-        let registry = AgentRegistry::new();
+        let registry = crate::app::AppCore::start(Default::default()).agents();
         let session = test_session();
         let _ = session.runtime.model_tx.send("gpt-5.6-sol".into());
         let _ = session.runtime.provider_tx.send("road".into());
-        registry.insert(
-            "dev",
-            AgentKind::Hire,
-            None,
-            "implementation".into(),
-            session,
-        );
+        registry
+            .insert(
+                "dev",
+                AgentKind::Hire,
+                None,
+                "implementation".into(),
+                session,
+            )
+            .now();
 
         let statuses = registry.list();
         assert_eq!(statuses.len(), 1);
@@ -1698,25 +2525,27 @@ mod tests {
 
     #[test]
     fn claim_name_dedupes_and_defaults() {
-        let reg = AgentRegistry::new();
-        assert_eq!(reg.claim_name(""), "agent", "empty name falls back");
-        assert_eq!(reg.claim_name("reviewer"), "reviewer");
+        let reg = crate::app::AppCore::start(Default::default()).agents();
+        assert_eq!(reg.claim_name("").now(), "agent", "empty name falls back");
+        assert_eq!(reg.claim_name("reviewer").now(), "reviewer");
         reg.insert(
             "reviewer",
             AgentKind::Hire,
             None,
             "r".into(),
             test_session(),
-        );
-        assert_eq!(reg.claim_name("reviewer"), "reviewer-2");
+        )
+        .now();
+        assert_eq!(reg.claim_name("reviewer").now(), "reviewer-2");
         reg.insert(
             "reviewer-2",
             AgentKind::Hire,
             None,
             "r".into(),
             test_session(),
-        );
-        assert_eq!(reg.claim_name("reviewer"), "reviewer-3");
+        )
+        .now();
+        assert_eq!(reg.claim_name("reviewer").now(), "reviewer-3");
     }
 
     /// A hire serves one task and goes (D53): once it is idle with nothing waiting, the
@@ -1724,38 +2553,40 @@ mod tests {
     /// one round to follow up before the instance disappears under it.
     #[test]
     fn a_finished_hire_is_released_and_the_crew_is_not() {
-        let reg = AgentRegistry::new();
+        let reg = crate::app::AppCore::start(Default::default()).agents();
         reg.insert(
             "dev",
             AgentKind::Crew,
             None,
             "member".into(),
             test_session(),
-        );
+        )
+        .now();
         reg.insert(
             "temp",
             AgentKind::Hire,
             None,
             "one job".into(),
             test_session(),
-        );
+        )
+        .now();
         // Mirrors the real spawn: both Agent-tool paths call next_run right after insert,
         // and a hire with no run behind it is unstarted, not finished.
-        let _ = reg.next_run("temp");
+        let _ = reg.next_run("temp").now();
 
         // Running: nothing is released, however many sweeps run.
-        assert!(reg.release_hires().is_empty());
-        assert!(reg.release_hires().is_empty());
+        assert!(reg.release_hires().now().is_empty());
+        assert!(reg.release_hires().now().is_empty());
         assert_eq!(reg.list().len(), 2, "a working hire keeps its name");
 
         // Finished: idle, empty inbox, nothing owed. One sweep is not enough — that would
         // take the instance away in the very round its result reaches main.
-        assert!(reg.finish("temp", Vec::new(), 1).is_none());
+        assert!(reg.finish("temp", Vec::new(), 1).now().is_none());
         assert!(
-            reg.release_hires().is_empty(),
+            reg.release_hires().now().is_empty(),
             "main still has a round to follow up in"
         );
-        assert_eq!(reg.release_hires(), vec!["temp".to_string()]);
+        assert_eq!(reg.release_hires().now(), vec!["temp".to_string()]);
         let left = reg.list();
         assert_eq!(left.len(), 1);
         assert_eq!(left[0].name, "dev", "the crew member is untouched");
@@ -1766,26 +2597,28 @@ mod tests {
     /// from under the conversation.
     #[test]
     fn a_hire_with_work_waiting_keeps_its_name() {
-        let reg = AgentRegistry::new();
+        let reg = crate::app::AppCore::start(Default::default()).agents();
         reg.insert(
             "dev",
             AgentKind::Crew,
             None,
             "member".into(),
             test_session(),
-        );
+        )
+        .now();
         reg.insert(
             "temp",
             AgentKind::Hire,
             None,
             "one job".into(),
             test_session(),
-        );
+        )
+        .now();
         // Mirrors the real spawn: both Agent-tool paths call next_run right after insert,
         // and a hire with no run behind it is unstarted, not finished.
-        let _ = reg.next_run("temp");
-        assert!(reg.finish("temp", Vec::new(), 1).is_none());
-        assert!(reg.release_hires().is_empty());
+        let _ = reg.next_run("temp").now();
+        assert!(reg.finish("temp", Vec::new(), 1).now().is_none());
+        assert!(reg.release_hires().now().is_empty());
 
         // A queued follow-up is work waiting: the count goes back to full.
         let _ = reg
@@ -1796,56 +2629,64 @@ mod tests {
                 Vec::new(),
                 None,
             )
+            .now()
             .unwrap_or_else(|e| panic!("{e}"));
-        assert!(reg.release_hires().is_empty());
-        assert!(reg.release_hires().is_empty(), "the lease was renewed");
+        assert!(reg.release_hires().now().is_empty());
+        assert!(
+            reg.release_hires().now().is_empty(),
+            "the lease was renewed"
+        );
 
         // Read into a run and answered, with nothing left waiting → released as before.
-        let woken = reg.flush_pending();
+        let woken = reg.flush_pending().now();
         assert_eq!(woken.len(), 1);
-        assert!(reg.finish("temp", Vec::new(), 1).is_none());
-        assert!(reg.release_hires().is_empty());
-        assert_eq!(reg.release_hires(), vec!["temp".to_string()]);
+        assert!(reg.finish("temp", Vec::new(), 1).now().is_none());
+        assert!(reg.release_hires().now().is_empty());
+        assert_eq!(reg.release_hires().now(), vec!["temp".to_string()]);
     }
 
     /// A message the hire never answered is not a finished task. Releasing there would
     /// destroy the record the sender uses to find out it was left hanging.
     #[test]
     fn a_hire_still_owing_an_answer_is_not_released() {
-        let reg = AgentRegistry::new();
+        let reg = crate::app::AppCore::start(Default::default()).agents();
         reg.insert(
             "dev",
             AgentKind::Crew,
             None,
             "member".into(),
             test_session(),
-        );
+        )
+        .now();
         reg.insert(
             "temp",
             AgentKind::Hire,
             None,
             "one job".into(),
             test_session(),
-        );
+        )
+        .now();
         // Mirrors the real spawn: both Agent-tool paths call next_run right after insert,
         // and a hire with no run behind it is unstarted, not finished.
-        let _ = reg.next_run("temp");
-        assert!(reg.finish("temp", Vec::new(), 1).is_none());
-        let _ = reg.deliver(
-            "temp",
-            crate::channels::MAIN_NAME,
-            "answer me",
-            Vec::new(),
-            None,
-        );
+        let _ = reg.next_run("temp").now();
+        assert!(reg.finish("temp", Vec::new(), 1).now().is_none());
+        let _ = reg
+            .deliver(
+                "temp",
+                crate::channels::MAIN_NAME,
+                "answer me",
+                Vec::new(),
+                None,
+            )
+            .now();
         assert_eq!(
-            reg.flush_pending().len(),
+            reg.flush_pending().now().len(),
             1,
             "the idle hire takes the message"
         );
         // The run that read it ended saying nothing: delivered, unanswered, inbox empty.
-        assert!(reg.finish("temp", Vec::new(), 0).is_none());
-        let owed = |reg: &AgentRegistry| {
+        assert!(reg.finish("temp", Vec::new(), 0).now().is_none());
+        let owed = |reg: &AgentHandle| {
             reg.list()
                 .into_iter()
                 .find(|a| a.name == "temp")
@@ -1855,7 +2696,7 @@ mod tests {
         assert_eq!(owed(&reg), 1);
         for _ in 0..4 {
             assert!(
-                reg.release_hires().is_empty(),
+                reg.release_hires().now().is_empty(),
                 "an outstanding message holds the instance open"
             );
         }
@@ -1866,20 +2707,21 @@ mod tests {
     /// instances main still expects to address.
     #[test]
     fn hires_are_not_swept_in_a_project_with_no_crew() {
-        let reg = AgentRegistry::new();
+        let reg = crate::app::AppCore::start(Default::default()).agents();
         reg.insert(
             "temp",
             AgentKind::Hire,
             None,
             "one job".into(),
             test_session(),
-        );
+        )
+        .now();
         // Mirrors the real spawn: both Agent-tool paths call next_run right after insert,
         // and a hire with no run behind it is unstarted, not finished.
-        let _ = reg.next_run("temp");
-        assert!(reg.finish("temp", Vec::new(), 1).is_none());
+        let _ = reg.next_run("temp").now();
+        assert!(reg.finish("temp", Vec::new(), 1).now().is_none());
         for _ in 0..4 {
-            assert!(reg.release_hires().is_empty());
+            assert!(reg.release_hires().now().is_empty());
         }
         assert_eq!(reg.list().len(), 1);
 
@@ -1890,10 +2732,11 @@ mod tests {
             None,
             "member".into(),
             test_session(),
-        );
-        let _ = reg.stop("dev");
+        )
+        .now();
+        let _ = reg.stop("dev").now();
         for _ in 0..4 {
-            assert!(reg.release_hires().is_empty());
+            assert!(reg.release_hires().now().is_empty());
         }
     }
 
@@ -1901,39 +2744,42 @@ mod tests {
     /// a lease that measures a follow-up window it can no longer receive.
     #[test]
     fn a_stopped_hire_is_released_immediately() {
-        let reg = AgentRegistry::new();
+        let reg = crate::app::AppCore::start(Default::default()).agents();
         reg.insert(
             "dev",
             AgentKind::Crew,
             None,
             "member".into(),
             test_session(),
-        );
+        )
+        .now();
         reg.insert(
             "temp",
             AgentKind::Hire,
             None,
             "one job".into(),
             test_session(),
-        );
+        )
+        .now();
         // Mirrors the real spawn: both Agent-tool paths call next_run right after insert,
         // and a hire with no run behind it is unstarted, not finished.
-        let _ = reg.next_run("temp");
-        let _ = reg.stop("temp");
-        assert_eq!(reg.release_hires(), vec!["temp".to_string()]);
+        let _ = reg.next_run("temp").now();
+        let _ = reg.stop("temp").now();
+        assert_eq!(reg.release_hires().now(), vec!["temp".to_string()]);
         assert_eq!(reg.list().len(), 1);
     }
 
     #[test]
     fn activity_timestamp_refreshes_only_when_the_instance_is_active() {
-        let reg = AgentRegistry::new();
+        let reg = crate::app::AppCore::start(Default::default()).agents();
         reg.insert(
             "scout",
             AgentKind::Hire,
             None,
             "research".into(),
             test_session(),
-        );
+        )
+        .now();
         let initial = reg.list()[0].last_active;
         std::thread::sleep(Duration::from_millis(2));
         let unchanged = reg.list()[0].last_active;
@@ -1947,6 +2793,7 @@ mod tests {
                 Vec::new(),
                 None,
             )
+            .now()
             .unwrap_or_else(|e| panic!("{e}"));
         let delivered = reg.list()[0].last_active;
         assert!(
@@ -1955,7 +2802,7 @@ mod tests {
         );
 
         std::thread::sleep(Duration::from_millis(2));
-        let _ = reg.follow_up("scout", first);
+        let _ = reg.follow_up("scout", first).now();
         assert_eq!(
             reg.list()[0].last_active,
             delivered,
@@ -1964,6 +2811,7 @@ mod tests {
 
         std::thread::sleep(Duration::from_millis(2));
         reg.touch("scout");
+        reg.settle_now();
         let streamed = reg.list()[0].last_active;
         assert!(
             streamed > delivered,
@@ -1971,7 +2819,7 @@ mod tests {
         );
 
         std::thread::sleep(Duration::from_millis(2));
-        assert!(reg.finish("scout", Vec::new(), 0).is_some());
+        assert!(reg.finish("scout", Vec::new(), 0).now().is_some());
         let finished = reg.list()[0].last_active;
         assert!(finished > streamed, "turn completion is activity");
     }
@@ -1983,21 +2831,24 @@ mod tests {
     /// pinned that (D135a).
     #[test]
     fn replace_history_refuses_a_running_instance_and_drops_stale_clocks() {
-        let reg = AgentRegistry::new();
+        let reg = crate::app::AppCore::start(Default::default()).agents();
         reg.insert(
             "scout",
             AgentKind::Hire,
             None,
             "research".into(),
             test_session(),
-        );
+        )
+        .now();
         assert!(
-            !reg.replace_history("ghost", vec![Message::user_text("summary")]),
+            !reg.replace_history("ghost", vec![Message::user_text("summary")])
+                .now(),
             "an instance that is not there cannot be rewritten"
         );
         // `insert` is the spawn path, and a spawned instance is running.
         assert!(
-            !reg.replace_history("scout", vec![Message::user_text("summary")]),
+            !reg.replace_history("scout", vec![Message::user_text("summary")])
+                .now(),
             "a running instance holds its own copy and overwrites this at finish"
         );
 
@@ -2011,10 +2862,12 @@ mod tests {
                 ],
                 0,
             )
+            .now()
             .is_none()
         );
         assert!(
-            reg.replace_history("scout", vec![Message::user_text("summary")]),
+            reg.replace_history("scout", vec![Message::user_text("summary")])
+                .now(),
             "idle, so the rewrite lands"
         );
         let (history, stamps, _) = reg.view_of("scout").unwrap_or_else(|| panic!("exists"));
@@ -2030,20 +2883,22 @@ mod tests {
     /// a rewritten (shorter) history drops the stale clocks instead of lying.
     #[test]
     fn finish_stamps_history_and_drops_clocks_on_rewrite() {
-        let reg = AgentRegistry::new();
+        let reg = crate::app::AppCore::start(Default::default()).agents();
         reg.insert(
             "scout",
             AgentKind::Hire,
             None,
             "research".into(),
             test_session(),
-        );
+        )
+        .now();
         assert!(
             reg.finish(
                 "scout",
                 vec![Message::user_text("a"), Message::user_text("b")],
                 0,
             )
+            .now()
             .is_none()
         );
         let (history, stamps, _) = reg.view_of("scout").unwrap_or_else(|| panic!("exists"));
@@ -2053,6 +2908,7 @@ mod tests {
         // longer describe it — no stamp is rendered rather than a wrong one.
         assert!(
             reg.finish("scout", vec![Message::user_text("summary")], 0)
+                .now()
                 .is_none()
         );
         let (history, stamps, _) = reg.view_of("scout").unwrap_or_else(|| panic!("exists"));
@@ -2065,6 +2921,7 @@ mod tests {
                 vec![Message::user_text("summary"), Message::user_text("more")],
                 0,
             )
+            .now()
             .is_none()
         );
         let (_, stamps, _) = reg.view_of("scout").unwrap_or_else(|| panic!("exists"));
@@ -2078,15 +2935,16 @@ mod tests {
     /// that window, and lets go the moment the history holds the message.
     #[test]
     fn a_claimed_message_stays_visible_until_it_lands() {
-        let reg = AgentRegistry::new();
+        let reg = crate::app::AppCore::start(Default::default()).agents();
         reg.insert(
             "scout",
             AgentKind::Hire,
             None,
             "research".into(),
             test_session(),
-        );
-        assert!(reg.finish("scout", Vec::new(), 0).is_none());
+        )
+        .now();
+        assert!(reg.finish("scout", Vec::new(), 0).now().is_none());
         let _ = reg
             .deliver(
                 "scout",
@@ -2095,6 +2953,7 @@ mod tests {
                 Vec::new(),
                 None,
             )
+            .now()
             .unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(
             reg.pending_of("scout"),
@@ -2106,7 +2965,7 @@ mod tests {
         );
 
         // Claimed: gone from the inbox, not yet in the history — in flight.
-        assert_eq!(reg.flush_pending().len(), 1);
+        assert_eq!(reg.flush_pending().now().len(), 1);
         assert!(reg.pending_of("scout").is_empty());
         let (history, _, _) = reg.view_of("scout").unwrap_or_else(|| panic!("exists"));
         let in_flight = reg.in_flight_of("scout");
@@ -2129,7 +2988,7 @@ mod tests {
                 }],
             },
         ];
-        assert!(reg.finish("scout", landed, 6).is_none());
+        assert!(reg.finish("scout", landed, 6).now().is_none());
         let (history, _, _) = reg.view_of("scout").unwrap_or_else(|| panic!("exists"));
         assert_eq!(history.len(), 2);
         let in_flight = reg.in_flight_of("scout");
@@ -2141,15 +3000,16 @@ mod tests {
     /// again instead of being on screen twice.
     #[test]
     fn a_restored_message_leaves_the_in_flight_record() {
-        let reg = AgentRegistry::new();
+        let reg = crate::app::AppCore::start(Default::default()).agents();
         reg.insert(
             "scout",
             AgentKind::Hire,
             None,
             "research".into(),
             test_session(),
-        );
-        assert!(reg.finish("scout", Vec::new(), 0).is_none());
+        )
+        .now();
+        assert!(reg.finish("scout", Vec::new(), 0).now().is_none());
         let _ = reg
             .deliver(
                 "scout",
@@ -2158,15 +3018,18 @@ mod tests {
                 Vec::new(),
                 None,
             )
+            .now()
             .unwrap_or_else(|e| panic!("{e}"));
         let wake = reg
             .flush_pending()
+            .now()
             .pop()
             .unwrap_or_else(|| panic!("claimed"));
         let in_flight = reg.in_flight_of("scout");
         assert_eq!(in_flight.len(), 1);
 
         reg.restore_inbox("scout", wake.items);
+        reg.settle_now();
         let in_flight = reg.in_flight_of("scout");
         assert!(in_flight.is_empty(), "{in_flight:?}");
         assert_eq!(
@@ -2181,14 +3044,15 @@ mod tests {
 
     #[test]
     fn lifecycle_running_idle_queue_and_revive() {
-        let reg = AgentRegistry::new();
+        let reg = crate::app::AppCore::start(Default::default()).agents();
         reg.insert(
             "scout",
             AgentKind::Hire,
             None,
             "research".into(),
             test_session(),
-        );
+        )
+        .now();
         // Running: message queued (delivery never happens inside deliver itself).
         let first = reg
             .deliver(
@@ -2198,10 +3062,12 @@ mod tests {
                 Vec::new(),
                 None,
             )
+            .now()
             .unwrap_or_else(|e| panic!("{e}"));
         // Turn finished + inbox non-empty → continues (history saved, inbox drained, ack set).
         let next = reg
             .finish("scout", vec![Message::user_text("hi")], 1)
+            .now()
             .unwrap_or_else(|| panic!("should continue"));
         assert_eq!(
             next.history.len(),
@@ -2217,7 +3083,7 @@ mod tests {
         assert_eq!(acks[0].id, first);
         assert_eq!(acks[0].state, AckState::Delivered { run: next.run });
         // Finish again with an empty inbox → Idle.
-        assert!(reg.finish("scout", Vec::new(), 1).is_none());
+        assert!(reg.finish("scout", Vec::new(), 1).now().is_none());
         assert_eq!(reg.list()[0].state, AgentState::Idle);
         // Idle: the message waits for a flush rather than starting a run on the spot.
         let _ = reg
@@ -2228,21 +3094,114 @@ mod tests {
                 Vec::new(),
                 None,
             )
+            .now()
             .unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(
             reg.list()[0].state,
             AgentState::Idle,
             "delivery does not start a run by itself"
         );
-        let woken = reg.flush_pending();
+        let woken = reg.flush_pending().now();
         assert_eq!(woken.len(), 1);
         assert!(
             matches!(&woken[0].items[..], [InboxItem::Direct { text: m, .. }] if m == "look at B again")
         );
         assert_eq!(reg.list()[0].state, AgentState::Running);
         assert!(
-            reg.flush_pending().is_empty(),
+            reg.flush_pending().now().is_empty(),
             "claimed instances do not start twice"
+        );
+    }
+
+    /// Every producer at once, through the registries: several runs depositing
+    /// into inboxes and posting into a room while a frontend reads the stream.
+    ///
+    /// Two things are asserted and they are the two the actor exists for. One
+    /// **history**: the sequence numbers the events carry are strictly
+    /// increasing and gapless, however the work interleaved. And **no
+    /// deadlock**: every producer finishes, because no producer waits to be
+    /// heard and the actor waits on nobody — the timeout is what makes that an
+    /// assertion rather than a hope.
+    #[tokio::test]
+    async fn concurrent_registry_work_makes_one_gapless_history() {
+        use crate::app::command::AppQuery;
+        use crate::app::{AppCore, AppFrame, AppReply, AppRequest, AttachRequest, RequestId};
+        use crate::channels::ChannelMode;
+
+        const RUNS: usize = 6;
+        const EACH: usize = 15;
+
+        let core = AppCore::start(Default::default());
+        let agents = core.agents();
+        let rooms = core.channels();
+        let session = test_session();
+        let mut link = core
+            .attach(AttachRequest::new("test"))
+            .await
+            .unwrap_or_else(|error| panic!("{error}"));
+        link.request(AppRequest::Query {
+            id: RequestId(1),
+            query: AppQuery::ReadSession,
+        })
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+        let cursor = match link.recv().await {
+            Some(AppFrame::Reply {
+                result: Ok(AppReply::Session(snapshot)),
+                ..
+            }) => snapshot.event_cursor,
+            other => panic!("expected a session snapshot, got {other:?}"),
+        };
+
+        let names: Vec<String> = (0..RUNS).map(|i| format!("w{i}")).collect();
+        for name in &names {
+            agents
+                .insert(name, AgentKind::Hire, None, "w".into(), session.clone())
+                .await;
+        }
+        rooms
+            .create("build", names.clone(), ChannelMode::Free)
+            .await
+            .unwrap_or_else(|error| panic!("{error}"));
+
+        let mut runs = Vec::new();
+        for name in names.clone() {
+            let agents = agents.clone();
+            let rooms = rooms.clone();
+            runs.push(tokio::spawn(async move {
+                for step in 0..EACH {
+                    agents.deposit(&name, room_line("peer", step as u64)).await;
+                    let _ = rooms.post(&name, "build", "line").await;
+                }
+            }));
+        }
+        tokio::time::timeout(Duration::from_secs(30), async {
+            for run in runs {
+                run.await.unwrap_or_else(|error| panic!("{error}"));
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("a producer never finished: the actor stopped serving"));
+
+        // Everything published up to here is already queued on the attachment.
+        let mut seen = Vec::new();
+        while let Ok(Some(frame)) =
+            tokio::time::timeout(Duration::from_millis(200), link.recv()).await
+        {
+            match frame {
+                AppFrame::Event(event) => seen.push(event.meta.seq),
+                other => panic!("expected an event, got {other:?}"),
+            }
+        }
+        assert!(
+            seen.len() >= RUNS * EACH,
+            "every post and every deposit is accounted for: {} events",
+            seen.len()
+        );
+        assert_eq!(
+            seen,
+            (cursor + 1..=cursor + seen.len() as u64).collect::<Vec<_>>(),
+            "one history: strictly increasing, gapless, in arrival order"
         );
     }
 
@@ -2257,18 +3216,22 @@ mod tests {
 
     #[test]
     fn inbox_accumulates_direct_and_channel_items_in_order() {
-        let reg = AgentRegistry::new();
-        reg.insert("w", AgentKind::Hire, None, "w".into(), test_session());
-        let _ = reg.deliver(
-            "w",
-            crate::channels::MAIN_NAME,
-            "do 1 first",
-            Vec::new(),
-            None,
-        );
-        assert!(reg.deposit("w", room_line("a", 3)));
+        let reg = crate::app::AppCore::start(Default::default()).agents();
+        reg.insert("w", AgentKind::Hire, None, "w".into(), test_session())
+            .now();
+        let _ = reg
+            .deliver(
+                "w",
+                crate::channels::MAIN_NAME,
+                "do 1 first",
+                Vec::new(),
+                None,
+            )
+            .now();
+        assert!(reg.deposit("w", room_line("a", 3)).now());
         let items = reg
             .finish("w", Vec::new(), 1)
+            .now()
             .unwrap_or_else(|| panic!("continue"))
             .items;
         assert_eq!(items.len(), 2);
@@ -2284,31 +3247,31 @@ mod tests {
         // the `@` decides what is owed, never what is read. A finished turn
         // with an empty inbox still parks idle: nothing polls.
         assert!(
-            reg.finish("w", Vec::new(), 1).is_none(),
+            reg.finish("w", Vec::new(), 1).now().is_none(),
             "empty inbox parks"
         );
-        assert!(reg.deposit("w", room_line("b", 4)));
-        let woken = reg.flush_pending();
+        assert!(reg.deposit("w", room_line("b", 4)).now());
+        let woken = reg.flush_pending().now();
         assert_eq!(woken.len(), 1, "one unmentioned line is enough");
         assert_eq!(woken[0].items.len(), 1);
-        assert!(reg.finish("w", Vec::new(), 1).is_none());
-        assert!(reg.deposit("w", room_line("b", 5)));
-        assert!(reg.deposit("w", room_line("b", 6)));
-        let woken = reg.flush_pending();
+        assert!(reg.finish("w", Vec::new(), 1).now().is_none());
+        assert!(reg.deposit("w", room_line("b", 5)).now());
+        assert!(reg.deposit("w", room_line("b", 6)).now());
+        let woken = reg.flush_pending().now();
         assert_eq!(woken.len(), 1);
         assert_eq!(
             woken[0].items.len(),
             2,
             "whatever is waiting drains together, in order"
         );
-        let _ = reg.stop("w");
+        let _ = reg.stop("w").now();
         let dropped = room_line("c", 6);
         assert!(
-            !reg.deposit("w", dropped.clone()),
+            !reg.deposit("w", dropped.clone()).now(),
             "stopped members do not receive"
         );
         assert!(
-            !reg.deposit("ghost", dropped),
+            !reg.deposit("ghost", dropped).now(),
             "unknown instances are silently dropped"
         );
     }
@@ -2320,31 +3283,32 @@ mod tests {
     /// unread in every inbox and re-crosses it for all of them.
     #[test]
     fn any_waiting_line_wakes_and_an_empty_inbox_never_does() {
-        let reg = AgentRegistry::new();
-        reg.insert("w", AgentKind::Hire, None, "w".into(), test_session());
-        assert!(reg.finish("w", Vec::new(), 0).is_none(), "start idle");
+        let reg = crate::app::AppCore::start(Default::default()).agents();
+        reg.insert("w", AgentKind::Hire, None, "w".into(), test_session())
+            .now();
+        assert!(reg.finish("w", Vec::new(), 0).now().is_none(), "start idle");
         assert!(
-            reg.flush_pending().is_empty(),
+            reg.flush_pending().now().is_empty(),
             "an empty inbox never wakes: no polling, and a quiet room is free"
         );
 
-        assert!(reg.deposit("w", room_line("a", 1)));
-        let woken = reg.flush_pending();
+        assert!(reg.deposit("w", room_line("a", 1)).now());
+        let woken = reg.flush_pending().now();
         assert_eq!(woken.len(), 1, "one unmentioned line wakes on its own");
         assert_eq!(woken[0].items.len(), 1);
         assert!(
-            reg.flush_pending().is_empty(),
+            reg.flush_pending().now().is_empty(),
             "and the drain leaves nothing behind to wake it again"
         );
 
         // A running member is not woken twice: what lands while it works is
         // absorbed at its next tool boundary instead (`take_running`).
-        assert!(reg.deposit("w", room_line("a", 2)));
+        assert!(reg.deposit("w", room_line("a", 2)).now());
         assert!(
-            reg.flush_pending().is_empty(),
+            reg.flush_pending().now().is_empty(),
             "a running member takes its mail at the tool boundary, not by waking"
         );
-        assert_eq!(reg.take_running("w", 0).len(), 1, "steered mid-turn");
+        assert_eq!(reg.take_running("w", 0).now().len(), 1, "steered mid-turn");
     }
 
     #[test]
@@ -2353,7 +3317,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         let store = crate::share::ShareStore::load_or_create(&root.join("shares").join("s.json"))
             .unwrap_or_else(|e| panic!("{e}"));
-        let reg = AgentRegistry::new();
+        let reg = crate::app::AppCore::start(Default::default()).agents();
         reg.attach_share(store.clone());
 
         // insert → creates an entry (running, empty history).
@@ -2363,7 +3327,8 @@ mod tests {
             Some("scout".into()),
             "research".into(),
             test_session(),
-        );
+        )
+        .now();
         let doc = store.snapshot();
         assert_eq!(doc.agents.len(), 1);
         assert_eq!(doc.agents[0].state, "running");
@@ -2371,7 +3336,7 @@ mod tests {
         assert!(doc.agents[0].history.is_empty());
 
         // finish → history + state (empty inbox → idle).
-        reg.finish("scout", vec![Message::user_text("hi")], 1);
+        reg.finish("scout", vec![Message::user_text("hi")], 1).now();
         let doc = store.snapshot();
         assert_eq!(doc.agents[0].state, "idle");
         assert_eq!(doc.agents[0].history.len(), 1);
@@ -2386,6 +3351,7 @@ mod tests {
             Vec::new(),
             None,
         )
+        .now()
         .unwrap_or_else(|e| panic!("{e}"));
         reg.deliver(
             "scout",
@@ -2394,17 +3360,18 @@ mod tests {
             Vec::new(),
             None,
         )
+        .now()
         .unwrap_or_else(|e| panic!("{e}"));
-        reg.finish("scout", Vec::new(), 1);
+        reg.finish("scout", Vec::new(), 1).now();
         let doc = store.snapshot();
         assert_eq!(doc.agents[0].state, "running");
         // Inbox drained → idle.
-        reg.finish("scout", Vec::new(), 1);
+        reg.finish("scout", Vec::new(), 1).now();
         let doc = store.snapshot();
         assert_eq!(doc.agents[0].state, "idle");
 
         // stop → stopped.
-        reg.stop("scout").unwrap_or_else(|e| panic!("{e}"));
+        reg.stop("scout").now().unwrap_or_else(|e| panic!("{e}"));
         let doc = store.snapshot();
         assert_eq!(doc.agents[0].state, "stopped");
         let _ = std::fs::remove_dir_all(&root);
@@ -2412,9 +3379,9 @@ mod tests {
 
     #[test]
     fn main_name_is_reserved() {
-        let reg = AgentRegistry::new();
+        let reg = crate::app::AppCore::start(Default::default()).agents();
         assert_eq!(
-            reg.claim_name("main"),
+            reg.claim_name("main").now(),
             "main-2",
             "the main agent owns the name; a subagent asking for it is renamed"
         );
@@ -2424,11 +3391,16 @@ mod tests {
     /// together instead of burning a turn per message.
     #[test]
     fn messages_sent_in_one_turn_arrive_as_one_batch() {
-        let reg = AgentRegistry::new();
-        reg.insert("w", AgentKind::Hire, None, "w".into(), test_session());
-        assert!(reg.finish("w", Vec::new(), 1).is_none(), "turns idle first");
+        let reg = crate::app::AppCore::start(Default::default()).agents();
+        reg.insert("w", AgentKind::Hire, None, "w".into(), test_session())
+            .now();
+        assert!(
+            reg.finish("w", Vec::new(), 1).now().is_none(),
+            "turns idle first"
+        );
         for text in ["look at A first", "look at B again", "and finally C"] {
             reg.deliver("w", crate::channels::MAIN_NAME, text, Vec::new(), None)
+                .now()
                 .unwrap_or_else(|e| panic!("{e}"));
         }
         assert_eq!(
@@ -2437,7 +3409,7 @@ mod tests {
             "all queued, none started individually"
         );
 
-        let woken = reg.flush_pending();
+        let woken = reg.flush_pending().now();
         assert_eq!(woken.len(), 1, "one instance runs one round");
         assert_eq!(woken[0].items.len(), 3, "all three delivered at once");
         let acks = reg.acks_of("w").unwrap_or_else(|| unreachable!());
@@ -2452,8 +3424,9 @@ mod tests {
     /// that only saw "queued" can still find out it was never delivered.
     #[test]
     fn stop_records_undelivered_messages_as_dropped() {
-        let reg = AgentRegistry::new();
-        reg.insert("w", AgentKind::Hire, None, "w".into(), test_session());
+        let reg = crate::app::AppCore::start(Default::default()).agents();
+        reg.insert("w", AgentKind::Hire, None, "w".into(), test_session())
+            .now();
         let id = reg
             .deliver(
                 "w",
@@ -2462,8 +3435,9 @@ mod tests {
                 Vec::new(),
                 None,
             )
+            .now()
             .unwrap_or_else(|e| panic!("{e}"));
-        let (_, dropped) = reg.stop("w").unwrap_or_else(|e| panic!("{e}"));
+        let (_, dropped) = reg.stop("w").now().unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(dropped, 1);
         let acks = reg.acks_of("w").unwrap_or_else(|| unreachable!());
         assert_eq!(acks.len(), 1);
@@ -2482,10 +3456,12 @@ mod tests {
     /// chase and the room broadcast deliberately do not take this door.
     #[test]
     fn a_direct_message_resumes_a_stopped_instance() {
-        let reg = AgentRegistry::new();
-        reg.insert("w", AgentKind::Hire, None, "w".into(), test_session());
-        reg.finish("w", vec![crate::api::types::Message::user_text("go")], 0);
-        reg.stop("w").unwrap_or_else(|e| panic!("{e}"));
+        let reg = crate::app::AppCore::start(Default::default()).agents();
+        reg.insert("w", AgentKind::Hire, None, "w".into(), test_session())
+            .now();
+        reg.finish("w", vec![crate::api::types::Message::user_text("go")], 0)
+            .now();
+        reg.stop("w").now().unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(reg.list()[0].state, AgentState::Stopped);
 
         reg.deliver(
@@ -2495,6 +3471,7 @@ mod tests {
             Vec::new(),
             None,
         )
+        .now()
         .unwrap_or_else(|e| panic!("a stopped instance accepts a direct message: {e}"));
         assert_eq!(
             reg.list()[0].state,
@@ -2502,7 +3479,7 @@ mod tests {
             "flipped, not refused"
         );
 
-        let woken = reg.flush_pending();
+        let woken = reg.flush_pending().now();
         assert_eq!(woken.len(), 1, "the ordinary wake path picks it up");
         assert_eq!(woken[0].name, "w");
         assert_eq!(
@@ -2518,8 +3495,9 @@ mod tests {
     /// comes settles every later check.
     #[test]
     fn follow_up_chases_a_queued_message_until_the_budget_runs_out() {
-        let reg = AgentRegistry::new();
-        reg.insert("w", AgentKind::Hire, None, "w".into(), test_session());
+        let reg = crate::app::AppCore::start(Default::default()).agents();
+        reg.insert("w", AgentKind::Hire, None, "w".into(), test_session())
+            .now();
         let id = reg
             .deliver(
                 "w",
@@ -2528,17 +3506,19 @@ mod tests {
                 Vec::new(),
                 Some(Duration::from_secs(30)),
             )
+            .now()
             .unwrap_or_else(|e| panic!("{e}"));
         for round in 1..=MAX_FOLLOW_UPS {
-            assert_eq!(reg.follow_up("w", id), FollowUp::Sent { round });
+            assert_eq!(reg.follow_up("w", id).now(), FollowUp::Sent { round });
         }
         assert_eq!(
-            reg.follow_up("w", id),
+            reg.follow_up("w", id).now(),
             FollowUp::Exhausted,
             "budget exhausted"
         );
         let items = reg
             .finish("w", Vec::new(), 1)
+            .now()
             .unwrap_or_else(|| panic!("queued messages should be claimed by the receiver"))
             .items;
         assert_eq!(
@@ -2567,12 +3547,12 @@ mod tests {
             "entering the context is not yet a receipt"
         );
         assert!(
-            reg.finish("w", Vec::new(), 2).is_none(),
+            reg.finish("w", Vec::new(), 2).now().is_none(),
             "that round answers"
         );
         assert!(
             matches!(
-                reg.follow_up("w", id),
+                reg.follow_up("w", id).now(),
                 FollowUp::Settled(AckState::Answered { .. })
             ),
             "no follow-up after a reply"
@@ -2584,16 +3564,17 @@ mod tests {
     /// and the follow-up has to name which silence it is, since the two need different words.
     #[test]
     fn a_turn_that_says_nothing_does_not_acknowledge_what_it_read() {
-        let reg = AgentRegistry::new();
+        let reg = crate::app::AppCore::start(Default::default()).agents();
         reg.insert(
             "mute",
             AgentKind::Hire,
             None,
             "silent".into(),
             test_session(),
-        );
+        )
+        .now();
         assert!(
-            reg.finish("mute", Vec::new(), 1).is_none(),
+            reg.finish("mute", Vec::new(), 1).now().is_none(),
             "turns idle first"
         );
         let id = reg
@@ -2604,14 +3585,15 @@ mod tests {
                 Vec::new(),
                 Some(Duration::from_secs(30)),
             )
+            .now()
             .unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(
-            reg.flush_pending().len(),
+            reg.flush_pending().now().len(),
             1,
             "idle instances receive at the boundary"
         );
         // The turn ends producing no text for main.
-        assert!(reg.finish("mute", Vec::new(), 0).is_none());
+        assert!(reg.finish("mute", Vec::new(), 0).now().is_none());
         let acks = reg.acks_of("mute").unwrap_or_else(|| unreachable!());
         assert!(
             matches!(acks[0].state, AckState::Delivered { run: 1 }),
@@ -2623,10 +3605,10 @@ mod tests {
             1,
             "the sender is still waiting for an answer"
         );
-        assert_eq!(reg.follow_up("mute", id), FollowUp::Sent { round: 1 });
+        assert_eq!(reg.follow_up("mute", id).now(), FollowUp::Sent { round: 1 });
         assert!(
             matches!(
-                reg.flush_pending()[0].items[..],
+                reg.flush_pending().now()[0].items[..],
                 [InboxItem::FollowUp {
                     delivered: true,
                     ..
@@ -2635,7 +3617,7 @@ mod tests {
             "the follow-up marks 'read but silent' rather than 'not picked up'"
         );
         // Speaking up answers what it had already read, even though a later run says it.
-        assert!(reg.finish("mute", Vec::new(), 1).is_none());
+        assert!(reg.finish("mute", Vec::new(), 1).now().is_none());
         assert_eq!(
             reg.acks_of("mute").unwrap_or_else(|| unreachable!())[0].state,
             AckState::Answered { run: 2 },
@@ -2648,8 +3630,9 @@ mod tests {
     /// message, a deleted one takes the record with it. Both are reportable outcomes, not silence.
     #[test]
     fn follow_up_settles_on_a_dropped_message_and_a_gone_instance() {
-        let reg = AgentRegistry::new();
-        reg.insert("w", AgentKind::Hire, None, "w".into(), test_session());
+        let reg = crate::app::AppCore::start(Default::default()).agents();
+        reg.insert("w", AgentKind::Hire, None, "w".into(), test_session())
+            .now();
         let id = reg
             .deliver(
                 "w",
@@ -2658,27 +3641,29 @@ mod tests {
                 Vec::new(),
                 Some(Duration::from_secs(10)),
             )
+            .now()
             .unwrap_or_else(|e| panic!("{e}"));
-        assert_eq!(reg.follow_up("w", id), FollowUp::Sent { round: 1 });
-        reg.stop("w").unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(reg.follow_up("w", id).now(), FollowUp::Sent { round: 1 });
+        reg.stop("w").now().unwrap_or_else(|e| panic!("{e}"));
         assert!(
             matches!(
-                reg.follow_up("w", id),
+                reg.follow_up("w", id).now(),
                 FollowUp::Settled(AckState::Dropped { .. })
             ),
             "stopping discards"
         );
-        reg.remove("w").unwrap_or_else(|e| panic!("{e}"));
-        assert_eq!(reg.follow_up("w", id), FollowUp::Gone);
-        assert_eq!(reg.follow_up("ghost", MsgId(999)), FollowUp::Gone);
+        reg.remove("w").now().unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(reg.follow_up("w", id).now(), FollowUp::Gone);
+        assert_eq!(reg.follow_up("ghost", MsgId(999)).now(), FollowUp::Gone);
     }
 
     /// A run chain that dies with messages still queued must not strand them: the instance goes
     /// back to Idle and the recovery dispatcher picks the batch up.
     #[test]
     fn messages_survive_a_failed_run_and_are_retried() {
-        let reg = AgentRegistry::new();
-        reg.insert("w", AgentKind::Hire, None, "w".into(), test_session());
+        let reg = crate::app::AppCore::start(Default::default()).agents();
+        reg.insert("w", AgentKind::Hire, None, "w".into(), test_session())
+            .now();
         reg.deliver(
             "w",
             crate::channels::MAIN_NAME,
@@ -2686,6 +3671,7 @@ mod tests {
             Vec::new(),
             None,
         )
+        .now()
         .unwrap_or_else(|e| panic!("{e}"));
         // The run failed (spawn_agent_loop's error branch) — it only marks the instance idle.
         reg.mark_idle("w");
@@ -2694,16 +3680,17 @@ mod tests {
             1,
             "the message is still in the inbox"
         );
-        let woken = reg.flush_pending();
+        let woken = reg.flush_pending().now();
         assert_eq!(woken.len(), 1, "the recovery dispatcher re-delivers");
         assert_eq!(woken[0].items.len(), 1);
     }
 
     #[test]
     fn delivered_messages_require_output_after_their_delivery_offset() {
-        let reg = AgentRegistry::new();
-        reg.insert("w", AgentKind::Hire, None, "w".into(), test_session());
-        let _ = reg.next_run("w");
+        let reg = crate::app::AppCore::start(Default::default()).agents();
+        reg.insert("w", AgentKind::Hire, None, "w".into(), test_session())
+            .now();
+        let _ = reg.next_run("w").now();
         let id = reg
             .deliver(
                 "w",
@@ -2712,23 +3699,24 @@ mod tests {
                 Vec::new(),
                 None,
             )
+            .now()
             .unwrap_or_else(|e| panic!("{e}"));
-        let items = reg.take_running("w", 5);
+        let items = reg.take_running("w", 5).now();
         assert_eq!(items.len(), 1);
         assert_eq!(
             reg.acks_of("w").unwrap_or_else(|| unreachable!())[0].state,
             AckState::Delivered { run: 1 }
         );
-        assert!(reg.finish("w", Vec::new(), 5).is_none());
+        assert!(reg.finish("w", Vec::new(), 5).now().is_none());
         assert_eq!(
             reg.acks_of("w").unwrap_or_else(|| unreachable!())[0].state,
             AckState::Delivered { run: 1 },
             "text produced before delivery does not answer it"
         );
-        assert_eq!(reg.follow_up("w", id), FollowUp::Sent { round: 1 });
-        let follow_up = reg.flush_pending();
+        assert_eq!(reg.follow_up("w", id).now(), FollowUp::Sent { round: 1 });
+        let follow_up = reg.flush_pending().now();
         assert_eq!(follow_up.len(), 1);
-        assert!(reg.finish("w", Vec::new(), 1).is_none());
+        assert!(reg.finish("w", Vec::new(), 1).now().is_none());
         assert_eq!(
             reg.acks_of("w").unwrap_or_else(|| unreachable!())[0].state,
             AckState::Answered { run: 2 },
@@ -2742,20 +3730,23 @@ mod tests {
     /// message going back.
     #[test]
     fn a_peer_is_answered_by_a_message_back_not_by_turn_text() {
-        let reg = AgentRegistry::new();
-        reg.insert("qa", AgentKind::Hire, None, "qa".into(), test_session());
-        reg.insert("dev", AgentKind::Hire, None, "dev".into(), test_session());
-        let _ = reg.next_run("qa");
+        let reg = crate::app::AppCore::start(Default::default()).agents();
+        reg.insert("qa", AgentKind::Hire, None, "qa".into(), test_session())
+            .now();
+        reg.insert("dev", AgentKind::Hire, None, "dev".into(), test_session())
+            .now();
+        let _ = reg.next_run("qa").now();
         reg.deliver("qa", "dev", "does the parser handle EOF?", Vec::new(), None)
+            .now()
             .unwrap_or_else(|e| panic!("{e}"));
-        let _ = reg.take_running("qa", 0);
+        let _ = reg.take_running("qa", 0).now();
         assert!(matches!(
             reg.acks_of("qa").unwrap_or_else(|| unreachable!())[0].state,
             AckState::Delivered { .. }
         ));
 
         // A whole turn's worth of prose, and dev has still heard nothing.
-        assert!(reg.finish("qa", Vec::new(), 500).is_none());
+        assert!(reg.finish("qa", Vec::new(), 500).now().is_none());
         assert!(
             matches!(
                 reg.acks_of("qa").unwrap_or_else(|| unreachable!())[0].state,
@@ -2766,6 +3757,7 @@ mod tests {
 
         // The message back is the answer.
         reg.deliver("dev", "qa", "it does, since the rewrite", Vec::new(), None)
+            .now()
             .unwrap_or_else(|e| panic!("{e}"));
         assert!(
             matches!(
@@ -2780,9 +3772,10 @@ mod tests {
     /// turn text, so the turn text answers it.
     #[test]
     fn mains_message_is_still_answered_by_turn_text() {
-        let reg = AgentRegistry::new();
-        reg.insert("qa", AgentKind::Hire, None, "qa".into(), test_session());
-        let _ = reg.next_run("qa");
+        let reg = crate::app::AppCore::start(Default::default()).agents();
+        reg.insert("qa", AgentKind::Hire, None, "qa".into(), test_session())
+            .now();
+        let _ = reg.next_run("qa").now();
         reg.deliver(
             "qa",
             crate::channels::MAIN_NAME,
@@ -2790,9 +3783,10 @@ mod tests {
             Vec::new(),
             None,
         )
+        .now()
         .unwrap_or_else(|e| panic!("{e}"));
-        let _ = reg.take_running("qa", 0);
-        assert!(reg.finish("qa", Vec::new(), 500).is_none());
+        let _ = reg.take_running("qa", 0).now();
+        assert!(reg.finish("qa", Vec::new(), 500).now().is_none());
         assert!(matches!(
             reg.acks_of("qa").unwrap_or_else(|| unreachable!())[0].state,
             AckState::Answered { .. }
@@ -2801,9 +3795,10 @@ mod tests {
 
     #[test]
     fn restored_running_batch_returns_to_queued_state() {
-        let reg = AgentRegistry::new();
-        reg.insert("w", AgentKind::Hire, None, "w".into(), test_session());
-        let _ = reg.next_run("w");
+        let reg = crate::app::AppCore::start(Default::default()).agents();
+        reg.insert("w", AgentKind::Hire, None, "w".into(), test_session())
+            .now();
+        let _ = reg.next_run("w").now();
         reg.deliver(
             "w",
             crate::channels::MAIN_NAME,
@@ -2811,57 +3806,75 @@ mod tests {
             Vec::new(),
             None,
         )
+        .now()
         .unwrap_or_else(|e| panic!("{e}"));
-        let items = reg.take_running("w", 0);
+        let items = reg.take_running("w", 0).now();
         assert!(matches!(
             reg.acks_of("w").unwrap_or_else(|| unreachable!())[0].state,
             AckState::Delivered { run: 1 }
         ));
         reg.restore_inbox("w", items);
+        reg.settle_now();
         assert_eq!(
             reg.acks_of("w").unwrap_or_else(|| unreachable!())[0].state,
             AckState::Queued
         );
         reg.mark_idle("w");
-        let retry = reg.flush_pending();
+        let retry = reg.flush_pending().now();
         assert_eq!(retry.len(), 1);
         assert_eq!(retry[0].run, 2);
     }
 
     #[tokio::test]
     async fn stop_wins_before_a_claimed_run_installs_its_abort_handle() {
-        let reg = AgentRegistry::new();
-        reg.insert("w", AgentKind::Hire, None, "w".into(), test_session());
+        let reg = crate::app::AppCore::start(Default::default()).agents();
+        reg.insert("w", AgentKind::Hire, None, "w".into(), test_session())
+            .await;
         reg.mark_idle("w");
         reg.deliver("w", crate::channels::MAIN_NAME, "start", Vec::new(), None)
+            .await
             .unwrap_or_else(|e| panic!("{e}"));
-        let wake = reg.flush_pending().pop().unwrap_or_else(|| unreachable!());
+        let wake = reg
+            .flush_pending()
+            .await
+            .pop()
+            .unwrap_or_else(|| unreachable!());
         assert_eq!(wake.run, 1);
-        reg.stop("w").unwrap_or_else(|e| panic!("{e}"));
+        reg.stop("w").await.unwrap_or_else(|e| panic!("{e}"));
         let task = tokio::spawn(async { std::future::pending::<()>().await });
         assert!(
-            !reg.set_abort_if_running("w", wake.run, task.abort_handle(), wake.items),
+            !reg.set_abort_if_running("w", wake.run, task.abort_handle(), wake.items)
+                .await,
             "a stopped entry rejects the late handle"
         );
-        assert!(!reg.accepts_run("w", wake.run));
+        assert!(!reg.accepts_run("w", wake.run).await);
     }
 
     #[test]
     fn stop_and_delete_semantics() {
-        let reg = AgentRegistry::new();
-        reg.insert("x", AgentKind::Hire, None, "x".into(), test_session());
+        let reg = crate::app::AppCore::start(Default::default()).agents();
+        reg.insert("x", AgentKind::Hire, None, "x".into(), test_session())
+            .now();
         reg.set_run_watch("x", crate::watch::WatchId(7));
         assert_eq!(
-            reg.stop("x").unwrap_or_else(|e| panic!("{e}")),
+            reg.stop("x").now().unwrap_or_else(|e| panic!("{e}")),
             (Some(crate::watch::WatchId(7)), 0),
             "stopping while running returns the current watch line"
         );
         assert!(
-            reg.stop("x").unwrap_or_else(|e| panic!("{e}")).0.is_none(),
+            reg.stop("x")
+                .now()
+                .unwrap_or_else(|e| panic!("{e}"))
+                .0
+                .is_none(),
             "idempotent"
         );
         // Turn finishing after a stop: history is still archived, no revival.
-        assert!(reg.finish("x", vec![Message::user_text("h")], 1).is_none());
+        assert!(
+            reg.finish("x", vec![Message::user_text("h")], 1)
+                .now()
+                .is_none()
+        );
         assert_eq!(reg.list()[0].state, AgentState::Stopped);
         // A direct message after the stop is the one thing that revives (D105a).
         reg.deliver(
@@ -2871,26 +3884,33 @@ mod tests {
             Vec::new(),
             None,
         )
+        .now()
         .unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(
             reg.list()[0].state,
             AgentState::Idle,
             "resumed, not refused"
         );
-        reg.remove("x").unwrap_or_else(|e| panic!("{e}"));
+        reg.remove("x").now().unwrap_or_else(|e| panic!("{e}"));
         assert!(reg.list().is_empty());
-        assert_eq!(reg.claim_name("x"), "x", "deletion frees the name");
+        assert_eq!(reg.claim_name("x").now(), "x", "deletion frees the name");
         assert!(
             reg.deliver("x", crate::channels::MAIN_NAME, "hi", Vec::new(), None)
+                .now()
                 .is_err(),
             "unknown instance errors"
         );
         // Stopping an idle instance: no active line.
-        reg.insert("y", AgentKind::Hire, None, "y".into(), test_session());
+        reg.insert("y", AgentKind::Hire, None, "y".into(), test_session())
+            .now();
         reg.set_run_watch("y", crate::watch::WatchId(9));
-        assert!(reg.finish("y", Vec::new(), 1).is_none());
+        assert!(reg.finish("y", Vec::new(), 1).now().is_none());
         assert!(
-            reg.stop("y").unwrap_or_else(|e| panic!("{e}")).0.is_none(),
+            reg.stop("y")
+                .now()
+                .unwrap_or_else(|e| panic!("{e}"))
+                .0
+                .is_none(),
             "stopping while idle does not cancel a terminal watch line"
         );
     }

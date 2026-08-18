@@ -378,7 +378,10 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         &runtime.provider.borrow().clone(),
         &client.models(),
     ));
-    let channel_limits = crate::channels::ChannelLimits::from_settings(&settings);
+    let core = crate::app::AppCore::start(crate::app::SessionSetup {
+        channel_limits: crate::channels::ChannelLimits::from_settings(&settings),
+        ..Default::default()
+    });
     let session = Arc::new(Session {
         client,
         runtime,
@@ -391,15 +394,11 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         user_config_dir: user_dir.clone(),
         quiet: !cli.print,
         compact_failures: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
-        watch: crate::app::AppCore::start(Default::default()).watch(),
+        watch: core.watch(),
         tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(&home, &task_list_key)),
         expand_tasks: expand_tx,
-        agents: crate::agents::AgentRegistry::new(),
-        channels: crate::app::AppCore::start(crate::app::SessionSetup {
-            channel_limits,
-            ..Default::default()
-        })
-        .channels(),
+        agents: core.agents(),
+        channels: core.channels(),
         instance: None,
         attachments: crate::api::image::Attachments::new(),
     });

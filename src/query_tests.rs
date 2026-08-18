@@ -621,6 +621,7 @@ pub(super) fn test_session(base_url: String, transcript: Option<Transcript>) -> 
 
 /// A session whose home/cwd point at seeded experience/memory stores.
 fn test_session_at(home: std::path::PathBuf, cwd: std::path::PathBuf) -> Arc<Session> {
+    let core = crate::app::AppCore::start(Default::default());
     Arc::new(Session {
         client: crate::api::client::Client::new("k".into(), "http://127.0.0.1:1".into()),
         runtime: Runtime::new("m".into(), None, Default::default()),
@@ -633,11 +634,11 @@ fn test_session_at(home: std::path::PathBuf, cwd: std::path::PathBuf) -> Arc<Ses
         home,
         quiet: true,
         compact_failures: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
-        watch: crate::app::AppCore::start(Default::default()).watch(),
+        watch: core.watch(),
         tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), "test")),
         expand_tasks: tokio::sync::watch::channel(false).0,
-        agents: crate::agents::AgentRegistry::new(),
-        channels: crate::app::AppCore::start(Default::default()).channels(),
+        agents: core.agents(),
+        channels: core.channels(),
         instance: None,
         attachments: crate::api::image::Attachments::new(),
     })
@@ -696,6 +697,7 @@ fn test_session_with_client_and_failures(
     transcript: Option<Transcript>,
     compact_failures: u64,
 ) -> Arc<Session> {
+    let core = crate::app::AppCore::start(Default::default());
     Arc::new(Session {
         client,
         runtime: Runtime::new("m".into(), transcript, Default::default()),
@@ -708,11 +710,11 @@ fn test_session_with_client_and_failures(
         user_config_dir: std::env::temp_dir().join(".config"),
         quiet: true,
         compact_failures: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(compact_failures)),
-        watch: crate::app::AppCore::start(Default::default()).watch(),
+        watch: core.watch(),
         tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), "test")),
         expand_tasks: tokio::sync::watch::channel(false).0,
-        agents: crate::agents::AgentRegistry::new(),
-        channels: crate::app::AppCore::start(Default::default()).channels(),
+        agents: core.agents(),
+        channels: core.channels(),
         instance: None,
         attachments: crate::api::image::Attachments::new(),
     })
@@ -1184,14 +1186,17 @@ async fn running_agent_absorbs_a_batch_at_the_next_tool_round() {
         instance: Some("worker".into()),
         ..base.as_ref().clone()
     });
-    session.agents.insert(
-        "worker",
-        crate::agents::AgentKind::Hire,
-        None,
-        "work".into(),
-        session.clone(),
-    );
-    session.agents.next_run("worker");
+    session
+        .agents
+        .insert(
+            "worker",
+            crate::agents::AgentKind::Hire,
+            None,
+            "work".into(),
+            session.clone(),
+        )
+        .await;
+    session.agents.next_run("worker").await;
     let ui = headless_hooks();
     let tools = crate::tools::assemble_tools(&session, &mut ui.events.warn_sink()).await;
     let ctx = tool_context(&session, &ui).unwrap_or_else(|e| panic!("{e}"));
@@ -1224,6 +1229,7 @@ async fn running_agent_absorbs_a_batch_at_the_next_tool_round() {
             Vec::new(),
             None,
         )
+        .await
         .unwrap_or_else(|e| panic!("{e}"));
     session
         .agents
@@ -1234,6 +1240,7 @@ async fn running_agent_absorbs_a_batch_at_the_next_tool_round() {
             Vec::new(),
             None,
         )
+        .await
         .unwrap_or_else(|e| panic!("{e}"));
     assert_eq!(session.agents.list()[0].pending, 2);
 
@@ -1419,6 +1426,7 @@ fn escapes_xml_for_bash_output() {
 /// (thinking-mode endpoints reject assistant messages without a thinking block).
 #[tokio::test]
 async fn bash_command_executes_without_model_query() {
+    let core = crate::app::AppCore::start(Default::default());
     let session = Arc::new(Session {
         client: crate::api::client::Client::new("k".into(), "http://127.0.0.1:9".into()),
         runtime: Runtime::new("m".into(), None, Default::default()),
@@ -1434,11 +1442,11 @@ async fn bash_command_executes_without_model_query() {
         user_config_dir: std::env::temp_dir().join(".config"),
         quiet: true,
         compact_failures: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
-        watch: crate::app::AppCore::start(Default::default()).watch(),
+        watch: core.watch(),
         tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), "test")),
         expand_tasks: tokio::sync::watch::channel(false).0,
-        agents: crate::agents::AgentRegistry::new(),
-        channels: crate::app::AppCore::start(Default::default()).channels(),
+        agents: core.agents(),
+        channels: core.channels(),
         instance: None,
         attachments: crate::api::image::Attachments::new(),
     });
@@ -2045,6 +2053,7 @@ fn missing_tool_results_are_filled_exactly_once() {
 /// gate (respond=false, no model query).
 #[tokio::test]
 async fn bash_command_refuses_interactive_tty_commands() {
+    let core = crate::app::AppCore::start(Default::default());
     let session = Arc::new(Session {
         client: crate::api::client::Client::new("k".into(), "http://127.0.0.1:9".into()),
         runtime: Runtime::new("m".into(), None, Default::default()),
@@ -2060,11 +2069,11 @@ async fn bash_command_refuses_interactive_tty_commands() {
         user_config_dir: std::env::temp_dir().join(".config"),
         quiet: true,
         compact_failures: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
-        watch: crate::app::AppCore::start(Default::default()).watch(),
+        watch: core.watch(),
         tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), "test")),
         expand_tasks: tokio::sync::watch::channel(false).0,
-        agents: crate::agents::AgentRegistry::new(),
-        channels: crate::app::AppCore::start(Default::default()).channels(),
+        agents: core.agents(),
+        channels: core.channels(),
         instance: None,
         attachments: crate::api::image::Attachments::new(),
     });

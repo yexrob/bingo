@@ -72,11 +72,12 @@ impl InboxWake {
         })
     }
 
-    fn take(&mut self, session: &Arc<Session>) -> Vec<crate::agents::InboxItem> {
+    async fn take(&mut self, session: &Arc<Session>) -> Vec<crate::agents::InboxItem> {
         let _ = self.rx.borrow_and_update();
         let items = session
             .agents
-            .take_running(&self.instance, self.output_chars);
+            .take_running(&self.instance, self.output_chars)
+            .await;
         self.claimed.extend(items.iter().cloned());
         items
     }
@@ -911,7 +912,7 @@ async fn query_loop(
     normalize_synthetic_bash_calls(&mut messages);
     loop {
         if let Some(inbox) = inbox_wake.as_mut() {
-            let items = inbox.take(session);
+            let items = inbox.take(session).await;
             if !items.is_empty() {
                 let (prompt, images) =
                     crate::tool::agent::absorb_inbox(&session.channels, &inbox.instance, &items);
@@ -949,7 +950,7 @@ async fn query_loop(
         // Main sweeps, and only main: every instance shares this registry, so letting a
         // subagent's own loop run it would have hires releasing each other — and themselves.
         let released = if session.instance.is_none() {
-            session.agents.release_hires()
+            session.agents.release_hires().await
         } else {
             Vec::new()
         };

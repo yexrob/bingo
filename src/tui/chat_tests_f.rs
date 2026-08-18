@@ -38,13 +38,16 @@ fn assistant(text: &str) -> Message {
 
 /// Register a hire on the chat's own session, the way a `Task` spawn would.
 fn seed_agent(chat: &Chat, name: &str) {
-    chat.session.agents.insert(
-        name,
-        AgentKind::Hire,
-        None,
-        "test instance".to_string(),
-        chat.session.clone(),
-    );
+    chat.session
+        .agents
+        .insert(
+            name,
+            AgentKind::Hire,
+            None,
+            "test instance".to_string(),
+            chat.session.clone(),
+        )
+        .now();
 }
 
 fn lifecycle(label: &str, status: WatchState, detail: Option<&str>) -> UiEvent {
@@ -192,20 +195,23 @@ fn a_completion_bumps_the_dm_instead_of_main() {
 
     // The agent finishes: its reply lands in its history, then the lifecycle
     // event arrives — the order the domain actually produces.
-    chat.session.agents.finish(
-        "scout",
-        vec![
-            // A DM the user sent, then the reply to it: the badge counts the
-            // pair lane (D99), and an agent's report on the task main gave it
-            // is main's news rather than the user's.
-            crate::api::types::Message::user_text(format!(
-                "{}\nhow is the parser?",
-                crate::tool::agent::DM_FROM_USER_MARKER
-            )),
-            assistant("the parser is fixed"),
-        ],
-        0,
-    );
+    chat.session
+        .agents
+        .finish(
+            "scout",
+            vec![
+                // A DM the user sent, then the reply to it: the badge counts the
+                // pair lane (D99), and an agent's report on the task main gave it
+                // is main's news rather than the user's.
+                crate::api::types::Message::user_text(format!(
+                    "{}\nhow is the parser?",
+                    crate::tool::agent::DM_FROM_USER_MARKER
+                )),
+                assistant("the parser is fixed"),
+            ],
+            0,
+        )
+        .now();
     chat.apply_event(lifecycle(
         "scout · fix the parser",
         WatchState::Done,
@@ -1102,15 +1108,18 @@ fn a_woken_turn_counts_on_the_console_like_any_other() {
 /// Put a dispatch row on a running turn and give its instance a run to show.
 fn dispatching(chat: &mut Chat, name: &str, description: &str, activity: &[&str], tokens: u64) {
     seed_agent(chat, name);
-    chat.session.agents.set_progress_snapshot(
-        name,
-        crate::agents::AgentProgress {
-            started_at: Some(std::time::Instant::now()),
-            output_tokens: tokens,
-            tool_uses: activity.len(),
-            recent_activity: activity.iter().map(|a| a.to_string()).collect(),
-        },
-    );
+    chat.session
+        .agents
+        .set_progress_snapshot(
+            name,
+            crate::agents::AgentProgress {
+                started_at: Some(std::time::Instant::now()),
+                output_tokens: tokens,
+                tool_uses: activity.len(),
+                recent_activity: activity.iter().map(|a| a.to_string()).collect(),
+            },
+        )
+        .now();
     chat.apply_event(lifecycle(
         &format!("{name} · {description}"),
         WatchState::Running,
@@ -1211,7 +1220,7 @@ fn a_finished_dispatch_settles_into_what_the_run_cost() {
     );
     chat.tick();
     // What the domain does one line before it reports the end.
-    chat.session.agents.set_progress("scout", None);
+    chat.session.agents.set_progress("scout", None).now();
     chat.apply_event(UiEvent::WatchEvent {
         label: "scout · fix the parser".into(),
         kind: WatchKind::Agent,
@@ -1659,7 +1668,7 @@ fn running_idle_and_stopped_write_no_line() {
     ));
     chat.apply_event(lifecycle("scout · fix the parser", WatchState::Idle, None));
     chat.session.agents.mark_idle("scout");
-    chat.session.agents.stop("scout").expect("stopped");
+    chat.session.agents.stop("scout").now().expect("stopped");
     chat.refresh_conversations();
     chat.tick();
 
@@ -1797,7 +1806,7 @@ fn seed_run(chat: &Chat, name: &str, assistant: Vec<ContentBlock>, results: Vec<
             content: results,
         });
     }
-    let _ = chat.session.agents.finish(name, history, 0);
+    let _ = chat.session.agents.finish(name, history, 0).now();
 }
 
 fn call(id: &str, url: &str) -> ContentBlock {
@@ -1857,7 +1866,7 @@ fn an_agent_page_says_whether_a_call_worked() {
 }
 
 /// A call whose answer is not in the record never got one: a committed history
-/// is written when the run ends (`AgentRegistry::finish`), so the run was cut
+/// is written when the run ends (`AgentHandle::finish`), so the run was cut
 /// short. That is a state the console already draws, and borrowing "Done" for it
 /// would report a completion that never happened.
 #[test]
@@ -2232,6 +2241,7 @@ async fn a_line_sent_to_an_agent_shows_on_its_page_once() {
             Vec::new(),
             None,
         )
+        .await
         .unwrap_or_else(|e| panic!("{e}"));
     chat.drain_all();
     assert!(
@@ -2606,14 +2616,17 @@ fn a_page_opened_over_undrained_events_does_not_double_the_turn() {
     let mut chat = test_chat();
     seed_agent(&chat, "scout");
     // The run committed its history first.
-    chat.session.agents.finish(
-        "scout",
-        vec![
-            Message::user_text("fix the parser"),
-            assistant("the lexer drops a token at EOF"),
-        ],
-        0,
-    );
+    chat.session
+        .agents
+        .finish(
+            "scout",
+            vec![
+                Message::user_text("fix the parser"),
+                assistant("the lexer drops a token at EOF"),
+            ],
+            0,
+        )
+        .now();
     // …and the events that produced it are still queued, unread.
     let sink = chat
         .events
@@ -2682,24 +2695,29 @@ fn a_store_opened_by_mail_still_owes_its_record() {
     use crate::api::types::Role as ApiRole;
     let mut chat = test_chat();
     seed_agent(&chat, "scout");
-    let _ = chat.session.agents.finish(
-        "scout",
-        vec![
-            Message {
-                role: ApiRole::User,
-                content: vec![ContentBlock::Text {
-                    text: "map the parser".to_string(),
-                }],
-            },
-            assistant("the lexer owns it"),
-        ],
-        0,
-    );
+    let _ = chat
+        .session
+        .agents
+        .finish(
+            "scout",
+            vec![
+                Message {
+                    role: ApiRole::User,
+                    content: vec![ContentBlock::Text {
+                        text: "map the parser".to_string(),
+                    }],
+                },
+                assistant("the lexer owns it"),
+            ],
+            0,
+        )
+        .now();
     // Mail lands before the page is ever opened: the store opens blank.
-    let _ =
-        chat.session
-            .agents
-            .deliver("scout", "main", "and check EOF handling", Vec::new(), None);
+    let _ = chat
+        .session
+        .agents
+        .deliver("scout", "main", "and check EOF handling", Vec::new(), None)
+        .now();
     chat.drain_events();
 
     let rows = agent_page(&mut chat, "scout");

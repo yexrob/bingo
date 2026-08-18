@@ -40,6 +40,7 @@ pub(super) fn test_chat_home(home: std::path::PathBuf) -> Chat {
     let _ = std::fs::create_dir_all(&home);
     let (events_tx, events_rx) = mpsc::unbounded_channel();
     let (asks_tx, asks_rx) = mpsc::unbounded_channel();
+    let core = crate::app::AppCore::start(Default::default());
     let session = Arc::new(Session {
         client: crate::api::client::Client::new(
             "test-key".to_string(),
@@ -56,11 +57,11 @@ pub(super) fn test_chat_home(home: std::path::PathBuf) -> Chat {
         user_config_dir: home.join(".config"),
         quiet: true,
         compact_failures: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
-        watch: crate::app::AppCore::start(Default::default()).watch(),
+        watch: core.watch(),
         tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(&home, "test")),
         expand_tasks: tokio::sync::watch::channel(false).0,
-        agents: crate::agents::AgentRegistry::new(),
-        channels: crate::app::AppCore::start(Default::default()).channels(),
+        agents: core.agents(),
+        channels: core.channels(),
         instance: None,
         attachments: crate::api::image::Attachments::new(),
     });
@@ -1073,6 +1074,7 @@ fn model_bash_still_folds_into_group() {
 /// (respondToBashCommands=false → no model call; the turn ends and busy resets).
 #[tokio::test]
 async fn bash_submit_runs_command_and_ends_turn() {
+    let core = crate::app::AppCore::start(Default::default());
     let session = Arc::new(Session {
         client: crate::api::client::Client::new("k".into(), "http://127.0.0.1:9".into()),
         runtime: crate::query::Runtime::new("m".into(), None, Default::default()),
@@ -1088,11 +1090,11 @@ async fn bash_submit_runs_command_and_ends_turn() {
         user_config_dir: std::env::temp_dir().join(".config"),
         quiet: true,
         compact_failures: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
-        watch: crate::app::AppCore::start(Default::default()).watch(),
+        watch: core.watch(),
         tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), "test")),
         expand_tasks: tokio::sync::watch::channel(false).0,
-        agents: crate::agents::AgentRegistry::new(),
-        channels: crate::app::AppCore::start(Default::default()).channels(),
+        agents: core.agents(),
+        channels: core.channels(),
         instance: None,
         attachments: crate::api::image::Attachments::new(),
     });

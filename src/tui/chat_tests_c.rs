@@ -10,13 +10,16 @@ use serde_json::json;
 
 /// Register an instance on the chat's own session, the way a spawn would.
 fn seed_agent(chat: &Chat, name: &str) {
-    chat.session.agents.insert(
-        name,
-        crate::agents::AgentKind::Hire,
-        None,
-        "test instance".to_string(),
-        chat.session.clone(),
-    );
+    chat.session
+        .agents
+        .insert(
+            name,
+            crate::agents::AgentKind::Hire,
+            None,
+            "test instance".to_string(),
+            chat.session.clone(),
+        )
+        .now();
 }
 
 /// Three grouped reads, each with output of its own.
@@ -1432,13 +1435,16 @@ fn both_kill_keys_kill_to_the_end_of_the_line() {
 #[tokio::test]
 async fn a_direct_send_never_steers_mains_turn() {
     let mut chat = chat_with_history("steer-direct");
-    chat.session.agents.insert(
-        "scout",
-        crate::agents::AgentKind::Hire,
-        None,
-        "research".into(),
-        chat.session.clone(),
-    );
+    chat.session
+        .agents
+        .insert(
+            "scout",
+            crate::agents::AgentKind::Hire,
+            None,
+            "research".into(),
+            chat.session.clone(),
+        )
+        .await;
     chat.refresh_conversations();
     chat.conv.busy = true;
 
@@ -1460,7 +1466,12 @@ async fn a_direct_send_never_steers_mains_turn() {
             .pending_of("scout")
             .iter()
             .any(|(from, text)| from == crate::channels::USER_NAME && text == "use tabs")
-            || !chat.session.agents.take_running("scout", 0).is_empty(),
+            || !chat
+                .session
+                .agents
+                .take_running("scout", 0)
+                .await
+                .is_empty(),
         "it went to the instance instead"
     );
 

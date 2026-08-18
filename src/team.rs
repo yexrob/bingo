@@ -1180,7 +1180,7 @@ fn spawn_members(
         let name = if existing {
             member.name.clone()
         } else {
-            session.agents.claim_name(&member.name)
+            session.agents.claim_name(&member.name).now()
         };
         if name != member.name {
             claimed.insert(member.name.clone(), name.clone());
@@ -1208,6 +1208,7 @@ fn spawn_members(
             match session
                 .agents
                 .refresh(&name, Some(member.agent.clone()), description, sub)
+                .now()
             {
                 // Everything else counts as the reuse it has always been: a member
                 // mid-turn keeps the definition it started under (the next start catches
@@ -1218,13 +1219,16 @@ fn spawn_members(
             }
             continue;
         }
-        session.agents.insert(
-            &name,
-            crate::agents::AgentKind::Crew,
-            Some(member.agent.clone()),
-            description,
-            sub,
-        );
+        session
+            .agents
+            .insert(
+                &name,
+                crate::agents::AgentKind::Crew,
+                Some(member.agent.clone()),
+                description,
+                sub,
+            )
+            .now();
         // Spawn ≠ wake: mark Idle after insert (zero-token standby; the turn only starts with SendMessage).
         session.agents.mark_idle(&name);
         summary.spawned.push(name);
@@ -1531,9 +1535,6 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
-    use crate::agents::AgentRegistry;
-    use crate::channels::ChannelLimits;
-
     fn tmp(name: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("bingo-team-{}-{}", name, std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1819,6 +1820,7 @@ mod tests {
     }
 
     fn session() -> Arc<Session> {
+        let core = crate::app::AppCore::start(Default::default());
         Arc::new(Session {
             client: crate::api::client::Client::new("k".into(), "http://x".into()),
             runtime: crate::query::Runtime::new("m".into(), None, Default::default()),
@@ -1831,15 +1833,11 @@ mod tests {
             user_config_dir: std::env::temp_dir().join(".config"),
             quiet: true,
             compact_failures: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            watch: crate::app::AppCore::start(Default::default()).watch(),
+            watch: core.watch(),
             tasks: Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), "t")),
             expand_tasks: tokio::sync::watch::channel(false).0,
-            agents: AgentRegistry::new(),
-            channels: crate::app::AppCore::start(crate::app::SessionSetup {
-                channel_limits: ChannelLimits::default(),
-                ..Default::default()
-            })
-            .channels(),
+            agents: core.agents(),
+            channels: core.channels(),
             instance: None,
             attachments: crate::api::image::Attachments::new(),
         })
@@ -1899,7 +1897,7 @@ mod tests {
             role: Role::User,
             content: vec![ContentBlock::Text { text: said.into() }],
         }];
-        s.agents.finish(who, history.clone(), said.len());
+        s.agents.finish(who, history.clone(), said.len()).now();
         history
     }
 
@@ -2024,9 +2022,10 @@ mod tests {
                 Vec::new(),
                 None,
             )
+            .now()
             .unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(
-            s.agents.flush_pending().len(),
+            s.agents.flush_pending().now().len(),
             1,
             "the member is now running"
         );
@@ -2047,7 +2046,7 @@ mod tests {
         );
 
         // Turn over → the next start applies what the user wrote.
-        s.agents.finish("qa", Vec::new(), 0);
+        s.agents.finish("qa", Vec::new(), 0).now();
         let after = spawn_tree(&s, &tree_of(&project), &home).unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(after.refreshed, vec!["qa".to_string()], "{after:?}");
         assert!(prompt_of(&s, "qa").contains("rewritten mid-turn"));
@@ -2068,7 +2067,7 @@ mod tests {
             .unwrap_or_else(|e| panic!("{e}"));
         spawn_tree(&s, &tree_of(&project), &home).unwrap_or_else(|e| panic!("{e}"));
         let history = worked(&s, "qa", "before the edit");
-        s.agents.stop("qa").unwrap_or_else(|e| panic!("{e}"));
+        s.agents.stop("qa").now().unwrap_or_else(|e| panic!("{e}"));
 
         write_persona(
             &project,
@@ -2096,6 +2095,7 @@ mod tests {
                     Vec::new(),
                     None
                 )
+                .now()
                 .is_ok()
         );
         std::fs::remove_dir_all(&home).unwrap();
@@ -2115,13 +2115,15 @@ mod tests {
         write_team_file(&project, &team_def("t", &[("qa", "qa")]))
             .unwrap_or_else(|e| panic!("{e}"));
         // The name was taken by an ad-hoc spawn in this same project before the crew came up.
-        s.agents.insert(
-            "qa",
-            crate::agents::AgentKind::Hire,
-            None,
-            "hired for one task".into(),
-            s.clone(),
-        );
+        s.agents
+            .insert(
+                "qa",
+                crate::agents::AgentKind::Hire,
+                None,
+                "hired for one task".into(),
+                s.clone(),
+            )
+            .now();
 
         let out = spawn_tree(&s, &tree_of(&project), &home).unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(out.reused, vec!["qa".to_string()], "{out:?}");

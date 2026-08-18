@@ -2517,13 +2517,16 @@ async fn queued_slashes_drain_through_run_slash() {
 #[test]
 fn running_agents_leave_the_arrows_to_history() {
     let mut chat = test_chat();
-    chat.session.agents.insert(
-        "scout",
-        crate::agents::AgentKind::Hire,
-        None,
-        "research".into(),
-        chat.session.clone(),
-    );
+    chat.session
+        .agents
+        .insert(
+            "scout",
+            crate::agents::AgentKind::Hire,
+            None,
+            "research".into(),
+            chat.session.clone(),
+        )
+        .now();
     chat.refresh_conversations();
     chat.history.record("earlier prompt");
     assert!(chat.input.is_empty());
@@ -2560,32 +2563,42 @@ fn running_agents_leave_the_arrows_to_history() {
 #[test]
 fn the_background_dialog_lists_opens_details_and_stops_agents() {
     let mut chat = test_chat();
-    chat.session.agents.insert(
-        "alpha",
-        crate::agents::AgentKind::Hire,
-        None,
-        "first agent".into(),
-        chat.session.clone(),
-    );
-    chat.session.agents.insert(
-        "scout",
-        crate::agents::AgentKind::Hire,
-        None,
-        "inspect the code".into(),
-        chat.session.clone(),
-    );
     chat.session
         .agents
-        .set_prompt("scout", "Find the rendering seam".into());
-    chat.session.agents.set_progress_snapshot(
-        "scout",
-        crate::agents::AgentProgress {
-            started_at: Some(std::time::Instant::now()),
-            output_tokens: 123,
-            tool_uses: 2,
-            recent_activity: vec!["⏺Read(src/tui/chat.rs)".into()],
-        },
-    );
+        .insert(
+            "alpha",
+            crate::agents::AgentKind::Hire,
+            None,
+            "first agent".into(),
+            chat.session.clone(),
+        )
+        .now();
+    chat.session
+        .agents
+        .insert(
+            "scout",
+            crate::agents::AgentKind::Hire,
+            None,
+            "inspect the code".into(),
+            chat.session.clone(),
+        )
+        .now();
+    chat.session
+        .agents
+        .set_prompt("scout", "Find the rendering seam".into())
+        .now();
+    chat.session
+        .agents
+        .set_progress_snapshot(
+            "scout",
+            crate::agents::AgentProgress {
+                started_at: Some(std::time::Instant::now()),
+                output_tokens: 123,
+                tool_uses: 2,
+                recent_activity: vec!["⏺Read(src/tui/chat.rs)".into()],
+            },
+        )
+        .now();
 
     assert!(chat.on_key(KeyCode::Char('b'), KeyModifiers::CONTROL));
     let list = chat
@@ -2640,25 +2653,33 @@ fn the_background_dialog_lists_opens_details_and_stops_agents() {
     );
 
     // Enter opens the detail on the selected row.
-    chat.session.agents.insert(
-        "scout",
-        crate::agents::AgentKind::Hire,
-        None,
-        "inspect the code".into(),
-        chat.session.clone(),
-    );
     chat.session
         .agents
-        .set_prompt("scout", "Find the rendering seam".into());
-    chat.session.agents.set_progress_snapshot(
-        "scout",
-        crate::agents::AgentProgress {
-            started_at: Some(std::time::Instant::now()),
-            output_tokens: 123,
-            tool_uses: 2,
-            recent_activity: vec!["⏺Read(src/tui/chat.rs)".into()],
-        },
-    );
+        .insert(
+            "scout",
+            crate::agents::AgentKind::Hire,
+            None,
+            "inspect the code".into(),
+            chat.session.clone(),
+        )
+        .now();
+    chat.session
+        .agents
+        .set_prompt("scout", "Find the rendering seam".into())
+        .now();
+    chat.session
+        .agents
+        .set_progress_snapshot(
+            "scout",
+            crate::agents::AgentProgress {
+                started_at: Some(std::time::Instant::now()),
+                output_tokens: 123,
+                tool_uses: 2,
+                recent_activity: vec!["⏺Read(src/tui/chat.rs)".into()],
+            },
+        )
+        .now();
+    chat.session.agents.settle_now();
     chat.dialog = Some(crate::tui::background::BackgroundDialog {
         selected: Some(crate::tui::background::DialogTarget::Agent("scout".into())),
         detail: None,
@@ -3115,13 +3136,16 @@ fn task_lines_use_checkbox_glyphs() {
 #[test]
 fn task_lines_name_a_live_owner_and_what_blocks_the_row() {
     let mut chat = chat_with_history("todo");
-    chat.session.agents.insert(
-        "scout",
-        crate::agents::AgentKind::Hire,
-        None,
-        "test instance".into(),
-        chat.session.clone(),
-    );
+    chat.session
+        .agents
+        .insert(
+            "scout",
+            crate::agents::AgentKind::Hire,
+            None,
+            "test instance".into(),
+            chat.session.clone(),
+        )
+        .now();
     chat.tasks_visible = true;
     chat.tasks_cache = vec![
         TodoItem {
@@ -3172,7 +3196,7 @@ fn task_lines_name_a_live_owner_and_what_blocks_the_row() {
     );
 
     // Stopping the owner takes the name off the row: it points at nobody now.
-    chat.session.agents.stop("scout").expect("stopped");
+    chat.session.agents.stop("scout").now().expect("stopped");
     let joined: Vec<String> = chat.task_lines().iter().map(|l| l.plain_text()).collect();
     assert!(
         joined.iter().any(|l| l == "☐ land the parser"),

@@ -285,7 +285,7 @@ pub enum UiEvent {
     /// later. A user watching that instance could see what *they* had asked for
     /// (the console echoed it at send time) and nothing of what main had. So the
     /// echo moves to the one place every sender passes through
-    /// ([`crate::agents::AgentRegistry::deliver`]) and covers all of them, and
+    /// ([`crate::agents::AgentHandle::deliver`]) and covers all of them, and
     /// the absorbed prompt's DM lines are dropped as the repeat they are.
     Mail {
         from: String,

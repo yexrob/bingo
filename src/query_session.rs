@@ -94,7 +94,7 @@ pub struct Session {
     /// Task panel expand signal (subscribed by the TUI loop).
     pub expand_tasks: watch::Sender<bool>,
     /// Sub-agent instance registry (continuation/lifecycle; sub-sessions share the same table).
-    pub agents: Arc<crate::agents::AgentRegistry>,
+    pub agents: crate::agents::AgentHandle,
     /// Agent channel registry (experimental; sub-sessions share the same table).
     pub channels: crate::channels::ChannelHandle,
     /// This session's instance name (sub-agents = Some(registry name); main session None,

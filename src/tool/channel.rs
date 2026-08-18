@@ -117,15 +117,18 @@ pub(crate) fn deliver_post(
             // waits on a count or a clock any more.
             let mut undelivered_mentions = Vec::new();
             for delivery in deliveries {
-                let accepted = session.agents.deposit(
-                    &delivery.member,
-                    crate::agents::InboxItem::Channel {
-                        channel: channel.to_string(),
-                        from: delivery.msg.from.clone(),
-                        text: delivery.msg.text.clone(),
-                        seq: delivery.msg.seq,
-                    },
-                );
+                let accepted = session
+                    .agents
+                    .deposit(
+                        &delivery.member,
+                        crate::agents::InboxItem::Channel {
+                            channel: channel.to_string(),
+                            from: delivery.msg.from.clone(),
+                            text: delivery.msg.text.clone(),
+                            seq: delivery.msg.seq,
+                        },
+                    )
+                    .now();
                 if !accepted && delivery.mentioned {
                     undelivered_mentions.push(delivery.member);
                 } else if delivery.mentioned {
@@ -227,17 +230,20 @@ fn spawn_mention_watchdog(
                 );
                 continue;
             }
-            let accepted = session.agents.deposit(
-                &to,
-                crate::agents::InboxItem::Unanswered {
-                    channel: channel.clone(),
-                    seq,
-                    from: owed.from.clone(),
-                    excerpt: excerpt.clone(),
-                    round,
-                    waited,
-                },
-            );
+            let accepted = session
+                .agents
+                .deposit(
+                    &to,
+                    crate::agents::InboxItem::Unanswered {
+                        channel: channel.clone(),
+                        seq,
+                        from: owed.from.clone(),
+                        excerpt: excerpt.clone(),
+                        round,
+                        waited,
+                    },
+                )
+                .await;
             if !accepted {
                 report(
                     crate::watch::WatchState::Failed,
@@ -520,9 +526,9 @@ Joins and departures are written into the room where everyone in it can see them
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agents::AgentRegistry;
 
     fn main_session() -> Arc<Session> {
+        let core = crate::app::AppCore::start(Default::default());
         Arc::new(Session {
             client: crate::api::client::Client::new("k".into(), "http://x".into()),
             runtime: crate::query::Runtime::new("m".into(), None, Default::default()),
@@ -541,11 +547,11 @@ mod tests {
             user_config_dir: std::env::temp_dir().join(".config"),
             quiet: true,
             compact_failures: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            watch: crate::app::AppCore::start(Default::default()).watch(),
+            watch: core.watch(),
             tasks: Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), "t")),
             expand_tasks: tokio::sync::watch::channel(false).0,
-            agents: AgentRegistry::new(),
-            channels: crate::app::AppCore::start(Default::default()).channels(),
+            agents: core.agents(),
+            channels: core.channels(),
             instance: None,
             attachments: crate::api::image::Attachments::new(),
         })
@@ -591,13 +597,15 @@ mod tests {
             .unwrap_err();
         assert!(err.to_string().contains("ghost"), "{err}");
         // depth-1 members pass; main joins automatically.
-        main.agents.insert(
-            "a",
-            crate::agents::AgentKind::Hire,
-            None,
-            "a".into(),
-            sub_session(&main, "a"),
-        );
+        main.agents
+            .insert(
+                "a",
+                crate::agents::AgentKind::Hire,
+                None,
+                "a".into(),
+                sub_session(&main, "a"),
+            )
+            .await;
         let out = tool
             .call(
                 serde_json::json!({"action": "create", "channel": "t", "members": ["a"]}),
@@ -612,13 +620,15 @@ mod tests {
             depth: 2,
             ..(*sub_session(&main, "deep")).clone()
         });
-        main.agents.insert(
-            "deep",
-            crate::agents::AgentKind::Hire,
-            None,
-            "d".into(),
-            deep,
-        );
+        main.agents
+            .insert(
+                "deep",
+                crate::agents::AgentKind::Hire,
+                None,
+                "d".into(),
+                deep,
+            )
+            .await;
         let err = tool
             .call(
                 serde_json::json!({"action": "invite", "channel": "t", "members": ["deep"]}),
@@ -639,20 +649,24 @@ mod tests {
     #[tokio::test]
     async fn post_stamps_sender_and_queues_to_running_members() {
         let main = main_session();
-        main.agents.insert(
-            "a",
-            crate::agents::AgentKind::Hire,
-            None,
-            "a".into(),
-            sub_session(&main, "a"),
-        );
-        main.agents.insert(
-            "b",
-            crate::agents::AgentKind::Hire,
-            None,
-            "b".into(),
-            sub_session(&main, "b"),
-        );
+        main.agents
+            .insert(
+                "a",
+                crate::agents::AgentKind::Hire,
+                None,
+                "a".into(),
+                sub_session(&main, "a"),
+            )
+            .await;
+        main.agents
+            .insert(
+                "b",
+                crate::agents::AgentKind::Hire,
+                None,
+                "b".into(),
+                sub_session(&main, "b"),
+            )
+            .await;
         let mgmt = ChannelTool::new(main.clone());
         let _ = mgmt
             .call(
@@ -676,6 +690,7 @@ mod tests {
         let items = main
             .agents
             .finish("b", Vec::new(), 1)
+            .await
             .unwrap_or_else(|| panic!("b's inbox should have a message"))
             .items;
         assert!(
@@ -715,13 +730,15 @@ mod tests {
     async fn a_mention_interrupts_and_a_misfire_is_reported() {
         let main = main_session();
         for name in ["a", "b"] {
-            main.agents.insert(
-                name,
-                crate::agents::AgentKind::Hire,
-                None,
-                name.into(),
-                sub_session(&main, name),
-            );
+            main.agents
+                .insert(
+                    name,
+                    crate::agents::AgentKind::Hire,
+                    None,
+                    name.into(),
+                    sub_session(&main, name),
+                )
+                .await;
         }
         let mgmt = ChannelTool::new(main.clone());
         let _ = mgmt
@@ -750,7 +767,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let items = main.agents.take_running("b", 0);
+        let items = main.agents.take_running("b", 0).await;
         assert_eq!(items.len(), 2, "both lines ride the same boundary");
         assert!(
             matches!(&items[0], crate::agents::InboxItem::Channel { seq: 1, .. }),
@@ -776,7 +793,7 @@ mod tests {
                 .contains("@ghost is not in #t"),
             "{out:?}"
         );
-        let _ = main.agents.stop("b");
+        let _ = main.agents.stop("b").await;
         let out = post_a
             .call(
                 serde_json::json!({"to": "#t", "message": "@b are you there?"}),
@@ -796,20 +813,24 @@ mod tests {
     #[tokio::test]
     async fn serial_bounce_returns_increments_as_result() {
         let main = main_session();
-        main.agents.insert(
-            "a",
-            crate::agents::AgentKind::Hire,
-            None,
-            "a".into(),
-            sub_session(&main, "a"),
-        );
-        main.agents.insert(
-            "b",
-            crate::agents::AgentKind::Hire,
-            None,
-            "b".into(),
-            sub_session(&main, "b"),
-        );
+        main.agents
+            .insert(
+                "a",
+                crate::agents::AgentKind::Hire,
+                None,
+                "a".into(),
+                sub_session(&main, "a"),
+            )
+            .await;
+        main.agents
+            .insert(
+                "b",
+                crate::agents::AgentKind::Hire,
+                None,
+                "b".into(),
+                sub_session(&main, "b"),
+            )
+            .await;
         let mgmt = ChannelTool::new(main.clone());
         let _ = mgmt
             .call(

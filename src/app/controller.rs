@@ -19,11 +19,12 @@
 use tokio::sync::{mpsc, oneshot};
 
 use crate::app::command::{AppCommand, AppQuery};
-use crate::app::event::{AppEvent, AppEventPayload, EventMeta};
-use crate::app::ids::{EpochId, IdMint, OperationId, SessionId, now_millis};
+use crate::app::event::{AgentChanged, AppEvent, AppEventPayload, EventMeta, RoomChanged};
+use crate::app::ids::{AgentId, EpochId, IdMint, OperationId, RoomId, SessionId, now_millis};
 use crate::app::snapshot::{
-    Collection, ConfigSnapshot, RuntimeCollections, ServerCapabilities, SessionSnapshot,
-    SessionState, SessionSummary,
+    AgentKind, AgentResource, AgentState, Collection, ConfigSnapshot, RoomMode, RoomResource,
+    RuntimeCollections, ServerCapabilities, SessionSnapshot, SessionState, SessionSummary,
+    ThinkingLevel,
 };
 use crate::app::{
     AppError, AppFrame, AppLink, AppReply, AppRequest, AttachRequest, FRAME_CAPACITY,
@@ -63,6 +64,8 @@ pub(crate) enum Control {
     Watch(crate::watch::WatchMsg),
     /// A change to, or a question about, the rooms.
     Channels(crate::channels::ChannelMsg),
+    /// A change to, or a question about, the subagent instances.
+    Agents(crate::agents::AgentMsg),
     /// Answered once everything queued ahead of it has been applied.
     Settle {
         reply: oneshot::Sender<()>,
@@ -73,6 +76,7 @@ pub(crate) enum Control {
 pub(crate) struct Registries {
     pub watch: crate::watch::WatchHandle,
     pub channels: crate::channels::ChannelHandle,
+    pub agents: crate::agents::AgentHandle,
 }
 
 /// Start the actor and return the handle everything reaches it by.
@@ -88,10 +92,11 @@ pub(super) fn spawn(setup: SessionSetup) -> (mpsc::UnboundedSender<Control>, Reg
     let (control, inbox) = mpsc::unbounded_channel();
     let (watch, watch_handle) = crate::watch::attach(control.clone());
     let (channels, channel_handle) = crate::channels::attach(control.clone(), setup.channel_limits);
+    let (agents, agent_handle) = crate::agents::attach(control.clone());
     // The actor holds a weak handle to its own inbox: it hands strong clones to
     // the attachments it spawns, and a strong one of its own would keep the
     // queue open forever, so the loop could never end.
-    let controller = Controller::new(setup, control.downgrade(), watch, channels);
+    let controller = Controller::new(setup, control.downgrade(), watch, channels, agents);
     std::thread::Builder::new()
         .name("bingo-session".to_string())
         .spawn(move || controller.run(inbox))
@@ -101,6 +106,7 @@ pub(super) fn spawn(setup: SessionSetup) -> (mpsc::UnboundedSender<Control>, Reg
         Registries {
             watch: watch_handle,
             channels: channel_handle,
+            agents: agent_handle,
         },
     )
 }
@@ -156,6 +162,36 @@ struct Controller {
     watch: crate::watch::WatchRegistry,
     /// The rooms, and the main agent's inbox. Actor-private since B2b.
     channels: crate::channels::ChannelRegistry,
+    /// The subagent instances: their state machine, their inboxes, their
+    /// delivery records. Actor-private since B2b.
+    agents: crate::agents::AgentRegistry,
+    /// What was last said about each instance and each room, so a change can be
+    /// told from a repeat. Identifiers are minted once per name and kept for the
+    /// epoch: a client that saw `agent_3` twice saw the same instance twice.
+    told: Told,
+}
+
+/// The last thing published about each collaboration resource.
+#[derive(Default)]
+struct Told {
+    agents: std::collections::HashMap<String, (AgentId, AgentSummary)>,
+    rooms: std::collections::HashMap<String, (RoomId, RoomSummary)>,
+}
+
+/// What decides whether an instance's change is worth an event. Progress
+/// counters are deliberately out: a token count moving is not a state
+/// transition, and B4's usage events are where a live figure belongs.
+#[derive(PartialEq, Eq)]
+struct AgentSummary {
+    state: AgentState,
+    pending: u32,
+    unacked: u32,
+}
+
+#[derive(PartialEq, Eq)]
+struct RoomSummary {
+    members: Vec<String>,
+    last_seq: u64,
 }
 
 impl Controller {
@@ -164,6 +200,7 @@ impl Controller {
         control: mpsc::WeakUnboundedSender<Control>,
         watch: crate::watch::WatchRegistry,
         channels: crate::channels::ChannelRegistry,
+        agents: crate::agents::AgentRegistry,
     ) -> Self {
         let epoch = EpochId::mint();
         let mut mint = IdMint::new(epoch.clone());
@@ -212,6 +249,8 @@ impl Controller {
             control,
             watch,
             channels,
+            agents,
+            told: Told::default(),
         }
     }
 
@@ -233,8 +272,18 @@ impl Controller {
                     self.attachments.retain(|open| open.id != attachment);
                 }
                 Control::Publish { payload, caused_by } => self.publish(payload, caused_by),
+                // The registries publish their own reader snapshots; what the
+                // actor adds is the sequenced account of what changed, which is
+                // the only ordering a second frontend can rely on.
                 Control::Watch(message) => self.watch.handle(message),
-                Control::Channels(message) => self.channels.handle(message),
+                Control::Channels(message) => {
+                    self.channels.handle(message);
+                    self.announce_rooms();
+                }
+                Control::Agents(message) => {
+                    self.agents.handle(message);
+                    self.announce_agents();
+                }
                 Control::Settle { reply } => {
                     let _ = reply.send(());
                 }
@@ -388,6 +437,109 @@ impl Controller {
         });
     }
 
+    /// Publish one event per instance whose state moved, and one per instance
+    /// that is new. An instance that went away is not announced yet: `agent/gone`
+    /// is B4's, and inventing a shape for it here would be deciding the contract
+    /// from the implementation.
+    fn announce_agents(&mut self) {
+        let facts = self.agents.facts();
+        let mut changed = Vec::new();
+        for fact in facts {
+            let summary = AgentSummary {
+                state: agent_state(fact.state),
+                pending: fact.pending,
+                unacked: fact.unacked,
+            };
+            let known = self.told.agents.get(&fact.name);
+            if known.is_some_and(|(_, told)| told == &summary) {
+                continue;
+            }
+            let id = match known {
+                Some((id, _)) => id.clone(),
+                None => self.mint.mint(),
+            };
+            self.told
+                .agents
+                .insert(fact.name.clone(), (id.clone(), summary));
+            changed.push(AgentResource {
+                id,
+                name: fact.name,
+                def: fact.def,
+                description: fact.description,
+                kind: match fact.kind {
+                    crate::agents::AgentKind::Crew => AgentKind::Crew,
+                    crate::agents::AgentKind::Hire => AgentKind::Hire,
+                },
+                state: agent_state(fact.state),
+                model: fact.model,
+                provider: fact.provider,
+                // The instance's own thinking level and its conversation arrive
+                // with B4, which is where an agent gets a conversation at all.
+                thinking: ThinkingLevel::Off,
+                cwd: fact.cwd,
+                conversation_id: None,
+                pending: fact.pending,
+                unacked: fact.unacked,
+                elapsed_ms: fact.elapsed_ms,
+                output_tokens: fact.output_tokens,
+                tool_uses: fact.tool_uses,
+                last_active_at: now_millis(),
+            });
+        }
+        for agent in changed {
+            self.publish(
+                Box::new(AppEventPayload::AgentChanged(AgentChanged { agent })),
+                None,
+            );
+        }
+    }
+
+    /// Publish one event per room whose roster or head moved.
+    fn announce_rooms(&mut self) {
+        let facts = self.channels.facts();
+        let mut changed = Vec::new();
+        for fact in facts {
+            let summary = RoomSummary {
+                members: fact.members.clone(),
+                last_seq: fact.last_seq,
+            };
+            let known = self.told.rooms.get(&fact.name);
+            if known.is_some_and(|(_, told)| told == &summary) {
+                continue;
+            }
+            let id = match known {
+                Some((id, _)) => id.clone(),
+                None => self.mint.mint(),
+            };
+            self.told
+                .rooms
+                .insert(fact.name.clone(), (id.clone(), summary));
+            changed.push(RoomResource {
+                id,
+                name: fact.name,
+                topic: None,
+                mode: match fact.mode {
+                    crate::channels::ChannelMode::Serial => RoomMode::Relay,
+                    crate::channels::ChannelMode::Free => RoomMode::Broadcast,
+                },
+                user_is_member: fact.members.iter().any(|m| m == crate::channels::USER_NAME),
+                members: fact.members,
+                conversation_id: None,
+                message_count: fact.message_count,
+                last_seq: fact.last_seq,
+                // Attention is the user's, and the user's cursors land with B4.
+                unread: 0,
+                mentions: 0,
+            });
+        }
+        for room in changed {
+            self.publish(
+                Box::new(AppEventPayload::RoomChanged(RoomChanged { room })),
+                None,
+            );
+        }
+    }
+
     fn deliver(&mut self, attachment: AttachmentId, frame: AppFrame) {
         self.attachments
             .retain(|open| open.id != attachment || send(open, frame.clone()));
@@ -402,6 +554,15 @@ impl Controller {
 /// read again — the transport's own backpressure policy is B6's.
 fn send(attachment: &Attachment, frame: AppFrame) -> bool {
     attachment.frames.try_send(frame).is_ok()
+}
+
+/// The domain's instance state, as the contract names it.
+fn agent_state(state: crate::agents::AgentState) -> AgentState {
+    match state {
+        crate::agents::AgentState::Running => AgentState::Running,
+        crate::agents::AgentState::Idle => AgentState::Idle,
+        crate::agents::AgentState::Stopped => AgentState::Stopped,
+    }
 }
 
 fn empty_collection<T>() -> Collection<T> {

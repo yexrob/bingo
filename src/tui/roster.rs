@@ -350,13 +350,16 @@ mod tests {
     }
 
     fn seed(chat: &Chat, name: &str) {
-        chat.session.agents.insert(
-            name,
-            AgentKind::Hire,
-            None,
-            "test instance".to_string(),
-            chat.session.clone(),
-        );
+        chat.session
+            .agents
+            .insert(
+                name,
+                AgentKind::Hire,
+                None,
+                "test instance".to_string(),
+                chat.session.clone(),
+            )
+            .now();
     }
 
     fn texts(chat: &Chat) -> Vec<String> {

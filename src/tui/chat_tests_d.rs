@@ -147,18 +147,21 @@ fn mention_selection_inserts_a_relative_path_and_closes() {
 ///
 /// *Stopped instances are still listed*, which is what D103 decided and what
 /// D105 found to be half true: the composer offers them and the domain then
-/// refuses (`AgentRegistry::deliver`). The listing is left exactly as it is —
+/// refuses (`AgentHandle::deliver`). The listing is left exactly as it is —
 /// the gap is in the domain, and it is named where it lives (D105's record).
 #[test]
 fn mention_lists_agents_by_what_the_position_can_reach() {
     let (mut chat, root) = project_chat("agents");
-    chat.session.agents.insert(
-        "scout",
-        crate::agents::AgentKind::Hire,
-        None,
-        "inspect the code".into(),
-        chat.session.clone(),
-    );
+    chat.session
+        .agents
+        .insert(
+            "scout",
+            crate::agents::AgentKind::Hire,
+            None,
+            "inspect the code".into(),
+            chat.session.clone(),
+        )
+        .now();
 
     let agent_row = |chat: &Chat| {
         chat.mention
@@ -191,7 +194,7 @@ fn mention_lists_agents_by_what_the_position_can_reach() {
 
     // A stopped agent is still offered by the typeahead (D103's ruling) —
     // but it is not a live reference.
-    let _ = chat.session.agents.stop("scout");
+    let _ = chat.session.agents.stop("scout").now();
     chat.set_input("x");
     chat.set_input("@scou");
     assert_eq!(agent_row(&chat).note, "send message · stopped");
@@ -317,13 +320,16 @@ fn permission_dialog_keeps_the_mention_dropdown_closed() {
 #[test]
 fn mention_rows_label_sections_and_carry_a_footer() {
     let (mut chat, root) = project_chat("render");
-    chat.session.agents.insert(
-        "scout",
-        crate::agents::AgentKind::Hire,
-        None,
-        "inspect the code".into(),
-        chat.session.clone(),
-    );
+    chat.session
+        .agents
+        .insert(
+            "scout",
+            crate::agents::AgentKind::Hire,
+            None,
+            "inspect the code".into(),
+            chat.session.clone(),
+        )
+        .now();
 
     chat.set_input("@");
     let state = chat.mention.as_ref().unwrap_or_else(|| panic!("open"));

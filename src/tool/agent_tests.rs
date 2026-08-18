@@ -62,6 +62,7 @@ fn parent_session() -> (Arc<Session>, Arc<crate::api::client::Client>) {
         Default::default(),
         Default::default(),
     )));
+    let core = crate::app::AppCore::start(Default::default());
     let session = Arc::new(Session {
         client: (*client).clone(),
         runtime,
@@ -77,11 +78,11 @@ fn parent_session() -> (Arc<Session>, Arc<crate::api::client::Client>) {
         user_config_dir: std::env::temp_dir().join(".config"),
         quiet: true,
         compact_failures: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-        watch: crate::app::AppCore::start(Default::default()).watch(),
+        watch: core.watch(),
         tasks: Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), "test")),
         expand_tasks: tokio::sync::watch::channel(false).0,
-        agents: AgentRegistry::new(),
-        channels: crate::app::AppCore::start(Default::default()).channels(),
+        agents: core.agents(),
+        channels: core.channels(),
         instance: None,
         attachments: crate::api::image::Attachments::new(),
     });
@@ -556,13 +557,16 @@ fn agent_control_list_reports_relative_last_activity() {
 #[tokio::test]
 async fn agent_control_list_stop_delete() {
     let (session, _client) = parent_session();
-    session.agents.insert(
-        "scout",
-        AgentKind::Hire,
-        None,
-        "research".into(),
-        session.clone(),
-    );
+    session
+        .agents
+        .insert(
+            "scout",
+            AgentKind::Hire,
+            None,
+            "research".into(),
+            session.clone(),
+        )
+        .await;
     let ctl = AgentControlTool::new(session.clone());
     let ctx = crate::tool::ToolContext {
         home: std::env::temp_dir(),
@@ -637,13 +641,16 @@ async fn agent_control_list_stop_delete() {
 #[tokio::test]
 async fn send_message_starts_an_idle_instance_before_returning() {
     let (session, _client) = parent_session();
-    session.agents.insert(
-        "worker",
-        AgentKind::Hire,
-        None,
-        "do work".into(),
-        session.clone(),
-    );
+    session
+        .agents
+        .insert(
+            "worker",
+            AgentKind::Hire,
+            None,
+            "do work".into(),
+            session.clone(),
+        )
+        .await;
     session.agents.mark_idle("worker");
     let out = SendMessageTool::new(session.clone())
         .call(
@@ -666,19 +673,22 @@ async fn send_message_starts_an_idle_instance_before_returning() {
         acks[0].state,
         crate::agents::AckState::Delivered { run: 1 }
     ));
-    let _ = session.agents.stop("worker");
+    let _ = session.agents.stop("worker").await;
 }
 
 #[tokio::test]
 async fn send_message_keeps_running_instance_queued_for_its_next_tool_round() {
     let (session, _client) = parent_session();
-    session.agents.insert(
-        "worker",
-        AgentKind::Hire,
-        None,
-        "do work".into(),
-        session.clone(),
-    );
+    session
+        .agents
+        .insert(
+            "worker",
+            AgentKind::Hire,
+            None,
+            "do work".into(),
+            session.clone(),
+        )
+        .await;
     let send = SendMessageTool::new(session.clone());
     let ctx = main_ctx(&session);
     // The acknowledgement wait is opt-in: omitting it keeps the plain fire-and-forget path.
@@ -713,13 +723,16 @@ async fn send_message_keeps_running_instance_queued_for_its_next_tool_round() {
 #[tokio::test]
 async fn the_reply_check_is_on_by_default_and_zero_turns_it_off() {
     let (session, _client) = parent_session();
-    session.agents.insert(
-        "worker",
-        AgentKind::Hire,
-        None,
-        "do work".into(),
-        session.clone(),
-    );
+    session
+        .agents
+        .insert(
+            "worker",
+            AgentKind::Hire,
+            None,
+            "do work".into(),
+            session.clone(),
+        )
+        .await;
     let send = SendMessageTool::new(session.clone());
     let ctx = main_ctx(&session);
     let receipt = |out: ToolResult| -> serde_json::Value {
@@ -802,13 +815,16 @@ fn sub_of(parent: &Arc<Session>, instance: &str, rooms: bool) -> Arc<Session> {
 #[tokio::test]
 async fn a_subagent_reaches_a_sibling_and_the_sibling_learns_who_wrote() {
     let (session, _client) = parent_session();
-    session.agents.insert(
-        "sibling",
-        AgentKind::Hire,
-        None,
-        "work".into(),
-        session.clone(),
-    );
+    session
+        .agents
+        .insert(
+            "sibling",
+            AgentKind::Hire,
+            None,
+            "work".into(),
+            session.clone(),
+        )
+        .await;
     let ctx = main_ctx(&session);
     let send = SendMessageTool::new(sub_of(&session, "scout", false));
 
@@ -895,16 +911,18 @@ fn a_peer_s_message_arrives_headed_and_main_s_stays_bare() {
 fn a_chase_names_the_sender_that_is_still_waiting() {
     let (session, _client) = parent_session();
     let reg = &session.agents;
-    reg.insert("qa", AgentKind::Hire, None, "w".into(), session.clone());
+    reg.insert("qa", AgentKind::Hire, None, "w".into(), session.clone())
+        .now();
     let id = reg
         .deliver("qa", "dev", "does the parser handle EOF?", Vec::new(), None)
+        .now()
         .unwrap_or_else(|e| panic!("{e}"));
-    let _ = reg.take_running("qa", 0);
+    let _ = reg.take_running("qa", 0).now();
     assert_eq!(
-        reg.follow_up("qa", id),
+        reg.follow_up("qa", id).now(),
         crate::agents::FollowUp::Sent { round: 1 }
     );
-    let items = reg.take_running("qa", 0);
+    let items = reg.take_running("qa", 0).now();
     let prompt = crate::tool::agent::absorb_inbox(&session.channels, "qa", &items).0;
     assert!(
         prompt.contains("@dev sent you message"),
@@ -1024,13 +1042,16 @@ async fn a_summary_previews_the_message_without_entering_it() {
 #[tokio::test]
 async fn urgent_is_a_subagent_to_main_flag_and_refused_elsewhere() {
     let (session, _client) = parent_session();
-    session.agents.insert(
-        "worker",
-        AgentKind::Hire,
-        None,
-        "work".into(),
-        session.clone(),
-    );
+    session
+        .agents
+        .insert(
+            "worker",
+            AgentKind::Hire,
+            None,
+            "work".into(),
+            session.clone(),
+        )
+        .await;
     let ctx = main_ctx(&session);
 
     SendMessageTool::new(sub_of(&session, "scout", false))
@@ -1141,13 +1162,16 @@ fn only_an_all_user_batch_keeps_its_end_to_itself() {
 async fn unacknowledged_message_is_chased_three_times_then_reported() {
     let (session, _client) = parent_session();
     // Running without a query loop: the dispatcher cannot claim it, so the message stays queued.
-    session.agents.insert(
-        "worker",
-        AgentKind::Hire,
-        None,
-        "do work".into(),
-        session.clone(),
-    );
+    session
+        .agents
+        .insert(
+            "worker",
+            AgentKind::Hire,
+            None,
+            "do work".into(),
+            session.clone(),
+        )
+        .await;
     let ctx = main_ctx(&session);
     let out = SendMessageTool::new(session.clone())
         .call(
@@ -1163,8 +1187,18 @@ async fn unacknowledged_message_is_chased_three_times_then_reported() {
         "waits below the lower bound are clamped"
     );
 
-    // Four deadlines: three follow-ups, then the give-up.
-    tokio::time::sleep(std::time::Duration::from_secs(5 * 5)).await;
+    // Four deadlines: three follow-ups, then the give-up. The chase is a task of
+    // its own and each of its rounds is a round trip to the actor, so the test
+    // waits for the last of them to land rather than for a fixed span of the
+    // clock — the give-up is what puts the line in main's queue.
+    for _ in 0..40 {
+        session.watch.settle().await;
+        if session.watch.has_wake_notifications(None) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+    }
+    session.agents.settle().await;
 
     let acks = session
         .agents
@@ -1193,13 +1227,16 @@ async fn unacknowledged_message_is_chased_three_times_then_reported() {
 #[tokio::test(start_paused = true)]
 async fn a_receiver_that_reads_and_says_nothing_is_still_chased() {
     let (session, _client) = parent_session();
-    session.agents.insert(
-        "mute",
-        AgentKind::Hire,
-        None,
-        "silent".into(),
-        session.clone(),
-    );
+    session
+        .agents
+        .insert(
+            "mute",
+            AgentKind::Hire,
+            None,
+            "silent".into(),
+            session.clone(),
+        )
+        .await;
     let ctx = main_ctx(&session);
     SendMessageTool::new(session.clone())
         .call(
@@ -1210,7 +1247,7 @@ async fn a_receiver_that_reads_and_says_nothing_is_still_chased() {
         .unwrap_or_else(|e| panic!("{e}"));
     // A turn ends without a word and takes the queued message into the next one: delivered,
     // unanswered, and still Running — so the flush the watchdog retries stays a no-op here.
-    assert!(session.agents.finish("mute", Vec::new(), 0).is_some());
+    assert!(session.agents.finish("mute", Vec::new(), 0).await.is_some());
     assert!(matches!(
         session
             .agents
@@ -1220,7 +1257,17 @@ async fn a_receiver_that_reads_and_says_nothing_is_still_chased() {
         crate::agents::AckState::Delivered { .. }
     ));
 
-    tokio::time::sleep(std::time::Duration::from_secs(5 * 5)).await;
+    // The chase is a task of its own and each of its rounds is a round trip to
+    // the actor, so the test waits for the last of them to land rather than for
+    // a fixed span of the clock.
+    for _ in 0..40 {
+        session.watch.settle().await;
+        if session.watch.has_wake_notifications(None) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+    }
+    session.agents.settle().await;
 
     let acks = session
         .agents
@@ -1243,13 +1290,16 @@ async fn a_receiver_that_reads_and_says_nothing_is_still_chased() {
 #[tokio::test(start_paused = true)]
 async fn an_acknowledged_message_reports_nothing() {
     let (session, _client) = parent_session();
-    session.agents.insert(
-        "worker",
-        AgentKind::Hire,
-        None,
-        "do work".into(),
-        session.clone(),
-    );
+    session
+        .agents
+        .insert(
+            "worker",
+            AgentKind::Hire,
+            None,
+            "do work".into(),
+            session.clone(),
+        )
+        .await;
     let ctx = main_ctx(&session);
     SendMessageTool::new(session.clone())
         .call(
@@ -1259,8 +1309,20 @@ async fn an_acknowledged_message_reports_nothing() {
         .await
         .unwrap_or_else(|e| panic!("{e}"));
     // The receiver picks it up at the boundary, then that run ends with something to say.
-    assert!(session.agents.finish("worker", Vec::new(), 1).is_some());
-    assert!(session.agents.finish("worker", Vec::new(), 2).is_none());
+    assert!(
+        session
+            .agents
+            .finish("worker", Vec::new(), 1)
+            .await
+            .is_some()
+    );
+    assert!(
+        session
+            .agents
+            .finish("worker", Vec::new(), 2)
+            .await
+            .is_none()
+    );
     tokio::time::sleep(std::time::Duration::from_secs(120)).await;
     let acks = session
         .agents
@@ -1322,7 +1384,8 @@ fn image_markers_resolve_for_spawn_and_follow_up() {
     // Follow-up: a queued instruction keeps its images until it is delivered.
     session
         .agents
-        .insert("worker", AgentKind::Hire, None, "d".into(), sub.clone());
+        .insert("worker", AgentKind::Hire, None, "d".into(), sub.clone())
+        .now();
     let id = session
         .agents
         .deliver(
@@ -1332,8 +1395,9 @@ fn image_markers_resolve_for_spawn_and_follow_up() {
             images.clone(),
             None,
         )
+        .now()
         .unwrap_or_else(|e| panic!("{e}"));
-    let (prompt, carried) = match session.agents.finish("worker", Vec::new(), 1) {
+    let (prompt, carried) = match session.agents.finish("worker", Vec::new(), 1).now() {
         Some(next) => absorb_inbox(&sub.channels, "worker", &next.items),
         None => unreachable!("queued messages should be claimed by the receiver"),
     };
@@ -1369,15 +1433,17 @@ fn absorb_inbox_names_the_user_and_keeps_main_verbatim() {
     .unwrap_or_else(|e| panic!("spawn: {e}"));
     session
         .agents
-        .insert("worker", AgentKind::Hire, None, "d".into(), sub.clone());
+        .insert("worker", AgentKind::Hire, None, "d".into(), sub.clone())
+        .now();
 
     let deliver = |from: &str, text: &str| {
         session
             .agents
             .deliver("worker", from, text, Vec::new(), None)
+            .now()
             .unwrap_or_else(|e| panic!("{e}"));
     };
-    let absorb = || match session.agents.finish("worker", Vec::new(), 0) {
+    let absorb = || match session.agents.finish("worker", Vec::new(), 0).now() {
         Some(next) => absorb_inbox(&sub.channels, "worker", &next.items).0,
         None => unreachable!("queued messages should be claimed by the receiver"),
     };
@@ -1823,8 +1889,9 @@ async fn a_subagents_turn_streams_as_addressed_events() {
     let output = Arc::new(Mutex::new(String::new()));
     let (sink, mut rx) = worker_sink();
     let progress = Arc::new(Mutex::new(crate::agents::AgentProgress::default()));
-    let watch = crate::app::AppCore::start(Default::default()).watch();
-    let registry = AgentRegistry::new();
+    let core = crate::app::AppCore::start(Default::default());
+    let watch = core.watch();
+    let registry = core.agents();
     let cell = Arc::new(AgentCell::new(registry.clone()));
     let id = register_run_watch(
         &watch,
@@ -1930,8 +1997,9 @@ async fn subagent_retry_restores_the_current_attempt_checkpoint() {
     let output = Arc::new(Mutex::new(String::new()));
     let (sink, mut rx) = worker_sink();
     let progress = Arc::new(Mutex::new(crate::agents::AgentProgress::default()));
-    let watch = crate::app::AppCore::start(Default::default()).watch();
-    let registry = AgentRegistry::new();
+    let core = crate::app::AppCore::start(Default::default());
+    let watch = core.watch();
+    let registry = core.agents();
     let cell = Arc::new(AgentCell::new(registry.clone()));
     let id = register_run_watch(
         &watch,
@@ -2019,8 +2087,9 @@ async fn subagent_progress_accumulates_tokens_tools_and_recent_activity() {
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .start_run();
-    let watch = crate::app::AppCore::start(Default::default()).watch();
-    let registry = AgentRegistry::new();
+    let core = crate::app::AppCore::start(Default::default());
+    let watch = core.watch();
+    let registry = core.agents();
     let id = register_run_watch(
         &watch,
         "progress".into(),
@@ -2077,13 +2146,16 @@ async fn subagent_progress_accumulates_tokens_tools_and_recent_activity() {
 #[tokio::test]
 async fn subagent_hooks_touch_activity_on_stream_and_tool_signals() {
     let session = parent_session().0;
-    session.agents.insert(
-        "worker",
-        AgentKind::Hire,
-        None,
-        "work".into(),
-        session.clone(),
-    );
+    session
+        .agents
+        .insert(
+            "worker",
+            AgentKind::Hire,
+            None,
+            "work".into(),
+            session.clone(),
+        )
+        .await;
     let watch = crate::app::AppCore::start(Default::default()).watch();
     let registry = session.agents.clone();
     let id = register_run_watch(
@@ -2114,6 +2186,7 @@ async fn subagent_hooks_touch_activity_on_stream_and_tool_signals() {
             index: 0,
             text: "hi".into(),
         });
+    session.agents.settle().await;
     let streamed = session.agents.list()[0].last_active;
     assert!(streamed > inserted);
 
@@ -2124,6 +2197,7 @@ async fn subagent_hooks_touch_activity_on_stream_and_tool_signals() {
         input: serde_json::json!({"file_path": "a"}),
         standalone: false,
     });
+    session.agents.settle().await;
     let ready = session.agents.list()[0].last_active;
     assert!(ready > streamed);
 
@@ -2138,6 +2212,7 @@ async fn subagent_hooks_touch_activity_on_stream_and_tool_signals() {
             diff: None,
             duration_ms: 1,
         }));
+    session.agents.settle().await;
     assert!(session.agents.list()[0].last_active > ready);
 }
 
@@ -2157,8 +2232,9 @@ async fn subagent_ask_forwards_to_attached_prompt() {
             ));
         Box::pin(async { crate::query::AskOutcome::Allow })
     });
-    let watch = crate::app::AppCore::start(Default::default()).watch();
-    let registry = AgentRegistry::new();
+    let core = crate::app::AppCore::start(Default::default());
+    let watch = core.watch();
+    let registry = core.agents();
     let id = register_run_watch(
         &watch,
         "l".into(),

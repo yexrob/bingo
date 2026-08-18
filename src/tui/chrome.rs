@@ -823,13 +823,16 @@ mod tests {
     fn the_roster_takes_the_last_rows() {
         let chat = chat_at(100, 40);
         let base = rows_of(chrome(&chat, 100, false)).len();
-        chat.session.agents.insert(
-            "scout",
-            crate::agents::AgentKind::Hire,
-            None,
-            "test instance".to_string(),
-            chat.session.clone(),
-        );
+        chat.session
+            .agents
+            .insert(
+                "scout",
+                crate::agents::AgentKind::Hire,
+                None,
+                "test instance".to_string(),
+                chat.session.clone(),
+            )
+            .now();
 
         let rows = rows_of(chrome(&chat, 100, false));
         let text: Vec<String> = rows.iter().map(row_text).collect();

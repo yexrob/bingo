@@ -532,7 +532,7 @@ impl TeamTool {
         };
         let mut stopped = Vec::new();
         for (_, m) in tree.members() {
-            let Ok((watch, _dropped)) = self.session.agents.stop(&m.name) else {
+            let Ok((watch, _dropped)) = self.session.agents.stop(&m.name).now() else {
                 continue;
             };
             if let Some(id) = watch {
@@ -757,6 +757,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         let project = root.join("proj");
         std::fs::create_dir_all(project.join(".bingo/agents")).unwrap_or_default();
+        let core = crate::app::AppCore::start(Default::default());
         let session = Arc::new(Session {
             client: crate::api::client::Client::new("k".into(), "http://x".into()),
             runtime: crate::query::Runtime::new("m".into(), None, Default::default()),
@@ -769,11 +770,11 @@ mod tests {
             user_config_dir: root.join("home").join(".config"),
             quiet: true,
             compact_failures: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            watch: crate::app::AppCore::start(Default::default()).watch(),
+            watch: core.watch(),
             tasks: Arc::new(crate::tasks::TaskStore::new(&root, "t")),
             expand_tasks: tokio::sync::watch::channel(false).0,
-            agents: crate::agents::AgentRegistry::new(),
-            channels: crate::app::AppCore::start(Default::default()).channels(),
+            agents: core.agents(),
+            channels: core.channels(),
             instance: None,
             attachments: crate::api::image::Attachments::new(),
         });

@@ -23,6 +23,11 @@ use std::task::{Context, Poll, Wake, Waker};
 use tokio::sync::oneshot;
 
 /// One pending answer.
+///
+/// Marked `must_use` on purpose: the question has already been sent by the time
+/// this exists, so dropping it silently turns a question into a report — which
+/// is sometimes what a caller means and never what it should mean by accident.
+#[must_use = "an answer that is neither awaited nor taken turns the question into a report"]
 pub struct Answer<T> {
     reply: oneshot::Receiver<T>,
     /// What to answer when the actor is gone. The actor outlives every handle,

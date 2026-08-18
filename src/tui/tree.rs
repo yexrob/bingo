@@ -118,7 +118,7 @@ pub(crate) fn status_label(status: &AgentStatus, now: std::time::Instant) -> Str
         // instance stays on the roster because the registry keeps it: its
         // history is intact, its record is still readable, and a direct
         // message resumes it from that history (CC subagent semantics —
-        // `AgentRegistry::deliver` flips it back to idle and the delivery
+        // `AgentHandle::deliver` flips it back to idle and the delivery
         // flush respawns the run).
         AgentState::Stopped => "[stopped]".to_string(),
         AgentState::Idle => format!(

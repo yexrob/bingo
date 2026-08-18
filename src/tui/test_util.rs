@@ -27,6 +27,7 @@ use crate::tui::theme::Theme;
 
 /// A minimal offline session (no real endpoint is ever contacted in tests).
 pub fn test_session() -> Arc<Session> {
+    let core = crate::app::AppCore::start(Default::default());
     Arc::new(Session {
         client: crate::api::client::Client::new(
             "test-key".to_string(),
@@ -42,11 +43,11 @@ pub fn test_session() -> Arc<Session> {
         user_config_dir: std::env::temp_dir().join(".config"),
         quiet: true,
         compact_failures: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-        watch: crate::app::AppCore::start(Default::default()).watch(),
+        watch: core.watch(),
         tasks: Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), "test")),
         expand_tasks: tokio::sync::watch::channel(false).0,
-        agents: crate::agents::AgentRegistry::new(),
-        channels: crate::app::AppCore::start(Default::default()).channels(),
+        agents: core.agents(),
+        channels: core.channels(),
         instance: None,
         attachments: crate::api::image::Attachments::new(),
     })

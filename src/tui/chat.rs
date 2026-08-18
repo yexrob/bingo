@@ -706,7 +706,7 @@ struct Follow {
 pub struct Chat {
     pub session: Arc<Session>,
     /// The console's own sink, bound to main. Every other conversation's
-    /// producer holds one bound to itself (`AgentRegistry::sink_for`).
+    /// producer holds one bound to itself (`AgentHandle::sink_for`).
     pub(super) events: crate::ui::EventSink,
     pub asks: mpsc::UnboundedSender<AskRequest>,
     pub(crate) events_rx: mpsc::UnboundedReceiver<crate::ui::Addressed>,

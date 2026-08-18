@@ -89,7 +89,7 @@ impl Chat {
             return false;
         };
         let next = crate::tui::chat::next_permission_mode(mode, self.session.permission_mode);
-        self.session.agents.set_permission_mode(&name, next);
+        self.session.agents.set_permission_mode(&name, next).now();
         self.dirty = true;
         true
     }
@@ -171,20 +171,23 @@ mod tests {
     /// An instance the registry has just been told about — which is a
     /// *running* one: `insert` is the spawn path and a spawned agent is working.
     fn seed(chat: &Chat, name: &str) {
-        chat.session.agents.insert(
-            name,
-            AgentKind::Hire,
-            None,
-            "fix the parser".to_string(),
-            chat.session.clone(),
-        );
+        chat.session
+            .agents
+            .insert(
+                name,
+                AgentKind::Hire,
+                None,
+                "fix the parser".to_string(),
+                chat.session.clone(),
+            )
+            .now();
     }
 
     /// The same instance, parked: `finish` with an empty inbox is the one
     /// legal door to `Idle`.
     fn seed_idle(chat: &Chat, name: &str) {
         seed(chat, name);
-        let _ = chat.session.agents.finish(name, Vec::new(), 0);
+        let _ = chat.session.agents.finish(name, Vec::new(), 0).now();
     }
 
     fn assistant(text: &str) -> ApiMessage {
@@ -198,7 +201,7 @@ mod tests {
 
     fn seed_with_history(chat: &Chat, name: &str, history: Vec<ApiMessage>) {
         seed(chat, name);
-        let _ = chat.session.agents.finish(name, history, 0);
+        let _ = chat.session.agents.finish(name, history, 0).now();
     }
 
     fn seed_room(chat: &Chat, name: &str, members: &[&str]) {
@@ -487,7 +490,7 @@ mod tests {
     async fn a_message_to_a_stopped_agent_resumes_it() {
         let mut chat = test_chat();
         seed_idle(&chat, "scout");
-        let _ = chat.session.agents.stop("scout");
+        let _ = chat.session.agents.stop("scout").await;
         chat.switch_to(Some(ZoomTarget::Agent("scout".into())));
         chat.set_input("wake up".to_string());
         chat.submit();
@@ -597,7 +600,7 @@ mod tests {
         chat.switch_to(Some(ZoomTarget::Agent("scout".into())));
         chat.sync_away();
         assert!(!chat.active.is_main(), "a finished agent's page stays open");
-        let _ = chat.session.agents.remove("scout");
+        let _ = chat.session.agents.remove("scout").now();
         chat.sync_away();
         assert!(chat.active.is_main(), "a deleted agent's page cannot stay");
     }
@@ -677,6 +680,7 @@ mod tests {
         chat.session
             .agents
             .deliver("qa", "dev", "does the parser handle EOF?", Vec::new(), None)
+            .now()
             .unwrap_or_else(|e| panic!("{e}"));
         chat.switch_to(Some(ZoomTarget::Agent("qa".into())));
         let rows = page_rows(&mut chat);

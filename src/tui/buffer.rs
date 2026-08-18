@@ -127,7 +127,7 @@ impl Buffer {
 /// Where a direct send belongs. Data only — [`deliver`] performs it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SubmitTarget {
-    /// `AgentRegistry::deliver` under the user's name. The `[DM from user]`
+    /// `AgentHandle::deliver` under the user's name. The `[DM from user]`
     /// marker is *not* applied here and must not be: it is added downstream in
     /// `absorb_inbox`, derived from `from`, and adding it at both ends would
     /// double it (D64).
@@ -379,6 +379,7 @@ pub fn deliver(session: &Arc<Session>, target: SubmitTarget) -> Delivery {
             match session
                 .agents
                 .deliver(&agent, USER_NAME, &text, Vec::new(), None)
+                .now()
             {
                 Ok(_) => {
                     crate::tool::agent::flush_agent_inbox(session, &session.watch);
@@ -610,27 +611,33 @@ mod tests {
     /// An instance with `history` already behind it, the way a subagent that has
     /// answered a few times looks to the registry.
     fn seed_agent(session: &Arc<Session>, name: &str, history: Vec<Message>) {
-        session.agents.insert(
-            name,
-            AgentKind::Hire,
-            None,
-            "test instance".to_string(),
-            session.clone(),
-        );
+        session
+            .agents
+            .insert(
+                name,
+                AgentKind::Hire,
+                None,
+                "test instance".to_string(),
+                session.clone(),
+            )
+            .now();
         if !history.is_empty() {
-            session.agents.finish(name, history, 0);
+            session.agents.finish(name, history, 0).now();
         }
     }
 
     /// A crew member (D53): a teammate from the blueprint rather than a hire.
     fn seed_crew(session: &Arc<Session>, name: &str) {
-        session.agents.insert(
-            name,
-            AgentKind::Crew,
-            None,
-            "crew member".to_string(),
-            session.clone(),
-        );
+        session
+            .agents
+            .insert(
+                name,
+                AgentKind::Crew,
+                None,
+                "crew member".to_string(),
+                session.clone(),
+            )
+            .now();
     }
 
     /// A room the user is in — the ordinary case for anything the store
@@ -794,13 +801,13 @@ mod tests {
         assert_eq!(buffers.get(&id).map(|buffer| buffer.last_activity), Some(1));
 
         let mut history = vec![from_user("look at the parser"), assistant("one")];
-        session.agents.finish("scout", history.clone(), 0);
+        session.agents.finish("scout", history.clone(), 0).now();
         buffers.refresh(&session, 7);
         assert_eq!(buffers.get(&id).map(Buffer::unread), Some(2));
         assert_eq!(buffers.get(&id).map(|buffer| buffer.last_activity), Some(7));
 
         history.push(assistant("two"));
-        session.agents.finish("scout", history, 0);
+        session.agents.finish("scout", history, 0).now();
         buffers.refresh(&session, 9);
         assert_eq!(buffers.get(&id).map(Buffer::unread), Some(3));
         assert_eq!(buffers.get(&id).map(|buffer| buffer.last_activity), Some(9));
@@ -837,7 +844,7 @@ mod tests {
             },
             assistant("found it"),
         ];
-        session.agents.finish("scout", history, 0);
+        session.agents.finish("scout", history, 0).now();
         buffers.refresh(&session, 2);
         assert_eq!(
             buffers.get(&id).map(Buffer::unread),
@@ -860,31 +867,38 @@ mod tests {
         // Your own message landing in the record is not somebody wanting you.
         session
             .agents
-            .finish("scout", vec![from_user("look at the parser")], 0);
+            .finish("scout", vec![from_user("look at the parser")], 0)
+            .now();
         buffers.refresh(&session, 2);
         assert_eq!(buffers.get(&id).map(Buffer::unread), Some(1));
         assert_eq!(buffers.get(&id).map(Buffer::mention), Some(false));
 
-        session.agents.finish(
-            "scout",
-            vec![from_user("look at the parser"), assistant("found it")],
-            0,
-        );
+        session
+            .agents
+            .finish(
+                "scout",
+                vec![from_user("look at the parser"), assistant("found it")],
+                0,
+            )
+            .now();
         buffers.refresh(&session, 3);
         assert_eq!(buffers.get(&id).map(Buffer::mention), Some(true));
 
         // And main's traffic through the same instance is not a DM at all.
         buffers.mark_read(&id);
-        session.agents.finish(
-            "scout",
-            vec![
-                from_user("look at the parser"),
-                assistant("found it"),
-                Message::user_text("also check the lexer"),
-                assistant("checked"),
-            ],
-            0,
-        );
+        session
+            .agents
+            .finish(
+                "scout",
+                vec![
+                    from_user("look at the parser"),
+                    assistant("found it"),
+                    Message::user_text("also check the lexer"),
+                    assistant("checked"),
+                ],
+                0,
+            )
+            .now();
         buffers.refresh(&session, 4);
         assert_eq!(
             buffers.get(&id).map(Buffer::unread),
@@ -1035,7 +1049,7 @@ mod tests {
         // An inbox item from `user`, which is what earns the D64 marker when
         // the instance picks it up. The send path must not add the marker
         // itself — that would double it.
-        let items = session.agents.take_running("scout", 0);
+        let items = session.agents.take_running("scout", 0).await;
         let (prompt, _) = crate::tool::agent::absorb_inbox(&session.channels, "scout", &items);
         assert_eq!(
             prompt,

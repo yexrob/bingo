@@ -366,6 +366,36 @@ pub struct ChannelView {
     shared: bool,
 }
 
+/// One room as the application event layer names it: everything a
+/// `RoomResource` carries except the server-minted identifier.
+pub(crate) struct RoomFacts {
+    pub name: String,
+    pub mode: ChannelMode,
+    pub members: Vec<String>,
+    pub message_count: u64,
+    pub last_seq: u64,
+}
+
+impl ChannelRegistry {
+    /// What every room stands at, for the actor to turn into events.
+    pub(crate) fn facts(&self) -> Vec<RoomFacts> {
+        let mut out: Vec<RoomFacts> = self
+            .inner
+            .channels
+            .iter()
+            .map(|(name, ch)| RoomFacts {
+                name: name.clone(),
+                mode: ch.mode,
+                members: ch.members.clone(),
+                message_count: ch.log.len() as u64,
+                last_seq: ch.seq,
+            })
+            .collect();
+        out.sort_by(|a, b| a.name.cmp(&b.name));
+        out
+    }
+}
+
 /// An answer held back until the view carrying its effect has been published.
 type Answered = Box<dyn FnOnce()>;
 
