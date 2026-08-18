@@ -401,9 +401,22 @@ impl Controller {
                 // the only ordering a second frontend can rely on.
                 Control::Watch(message) => self.watch.handle(message),
                 Control::Channels(message) => {
+                    // A replayed sidecar carries the user's own cursors, and they
+                    // have to be applied *after* the log it measures has become
+                    // items — otherwise the restored history would all read as
+                    // unread (Amendment #6).
+                    let restored = match &message {
+                        crate::channels::ChannelMsg::RestoreRooms(replay) => {
+                            Some(replay.read_cursors())
+                        }
+                        _ => None,
+                    };
                     self.channels.handle(message);
                     self.absorb_posts();
                     self.absorb_main_mail();
+                    if let Some(cursors) = restored {
+                        self.restore_attention(cursors);
+                    }
                     self.announce_rooms();
                     self.consider_mail();
                 }
@@ -763,6 +776,14 @@ impl Controller {
         }
         self.attention
             .mark_read(&key, record, last_item_id, last_room_seq);
+        // A room's cursor is the one piece of attention that survives a restart,
+        // so it is written down where it moves (Amendment #6).
+        if let Some(room) = key.room() {
+            let seq = self.attention.read_room_seq(&key);
+            if seq > 0 {
+                self.channels.log_read(room, seq);
+            }
+        }
         self.dirty.insert(key);
         Ok(AppReply::Accepted)
     }
@@ -1655,6 +1676,28 @@ impl Controller {
                     None,
                 );
             }
+        }
+    }
+
+    /// Put back the read cursors a resumed sidecar remembered.
+    ///
+    /// The unit is the room's own sequence, which is the one attention has that
+    /// outlives a restart: an item identifier dies with its epoch.
+    fn restore_attention(&mut self, cursors: Vec<(String, u64)>) {
+        for (room, seq) in cursors {
+            let key = ConvKey::Room(room);
+            let record = self.conversations.record_mut(&mut self.mint, &key);
+            let last = record
+                .items
+                .iter()
+                .rev()
+                .find(|item| {
+                    matches!(&item.body, ItemBody::RoomMessage { room_seq, .. } if *room_seq <= seq)
+                })
+                .map(|item| item.id.clone());
+            self.attention
+                .mark_read(&key, record, last.as_ref(), Some(seq));
+            self.dirty.insert(key);
         }
     }
 

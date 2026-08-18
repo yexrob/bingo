@@ -683,6 +683,49 @@ These are protocol requirements, not implementation notes.
     `conversation/markRead` advances attention cursors.
 15. Conversation selection and display state never change server routing.
 
+## Room and attention persistence
+
+Room history is not in the transcript. The transcript records what a model saw;
+a room is a log between agents that main only relays, so before 1.0 a resumed
+session came back with its rooms empty and every unread mark gone. Amendment #6
+puts both in scope, in a per-session sidecar beside the transcript's own store.
+
+- Path: `<data>/rooms/<transcript-stem>.rooms.jsonl`. Its own directory rather
+  than beside the transcript, because the transcript sweep selects on `*.jsonl`
+  and would otherwise collect a sidecar as a session. Garbage collection removes
+  a sidecar with the transcript it belongs to.
+- Format: UTF-8 NDJSON, one JSON object per line, append-only. Nothing is ever
+  rewritten. Replay is a fold over the lines in order, so a line a crash
+  truncated costs the last fact and nothing else.
+- Every line carries `v` (record version, currently `1`) and `at` (unix ms).
+  A reader skips a line whose `v` it does not know rather than failing.
+
+```json
+{"v":1,"at":1760000000000,"type":"room","room":"build","mode":"free","members":["main","scout"],"frozen":false}
+{"v":1,"at":1760000000100,"type":"post","room":"build","seq":1,"from":"scout","text":"the suite is green","atUnix":1760000000,"said":true}
+{"v":1,"at":1760000000200,"type":"member","room":"build","member":"scout","seen":1,"sent":1}
+{"v":1,"at":1760000005000,"type":"read","room":"build","seq":1}
+```
+
+| Record | Meaning |
+| --- | --- |
+| `room` | The room exists with this roster, mode, freeze state, and optional message limit. Written on creation and on every change; the last one wins. |
+| `post` | One entry of the room's log. `said: false` is a roster change, which takes a sequence number and is a message item like any other. |
+| `member` | How far one member has read (`seen`) and how much of its budget it has spent (`sent`). Without it a resumed member would bounce on the whole replayed log, which is the flood the serial rule exists to prevent. |
+| `read` | How far the **user** has read, in the room's own sequence — the one unit attention has that outlives a restart, because an item identifier dies with its epoch. |
+
+Deliberately absent:
+
+- **Mentions.** Re-derived by replaying the posts through the same rule that
+  opened them, so what an `@` owes has one authority however the log arrived.
+- **An agent conversation's history.** That is the instance's own transcript,
+  walked on demand rather than duplicated. Attention on an agent conversation
+  therefore does not survive a restart in 1.0.
+
+Replay happens before the writer is attached, and only fills in rooms the
+registry does not already hold: a resume may run after a team has already
+repopulated them, and the live room is the one that is running.
+
 ## Errors, load, and security
 
 JSON-RPC standard codes cover parse, invalid request, unknown method, invalid

@@ -84,6 +84,14 @@ pub fn tasks_dir(home: &Path) -> PathBuf {
     data_dir(home).join("tasks")
 }
 
+/// Room sidecars: ~/.local/share/bingo/rooms/<session>.rooms.jsonl.
+///
+/// Its own directory rather than beside the transcript, because the transcript
+/// sweep selects on `*.jsonl` and would collect a sidecar as a session.
+pub fn rooms_dir(home: &Path) -> PathBuf {
+    data_dir(home).join("rooms")
+}
+
 #[derive(Debug, Clone, Copy)]
 struct RetentionPolicy {
     ttl: Duration,
@@ -177,6 +185,9 @@ fn cleanup_with_policy_at(
         report.transcripts += 1;
         if let Some(key) = session_key {
             report.shares += remove_share_files(&shares_dir(home), &key)?;
+            // The room sidecar belongs to the transcript it was written beside:
+            // a session that is gone has no rooms to come back to.
+            let _ = std::fs::remove_file(rooms_dir(home).join(format!("{key}.rooms.jsonl")));
         }
     }
 

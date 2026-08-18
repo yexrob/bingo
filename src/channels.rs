@@ -513,6 +513,9 @@ pub struct ChannelRegistry {
     share: Option<Arc<crate::share::ShareStore>>,
     /// Where the attached document's disk writes happen — never here.
     saver: Option<crate::share::ShareSaver>,
+    /// The room sidecar, if this session has one. Append-only, written on its
+    /// own thread, and replayed on resume (Amendment #6).
+    sidecar: Option<crate::app::roomlog::Writer>,
     view: tokio::sync::watch::Sender<Arc<ChannelView>>,
 }
 
@@ -525,6 +528,11 @@ pub struct ChannelRegistry {
 /// a room that already exists — and a stale view would let it act on a world
 /// that has moved.
 pub enum ChannelMsg {
+    /// Start writing this session's rooms to a sidecar, and write down what is
+    /// already here.
+    AttachSidecar(std::path::PathBuf),
+    /// Rebuild the rooms a sidecar remembers.
+    RestoreRooms(Box<crate::app::roomlog::Replay>),
     AttachShare(Arc<crate::share::ShareStore>),
     AlignWithShare(Arc<crate::share::ShareStore>),
     DetachShare,
@@ -630,6 +638,51 @@ pub fn format_agent_message(from: &str, text: &str) -> String {
 /// wants the roster asks for it. Nor does it make anybody stale — the serial
 /// check reads speech only, so a join can never bounce a post already in
 /// flight.
+/// Re-derive a room's `@` ledger from its log.
+///
+/// The rules are `post`'s, applied in sequence order: close the debts this line
+/// settles, then open the ones it names. Replaying them rather than storing them
+/// keeps one authority for what a `@` owes, however the log arrived.
+fn rebuild_mentions(channel: &mut Channel) {
+    let entries: Vec<ChannelMessage> = channel
+        .log
+        .iter()
+        .filter(|entry| entry.kind == MessageKind::Said)
+        .cloned()
+        .collect();
+    for entry in entries {
+        for owed in channel.mentions.iter_mut() {
+            if owed.answered.is_none() && owed.seq < entry.seq && owed.settled_by(&entry.from) {
+                owed.answered = Some(entry.seq);
+            }
+        }
+        let tokens = mention_tokens(&entry.text);
+        let at_all = tokens.iter().any(|token| token == ALL_NAME);
+        let named: Vec<String> = if at_all {
+            vec![ALL_NAME.to_string()]
+        } else {
+            channel
+                .members
+                .iter()
+                .filter(|member| {
+                    member.as_str() != entry.from
+                        && tokens.iter().any(|token| *token == member.to_lowercase())
+                })
+                .cloned()
+                .collect()
+        };
+        for to in named {
+            channel.mentions.push(Mention {
+                seq: entry.seq,
+                from: entry.from.clone(),
+                to,
+                at: entry.at,
+                answered: None,
+            });
+        }
+    }
+}
+
 fn record_membership(channel: &mut Channel, member: &str, what: &str) -> ChannelMessage {
     channel.seq += 1;
     let event = ChannelMessage {
@@ -660,6 +713,7 @@ pub(crate) fn attach(
         },
         share: None,
         saver: None,
+        sidecar: None,
         view,
     };
     let handle = ChannelHandle {
@@ -686,6 +740,14 @@ impl ChannelRegistry {
 
     fn apply(&mut self, message: ChannelMsg) -> (Touched, Option<Answered>) {
         match message {
+            ChannelMsg::AttachSidecar(path) => {
+                self.attach_sidecar(path);
+                (Touched::NoRoom, None)
+            }
+            ChannelMsg::RestoreRooms(replay) => {
+                self.restore(&replay);
+                (Touched::Every, None)
+            }
             ChannelMsg::AttachShare(store) => {
                 self.attach_share(store);
                 (Touched::NoRoom, None)
@@ -859,6 +921,139 @@ impl ChannelRegistry {
         }
     }
 
+    // -- the room sidecar ---------------------------------------------------
+
+    /// Start writing this session's rooms down, and write what is already here.
+    fn attach_sidecar(&mut self, path: std::path::PathBuf) {
+        match crate::app::roomlog::Writer::open(path) {
+            Ok(writer) => {
+                self.sidecar = Some(writer);
+                let names: Vec<String> = self.inner.channels.keys().cloned().collect();
+                for name in names {
+                    self.log_room(&name);
+                    let entries: Vec<ChannelMessage> = self
+                        .inner
+                        .channels
+                        .get(&name)
+                        .map(|ch| ch.log.clone())
+                        .unwrap_or_default();
+                    for entry in entries {
+                        self.log_post(&name, &entry);
+                    }
+                }
+            }
+            // A sidecar is an enhancement, not a contract: a session whose rooms
+            // cannot be written down still has rooms.
+            Err(_) => self.sidecar = None,
+        }
+    }
+
+    fn log_room(&self, name: &str) {
+        let Some(sidecar) = &self.sidecar else {
+            return;
+        };
+        let Some(ch) = self.inner.channels.get(name) else {
+            return;
+        };
+        sidecar.append(vec![crate::app::roomlog::Record::Room {
+            room: name.to_string(),
+            mode: ch.mode.label().to_string(),
+            members: ch.members.clone(),
+            frozen: ch.frozen,
+            message_limit: ch.message_limit,
+        }]);
+    }
+
+    fn log_post(&self, name: &str, message: &ChannelMessage) {
+        let Some(sidecar) = &self.sidecar else {
+            return;
+        };
+        sidecar.append(vec![crate::app::roomlog::Record::Post {
+            room: name.to_string(),
+            seq: message.seq,
+            from: message.from.clone(),
+            text: message.text.clone(),
+            at_unix: message.at,
+            said: message.kind == MessageKind::Said,
+        }]);
+    }
+
+    fn log_member(&self, name: &str, member: &str) {
+        let Some(sidecar) = &self.sidecar else {
+            return;
+        };
+        let Some(ch) = self.inner.channels.get(name) else {
+            return;
+        };
+        sidecar.append(vec![crate::app::roomlog::Record::Member {
+            room: name.to_string(),
+            member: member.to_string(),
+            seen: ch.seen.get(member).copied().unwrap_or(0),
+            sent: ch.sent.get(member).copied().unwrap_or(0),
+        }]);
+    }
+
+    /// Write down how far the *user* has read one room.
+    pub(crate) fn log_read(&self, name: &str, seq: u64) {
+        let Some(sidecar) = &self.sidecar else {
+            return;
+        };
+        sidecar.append(vec![crate::app::roomlog::Record::Read {
+            room: name.to_string(),
+            seq,
+        }]);
+    }
+
+    /// Rebuild the rooms a sidecar remembers.
+    ///
+    /// Only rooms that are not already here: a resume replays into a registry
+    /// the team may have already repopulated, and the live room is the one that
+    /// is running. Mentions are re-derived rather than replayed, so what a `@`
+    /// owes has one authority however the log got here.
+    fn restore(&mut self, replay: &crate::app::roomlog::Replay) {
+        for state in &replay.rooms {
+            if self.inner.channels.contains_key(&state.name) {
+                continue;
+            }
+            let mut ch = Channel {
+                members: state.members.clone(),
+                mode: ChannelMode::parse(&state.mode).unwrap_or(ChannelMode::Free),
+                seq: state.log.iter().map(|entry| entry.seq).max().unwrap_or(0),
+                log: state
+                    .log
+                    .iter()
+                    .map(|entry| ChannelMessage {
+                        seq: entry.seq,
+                        from: entry.from.clone(),
+                        text: entry.text.clone(),
+                        at: entry.at_unix,
+                        kind: if entry.said {
+                            MessageKind::Said
+                        } else {
+                            MessageKind::Membership
+                        },
+                    })
+                    .collect(),
+                mentions: Vec::new(),
+                seen: state
+                    .members_seen
+                    .iter()
+                    .map(|(member, seen, _)| (member.clone(), *seen))
+                    .collect(),
+                sent: state
+                    .members_seen
+                    .iter()
+                    .map(|(member, _, sent)| (member.clone(), *sent))
+                    .collect(),
+                frozen: state.frozen,
+                message_limit: state.message_limit,
+                watch_id: None,
+            };
+            rebuild_mentions(&mut ch);
+            self.inner.channels.insert(state.name.clone(), ch);
+        }
+    }
+
     /// Ask the attached document to reach the disk. Never writes it here: the
     /// actor is the one ordering point and a file is not something it may wait on.
     fn save_share(&self) {
@@ -869,6 +1064,7 @@ impl ChannelRegistry {
 
     /// Write a channel's latest metadata (mode + members) into the share document (no-op without a store).
     fn sync_channel_meta(&self, name: &str) {
+        self.log_room(name);
         let Some(store) = self.share.as_ref() else {
             return;
         };
@@ -881,6 +1077,7 @@ impl ChannelRegistry {
 
     /// Append a landed channel message to the share document (no-op without a store).
     fn sync_channel_message(&self, name: &str, msg: &ChannelMessage) {
+        self.log_post(name, msg);
         let Some(store) = self.share.as_ref() else {
             return;
         };
@@ -1156,6 +1353,7 @@ impl ChannelRegistry {
         // (`MAIN_CHANNEL_NOTE`), never the delivery's.
         if let Some(msg) = landed {
             self.sync_channel_message(name, &msg);
+            self.log_member(name, from);
         }
         if let Some((line, _mentioned)) = main_line {
             self.inner.main_mail.push(line);
@@ -1177,11 +1375,19 @@ impl ChannelRegistry {
     /// Mark the member's inbox as digested up to seq (its running turn was
     /// injected with channel messages up to seq).
     fn mark_seen(&mut self, member: &str, name: &str, seq: u64) {
+        let mut moved = false;
         if let Some(ch) = self.inner.channels.get_mut(name) {
             let cursor = ch.seen.entry(member.to_string()).or_insert(0);
             if *cursor < seq {
                 *cursor = seq;
+                moved = true;
             }
+        }
+        if moved {
+            // A resumed member that had forgotten how far it had read would
+            // bounce on the whole replayed log, which is exactly the flood the
+            // serial rule exists to prevent.
+            self.log_member(name, member);
         }
     }
 
@@ -1259,6 +1465,16 @@ impl ChannelHandle {
     }
 
     /// Replace share persistence and ensure existing channels can accept future messages.
+    /// Start writing this session's rooms down (Amendment #6).
+    pub fn attach_sidecar(&self, path: std::path::PathBuf) {
+        self.report(ChannelMsg::AttachSidecar(path));
+    }
+
+    /// Rebuild the rooms a sidecar remembers.
+    pub fn restore_rooms(&self, replay: crate::app::roomlog::Replay) {
+        self.report(ChannelMsg::RestoreRooms(Box::new(replay)));
+    }
+
     pub fn attach_share(&self, store: Arc<crate::share::ShareStore>) {
         self.report(ChannelMsg::AttachShare(store));
     }

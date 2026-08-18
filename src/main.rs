@@ -424,6 +424,13 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 "[bingo] warning: share store unavailable ({e}); bingo share will have the conversation view only"
             ),
         }
+        // The room sidecar (Amendment #6): replay first, so a resumed session
+        // comes back to the rooms it left, and only then start appending.
+        let rooms = crate::app::roomlog::path(&home, &stem);
+        session
+            .channels
+            .restore_rooms(crate::app::roomlog::replay(&rooms));
+        session.channels.attach_sidecar(rooms);
     }
 
     let mode_str = session.permission_mode_str();

@@ -134,6 +134,23 @@ async fn read_conversation(
     }
 }
 
+/// Send one command and wait for its own reply.
+async fn command(link: &mut AppLink, id: u64, command: AppCommand) -> Result<AppReply, AppError> {
+    link.request(AppRequest::Command {
+        id: RequestId(id),
+        command,
+    })
+    .await
+    .unwrap_or_else(|error| panic!("{error}"));
+    loop {
+        match link.recv().await {
+            Some(AppFrame::Reply { id: seen, result }) if seen == RequestId(id) => return result,
+            Some(_) => {}
+            None => panic!("the core closed"),
+        }
+    }
+}
+
 /// The conversation the newest summary named for this key.
 fn conversation_of(events: &[AppEvent], title: &str) -> ConversationId {
     summaries(events)
@@ -516,21 +533,145 @@ async fn reading_a_room_never_marks_it_read() {
         .last()
         .map(|item| item.id.clone())
         .unwrap_or_else(|| panic!("the room has a post"));
-    link.request(AppRequest::Command {
-        id: RequestId(9),
-        command: AppCommand::MarkRead {
-            conversation_id: room.clone(),
-            last_item_id: Some(last),
-            last_room_seq: None,
-            expected_revision: again.conversation.revision,
-        },
-    })
-    .await
-    .unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(
+        command(
+            &mut link,
+            9,
+            AppCommand::MarkRead {
+                conversation_id: room.clone(),
+                last_item_id: Some(last),
+                last_room_seq: None,
+                expected_revision: again.conversation.revision,
+            },
+        )
+        .await,
+        Ok(AppReply::Accepted)
+    );
     let _ = drain(&mut link).await;
     let after = read_conversation(&mut link, &room, None)
         .await
         .unwrap_or_else(|error| panic!("{error}"));
     assert_eq!(after.conversation.unread, 0);
     assert_eq!(after.conversation.mentions, 0);
+}
+
+/// The golden one (Amendment #6): a session's rooms and the user's place in them
+/// come back after a restart. The sidecar is the only thing that crossed.
+#[tokio::test]
+async fn a_resumed_session_comes_back_to_its_rooms_and_its_unread_marks() {
+    let home = std::env::temp_dir().join(format!(
+        "bingo-resume-{}-{}",
+        std::process::id(),
+        crate::app::ids::now_millis()
+    ));
+    let sidecar = crate::app::roomlog::path(&home, "notes-1");
+
+    // --- the first session -------------------------------------------------
+    {
+        let core = AppCore::start(SessionSetup::default());
+        let channels = core.channels();
+        let mut link = attached(&core).await;
+        channels.attach_sidecar(sidecar.clone());
+        channels
+            .create(
+                "build",
+                vec![MAIN_NAME.to_string(), "scout".to_string(), "qa".to_string()],
+                ChannelMode::Free,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{error}"));
+        channels
+            .invite("build", USER_NAME)
+            .await
+            .unwrap_or_else(|error| panic!("{error}"));
+        for line in ["one", "two", "@user three"] {
+            channels
+                .post("scout", "build", line)
+                .await
+                .unwrap_or_else(|error| panic!("{error}"));
+        }
+        let events = drain(&mut link).await;
+        let room = conversation_of(&events, "#build");
+        let snapshot = read_conversation(&mut link, &room, None)
+            .await
+            .unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(snapshot.conversation.unread, 3);
+        assert_eq!(snapshot.conversation.mentions, 1);
+
+        // The user reads the first two posts. The join took sequence 1, so the
+        // second post is sequence 3 — a room's own sequence counts roster
+        // changes too.
+        let second = snapshot
+            .items
+            .items
+            .iter()
+            .find(|item| matches!(&item.body, ItemBody::RoomMessage { room_seq, .. } if *room_seq == 3))
+            .map(|item| item.id.clone())
+            .unwrap_or_else(|| panic!("the second post is in the log"));
+        assert_eq!(
+            command(
+                &mut link,
+                11,
+                AppCommand::MarkRead {
+                    conversation_id: room.clone(),
+                    last_item_id: Some(second),
+                    last_room_seq: Some(3),
+                    expected_revision: snapshot.conversation.revision,
+                },
+            )
+            .await,
+            Ok(AppReply::Accepted),
+            "the client marked the view it had just read"
+        );
+        let _ = drain(&mut link).await;
+        let after = read_conversation(&mut link, &room, None)
+            .await
+            .unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(after.conversation.unread, 1, "one post is still unread");
+        core.close().await;
+    }
+
+    // --- and the one that resumes it ---------------------------------------
+    let core = AppCore::start(SessionSetup::default());
+    let channels = core.channels();
+    let mut link = attached(&core).await;
+    let replayed = crate::app::roomlog::replay(&sidecar);
+    channels.restore_rooms(replayed);
+    let events = drain(&mut link).await;
+    let room = conversation_of(&events, "#build");
+    let snapshot = read_conversation(&mut link, &room, None)
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+
+    let texts: Vec<String> = snapshot
+        .items
+        .items
+        .iter()
+        .filter_map(|item| match &item.body {
+            ItemBody::RoomMessage { text, .. } => Some(text.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        texts,
+        vec!["joined", "one", "two", "@user three"],
+        "the room came back with its whole log, roster changes included"
+    );
+    assert_eq!(
+        snapshot.conversation.unread, 1,
+        "and with the user where they left off"
+    );
+    assert_eq!(
+        snapshot.conversation.mentions, 1,
+        "including what named them"
+    );
+    assert!(snapshot.conversation.is_member, "the roster came back too");
+
+    // The `@` ledger is re-derived rather than replayed, so a resumed session
+    // still knows what the room owes.
+    let owed = channels.owed_in("build");
+    assert_eq!(owed.len(), 1, "the mention nobody answered is still open");
+    assert_eq!(owed[0].to, USER_NAME);
+
+    let _ = std::fs::remove_dir_all(&home);
 }

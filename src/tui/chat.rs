@@ -3142,6 +3142,14 @@ impl Chat {
                 "share store unavailable ({error}); bingo share will have the conversation view only"
             )),
         }
+        // The room sidecar (Amendment #6): replay first, so a resumed session
+        // comes back to the rooms it left with its unread marks intact, and only
+        // then start appending to the log it just read.
+        let rooms = crate::app::roomlog::path(&self.session.home, &transcript.name());
+        self.session
+            .channels
+            .restore_rooms(crate::app::roomlog::replay(&rooms));
+        self.session.channels.attach_sidecar(rooms);
     }
 
     fn slash_clear(&mut self) {

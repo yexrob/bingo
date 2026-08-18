@@ -34,6 +34,7 @@ pub mod interaction;
 pub mod mail;
 pub mod projection;
 pub mod queue;
+pub mod roomlog;
 pub mod snapshot;
 pub mod submit;
 pub mod turn;
