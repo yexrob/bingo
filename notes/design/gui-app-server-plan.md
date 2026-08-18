@@ -193,6 +193,15 @@ attention（markRead/unread/mention obligations）；**房间+attention 持久�
 （决定 3，含 golden 测试）；team 启动为 operation；agent 资源形状（决定 6）。
 **验收**：四门绿 + 协作场景测试（DM 三声部 marker、@债务、serial bounce、resume 恢复房间）。
 
+> **B4 review 裁决（2026-08-19，Fable）**：① 投递状态映射**核准**（域 Queued→wire delivered、
+> 域 Delivered{run}→wire read）——正确对应 D135 两时刻（入箱=送达、入 run=已读），恒等映射
+> 反而会把已入箱的信显示成"未送达"；wire `queued` 保留给未来异步投递间隙。
+> ② `Route::Deliver` 的唤醒半边留在调用方，B7 收；由此 B2a 裁决"Unserved 于 B5 清零"**修订**为：
+> 除 submit 的 Deliver disposition（B7）外全部清零。③ agent 会话的 attention 不随 resume
+> 恢复，接受为 1.0 已知限界（规范已载明）。④ `BackgroundCommandResource.exit_code` 恒缺
+> （watch 表无退出码）——B8 收尾时给 watch 表补 exit status。⑤ `/team status` 增印成员
+> thinking/cwd 的可见变化核准（Amendment #5 的读者）。
+
 ### B5 · 动作注册表与目录（M）
 `Action` 枚举 + 单 registry（`action/list` 元数据与分派同源 + 完备性测试，终结斜杠三表漂移）；
 斜杠家族逐一迁出 Chat/team_cmd；`catalog/read`（session 前可用，决定 7）/`config/read`/
