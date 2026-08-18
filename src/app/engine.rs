@@ -37,6 +37,10 @@ pub enum Run {
     /// A post reached a room's log and every member's inbox. What is left is the
     /// room's display row, the chases an `@` owes, and the members it woke.
     Posted(Box<Posted>),
+    /// Somebody asked a turn to stop. The core has already recorded the request
+    /// — a runner that checks late still sees it — and this is what reaches the
+    /// stream that is open right now.
+    Interrupt { turn: TurnId },
 }
 
 /// What a room post left for the engine to finish.

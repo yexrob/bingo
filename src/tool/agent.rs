@@ -227,6 +227,10 @@ fn subagent_hooks(
                     events.send(UiEvent::ToolStart { name });
                     return;
                 }
+                // A subagent's shell runs detached: there is no foreground slot
+                // for it to publish into, so a sample it somehow produced is not
+                // this surface's to draw.
+                EngineEvent::CommandTail(_) => return,
                 EngineEvent::StopReason {
                     output_tokens: Some(tokens),
                     ..

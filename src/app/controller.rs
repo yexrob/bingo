@@ -1072,10 +1072,17 @@ impl Controller {
             return Err(AppError::Refused(ProtocolErrorKind::ConversationNotFound));
         }
         match self.turns.interrupt(&turn_id) {
-            crate::app::turn::Interrupted::Asked => Ok(AppReply::Interrupted {
-                turn_id,
-                accepted: true,
-            }),
+            crate::app::turn::Interrupted::Asked => {
+                if let Some(engine) = &self.engine {
+                    engine.run(crate::app::engine::Run::Interrupt {
+                        turn: turn_id.clone(),
+                    });
+                }
+                Ok(AppReply::Interrupted {
+                    turn_id,
+                    accepted: true,
+                })
+            }
             crate::app::turn::Interrupted::Already => Ok(AppReply::Interrupted {
                 turn_id,
                 accepted: false,
@@ -2027,6 +2034,19 @@ impl Controller {
                         turn,
                     })
                 }
+                TurnChange::ItemCommandTail {
+                    conversation,
+                    turn,
+                    item,
+                    tail,
+                } => AppEventPayload::ItemCommandTailUpdated(
+                    crate::app::event::ItemCommandTailUpdated {
+                        conversation_id: self.conversation_id(&conversation),
+                        turn_id: Some(turn),
+                        item_id: item,
+                        tail,
+                    },
+                ),
                 TurnChange::ItemStarted {
                     conversation,
                     turn,

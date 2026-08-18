@@ -100,6 +100,14 @@ pub enum EngineEvent {
         standalone: bool,
     },
     ToolDone(ToolCallDone),
+    /// The foreground shell command's output so far (D84): last lines and the
+    /// count behind them, after carriage returns and escapes have been read.
+    ///
+    /// A replacement, never an append — it is a sample of a running command, not
+    /// its output. There is at most one in flight, which is not a convention:
+    /// [`crate::live::LiveBash`] holds one slot and phase 2 runs unsafe tools
+    /// serially, so "the foreground command" names exactly one call.
+    CommandTail(crate::live::LiveTail),
     /// One model response and all of its tools finished.
     RoundEnd,
     /// Something went wrong that did not end the run.
@@ -222,10 +230,23 @@ impl EngineEvents {
 
     /// The warning callback tool assembly and the compactor were written
     /// against. They take a callback because they are called from outside a run
-    /// as well; a shim, and B3 removes this when they move behind the actor.
+    /// as well.
+    ///
+    /// It goes through [`EngineEvents::emit`] like everything else: a warning
+    /// raised while the tools were being assembled is as much a fact about the
+    /// turn as one raised inside it, and one that reached only the frontend sink
+    /// would never become `feedback/raised`.
     pub fn warn_sink(&self) -> impl Fn(String) + Send + 'static + use<> {
-        let sink = self.sink.clone();
-        move |message| (sink)(EngineEvent::Warning(message))
+        let events = self.clone();
+        move |message| events.emit(EngineEvent::Warning(message))
+    }
+
+    /// A sink for the foreground command's output tail, for a run that wants one
+    /// published. The handle is per-run, so the tail reaches the turn it belongs
+    /// to and no other.
+    pub fn tail_sink(&self) -> Arc<crate::live::TailFn> {
+        let events = self.clone();
+        Arc::new(move |tail| events.emit(EngineEvent::CommandTail(tail)))
     }
 }
 

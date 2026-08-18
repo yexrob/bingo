@@ -474,6 +474,10 @@ pub fn tui_hooks(
             // own transcript before the turn ever started, and echoing it here
             // would print it twice.
             EngineEvent::Inbound(_) => {}
+            // The console's own tail arrives on the `LiveBash` handle it built
+            // and handed in, so it is already a `UiEvent` by the time it gets
+            // here. This is the same sample reaching the core (B7).
+            EngineEvent::CommandTail(_) => {}
         }),
         EngineRequests {
             ask: crate::app::interaction::permission_ask(interactions.clone(), ConvKey::Main),

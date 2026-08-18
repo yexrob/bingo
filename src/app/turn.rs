@@ -159,6 +159,14 @@ pub(crate) enum TurnChange {
         turn: TurnId,
         text: String,
     },
+    /// The foreground command's output so far. It replaces the slot rather than
+    /// appending to it, and it never becomes the item's final output.
+    ItemCommandTail {
+        conversation: ConvKey,
+        turn: TurnId,
+        item: ItemId,
+        tail: crate::app::snapshot::CommandTail,
+    },
 }
 
 /// What a reader can see of the turns in flight, without asking.
@@ -670,6 +678,24 @@ impl TurnRegistry {
             // announced when it starts and carries its resolved input when it is
             // ready.
             EngineEvent::ToolInputDelta { .. } => {}
+            // The tail belongs to the one shell call that is running. Which one
+            // that is needs no guess: the foreground slot holds one command at a
+            // time, so at most one shell item is open when a sample arrives, and
+            // a sample that arrives with none is a promoted command's last —
+            // dropped, because a promoted command owns no rows any more.
+            EngineEvent::CommandTail(tail) => {
+                if let Some(item) = foreground_item(record) {
+                    changes.push(TurnChange::ItemCommandTail {
+                        conversation,
+                        turn: turn.clone(),
+                        item,
+                        tail: crate::app::snapshot::CommandTail {
+                            lines: tail.lines,
+                            total_lines: tail.total_lines as u64,
+                        },
+                    });
+                }
+            }
             EngineEvent::ToolUseStarted { index, id, name } => {
                 changes.extend(open_round(record));
                 let item = tool_item(record, mint, &id, &name);
@@ -889,6 +915,27 @@ fn tool_item(record: &mut Record, mint: &mut IdMint, call: &str, name: &str) -> 
         },
     );
     id
+}
+
+/// The shell call the foreground tail belongs to: the newest `Bash` item this
+/// attempt still has open.
+///
+/// Newest rather than only, because a retry can leave an earlier attempt's item
+/// in `order` — the search is over what is open, and the last one to open is the
+/// one that is running.
+fn foreground_item(record: &Record) -> Option<ItemId> {
+    record.live.order.iter().rev().find_map(|id| {
+        let item = record.live.items.get(id)?;
+        match &item.body {
+            ItemBody::ToolCall { name, .. }
+                if name == "Bash"
+                    && matches!(item.status, ItemStatus::Pending | ItemStatus::Streaming) =>
+            {
+                Some(id.clone())
+            }
+            _ => None,
+        }
+    })
 }
 
 fn snapshot(record: &Record, id: &ItemId) -> Box<Item> {

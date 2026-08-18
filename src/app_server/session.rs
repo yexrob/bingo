@@ -5,10 +5,12 @@
 //! the transport's: settings, the transcript this session writes, the catalogs it
 //! reads, the room sidecar it replays, and the actor that owns all of them.
 //!
-//! What is deliberately absent is the engine. A session started here can be read,
-//! configured, and closed; it cannot run a model turn, because nothing has
-//! attached a `Session` to it. That is B7's, and `action/list` already says which
-//! actions need it.
+//! The engine arrives here too (B7). A session's [`crate::query::Session`] — its
+//! client, its system prompt, its transcript, its task store — is assembled the
+//! same way `main.rs` assembles the console's, handed to
+//! [`crate::engine::runner::SessionEngine`], and attached to the actor. Until
+//! that attachment a core answers everything it can answer out of its own state
+//! and refuses a run by name; after it, `conversation/submit` starts real turns.
 
 use std::path::{Path, PathBuf};
 
@@ -258,7 +260,129 @@ fn assemble(
         ..Default::default()
     });
     attach_sidecars(boot, &core, transcript.as_ref());
+    attach_engine(
+        boot,
+        &core,
+        cwd,
+        &settings,
+        transcript.as_ref(),
+        permission_mode,
+    );
     Ok(Started { core, transcript })
+}
+
+/// Give the core the thing that runs a turn.
+///
+/// The assembly is `main.rs`'s, because it has to be: a run reads its model, its
+/// system prompt, its tools and its transcript from a [`crate::query::Session`],
+/// and a GUI's turn must read them from the same place the console's does or the
+/// two frontends are running different products.
+///
+/// A client that cannot be given an engine still gets a session. The client is
+/// the one part that can fail here — an unreadable credential, a provider whose
+/// endpoint will not resolve — and refusing the whole session over it would take
+/// away the catalogs and the configuration reads that are exactly how a client
+/// would diagnose it.
+fn attach_engine(
+    boot: &Bootstrap,
+    core: &AppCore,
+    cwd: &Path,
+    settings: &crate::settings::Settings,
+    transcript: Option<&Transcript>,
+    permission_mode: PermissionMode,
+) {
+    let client = match crate::api::client::Client::from_settings_at(settings, &boot.home) {
+        Ok(client) => client,
+        Err(error) => {
+            eprintln!(
+                "[bingo] warning: no engine for this session ({error}); it can be read and \
+                 configured but not run"
+            );
+            return;
+        }
+    };
+    let model = settings
+        .model
+        .clone()
+        .unwrap_or_else(|| crate::api::types::DEFAULT_MODEL.to_string());
+    let mut runtime = crate::query::Runtime::new(
+        model.clone(),
+        transcript.cloned(),
+        settings.permissions.clone(),
+    );
+    runtime.mcp = std::sync::Arc::new(tokio::sync::Mutex::new(crate::mcp::McpManager::new(
+        settings.mcp_servers.clone(),
+        settings.disabled_mcp_servers.iter().cloned().collect(),
+    )));
+    let _ = runtime.thinking_tx.send(settings.thinking_level.clone());
+    if let Some(name) = settings.provider.as_deref()
+        && client.set_provider(name).is_ok()
+    {
+        let _ = runtime.provider_tx.send(name.to_string());
+    }
+    let mut system = crate::system::build_system(
+        &crate::system::load_memory(&boot.home, cwd),
+        crate::load_project_memory(&boot.home, cwd),
+        settings.cache_control.unwrap_or(false),
+        cwd,
+    );
+    system.push(crate::system::model_capability_block(
+        &model,
+        &runtime.provider.borrow().clone(),
+        &client.models(),
+    ));
+    let key = transcript
+        .map(Transcript::name)
+        .filter(|stem| !stem.is_empty())
+        .unwrap_or_else(|| crate::tasks::project_task_key(cwd));
+    let session = std::sync::Arc::new(crate::query::Session {
+        client,
+        runtime,
+        permission_mode: match permission_mode {
+            PermissionMode::Default => crate::permission::PermissionMode::Default,
+            PermissionMode::AcceptEdits => crate::permission::PermissionMode::AcceptEdits,
+            PermissionMode::BypassPermissions => {
+                crate::permission::PermissionMode::BypassPermissions
+            }
+            PermissionMode::DontAsk => crate::permission::PermissionMode::DontAsk,
+            PermissionMode::Plan => crate::permission::PermissionMode::Plan,
+        },
+        settings: settings.clone(),
+        system,
+        depth: 0,
+        cwd: std::sync::Arc::new(std::sync::Mutex::new(cwd.to_path_buf())),
+        home: boot.home.clone(),
+        user_config_dir: boot.user_dir.clone(),
+        // stderr is the diagnostic stream and stdout carries frames only, so a
+        // progress print here is not the screen pollution `quiet` guards against.
+        quiet: false,
+        compact_failures: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        watch: core.watch(),
+        tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(&boot.home, &key)),
+        expand_tasks: tokio::sync::watch::channel(false).0,
+        agents: core.agents(),
+        channels: core.channels(),
+        turns: core.turns(),
+        queue: core.queue(),
+        submit: core.submit(),
+        interactions: core.interactions(),
+        mail: core.mail(),
+        operations: core.operations(),
+        instance: None,
+        attachments: crate::api::image::Attachments::new(),
+    });
+    // A subagent asks the same way main does: the prompt is the core's, and the
+    // answer comes back through `interaction/respond` (D144).
+    session
+        .agents
+        .attach_ask(crate::app::interaction::permission_ask(
+            core.interactions(),
+            crate::app::conversation::ConvKey::Main,
+        ));
+    let Some(engine) = crate::engine::runner::SessionEngine::new(session) else {
+        return;
+    };
+    core.attach_engine(engine);
 }
 
 /// The two files a session keeps beside its transcript: the share document, and

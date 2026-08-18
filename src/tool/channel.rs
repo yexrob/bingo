@@ -110,12 +110,18 @@ pub(crate) fn deliver_post(
             deliveries,
             unknown_mentions,
         } => {
-            refresh_channel_row(session, channel);
             // Deposit first, then claim every idle member in one pass (v7):
             // the deposit pulses the inbox signal, so a running member absorbs
-            // it at its next tool round and an idle one is woken here. Nothing
-            // waits on a count or a clock any more.
-            let mut undelivered_mentions = Vec::new();
+            // it at its next tool round and an idle one is woken by the
+            // follow-through. Nothing waits on a count or a clock any more.
+            let mut posted = crate::app::engine::Posted {
+                room: channel.to_string(),
+                from: from.to_string(),
+                text: text.to_string(),
+                seq,
+                chase: Vec::new(),
+                undelivered: Vec::new(),
+            };
             for delivery in deliveries {
                 let accepted = session
                     .agents
@@ -129,39 +135,16 @@ pub(crate) fn deliver_post(
                         },
                     )
                     .now();
-                if !accepted && delivery.mentioned {
-                    undelivered_mentions.push(delivery.member);
-                } else if delivery.mentioned {
-                    spawn_mention_watchdog(
-                        session.clone(),
-                        watch.clone(),
-                        channel.to_string(),
-                        seq,
-                        delivery.member,
-                        from.to_string(),
-                        crate::tool::agent::excerpt(text),
-                    );
+                if delivery.mentioned {
+                    if accepted {
+                        posted.chase.push(delivery.member);
+                    } else {
+                        posted.undelivered.push(delivery.member);
+                    }
                 }
             }
-            // `@all` is one debt against the room rather than one per member
-            // (R4), so it gets one watchdog rather than N — the room is chased
-            // by nudging nobody and telling the sender, because a nudge would
-            // have to pick a member the sigil deliberately did not.
-            if crate::channels::mention_tokens(text)
-                .iter()
-                .any(|t| t == crate::channels::ALL_NAME)
-            {
-                spawn_mention_watchdog(
-                    session.clone(),
-                    watch.clone(),
-                    channel.to_string(),
-                    seq,
-                    crate::channels::ALL_NAME.to_string(),
-                    from.to_string(),
-                    crate::tool::agent::excerpt(text),
-                );
-            }
-            flush_agent_inbox(session, watch);
+            let undelivered_mentions = posted.undelivered.clone();
+            follow_through(session, watch, &posted);
             Ok(PostDelivery::Sent {
                 seq,
                 unknown_mentions,
@@ -170,6 +153,51 @@ pub(crate) fn deliver_post(
         }
         PostOutcome::Stale { missed } => Ok(PostDelivery::Stale { missed }),
     }
+}
+
+/// What a post owes once it is in the log and in every inbox: the room's display
+/// row, a chase per outstanding `@`, and the members the deposit woke.
+///
+/// Split out because the actor does the first two thirds of a post itself — the
+/// log and the inboxes are its tables — and only this needs a runtime and a
+/// `Session` (B7). Both callers therefore chase the same way; a room posted to
+/// from a GUI owes exactly what one posted to from the console owes.
+pub(crate) fn follow_through(
+    session: &Arc<Session>,
+    watch: &crate::watch::WatchHandle,
+    posted: &crate::app::engine::Posted,
+) {
+    refresh_channel_row(session, &posted.room);
+    for member in &posted.chase {
+        spawn_mention_watchdog(
+            session.clone(),
+            watch.clone(),
+            posted.room.clone(),
+            posted.seq,
+            member.clone(),
+            posted.from.clone(),
+            crate::tool::agent::excerpt(&posted.text),
+        );
+    }
+    // `@all` is one debt against the room rather than one per member (R4), so it
+    // gets one watchdog rather than N — the room is chased by nudging nobody and
+    // telling the sender, because a nudge would have to pick a member the sigil
+    // deliberately did not.
+    if crate::channels::mention_tokens(&posted.text)
+        .iter()
+        .any(|token| token == crate::channels::ALL_NAME)
+    {
+        spawn_mention_watchdog(
+            session.clone(),
+            watch.clone(),
+            posted.room.clone(),
+            posted.seq,
+            crate::channels::ALL_NAME.to_string(),
+            posted.from.clone(),
+            crate::tool::agent::excerpt(&posted.text),
+        );
+    }
+    flush_agent_inbox(session, watch);
 }
 
 /// Chase one unanswered `@` (v7 batch 3) — the room's half of the watchdog a
