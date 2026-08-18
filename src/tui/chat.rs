@@ -782,7 +782,6 @@ pub struct Chat {
     /// starts a turn*, not what any conversation contains. D136 is where that
     /// stops being true — once main is an ordinary registry entry its mail is an
     /// inbox like everyone else's, and this window retires with it.
-    pub(crate) mail_wake: Option<chat_tail::MailWake>,
     /// Non-fatal warnings (timestamp + text): entries past `WARNING_TTL` expire
     /// automatically; rendering shows only valid entries (pruned on push).
     pub warnings: Vec<(std::time::Instant, String)>,
@@ -1164,7 +1163,6 @@ impl Chat {
             page_turn: false,
             bash_mode: false,
             tick: 0,
-            mail_wake: None,
             warnings: Vec::new(),
             last_error: None,
             last_prompt: String::new(),

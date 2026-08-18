@@ -85,6 +85,8 @@ pub(crate) enum Control {
     Queue(crate::app::queue::QueueMsg),
     /// A prompt opening, being answered, or being closed.
     Interaction(crate::app::interaction::InteractionMsg),
+    /// A question about the mail waiting for main.
+    Mail(crate::app::mail::MailMsg),
     /// One submission, read and routed.
     Submit {
         request: Box<crate::app::submit::SubmitRequest>,
@@ -128,6 +130,7 @@ pub(crate) struct Registries {
     pub queue: crate::app::queue::QueueHandle,
     pub submit: crate::app::submit::SubmitHandle,
     pub interactions: crate::app::interaction::InteractionHandle,
+    pub mail: crate::app::mail::MailHandle,
 }
 
 /// Start the actor and return the handle everything reaches it by.
@@ -180,8 +183,9 @@ pub(super) fn spawn(setup: SessionSetup) -> (mpsc::UnboundedSender<Control>, Reg
             agents: agent_handle,
             turns: turn_handle,
             queue: queue_handle,
-            submit: crate::app::submit::SubmitHandle::new(control_for_submit),
+            submit: crate::app::submit::SubmitHandle::new(control_for_submit.clone()),
             interactions: interaction_handle,
+            mail: crate::app::mail::MailHandle::new(control_for_submit),
         },
         alive,
     )
@@ -255,6 +259,10 @@ struct Controller {
     attention: Attention,
     /// Warnings raised outside any single turn, still standing.
     feedback: Vec<Feedback>,
+    /// The debounce that decides when main reads its mail (乙案).
+    mail: crate::app::mail::MailWake,
+    /// The standing "mail is waiting" notice, so it can be cleared by identity.
+    mail_notice: Option<FeedbackId>,
     /// Conversations whose summary may have moved this turn of the loop. Batched
     /// because one message can move several facts about one conversation, and a
     /// summary published per fact would say the same thing three times.
@@ -361,6 +369,8 @@ impl Controller {
             conversations,
             attention: Attention::default(),
             feedback: Vec::new(),
+            mail: crate::app::mail::MailWake::default(),
+            mail_notice: None,
             dirty: std::collections::BTreeSet::new(),
             serving: false,
             deferred: Vec::new(),
@@ -395,6 +405,7 @@ impl Controller {
                     self.absorb_posts();
                     self.absorb_main_mail();
                     self.announce_rooms();
+                    self.consider_mail();
                 }
                 Control::Agents(message) => {
                     self.agents.handle(message);
@@ -414,6 +425,7 @@ impl Controller {
                     let changes = self.interactions.handle(message, &mut self.mint);
                     self.announce_interactions(changes);
                 }
+                Control::Mail(message) => self.serve_mail(message),
                 Control::Submit { request, reply } => {
                     let route = self.submit(*request);
                     let _ = reply.send(route);
@@ -1569,6 +1581,80 @@ impl Controller {
                 })),
                 None,
             );
+        }
+    }
+
+    /// Answer what the frontends ask about the waiting mail.
+    fn serve_mail(&mut self, message: crate::app::mail::MailMsg) {
+        use crate::app::mail::MailMsg;
+        match message {
+            MailMsg::Due { interrupted, reply } => {
+                // Idle-only, as the per-post wake was: a running turn absorbs the
+                // mail at its own next round, and a queued user message goes
+                // first. Main's turn and main's queue, whatever page the screen
+                // is on.
+                let free = !interrupted
+                    && !self.turns.is_busy(&ConvKey::Main)
+                    && self.queue.count(&ConvKey::Main) == 0;
+                let _ = reply.send(free && self.mail.due(std::time::Instant::now()));
+            }
+            MailMsg::Woke => self.mail.woke(),
+            MailMsg::Waiting { reply } => {
+                let _ = reply.send(self.mail.is_waiting());
+            }
+            #[cfg(test)]
+            MailMsg::Rewind { by } => self.mail.rewind(by),
+        }
+    }
+
+    /// Read where main's inbox stands and say so.
+    ///
+    /// The notice is what a GUI draws its "reading the mail" state from; the
+    /// terminal front end has always drawn the same fact from the inbox itself.
+    fn consider_mail(&mut self) {
+        use crate::app::mail::Waiting;
+        let (waiting, urgent) = self.channels.main_mail_stand();
+        match self
+            .mail
+            .observe(std::time::Instant::now(), waiting, urgent)
+        {
+            Waiting::Unchanged => {}
+            Waiting::Cleared => {
+                if let Some(id) = self.mail_notice.take() {
+                    self.publish(
+                        Box::new(AppEventPayload::FeedbackCleared(
+                            crate::app::event::FeedbackCleared { feedback_id: id },
+                        )),
+                        None,
+                    );
+                }
+            }
+            Waiting::Started { count, urgent } => {
+                if let Some(id) = self.mail_notice.take() {
+                    self.publish(
+                        Box::new(AppEventPayload::FeedbackCleared(
+                            crate::app::event::FeedbackCleared { feedback_id: id },
+                        )),
+                        None,
+                    );
+                }
+                let id: FeedbackId = self.mint.mint();
+                self.mail_notice = Some(id.clone());
+                let feedback = Feedback {
+                    id,
+                    level: NoticeLevel::Info,
+                    code: crate::error::MAIL_WAITING.to_string(),
+                    message: format!("{count} waiting for main"),
+                    detail: urgent.then(|| "urgent".to_string()),
+                    conversation_id: Some(self.conversation_id(&ConvKey::Main)),
+                    raised_at: now_millis(),
+                    expires_at: None,
+                };
+                self.publish(
+                    Box::new(AppEventPayload::FeedbackRaised(FeedbackRaised { feedback })),
+                    None,
+                );
+            }
         }
     }
 

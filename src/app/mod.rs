@@ -31,6 +31,7 @@ pub mod conversation;
 pub mod event;
 pub mod ids;
 pub mod interaction;
+pub mod mail;
 pub mod projection;
 pub mod queue;
 pub mod snapshot;
@@ -217,6 +218,7 @@ pub struct AppCore {
     queue: crate::app::queue::QueueHandle,
     submit: crate::app::submit::SubmitHandle,
     interactions: crate::app::interaction::InteractionHandle,
+    mail: crate::app::mail::MailHandle,
     /// Whether the actor's loop is still running. Weak on purpose: holding it
     /// must not be what keeps a session alive.
     alive: controller::Alive,
@@ -235,6 +237,7 @@ impl AppCore {
             queue: registries.queue,
             submit: registries.submit,
             interactions: registries.interactions,
+            mail: registries.mail,
             alive,
         }
     }
@@ -272,6 +275,11 @@ impl AppCore {
     /// The prompts a run is stopped on.
     pub fn interactions(&self) -> crate::app::interaction::InteractionHandle {
         self.interactions.clone()
+    }
+
+    /// The mail waiting for main, and whether it is time to read it.
+    pub fn mail(&self) -> crate::app::mail::MailHandle {
+        self.mail.clone()
     }
 
     /// Whether the session actor's loop is still running.

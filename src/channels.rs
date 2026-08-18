@@ -1207,6 +1207,17 @@ impl ChannelRegistry {
     pub(crate) fn drain_delivered(&mut self) -> Vec<MainDelivery> {
         std::mem::take(&mut self.delivered)
     }
+
+    /// How much is waiting in main's inbox, and whether any of it asked for the
+    /// attention channel.
+    ///
+    /// The urgent flag is **read, not taken**: the terminal front end still takes
+    /// it to ring its bell, and two takers would mean whichever looked first
+    /// silenced the other. The core's own reading is the debounce's, and the
+    /// batch latch is what stops it acting on the same flag twice.
+    pub(crate) fn main_mail_stand(&self) -> (usize, bool) {
+        (self.inner.main_mail.len(), self.inner.main_mail_urgent)
+    }
 }
 
 /// One message main was handed, as the actor reads it back.
@@ -1497,13 +1508,6 @@ impl ChannelHandle {
 
     pub fn has_main_mail(&self) -> bool {
         self.view.borrow().main_mail > 0
-    }
-
-    /// How much is waiting. The digest debounce watches this rather than the
-    /// bare "is there any": a burst is exactly a count that keeps changing, and
-    /// the quiet window restarts every time it does.
-    pub fn main_mail_len(&self) -> usize {
-        self.view.borrow().main_mail
     }
 
     /// Drain channel messages pending injection into the main agent (batch-injected at turn boundaries).

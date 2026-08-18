@@ -384,7 +384,16 @@ fn the_alert_line_keeps_its_stamp() {
 
 // ---------------------------------------------------------------------------
 // C. the digest debounce (D98)
+//
+// The window itself is `app::mail`'s since B4 — one debounce, both frontends —
+// and these drive it through the console the way a frame does. `rewind` moves
+// the core's clock back rather than sleeping out two real seconds.
 // ---------------------------------------------------------------------------
+
+/// One millisecond short of the quiet window.
+fn nearly() -> std::time::Duration {
+    crate::app::mail::QUIET - std::time::Duration::from_millis(1)
+}
 
 /// One room post used to buy one woken turn. A burst now buys one digest: the
 /// wake waits for the room to stop talking.
@@ -396,7 +405,7 @@ fn a_burst_of_room_mail_wakes_once_after_the_quiet_window() {
         .deliver_to_main("scout", "one", None, false);
     assert!(!chat.digest_mail(), "the window has only just opened");
     assert!(
-        chat.mail_wake.is_some(),
+        chat.session.mail.is_waiting().now(),
         "and the clock is armed, which is what keeps the tick alive"
     );
     assert!(
@@ -405,7 +414,7 @@ fn a_burst_of_room_mail_wakes_once_after_the_quiet_window() {
     );
 
     // A second message inside the window restarts it: the room is still talking.
-    chat.tick += super::chat_tail::MAIL_QUIET_TICKS - 1;
+    chat.session.mail.rewind(nearly());
     chat.session
         .channels
         .deliver_to_main("zoe", "two", None, false);
@@ -414,9 +423,11 @@ fn a_burst_of_room_mail_wakes_once_after_the_quiet_window() {
         "the window restarted with the new message"
     );
 
-    chat.tick += super::chat_tail::MAIL_QUIET_TICKS - 1;
+    chat.session.mail.rewind(nearly());
     assert!(!chat.digest_mail(), "still inside the restarted window");
-    chat.tick += 1;
+    chat.session
+        .mail
+        .rewind(std::time::Duration::from_millis(1));
     assert!(chat.digest_mail(), "the room went quiet; digest the batch");
     assert!(
         !chat.digest_mail(),
@@ -454,14 +465,14 @@ fn an_unnamed_room_line_mails_at_once_and_starts_the_clock() {
 
     // A second line inside the window restarts it: the question and its answer
     // are one wake, not two.
-    chat.tick += super::chat_tail::MAIL_QUIET_TICKS - 1;
+    chat.session.mail.rewind(nearly());
     let _ = chat
         .session
         .channels
         .post("scout", "crew", "@main look")
         .now();
     assert!(!chat.digest_mail(), "still inside the restarted window");
-    chat.tick += super::chat_tail::MAIL_QUIET_TICKS;
+    chat.session.mail.rewind(crate::app::mail::QUIET);
     assert!(chat.digest_mail(), "then digests once, both lines together");
     assert!(!chat.digest_mail(), "and exactly once");
 }
@@ -471,14 +482,17 @@ fn an_unnamed_room_line_mails_at_once_and_starts_the_clock() {
 #[test]
 fn a_chatty_room_cannot_starve_the_wake_past_the_deadline() {
     let mut chat = test_chat();
-    let step = super::chat_tail::MAIL_QUIET_TICKS - 1;
+    let step = nearly();
     chat.session
         .channels
         .deliver_to_main("scout", "0", None, false);
     assert!(!chat.digest_mail());
     let mut fired = false;
-    for i in 1..=(super::chat_tail::MAIL_DEADLINE_TICKS / step + 1) {
-        chat.tick += step;
+    let mut elapsed = std::time::Duration::ZERO;
+    let rounds = crate::app::mail::DEADLINE.as_millis() / step.as_millis() + 1;
+    for i in 1..=rounds {
+        chat.session.mail.rewind(step);
+        elapsed += step;
         chat.session
             .channels
             .deliver_to_main("scout", &format!("{i}"), None, false);
@@ -492,9 +506,8 @@ fn a_chatty_room_cannot_starve_the_wake_past_the_deadline() {
         "the deadline fires even though the quiet window never elapsed"
     );
     assert!(
-        chat.tick >= super::chat_tail::MAIL_DEADLINE_TICKS,
-        "and not before it: {}",
-        chat.tick
+        elapsed >= crate::app::mail::DEADLINE,
+        "and not before it: {elapsed:?}"
     );
 }
 

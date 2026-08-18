@@ -27,6 +27,9 @@ pub const TURN_LOST: &str = "TURN_LOST";
 /// warning, raised as feedback so a frontend branches on the code rather than on
 /// the sentence.
 pub const RUNTIME_WARNING: &str = "RUNTIME_WARNING";
+/// Mail is waiting for the main agent and a digest turn has not run yet — the
+/// "reading the mail" state a frontend shows while the debounce window runs.
+pub const MAIL_WAITING: &str = "MAIL_WAITING";
 
 /// Stable app-server codes (`notes/design/gui-app-server.md` §Errors): the
 /// JSON-RPC `error.data.bingoCode` a client branches on. They live here rather

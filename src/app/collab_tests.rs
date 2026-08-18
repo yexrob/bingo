@@ -43,6 +43,7 @@ fn test_session(core: &AppCore) -> Arc<Session> {
         queue: core.queue(),
         submit: core.submit(),
         interactions: core.interactions(),
+        mail: core.mail(),
         instance: None,
         attachments: crate::api::image::Attachments::new(),
     })

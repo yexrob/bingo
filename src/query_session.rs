@@ -113,6 +113,10 @@ pub struct Session {
     /// The prompts a run is stopped on: permission and question alike, with the
     /// oneshot that answers them held by the actor rather than by a surface (B3).
     pub interactions: crate::app::interaction::InteractionHandle,
+    /// The mail waiting for main, and whether it is time to read it. The window,
+    /// the deadline and the idle gates are the core's one answer, so both
+    /// frontends wake main the same way (乙案, B4).
+    pub mail: crate::app::mail::MailHandle,
     /// This session's instance name (sub-agents = Some(registry name); main session None,
     /// channel member name main).
     pub instance: Option<String>,
