@@ -2370,26 +2370,22 @@ fn messages_queue_while_busy() {
     chat.conv.busy = true;
     chat.set_input("first queued");
     chat.submit();
-    assert_eq!(
-        chat.conv.queued,
-        vec![QueuedInput {
-            text: "first queued".into(),
-            is_slash: false,
-            id: 0,
-            on: crate::ui::ConvKey::Main,
-        }]
-    );
+    let queued = chat.main_queue().entries;
+    assert_eq!(queued.len(), 1);
+    assert_eq!(queued[0].text, "first queued");
+    assert!(!queued[0].is_command());
+    assert_eq!(queued[0].on, crate::ui::ConvKey::Main);
     assert_eq!(chat.input, "", "the input clears after enqueueing");
     chat.set_input("second queued");
     chat.submit();
-    assert_eq!(chat.conv.queued.len(), 2);
+    assert_eq!(chat.main_queue().len(), 2);
     let lines = chat.queue_lines();
     assert_eq!(lines.len(), 2);
     assert!(lines[0].starts_with("> first queued"), "{lines:?}");
     // While busy, ↑ pulls back the last queued message for further editing.
     press(&mut chat, KeyCode::Up);
     assert_eq!(chat.input, "second queued");
-    assert_eq!(chat.conv.queued.len(), 1);
+    assert_eq!(chat.main_queue().len(), 1);
 }
 
 /// Busy dispatch (contract §4.2): instant commands run immediately and never reset
@@ -2412,7 +2408,7 @@ fn busy_dispatch_runs_instant_and_queues_the_rest() {
     );
     assert!(chat.conv.busy, "the whitelist path does not reset busy");
     assert!(
-        chat.conv.queued.is_empty(),
+        chat.main_queue().is_empty(),
         "whitelisted commands do not queue"
     );
     let out = chat.slash_lines.join("\n");
@@ -2425,7 +2421,7 @@ fn busy_dispatch_runs_instant_and_queues_the_rest() {
         "refused cleanup does not reset the active turn"
     );
     assert!(
-        chat.conv.queued.is_empty(),
+        chat.main_queue().is_empty(),
         "refused cleanup is never queued"
     );
     assert!(
@@ -2446,22 +2442,20 @@ fn busy_dispatch_runs_instant_and_queues_the_rest() {
     // Non-instant slash: queued with the slash marker (never sent as a prompt).
     chat.set_input("/clear");
     chat.submit();
-    assert_eq!(
-        chat.conv.queued,
-        vec![QueuedInput {
-            text: "/clear".into(),
-            is_slash: true,
-            id: 0,
-            on: crate::ui::ConvKey::Main,
-        }],
-        "non-whitelisted slash commands queue with a marker"
+    let queued = chat.main_queue().entries;
+    assert_eq!(queued.len(), 1);
+    assert_eq!(queued[0].text, "/clear");
+    assert!(
+        queued[0].is_command(),
+        "non-whitelisted slash commands queue as commands"
     );
 
     // Plain message: queued without the marker.
     chat.set_input("hello");
     chat.submit();
-    assert_eq!(chat.conv.queued.len(), 2);
-    assert!(!chat.conv.queued[1].is_slash);
+    let queued = chat.main_queue().entries;
+    assert_eq!(queued.len(), 2);
+    assert!(!queued[1].is_command());
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
@@ -2473,26 +2467,9 @@ async fn queued_slashes_drain_through_run_slash() {
     let _ = std::fs::remove_dir_all(&tmp);
     let mut chat = test_chat_home(tmp.join("home"));
     chat.cwd = tmp.display().to_string();
-    chat.conv.queued = vec![
-        QueuedInput {
-            text: "/think low".into(),
-            is_slash: true,
-            id: 0,
-            on: crate::ui::ConvKey::Main,
-        },
-        QueuedInput {
-            text: "/nope".into(),
-            is_slash: true,
-            id: 1,
-            on: crate::ui::ConvKey::Main,
-        },
-        QueuedInput {
-            text: "the message".into(),
-            is_slash: false,
-            id: 2,
-            on: crate::ui::ConvKey::Main,
-        },
-    ];
+    for text in ["/think low", "/nope", "the message"] {
+        chat.enqueue(text.to_string(), crate::ui::ConvKey::Main);
+    }
     chat.submit_queued();
     // Both slash commands ran (think applied + unknown guidance), then the message started a turn.
     assert_eq!(
@@ -2705,14 +2682,9 @@ fn the_background_dialog_lists_opens_details_and_stops_agents() {
 #[test]
 fn queue_lines_are_capped() {
     let mut chat = chat_with_history("queuecap");
-    chat.conv.queued = (0..10)
-        .map(|i| QueuedInput {
-            text: format!("m{i}"),
-            is_slash: false,
-            id: i,
-            on: crate::ui::ConvKey::Main,
-        })
-        .collect();
+    for i in 0..10 {
+        chat.enqueue(format!("m{i}"), crate::ui::ConvKey::Main);
+    }
     assert_eq!(chat.queue_lines().len(), QUEUE_ROWS_MAX + 1);
     assert!(
         chat.queue_lines()
@@ -2856,15 +2828,9 @@ fn paste_burst_inserts_newlines_and_collapses() {
     now += slow;
     chat.on_key_at(KeyCode::Enter, KeyModifiers::empty(), now);
     assert_eq!(chat.input, "", "Enter submits instead of a newline");
-    assert_eq!(
-        chat.conv.queued,
-        vec![QueuedInput {
-            text: "hi".into(),
-            is_slash: false,
-            id: 0,
-            on: crate::ui::ConvKey::Main,
-        }]
-    );
+    let queued = chat.main_queue().entries;
+    assert_eq!(queued.len(), 1);
+    assert_eq!(queued[0].text, "hi");
 }
 
 /// Bracketed paste: the whole chunk inserts at the caret as one undo step; ≥10 lines fold into a placeholder,
@@ -2937,12 +2903,12 @@ fn image_path_line_becomes_marker_on_submit() {
     chat.set_input(format!("take a look at this image\n{}", png.display()));
     chat.conv.busy = true; // take the queue path: no tokio runtime needed
     chat.submit();
-    assert_eq!(chat.conv.queued.len(), 1);
+    assert_eq!(chat.main_queue().len(), 1);
     assert_eq!(
-        chat.conv.queued[0].text,
+        chat.main_queue().entries[0].text,
         format!("take a look at this image\n#[image 1]"),
         "the path line becomes a placeholder: {}",
-        chat.conv.queued[0].text
+        chat.main_queue().entries[0].text
     );
     assert_eq!(chat.session.attachments.len(), 1);
     assert_eq!(
@@ -2965,7 +2931,7 @@ fn markdown_image_syntax_and_non_image_lines() {
     chat.conv.busy = true;
     chat.submit();
     assert_eq!(
-        chat.conv.queued[0].text,
+        chat.main_queue().entries[0].text,
         format!("#[image 1]\n{}", txt.display())
     );
     assert_eq!(chat.session.attachments.len(), 1, "txt is not registered");

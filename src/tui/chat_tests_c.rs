@@ -632,8 +632,8 @@ fn an_interrupt_settles_the_dialog_it_leaves_behind() {
     assert!(chat.on_key(KeyCode::Enter, KeyModifiers::empty()));
     assert!(chat.pending_ask.is_none(), "nothing came back to life");
     assert_eq!(
-        chat.conv.queued.last().map(|q| q.text.as_str()),
-        Some("1"),
+        chat.main_queue().entries.last().map(|q| q.text.clone()),
+        Some("1".to_string()),
         "Enter queued a message instead of confirming an option"
     );
 }
@@ -1000,7 +1000,7 @@ async fn ask_user_question_keeps_its_own_shape() {
     let ui = crate::ui::tui_hooks(
         crate::ui::EventSink::new(crate::ui::ConvKey::Main, events_tx),
         chat.asks.clone(),
-        chat.steer.clone(),
+        crate::query::no_steer(),
         chat.live.clone(),
     );
     let answer = (ui.requests.ask_question)(
@@ -1036,12 +1036,13 @@ fn only_plain_messages_are_offered_to_the_running_turn() {
     chat.conv.busy = true;
     chat.set_input("use tabs");
     chat.submit();
+    let taken = chat.take_steering();
     assert_eq!(
-        chat.steer.take(),
-        vec![crate::steer::SteerItem {
-            id: 0,
-            text: "use tabs".into()
-        }],
+        taken
+            .iter()
+            .map(|item| item.text.as_str())
+            .collect::<Vec<_>>(),
+        vec!["use tabs"],
         "a plain message is on offer at the next barrier"
     );
 
@@ -1050,16 +1051,16 @@ fn only_plain_messages_are_offered_to_the_running_turn() {
     chat.set_input("/clear");
     chat.submit();
     assert!(
-        chat.steer.is_empty(),
+        chat.take_steering().is_empty(),
         "a slash command stays for TurnEnd: it is dispatched here, not by the turn"
     );
-    assert_eq!(chat.conv.queued.len(), 1, "and it is still queued");
+    assert_eq!(chat.main_queue().len(), 1, "and it is still queued");
 
     // Order survives: a plain message typed behind a slash command must not overtake it.
     chat.set_input("and then this");
     chat.submit();
     assert!(
-        chat.steer.is_empty(),
+        chat.take_steering().is_empty(),
         "a message queued behind a slash command waits with it"
     );
 }
@@ -1074,16 +1075,16 @@ fn an_absorbed_message_moves_from_the_queue_into_the_flow() {
     chat.submit();
     chat.set_input("second");
     chat.submit();
-    assert_eq!(chat.conv.queued.len(), 2);
+    assert_eq!(chat.main_queue().len(), 2);
 
-    // The barrier takes what is on offer, exactly as `tui_hooks` does.
-    let taken = chat.steer.take();
+    // The barrier takes what is on offer, exactly as the turn's steering source does.
+    let taken = chat.take_steering();
     assert_eq!(taken.len(), 2);
     chat.events.send(UiEvent::Steered { items: taken });
     chat.drain_events();
 
     assert!(
-        chat.conv.queued.is_empty(),
+        chat.main_queue().is_empty(),
         "absorbed messages stop being pending"
     );
     assert!(
@@ -1109,24 +1110,27 @@ fn an_absorbed_message_moves_from_the_queue_into_the_flow() {
 }
 
 /// The race: the turn took the message between the composer offering it and the user
-/// pressing ↑. The turn wins; the pull-back is a no-op and the absorption event, still
-/// in flight, is what takes it out of the queue.
+/// pressing ↑. The turn wins, and the pull-back is a no-op — the take and the
+/// pull-back are one race in the core, decided by which reached it first.
 #[test]
 fn a_pull_back_that_lost_the_race_does_nothing() {
     let mut chat = chat_with_history("steer-race");
     chat.conv.busy = true;
     chat.set_input("too late");
     chat.submit();
-    let taken = chat.steer.take();
+    let taken = chat.take_steering();
     assert_eq!(taken.len(), 1);
+    assert!(
+        chat.main_queue().is_empty(),
+        "the barrier took it out on the way past: it is in the request already"
+    );
 
     press(&mut chat, KeyCode::Up);
     assert_eq!(chat.input, "", "the composer is left alone");
-    assert_eq!(chat.conv.queued.len(), 1, "the queue waits for the event");
 
     chat.events.send(UiEvent::Steered { items: taken });
     chat.drain_events();
-    assert!(chat.conv.queued.is_empty(), "which then removes it");
+    assert!(chat.main_queue().is_empty(), "and it stays gone");
 }
 
 /// CC's wording, and only while it is true: with no turn running the queue is about to
@@ -1158,19 +1162,16 @@ async fn the_channel_is_re_armed_for_the_turn_that_actually_runs() {
     chat.submit();
     chat.set_input("two");
     chat.submit();
-    assert_eq!(chat.steer.take().len(), 2);
-
     // TurnEnd: "one" starts the next turn, and only what is still queued is on offer.
     chat.conv.busy = false;
     chat.submit_queued();
-    chat.rearm_steer();
     assert!(chat.conv.busy, "the first queued message opened a turn");
     assert_eq!(
-        chat.steer.take(),
-        vec![crate::steer::SteerItem {
-            id: 1,
-            text: "two".into()
-        }],
+        chat.take_steering()
+            .iter()
+            .map(|item| item.text.as_str())
+            .collect::<Vec<_>>(),
+        vec!["two"],
         "the message that opened the turn is not also steered into it"
     );
 }
@@ -1452,11 +1453,11 @@ async fn a_direct_send_never_steers_mains_turn() {
     chat.submit();
 
     assert!(
-        chat.steer.is_empty(),
+        chat.take_steering().is_empty(),
         "a direct send is not the turn's to read"
     );
     assert!(
-        chat.conv.queued.is_empty(),
+        chat.main_queue().is_empty(),
         "and it is not waiting for TurnEnd"
     );
     assert!(chat.conv.busy, "the turn is untouched");
@@ -1479,11 +1480,11 @@ async fn a_direct_send_never_steers_mains_turn() {
     chat.set_input("use tabs");
     chat.submit();
     assert_eq!(
-        chat.steer.take(),
-        vec![crate::steer::SteerItem {
-            id: 0,
-            text: "use tabs".into()
-        }],
+        chat.take_steering()
+            .iter()
+            .map(|item| item.text.as_str())
+            .collect::<Vec<_>>(),
+        vec!["use tabs"],
         "main's composer still steers"
     );
 }

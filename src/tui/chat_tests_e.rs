@@ -259,7 +259,7 @@ fn shift_enter_inserts_a_newline() {
     assert!(shift(&mut chat, KeyCode::Enter));
     type_text(&mut chat, "two");
     assert_eq!(chat.input, "one\ntwo", "a newline, in place");
-    assert!(chat.conv.queued.is_empty(), "and nothing was sent");
+    assert!(chat.main_queue().is_empty(), "and nothing was sent");
     assert!(!chat.conv.busy, "no turn started");
 }
 
@@ -310,7 +310,7 @@ fn a_key_burst_lands_as_text_and_opens_nothing() {
         chat.input, "review the diff\n@src/tui/chat.rs\n/model please\nthanks",
         "every Enter in the burst is a literal newline"
     );
-    assert!(chat.conv.queued.is_empty(), "nothing was submitted");
+    assert!(chat.main_queue().is_empty(), "nothing was submitted");
     assert!(!chat.conv.busy);
     assert!(chat.mention.is_none(), "no `@` dropdown mid-paste");
     assert!(
@@ -536,23 +536,25 @@ fn ctrl_p_pulls_back_a_queued_message_and_loses_the_same_race() {
     chat.conv.busy = true;
     chat.set_input("steer me");
     chat.submit();
-    assert_eq!(chat.conv.queued.len(), 1);
+    assert_eq!(chat.main_queue().len(), 1);
 
     assert!(ctrl(&mut chat, 'p'));
     assert_eq!(
         chat.input, "steer me",
         "ctrl+p pulls it back into the composer"
     );
-    assert!(chat.conv.queued.is_empty());
+    assert!(chat.main_queue().is_empty());
 
     // And the race: a message the turn already took stays taken.
     chat.set_input("too late");
     chat.submit();
-    let taken = chat.steer.take();
-    assert_eq!(taken.len(), 1);
+    assert_eq!(chat.take_steering().len(), 1);
     assert!(ctrl(&mut chat, 'p'));
     assert_eq!(chat.input, "", "the composer is left alone");
-    assert_eq!(chat.conv.queued.len(), 1, "the queue waits for the event");
+    assert!(
+        chat.main_queue().is_empty(),
+        "the barrier took it, and the pull-back changed nothing"
+    );
 }
 
 /// The outcome type carries its own copy, so the host and the tests cannot

@@ -105,6 +105,8 @@ pub struct Session {
     /// closes it exactly once (B3); the handle is what makes the terminal state
     /// the actor's fact rather than a message an abort could swallow.
     pub turns: crate::app::turn::TurnHandle,
+    /// The input queue, and the barrier/pull-back race it arbitrates (B3).
+    pub queue: crate::app::queue::QueueHandle,
     /// This session's instance name (sub-agents = Some(registry name); main session None,
     /// channel member name main).
     pub instance: Option<String>,

@@ -21,16 +21,17 @@ use tokio::sync::{mpsc, oneshot};
 use crate::app::command::{AppCommand, AppQuery};
 use crate::app::conversation::{ConvKey, Conversations};
 use crate::app::event::{
-    AgentChanged, AppEvent, AppEventPayload, EventMeta, ItemChanged, ItemDelta, RoomChanged,
-    TurnChanged, TurnRetrying, TurnRoundCompleted, TurnRoundStarted, TurnUsageUpdated,
+    AgentChanged, AppEvent, AppEventPayload, EventMeta, ItemChanged, ItemDelta, QueueItemAbsorbed,
+    QueueItemAdded, QueueItemRemoved, RoomChanged, TurnChanged, TurnRetrying, TurnRoundCompleted,
+    TurnRoundStarted, TurnUsageUpdated,
 };
 use crate::app::ids::{
     AgentId, ConversationId, EpochId, IdMint, OperationId, RoomId, SessionId, now_millis,
 };
 use crate::app::snapshot::{
-    AgentKind, AgentResource, AgentState, Collection, ConfigSnapshot, RoomMode, RoomResource,
-    RuntimeCollections, ServerCapabilities, SessionSnapshot, SessionState, SessionSummary,
-    ThinkingLevel,
+    AgentKind, AgentResource, AgentState, Collection, ConfigSnapshot, QueueEntry, RoomMode,
+    RoomResource, RuntimeCollections, ServerCapabilities, SessionSnapshot, SessionState,
+    SessionSummary, ThinkingLevel,
 };
 use crate::app::turn::TurnChange;
 use crate::app::{
@@ -75,6 +76,8 @@ pub(crate) enum Control {
     Agents(crate::agents::AgentMsg),
     /// A turn opening, reporting, or ending.
     Turn(crate::app::turn::TurnMsg),
+    /// An input queue accepting, absorbing, draining, or losing an entry.
+    Queue(crate::app::queue::QueueMsg),
     /// Answered once everything queued ahead of it has been applied.
     Settle {
         reply: oneshot::Sender<()>,
@@ -87,6 +90,7 @@ pub(crate) struct Registries {
     pub channels: crate::channels::ChannelHandle,
     pub agents: crate::agents::AgentHandle,
     pub turns: crate::app::turn::TurnHandle,
+    pub queue: crate::app::queue::QueueHandle,
 }
 
 /// Start the actor and return the handle everything reaches it by.
@@ -104,10 +108,19 @@ pub(super) fn spawn(setup: SessionSetup) -> (mpsc::UnboundedSender<Control>, Reg
     let (channels, channel_handle) = crate::channels::attach(control.clone(), setup.channel_limits);
     let (agents, agent_handle) = crate::agents::attach(control.clone());
     let (turns, turn_handle) = crate::app::turn::attach(control.clone());
+    let (queue, queue_handle) = crate::app::queue::attach(control.clone());
     // The actor holds a weak handle to its own inbox: it hands strong clones to
     // the attachments it spawns, and a strong one of its own would keep the
     // queue open forever, so the loop could never end.
-    let controller = Controller::new(setup, control.downgrade(), watch, channels, agents, turns);
+    let controller = Controller::new(
+        setup,
+        control.downgrade(),
+        watch,
+        channels,
+        agents,
+        turns,
+        queue,
+    );
     std::thread::Builder::new()
         .name("bingo-session".to_string())
         .spawn(move || controller.run(inbox))
@@ -119,6 +132,7 @@ pub(super) fn spawn(setup: SessionSetup) -> (mpsc::UnboundedSender<Control>, Reg
             channels: channel_handle,
             agents: agent_handle,
             turns: turn_handle,
+            queue: queue_handle,
         },
     )
 }
@@ -179,6 +193,8 @@ struct Controller {
     agents: crate::agents::AgentRegistry,
     /// The turns in flight and the items they are producing (B3).
     turns: crate::app::turn::TurnRegistry,
+    /// The input queues, and the barrier/pull-back race they arbitrate (B3).
+    queue: crate::app::queue::InputQueue,
     /// Which conversations exist and what each one is called on the wire.
     conversations: Conversations,
     /// What was last said about each instance and each room, so a change can be
@@ -218,6 +234,7 @@ impl Controller {
         channels: crate::channels::ChannelRegistry,
         agents: crate::agents::AgentRegistry,
         turns: crate::app::turn::TurnRegistry,
+        queue: crate::app::queue::InputQueue,
     ) -> Self {
         let epoch = EpochId::mint();
         let mut mint = IdMint::new(epoch.clone());
@@ -269,6 +286,7 @@ impl Controller {
             channels,
             agents,
             turns,
+            queue,
             conversations,
             told: Told::default(),
         }
@@ -307,6 +325,10 @@ impl Controller {
                 Control::Turn(message) => {
                     let changes = self.turns.handle(message, &mut self.mint);
                     self.announce_turn(changes);
+                }
+                Control::Queue(message) => {
+                    let changes = self.queue.handle(message, &mut self.mint);
+                    self.announce_queue(changes);
                 }
                 Control::Settle { reply } => {
                     let _ = reply.send(());
@@ -700,6 +722,73 @@ impl Controller {
                     item_id: item,
                     delta_seq,
                     delta,
+                }),
+            };
+            self.publish(Box::new(payload), None);
+        }
+    }
+
+    /// Publish what the queue changed. Absorption emits one event per entry in
+    /// contiguous sequence order, so a client can page a bounded change rather
+    /// than re-reading the whole queue.
+    fn announce_queue(&mut self, changes: Vec<crate::app::queue::QueueChange>) {
+        use crate::app::queue::QueueChange;
+        for change in changes {
+            let payload = match change {
+                QueueChange::Added {
+                    conversation,
+                    revision,
+                    position,
+                    entry,
+                    steer_eligible,
+                } => {
+                    let conversation_id = self.conversation_id(&conversation);
+                    let origin_conversation_id = self.conversation_id(&entry.on);
+                    AppEventPayload::QueueItemAdded(QueueItemAdded {
+                        conversation_id,
+                        revision,
+                        position,
+                        entry: QueueEntry {
+                            id: entry.id,
+                            origin_conversation_id,
+                            text: entry.text,
+                            attachments: entry.attachments,
+                            steer_eligible,
+                            queued_at: entry.queued_at,
+                        },
+                    })
+                }
+                QueueChange::Removed {
+                    conversation,
+                    revision,
+                    id,
+                    reason,
+                } => AppEventPayload::QueueItemRemoved(QueueItemRemoved {
+                    conversation_id: self.conversation_id(&conversation),
+                    revision,
+                    queue_id: id,
+                    reason,
+                }),
+                QueueChange::AbsorbedItem { conversation, item } => {
+                    let turn_id = item.turn_id.clone();
+                    AppEventPayload::ItemCompleted(ItemChanged {
+                        conversation_id: self.conversation_id(&conversation),
+                        turn_id,
+                        item: *item,
+                    })
+                }
+                QueueChange::Absorbed {
+                    conversation,
+                    revision,
+                    id,
+                    turn,
+                    item,
+                } => AppEventPayload::QueueItemAbsorbed(QueueItemAbsorbed {
+                    conversation_id: self.conversation_id(&conversation),
+                    revision,
+                    queue_id: id,
+                    turn_id: turn,
+                    item_id: item,
                 }),
             };
             self.publish(Box::new(payload), None);

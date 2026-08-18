@@ -27,6 +27,7 @@ pub mod controller;
 pub mod conversation;
 pub mod event;
 pub mod ids;
+pub mod queue;
 pub mod snapshot;
 pub mod turn;
 
@@ -203,6 +204,7 @@ pub struct AppCore {
     channels: crate::channels::ChannelHandle,
     agents: crate::agents::AgentHandle,
     turns: crate::app::turn::TurnHandle,
+    queue: crate::app::queue::QueueHandle,
 }
 
 impl AppCore {
@@ -215,6 +217,7 @@ impl AppCore {
             channels: registries.channels,
             agents: registries.agents,
             turns: registries.turns,
+            queue: registries.queue,
         }
     }
 
@@ -236,6 +239,11 @@ impl AppCore {
     /// The turns in flight.
     pub fn turns(&self) -> crate::app::turn::TurnHandle {
         self.turns.clone()
+    }
+
+    /// The input queues.
+    pub fn queue(&self) -> crate::app::queue::QueueHandle {
+        self.queue.clone()
     }
 
     /// Attach a frontend. The attachment sees no event until it takes a

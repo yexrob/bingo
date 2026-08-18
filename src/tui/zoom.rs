@@ -472,11 +472,7 @@ mod tests {
             chat.session.agents.pending_of("scout").is_empty(),
             "and it never reached the agent"
         );
-        assert_eq!(
-            chat.main_conv().queued.len(),
-            1,
-            "it is in the console's queue"
-        );
+        assert_eq!(chat.main_queue().len(), 1, "it is in the console's queue");
         assert!(
             chat.slash_info_lines.iter().any(|l| l.contains("queued")),
             "{:?}",

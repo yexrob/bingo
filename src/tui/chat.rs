@@ -106,27 +106,6 @@ pub use crate::tui::slash::{
     COMMANDS as SLASH_COMMANDS, INSTANT_COMMANDS as INSTANT_SLASH_COMMANDS, SlashSuggestion,
 };
 
-/// One queued input, submitted after TurnEnd: a slash command (dispatched through
-/// `run_slash`) or a plain message (`start_turn`). The marker keeps the two apart —
-/// a queued slash must never reach the model as literal text.
-///
-/// A plain entry may also leave earlier, through the steer channel (D83), which is why
-/// it carries an id: the turn reports back which entries it absorbed, and two identical
-/// messages are two messages.
-#[derive(Debug, Clone, PartialEq)]
-pub struct QueuedInput {
-    pub text: String,
-    pub is_slash: bool,
-    /// Session-unique, assigned on enqueue.
-    pub id: u64,
-    /// The page it was typed on. A command whose target is the conversation on
-    /// screen has to resolve that at *typing* time: the queue drains at TurnEnd
-    /// and the screen may be somewhere else by then, which for `/compact` means
-    /// summarising and overwriting the history of an agent the user never
-    /// pointed it at (D135a).
-    pub on: crate::ui::ConvKey,
-}
-
 /// Footer model badge: `{model} · think {level}` (off = no level shown, keeps it concise).
 pub fn model_footer_label(model: &str, thinking: Option<&str>) -> String {
     match thinking {
@@ -412,7 +391,7 @@ pub(crate) fn is_state_line(text: &str) -> bool {
 /// it and it reached the model, so it keeps its send stamp — it only loses the `❯`
 /// bubble, because the `↪` glyph is what marks where in the reply it landed.
 pub(crate) fn is_steer_line(text: &str) -> bool {
-    text.starts_with(crate::steer::STEER_FLOW_PREFIX)
+    text.starts_with(crate::app::queue::STEER_FLOW_PREFIX)
 }
 
 /// Hint shown while a collapse group runs: the input of the group's most recent tool.
@@ -682,15 +661,14 @@ pub struct HistorySearch {
 /// What the console does once the addressed store is back in place.
 ///
 /// These reactions read a conversation themselves — they start turns, drain the
-/// queue, re-arm the steer channel and write into main's transcript — so none of
-/// them can run while a store is detached for the length of a handler.
+/// queue and write into main's transcript — so none of them can run while a store
+/// is detached for the length of a handler.
 #[derive(Default)]
 struct Follow {
     /// A finished background run left a notification in main's context: wake a
     /// turn to read it.
     wake: bool,
     drain_queue: bool,
-    rearm: bool,
     /// A run that failed, named, with its reason (D98).
     alert: Option<(String, Option<String>)>,
     /// A run that finished and reported itself to main (D106).
@@ -744,10 +722,6 @@ pub struct Chat {
     pub history: crate::tui::history::History,
     /// Whether the history file is writable (after one failure, never retry — avoid hitting the same error on every submit).
     pub(crate) history_writable: bool,
-    /// Mid-turn steering channel (D83): the eligible prefix of `queued`, offered to the
-    /// turn that is running now. Re-armed from `queued` on every change, so it is a
-    /// projection of the queue rather than a second copy that could drift from it.
-    pub(crate) steer: crate::steer::SteerQueue,
     /// Foreground command liveness (D84): the seam the running Bash tool publishes
     /// its output tail through, and the one ctrl+b reaches to background it.
     pub(crate) live: std::sync::Arc<crate::live::LiveBash>,
@@ -1177,7 +1151,6 @@ impl Chat {
             stash: None,
             history,
             history_writable: true,
-            steer: crate::steer::SteerQueue::new(),
             live,
             bash_tail: None,
             help_visible: false,
@@ -1375,12 +1348,6 @@ impl Chat {
         }
         if follow.drain_queue {
             self.submit_queued();
-        }
-        if follow.rearm {
-            // `start_turn` reset the channel for whatever turn just began; hand it
-            // the rest of the queue. With no turn running this only clears it —
-            // an offer with nothing to take it is an offer to the next turn.
-            self.rearm_steer();
         }
         if let Some((label, reason)) = follow.alert {
             self.push_agent_alert(&label, reason.as_deref());
@@ -2039,7 +2006,7 @@ impl Chat {
                 if to.is_main()
                     && self.session.watch.has_wake_notifications(None)
                     && !conv.interrupted
-                    && conv.queued.is_empty()
+                    && self.main_queue().is_empty()
                 {
                     follow.wake = true;
                 }
@@ -2124,12 +2091,11 @@ impl Chat {
                 }
                 conv.stream_msg = None;
                 conv.stream_attempt_checkpoint = None;
-                // The queue and the steer channel are the *composer's*, and the
-                // composer talks to main. An instance's turn ending is not a
-                // reason to submit what the user typed at main (D135 is where
-                // one submit serves every conversation).
+                // The queue is the *composer's*, and the composer talks to main.
+                // An instance's turn ending is not a reason to submit what the
+                // user typed at main (D135 is where one submit serves every
+                // conversation).
                 follow.drain_queue = to.is_main();
-                follow.rearm = to.is_main();
             }
             UiEvent::Error {
                 code,
@@ -2147,9 +2113,6 @@ impl Chat {
                     conv.drop_empty_stream_message();
                     conv.stream_msg = None;
                     conv.stream_attempt_checkpoint = None;
-                    // No turn left to steer: the channel empties with it, and what is
-                    // still queued stays queued (D83).
-                    follow.rearm = true;
                 }
                 // A flow-level failure ends the turn on a screen the user has to
                 // come back to; a page-level one is a hint beside a session that
@@ -2509,19 +2472,8 @@ impl Chat {
                     return;
                 }
             }
-            let is_slash = text.starts_with('/');
             let on = self.active.clone();
-            let main = self.main_conv();
-            let id = main.next_queue_id;
-            main.next_queue_id = main.next_queue_id.wrapping_add(1);
-            main.queued.push(QueuedInput {
-                text,
-                is_slash,
-                id,
-                on,
-            });
-            // The turn may take it before TurnEnd does (D83).
-            self.rearm_steer();
+            self.enqueue(text, on);
             // The queue rows are main's page. Somewhere else, a line that
             // silently joined a queue nobody can see is a keystroke that did
             // nothing, so it says so on the tier the page does show.
@@ -2584,6 +2536,33 @@ impl Chat {
         }
         self.last_prompt = text.clone();
         self.start_turn(text, true);
+    }
+
+    /// Put a line on the console's queue.
+    ///
+    /// The core owns the queue and decides eligibility: a command or an attachment
+    /// cannot travel to a running turn, and neither can anything queued behind one
+    /// (D83). `on` is the page it was typed on and is immutable from here (D135a).
+    /// `.now()` is the console's synchronous seam; B7 removes it.
+    pub(crate) fn enqueue(&mut self, text: String, on: crate::ui::ConvKey) {
+        let kind = if text.starts_with('/') {
+            crate::app::queue::QueuedKind::Command
+        } else {
+            crate::app::queue::QueuedKind::Prose
+        };
+        let carries_attachments = !self.resolve_images(&text).is_empty();
+        self.session
+            .queue
+            .enqueue(crate::app::queue::Enqueue {
+                conversation: crate::ui::ConvKey::Main,
+                origin: on,
+                text,
+                kind,
+                attachments: Vec::new(),
+                carries_attachments,
+            })
+            .now();
+        self.dirty = true;
     }
 
     /// Whether a submitted line waits behind **main's** turn: everything the

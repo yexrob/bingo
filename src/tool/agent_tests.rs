@@ -84,6 +84,7 @@ fn parent_session() -> (Arc<Session>, Arc<crate::api::client::Client>) {
         agents: core.agents(),
         channels: core.channels(),
         turns: core.turns(),
+        queue: core.queue(),
         instance: None,
         attachments: crate::api::image::Attachments::new(),
     });

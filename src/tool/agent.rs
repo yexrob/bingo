@@ -1243,6 +1243,7 @@ pub(crate) fn build_sub_session(
         agents: parent.agents.clone(),
         channels: parent.channels.clone(),
         turns: parent.turns.clone(),
+        queue: parent.queue.clone(),
         instance: Some(instance.to_string()),
         attachments: parent.attachments.clone(),
     }))

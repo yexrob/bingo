@@ -437,7 +437,7 @@ mod tests {
 
         assert!(!chat.conv.busy, "a direct send is not a turn");
         assert!(
-            chat.conv.queued.is_empty(),
+            chat.main_queue().is_empty(),
             "and it did not queue behind main"
         );
         assert_eq!(

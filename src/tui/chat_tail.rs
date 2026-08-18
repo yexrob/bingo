@@ -340,8 +340,12 @@ impl super::Chat {
 
     /// Submits the next queued item after a turn (one at a time: a plain message starts
     /// the next turn; queued slash commands drain synchronously until one does).
+    ///
+    /// What comes out is the core's answer, not this side's: the queue and its
+    /// order are the actor's, and `.now()` is the console's synchronous seam
+    /// (B7 removes it).
     pub(crate) fn submit_queued(&mut self) {
-        if self.main_conv().busy || self.main_conv().queued.is_empty() {
+        if self.main_conv().busy {
             return;
         }
         if tokio::runtime::Handle::try_current().is_err() {
@@ -350,72 +354,68 @@ impl super::Chat {
         // Drain queued slash commands synchronously; stop at the first plain message
         // (it starts a turn, which re-triggers submit_queued on TurnEnd).
         loop {
-            let Some(first) = self.main_conv().queued.first() else {
+            let Some(item) = self.drain_main_queue() else {
                 return;
             };
-            if !first.is_slash {
-                break;
+            if !item.is_command() {
+                self.start_turn(item.text, true);
+                return;
             }
-            let item = self.main_conv().queued.remove(0);
             self.run_slash_on(item.text.strip_prefix('/').unwrap_or(&item.text), &item.on);
             if self.main_conv().busy {
                 return; // a skill command started a turn; the rest waits for TurnEnd
             }
         }
-        let item = self.main_conv().queued.remove(0);
-        self.start_turn(item.text, true);
     }
 
-    /// Re-arms the steer channel from the queue: the longest prefix of plain messages
-    /// the running turn may absorb (D83).
-    ///
-    /// It is a *prefix*, not a filter. A slash command runs on this side, so it cannot
-    /// travel to the turn — and letting a plain message queued behind one jump into the
-    /// turn would run the two in the opposite order from the one they were typed in.
-    /// The same goes for a message carrying images: mounting attachments is `start_turn`'s
-    /// path, so it waits for TurnEnd and everything after it waits with it.
-    ///
-    /// With no turn running there is nothing to steer, and the channel is emptied rather
-    /// than left holding an offer for whichever turn starts next.
-    pub(crate) fn rearm_steer(&mut self) {
-        if !self.main_conv().busy {
-            self.steer.reset();
-            return;
-        }
-        let mut items = Vec::new();
-        for entry in &self.main_conv().queued.clone() {
-            if entry.is_slash || !self.resolve_images(&entry.text).is_empty() {
-                break;
-            }
-            items.push(crate::steer::SteerItem {
-                id: entry.id,
-                text: entry.text.clone(),
-            });
-        }
-        self.steer.rearm(items);
+    /// The tool barrier, taken by hand: the same atomic absorb the running turn's
+    /// steering source performs, for a test that has no provider behind it.
+    #[cfg(test)]
+    pub(crate) fn take_steering(&self) -> Vec<crate::app::queue::SteerItem> {
+        self.session
+            .queue
+            .absorb(
+                crate::ui::ConvKey::Main,
+                crate::app::ids::TurnId::new("turn_test"),
+            )
+            .now()
+    }
+
+    /// Main's queue as it stands.
+    pub(crate) fn main_queue(&self) -> crate::app::queue::ConversationQueue {
+        self.session.queue.of(&crate::ui::ConvKey::Main)
+    }
+
+    /// The queue rows of the page on screen. Only the console has one; every other
+    /// page reads an empty queue rather than main's.
+    pub(crate) fn page_queue(&self) -> crate::app::queue::ConversationQueue {
+        self.session.queue.of(&self.active)
+    }
+
+    fn drain_main_queue(&self) -> Option<crate::app::queue::QueuedInput> {
+        self.session
+            .queue
+            .drain_front(crate::ui::ConvKey::Main)
+            .now()
     }
 
     /// The running turn took these queued messages into its own context at a tool
-    /// barrier: they are in the request already, so they leave the queue and enter the
-    /// flow where the model read them.
+    /// barrier: they are in the request already, and the core has already taken them
+    /// out of the queue. What is left is where they land on screen.
     ///
     /// The reply block is split there. One turn renders as one assistant message, so a
     /// line merely pushed after it would sink below everything the turn still had to
     /// say; closing the block and opening a continuation — the same move an
     /// AskUserQuestion answer makes — puts the message between the reply written
     /// without it and the reply written with it, which is the order the history holds.
-    pub(crate) fn absorb_steered(&mut self, items: &[crate::steer::SteerItem]) {
+    pub(crate) fn absorb_steered(&mut self, items: &[crate::app::queue::SteerItem]) {
         if items.is_empty() {
             return;
         }
-        self.main_conv()
-            .queued
-            .retain(|entry| !items.iter().any(|item| item.id == entry.id));
         for item in items {
             self.push_steered_line(&item.text);
         }
         self.open_continuation_message();
-        self.rearm_steer();
         self.dirty = true;
     }
 
@@ -425,7 +425,7 @@ impl super::Chat {
         self.main_conv().messages.push(UiMessage {
             speaker: None,
             role: Role::User,
-            text: format!("{}{text}", crate::steer::STEER_FLOW_PREFIX),
+            text: format!("{}{text}", crate::app::queue::STEER_FLOW_PREFIX),
             at: crate::channels::now_unix(),
             activities: Vec::new(),
             insert_points: Vec::new(),
@@ -540,7 +540,10 @@ impl super::Chat {
         // its own next round, and a queued user message goes first. Main's turn
         // and main's queue, whatever page the screen is on.
         let main = self.main_conv();
-        if main.busy || main.interrupted || !main.queued.is_empty() {
+        if main.busy || main.interrupted {
+            return false;
+        }
+        if !self.main_queue().is_empty() {
             return false;
         }
         self.submit_auto();
@@ -656,11 +659,6 @@ impl super::Chat {
         let main = self.main_conv();
         main.busy = true;
         main.interrupted = false;
-        // The steer channel belongs to one turn (D83): whatever the previous turn chose
-        // not to take must not be folded into this one behind the user's back. The
-        // caller re-arms it against the queue once this turn is the running one.
-        self.steer.reset();
-        let steer = self.steer.clone();
         let live = self.live.clone();
         let session = self.session_for_turn();
         let events = self.events.clone();
@@ -676,6 +674,7 @@ impl super::Chat {
         // is the synchronous seam this side of the console still has; B7 removes it.
         let turn = self.open_core_turn(crate::app::snapshot::TurnOrigin::User);
         let turns = self.session.turns.clone();
+        let steer = self.steering(turn.clone());
         let handle = tokio::spawn(async move {
             events.send(UiEvent::TurnStart);
             let mut host = crate::ui::tui_hooks(events.clone(), asks, steer, live);
@@ -703,6 +702,40 @@ impl super::Chat {
             }
         });
         Self::supervise_turn(self.events.clone(), handle);
+    }
+
+    /// This turn's tool barrier: what the composer queued while it worked (D83).
+    ///
+    /// The take is atomic because it happens inside the actor — whatever comes back
+    /// is out of the queue and on its way to the model, so a pull-back racing it
+    /// has already lost. The console is told through `Steered`, which is where the
+    /// `↪` rows come from; B7 replaces that with the absorption events the core
+    /// already publishes.
+    ///
+    /// A turn the core did not open steers nothing: there is no turn to absorb into.
+    fn steering(
+        &self,
+        turn: Option<crate::app::ids::TurnId>,
+    ) -> std::sync::Arc<crate::query::SteerFn> {
+        let queue = self.session.queue.clone();
+        let events = self.events.clone();
+        std::sync::Arc::new(move || {
+            let queue = queue.clone();
+            let events = events.clone();
+            let turn = turn.clone();
+            Box::pin(async move {
+                let Some(turn) = turn else {
+                    return Vec::new();
+                };
+                let items = queue.absorb(crate::ui::ConvKey::Main, turn).await;
+                if !items.is_empty() {
+                    events.send(UiEvent::Steered {
+                        items: items.clone(),
+                    });
+                }
+                items
+            })
+        })
     }
 
     /// Open main's turn in the core, or `None` when the core says one is already
@@ -785,9 +818,6 @@ impl super::Chat {
         // without this, one interrupt followed by only `!` commands kept
         // background wake-ups suppressed for the rest of the session.
         main.interrupted = false;
-        // Same as start_turn: the channel is this turn's (D83).
-        self.steer.reset();
-        let steer = self.steer.clone();
         let live = self.live.clone();
         let session = self.session_for_turn();
         let events = self.events.clone();
@@ -797,6 +827,7 @@ impl super::Chat {
         self.cancel_tx.send_replace(false);
         let turn = self.open_core_turn(crate::app::snapshot::TurnOrigin::Shell);
         let turns = self.session.turns.clone();
+        let steer = self.steering(turn.clone());
         let handle = tokio::spawn(async move {
             events.send(UiEvent::TurnStart);
             let mut host = crate::ui::tui_hooks(events.clone(), asks, steer, live);
@@ -1590,20 +1621,16 @@ impl super::Chat {
     /// ↑ while busy with a queue pulls back the last queued message.
     fn vertical(&mut self, down: bool) -> bool {
         // Pulling back a queued message only happens on empty input: what is being typed should not be clobbered.
-        if !down && self.conv.busy && self.input.is_empty() && !self.conv.queued.is_empty() {
-            if let Some(entry) = self.conv.queued.last() {
-                // The turn may have taken this one already (D83). It is in the request
-                // by then, so pulling it into the composer would send it twice: the
-                // turn wins, and the absorption event — already on its way — is what
-                // takes it out of the queue. Doing nothing here is the whole fix.
-                if self.steer.reclaim(entry.id) == crate::steer::Reclaim::Absorbed {
-                    return true;
-                }
+        if !down && self.conv.busy && self.input.is_empty() && !self.page_queue().is_empty() {
+            // The turn may take this one first (D83). Whichever reached the actor
+            // first wins, and a pull-back that lost is a no-op: the text is in the
+            // request by then, so bringing it back into the composer would send it
+            // twice.
+            match self.session.queue.reclaim_tail(self.active.clone()).now() {
+                crate::app::queue::Reclaim::Pulled(entry) => self.set_input(entry.text),
+                crate::app::queue::Reclaim::Absorbed | crate::app::queue::Reclaim::Empty => {}
             }
-            if let Some(item) = self.conv.queued.pop() {
-                self.set_input(item.text);
-            }
-            self.rearm_steer();
+            self.dirty = true;
             return true;
         }
         let width = self.input_width();
@@ -2519,21 +2546,18 @@ impl super::Chat {
 
     /// Queued-message rows (dim `> {text}` below the input); overflow folds into one row.
     pub fn queue_lines(&self) -> Vec<String> {
-        if self.conv.queued.is_empty() {
+        let queue = self.page_queue();
+        if queue.is_empty() {
             return Vec::new();
         }
-        let mut out: Vec<String> = self
-            .conv
-            .queued
+        let mut out: Vec<String> = queue
+            .entries
             .iter()
             .take(QUEUE_ROWS_MAX)
             .map(|item| format!("> {}", one_line(&item.text, self.width.saturating_sub(4))))
             .collect();
-        if self.conv.queued.len() > QUEUE_ROWS_MAX {
-            out.push(format!(
-                "… +{} more queued",
-                self.conv.queued.len() - QUEUE_ROWS_MAX
-            ));
+        if queue.len() > QUEUE_ROWS_MAX {
+            out.push(format!("… +{} more queued", queue.len() - QUEUE_ROWS_MAX));
         }
         out
     }
@@ -2542,7 +2566,7 @@ impl super::Chat {
     /// running: with nothing in flight the queue is about to submit itself, and there is
     /// no window in which editing it would mean anything.
     pub fn queue_hint(&self) -> Option<&'static str> {
-        (self.conv.busy && !self.conv.queued.is_empty())
+        (self.conv.busy && !self.page_queue().is_empty())
             .then_some("Press up to edit queued messages")
     }
 

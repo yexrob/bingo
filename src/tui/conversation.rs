@@ -1,6 +1,6 @@
 //! One conversation's transcript and the turn writing to it.
 
-use super::chat::{QueuedInput, UiMessage};
+use super::chat::UiMessage;
 use crate::tui::activities::{ActivityKind, ThinkingState};
 
 /// One conversation: the transcript, and the turn producing it.
@@ -10,7 +10,11 @@ use crate::tui::activities::{ActivityKind, ThinkingState};
 /// [`Chat`](super::chat::Chat). A conversation has one transcript and at most
 /// one turn writing into it, and every field here is either that transcript or
 /// something the turn is doing to it: where the stream is writing, what it has
-/// thought, what it has spent, when it started, what is queued behind it.
+/// thought, what it has spent, when it started.
+///
+/// What is queued behind it is not here: the input queue is the core's since B3,
+/// and a second copy on this side could disagree with the one the tool barrier
+/// arbitrates.
 ///
 /// `Chat` holds N of these, keyed by [`crate::ui::ConvKey`], and points at one
 /// (D134). Every one of them is fed the same way — `UiEvent`s addressed to it —
@@ -24,11 +28,6 @@ use crate::tui::activities::{ActivityKind, ThinkingState};
 /// ([`crate::tui::conv::room_tail`]) and its turn fields stay at rest forever.
 pub struct Conversation {
     pub messages: Vec<UiMessage>,
-    /// Messages queued while busy (submitted one by one after TurnEnd, or absorbed
-    /// earlier by the running turn through [`Chat::steer`](super::chat::Chat::steer)).
-    pub queued: Vec<QueuedInput>,
-    /// Id of the next queued entry.
-    pub(crate) next_queue_id: u64,
     pub busy: bool,
     /// Esc/Ctrl+C interrupted the current turn: background-task completion no longer auto-starts
     /// a new turn (interrupt semantics: wait for the user to submit), reset in start_turn.
@@ -103,8 +102,6 @@ impl Conversation {
     pub(crate) fn new(context_usage: crate::context_usage::ContextUsage) -> Self {
         Self {
             messages: Vec::new(),
-            queued: Vec::new(),
-            next_queue_id: 0,
             busy: false,
             interrupted: false,
             stream_msg: None,

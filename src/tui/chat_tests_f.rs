@@ -1005,8 +1005,8 @@ fn a_steered_message_still_wears_the_users_face() {
     chat.conv
         .messages
         .push(msg(Role::Assistant, "working on it"));
-    chat.absorb_steered(&[crate::steer::SteerItem {
-        id: 1,
+    chat.absorb_steered(&[crate::app::queue::SteerItem {
+        id: crate::app::ids::QueueId::new("queue_1"),
         text: "also check the lexer".to_string(),
     }]);
     chat.build_rows(78);
@@ -2670,7 +2670,7 @@ fn a_queued_command_acts_on_the_page_it_was_typed_on() {
     chat.set_input("/compact");
     chat.submit();
 
-    let queued = chat.main_conv().queued.clone();
+    let queued = chat.main_queue().entries;
     assert_eq!(queued.len(), 1, "it queued behind the running turn");
     assert_eq!(
         queued[0].on,
@@ -2680,7 +2680,7 @@ fn a_queued_command_acts_on_the_page_it_was_typed_on() {
 
     chat.switch_to(Some(crate::tui::zoom::ZoomTarget::Agent("scout".into())));
     assert_eq!(
-        chat.main_conv().queued[0].on,
+        chat.main_queue().entries[0].on,
         crate::ui::ConvKey::Main,
         "switching pages does not re-aim a command already typed"
     );

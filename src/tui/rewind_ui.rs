@@ -305,7 +305,7 @@ impl super::Chat {
             // The message goes back into the composer, where the user left it —
             // rewinding to a turn is almost always about asking it differently.
             self.set_input(point.text.clone());
-            self.conv.queued.clear();
+            self.session.queue.clear(crate::ui::ConvKey::Main);
             let stamp = crate::tui::buffer::stamp(point.at);
             lines.push(match action {
                 0 => format!("{REWIND_PREFIX}code and conversation restored to {stamp}"),

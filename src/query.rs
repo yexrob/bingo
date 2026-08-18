@@ -300,15 +300,19 @@ pub const RECONNECT_WARNING_PREFIX: &str = "Reconnecting... ";
 /// running right now.
 ///
 /// Called once per tool barrier. The caller commits to appending whatever it returns to
-/// the message it is about to record, so an implementation must take atomically and
-/// announce what it took — see [`crate::steer::SteerQueue::take`]. Returning an empty
-/// vector is the whole contract for a host with no composer behind it.
-pub type SteerFn = dyn Fn() -> Vec<crate::steer::SteerItem> + Send + Sync;
+/// the message it is about to record, so the take must be atomic — which it is, because
+/// since B3 it happens inside the session actor
+/// ([`crate::app::queue::QueueHandle::absorb`]). Returning an empty vector is the whole
+/// contract for a host with no composer behind it.
+pub type SteerFn = dyn Fn() -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Vec<crate::app::queue::SteerItem>> + Send>,
+    > + Send
+    + Sync;
 
 /// The steering source of a host that has no one to steer with: headless runs, the JSON
 /// protocol, and subagents, whose messages arrive through their own inbox instead.
 pub fn no_steer() -> Arc<SteerFn> {
-    Arc::new(Vec::new)
+    Arc::new(|| Box::pin(async { Vec::new() }))
 }
 
 /// Headless permission prompt (stderr question, stdin answer). Shared by `headless_hooks` and
@@ -1356,6 +1360,7 @@ async fn query_loop(
         if !interrupted && !stop_after_tools && !is_cancelled(&cancel_rx) {
             blocks.extend(
                 (host.requests.steer)()
+                    .await
                     .iter()
                     .map(|item| ContentBlock::Text {
                         text: item.block_text(),

@@ -815,7 +815,7 @@ mod tests {
         let ui = crate::ui::tui_hooks(
             crate::ui::EventSink::new(crate::ui::ConvKey::Main, events_tx),
             asks_tx,
-            crate::steer::SteerQueue::new(),
+            crate::query::no_steer(),
             crate::live::LiveBash::detached(),
         );
 

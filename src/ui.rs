@@ -274,7 +274,7 @@ pub enum UiEvent {
     /// from its queue and show them in the flow where the model read them — the turn
     /// side is the authority here, and a pull-back racing this event loses.
     Steered {
-        items: Vec<crate::steer::SteerItem>,
+        items: Vec<crate::app::queue::SteerItem>,
     },
     /// A foreground shell command's output so far (D84): the last few lines, dim,
     /// under the running tool row, replaced on every sample. No tool id travels with
@@ -384,14 +384,13 @@ fn ask_preview(ask: &crate::query::AskContext<'_>) -> Option<AskPreview> {
 pub fn tui_hooks(
     events: EventSink,
     asks: mpsc::UnboundedSender<AskRequest>,
-    steer: crate::steer::SteerQueue,
+    steer: Arc<crate::query::SteerFn>,
     live: Arc<crate::live::LiveBash>,
 ) -> EngineHost {
     // Live output-token estimate for the footer, reset by a retry (the failed
     // attempt's output is withdrawn) and by each round boundary. The provider's
     // own count replaces it whenever one arrives.
     let round_tokens = Arc::new(std::sync::Mutex::new((0u64, None::<usize>)));
-    let steer_events = events.clone();
     let ask_asks = asks.clone();
     EngineHost::new(
         EngineEvents::new(move |event| match event {
@@ -503,19 +502,7 @@ pub fn tui_hooks(
                     }
                 })
             }),
-            // Take and announce in one step, under the queue's own lock: whoever takes the
-            // items owns them, and the composer learns of it from the same act. Splitting
-            // the two would open a window in which an item is in the request and still
-            // pending on screen.
-            steer: Arc::new(move || {
-                let items = steer.take();
-                if !items.is_empty() {
-                    steer_events.send(UiEvent::Steered {
-                        items: items.clone(),
-                    });
-                }
-                items
-            }),
+            steer,
             live,
         },
     )
@@ -545,7 +532,7 @@ mod tests {
         let ui = tui_hooks(
             EventSink::new(ConvKey::Main, events_tx),
             asks_tx,
-            crate::steer::SteerQueue::new(),
+            crate::query::no_steer(),
             crate::live::LiveBash::detached(),
         );
 
@@ -604,7 +591,7 @@ mod tests {
         let ui = tui_hooks(
             EventSink::new(ConvKey::Main, events_tx),
             asks_tx,
-            crate::steer::SteerQueue::new(),
+            crate::query::no_steer(),
             crate::live::LiveBash::detached(),
         );
 

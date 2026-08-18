@@ -34,7 +34,7 @@
 //! | Shape | Composed at | Attributed to |
 //! |---|---|---|
 //! | `[DM from user]` heading a line | `tool::agent::direct_text` | the user |
-//! | `[Message from user, sent while you were working]` block | `steer::SteerItem::block_text` | the user |
+//! | `[Message from user, sent while you were working]` block | `app::queue::SteerItem::block_text` | the user |
 //! | `[follow-up instruction] …` | `direct_text`, batched | the protagonist's default counterpart |
 //! | unmarked prose | `direct_text`, single | the default: main in a subagent's record, the user in main's |
 //! | a `tool_result` block | `query::tool_result_block` | nobody — it is the answer to the call above it, and rides on that row ([`Work::Tool`]) |
@@ -376,7 +376,7 @@ fn split_user_text(text: &str, at: u64, first: bool, who: Protagonist<'_>) -> Ve
         ));
         return out;
     }
-    if let Some(body) = text.strip_prefix(crate::steer::STEER_MARKER) {
+    if let Some(body) = text.strip_prefix(crate::app::queue::STEER_MARKER) {
         // The user typed it while X was working. A real message, from a real
         // person, that arrived beside a tool result.
         out.push((
