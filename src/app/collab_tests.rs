@@ -742,3 +742,59 @@ async fn a_background_command_reports_its_transitions_as_a_resource() {
         other => panic!("expected a start and an end, got {other:?}"),
     }
 }
+
+/// The `@` ledger reaches the conversation summary: a debt the user owes is
+/// stated rather than left for a frontend to read out of prose, and speaking is
+/// what settles it.
+#[tokio::test]
+async fn a_mention_the_user_owes_is_an_obligation_until_they_speak() {
+    let core = AppCore::start(SessionSetup::default());
+    let channels = core.channels();
+    let mut link = attached(&core).await;
+    channels
+        .create(
+            "build",
+            vec![
+                MAIN_NAME.to_string(),
+                "scout".to_string(),
+                USER_NAME.to_string(),
+            ],
+            ChannelMode::Free,
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+    channels
+        .post("scout", "build", "@user which branch?")
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+    let events = drain(&mut link).await;
+    let room = conversation_of(&events, "#build");
+
+    let owing = read_conversation(&mut link, &room, None)
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+    match owing.conversation.obligations.as_slice() {
+        [owed] => {
+            assert_eq!(owed.kind, crate::app::snapshot::ObligationKind::MentionDebt);
+            assert_eq!(owed.from.as_deref(), Some("scout"), "who is waiting");
+        }
+        other => panic!("expected one open debt, got {other:?}"),
+    }
+
+    channels
+        .post(USER_NAME, "build", "the release branch")
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+    let _ = drain(&mut link).await;
+    let settled = read_conversation(&mut link, &room, None)
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+    assert!(
+        settled.conversation.obligations.is_empty(),
+        "speaking is the answer"
+    );
+    assert_eq!(
+        settled.conversation.unread, 0,
+        "and the user's own words are read by definition"
+    );
+}
