@@ -44,6 +44,7 @@ fn test_session(core: &AppCore) -> Arc<Session> {
         submit: core.submit(),
         interactions: core.interactions(),
         mail: core.mail(),
+        operations: core.operations(),
         instance: None,
         attachments: crate::api::image::Attachments::new(),
     })
@@ -674,4 +675,70 @@ async fn a_resumed_session_comes_back_to_its_rooms_and_its_unread_marks() {
     assert_eq!(owed[0].to, USER_NAME);
 
     let _ = std::fs::remove_dir_all(&home);
+}
+
+/// A background command's transitions are a typed resource update rather than a
+/// label-only string (parity ledger; B1 review ruling ①).
+#[tokio::test]
+async fn a_background_command_reports_its_transitions_as_a_resource() {
+    struct Shell(String);
+    impl crate::watch::Watchable for Shell {
+        fn label(&self) -> String {
+            self.0.clone()
+        }
+        fn poll(&self) -> crate::watch::WatchPoll {
+            crate::watch::WatchPoll {
+                state: crate::watch::WatchState::Running,
+                detail: None,
+                payload: None,
+                signal: None,
+            }
+        }
+        fn check_interval(&self) -> Option<std::time::Duration> {
+            None
+        }
+    }
+
+    let core = AppCore::start(SessionSetup::default());
+    let watch = core.watch();
+    let mut link = attached(&core).await;
+    let id = watch.register_with_conditions(
+        Box::new(Shell("$ cargo test".to_string())),
+        Vec::new(),
+        None,
+    );
+    watch.set_state(
+        id,
+        crate::watch::WatchState::Done,
+        Some("ok".to_string()),
+        None,
+    );
+
+    let events = drain(&mut link).await;
+    let reported: Vec<&crate::app::snapshot::BackgroundCommandResource> = events
+        .iter()
+        .filter_map(|event| match &event.payload {
+            AppEventPayload::CommandChanged(changed) => Some(&changed.command),
+            _ => None,
+        })
+        .collect();
+    match reported.as_slice() {
+        [started, .., done] => {
+            assert_eq!(started.label, "$ cargo test");
+            assert_eq!(
+                started.command, "cargo test",
+                "the line it runs, without the prompt marker"
+            );
+            assert_eq!(
+                started.state,
+                crate::app::snapshot::BackgroundCommandState::Running
+            );
+            assert_eq!(
+                done.state,
+                crate::app::snapshot::BackgroundCommandState::Done
+            );
+            assert_eq!(done.id, started.id, "one command, one identifier");
+        }
+        other => panic!("expected a start and an end, got {other:?}"),
+    }
 }

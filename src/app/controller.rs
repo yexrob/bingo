@@ -28,15 +28,15 @@ use crate::app::event::{
     TurnChanged, TurnRetrying, TurnRoundCompleted, TurnRoundStarted, TurnUsageUpdated,
 };
 use crate::app::ids::{
-    AgentId, ConversationId, DeliveryId, EpochId, FeedbackId, IdMint, ItemId, OperationId, RoomId,
-    SessionId, now_millis,
+    AgentId, CommandId, ConversationId, DeliveryId, EpochId, FeedbackId, IdMint, ItemId,
+    OperationId, RoomId, SessionId, now_millis,
 };
 use crate::app::snapshot::{
-    AgentKind, AgentResource, AgentState, Collection, ConfigSnapshot, ConversationKind,
-    ConversationRunState, ConversationSummary, DeliveryResource, DeliveryState, Feedback, Item,
-    ItemBody, ItemStatus, NoticeLevel, Obligation, Page, QueueEntry, RoomMode, RoomResource,
-    RuntimeCollections, ServerCapabilities, SessionCloseReason, SessionSnapshot, SessionState,
-    SessionSummary, ThinkingLevel,
+    AgentKind, AgentResource, AgentState, BackgroundCommandResource, BackgroundCommandState,
+    Collection, ConfigSnapshot, ConversationKind, ConversationRunState, ConversationSummary,
+    DeliveryResource, DeliveryState, Feedback, Item, ItemBody, ItemStatus, NoticeLevel, Obligation,
+    Page, QueueEntry, RoomMode, RoomResource, RuntimeCollections, ServerCapabilities,
+    SessionCloseReason, SessionSnapshot, SessionState, SessionSummary, ThinkingLevel,
 };
 use crate::app::turn::TurnChange;
 use crate::app::{
@@ -87,6 +87,8 @@ pub(crate) enum Control {
     Interaction(crate::app::interaction::InteractionMsg),
     /// A question about the mail waiting for main.
     Mail(crate::app::mail::MailMsg),
+    /// Work that is not a turn, starting, reporting, or ending.
+    Operation(crate::app::operation::OperationMsg),
     /// One submission, read and routed.
     Submit {
         request: Box<crate::app::submit::SubmitRequest>,
@@ -131,6 +133,7 @@ pub(crate) struct Registries {
     pub submit: crate::app::submit::SubmitHandle,
     pub interactions: crate::app::interaction::InteractionHandle,
     pub mail: crate::app::mail::MailHandle,
+    pub operations: crate::app::operation::OperationHandle,
 }
 
 /// Start the actor and return the handle everything reaches it by.
@@ -185,7 +188,8 @@ pub(super) fn spawn(setup: SessionSetup) -> (mpsc::UnboundedSender<Control>, Reg
             queue: queue_handle,
             submit: crate::app::submit::SubmitHandle::new(control_for_submit.clone()),
             interactions: interaction_handle,
-            mail: crate::app::mail::MailHandle::new(control_for_submit),
+            mail: crate::app::mail::MailHandle::new(control_for_submit.clone()),
+            operations: crate::app::operation::OperationHandle::new(control_for_submit),
         },
         alive,
     )
@@ -263,6 +267,8 @@ struct Controller {
     mail: crate::app::mail::MailWake,
     /// The standing "mail is waiting" notice, so it can be cleared by identity.
     mail_notice: Option<FeedbackId>,
+    /// Accepted work that is not a turn: a team coming up, a login, a share.
+    operations: crate::app::operation::OperationRegistry,
     /// Conversations whose summary may have moved this turn of the loop. Batched
     /// because one message can move several facts about one conversation, and a
     /// summary published per fact would say the same thing three times.
@@ -292,6 +298,8 @@ struct Told {
     conversations: std::collections::HashMap<ConvKey, ConversationSummary>,
     /// Where each direct message was last reported to stand.
     deliveries: std::collections::HashMap<u64, (DeliveryId, DeliveryState, u32)>,
+    /// Where each background command was last reported to stand.
+    commands: std::collections::HashMap<u64, (CommandId, BackgroundCommandState, Option<String>)>,
 }
 
 /// What decides whether an instance's change is worth an event. Progress
@@ -371,6 +379,7 @@ impl Controller {
             feedback: Vec::new(),
             mail: crate::app::mail::MailWake::default(),
             mail_notice: None,
+            operations: crate::app::operation::OperationRegistry::default(),
             dirty: std::collections::BTreeSet::new(),
             serving: false,
             deferred: Vec::new(),
@@ -399,7 +408,10 @@ impl Controller {
                 // The registries publish their own reader snapshots; what the
                 // actor adds is the sequenced account of what changed, which is
                 // the only ordering a second frontend can rely on.
-                Control::Watch(message) => self.watch.handle(message),
+                Control::Watch(message) => {
+                    self.watch.handle(message);
+                    self.announce_commands();
+                }
                 Control::Channels(message) => {
                     // A replayed sidecar carries the user's own cursors, and they
                     // have to be applied *after* the log it measures has become
@@ -439,6 +451,10 @@ impl Controller {
                     self.announce_interactions(changes);
                 }
                 Control::Mail(message) => self.serve_mail(message),
+                Control::Operation(message) => {
+                    let changes = self.operations.handle(message, &mut self.mint);
+                    self.announce_operations(changes);
+                }
                 Control::Submit { request, reply } => {
                     let route = self.submit(*request);
                     let _ = reply.send(route);
@@ -650,7 +666,7 @@ impl Controller {
             },
             active_turns,
             interactions: self.interactions.pending(),
-            operations: Vec::new(),
+            operations: self.operations.running(),
             collections: RuntimeCollections {
                 agents: Collection {
                     revision: agents.len() as u64,
@@ -668,7 +684,14 @@ impl Controller {
                     count: deliveries.len() as u32,
                     active: deliveries,
                 },
-                background_commands: empty_collection(),
+                background_commands: {
+                    let commands = self.command_resources();
+                    Collection {
+                        revision: commands.len() as u64,
+                        count: commands.len() as u32,
+                        active: commands,
+                    }
+                },
                 mcp_servers: Vec::new(),
             },
             feedback: self.feedback.clone(),
@@ -889,6 +912,70 @@ impl Controller {
                 }
             })
             .collect()
+    }
+
+    /// Every background command as the contract names it.
+    fn command_resources(&self) -> Vec<BackgroundCommandResource> {
+        self.watch
+            .command_facts()
+            .into_iter()
+            .map(|fact| BackgroundCommandResource {
+                id: CommandId::new(format!("{}{}", CommandId::PREFIX, fact.id.0)),
+                label: fact.label,
+                command: fact.command,
+                state: command_state(fact.state),
+                started_at: now_millis().saturating_sub(fact.elapsed_ms),
+                duration_ms: fact.elapsed_ms,
+                // The watch table records a state and a line about it, not an
+                // exit status; saying `0` here would be inventing one.
+                exit_code: None,
+                conversation_id: None,
+                item_id: None,
+            })
+            .collect()
+    }
+
+    /// Publish one event per background command whose state or detail moved.
+    ///
+    /// A typed resource update rather than a label-only string: the parity
+    /// ledger's "agent/task/command watch transitions" row asks for exactly this,
+    /// and polling `resource/read` does not satisfy it (B1 review ruling ①).
+    fn announce_commands(&mut self) {
+        let facts = self.watch.command_facts();
+        let mut changed = Vec::new();
+        for fact in facts {
+            let state = command_state(fact.state);
+            let known = self.told.commands.get(&fact.id.0);
+            if known.is_some_and(|(_, told, detail)| *told == state && detail == &fact.detail) {
+                continue;
+            }
+            let id = match known {
+                Some((id, ..)) => id.clone(),
+                None => CommandId::new(format!("{}{}", CommandId::PREFIX, fact.id.0)),
+            };
+            self.told
+                .commands
+                .insert(fact.id.0, (id.clone(), state, fact.detail));
+            changed.push(BackgroundCommandResource {
+                id,
+                label: fact.label,
+                command: fact.command,
+                state,
+                started_at: now_millis().saturating_sub(fact.elapsed_ms),
+                duration_ms: fact.elapsed_ms,
+                exit_code: None,
+                conversation_id: None,
+                item_id: None,
+            });
+        }
+        for command in changed {
+            self.publish(
+                Box::new(AppEventPayload::CommandChanged(
+                    crate::app::event::CommandChanged { command },
+                )),
+                None,
+            );
+        }
     }
 
     /// Every direct message the session has a record of.
@@ -1179,6 +1266,9 @@ impl Controller {
             );
             self.announce_queue(changes);
         }
+
+        let changes = self.operations.close_all();
+        self.announce_operations(changes);
 
         self.agents.release();
         self.session.state = SessionState::Closed;
@@ -1605,6 +1695,32 @@ impl Controller {
         }
     }
 
+    /// Publish what the operations changed, in the order they changed.
+    fn announce_operations(&mut self, changes: Vec<crate::app::operation::OperationChange>) {
+        use crate::app::operation::OperationChange;
+        for change in changes {
+            let payload = match change {
+                OperationChange::Started(operation) => {
+                    AppEventPayload::OperationStarted(crate::app::event::OperationChanged {
+                        operation: *operation,
+                    })
+                }
+                OperationChange::Progressed { id, progress } => {
+                    AppEventPayload::OperationProgress(crate::app::event::OperationProgressed {
+                        operation_id: id,
+                        progress,
+                    })
+                }
+                OperationChange::Completed(operation) => {
+                    AppEventPayload::OperationCompleted(crate::app::event::OperationChanged {
+                        operation: *operation,
+                    })
+                }
+            };
+            self.publish(Box::new(payload), None);
+        }
+    }
+
     /// Answer what the frontends ask about the waiting mail.
     fn serve_mail(&mut self, message: crate::app::mail::MailMsg) {
         use crate::app::mail::MailMsg;
@@ -1993,6 +2109,17 @@ fn thinking_level(level: Option<&str>) -> ThinkingLevel {
             .into_iter()
             .find(|known| known.as_str() == level)
             .unwrap_or(ThinkingLevel::Off),
+    }
+}
+
+/// The domain's watch state, as the contract names a background command's.
+fn command_state(state: crate::watch::WatchState) -> BackgroundCommandState {
+    match state {
+        crate::watch::WatchState::Running => BackgroundCommandState::Running,
+        crate::watch::WatchState::Idle => BackgroundCommandState::Idle,
+        crate::watch::WatchState::Done => BackgroundCommandState::Done,
+        crate::watch::WatchState::Failed => BackgroundCommandState::Failed,
+        crate::watch::WatchState::Cancelled => BackgroundCommandState::Cancelled,
     }
 }
 

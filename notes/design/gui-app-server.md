@@ -518,7 +518,7 @@ Required families:
 | Item | `item/started`, `item/textDelta`, `item/reasoningDelta`, `item/commandTailUpdated`, `item/updated`, `item/completed`. Text/reasoning deltas append; tail/update/completion replace. |
 | Input queue | `queue/itemAdded`, `queue/itemRemoved`, `queue/itemAbsorbed`; each carries bounded items/IDs and the queue revision. |
 | Interaction | `interaction/opened`, `interaction/resolved`, `interaction/cancelled`. |
-| Collaboration | `agent/changed`, `room/changed`, `task/changed`, `task/removed`, `delivery/changed`; room posts use the ordinary item lifecycle. |
+| Collaboration | `agent/changed`, `room/changed`, `task/changed`, `task/removed`, `delivery/changed`, `command/changed`; room posts use the ordinary item lifecycle. |
 | Operations | `operation/started`, `operation/progress`, `operation/completed`. |
 | Runtime state | `config/changed`, `catalog/changed`, `asset/available`, `feedback/raised`, `feedback/cleared`. |
 

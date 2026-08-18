@@ -456,7 +456,51 @@ pub(crate) fn attach(control: mpsc::UnboundedSender<Control>) -> (WatchRegistry,
     (registry, handle)
 }
 
+/// One background command as the application event layer names it: everything a
+/// `BackgroundCommandResource` carries except the server-minted identifier.
+pub(crate) struct CommandFacts {
+    pub id: WatchId,
+    /// What the row calls it: the command line under the shell's prompt marker.
+    pub label: String,
+    pub state: WatchState,
+    /// The line it is running, without the marker.
+    pub command: String,
+    pub elapsed_ms: u64,
+    /// What it last reported it was doing.
+    pub detail: Option<String>,
+}
+
 impl WatchRegistry {
+    /// What every background command stands at, for the actor to turn into
+    /// events.
+    ///
+    /// Only commands: an agent run and a room are watched through the same table
+    /// but reported as their own resources, and reporting them twice would be
+    /// two answers to one question.
+    pub(crate) fn command_facts(&self) -> Vec<CommandFacts> {
+        let mut out: Vec<CommandFacts> = self
+            .entries
+            .iter()
+            .filter(|(_, entry)| entry.kind == WatchKind::Command)
+            .map(|(id, entry)| CommandFacts {
+                id: *id,
+                label: entry.label.clone(),
+                state: entry.state,
+                // The label is composed once, in `tool::bash`, as the command
+                // under the shell's prompt marker; this is that one step undone.
+                command: entry
+                    .label
+                    .strip_prefix("$ ")
+                    .unwrap_or(&entry.label)
+                    .to_string(),
+                elapsed_ms: entry.born.elapsed().as_millis() as u64,
+                detail: entry.detail.clone(),
+            })
+            .collect();
+        out.sort_by_key(|fact| fact.id.0);
+        out
+    }
+
     /// Apply one message.
     ///
     /// The order of the last two steps is the contract a reader depends on: the

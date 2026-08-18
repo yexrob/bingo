@@ -13,13 +13,13 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::app::event::{
-    AgentChanged, AppEvent, AppEventPayload, AssetAvailable, CatalogChanged, ConfigChanged,
-    ConversationChanged, ConversationRemoved, DeliveryChanged, EventMeta, FeedbackCleared,
-    FeedbackRaised, InteractionCancelled, InteractionOpened, InteractionResolved, ItemChanged,
-    ItemCommandTailUpdated, ItemDelta, OperationChanged, OperationProgressed, QueueItemAbsorbed,
-    QueueItemAdded, QueueItemRemoved, RoomChanged, SessionClosed, SessionDeleted, SessionUpdated,
-    TaskChanged, TaskRemoved, TurnChanged, TurnRetrying, TurnRoundCompleted, TurnRoundStarted,
-    TurnUsageUpdated,
+    AgentChanged, AppEvent, AppEventPayload, AssetAvailable, CatalogChanged, CommandChanged,
+    ConfigChanged, ConversationChanged, ConversationRemoved, DeliveryChanged, EventMeta,
+    FeedbackCleared, FeedbackRaised, InteractionCancelled, InteractionOpened, InteractionResolved,
+    ItemChanged, ItemCommandTailUpdated, ItemDelta, OperationChanged, OperationProgressed,
+    QueueItemAbsorbed, QueueItemAdded, QueueItemRemoved, RoomChanged, SessionClosed,
+    SessionDeleted, SessionUpdated, TaskChanged, TaskRemoved, TurnChanged, TurnRetrying,
+    TurnRoundCompleted, TurnRoundStarted, TurnUsageUpdated,
 };
 
 /// One notification's params: the event header, then the body's own fields.
@@ -97,6 +97,7 @@ server_notifications! {
     TaskChanged(TaskChanged) => "task/changed",
     TaskRemoved(TaskRemoved) => "task/removed",
     DeliveryChanged(DeliveryChanged) => "delivery/changed",
+    CommandChanged(CommandChanged) => "command/changed",
     OperationStarted(OperationChanged) => "operation/started",
     OperationProgress(OperationProgressed) => "operation/progress",
     OperationCompleted(OperationChanged) => "operation/completed",
@@ -199,6 +200,9 @@ impl From<AppEvent> for ServerNotification {
             }
             AppEventPayload::DeliveryChanged(body) => {
                 Self::DeliveryChanged(NotificationParams::new(meta, body))
+            }
+            AppEventPayload::CommandChanged(body) => {
+                Self::CommandChanged(NotificationParams::new(meta, body))
             }
             AppEventPayload::OperationStarted(body) => {
                 Self::OperationStarted(NotificationParams::new(meta, body))

@@ -117,6 +117,9 @@ pub struct Session {
     /// the deadline and the idle gates are the core's one answer, so both
     /// frontends wake main the same way (乙案, B4).
     pub mail: crate::app::mail::MailHandle,
+    /// Accepted work that is not a turn — a team coming up, a login, a share —
+    /// each with progress and exactly one terminal state (B4).
+    pub operations: crate::app::operation::OperationHandle,
     /// This session's instance name (sub-agents = Some(registry name); main session None,
     /// channel member name main).
     pub instance: Option<String>,

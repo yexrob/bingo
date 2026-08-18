@@ -678,6 +678,7 @@ mod tests {
             submit: core.submit(),
             interactions: core.interactions(),
             mail: core.mail(),
+            operations: core.operations(),
             instance: None,
             attachments: crate::api::image::Attachments::new(),
         });

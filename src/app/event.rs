@@ -20,11 +20,11 @@ use crate::app::ids::{
     TurnId, UnixMillis,
 };
 use crate::app::snapshot::{
-    AgentResource, AssetRecord, CatalogKind, CommandTail, ConfigSnapshot, ContextUsage,
-    ConversationSummary, DeliveryResource, Feedback, Interaction, InteractionCancelReason,
-    InteractionDecision, Item, Operation, OperationProgress, QueueEntry, QueueRemovalReason,
-    RoomResource, SessionCloseReason, SessionLocator, SessionSummary, TaskResource, Turn,
-    TurnUsage,
+    AgentResource, AssetRecord, BackgroundCommandResource, CatalogKind, CommandTail,
+    ConfigSnapshot, ContextUsage, ConversationSummary, DeliveryResource, Feedback, Interaction,
+    InteractionCancelReason, InteractionDecision, Item, Operation, OperationProgress, QueueEntry,
+    QueueRemovalReason, RoomResource, SessionCloseReason, SessionLocator, SessionSummary,
+    TaskResource, Turn, TurnUsage,
 };
 
 /// The header every event carries.
@@ -284,6 +284,16 @@ pub struct DeliveryChanged {
     pub delivery: DeliveryResource,
 }
 
+/// A background command's state moved. Watch state only: the protocol invents no
+/// cancel or re-foreground capability the CLI does not have, and a label-only
+/// string is not a resource update (parity ledger, "agent/task/command watch
+/// transitions").
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct CommandChanged {
+    pub command: BackgroundCommandResource,
+}
+
 // --- Operation -------------------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -364,6 +374,7 @@ pub enum AppEventPayload {
     TaskChanged(TaskChanged),
     TaskRemoved(TaskRemoved),
     DeliveryChanged(DeliveryChanged),
+    CommandChanged(CommandChanged),
     OperationStarted(OperationChanged),
     OperationProgress(OperationProgressed),
     OperationCompleted(OperationChanged),
@@ -408,6 +419,7 @@ impl AppEventPayload {
             Self::TaskChanged(_) => "task/changed",
             Self::TaskRemoved(_) => "task/removed",
             Self::DeliveryChanged(_) => "delivery/changed",
+            Self::CommandChanged(_) => "command/changed",
             Self::OperationStarted(_) => "operation/started",
             Self::OperationProgress(_) => "operation/progress",
             Self::OperationCompleted(_) => "operation/completed",

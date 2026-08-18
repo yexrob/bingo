@@ -1247,6 +1247,7 @@ pub(crate) fn build_sub_session(
         submit: parent.submit.clone(),
         interactions: parent.interactions.clone(),
         mail: parent.mail.clone(),
+        operations: parent.operations.clone(),
         instance: Some(instance.to_string()),
         attachments: parent.attachments.clone(),
     }))

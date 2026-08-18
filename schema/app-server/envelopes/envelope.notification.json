@@ -529,6 +529,24 @@
       "properties": {
         "method": {
           "enum": [
+            "command/changed"
+          ],
+          "type": "string"
+        },
+        "params": {
+          "$ref": "../definitions.json#/definitions/NotificationParams_for_CommandChanged"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
             "operation/started"
           ],
           "type": "string"

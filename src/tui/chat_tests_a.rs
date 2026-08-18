@@ -66,6 +66,7 @@ pub(super) fn test_chat_home(home: std::path::PathBuf) -> Chat {
         submit: core.submit(),
         interactions: core.interactions(),
         mail: core.mail(),
+        operations: core.operations(),
         instance: None,
         attachments: crate::api::image::Attachments::new(),
     });
@@ -1102,6 +1103,7 @@ async fn bash_submit_runs_command_and_ends_turn() {
         submit: core.submit(),
         interactions: core.interactions(),
         mail: core.mail(),
+        operations: core.operations(),
         instance: None,
         attachments: crate::api::image::Attachments::new(),
     });

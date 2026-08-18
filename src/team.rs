@@ -1118,13 +1118,25 @@ pub fn spawn_tree(
     tree: &TeamTree,
     home: &Path,
 ) -> Result<SpawnSummary, TeamError> {
+    // Bringing a team up is accepted work that is not a turn: it takes a while,
+    // it has a shape a frontend can draw, and it ends exactly once (spec
+    // "Operation and interaction"). Validation runs first, so a chart with a bad
+    // reference fails before an operation is opened for it.
     validate_tree(tree, session, home)?;
+    let operation = session
+        .operations
+        .start(crate::app::snapshot::OperationKind::TeamStart)
+        .now();
     let mut summary = SpawnSummary::default();
     // The name a member ends up running under, when the registry had to claim a
     // different one. Rooms are declared in blueprint names, so without this a
     // renamed member would come up outside every room that names it.
     let mut claimed = HashMap::new();
-    for node in tree.nodes() {
+    let total = tree.nodes().len() as u32;
+    for (done, node) in tree.nodes().iter().enumerate() {
+        session
+            .operations
+            .progress(&operation, &node.def.name, done as u32, total);
         let defs = crate::agents::load_agent_defs(home, &node.dir);
         let branch = current_branch(&node.dir);
         // The note remains useful context even though D56 now gives the member that cwd directly.
@@ -1144,6 +1156,21 @@ pub fn spawn_tree(
     for node in tree.nodes() {
         open_rooms(session, &node.def, &claimed, &mut summary);
     }
+    session.operations.finish(
+        &operation,
+        if summary.failed.is_empty() {
+            crate::app::snapshot::OperationStatus::Completed
+        } else {
+            crate::app::snapshot::OperationStatus::Failed
+        },
+        summary
+            .failed
+            .first()
+            .map(|(name, why)| crate::app::snapshot::TurnError {
+                code: crate::error::GENERIC.to_string(),
+                message: format!("{name}: {why}"),
+            }),
+    );
     Ok(summary)
 }
 
@@ -1843,6 +1870,7 @@ mod tests {
             submit: core.submit(),
             interactions: core.interactions(),
             mail: core.mail(),
+            operations: core.operations(),
             instance: None,
             attachments: crate::api::image::Attachments::new(),
         })

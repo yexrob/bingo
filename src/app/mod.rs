@@ -32,6 +32,7 @@ pub mod event;
 pub mod ids;
 pub mod interaction;
 pub mod mail;
+pub mod operation;
 pub mod projection;
 pub mod queue;
 pub mod roomlog;
@@ -220,6 +221,7 @@ pub struct AppCore {
     submit: crate::app::submit::SubmitHandle,
     interactions: crate::app::interaction::InteractionHandle,
     mail: crate::app::mail::MailHandle,
+    operations: crate::app::operation::OperationHandle,
     /// Whether the actor's loop is still running. Weak on purpose: holding it
     /// must not be what keeps a session alive.
     alive: controller::Alive,
@@ -239,6 +241,7 @@ impl AppCore {
             submit: registries.submit,
             interactions: registries.interactions,
             mail: registries.mail,
+            operations: registries.operations,
             alive,
         }
     }
@@ -281,6 +284,11 @@ impl AppCore {
     /// The mail waiting for main, and whether it is time to read it.
     pub fn mail(&self) -> crate::app::mail::MailHandle {
         self.mail.clone()
+    }
+
+    /// The asynchronous work that is not a turn.
+    pub fn operations(&self) -> crate::app::operation::OperationHandle {
+        self.operations.clone()
     }
 
     /// Whether the session actor's loop is still running.

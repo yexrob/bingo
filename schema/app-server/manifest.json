@@ -693,6 +693,14 @@
       }
     },
     {
+      "method": "command/changed",
+      "direction": "serverToClient",
+      "params": {
+        "id": "urn:bingo:app-server:v1:command.changed.params",
+        "file": "notifications/command.changed.params.json"
+      }
+    },
+    {
       "method": "operation/started",
       "direction": "serverToClient",
       "params": {

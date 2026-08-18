@@ -3727,6 +3727,22 @@
       ],
       "type": "object"
     },
+    "NotificationParams_for_CommandChanged": {
+      "description": "One notification's params: the event header, then the body's own fields.",
+      "properties": {
+        "command": {
+          "$ref": "#/definitions/BackgroundCommandResource"
+        },
+        "event": {
+          "$ref": "#/definitions/EventMeta"
+        }
+      },
+      "required": [
+        "command",
+        "event"
+      ],
+      "type": "object"
+    },
     "NotificationParams_for_ConfigChanged": {
       "description": "One notification's params: the event header, then the body's own fields.",
       "properties": {

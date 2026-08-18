@@ -1772,6 +1772,15 @@ fn every_notification() -> Vec<(ServerNotification, Value)> {
             json!({"event": event_meta_json(), "delivery": delivery_resource_json()}),
         ),
         (
+            ServerNotification::CommandChanged(NotificationParams::new(
+                meta(),
+                CommandChanged {
+                    command: background_command(),
+                },
+            )),
+            json!({"event": event_meta_json(), "command": background_command_json()}),
+        ),
+        (
             ServerNotification::OperationStarted(NotificationParams::new(
                 meta(),
                 OperationChanged {
