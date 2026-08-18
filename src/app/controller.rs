@@ -78,6 +78,11 @@ pub(crate) enum Control {
     Turn(crate::app::turn::TurnMsg),
     /// An input queue accepting, absorbing, draining, or losing an entry.
     Queue(crate::app::queue::QueueMsg),
+    /// One submission, read and routed.
+    Submit {
+        request: Box<crate::app::submit::SubmitRequest>,
+        reply: oneshot::Sender<crate::app::submit::Route>,
+    },
     /// Answered once everything queued ahead of it has been applied.
     Settle {
         reply: oneshot::Sender<()>,
@@ -91,6 +96,7 @@ pub(crate) struct Registries {
     pub agents: crate::agents::AgentHandle,
     pub turns: crate::app::turn::TurnHandle,
     pub queue: crate::app::queue::QueueHandle,
+    pub submit: crate::app::submit::SubmitHandle,
 }
 
 /// Start the actor and return the handle everything reaches it by.
@@ -109,6 +115,7 @@ pub(super) fn spawn(setup: SessionSetup) -> (mpsc::UnboundedSender<Control>, Reg
     let (agents, agent_handle) = crate::agents::attach(control.clone());
     let (turns, turn_handle) = crate::app::turn::attach(control.clone());
     let (queue, queue_handle) = crate::app::queue::attach(control.clone());
+    let control_for_submit = control.clone();
     // The actor holds a weak handle to its own inbox: it hands strong clones to
     // the attachments it spawns, and a strong one of its own would keep the
     // queue open forever, so the loop could never end.
@@ -133,6 +140,7 @@ pub(super) fn spawn(setup: SessionSetup) -> (mpsc::UnboundedSender<Control>, Reg
             agents: agent_handle,
             turns: turn_handle,
             queue: queue_handle,
+            submit: crate::app::submit::SubmitHandle::new(control_for_submit),
         },
     )
 }
@@ -197,6 +205,10 @@ struct Controller {
     queue: crate::app::queue::InputQueue,
     /// Which conversations exist and what each one is called on the wire.
     conversations: Conversations,
+    /// A request is being answered: what it publishes waits for its reply.
+    serving: bool,
+    /// What the request in flight published, in the order it published it.
+    deferred: Vec<(Box<AppEventPayload>, Option<OperationId>)>,
     /// What was last said about each instance and each room, so a change can be
     /// told from a repeat. Identifiers are minted once per name and kept for the
     /// epoch: a client that saw `agent_3` twice saw the same instance twice.
@@ -288,6 +300,8 @@ impl Controller {
             turns,
             queue,
             conversations,
+            serving: false,
+            deferred: Vec::new(),
             told: Told::default(),
         }
     }
@@ -329,6 +343,10 @@ impl Controller {
                 Control::Queue(message) => {
                     let changes = self.queue.handle(message, &mut self.mint);
                     self.announce_queue(changes);
+                }
+                Control::Submit { request, reply } => {
+                    let route = self.submit(*request);
+                    let _ = reply.send(route);
                 }
                 Control::Settle { reply } => {
                     let _ = reply.send(());
@@ -378,24 +396,42 @@ impl Controller {
         })
     }
 
+    /// Answer one request, then publish what it caused.
+    ///
+    /// The order is the invariant (spec #3): an accepted request's response is
+    /// written before the first event caused solely by that request. Everything
+    /// the handler publishes is held until the reply frame is out, which is also
+    /// what makes a snapshot cut taken here valid — nothing can be sequenced
+    /// between the snapshot and the frame carrying it.
     fn serve(&mut self, attachment: AttachmentId, request: AppRequest) {
+        self.serving = true;
         let (id, result) = match request {
             AppRequest::Command { id, command } => (id, self.command(command)),
             AppRequest::Query { id, query } => (id, self.query(attachment, query)),
         };
+        self.serving = false;
         self.deliver(attachment, AppFrame::Reply { id, result });
+        for (payload, caused_by) in std::mem::take(&mut self.deferred) {
+            self.publish(payload, caused_by);
+        }
     }
 
     /// Mutations land with B3 (turns and queue), B4 (collaboration), and B5
     /// (actions). The skeleton refuses them by name rather than accepting work
     /// it cannot do.
     fn command(&mut self, command: AppCommand) -> Result<AppReply, AppError> {
+        if let AppCommand::Submit {
+            conversation_id,
+            input,
+        } = command
+        {
+            return self.serve_submit(conversation_id, input);
+        }
         Err(AppError::Unserved(match command {
             AppCommand::StartSession { .. } => "session/start",
             AppCommand::ResumeSession { .. } => "session/resume",
             AppCommand::CloseSession => "session/close",
             AppCommand::DeleteSession { .. } => "session/delete",
-            AppCommand::Submit { .. } => "conversation/submit",
             AppCommand::Execute { .. } => "action/execute",
             AppCommand::Interrupt { .. } => "turn/interrupt",
             AppCommand::RespondInteraction { .. } => "interaction/respond",
@@ -403,6 +439,8 @@ impl Controller {
             AppCommand::ReclaimQueueTail { .. } => "queue/reclaimTail",
             AppCommand::RegisterAsset { .. } => "asset/registerPath",
             AppCommand::Shutdown => "shutdown",
+            // Answered above; the compiler is what keeps this exhaustive.
+            AppCommand::Submit { .. } => "conversation/submit",
         }))
     }
 
@@ -464,6 +502,10 @@ impl Controller {
 
     /// Stamp one event and hand it to every attachment whose cut it is after.
     fn publish(&mut self, payload: Box<AppEventPayload>, caused_by: Option<OperationId>) {
+        if self.serving {
+            self.deferred.push((payload, caused_by));
+            return;
+        }
         self.seq = self.seq.saturating_add(1);
         let event = AppEvent {
             meta: EventMeta {
@@ -725,6 +767,107 @@ impl Controller {
                 }),
             };
             self.publish(Box::new(payload), None);
+        }
+    }
+
+    /// `conversation/submit`, as a client asks for it.
+    ///
+    /// The routing is the same one the terminal front end reaches; what differs
+    /// is who performs the result. A queue entry and a delivery the core does
+    /// itself. A turn, a shell run and a slash command are still run by the
+    /// console (B7) and dispatched by the action registry (B5), so the core says
+    /// so by name rather than answering out of state it does not hold.
+    fn serve_submit(
+        &mut self,
+        conversation_id: ConversationId,
+        input: crate::app::command::Submission,
+    ) -> Result<AppReply, AppError> {
+        use crate::app::command::SubmitDisposition;
+        use crate::app::submit::Route;
+        let Some(conversation) = self.conversations.key(&conversation_id).cloned() else {
+            return Err(AppError::Refused(
+                crate::app_server::protocol::error::ProtocolErrorKind::ConversationNotFound,
+            ));
+        };
+        let route = self.submit(crate::app::submit::SubmitRequest {
+            conversation,
+            input,
+            main_busy: None,
+            carries_attachments: false,
+        });
+        match route {
+            Route::Queued(placement) => Ok(AppReply::Submitted(SubmitDisposition::Queued {
+                queue_id: placement.id,
+                position: placement.position,
+                steer_eligible: placement.steer_eligible,
+            })),
+            Route::Nothing => Err(AppError::Refused(
+                crate::app_server::protocol::error::ProtocolErrorKind::BadArgument,
+            )),
+            Route::Deliver { .. } => Err(AppError::Unserved("conversation/submit delivery")),
+            Route::Turn { .. } | Route::Shell { .. } => {
+                Err(AppError::Unserved("conversation/submit run"))
+            }
+            Route::Command { .. } => Err(AppError::Unserved("action/execute")),
+        }
+    }
+
+    /// The one submission path (spec "One submission path").
+    ///
+    /// Reading the line and routing it both happen here, so the terminal front
+    /// end and a GUI cannot disagree about what a leading slash, shell mode or an
+    /// `@name` means. What the core can perform itself it performs — a queue
+    /// entry is on the queue by the time this returns; a turn, a shell run and a
+    /// slash command name work the caller still runs (B5 and B7 take those).
+    fn submit(&mut self, request: crate::app::submit::SubmitRequest) -> crate::app::submit::Route {
+        use crate::app::submit::{Decision, Route, compose, route};
+        let origin = crate::app::submit::Origin {
+            page: request.conversation.clone(),
+            main_busy: request
+                .main_busy
+                .unwrap_or_else(|| self.turns.is_busy(&ConvKey::Main)),
+        };
+        let composed = compose(&request.input, &self.addressable());
+        match route(composed, &origin) {
+            Decision::Nothing => Route::Nothing,
+            Decision::Turn { text } => Route::Turn { text },
+            Decision::Shell { command } => Route::Shell { command },
+            Decision::Command { line, on } => Route::Command { line, on },
+            Decision::Deliver {
+                target,
+                text,
+                addressed,
+            } => Route::Deliver {
+                target,
+                text,
+                addressed,
+            },
+            Decision::Queue(entry) => {
+                let mut entry = *entry;
+                entry.carries_attachments = request.carries_attachments;
+                let (placement, changes) = self.queue.enqueue(entry, &mut self.mint);
+                self.announce_queue(changes);
+                Route::Queued(placement)
+            }
+        }
+    }
+
+    /// The names a sigil can resolve against, taken from the registries rather
+    /// than from an accounting snapshot.
+    fn addressable(&self) -> crate::app::submit::Addressable {
+        crate::app::submit::Addressable {
+            agents: self
+                .agents
+                .facts()
+                .into_iter()
+                .map(|fact| fact.name)
+                .collect(),
+            rooms: self
+                .channels
+                .facts()
+                .into_iter()
+                .map(|fact| fact.name)
+                .collect(),
         }
     }
 

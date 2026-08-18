@@ -395,6 +395,10 @@ impl TurnRegistry {
         changes
     }
 
+    pub(crate) fn is_busy(&self, conversation: &ConvKey) -> bool {
+        self.active.contains_key(conversation)
+    }
+
     pub(crate) fn active_turns(&self) -> Vec<Turn> {
         self.active
             .values()

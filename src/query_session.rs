@@ -107,6 +107,9 @@ pub struct Session {
     pub turns: crate::app::turn::TurnHandle,
     /// The input queue, and the barrier/pull-back race it arbitrates (B3).
     pub queue: crate::app::queue::QueueHandle,
+    /// The one submission path: what a composer line is and where it goes are
+    /// the core's to decide, not a front end's (B3).
+    pub submit: crate::app::submit::SubmitHandle,
     /// This session's instance name (sub-agents = Some(registry name); main session None,
     /// channel member name main).
     pub instance: Option<String>,

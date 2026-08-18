@@ -50,6 +50,9 @@ pub enum QueuedKind {
     Prose,
     /// A slash command. It must never reach the model as literal text.
     Command,
+    /// Shell mode's line. It runs the console's shell rather than reaching the
+    /// model, so it cannot travel to a running turn either.
+    Shell,
 }
 
 /// One queued input.
@@ -80,6 +83,10 @@ impl QueuedInput {
     fn steerable(&self) -> bool {
         self.kind == QueuedKind::Prose && !self.carries_attachments
     }
+
+    pub fn is_shell(&self) -> bool {
+        self.kind == QueuedKind::Shell
+    }
 }
 
 /// One queued plain message offered to the running turn.
@@ -100,7 +107,7 @@ impl SteerItem {
 }
 
 /// What to put on a conversation's queue.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Enqueue {
     /// Whose queue this joins. Today that is always the console's: a message to
     /// somebody else waits in their inbox, which is the domain's queue and not
@@ -352,6 +359,30 @@ impl InputQueue {
 
     fn queue(&mut self, conversation: &ConvKey) -> &mut ConversationQueue {
         self.conversations.entry(conversation.clone()).or_default()
+    }
+
+    /// Put one entry on a queue. The submission path calls this directly, because
+    /// it has already decided that the line waits.
+    pub(crate) fn enqueue(
+        &mut self,
+        request: Enqueue,
+        mint: &mut IdMint,
+    ) -> (Placement, Vec<QueueChange>) {
+        let (reply, mut answer) = oneshot::channel();
+        let changes = self.handle(
+            QueueMsg::Enqueue {
+                request: Box::new(request),
+                reply,
+            },
+            mint,
+        );
+        let placement = answer.try_recv().unwrap_or_else(|_| Placement {
+            id: QueueId::new(""),
+            position: 0,
+            steer_eligible: false,
+            revision: 0,
+        });
+        (placement, changes)
     }
 
     fn apply(&mut self, message: QueueMsg, mint: &mut IdMint) -> Vec<QueueChange> {

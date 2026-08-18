@@ -102,9 +102,7 @@ pub fn is_hidden_tool(name: &str) -> bool {
     )
 }
 
-pub use crate::tui::slash::{
-    COMMANDS as SLASH_COMMANDS, INSTANT_COMMANDS as INSTANT_SLASH_COMMANDS, SlashSuggestion,
-};
+pub use crate::tui::slash::{COMMANDS as SLASH_COMMANDS, SlashSuggestion};
 
 /// Footer model badge: `{model} · think {level}` (off = no level shown, keeps it concise).
 pub fn model_footer_label(model: &str, thinking: Option<&str>) -> String {
@@ -2421,129 +2419,148 @@ impl Chat {
     /// last step alone — prose goes to whoever the screen is pointed at, which
     /// is the one difference main has, that it talks to the user by default.
     pub fn submit(&mut self) {
-        let text = std::mem::take(&mut self.input);
+        let raw = std::mem::take(&mut self.input);
         self.cursor = 0;
         self.undo.clear();
         self.last_edit = None;
-        if text.trim().is_empty() {
-            self.set_input(text);
+        if raw.trim().is_empty() {
+            self.set_input(raw);
             return;
         }
-        // A line that opens with a teammate's or a room's name is a **direct
-        // send** (D103, CC's `parseDirectMemberMessage`): the rest of it goes
-        // to that inbox or that room under the user's own name and the model
-        // never sees it. It sits above the busy branch because `busy` is
-        // *main's* state — a message to a subagent neither queues behind a
-        // running turn nor steers it — and it sits below the slash and bash
-        // checks because `/` and `!` decide what a line *is* before its first
-        // word decides where it goes.
-        if !self.bash_mode
-            && !text.starts_with('/')
-            && let Some((target, body)) = self.parse_direct_send(&text)
-        {
-            let body = self.expand_pastes(&body);
-            let body = self.expand_image_paths(&body);
-            // The whole line goes into history, envelope included: ↑ brings
-            // back what was typed, not what was delivered.
-            self.record_history(&text);
-            self.direct_send(target, body);
-            self.update_slash_suggestions();
-            return;
-        }
-        // Turn in progress: queue it, submitted one by one after TurnEnd (CC message queueing).
-        //
-        // **The console's turn, wherever the screen is.** A command changes the
-        // console's session and a prompt enters the console's transcript, so
-        // both wait behind the console's own turn even while a page is up.
-        // Prose to somebody else never comes through here: it waits in *their*
-        // inbox, which is the domain's queue and not this one.
-        if self.waits_for_main(&text) && self.main_conv().busy {
-            let text = self.expand_pastes(&text);
-            let text = self.expand_image_paths(&text);
-            // Instant commands bypass the queue (CC semantics: settings knobs apply
-            // before the next turn; read-only status commands run mid-turn). This is a
-            // side-channel dispatch — it must not reset `busy`. run_slash's contract is
-            // the line WITHOUT the leading slash, so strip it here.
-            if let Some(rest) = text.strip_prefix('/') {
-                let name = rest.split_whitespace().next().unwrap_or("");
-                if INSTANT_SLASH_COMMANDS.contains(&name) {
-                    self.run_slash(rest);
+        // Terminal-only shorthand resolves before the core sees the line: a paste
+        // placeholder and an image path are this surface's own, and the core is
+        // handed text and assets (spec "One submission path").
+        let text = self.expand_pastes(&raw);
+        let text = self.expand_image_paths(&text);
+        let busy = self.main_conv().busy;
+        let route = self.route_submission(&text, busy);
+        match route {
+            crate::app::submit::Route::Nothing => self.set_input(raw),
+            // The whole line goes into history, envelope included: ↑ brings back
+            // what was typed, not what was delivered.
+            crate::app::submit::Route::Deliver {
+                target,
+                text,
+                addressed: true,
+            } => {
+                self.record_history(&raw);
+                self.direct_send(target, text);
+                self.update_slash_suggestions();
+            }
+            // The page's own prose. A refusal is news and takes the warning tier;
+            // there is no receipt, because what a receipt would announce is drawn
+            // on this very screen the moment the frame redraws (D105).
+            crate::app::submit::Route::Deliver { target, text, .. } => {
+                self.record_history(&text);
+                if let crate::tui::buffer::Delivery::Rejected(why) =
+                    self.deliver_direct(&target, text)
+                {
+                    self.push_warning(why);
+                }
+                self.update_slash_suggestions();
+                self.dirty = true;
+            }
+            crate::app::submit::Route::Queued(_) => {
+                // The queue rows are main's page. Somewhere else, a line that
+                // silently joined a queue nobody can see is a keystroke that did
+                // nothing, so it says so on the tier the page does show.
+                if !self.active.is_main() {
+                    self.push_slash_info("queued behind main's turn".to_string());
+                }
+                self.update_slash_suggestions();
+                self.dirty = true;
+            }
+            crate::app::submit::Route::Shell { command } => {
+                self.record_history(&text);
+                self.bash_history.push(command.clone());
+                self.start_bash_turn(command);
+            }
+            crate::app::submit::Route::Command { line, .. } => {
+                // A command the core let through while a turn runs is a
+                // side-channel dispatch: it must not reset `busy`, it leaves no
+                // history entry, and the dropdown has nothing to do with it.
+                if busy {
+                    self.run_slash(&line);
                     self.update_slash_suggestions();
                     return;
                 }
-            }
-            let on = self.active.clone();
-            self.enqueue(text, on);
-            // The queue rows are main's page. Somewhere else, a line that
-            // silently joined a queue nobody can see is a keystroke that did
-            // nothing, so it says so on the tier the page does show.
-            if !self.active.is_main() {
-                self.push_slash_info("queued behind main's turn".to_string());
-            }
-            self.update_slash_suggestions();
-            return;
-        }
-        let text = self.expand_pastes(&text);
-        let text = self.expand_image_paths(&text);
-        self.record_history(&text);
-        if self.bash_mode {
-            let command = text.trim().to_string();
-            self.bash_history.push(command.clone());
-            self.start_bash_turn(command);
-            return;
-        }
-        if let Some(cmd) = text.strip_prefix('/') {
-            // Enter with a partial prefix and dropdown suggestions: apply the selection and run it
-            // (handleEnter: with suggestions present, Enter = complete + execute).
-            // Only in the command-NAME phase: an argument dropdown lists values,
-            // and running the selected one as a command would dispatch
-            // `/deepseek-chat` when the user meant `/model deepseek-chat`.
-            if self.slash_arg_start.is_none()
-                && !self.slash_suggestions.is_empty()
-                && !self
-                    .slash_suggestions
-                    .iter()
-                    .any(|s| s.name == cmd.trim_end())
-            {
-                let selected = self.slash_suggestions.get(self.slash_selected).cloned();
-                self.clear_slash_suggestions();
-                if let Some(s) = selected
-                    && self.run_slash(&s.name)
-                {
+                self.record_history(&text);
+                if self.run_completed_slash(&line) {
                     return;
                 }
+                // An unrecognized command falls through as prose, exactly as it
+                // did when this was one function.
+                self.last_prompt = text.clone();
+                self.start_turn(text, true);
             }
-            if self.run_slash(cmd) {
-                return;
+            crate::app::submit::Route::Turn { text } => {
+                self.record_history(&text);
+                self.last_prompt = text.clone();
+                self.start_turn(text, true);
             }
         }
-        // The one step that reads which page this is: prose belongs to the
-        // conversation on screen. Main's is a turn of its own; anybody else's
-        // is a delivery, and the domain takes it from there — queue behind a
-        // running receiver, wake an idle one, revive a stopped one, announce a
-        // join before speaking in a room.
-        if let Some(target) = self.page_addressee() {
-            // A refusal is news and takes the warning tier. There is no
-            // receipt, because what a receipt would announce is drawn on this
-            // very screen the moment the frame redraws.
-            if let crate::tui::buffer::Delivery::Rejected(why) = self.deliver_direct(&target, text)
-            {
-                self.push_warning(why);
-            }
-            self.update_slash_suggestions();
-            self.dirty = true;
-            return;
-        }
-        self.last_prompt = text.clone();
-        self.start_turn(text, true);
     }
 
-    /// Put a line on the console's queue.
+    /// Ask the core what this line is and where it goes.
     ///
-    /// The core owns the queue and decides eligibility: a command or an attachment
-    /// cannot travel to a running turn, and neither can anything queued behind one
-    /// (D83). `on` is the page it was typed on and is immutable from here (D135a).
-    /// `.now()` is the console's synchronous seam; B7 removes it.
+    /// `.now()` is the console's synchronous seam; B7 replaces it with the
+    /// `conversation/submit` request an attachment makes.
+    pub(crate) fn route_submission(&mut self, text: &str, busy: bool) -> crate::app::submit::Route {
+        let mode = if self.bash_mode {
+            crate::app::command::ComposerMode::Shell
+        } else {
+            crate::app::command::ComposerMode::Normal
+        };
+        let carries_attachments = !self.resolve_images(text).is_empty();
+        self.session
+            .submit
+            .submit(crate::app::submit::SubmitRequest {
+                conversation: self.active.clone(),
+                input: crate::app::command::Submission::Composer {
+                    mode,
+                    text: text.to_string(),
+                    attachments: Vec::new(),
+                },
+                // The console's own flag while the console still drives the run
+                // loop; B7 lets the core answer this from its turn registry.
+                main_busy: Some(busy),
+                carries_attachments,
+            })
+            .now()
+    }
+
+    /// Run a slash command, letting the dropdown finish a partial name first.
+    ///
+    /// Enter with a partial prefix and suggestions showing applies the selection
+    /// and runs it (handleEnter: with suggestions present, Enter = complete +
+    /// execute). Only in the command-NAME phase: an argument dropdown lists
+    /// values, and running the selected one as a command would dispatch
+    /// `/deepseek-chat` when the user meant `/model deepseek-chat`.
+    fn run_completed_slash(&mut self, line: &str) -> bool {
+        if self.slash_arg_start.is_none()
+            && !self.slash_suggestions.is_empty()
+            && !self
+                .slash_suggestions
+                .iter()
+                .any(|s| s.name == line.trim_end())
+        {
+            let selected = self.slash_suggestions.get(self.slash_selected).cloned();
+            self.clear_slash_suggestions();
+            if let Some(s) = selected
+                && self.run_slash(&s.name)
+            {
+                return true;
+            }
+        }
+        self.run_slash(line)
+    }
+
+    /// Put a line straight on the console's queue, for a test that wants one
+    /// there without a turn to queue it behind.
+    ///
+    /// Production reaches the queue through [`Chat::submit`], where the core
+    /// decides that the line waits at all.
+    #[cfg(test)]
     pub(crate) fn enqueue(&mut self, text: String, on: crate::ui::ConvKey) {
         let kind = if text.starts_with('/') {
             crate::app::queue::QueuedKind::Command
@@ -2563,30 +2580,6 @@ impl Chat {
             })
             .now();
         self.dirty = true;
-    }
-
-    /// Whether a submitted line waits behind **main's** turn: everything the
-    /// console owns — its commands, its shell, and prose addressed to it.
-    ///
-    /// Prose on somebody else's page is the exception, and it is the only one:
-    /// its queue is that instance's inbox.
-    fn waits_for_main(&self, text: &str) -> bool {
-        self.bash_mode || text.starts_with('/') || self.active.is_main()
-    }
-
-    /// Who the composer addresses when the screen is not main's — the page's
-    /// own subject, spelled exactly as the `@name`/`#room` grammar spells it,
-    /// because it is the same delivery.
-    fn page_addressee(&self) -> Option<crate::tui::bufferview::DirectTarget> {
-        match &self.active {
-            crate::ui::ConvKey::Main => None,
-            crate::ui::ConvKey::Agent(name) => {
-                Some(crate::tui::bufferview::DirectTarget::Agent(name.clone()))
-            }
-            crate::ui::ConvKey::Room(name) => {
-                Some(crate::tui::bufferview::DirectTarget::Room(name.clone()))
-            }
-        }
     }
 
     /// Large pastes collapse into a placeholder: the input keeps `[Pasted text #N +M lines]`,

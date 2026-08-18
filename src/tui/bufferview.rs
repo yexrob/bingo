@@ -79,28 +79,10 @@ pub(crate) fn agent_notice_line(label: &str) -> String {
     }
 }
 
-/// Who a composer line addresses when it opens with a sigil (D103).
-///
-/// CC's `parseDirectMemberMessage` (2.1.88 `utils/directMemberMessage.ts`) is
-/// the shape: a bare `@name`, whitespace, and a non-empty rest. bingo adds the
-/// room half, because a room is the one thing it has that CC does not.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DirectTarget {
-    /// An instance's inbox, written to as the user.
-    Agent(String),
-    /// A room's log, posted to as the user (joining first if need be).
-    Room(String),
-}
-
-impl DirectTarget {
-    /// The address as it is written: the sigil is part of the name.
-    pub(crate) fn label(&self) -> String {
-        match self {
-            Self::Agent(name) => format!("@{name}"),
-            Self::Room(name) => format!("#{name}"),
-        }
-    }
-}
+/// Who a composer line addresses when it opens with a sigil (D103). The grammar
+/// and its resolution are the core's since B3; this is the name the console
+/// reads them under.
+pub use crate::app::submit::DirectTarget;
 
 impl Chat {
     /// The rows a line about somebody else's life takes in the flow (D106) —
@@ -121,62 +103,6 @@ impl Chat {
             theme.dim(),
         );
         Some(vec![Row::new(line)])
-    }
-
-    /// A composer line that is a direct send, or `None` when it is a prompt.
-    ///
-    /// `@scout fix the lexer too` reaches scout without the model ever seeing
-    /// it; `#build tests are green` reaches the room the same way. Everything
-    /// else — including `@scout` on its own, which addresses somebody and says
-    /// nothing — is an ordinary turn to main.
-    ///
-    /// **An unresolved name is prose.** `@utils explain this code` is a
-    /// question about a directory, not a failed delivery, and CC settles it the
-    /// same way: `sendDirectMemberMessage` answers `unknown_recipient` and the
-    /// caller falls through to a normal prompt rather than raising an error.
-    /// The typeahead is where discovery belongs; the parser refuses to guess.
-    ///
-    /// **The whitespace may be a newline**, matching CC's `/^@([\w-]+)\s+(.+)$/s`
-    /// — a pasted block under a name is still a message to that name.
-    pub(crate) fn parse_direct_send(&self, text: &str) -> Option<(DirectTarget, String)> {
-        let sigil = text.chars().next()?;
-        if sigil != '@' && sigil != '#' {
-            return None;
-        }
-        let cut = text.find(char::is_whitespace)?;
-        let name = text.get(sigil.len_utf8()..cut)?;
-        if name.is_empty() {
-            return None;
-        }
-        let body = text[cut..].trim();
-        if body.is_empty() {
-            return None;
-        }
-        // Resolved against the domain registries rather than against the
-        // accounting store: the store is refreshed on a poll, and an agent
-        // spawned two frames ago is already addressable.
-        let known = match sigil {
-            '@' => self
-                .session
-                .agents
-                .list()
-                .iter()
-                .any(|status| status.name == name),
-            _ => self
-                .session
-                .channels
-                .list()
-                .iter()
-                .any(|status| status.name == name),
-        };
-        if !known {
-            return None;
-        }
-        let target = match sigil {
-            '@' => DirectTarget::Agent(name.to_string()),
-            _ => DirectTarget::Room(name.to_string()),
-        };
-        Some((target, body.to_string()))
     }
 
     /// Perform a direct send. The delivery and nothing else.
@@ -563,32 +489,43 @@ mod tests {
             .expect("channel created");
         chat.refresh_conversations();
 
-        assert_eq!(chat.parse_direct_send("@scout"), None);
-        assert_eq!(chat.parse_direct_send("@scout   "), None);
+        // The grammar is the core's, and these are the names it resolves
+        // against: one live instance and one live room.
+        let addressed = |chat: &mut Chat, line: &str| match chat.route_submission(line, false) {
+            crate::app::submit::Route::Deliver {
+                target,
+                text,
+                addressed: true,
+            } => Some((target, text)),
+            _ => None,
+        };
+
+        assert_eq!(addressed(&mut chat, "@scout"), None);
+        assert_eq!(addressed(&mut chat, "@scout   "), None);
         assert_eq!(
-            chat.parse_direct_send("scout hello"),
+            addressed(&mut chat, "scout hello"),
             None,
             "the sigil is required"
         );
         assert_eq!(
-            chat.parse_direct_send("@Scout hello"),
+            addressed(&mut chat, "@Scout hello"),
             None,
             "and the name resolves exactly, not case-insensitively"
         );
         assert_eq!(
-            chat.parse_direct_send("@main hello"),
+            addressed(&mut chat, "@main hello"),
             None,
             "main is who you are already talking to, so it is never an envelope"
         );
         assert_eq!(
-            chat.parse_direct_send("@scout hello"),
+            addressed(&mut chat, "@scout hello"),
             Some((
                 DirectTarget::Agent("scout".to_string()),
                 "hello".to_string()
             ))
         );
         assert_eq!(
-            chat.parse_direct_send("@scout\nlook at this\nand this"),
+            addressed(&mut chat, "@scout\nlook at this\nand this"),
             Some((
                 DirectTarget::Agent("scout".to_string()),
                 "look at this\nand this".to_string()
@@ -596,14 +533,14 @@ mod tests {
             "a newline is whitespace, as in CC's own regex"
         );
         assert_eq!(
-            chat.parse_direct_send("#build ship it"),
+            addressed(&mut chat, "#build ship it"),
             Some((
                 DirectTarget::Room("build".to_string()),
                 "ship it".to_string()
             ))
         );
         assert_eq!(
-            chat.parse_direct_send("#nowhere ship it"),
+            addressed(&mut chat, "#nowhere ship it"),
             None,
             "an unknown room is prose too, symmetrically"
         );

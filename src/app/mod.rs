@@ -29,6 +29,7 @@ pub mod event;
 pub mod ids;
 pub mod queue;
 pub mod snapshot;
+pub mod submit;
 pub mod turn;
 
 use std::path::PathBuf;
@@ -117,6 +118,8 @@ pub enum AppReply {
     Session(Box<SessionSnapshot>),
     /// A conversation cut, valid through its `event_cursor`.
     Conversation(Box<ConversationSnapshot>),
+    /// What the core did with a submission. The caller never chose it.
+    Submitted(crate::app::command::SubmitDisposition),
 }
 
 /// Why the core did not do it.
@@ -205,6 +208,7 @@ pub struct AppCore {
     agents: crate::agents::AgentHandle,
     turns: crate::app::turn::TurnHandle,
     queue: crate::app::queue::QueueHandle,
+    submit: crate::app::submit::SubmitHandle,
 }
 
 impl AppCore {
@@ -218,6 +222,7 @@ impl AppCore {
             agents: registries.agents,
             turns: registries.turns,
             queue: registries.queue,
+            submit: registries.submit,
         }
     }
 
@@ -244,6 +249,11 @@ impl AppCore {
     /// The input queues.
     pub fn queue(&self) -> crate::app::queue::QueueHandle {
         self.queue.clone()
+    }
+
+    /// The one submission path.
+    pub fn submit(&self) -> crate::app::submit::SubmitHandle {
+        self.submit.clone()
     }
 
     /// Attach a frontend. The attachment sees no event until it takes a

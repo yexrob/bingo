@@ -170,6 +170,7 @@ mod tests {
             channels: core.channels(),
             turns: core.turns(),
             queue: core.queue(),
+            submit: core.submit(),
             instance: None,
             attachments: crate::api::image::Attachments::new(),
         })

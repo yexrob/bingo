@@ -66,12 +66,6 @@ pub const COMMANDS: &[SlashCommand] = &[
     ("exit", "", "exit the session"),
 ];
 
-/// Slash commands that execute immediately while a model turn is active.
-pub const INSTANT_COMMANDS: &[&str] = &[
-    "think", "model", "provider", "theme", "images", "status", "context", "tasks", "help",
-    "skills", "config", "gc",
-];
-
 /// Slash dropdown suggestion item (`/name`, hint, and description).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SlashSuggestion {

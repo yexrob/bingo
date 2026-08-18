@@ -1244,6 +1244,7 @@ pub(crate) fn build_sub_session(
         channels: parent.channels.clone(),
         turns: parent.turns.clone(),
         queue: parent.queue.clone(),
+        submit: parent.submit.clone(),
         instance: Some(instance.to_string()),
         attachments: parent.attachments.clone(),
     }))
