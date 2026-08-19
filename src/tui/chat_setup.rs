@@ -28,9 +28,9 @@ pub(super) enum McpRequest {
 impl super::Chat {
     pub(super) fn slash_status(&mut self) {
         let session = self.session.clone();
-        let model = session.runtime.model.borrow().clone();
-        let provider = session.runtime.provider.borrow().clone();
-        let thinking = session.runtime.thinking.borrow().clone();
+        let model = self.model();
+        let provider = self.provider();
+        let thinking = self.thinking();
         let thinking_shown = thinking.unwrap_or_else(|| "off".to_string());
         let transcript = session.runtime.transcript.borrow().clone();
         let transcript_name = transcript
@@ -122,8 +122,8 @@ impl super::Chat {
             lines.push(entry);
         }
         // Runtime identity: what this session is actually talking to.
-        let provider = self.session.runtime.provider.borrow().clone();
-        let model = self.session.runtime.model.borrow().clone();
+        let provider = self.provider();
+        let model = self.model();
         let (_, url) = self.session.client.current_endpoint();
         lines.push(format!(
             "current session: {provider} · {model} · {url}{}",
@@ -156,7 +156,7 @@ impl super::Chat {
     }
 
     pub(super) fn slash_context(&mut self) {
-        let model = self.session.runtime.model.borrow().clone();
+        let model = self.model();
         let models = self.session.client.models();
         self.slash_stats_async(move |_msg_count, tokens| {
             let window = crate::budget::context_window_for(&models, &model).max(1);

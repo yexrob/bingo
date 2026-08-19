@@ -182,8 +182,8 @@ fn footer_row(chat: &Chat, width: usize) -> Row {
     }
     left.push((hints, theme.text_secondary));
 
-    let model_name = chat.session.runtime.model.borrow().clone();
-    let thinking = chat.session.runtime.thinking.borrow().clone();
+    let model_name = chat.model();
+    let thinking = chat.thinking();
     let (model, model_color) = if let Some(menu) = &chat.think_menu {
         let level = crate::tui::chat::think_levels()[menu
             .selected
@@ -196,7 +196,7 @@ fn footer_row(chat: &Chat, width: usize) -> Row {
             theme.text_secondary,
         )
     };
-    let provider = chat.session.runtime.provider.borrow().clone();
+    let provider = chat.provider();
     let model = if provider == "default" {
         model
     } else {
@@ -1428,11 +1428,7 @@ mod tests {
     #[test]
     fn footer_previews_browsed_think_level() {
         let mut chat = chat_at(80, 24);
-        let _ = chat
-            .session
-            .runtime
-            .thinking_tx
-            .send(Some("high".to_string()));
+        crate::tui::test_util::set_thinking(&mut chat, Some("high"));
         let text = row_text(&footer_row(&chat, 80));
         assert!(text.contains("test-model · think high"), "{text}");
         assert!(

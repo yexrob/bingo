@@ -576,7 +576,7 @@ fn enter_in_the_argument_phase_runs_the_typed_command() {
     assert!(!chat.slash_suggestions.is_empty(), "the dropdown is open");
     chat.submit();
     assert_eq!(
-        chat.session.runtime.thinking.borrow().as_deref(),
+        chat.thinking().as_deref(),
         Some("high"),
         "the typed command ran"
     );

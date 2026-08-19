@@ -836,7 +836,7 @@ impl Chat {
     /// picker's fourth tier is a network fetch, which a dropdown refreshed on
     /// every keystroke must not do.
     fn model_candidates(&self) -> Vec<ArgCandidate> {
-        let provider = self.session.runtime.provider.borrow().clone();
+        let provider = self.provider();
         if let Some(declared) = self.session.client.declared_models(&provider) {
             return declared
                 .iter()

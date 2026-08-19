@@ -267,8 +267,12 @@ impl Default for SessionSetup {
             title: String::new(),
             cwd: PathBuf::new(),
             locator: SessionLocator::Latest,
-            provider: String::new(),
-            model: String::new(),
+            // A session with nothing configured still has a provider and a
+            // model: the console and the transport both resolve these before
+            // starting one, and an empty string is not a selection anything can
+            // read (D154).
+            provider: crate::app::catalog::DEFAULT_PROVIDER.to_string(),
+            model: crate::api::types::DEFAULT_MODEL.to_string(),
             thinking: ThinkingLevel::Off,
             permission_mode: PermissionMode::Default,
             theme: ThemeChoice::Auto,

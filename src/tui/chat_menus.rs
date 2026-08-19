@@ -28,8 +28,8 @@ impl super::Chat {
         match session.client.set_provider(&name) {
             Ok(()) => {
                 let (_, url) = session.client.current_endpoint();
-                let prev_provider = session.runtime.provider.borrow().clone();
-                let prev_model = session.runtime.model.borrow().clone();
+                let prev_provider = session.core.config().borrow().provider.clone();
+                let prev_model = session.core.config().borrow().model.clone();
                 if prev_provider != name {
                     self.provider_models
                         .insert(prev_provider, prev_model.clone());
@@ -37,7 +37,6 @@ impl super::Chat {
                 self.apply_to_core(crate::app::command::Action::ProviderSelect {
                     provider: name.clone(),
                 });
-                let _ = session.runtime.provider_tx.send(name.clone());
                 let resolved = self
                     .provider_models
                     .get(&name)
@@ -48,7 +47,6 @@ impl super::Chat {
                         self.apply_to_core(crate::app::command::Action::ModelSelect {
                             model: model.clone(),
                         });
-                        let _ = session.runtime.model_tx.send(model.clone());
                         format!(" · model {model}")
                     }
                     Some(_) => String::new(),
@@ -56,7 +54,7 @@ impl super::Chat {
                         " · ⚠ model {prev_model} may not be available on this endpoint (pick with /model)"
                     ),
                 };
-                let model_now = session.runtime.model.borrow().clone();
+                let model_now = session.core.config().borrow().model.clone();
                 let used = self.main_conv().context_usage.used;
                 self.main_conv().context_usage = crate::context_usage::ContextUsage::for_model(
                     used,
@@ -158,7 +156,7 @@ impl super::Chat {
     /// Open the `/provider` selector: default first (the top-level endpoint), then named providers;
     /// ● marks the current provider, other menus close exclusively.
     pub(crate) fn open_provider_menu(&mut self) {
-        let current = self.session.runtime.provider.borrow().clone();
+        let current = self.provider();
         // Order shares a source with /model's level one (provider_order): the number jump means the same in both places.
         let names = self.provider_order();
         let mut options = Vec::with_capacity(names.len());
@@ -391,11 +389,10 @@ impl super::Chat {
                 _ => crate::app::snapshot::ThinkingLevel::Off,
             },
         });
-        let _ = self.session.runtime.thinking_tx.send(level.clone());
         let saved = level.as_deref().unwrap_or("off");
         // The wire gate (query.rs) skips thinking for models that reject it —
         // say so here, or the footer shows a level that never takes effect.
-        let model = self.session.runtime.model.borrow().clone();
+        let model = self.model();
         let ignored = if level.is_some() && !self.session.client.models().supports_thinking(&model)
         {
             format!(" (⚠ {model} does not support thinking; the level will be ignored)")
@@ -419,7 +416,7 @@ impl super::Chat {
 
     /// Enters the `/think` level selector: preselects the current level (off when unset).
     pub(crate) fn open_think_menu(&mut self) {
-        let current = self.session.runtime.thinking.borrow().clone();
+        let current = self.thinking();
         let current = current.as_deref().unwrap_or("off");
         let levels = crate::tui::chat::think_levels();
         let current = levels

@@ -88,15 +88,16 @@ pub fn attach_test_engine(session: &Arc<Session>) {
     // the core is told what it was built with. Since D154 the mode a run obeys
     // is the core's, and a session whose two halves disagreed would be a test
     // fixture no terminal could produce.
-    let _ = session
-        .core
-        .execute(
-            crate::ui::ConvKey::Main,
-            crate::app::command::Action::PermissionModeSet {
-                mode: crate::tui::chat::app_permission_mode(session.permission_mode),
-            },
-        )
-        .now();
+    for action in [
+        crate::app::command::Action::PermissionModeSet {
+            mode: crate::tui::selection::app_permission_mode(session.permission_mode),
+        },
+        crate::app::command::Action::ModelSelect {
+            model: session.runtime.model.borrow().clone(),
+        },
+    ] {
+        let _ = session.core.execute(crate::ui::ConvKey::Main, action).now();
+    }
     match crate::engine::runner::SessionEngine::new(session.clone()) {
         Some(engine) => session.core.attach_engine(engine),
         None => session
@@ -161,15 +162,40 @@ pub fn settled(chat: &mut Chat) {
 /// key press goes through: the core holds it, and the console reads it back
 /// (D154).
 pub fn set_permission_mode(chat: &mut Chat, mode: crate::permission::PermissionMode) {
+    apply(
+        chat,
+        crate::app::command::Action::PermissionModeSet {
+            mode: crate::tui::selection::app_permission_mode(mode),
+        },
+    );
+}
+
+/// Put the session's model where a test wants it, through the door a slash line
+/// goes through: the core holds the selection, and the console reads it back
+/// (D154).
+pub fn set_model(chat: &mut Chat, model: &str) {
+    apply(
+        chat,
+        crate::app::command::Action::ModelSelect {
+            model: model.to_string(),
+        },
+    );
+}
+
+/// The same for the thinking level. `None` is `off`.
+pub fn set_thinking(chat: &mut Chat, level: Option<&str>) {
+    let level = crate::app::snapshot::ThinkingLevel::ALL
+        .into_iter()
+        .find(|held| Some(held.as_str()) == level)
+        .unwrap_or(crate::app::snapshot::ThinkingLevel::Off);
+    apply(chat, crate::app::command::Action::ThinkingSelect { level });
+}
+
+fn apply(chat: &mut Chat, action: crate::app::command::Action) {
     let _ = chat
         .session
         .core
-        .execute(
-            crate::ui::ConvKey::Main,
-            crate::app::command::Action::PermissionModeSet {
-                mode: crate::tui::chat::app_permission_mode(mode),
-            },
-        )
+        .execute(crate::ui::ConvKey::Main, action)
         .now();
     settled(chat);
 }

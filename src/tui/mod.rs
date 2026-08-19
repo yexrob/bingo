@@ -63,6 +63,7 @@ pub mod motion;
 pub mod notify;
 pub mod picker;
 pub(crate) mod roster;
+pub(crate) mod selection;
 pub mod slash;
 pub mod statics;
 pub mod store;

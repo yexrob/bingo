@@ -2420,7 +2420,7 @@ fn busy_dispatch_runs_instant_and_queues_the_rest() {
     chat.set_input("/think xhigh");
     chat.submit();
     assert_eq!(
-        chat.session.runtime.thinking.borrow().as_deref(),
+        chat.thinking().as_deref(),
         Some("xhigh"),
         "whitelisted commands apply immediately while busy"
     );
@@ -2453,7 +2453,7 @@ fn busy_dispatch_runs_instant_and_queues_the_rest() {
 
     chat.set_input("/model deepseek-v4");
     chat.submit();
-    assert_eq!(*chat.session.runtime.model.borrow(), "test-model");
+    assert_eq!(chat.model(), "test-model");
     assert!(
         chat.slash_error_lines
             .join("\n")
@@ -2996,20 +2996,12 @@ fn reverse_search_walks_history() {
 #[test]
 fn alt_t_toggles_thinking() {
     let mut chat = chat_with_history("think");
-    let _ = chat
-        .session
-        .runtime
-        .thinking_tx
-        .send(Some("high".to_string()));
+    crate::tui::test_util::set_thinking(&mut chat, Some("high"));
+    alt(&mut chat, 't');
+    assert_eq!(chat.thinking(), None, "thinking turned off");
     alt(&mut chat, 't');
     assert_eq!(
-        *chat.session.runtime.thinking.borrow(),
-        None,
-        "thinking turned off"
-    );
-    alt(&mut chat, 't');
-    assert_eq!(
-        chat.session.runtime.thinking.borrow().as_deref(),
+        chat.thinking().as_deref(),
         Some("high"),
         "restores the last level"
     );
@@ -3591,26 +3583,26 @@ fn switch_provider_resolves_model_atomically() {
             Err(std::env::VarError::NotPresent)
         })
         .unwrap();
-    let _ = chat.session.runtime.model_tx.send("claude-sonnet-5".into());
+    crate::tui::test_util::set_model(&mut chat, "claude-sonnet-5");
 
     // An anthropic-protocol endpoint: default model fallback (claude-sonnet-5 is already in use → unchanged).
     chat.input = "/provider deepseek".to_string();
     chat.submit();
-    assert_eq!(*chat.session.runtime.provider.borrow(), "deepseek");
+    assert_eq!(chat.provider(), "deepseek");
     // Switch models mid-session → away and back restores the model that endpoint last used.
     chat.input = "/model deepseek-v4".to_string();
     chat.submit();
     chat.input = "/provider default".to_string();
     chat.submit();
     assert_eq!(
-        *chat.session.runtime.model.borrow(),
+        chat.model(),
         "claude-sonnet-5",
         "back to default restores its last model"
     );
     chat.input = "/provider deepseek".to_string();
     chat.submit();
     assert_eq!(
-        *chat.session.runtime.model.borrow(),
+        chat.model(),
         "deepseek-v4",
         "back to deepseek restores its last model"
     );
@@ -3624,11 +3616,7 @@ fn switch_provider_refuses_while_busy() {
     chat.start_test_turn();
     chat.input = "/provider codex".to_string();
     chat.submit();
-    assert_eq!(
-        *chat.session.runtime.provider.borrow(),
-        "default",
-        "not switched"
-    );
+    assert_eq!(chat.provider(), "default", "not switched");
     assert!(
         chat.slash_error_lines.join("\n").contains("BUSY"),
         "{:?}",

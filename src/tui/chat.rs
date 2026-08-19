@@ -487,61 +487,6 @@ fn auth_hint_for(oauth: bool, provider: &str, code: &str, msg: String) -> String
 
 /// Collapse-group summary text: `Searched for 2 patterns, read 3 files`;
 /// uses the -ing form plus a trailing … while in progress.
-/// The next permission mode in the shift+tab ladder (CC `app:cycleMode`).
-///
-/// `startup` is the mode the process was launched in, and it is what makes the
-/// dangerous modes reachable without being *introduced*: a session that never
-/// started in bypass/dontAsk can never cycle into one.
-///
-/// Pure since D105, because the zoom cycles a *different* subject's mode — the
-/// viewed agent's — and CC does exactly that, calling its own
-/// `getNextPermissionMode` on the teammate's context and leaving the leader's
-/// alone (`PromptInput.tsx:1410-1447`).
-/// The permission mode as the core spells it. The two vocabularies are the same
-/// five names; the crossing lives here so nothing else has to know both.
-pub fn app_permission_mode(mode: PermissionMode) -> crate::app::snapshot::PermissionMode {
-    use crate::app::snapshot::PermissionMode as App;
-    match mode {
-        PermissionMode::Default => App::Default,
-        PermissionMode::AcceptEdits => App::AcceptEdits,
-        PermissionMode::BypassPermissions => App::BypassPermissions,
-        PermissionMode::DontAsk => App::DontAsk,
-        PermissionMode::Plan => App::Plan,
-    }
-}
-
-/// And back, for a console reading the mode the core holds.
-pub fn console_permission_mode(mode: crate::app::snapshot::PermissionMode) -> PermissionMode {
-    use crate::app::snapshot::PermissionMode as App;
-    match mode {
-        App::Default => PermissionMode::Default,
-        App::AcceptEdits => PermissionMode::AcceptEdits,
-        App::BypassPermissions => PermissionMode::BypassPermissions,
-        App::DontAsk => PermissionMode::DontAsk,
-        App::Plan => PermissionMode::Plan,
-    }
-}
-
-pub fn next_permission_mode(mode: PermissionMode, startup: PermissionMode) -> PermissionMode {
-    let next = match mode {
-        PermissionMode::Default => PermissionMode::AcceptEdits,
-        PermissionMode::AcceptEdits => PermissionMode::Plan,
-        PermissionMode::Plan => PermissionMode::Default,
-        // Started in bypass/dontAsk: toggle between it and default, never introducing a new dangerous mode.
-        PermissionMode::BypassPermissions | PermissionMode::DontAsk => PermissionMode::Default,
-    };
-    // From default, switch back to the startup mode (an edge that only bypass/dontAsk sessions have).
-    if next == PermissionMode::AcceptEdits
-        && matches!(
-            startup,
-            PermissionMode::BypassPermissions | PermissionMode::DontAsk
-        )
-    {
-        return startup;
-    }
-    next
-}
-
 /// One-line result summary for the expanded state (CC renderToolResultMessage).
 pub fn result_summary(name: &str, output: &str) -> Option<String> {
     let lines = output.lines().filter(|l| !l.trim().is_empty()).count();
@@ -1166,7 +1111,7 @@ impl Chat {
         let context_usage = crate::context_usage::ContextUsage::for_model(
             context_tokens,
             &session.client.models(),
-            &session.runtime.model.borrow().clone(),
+            &session.core.config().borrow().model.clone(),
         );
         // A running command's tail reaches the screen the way every other turn-side
         // fact does: as a UiEvent on the channel the drain loop already wakes for.
@@ -3118,19 +3063,6 @@ impl Chat {
         self.intend(crate::tui::intent::Intent::Execute(Box::new(action)));
     }
 
-    /// The permission mode in effect, read from the projection rather than kept.
-    ///
-    /// Shift+tab used to set a copy here while `/permission-mode` set the core's,
-    /// which is two answers to one question. There is one now: the core's, as
-    /// `config/read` publishes it. Before the first cut lands, the mode the
-    /// session started in is the honest answer.
-    pub fn permission_mode(&self) -> PermissionMode {
-        match &self.store.view().config {
-            Some(config) => console_permission_mode(config.permission_mode),
-            None => self.session.permission_mode,
-        }
-    }
-
     /// Queues slash output lines (transient hints: rendered after messages and above the input, gone after TTL).
     pub(crate) fn push_slash_output(&mut self, text: String) {
         for line in text.lines() {
@@ -3448,7 +3380,7 @@ impl Chat {
     }
 
     fn reset_context_usage(&mut self) {
-        let model = self.session.runtime.model.borrow().clone();
+        let model = self.model();
         let usage =
             crate::context_usage::ContextUsage::for_model(0, &self.session.client.models(), &model);
         self.main_conv().context_usage = usage;
@@ -3456,17 +3388,25 @@ impl Chat {
 
     /// Main's own occupancy: it is measured from main's transcript, so it is
     /// recorded against main's store wherever the screen happens to be.
-    fn estimate_context_usage(&mut self, messages: &[crate::api::types::Message]) {
-        let model = self.session.runtime.model.borrow().clone();
+    ///
+    /// The model is named by the caller rather than read back, because a caller
+    /// that has just chosen one has it before the core has published it, and the
+    /// window belongs to the model the user picked (D154).
+    fn estimate_context_usage_for(&mut self, model: &str, messages: &[crate::api::types::Message]) {
         let usage = crate::context_usage::ContextUsage::for_model(
             crate::compact::estimate_tokens(&self.session.system, messages, &[]),
             &self.session.client.models(),
-            &model,
+            model,
         );
         self.main_conv().context_usage = usage;
     }
 
     fn refresh_context_usage_from_transcript(&mut self) {
+        let model = self.model();
+        self.refresh_context_usage_for(&model);
+    }
+
+    fn refresh_context_usage_for(&mut self, model: &str) {
         let messages = self
             .session
             .runtime
@@ -3475,7 +3415,7 @@ impl Chat {
             .clone()
             .and_then(|transcript| transcript.load_messages().ok())
             .unwrap_or_default();
-        self.estimate_context_usage(&messages);
+        self.estimate_context_usage_for(model, &messages);
     }
 
     pub(crate) fn rebind_tasks_to_transcript(
@@ -3528,7 +3468,7 @@ impl Chat {
         // P1-E: known-list check — when the current provider has a cache and the model is not in it, append a note
         // (advisory, non-blocking; the endpoint may have just shipped a new model or the cache may never have been pulled — typing it directly is still
         // a valid path). Merged into one line with the success note, to avoid the jarring "⚠ and ✓ together".
-        let provider = self.session.runtime.provider.borrow().clone();
+        let provider = self.provider();
         let unknown = match self.session.client.declared_models(&provider) {
             Some(declared) => !declared.iter().any(|entry| entry.id == model),
             None => self
@@ -3536,11 +3476,13 @@ impl Chat {
                 .get(&provider)
                 .is_some_and(|known| !known.is_empty() && !known.contains(&model)),
         };
+        // The core holds the selection and the engine mirrors it into the
+        // runtime a run reads (D154). Writing the runtime here as well would be
+        // the second half of the mirror this batch removed.
         self.apply_to_core(crate::app::command::Action::ModelSelect {
             model: model.clone(),
         });
-        let _ = self.session.runtime.model_tx.send(model.clone());
-        self.refresh_context_usage_from_transcript();
+        self.refresh_context_usage_for(&model);
         self.provider_models.insert(provider.clone(), model.clone());
         // Persistence follows the provider's scope: a session-only provider
         // (`s` in the picker) must not have its model half-persisted — that
@@ -3803,7 +3745,7 @@ impl Chat {
                     id: "stats".to_string(),
                 });
             };
-            let model = session.runtime.model.borrow().clone();
+            let model = session.core.config().borrow().model.clone();
             let transcript = session.runtime.transcript.borrow().clone();
             let msgs = transcript
                 .map(|t| t.load_messages().unwrap_or_default())

@@ -1596,7 +1596,7 @@ fn slash_model_switches_runtime_model() {
     let mut chat = test_chat_home(home.clone());
     chat.input = "/model deepseek-v4".to_string();
     chat.submit();
-    assert_eq!(*chat.session.runtime.model.borrow(), "deepseek-v4");
+    assert_eq!(chat.model(), "deepseek-v4");
     assert_eq!(chat.conv.context_usage.window, 1_000_000);
     assert_eq!(chat.conv.context_usage.used, 0);
     assert!(chat.slash_lines.join("\n").contains("deepseek-v4"));
@@ -2585,11 +2585,7 @@ fn slash_provider_lists_and_switches() {
     assert_eq!(menu.current, Some(0), "● marks the current default");
     assert!(chat.on_key(KeyCode::Esc, KeyModifiers::empty()));
     assert!(chat.provider_menu.is_none(), "Esc closes the selector");
-    assert_eq!(
-        *chat.session.runtime.provider.borrow(),
-        "default",
-        "Esc does not change"
-    );
+    assert_eq!(chat.provider(), "default", "Esc does not change");
 
     // Enter confirms: switch + persist (equivalent to the argument fast path).
     chat.input = "/provider".to_string();
@@ -2601,7 +2597,7 @@ fn slash_provider_lists_and_switches() {
     assert!(chat.on_key(KeyCode::Enter, KeyModifiers::empty()));
     assert!(chat.provider_menu.is_none(), "Enter closes the selector");
     assert_eq!(
-        *chat.session.runtime.provider.borrow(),
+        chat.provider(),
         "deepseek",
         "the runtime provider is synced"
     );
@@ -2611,7 +2607,7 @@ fn slash_provider_lists_and_switches() {
     // The argument fast path stays.
     chat.input = "/provider deepseek".to_string();
     chat.submit();
-    assert_eq!(*chat.session.runtime.provider.borrow(), "deepseek");
+    assert_eq!(chat.provider(), "deepseek");
     let _ = std::fs::remove_dir_all(&s_tmp);
 
     // s = this session only (a fresh chat, nothing persisted before): runtime switch without writing settings.
@@ -2625,11 +2621,7 @@ fn slash_provider_lists_and_switches() {
     assert_eq!(menu.current, Some(0), "● marks the current default");
     assert!(chat.on_key(KeyCode::Char('4'), KeyModifiers::empty()));
     assert!(chat.on_key(KeyCode::Char('s'), KeyModifiers::empty()));
-    assert_eq!(
-        *chat.session.runtime.provider.borrow(),
-        "deepseek",
-        "s switches the runtime"
-    );
+    assert_eq!(chat.provider(), "deepseek", "s switches the runtime");
     let out = chat.slash_lines.join("\n");
     assert!(
         out.contains("(this session only)"),
@@ -2671,10 +2663,7 @@ fn slash_think_sets_level_and_persists() {
     chat.submit();
     let out = chat.slash_lines.join("\n");
     assert!(out.contains("✓ thinking level set: xhigh"), "{out}");
-    assert_eq!(
-        chat.session.runtime.thinking.borrow().as_deref(),
-        Some("xhigh")
-    );
+    assert_eq!(chat.thinking().as_deref(), Some("xhigh"));
     let saved: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(tmp.join("home/.config/bingo/settings.json")).unwrap(),
     )
@@ -2685,7 +2674,7 @@ fn slash_think_sets_level_and_persists() {
     chat.submit();
     let out = chat.slash_lines.join("\n");
     assert!(out.contains("✓ thinking level set: off"), "{out}");
-    assert_eq!(chat.session.runtime.thinking.borrow().as_deref(), None);
+    assert_eq!(chat.thinking().as_deref(), None);
 
     chat.input = "/think bogus".to_string();
     chat.submit();
@@ -2695,7 +2684,7 @@ fn slash_think_sets_level_and_persists() {
         "the usage line carries a stable error code: {out}"
     );
     assert_eq!(
-        chat.session.runtime.thinking.borrow().as_deref(),
+        chat.thinking().as_deref(),
         None,
         "an invalid argument does not change the state"
     );
@@ -3135,7 +3124,7 @@ async fn model_menu_picks_model_and_switches() {
     }
     assert!(chat.on_key(KeyCode::Enter, KeyModifiers::empty()));
     assert_eq!(
-        *chat.session.runtime.model.borrow(),
+        chat.model(),
         "deepseek-r1",
         "the selected model takes effect"
     );
@@ -3250,7 +3239,7 @@ async fn provider_switch_persists_provider_and_model_menu_persists_both() {
         saved["provider"], "deepseek",
         "the provider is persisted (user layer)"
     );
-    assert_eq!(*chat.session.runtime.provider.borrow(), "deepseek");
+    assert_eq!(chat.provider(), "deepseek");
 
     // /model menu: current provider=deepseek (preselected) → level-two confirms the model
     // → provider + model persist together.
@@ -3317,7 +3306,7 @@ fn slash_model_validates_against_cached_list() {
         1,
         "one-line output; ⚠ and ✓ do not coexist"
     );
-    assert_eq!(*chat.session.runtime.model.borrow(), "unknown-xyz");
+    assert_eq!(chat.model(), "unknown-xyz");
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
@@ -3361,7 +3350,7 @@ fn think_menu_navigates_and_confirms() {
     let home = std::env::temp_dir().join(format!("bingo-think-menu-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&home);
     let mut chat = test_chat_home(home.clone());
-    let _ = chat.session.runtime.thinking_tx.send(Some("high".into()));
+    crate::tui::test_util::set_thinking(&mut chat, Some("high"));
     chat.input = "/think".to_string();
     chat.submit();
     let menu = chat.think_menu.as_ref().expect("menu is open");
@@ -3377,10 +3366,7 @@ fn think_menu_navigates_and_confirms() {
         chat.think_menu.is_none(),
         "closes the menu after confirming"
     );
-    assert_eq!(
-        chat.session.runtime.thinking.borrow().as_deref(),
-        Some("medium")
-    );
+    assert_eq!(chat.thinking().as_deref(), Some("medium"));
     let saved: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(home.join(".config/bingo/settings.json")).unwrap(),
     )
@@ -3396,11 +3382,7 @@ fn think_menu_navigates_and_confirms() {
     assert!(chat.think_menu.is_none(), "Esc exits");
     chat.input = "/think off".to_string();
     chat.submit();
-    assert_eq!(
-        chat.session.runtime.thinking.borrow().as_deref(),
-        None,
-        "off clears the level"
-    );
+    assert_eq!(chat.thinking().as_deref(), None, "off clears the level");
     let _ = std::fs::remove_dir_all(&home);
 }
 
@@ -3422,7 +3404,7 @@ fn think_menu_direct_jump_and_session_only() {
     let home = std::env::temp_dir().join(format!("bingo-think-menu-s-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&home);
     let mut chat = test_chat_home(home.clone());
-    let _ = chat.session.runtime.thinking_tx.send(Some("off".into()));
+    crate::tui::test_util::set_thinking(&mut chat, None);
     chat.input = "/think".to_string();
     chat.submit();
     let menu = chat.think_menu.as_ref().expect("menu is open");
@@ -3449,9 +3431,9 @@ fn think_menu_direct_jump_and_session_only() {
     );
     assert!(chat.on_key(KeyCode::Esc, KeyModifiers::empty()));
     assert_eq!(
-        chat.session.runtime.thinking.borrow().as_deref(),
-        Some("off"),
-        "Esc does not change the state"
+        chat.thinking(),
+        None,
+        "Esc does not change the state — and `off` is the absence of a level"
     );
 
     // `s`: session-only — runtime switches, no settings write.
@@ -3464,7 +3446,7 @@ fn think_menu_direct_jump_and_session_only() {
         "s closes the menu after confirming"
     );
     assert_eq!(
-        chat.session.runtime.thinking.borrow().as_deref(),
+        chat.thinking().as_deref(),
         Some("low"),
         "s switches the runtime"
     );

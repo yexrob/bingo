@@ -87,7 +87,7 @@ impl Chat {
         let Some(mode) = self.session.agents.permission_mode_of(&name) else {
             return false;
         };
-        let next = crate::tui::chat::next_permission_mode(mode, self.session.permission_mode);
+        let next = crate::tui::selection::next_permission_mode(mode, self.session.permission_mode);
         self.intend(crate::tui::intent::Intent::AgentMode { name, next });
         true
     }

@@ -464,7 +464,7 @@ impl super::Chat {
     /// hint (the raw API error body rarely tells the user what to do);
     /// `PERMISSION_DENIED` points at the model/subscription (D33 §6.4).
     fn auth_error_hint(session: &Session, code: &str, msg: String) -> String {
-        let provider = session.runtime.provider.borrow().clone();
+        let provider = session.core.config().borrow().provider.clone();
         // Merge built-in presets: zero-config codex (no settings entry) is the
         // main preset use case — without this, its expired token produced a
         // bare 401 with no re-login guidance.
@@ -1438,18 +1438,18 @@ impl super::Chat {
     /// `config/read` and the badge could say two different things about one
     /// session.
     fn cycle_permission_mode(&mut self) {
-        let next = crate::tui::chat::next_permission_mode(
+        let next = crate::tui::selection::next_permission_mode(
             self.permission_mode(),
             self.session.permission_mode,
         );
         self.apply_to_core(crate::app::command::Action::PermissionModeSet {
-            mode: crate::tui::chat::app_permission_mode(next),
+            mode: crate::tui::selection::app_permission_mode(next),
         });
     }
 
     /// Alt+T: thinking toggle (off ↔ the last non-off level, default medium).
     fn toggle_thinking(&mut self) {
-        let current = self.session.runtime.thinking.borrow().clone();
+        let current = self.thinking();
         let next = match current.as_deref() {
             None | Some("off") => self
                 .last_thinking
@@ -2578,10 +2578,10 @@ impl super::Chat {
             let frame = self.update_banner_frame().unwrap_or(UPDATE_BANNER_FRAMES);
             (v, self.motion.breath(theme, frame))
         });
-        let provider = self.session.runtime.provider.borrow().clone();
+        let provider = self.provider();
         El::Rows(welcome_card_rows(
             theme,
-            &self.session.runtime.model.borrow(),
+            &self.model(),
             self.permission_mode_label(),
             &self.cwd,
             width,

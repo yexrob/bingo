@@ -117,7 +117,7 @@ impl super::Chat {
         self.close_menus();
         let providers = self.provider_order();
         let provider_descs = providers.iter().map(|p| self.provider_desc(p)).collect();
-        let current = self.session.runtime.provider.borrow().clone();
+        let current = self.provider();
         let selected = providers.iter().position(|p| *p == current).unwrap_or(0);
         self.model_menu = Some(ModelMenu {
             providers,
@@ -212,8 +212,8 @@ impl super::Chat {
         declared: bool,
         failed: Option<String>,
     ) -> ModelMenuModels {
-        let current_provider = self.session.runtime.provider.borrow().clone();
-        let current_model = self.session.runtime.model.borrow().clone();
+        let current_provider = self.provider();
+        let current_model = self.model();
         let current = (provider == current_provider)
             .then(|| models.iter().position(|m| m.id == current_model))
             .flatten();
@@ -436,9 +436,9 @@ impl super::Chat {
                 // switch_provider (login warnings, the busy guard, and paired persistence all live there),
                 // the old bypass dropped every provider-side notice (audit A3).
                 self.provider_models.insert(provider.clone(), model.clone());
-                if provider != self.session.runtime.provider.borrow().clone() {
+                if provider != self.provider() {
                     self.switch_provider(&provider, true);
-                    if *self.session.runtime.provider.borrow() != provider {
+                    if self.provider() != provider {
                         // Switch refused (busy / unknown): keep the menu alive.
                         self.restore_model_menu(
                             menu.providers,
@@ -566,7 +566,7 @@ mod tests {
                 {"id": "claude-sonnet-5", "display": "Sonnet (fast)"}
             ]}"#,
         );
-        let _ = chat.session.runtime.model_tx.send("claude-sonnet-5".into());
+        crate::tui::test_util::set_model(&mut chat, "claude-sonnet-5");
 
         chat.input = "/model".to_string();
         chat.submit();
@@ -598,7 +598,7 @@ mod tests {
 
         // Confirming commits the id, not the label.
         chat.on_key(KeyCode::Enter, KeyModifiers::empty());
-        assert_eq!(*chat.session.runtime.model.borrow(), "claude-sonnet-5");
+        assert_eq!(chat.model(), "claude-sonnet-5");
     }
 
     /// `r` re-asks the endpoint (and drops the session cache first, or the

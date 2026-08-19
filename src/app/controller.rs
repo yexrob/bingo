@@ -896,12 +896,11 @@ impl Controller {
                 Ok(ActionResultStatus::Applied)
             }
             Action::ProviderSelect { provider } => {
-                if !self
-                    .catalog
-                    .providers()
-                    .iter()
-                    .any(|known| known.name == provider)
-                {
+                // A catalog that lists nothing has no opinion about which
+                // providers exist — it is a session assembled without a client,
+                // and refusing every name would be an answer it cannot give.
+                let known = self.catalog.providers();
+                if !known.is_empty() && !known.iter().any(|held| held.name == provider) {
                     return Err(AppError::Refused(ProtocolErrorKind::BadArgument));
                 }
                 if self.config.provider == provider {
