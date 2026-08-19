@@ -8772,8 +8772,18 @@ tmux, 120×40, a scripted Anthropic-protocol endpoint on loopback, an isolated
 | `/model scripted-2` | **pass** — footer follows, and the next request carried `model=scripted-2`: the mirror reaches the engine |
 | `/clear` | **pass** — context back to 0/200k |
 | an image in a turn | **pass** — `#[image 1]` on the row, `user ['text', 'image']` in the transcript |
+| `--print "…"` | **pass** — the headless path reads the same configuration and exits 0; attaching an engine to the console's core does not disturb it |
 | the mail digest with a real agent | **not run** — the scripted provider calls no tools, so nothing could fill main's inbox. The wake it shares is exercised above (the task notification), and `app/mail.rs` plus six console assertions cover the window itself |
 | `/team`, `/rewind`, `/share`, `/rename`, `/mcp`, `/provider login` | **not re-run** — unmoved by this batch (D153's smoke) except that a *drained* one now renders its notice, which `/compact` above proves |
+
+### The `.now()` count, reproducibly
+
+`rg "\.now\(\)" src/query.rs src/main.rs` is **0 hits**. Under `src/tui/` the
+raw count is 65 and every one of them is inside a `#[cfg(test)]` block: the
+seven files with a `mod tests`, the two `#[cfg(test)]` helpers in `chat.rs` and
+`chat_tail.rs`, `test_util.rs` (a `#[cfg(test)] mod`) and the six
+`chat_tests_*.rs` (`#[cfg(test)] #[path]` modules). Stripping `cfg(test)` blocks
+by brace depth leaves **0**.
 
 ### Where the shims stand
 
