@@ -925,7 +925,7 @@ fn running_status_verb_priority() {
     let mut chat = test_chat();
     assert_eq!(chat.running_status(), None, "no status row when idle");
 
-    chat.conv.busy = true;
+    chat.start_test_turn();
     chat.conv.turn_started = Some(std::time::Instant::now());
     let verb = chat.running_status().expect("busy status").verb;
     assert_eq!(verb, "Working", "fallback when nothing is active");

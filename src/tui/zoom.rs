@@ -464,7 +464,7 @@ mod tests {
     fn a_command_on_a_page_waits_behind_mains_turn_and_says_so() {
         let mut chat = test_chat();
         seed(&chat, "scout");
-        chat.conv.busy = true; // main's turn, before the page turn parks it
+        chat.start_test_turn(); // main's turn, before the page turn parks it
         chat.switch_to(Some(ZoomTarget::Agent("scout".into())));
         chat.set_input("/clear".to_string());
         chat.submit();
@@ -528,7 +528,7 @@ mod tests {
     fn esc_stops_the_run_first_and_comes_home_second() {
         let mut chat = test_chat();
         seed(&chat, "scout"); // Running
-        chat.conv.busy = true; // main's own turn, out of Esc's reach while away
+        chat.start_test_turn(); // main's own turn, out of Esc's reach while away
         chat.switch_to(Some(ZoomTarget::Agent("scout".into())));
 
         chat.on_key(KeyCode::Esc, KeyModifiers::NONE);

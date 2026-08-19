@@ -897,7 +897,7 @@ mod tests {
     #[test]
     fn tiny_terminal_keeps_the_prompt_and_footer() {
         let mut chat = chat_at(60, 6);
-        chat.conv.busy = true;
+        chat.start_test_turn();
         chat.push_warning("mcp connection failed".to_string());
         let frame = Frame::assemble(&chat, size(60, 6));
         assert_eq!(frame.rows.len(), 4, "height-2 cap");
@@ -1338,7 +1338,7 @@ mod tests {
     #[test]
     fn fullscreen_tiny_terminal_keeps_the_prompt_and_footer() {
         let mut chat = chat_at(60, 6);
-        chat.conv.busy = true;
+        chat.start_test_turn();
         chat.push_warning("mcp connection failed".to_string());
         chat.help_visible = true;
         let frame = fullscreen_frame(&chat, size(60, 6));

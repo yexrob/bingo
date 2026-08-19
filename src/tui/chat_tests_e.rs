@@ -529,7 +529,7 @@ fn ctrl_p_and_ctrl_n_mirror_the_arrows() {
 #[test]
 fn ctrl_p_pulls_back_a_queued_message_and_loses_the_same_race() {
     let mut chat = chat_with_history("d86-pullback");
-    chat.conv.busy = true;
+    chat.start_test_turn();
     chat.set_input("steer me");
     chat.submit();
     assert_eq!(chat.main_queue().len(), 1);
@@ -596,7 +596,7 @@ fn both_diff_surfaces_render_the_same_gutter() {
 
     // Surface 2: the completed-edit rows in the flow.
     let mut chat = test_chat();
-    chat.conv.busy = true;
+    chat.start_test_turn();
     chat.conv.messages.push(msg(Role::Assistant, ""));
     chat.conv.stream_msg = Some(0);
     chat.events.send(UiEvent::ToolStart {
@@ -642,7 +642,7 @@ fn both_diff_surfaces_render_the_same_gutter() {
 #[test]
 fn switching_theme_recolours_baked_diff_rows() {
     let mut chat = test_chat();
-    chat.conv.busy = true;
+    chat.start_test_turn();
     chat.conv.messages.push(msg(Role::Assistant, ""));
     chat.conv.stream_msg = Some(0);
     chat.events.send(UiEvent::ToolStart {

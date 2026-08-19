@@ -491,7 +491,7 @@ mod tests {
 
         // The grammar is the core's, and these are the names it resolves
         // against: one live instance and one live room.
-        let addressed = |chat: &mut Chat, line: &str| match chat.route_submission(line, false) {
+        let addressed = |chat: &mut Chat, line: &str| match chat.route_submission(line) {
             crate::app::submit::Route::Deliver {
                 target,
                 text,

@@ -2453,8 +2453,7 @@ impl Chat {
         // handed text and assets (spec "One submission path").
         let text = self.expand_pastes(&raw);
         let text = self.expand_image_paths(&text);
-        let busy = self.main_conv().busy;
-        let route = self.route_submission(&text, busy);
+        let route = self.route_submission(&text);
         match route {
             crate::app::submit::Route::Nothing => self.set_input(raw),
             // The whole line goes into history, envelope included: ↑ brings back
@@ -2500,7 +2499,7 @@ impl Chat {
                 // A command the core let through while a turn runs is a
                 // side-channel dispatch: it must not reset `busy`, it leaves no
                 // history entry, and the dropdown has nothing to do with it.
-                if busy {
+                if self.main_conv().busy {
                     self.run_slash(&line);
                     self.update_slash_suggestions();
                     return;
@@ -2524,9 +2523,10 @@ impl Chat {
 
     /// Ask the core what this line is and where it goes.
     ///
-    /// `.now()` is the console's synchronous seam; B7 replaces it with the
-    /// `conversation/submit` request an attachment makes.
-    pub(crate) fn route_submission(&mut self, text: &str, busy: bool) -> crate::app::submit::Route {
+    /// Whether main is busy is no longer stated here: the turn registry is the
+    /// core's, and a caller that could state it could also state it wrongly.
+    /// `.now()` is the console's remaining synchronous seam on this path.
+    pub(crate) fn route_submission(&mut self, text: &str) -> crate::app::submit::Route {
         let mode = if self.bash_mode {
             crate::app::command::ComposerMode::Shell
         } else {
@@ -2542,12 +2542,38 @@ impl Chat {
                     text: text.to_string(),
                     attachments: Vec::new(),
                 },
-                // The console's own flag while the console still drives the run
-                // loop; B7 lets the core answer this from its turn registry.
-                main_busy: Some(busy),
                 carries_attachments,
             })
             .now()
+    }
+
+    /// Put main into a running turn the way a run does.
+    ///
+    /// `conv.busy = true` used to be enough, because the console's flag was also
+    /// what the core was told. It no longer is: the turn registry answers whether
+    /// main is busy, so a test that wants a busy main opens a turn there. The
+    /// console's own flag follows it — that half is still the console's until it
+    /// reads the store for it.
+    #[cfg(test)]
+    pub(crate) fn start_test_turn(&mut self) -> Option<crate::app::ids::TurnId> {
+        let turn = self.open_core_turn(crate::app::snapshot::TurnOrigin::User);
+        self.main_conv().busy = true;
+        turn
+    }
+
+    /// End the turn `start_test_turn` opened, and the console's flag with it.
+    #[cfg(test)]
+    pub(crate) fn end_test_turn(&mut self) {
+        if let Some(turn) = self.session.turns.active(crate::ui::ConvKey::Main).now() {
+            self.session
+                .turns
+                .close(turn, crate::app::snapshot::TurnStatus::Completed, None);
+            // Closing is a report, not a question. Asking one afterwards is how
+            // this side knows the report was read: both travel the actor's one
+            // queue, in order.
+            let _ = self.session.turns.active(crate::ui::ConvKey::Main).now();
+        }
+        self.main_conv().busy = false;
     }
 
     /// Run a slash command, letting the dropdown finish a partial name first.

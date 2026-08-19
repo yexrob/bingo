@@ -731,7 +731,7 @@ mod tests {
         // Idle: input 3 rows (two borders + one placeholder row) + footer 1 row.
         assert_eq!(base, 4);
 
-        chat.conv.busy = true;
+        chat.start_test_turn();
         chat.push_warning("mcp connection failed".to_string());
         chat.stub_ask(crate::ui::PermissionRequest::new(
             "t",
@@ -1340,7 +1340,7 @@ mod tests {
         // 2 columns of padding on each side (CC footer padding): the model name's right edge lands at width-2.
         assert_eq!(text_width(&text), 78, "model name right-aligned to width-2");
 
-        chat.conv.busy = true;
+        chat.start_test_turn();
         let text = row_text(&footer_row(&chat, 80));
         assert!(
             !text.contains("? for shortcuts"),
@@ -1348,7 +1348,7 @@ mod tests {
         );
         assert!(text.contains("ctrl+o to expand"), "{text}");
 
-        chat.conv.busy = false;
+        chat.end_test_turn();
         chat.bash_mode = true;
         chat.permission_mode = PermissionMode::Plan;
         let text = row_text(&footer_row(&chat, 80));
@@ -1400,7 +1400,7 @@ mod tests {
         assert!(row_text(&footer_row(&chat, 100)).contains("0% 0/200k"));
 
         let start = std::time::Instant::now() - std::time::Duration::from_secs(1);
-        chat.conv.busy = true;
+        chat.start_test_turn();
         chat.conv.token_rate.start(start);
         chat.conv
             .token_rate
@@ -1417,7 +1417,7 @@ mod tests {
             "{text}"
         );
 
-        chat.conv.busy = false;
+        chat.end_test_turn();
         assert!(!row_text(&footer_row(&chat, 100)).contains("tok/s"));
     }
 
@@ -1518,7 +1518,7 @@ mod tests {
     #[test]
     fn the_bottom_states_compose_around_the_composer() {
         let mut chat = chat_at(100, 40);
-        chat.conv.busy = true;
+        chat.start_test_turn();
         chat.set_input("/theme");
         chat.run_slash("theme");
 

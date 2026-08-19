@@ -1990,7 +1990,6 @@ impl Controller {
         let route = self.submit(crate::app::submit::SubmitRequest {
             conversation,
             input,
-            main_busy: None,
             carries_attachments: false,
         });
         match route {
@@ -2078,9 +2077,9 @@ impl Controller {
         use crate::app::submit::{Decision, Route, compose, route};
         let origin = crate::app::submit::Origin {
             page: request.conversation.clone(),
-            main_busy: request
-                .main_busy
-                .unwrap_or_else(|| self.turns.is_busy(&ConvKey::Main)),
+            // Whose turn it is is the registry's fact, and the registry is
+            // here. No caller states it and none can disagree with it.
+            main_busy: self.turns.is_busy(&ConvKey::Main),
         };
         let composed = compose(&request.input, &self.addressable());
         match route(composed, &origin) {

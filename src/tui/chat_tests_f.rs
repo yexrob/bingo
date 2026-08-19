@@ -2679,7 +2679,7 @@ fn a_page_opened_over_undrained_events_does_not_double_the_turn() {
 fn a_queued_command_acts_on_the_page_it_was_typed_on() {
     let mut chat = test_chat();
     seed_agent(&chat, "scout");
-    chat.conv.busy = true;
+    chat.start_test_turn();
     chat.set_input("/compact");
     chat.submit();
 

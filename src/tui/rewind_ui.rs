@@ -631,7 +631,7 @@ mod tests {
         let transcript = attach(&chat, &home, "busy");
         turn(&transcript, "first question", "t1");
 
-        chat.conv.busy = true;
+        chat.start_test_turn();
         chat.open_rewind();
         assert!(chat.rewind.is_none());
         assert!(

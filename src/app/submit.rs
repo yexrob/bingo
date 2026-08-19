@@ -282,10 +282,6 @@ pub struct SubmitRequest {
     /// to (D135a).
     pub conversation: ConvKey,
     pub input: Submission,
-    /// The console's own busy flag, while the terminal front end still drives
-    /// the run loop. `None` asks the core's turn registry, which is the only
-    /// answer once B7 removes this.
-    pub main_busy: Option<bool>,
     /// The text names images the core has not been handed as assets yet.
     /// B5's `asset/registerPath` retires this.
     pub carries_attachments: bool,

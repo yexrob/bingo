@@ -385,7 +385,7 @@ async fn turn_end_triggers_auto_turn_when_wake_notification_pending() {
     let mut chat = test_chat();
     chat.conv.messages.push(msg(Role::Assistant, ""));
     chat.conv.stream_msg = Some(0);
-    chat.conv.busy = true;
+    chat.start_test_turn();
     let watch = chat.session.watch.clone();
     let id = watch.register_with_conditions(Box::new(FakeWatchable), Vec::new(), None);
     watch.set_state(
@@ -1444,12 +1444,12 @@ fn tick_marks_dirty_only_when_dynamic() {
     chat.tick();
     assert!(!chat.dirty, "no rebuild when idle");
     assert!(!chat.needs_tick(), "idle does not wake components");
-    chat.conv.busy = true;
+    chat.start_test_turn();
     chat.tick();
     assert!(chat.dirty, "rebuilds while busy (spinner/duration row)");
     assert!(chat.needs_tick());
     // Pending events must also wake it up (otherwise they would never drain).
-    chat.conv.busy = false;
+    chat.end_test_turn();
     chat.dirty = false;
     chat.events.send(UiEvent::Warning("w".into()));
     assert!(chat.needs_tick(), "pending events need a wake-up");
@@ -1781,7 +1781,7 @@ fn ask_arrow_keys_move_focus() {
 #[test]
 fn esc_sets_interrupted_and_start_turn_resets() {
     let mut chat = test_chat();
-    chat.conv.busy = true;
+    chat.start_test_turn();
     assert!(
         chat.on_key(KeyCode::Esc, KeyModifiers::empty()),
         "busy Esc interrupts"
@@ -1791,9 +1791,9 @@ fn esc_sets_interrupted_and_start_turn_resets() {
         *chat.cancel_tx.borrow(),
         "the interrupt signal was sent (send_replace applies unconditionally)"
     );
-    chat.conv.busy = false;
+    chat.end_test_turn();
     chat.conv.interrupted = false;
-    chat.conv.busy = true;
+    chat.start_test_turn();
     let _ = chat.cancel_tx.send_replace(true);
     let cancel_rx = chat.cancel_tx.subscribe();
     chat.cancel_tx.send_replace(false);
@@ -2147,12 +2147,12 @@ fn prompt_rows_are_capped() {
 fn ctrl_c_interrupt_clear_then_exit() {
     let mut chat = chat_with_history("ctrlc");
     let t0 = std::time::Instant::now();
-    chat.conv.busy = true;
+    chat.start_test_turn();
     chat.on_key_at(KeyCode::Char('c'), KeyModifiers::CONTROL, t0);
     assert!(chat.conv.interrupted, "busy → interrupt");
     assert!(!chat.exit);
 
-    chat.conv.busy = false;
+    chat.end_test_turn();
     chat.set_input("draft");
     chat.on_key_at(KeyCode::Char('c'), KeyModifiers::CONTROL, t0);
     assert_eq!(chat.input, "", "non-empty input clears first");
@@ -2192,7 +2192,7 @@ fn ctrl_c_interrupt_clear_then_exit() {
 fn ctrl_c_force_quits_a_turn_that_never_stops() {
     let mut chat = chat_with_history("wedged");
     let t0 = std::time::Instant::now();
-    chat.conv.busy = true;
+    chat.start_test_turn();
 
     chat.on_key_at(KeyCode::Char('c'), KeyModifiers::CONTROL, t0);
     assert!(
@@ -2226,7 +2226,7 @@ fn ctrl_c_force_quits_a_turn_that_never_stops() {
 fn a_new_turn_rearms_the_ordinary_interrupt() {
     let mut chat = chat_with_history("rearm");
     let t0 = std::time::Instant::now();
-    chat.conv.busy = true;
+    chat.start_test_turn();
     chat.on_key_at(KeyCode::Char('c'), KeyModifiers::CONTROL, t0);
     assert!(chat.interrupt_at.is_some());
 
@@ -2281,11 +2281,11 @@ async fn a_lost_turn_reports_itself_instead_of_latching_busy() {
 fn esc_closes_layers_then_clears_input() {
     let mut chat = chat_with_history("esc");
     let t0 = std::time::Instant::now();
-    chat.conv.busy = true;
+    chat.start_test_turn();
     chat.on_key_at(KeyCode::Esc, KeyModifiers::empty(), t0);
     assert!(chat.conv.interrupted, "busy → interrupt");
 
-    chat.conv.busy = false;
+    chat.end_test_turn();
     chat.set_input("/");
     assert!(!chat.slash_suggestions.is_empty());
     chat.on_key_at(KeyCode::Esc, KeyModifiers::empty(), t0);
@@ -2359,7 +2359,7 @@ fn shift_tab_cycles_permission_mode() {
 #[test]
 fn messages_queue_while_busy() {
     let mut chat = chat_with_history("queue");
-    chat.conv.busy = true;
+    chat.start_test_turn();
     chat.set_input("first queued");
     chat.submit();
     let queued = chat.main_queue().entries;
@@ -2388,7 +2388,7 @@ fn busy_dispatch_runs_instant_and_queues_the_rest() {
     let _ = std::fs::remove_dir_all(&tmp);
     let mut chat = test_chat_home(tmp.join("home"));
     chat.cwd = tmp.display().to_string();
-    chat.conv.busy = true;
+    chat.start_test_turn();
 
     // Instant: /think xhigh applies now, not queued; busy stays true.
     chat.set_input("/think xhigh");
@@ -2813,7 +2813,7 @@ fn paste_burst_inserts_newlines_and_collapses() {
 
     // Normal typing (wide intervals): Enter submits as usual instead of inserting a newline.
     let mut chat = chat_with_history("paste2");
-    chat.conv.busy = true; // queueing path: no tokio runtime needed
+    chat.start_test_turn(); // queueing path: no tokio runtime needed
     let slow = std::time::Duration::from_millis(50);
     let mut now = std::time::Instant::now();
     for c in "hi".chars() {
@@ -2896,7 +2896,7 @@ fn image_path_line_becomes_marker_on_submit() {
     std::fs::create_dir_all(&dir).unwrap();
     let png = test_png_path(&dir, "a.png", 8, 8);
     chat.set_input(format!("take a look at this image\n{}", png.display()));
-    chat.conv.busy = true; // take the queue path: no tokio runtime needed
+    chat.start_test_turn(); // take the queue path: no tokio runtime needed
     chat.submit();
     assert_eq!(chat.main_queue().len(), 1);
     assert_eq!(
@@ -2923,7 +2923,7 @@ fn markdown_image_syntax_and_non_image_lines() {
     let txt = dir.join("note.txt");
     std::fs::write(&txt, "hi").unwrap();
     chat.set_input(format!("![img]({})\n{}", png.display(), txt.display()));
-    chat.conv.busy = true;
+    chat.start_test_turn();
     chat.submit();
     assert_eq!(
         chat.main_queue().entries[0].text,
@@ -3628,7 +3628,7 @@ fn switch_provider_resolves_model_atomically() {
 #[test]
 fn switch_provider_refuses_while_busy() {
     let mut chat = test_chat();
-    chat.conv.busy = true;
+    chat.start_test_turn();
     chat.input = "/provider codex".to_string();
     chat.submit();
     assert_eq!(
@@ -3667,7 +3667,7 @@ fn ask_other_input_does_not_swallow_modifier_chords() {
 #[test]
 fn short_sync_error_keeps_the_running_turn() {
     let mut chat = test_chat();
-    chat.conv.busy = true;
+    chat.start_test_turn();
     chat.conv.stream_msg = Some(0);
     chat.apply_event(UiEvent::Error {
         code: "TIMEOUT",
