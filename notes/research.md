@@ -9223,3 +9223,24 @@ questions to the guide skill. The listing fix should suffice — the Skill
 tool's own preamble already orders a matching skill invoked before answering —
 and a base-prompt line costs every session tokens; hold it until the listing
 alone proves insufficient.
+
+## D161 — the guide ships without the ledger's vocabulary
+
+The bundled guide carried 37 D-number references and 7 v6/v7 tags — every
+update quoted the ruling it came from, D159's included. The user's call: those
+are development-stage vocabulary, and the guide is the user-facing product
+surface. All stripped; where a sentence existed only to narrate history ("the
+D96 observation page is retired too"), the sentence went with the number, and
+current behavior stayed said in current terms. Two incidental fixes rode
+along: the shortcut bullet's `● main` became `● @main`, and "no longer writes
+into `@main`" became "does not write".
+
+The convention is a test, not a habit — `bundled_guide_speaks_no_ledger_numbers`
+scans the guide's description, when_to_use and body for a `D` + digits token
+and names the offending context, because the numbers kept leaking in through
+exactly the person maintaining the ledger. **1723 → 1724 unit.**
+
+The READMEs keep their D-references on purpose: they are repository
+documentation and link `notes/research.md` as the decision record, so a
+D-number there is a traceable anchor rather than a leak. The boundary is the
+binary: what ships inside it speaks no ledger.

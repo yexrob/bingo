@@ -436,6 +436,38 @@ mod tests {
         std::fs::write(path, content).unwrap();
     }
 
+    /// The bundled guide is user-facing: the decision ledger's D-numbers are
+    /// development vocabulary and must not ship in it. They kept leaking in —
+    /// every guide update quoted the ruling it came from — so the convention
+    /// is a test, not a habit.
+    #[test]
+    fn bundled_guide_speaks_no_ledger_numbers() {
+        let guide = bundled_skills()
+            .into_iter()
+            .find(|s| s.name == "guide")
+            .unwrap();
+        let text = format!(
+            "{} {} {}",
+            guide.description,
+            guide.when_to_use.as_deref().unwrap_or(""),
+            guide.content
+        );
+        let chars: Vec<char> = text.chars().collect();
+        for i in 0..chars.len() {
+            if chars[i] == 'D'
+                && (i == 0 || !chars[i - 1].is_ascii_alphanumeric())
+                && i + 2 < chars.len()
+                && chars[i + 1].is_ascii_digit()
+                && chars[i + 2].is_ascii_digit()
+            {
+                let context: String = chars[i.saturating_sub(30)..(i + 10).min(chars.len())]
+                    .iter()
+                    .collect();
+                panic!("ledger number in the bundled guide (development vocabulary): …{context}…");
+            }
+        }
+    }
+
     #[test]
     fn parses_frontmatter_fields() {
         let (fm, body) = parse_frontmatter(
