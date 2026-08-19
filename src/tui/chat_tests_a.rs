@@ -2839,6 +2839,19 @@ async fn slash_mcp_reconnect_unknown_server() {
         out.contains("handshake failed") || out.contains("✗"),
         "{out}"
     );
+    // Bare `/mcp reconnect` reaches every enabled server (D157) instead of a
+    // usage refusal — the action always allowed it, only the console said no.
+    chat.input = "/mcp reconnect".to_string();
+    chat.submit();
+    let out = slash_mcp_wait(&mut chat).await;
+    assert!(
+        !out.contains("usage:"),
+        "no-name reconnect is a command, not a usage error: {out}"
+    );
+    assert!(
+        out.contains("handshake failed") || out.contains("✗"),
+        "the one configured server was attempted: {out}"
+    );
     let _ = std::fs::remove_dir_all(&tmp);
 }
 

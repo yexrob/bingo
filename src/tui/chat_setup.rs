@@ -297,7 +297,7 @@ impl super::Chat {
                         lines.push(line);
                     }
                     lines.push(
-                        "usage: /mcp enable|disable [name|all] · /mcp reconnect <name>".into(),
+                        "usage: /mcp enable|disable [name|all] · /mcp reconnect [name]".into(),
                     );
                     unpin();
                     events.send(UiEvent::SlashInfo(lines.join("\n")));
@@ -351,13 +351,15 @@ impl super::Chat {
                     )));
                 });
             }
-            McpRequest::Reconnect { server: None } => {
-                self.push_slash_error("usage: /mcp reconnect <server name>".to_string());
-            }
-            McpRequest::Reconnect { server: Some(name) } => {
-                self.pin_panel("mcp", vec![format!("⏳ reconnecting {name}…")]);
+            McpRequest::Reconnect { server } => {
+                // No name reconnects every enabled server (D157) — the action
+                // always could, and the console refusing what the wire allows
+                // was the parity ledger's one admitted asymmetry.
+                let label = server.as_deref().unwrap_or("all MCP servers");
+                self.pin_panel("mcp", vec![format!("⏳ reconnecting {label}…")]);
                 tokio::spawn(async move {
-                    let said = crate::engine::actions::reconnect_mcp(&session, Some(&name)).await;
+                    let said =
+                        crate::engine::actions::reconnect_mcp(&session, server.as_deref()).await;
                     events.send(UiEvent::Unpin {
                         id: "mcp".to_string(),
                     });

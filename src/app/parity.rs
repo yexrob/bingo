@@ -208,7 +208,7 @@ const ACTION_ROWS: &[Row] = &[
     row(
         "mcp.reconnect",
         Shared,
-        "`/mcp reconnect <server>`. With no server the action reconnects every one of them — a wire client can ask for that, no console line does.",
+        "`/mcp reconnect [server]`. With no server the action reconnects every enabled one, from either frontend (D157).",
     ),
     row(
         "skill.invoke",
