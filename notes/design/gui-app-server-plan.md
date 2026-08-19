@@ -413,6 +413,16 @@ Chat/App 管线换 AppLink 帧，删全部 shim；TuiEvent 本地化；按键动
 > 建议 **(a)**。已探到的写入面成果（`Submitted` 处置、`serve_submit` 降为映射、`❯` 行改由
 > `turn/started` 的 `input_item_ids` 画）已回滚，详见 D152 末节。
 
+> **B7d review 裁决（2026-08-19，Fable）**：① 第四次止步核准（engine parity/说话即入场/
+> 时序 bug 三件已落且回滚了不能变绿的勘察工作——工作区干净是止步纪律的正确形状）。
+> ② 三条出路裁 **(a)**：动作表的 engine 半边入核（B7d-2，D153）——(b) 是在终点重新引入
+> 前端分叉，(c) 留两个权威；(a) 是 B5 单表原则的补完。之后 B7d-3（D154）按已核准顺序
+> 完成写入面。③ `Availability::engine_attached` 维持 false 直到 B7d-2 使之真实——
+> "action/list 不许诺 action/execute 会拒绝的事"这条判断核准。④ wire 会话每 turn 新增
+> memory pass 成本：核准（对齐即代价，控制台一直在付）；未来可做成 capability，不现在做。
+> ⑤ `!session.quiet` 吞掉第一条空回应警告的 parity 泄漏 → B7d-2 修（走 emit）。
+> ⑥ B8 顺延 D155（预留扩至 D156）。
+
 ### B8 · 收尾（S）
 `--print` 薄客户端；main.rs 启动统一；parity ledger 落成 CI 检查表（每个斜杠命令/提交分支/
 AppEvent 变体分类 shared|frontend-local，新增未分类即红）；schema 标 experimental；
