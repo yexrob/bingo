@@ -297,6 +297,17 @@ Chat/App 管线换 AppLink 帧，删全部 shim；TuiEvent 本地化；按键动
 > ④ D 编号：B7b 取 **D149**；追加预留 **D150–D152**（B8 与溢出）。⑤ agents.rs 仍超 4000 线，
 > B7b/B8 收敛或报告距离。
 
+> **B7b review 裁决（2026-08-19，Fable）**：① 再次拆批核准（store 落地 + 三项团队 smoke 全过
+> + main_busy 清零 + 全仓行数达标；读取面切换止步于真发现）。② 对三选项的裁决：**选 ②，
+> `attach` 去 runtime 化**——`AppLink.requests` 改为 `Requests` 包装（send 时打标、Drop 时发
+> Detach），不再派生转发任务。理由：唯一消除分歧而非绕开分歧的选项；与 B2b 的架构形状同构
+> （actor 独立线程 + 无界收件箱正是为同步调用方而设，runtime 绑定的 attach 是实现意外不是
+> 设计要求）；失去的进程内逐 attachment 有界请求队列可接受——wire 传输保有自己的入站上界
+> （B6），进程内生产者与 B2b 裁决①同一信任域。核之公共接缝由此变更，本裁决即授权。
+> ③ `/team list` 印用法菜单的 bug 修复核准；`TeamStart{members}`/`McpReconnect{server:None}`
+> 两处"wire 能说、console 从没说过"的既有限界 → B8 parity ledger 分类。
+> ④ store 的 `#![allow(dead_code)]` 随 B7b-2 读者落地摘除。
+
 ### B8 · 收尾（S）
 `--print` 薄客户端；main.rs 启动统一；parity ledger 落成 CI 检查表（每个斜杠命令/提交分支/
 AppEvent 变体分类 shared|frontend-local，新增未分类即红）；schema 标 experimental；
