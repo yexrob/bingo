@@ -370,6 +370,18 @@ Chat/App 管线换 AppLink 帧，删全部 shim；TuiEvent 本地化；按键动
 > 故建议 **B7d = 写入面**：`Controller::submit` 执行化 → 控制台 intent 队列 → 唤醒的门 →
 > 末尾挂 engine；`.now()` 在那里归零，配置双镜像随之。
 
+> **B7c review 裁决（2026-08-19，Fable）**：① 读取面切换全部核准——渲染器 700 行字节未动、
+> 行断言原样通过是行为等价的正确证法；steer 行竞态修复（改从 `queue/itemAbsorbed` 画）核准，
+> "两个生产者都对、只有钟错了"是投影架构才能修的 bug。② 两处可见微差核准并记录（流式中
+> 工具参数 JSON 不计入 token 估算——权威值在终态到达；watch 行插入点 ±数字符——本就双生产者
+> 竞态）。③ `absorb_inbound` 落 `peerMessage` 且 user 转发行标已读**追认**——与 B4"用户自己
+> 的话定义为已读"同一原则。④ `standalone` 走 call-id 前缀（`bash-`）记为债务，
+> `ItemBody::Command` 是正home → B8。⑤ 范围裁决：**B7d = 写入面**，按其建议顺序——
+> `Controller::submit` 从"裁决"变"执行"（Command 交回前端渲染）→ 控制台意图队列
+> （~130 提交点，回执在下帧前折叠）→ 乙案的门+图片+memory pass+LiveBash 另一半 →
+> **engine 最后挂**。完成时 `.now()` 生产路径零、config 双镜像亡、answer.rs 阻塞半边亡。
+> D152 归 B7d，B8 顺延 D153（预留扩至 D154）。
+
 ### B8 · 收尾（S）
 `--print` 薄客户端；main.rs 启动统一；parity ledger 落成 CI 检查表（每个斜杠命令/提交分支/
 AppEvent 变体分类 shared|frontend-local，新增未分类即红）；schema 标 experimental；
