@@ -37,6 +37,8 @@ pub mod ids;
 pub mod interaction;
 pub mod mail;
 pub mod operation;
+#[cfg(test)]
+mod parity;
 pub mod projection;
 pub mod queue;
 pub mod roomlog;
