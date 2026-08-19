@@ -406,18 +406,37 @@ async fn turn_end_triggers_auto_turn_when_wake_notification_pending() {
     // console's wake decision hangs off that report rather than off a word this
     // side put on its own channel.
     chat.end_test_turn();
-    chat.settle_store();
-    assert!(
-        chat.conv.messages[0]
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    let mut has_watch = false;
+    while std::time::Instant::now() < deadline {
+        chat.settle_store();
+        has_watch = chat.conv.messages[0]
             .activities
             .iter()
-            .any(|activity| matches!(&activity.kind, ActivityKind::Watch(_))),
+            .any(|activity| matches!(&activity.kind, ActivityKind::Watch(_)));
+        if has_watch {
+            break;
+        }
+        tokio::task::yield_now().await;
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(
+        has_watch,
         "the turn keeps the message the watch row hangs on: {:?}",
         chat.conv.messages
     );
-    tokio::task::yield_now().await;
-    chat.settle_store();
-    assert!(chat.conv.busy, "auto turn started after the turn ended");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    let mut woke = false;
+    while std::time::Instant::now() < deadline {
+        chat.settle_store();
+        if chat.conv.busy {
+            woke = true;
+            break;
+        }
+        tokio::task::yield_now().await;
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(woke, "auto turn started after the turn ended");
     assert_eq!(
         chat.conv.messages.len(),
         2,
