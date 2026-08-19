@@ -957,6 +957,30 @@ impl Controller {
                 Some(crate::app::snapshot::OperationKind::Compact),
                 compact,
             ),
+            reconnect @ Action::McpReconnect { .. } => self.hand_over(
+                on,
+                Some(crate::app::snapshot::OperationKind::McpReconnect),
+                reconnect,
+            ),
+            // Bringing a crew up opens its own operation further down, so this
+            // one does not open a second row for the same work; the other four
+            // are quick enough to be their report.
+            start @ Action::TeamStart { .. } => self.hand_over(on, None, start),
+            team @ (Action::TeamAssign { .. }
+            | Action::TeamStop { .. }
+            | Action::TeamScaffold { .. }
+            | Action::TeamMemoryGarbageCollect) => self.hand_over(on, None, team),
+            // A skill is a turn, not an operation: the marker is the prompt, and
+            // everything after it is the run the marker opened. It is main's
+            // turn wherever the line was typed, for the same reason a shell line
+            // is (D135) — the skill acts on the console's context.
+            Action::SkillInvoke { skill, input } => {
+                self.start_turn(
+                    crate::skills::invocation(&skill, input.as_deref()),
+                    crate::app::snapshot::TurnOrigin::User,
+                )?;
+                Ok(ActionResultStatus::Applied)
+            }
             // Everything else needs the engine, and its spec said so before it
             // got here.
             _ => Err(unavailable()),

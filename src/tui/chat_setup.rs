@@ -373,40 +373,11 @@ impl super::Chat {
             McpRequest::Reconnect { server: Some(name) } => {
                 self.pin_panel("mcp", vec![format!("⏳ reconnecting {name}…")]);
                 tokio::spawn(async move {
-                    let unpin = || {
-                        events.send(UiEvent::Unpin {
-                            id: "mcp".to_string(),
-                        });
-                    };
-                    let mut mgr = session.runtime.mcp.lock().await;
-                    if !mgr.configured().contains(&name) {
-                        unpin();
-                        events.send(UiEvent::SlashError(format!("no MCP server \"{name}\".")));
-                        return;
-                    }
-                    if mgr.is_disabled(&name) {
-                        unpin();
-                        events.send(UiEvent::SlashError(format!(
-                            "{name} is disabled; run /mcp enable {name} before reconnecting."
-                        )));
-                        return;
-                    }
-                    match mgr.reconnect(&name).await {
-                        Ok(()) => {
-                            let count = match mgr.status(&name) {
-                                McpStatus::Connected { tool_count } => tool_count,
-                                _ => 0,
-                            };
-                            unpin();
-                            events.send(UiEvent::SlashOutput(format!(
-                                "✓ {name} reconnected · {count} tools"
-                            )));
-                        }
-                        Err(e) => {
-                            unpin();
-                            events.send(UiEvent::SlashError(format!("✗ {e}")));
-                        }
-                    }
+                    let said = crate::engine::actions::reconnect_mcp(&session, Some(&name)).await;
+                    events.send(UiEvent::Unpin {
+                        id: "mcp".to_string(),
+                    });
+                    events.send(crate::tui::chat::said_event(said));
                 });
             }
         }

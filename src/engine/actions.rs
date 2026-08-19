@@ -106,6 +106,12 @@ pub async fn perform(session: &Arc<Session>, act: crate::app::engine::Act) {
                 }
             }
         }
+        Action::McpReconnect { server } => reconnect_mcp(session, server.as_deref()).await,
+        crew @ (Action::TeamStart { .. }
+        | Action::TeamAssign { .. }
+        | Action::TeamStop { .. }
+        | Action::TeamScaffold { .. }
+        | Action::TeamMemoryGarbageCollect) => team(session, &crew),
         // The table said this action needs an engine and the core handed it
         // over; an arm missing here is a dispatch bug, and saying so beats
         // finishing an operation that never ran.
@@ -338,4 +344,107 @@ fn usage_of(
         &session.client.models(),
         &session.runtime.model.borrow().clone(),
     )
+}
+
+// ---------------------------------------------------------------------------
+// mcp.reconnect
+// ---------------------------------------------------------------------------
+
+/// Reconnect one configured MCP server, or every one of them.
+///
+/// The manager lives outside the actor, so what it stands at afterwards is
+/// *reported in* rather than read out — a reconnect that left `config/read`
+/// saying "not connected" would be a lie a client has no way to catch.
+pub async fn reconnect_mcp(session: &Arc<Session>, server: Option<&str>) -> Said {
+    let mut manager = session.runtime.mcp.lock().await;
+    let configured = manager.configured();
+    let targets: Vec<String> = match server {
+        Some(name) => {
+            if !configured.iter().any(|known| known == name) {
+                return Said::error(format!("no MCP server \"{name}\"."));
+            }
+            if manager.is_disabled(name) {
+                return Said::error(format!(
+                    "{name} is disabled; run /mcp enable {name} before reconnecting."
+                ));
+            }
+            vec![name.to_string()]
+        }
+        None => configured
+            .iter()
+            .filter(|name| !manager.is_disabled(name))
+            .cloned()
+            .collect(),
+    };
+    if targets.is_empty() {
+        return Said::error("no MCP server is configured and enabled.".to_string());
+    }
+    let mut failures = Vec::new();
+    let mut tools = 0usize;
+    for name in &targets {
+        match manager.reconnect(name).await {
+            Ok(()) => {
+                if let crate::mcp::McpStatus::Connected { tool_count } = manager.status(name) {
+                    tools += tool_count;
+                }
+            }
+            Err(error) => failures.push(format!("{error}")),
+        }
+    }
+    session.core.report_mcp(mcp_states(&manager));
+    if let Some(first) = failures.first() {
+        return Said::error(format!("✗ {first}"));
+    }
+    Said::output(match targets.as_slice() {
+        [one] => format!("✓ {one} reconnected · {tools} tools"),
+        many => format!("✓ {} MCP servers reconnected · {tools} tools", many.len()),
+    })
+}
+
+/// What the manager stands at, in the shape the core publishes.
+fn mcp_states(manager: &crate::mcp::McpManager) -> Vec<crate::app::snapshot::McpServerState> {
+    manager
+        .configured()
+        .into_iter()
+        .map(|name| {
+            let status = manager.status(&name);
+            let (wire, tools, error) = match &status {
+                crate::mcp::McpStatus::Connected { tool_count } => (
+                    crate::app::snapshot::McpStatus::Connected,
+                    *tool_count as u32,
+                    None,
+                ),
+                crate::mcp::McpStatus::Failed { detail } => (
+                    crate::app::snapshot::McpStatus::Error,
+                    0,
+                    Some(crate::error::sanitize_msg(detail)),
+                ),
+                // Disabled and never-connected are one wire state, because the
+                // wire says separately whether a server is enabled: two ways to
+                // read one fact is how they come to disagree.
+                crate::mcp::McpStatus::Disabled | crate::mcp::McpStatus::NotConnected => {
+                    (crate::app::snapshot::McpStatus::Disconnected, 0, None)
+                }
+            };
+            crate::app::snapshot::McpServerState {
+                enabled: !manager.is_disabled(&name),
+                name,
+                status: wire,
+                tools,
+                error,
+            }
+        })
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
+// team.*
+// ---------------------------------------------------------------------------
+
+/// The five `/team` mutations. The chart, the crew and the memory all live in
+/// the project directory, which is why this is the engine's half rather than the
+/// actor's: it reads files and starts loops.
+pub fn team(session: &Arc<Session>, action: &crate::app::command::Action) -> Said {
+    let lines = crate::team_cmd::act(session, &session.cwd(), action);
+    Said::info(lines.join("\n"))
 }

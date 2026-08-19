@@ -747,6 +747,120 @@ mod tests {
         assert!(opened, "and the client is told it is running: {events:#?}");
     }
 
+    /// Ask for an action on main, and say what the core answered.
+    async fn execute(
+        link: &mut AppLink,
+        id: u64,
+        action: crate::app::command::Action,
+    ) -> Result<AppReply, AppError> {
+        link.request(AppRequest::Command {
+            id: RequestId(id),
+            command: AppCommand::Execute {
+                origin_conversation_id: ConversationId::new("conv_1"),
+                precondition: None,
+                action,
+            },
+        })
+        .unwrap_or_else(|error| panic!("{error}"));
+        loop {
+            match link.recv().await {
+                Some(AppFrame::Reply { id: seen, result }) if seen == RequestId(id) => {
+                    return result;
+                }
+                Some(_) => {}
+                None => panic!("the core closed"),
+            }
+        }
+    }
+
+    /// A skill is a turn: the marker is the prompt, and the run it opens is the
+    /// answer. It is not an operation, because there is nothing beside the turn
+    /// to report.
+    #[tokio::test]
+    async fn invoking_a_skill_opens_the_turn_its_marker_asks_for() {
+        let (core, engine) = running();
+        let mut link = attached(&core).await;
+        let reply = execute(
+            &mut link,
+            11,
+            crate::app::command::Action::SkillInvoke {
+                skill: "guide".to_string(),
+                input: Some("the config table".to_string()),
+            },
+        )
+        .await;
+        assert!(matches!(
+            reply,
+            Ok(AppReply::Submitted(SubmitDisposition::Applied { .. }))
+        ));
+        match engine.taken().as_slice() {
+            [Run::Turn { text, .. }] => assert_eq!(
+                text, "✦ guide the config table",
+                "only the marker is submitted (progressive disclosure)"
+            ),
+            other => panic!("expected one turn, got {other:?}"),
+        }
+    }
+
+    /// The rest of the engine half is work rather than a turn: it is handed over
+    /// with the page it was asked on, and the operation is how a client watches
+    /// it. A crew coming up opens its own operation further down, so the core
+    /// does not open a second row for it.
+    #[tokio::test]
+    async fn the_work_that_needs_the_engine_is_handed_over_under_an_operation() {
+        use crate::app::command::Action;
+        let (core, engine) = running();
+        let mut link = attached(&core).await;
+        for (id, action, operation) in [
+            (
+                20,
+                Action::McpReconnect {
+                    server: Some("docs".to_string()),
+                },
+                true,
+            ),
+            (21, Action::TeamStart { members: None }, false),
+            (
+                22,
+                Action::TeamAssign {
+                    member: "scout".to_string(),
+                    task: "read the plan".to_string(),
+                },
+                false,
+            ),
+            (23, Action::TeamStop { member: None }, false),
+            (
+                24,
+                Action::TeamScaffold {
+                    name: "crew".to_string(),
+                },
+                false,
+            ),
+            (25, Action::TeamMemoryGarbageCollect, false),
+        ] {
+            let reply = execute(&mut link, id, action.clone()).await;
+            assert!(
+                matches!(
+                    reply,
+                    Ok(AppReply::Submitted(SubmitDisposition::Applied { .. }))
+                ),
+                "{action:?}: {reply:?}"
+            );
+            match engine.taken().last() {
+                Some(Run::Act(act)) => {
+                    assert_eq!(act.action, action);
+                    assert_eq!(act.on, ConvKey::Main);
+                    assert_eq!(
+                        act.operation.is_some(),
+                        operation,
+                        "{action:?} opens its own row exactly once"
+                    );
+                }
+                other => panic!("expected {action:?} to be handed over, got {other:?}"),
+            }
+        }
+    }
+
     /// A core with no engine keeps the console's arrangement: it queues, and the
     /// drain is not its to run.
     #[tokio::test]

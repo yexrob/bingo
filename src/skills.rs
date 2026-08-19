@@ -338,6 +338,18 @@ pub fn expand_skill(skill: &Skill, args: &str) -> String {
     content.replace("${CLAUDE_SKILL_DIR}", &skill.base_dir.display().to_string())
 }
 
+/// The line a skill invocation submits.
+///
+/// Progressive disclosure: only the marker is submitted, and the model reads the
+/// body on demand through the Skill tool pointer and Read. It is model-facing
+/// text, so it has one author whichever frontend typed `/<skill name>`.
+pub fn invocation(name: &str, input: Option<&str>) -> String {
+    match input {
+        Some(input) => format!("✦ {name} {input}"),
+        None => format!("✦ {name}"),
+    }
+}
+
 /// Truncation length for listing entries.
 pub const MAX_LISTING_DESC_CHARS: usize = 250;
 /// Default char budget for the listing (1% of context).

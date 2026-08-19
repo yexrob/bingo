@@ -422,11 +422,7 @@ impl super::Chat {
                 page.send(UiEvent::ContextUsage(usage));
             }
             console.send(UiEvent::Unpin { id: pin });
-            console.send(match done.said.tier {
-                actions::Tier::Error => UiEvent::SlashError(done.said.text),
-                actions::Tier::Info => UiEvent::SlashInfo(done.said.text),
-                actions::Tier::Output => UiEvent::SlashOutput(done.said.text),
-            });
+            console.send(super::said_event(done.said));
         });
     }
 

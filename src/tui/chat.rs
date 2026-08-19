@@ -355,6 +355,20 @@ pub const ASK_RECEIPT_NO: &str = "> no";
 /// A refusal that carried feedback: `> no — <what to do instead>`.
 pub const ASK_RECEIPT_NO_PREFIX: &str = "> no — ";
 
+/// One line of an action's own report, as the terminal shows it.
+///
+/// The tier comes from the work rather than from here, which is the point: the
+/// core records the same sentence as a notice item, so a GUI and this screen say
+/// the same thing about the same outcome without either owning the words.
+pub(crate) fn said_event(said: crate::engine::actions::Said) -> UiEvent {
+    use crate::engine::actions::Tier;
+    match said.tier {
+        Tier::Error => UiEvent::SlashError(said.text),
+        Tier::Info => UiEvent::SlashInfo(said.text),
+        Tier::Output => UiEvent::SlashOutput(said.text),
+    }
+}
+
 /// Whether a line is a permission receipt. Matched whole for the three plain
 /// choices and by the em-dash prefix for a refusal with feedback — a bare `> `
 /// test would swallow every markdown quote the user ever pastes.
@@ -3223,14 +3237,7 @@ impl Chat {
                 }),
                 Action::McpReconnect { server } => self.slash_mcp(McpRequest::Reconnect { server }),
                 Action::SkillInvoke { skill, input } => {
-                    // Progressive disclosure: only the `✦ <skill name> [args]`
-                    // marker is submitted; the model reads the body on demand
-                    // through the Skill tool pointer and Read.
-                    let marker = match input {
-                        Some(input) => format!("✦ {skill} {input}"),
-                        None => format!("✦ {skill}"),
-                    };
-                    self.start_turn(marker, true);
+                    self.start_turn(crate::skills::invocation(&skill, input.as_deref()), true);
                 }
                 team @ (Action::TeamStart { .. }
                 | Action::TeamAssign { .. }
