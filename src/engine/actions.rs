@@ -106,6 +106,33 @@ pub async fn perform(session: &Arc<Session>, act: crate::app::engine::Act) {
                 }
             }
         }
+        Action::SessionReset => {
+            let done = reset_session(session);
+            warn(session, &on, done.warnings);
+            done.said
+        }
+        Action::SessionRename { name } => {
+            let done = rename_session(session, &name);
+            warn(session, &on, done.warnings);
+            done.said
+        }
+        Action::SessionShare {
+            public,
+            open,
+            output,
+        } => match prepare_share(session, output) {
+            Err(said) => said,
+            Ok(export) => {
+                for note in &export.notes {
+                    session.operations.record(on.clone(), notice(note));
+                }
+                if public {
+                    publish_share(export, open).await
+                } else {
+                    export_share(&export, open)
+                }
+            }
+        },
         Action::McpReconnect { server } => reconnect_mcp(session, server.as_deref()).await,
         crew @ (Action::TeamStart { .. }
         | Action::TeamAssign { .. }
@@ -122,14 +149,7 @@ pub async fn perform(session: &Arc<Session>, act: crate::app::engine::Act) {
     // end and stops looking must already have been told what happened.
     let failed = said.tier == Tier::Error;
     let message = said.text.clone();
-    session.operations.record(
-        on,
-        crate::app::snapshot::ItemBody::Notice {
-            code: crate::error::GENERIC.to_string(),
-            level: said.level(),
-            text: said.text,
-        },
-    );
+    session.operations.record(on, notice(&said));
     if let Some(operation) = &operation {
         session.operations.finish(
             operation,
@@ -142,6 +162,30 @@ pub async fn perform(session: &Arc<Session>, act: crate::app::engine::Act) {
                 code: crate::error::GENERIC.to_string(),
                 message: crate::error::sanitize_msg(&message),
             }),
+        );
+    }
+}
+
+/// One line of a report, as an item in a conversation's log.
+fn notice(said: &Said) -> crate::app::snapshot::ItemBody {
+    crate::app::snapshot::ItemBody::Notice {
+        code: crate::error::GENERIC.to_string(),
+        level: said.level(),
+        text: said.text.clone(),
+    }
+}
+
+/// What the work could not carry over, said beside the result rather than
+/// instead of it.
+fn warn(session: &Arc<Session>, on: &ConvKey, warnings: Vec<String>) {
+    for warning in warnings {
+        session.operations.record(
+            on.clone(),
+            crate::app::snapshot::ItemBody::Notice {
+                code: crate::error::GENERIC.to_string(),
+                level: crate::app::snapshot::NoticeLevel::Warning,
+                text: warning,
+            },
         );
     }
 }
@@ -447,4 +491,241 @@ fn mcp_states(manager: &crate::mcp::McpManager) -> Vec<crate::app::snapshot::Mcp
 pub fn team(session: &Arc<Session>, action: &crate::app::command::Action) -> Said {
     let lines = crate::team_cmd::act(session, &session.cwd(), action);
     Said::info(lines.join("\n"))
+}
+
+// ---------------------------------------------------------------------------
+// The session family: reset, rename, share
+// ---------------------------------------------------------------------------
+
+/// Bind the session's task store to a transcript.
+///
+/// A session with no transcript files its tasks under the project instead, so
+/// there is always a key and never a hole.
+pub fn bind_tasks(session: &Arc<Session>, transcript: Option<&crate::transcript::Transcript>) {
+    let key = transcript
+        .map(crate::transcript::Transcript::name)
+        .filter(|key| !key.is_empty())
+        .unwrap_or_else(|| crate::tasks::project_task_key(&session.cwd()));
+    session.tasks.rebind(&key);
+}
+
+/// Bind the two files a session keeps beside its transcript: the share document
+/// and the room log a resume replays (Amendment #6).
+///
+/// Neither failing is worth refusing over — both are enhancements to a session
+/// that is otherwise complete — so a failure comes back as a warning beside the
+/// result rather than instead of it.
+pub fn bind_share(
+    session: &Arc<Session>,
+    transcript: Option<&crate::transcript::Transcript>,
+) -> Vec<String> {
+    session.agents.detach_share();
+    session.channels.detach_share();
+    let Some(transcript) = transcript else {
+        return Vec::new();
+    };
+    let mut warnings = Vec::new();
+    let path = crate::share::shares_dir(&session.home).join(format!("{}.json", transcript.name()));
+    match crate::share::ShareStore::load_or_create(&path) {
+        Ok(store) => {
+            session.channels.align_with_share(store.clone());
+            session.agents.attach_share(store.clone());
+            session.channels.attach_share(store);
+        }
+        Err(error) => warnings.push(format!(
+            "share store unavailable ({error}); bingo share will have the conversation view only"
+        )),
+    }
+    // Replay first, so a resumed session comes back to the rooms it left with
+    // its unread marks intact, and only then start appending to the log it just
+    // read.
+    let rooms = crate::app::roomlog::path(&session.home, &transcript.name());
+    session
+        .channels
+        .restore_rooms(crate::app::roomlog::replay(&rooms));
+    session.channels.attach_sidecar(rooms);
+    warnings
+}
+
+/// What a session-level rewrite left behind: the line to print, and what could
+/// not be carried over.
+///
+/// The transcript itself is not here because it is not returned anywhere: it is
+/// *published* on `runtime.transcript`, which is where every reader of "which
+/// transcript is this session on" already looks.
+pub struct Rebound {
+    pub said: Said,
+    pub warnings: Vec<String>,
+}
+
+/// `session.reset`: a fresh transcript, with everything the old one carried
+/// rebound to it.
+pub fn reset_session(session: &Arc<Session>) -> Rebound {
+    let transcript = crate::transcript::create(&session.home, &session.cwd()).ok();
+    let _ = session.runtime.transcript_tx.send(transcript.clone());
+    bind_tasks(session, transcript.as_ref());
+    let warnings = bind_share(session, transcript.as_ref());
+    Rebound {
+        said: Said::output("✓ conversation cleared; starting a new session."),
+        warnings,
+    }
+}
+
+/// `session.rename`: the transcript file, and the two sidecars that answer to
+/// its name.
+pub fn rename_session(session: &Arc<Session>, name: &str) -> Rebound {
+    let Some(current) = session.runtime.transcript.borrow().clone() else {
+        return Rebound {
+            said: Said::error("this session has no transcript; cannot rename."),
+            warnings: Vec::new(),
+        };
+    };
+    let previous = current.name();
+    let renamed = match current.rename(name) {
+        Ok(renamed) => renamed,
+        Err(error) => {
+            return Rebound {
+                said: Said::error(format!("rename failed: {error}")),
+                warnings: Vec::new(),
+            };
+        }
+    };
+    let name = renamed.name();
+    let mut warnings = Vec::new();
+    if let Err(error) = session.tasks.rename_key(&previous, &name) {
+        warnings.push(format!(
+            "task data could not follow the renamed session ({error}); tasks remain under the previous session name"
+        ));
+    }
+    if let Err(error) = crate::share::rename_session_sidecars(&session.home, &previous, &name) {
+        warnings.push(format!(
+            "share data could not follow the renamed session ({error}); export may omit agent/channel history"
+        ));
+    }
+    let _ = session.runtime.transcript_tx.send(Some(renamed.clone()));
+    warnings.extend(bind_share(session, Some(&renamed)));
+    Rebound {
+        said: Said::output(format!("✓ session renamed: {name}")),
+        warnings,
+    }
+}
+
+/// A rendered export, and where it is going.
+pub struct Export {
+    pub html: String,
+    pub out: std::path::PathBuf,
+    /// What the render had to do without, said before the export itself.
+    pub notes: Vec<Said>,
+    base: String,
+    id: String,
+}
+
+/// Render the session as one page. The human-facing export is the full canonical
+/// conversation, not the compacted projection the model sees.
+pub fn prepare_share(
+    session: &Arc<Session>,
+    output: Option<std::path::PathBuf>,
+) -> Result<Export, Said> {
+    let Some(transcript) = session.runtime.transcript.borrow().clone() else {
+        return Err(Said::output(
+            "no session to export yet (the new session has not been persisted; send a message first).",
+        ));
+    };
+    let messages = match transcript.load_canonical() {
+        Ok(messages) => messages,
+        Err(error) => return Err(Said::error(format!("failed to read the session: {error}"))),
+    };
+    let stem = transcript.name();
+    let path = crate::share::shares_dir(&session.home).join(format!("{stem}.json"));
+    let mut notes = Vec::new();
+    let doc = match crate::share::ShareStore::load_or_create(&path) {
+        Ok(store) => store.snapshot(),
+        Err(error) => {
+            // The export still happens; what it loses is the collaboration half.
+            notes.push(Said::error(format!(
+                "cannot read the share document ({error}); exporting the conversation view only."
+            )));
+            crate::share::ShareDoc::new(stem.clone())
+        }
+    };
+    // Legacy-session fallback: without a share document, derive the team, DM and
+    // channel data from the main transcript.
+    let doc = if doc.agents.is_empty() && doc.channels.is_empty() {
+        crate::share::derive_share_doc(&stem, &messages)
+    } else {
+        doc
+    };
+    Ok(Export {
+        html: crate::share_html::render(&doc, &messages),
+        out: output.unwrap_or_else(|| session.cwd().join(format!("{stem}.html"))),
+        notes,
+        base: session
+            .settings
+            .share
+            .base_url
+            .clone()
+            .unwrap_or_else(|| crate::share::DEFAULT_SHARE_BASE.to_string()),
+        id: crate::share::share_id(&stem),
+    })
+}
+
+/// The note every export carries: what is in the file, before anyone sends it on.
+const SHARE_NOTE: &str = "note: this file contains the full conversation and tool outputs (possibly sensitive); review it before sharing.";
+
+/// Local export, which is the safe default. `open` only opens the file it wrote.
+pub fn export_share(export: &Export, open: bool) -> Said {
+    let overwritten = export.out.exists();
+    if let Err(error) = crate::share::write_html_atomic(&export.out, &export.html) {
+        return Said::error(format!("write failed: {error}"));
+    }
+    let mut lines = vec![format!(
+        "✓ exported: {}{}",
+        export.out.display(),
+        if overwritten { " (overwritten)" } else { "" }
+    )];
+    if open {
+        match crate::share::open_in_browser(&export.out.display().to_string()) {
+            Ok(_) => lines.push("opened in the browser.".to_string()),
+            Err(error) => lines.push(format!("cannot open the browser: {error}")),
+        }
+    }
+    lines.push(SHARE_NOTE.to_string());
+    Said::info(lines.join("\n"))
+}
+
+/// Publish a public link. Explicit opt-in, and a failed upload falls back to the
+/// local file rather than losing the export.
+pub async fn publish_share(export: Export, open: bool) -> Said {
+    match crate::share::upload_share(&export.base, &export.id, &export.html).await {
+        Ok(url) => {
+            let mut lines = vec![format!("✓ published: {url}")];
+            if open {
+                match crate::share::open_in_browser(&url) {
+                    Ok(_) => lines.push("opened in the browser.".to_string()),
+                    Err(error) => lines.push(format!("cannot open the browser: {error}")),
+                }
+            }
+            // The URL must survive long enough to copy — info tier.
+            Said::info(lines.join("\n"))
+        }
+        Err(error) => {
+            let mut lines = vec![format!(
+                "upload failed ({error}); falling back to a local file."
+            )];
+            let overwritten = export.out.exists();
+            match crate::share::write_html_atomic(&export.out, &export.html) {
+                Ok(()) => lines.push(format!(
+                    "✓ exported: {}{}",
+                    export.out.display(),
+                    if overwritten { " (overwritten)" } else { "" }
+                )),
+                Err(write) => lines.push(format!("write failed: {write}")),
+            }
+            if open && crate::share::open_in_browser(&export.out.display().to_string()).is_ok() {
+                lines.push("opened in the browser.".to_string());
+            }
+            lines.push(SHARE_NOTE.to_string());
+            Said::error(lines.join("\n"))
+        }
+    }
 }

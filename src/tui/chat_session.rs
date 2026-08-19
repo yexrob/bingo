@@ -56,32 +56,11 @@ impl ResumeMenu {
 
 impl super::Chat {
     pub(super) fn slash_rename(&mut self, arg: &str) {
-        let Some(t) = self.session.runtime.transcript.borrow().clone() else {
-            self.push_slash_error("this session has no transcript; cannot rename.".to_string());
-            return;
-        };
-        let old_name = t.name();
-        match t.rename(arg) {
-            Ok(new_t) => {
-                let name = new_t.name();
-                if let Err(error) = self.session.tasks.rename_key(&old_name, &name) {
-                    self.push_warning(format!(
-                        "task data could not follow the renamed session ({error}); tasks remain under the previous session name"
-                    ));
-                }
-                if let Err(error) =
-                    crate::share::rename_session_sidecars(&self.session.home, &old_name, &name)
-                {
-                    self.push_warning(format!(
-                        "share data could not follow the renamed session ({error}); export may omit agent/channel history"
-                    ));
-                }
-                let _ = self.session.runtime.transcript_tx.send(Some(new_t.clone()));
-                self.attach_share_to_transcript(Some(&new_t));
-                self.push_slash_output(format!("✓ session renamed: {name}"));
-            }
-            Err(e) => self.push_slash_error(format!("rename failed: {e}")),
+        let done = crate::engine::actions::rename_session(&self.session, arg);
+        for warning in done.warnings {
+            self.push_warning(warning);
         }
+        self.say(done.said);
     }
 
     /// `/resume [name or keyword]`: no argument opens the session selector (picker-model.md commit C,
@@ -261,75 +240,20 @@ impl super::Chat {
     /// to re-split the same line the registry had already parsed — one grammar
     /// with two readers, which is how a flag comes to mean two things.
     pub(super) fn slash_share(&mut self, public: bool, open: bool) {
-        let Some(transcript) = self.session.runtime.transcript.borrow().clone() else {
-            self.push_slash_output("no session to export yet (the new session has not been persisted; send a message first).".to_string());
-            return;
+        let export = match crate::engine::actions::prepare_share(&self.session, None) {
+            Ok(export) => export,
+            Err(said) => return self.say(said),
         };
-        // Human-facing export: the full canonical conversation, not the
-        // compacted projection the model sees.
-        let messages = match transcript.load_canonical() {
-            Ok(m) => m,
-            Err(e) => {
-                self.push_slash_error(format!("failed to read the session: {e}"));
-                return;
-            }
-        };
-        let stem = transcript.name();
-        let share_path = crate::share::shares_dir(&self.session.home).join(format!("{stem}.json"));
-        let doc = match crate::share::ShareStore::load_or_create(&share_path) {
-            Ok(store) => store.snapshot(),
-            Err(e) => {
-                self.push_slash_error(format!(
-                    "cannot read the share document ({e}); exporting the conversation view only."
-                ));
-                crate::share::ShareDoc::new(stem.clone())
-            }
-        };
-        // Legacy-session fallback: without a share document, derive Team/DM/channel data from the main transcript.
-        let doc = if doc.agents.is_empty() && doc.channels.is_empty() {
-            crate::share::derive_share_doc(&stem, &messages)
-        } else {
-            doc
-        };
-        let html = crate::share_html::render(&doc, &messages);
-        let out = std::path::PathBuf::from(&self.cwd).join(format!("{stem}.html"));
-
+        for note in export.notes.clone() {
+            self.say(note);
+        }
         // Local export is the safe default; `--open` only opens the generated file.
         if !public {
-            let overwritten = out.exists();
-            if let Err(e) = crate::share::write_html_atomic(&out, &html) {
-                self.push_slash_error(format!("write failed: {e}"));
-                return;
-            }
-            let mut lines = vec![format!(
-                "✓ exported: {}{}",
-                out.display(),
-                if overwritten { " (overwritten)" } else { "" }
-            )];
-            if open {
-                match crate::share::open_in_browser(&out.display().to_string()) {
-                    Ok(_) => lines.push("opened in the browser.".to_string()),
-                    Err(e) => lines.push(format!("cannot open the browser: {e}")),
-                }
-            }
-            lines.push(
-                "note: this file contains the full conversation and tool outputs (possibly sensitive); review it before sharing."
-                    .to_string(),
-            );
-            self.push_slash_info(lines.join("\n"));
+            let said = crate::engine::actions::export_share(&export, open);
+            self.say(said);
             return;
         }
-
         // Public publishing is asynchronous so the TUI event loop remains responsive.
-        // The runtime settings snapshot is authoritative for the configured share service.
-        let base = self
-            .session
-            .settings
-            .share
-            .base_url
-            .clone()
-            .unwrap_or_else(|| crate::share::DEFAULT_SHARE_BASE.to_string());
-        let id = crate::share::share_id(&stem);
         let events = self.events.clone();
         self.pin_panel(
             "share",
@@ -340,49 +264,11 @@ impl super::Chat {
             ],
         );
         tokio::spawn(async move {
-            let unpin = || {
-                events.send(UiEvent::Unpin {
-                    id: "share".to_string(),
-                });
-            };
-            match crate::share::upload_share(&base, &id, &html).await {
-                Ok(url) => {
-                    let mut lines = vec![format!("✓ published: {url}")];
-                    if open {
-                        match crate::share::open_in_browser(&url) {
-                            Ok(_) => lines.push("opened in the browser.".to_string()),
-                            Err(e) => lines.push(format!("cannot open the browser: {e}")),
-                        }
-                    }
-                    unpin();
-                    // The URL must survive long enough to copy — info tier.
-                    events.send(UiEvent::SlashInfo(lines.join("\n")));
-                }
-                Err(e) => {
-                    // Upload failure falls back to a local file + a notice (consistent with the bingo share subcommand).
-                    let mut lines = vec![format!(
-                        "upload failed ({e}); falling back to a local file."
-                    )];
-                    let overwritten = out.exists();
-                    match crate::share::write_html_atomic(&out, &html) {
-                        Ok(()) => lines.push(format!(
-                            "✓ exported: {}{}",
-                            out.display(),
-                            if overwritten { " (overwritten)" } else { "" }
-                        )),
-                        Err(write_err) => lines.push(format!("write failed: {write_err}")),
-                    }
-                    if open && crate::share::open_in_browser(&out.display().to_string()).is_ok() {
-                        lines.push("opened in the browser.".to_string());
-                    }
-                    lines.push(
-                        "note: this file contains the full conversation and tool outputs (possibly sensitive); review it before sharing."
-                            .to_string(),
-                    );
-                    unpin();
-                    events.send(UiEvent::SlashError(lines.join("\n")));
-                }
-            }
+            let said = crate::engine::actions::publish_share(export, open).await;
+            events.send(UiEvent::Unpin {
+                id: "share".to_string(),
+            });
+            events.send(super::said_event(said));
         });
     }
 

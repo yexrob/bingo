@@ -812,6 +812,23 @@ mod tests {
         let (core, engine) = running();
         let mut link = attached(&core).await;
         for (id, action, operation) in [
+            (16, Action::SessionReset, false),
+            (
+                17,
+                Action::SessionRename {
+                    name: "renamed".to_string(),
+                },
+                false,
+            ),
+            (
+                18,
+                Action::SessionShare {
+                    public: false,
+                    open: false,
+                    output: None,
+                },
+                true,
+            ),
             (
                 20,
                 Action::McpReconnect {

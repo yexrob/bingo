@@ -957,6 +957,15 @@ impl Controller {
                 Some(crate::app::snapshot::OperationKind::Compact),
                 compact,
             ),
+            // The session family. A reset and a rename rewrite what the session
+            // *is*, so the core takes the answer back and updates its own record
+            // rather than waiting to be told a second time; a share is a render
+            // and possibly an upload, so it is an operation.
+            reset @ Action::SessionReset => self.hand_over(on, None, reset),
+            rename @ Action::SessionRename { .. } => self.hand_over(on, None, rename),
+            share @ Action::SessionShare { .. } => {
+                self.hand_over(on, Some(crate::app::snapshot::OperationKind::Share), share)
+            }
             reconnect @ Action::McpReconnect { .. } => self.hand_over(
                 on,
                 Some(crate::app::snapshot::OperationKind::McpReconnect),

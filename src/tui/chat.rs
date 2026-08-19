@@ -3349,49 +3349,27 @@ impl Chat {
         self.estimate_context_usage(&messages);
     }
 
-    fn rebind_tasks_to_transcript(&self, transcript: Option<&crate::transcript::Transcript>) {
-        let key = transcript
-            .map(crate::transcript::Transcript::name)
-            .filter(|key| !key.is_empty())
-            .unwrap_or_else(|| crate::tasks::project_task_key(&self.session.cwd()));
-        self.session.tasks.rebind(&key);
+    pub(crate) fn rebind_tasks_to_transcript(
+        &self,
+        transcript: Option<&crate::transcript::Transcript>,
+    ) {
+        crate::engine::actions::bind_tasks(&self.session, transcript);
     }
 
-    fn attach_share_to_transcript(&mut self, transcript: Option<&crate::transcript::Transcript>) {
-        self.session.agents.detach_share();
-        self.session.channels.detach_share();
-        let Some(transcript) = transcript else {
-            return;
-        };
-        let path = crate::share::shares_dir(&self.session.home)
-            .join(format!("{}.json", transcript.name()));
-        match crate::share::ShareStore::load_or_create(&path) {
-            Ok(store) => {
-                self.session.channels.align_with_share(store.clone());
-                self.session.agents.attach_share(store.clone());
-                self.session.channels.attach_share(store);
-            }
-            Err(error) => self.push_warning(format!(
-                "share store unavailable ({error}); bingo share will have the conversation view only"
-            )),
+    pub(crate) fn attach_share_to_transcript(
+        &mut self,
+        transcript: Option<&crate::transcript::Transcript>,
+    ) {
+        for warning in crate::engine::actions::bind_share(&self.session, transcript) {
+            self.push_warning(warning);
         }
-        // The room sidecar (Amendment #6): replay first, so a resumed session
-        // comes back to the rooms it left with its unread marks intact, and only
-        // then start appending to the log it just read.
-        let rooms = crate::app::roomlog::path(&self.session.home, &transcript.name());
-        self.session
-            .channels
-            .restore_rooms(crate::app::roomlog::replay(&rooms));
-        self.session.channels.attach_sidecar(rooms);
     }
 
     fn slash_clear(&mut self) {
-        let session = self.session.clone();
-        let cwd = std::path::PathBuf::from(&self.cwd);
-        let new_transcript = crate::transcript::create(&session.home, &cwd).ok();
-        let _ = session.runtime.transcript_tx.send(new_transcript.clone());
-        self.rebind_tasks_to_transcript(new_transcript.as_ref());
-        self.attach_share_to_transcript(new_transcript.as_ref());
+        let done = crate::engine::actions::reset_session(&self.session);
+        for warning in done.warnings {
+            self.push_warning(warning);
+        }
         let main = self.main_conv();
         main.messages.clear();
         main.stream_msg = None;
@@ -3405,7 +3383,7 @@ impl Chat {
             self.reset_flushed();
         }
         self.reset_context_usage();
-        self.push_slash_output("✓ conversation cleared; starting a new session.".to_string());
+        self.say(done.said);
     }
 
     /// Switches the runtime model and persists it as the default (same path as /theme /think: writes the project layer).
