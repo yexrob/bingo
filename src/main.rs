@@ -6,9 +6,9 @@ use clap::Parser;
 
 use crate::api::client::Client;
 use crate::api::types::{DEFAULT_MODEL, Message};
-use crate::memory::{extract_memory, load_project_memory};
+use crate::memory::load_project_memory;
 use crate::permission::PermissionMode;
-use crate::query::{Session, headless_hooks, run_query};
+use crate::query::Session;
 use crate::settings::load_settings;
 use crate::system::{build_system, load_memory};
 use crate::transcript::{Transcript, create as create_transcript, latest as latest_transcript};
@@ -35,6 +35,7 @@ mod model_families;
 mod permission;
 mod platform;
 mod preapproved;
+mod print;
 mod query;
 mod query_session;
 mod query_turn;
@@ -313,14 +314,12 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             None => match create_transcript(&home, &project_dir).and_then(started) {
                 Ok(t) => (Some(t), Vec::new()),
                 Err(e) => {
-                    if !cli.print {
-                        eprintln!(
-                            "[bingo] warning: cannot create transcript (history will not persist): {e}"
-                        );
-                        startup_notes.push(format!(
-                            "⚠ cannot create transcript (history will not persist): {e}"
-                        ));
-                    }
+                    eprintln!(
+                        "[bingo] warning: cannot create transcript (history will not persist): {e}"
+                    );
+                    startup_notes.push(format!(
+                        "⚠ cannot create transcript (history will not persist): {e}"
+                    ));
                     (None, Vec::new())
                 }
             },
@@ -329,14 +328,15 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         match create_transcript(&home, &project_dir).and_then(started) {
             Ok(t) => (Some(t), Vec::new()),
             Err(e) => {
-                if !cli.print {
-                    eprintln!(
-                        "[bingo] warning: cannot create transcript (history will not persist): {e}"
-                    );
-                    startup_notes.push(format!(
-                        "⚠ cannot create transcript (history will not persist): {e}"
-                    ));
-                }
+                // Said whichever frontend is starting: a session whose history
+                // will not persist is the same fact in all three, and the
+                // startup note below is simply read by only one of them.
+                eprintln!(
+                    "[bingo] warning: cannot create transcript (history will not persist): {e}"
+                );
+                startup_notes.push(format!(
+                    "⚠ cannot create transcript (history will not persist): {e}"
+                ));
                 (None, Vec::new())
             }
         }
@@ -572,10 +572,12 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             // Subagents borrow the same stdin prompt (serialized in the Agent tool), so a
             // background instance can still ask rather than having the call auto-denied.
             session.agents.attach_ask(crate::query::stdin_ask());
-            let host = headless_hooks();
-            let outcome = run_query(&session, initial_messages, &prompt, &[], &host, None).await?;
-            let cwd = session.cwd();
-            extract_memory(&session, &outcome.messages, &home, &cwd).await;
+            // The history is the transcript's, and the run reads it there: a
+            // turn the core opened is run by the engine assembled above, which
+            // is the same engine `bingo app-server` attaches. The memory pass is
+            // that engine's too, after the turn closes.
+            drop(initial_messages);
+            crate::print::run(&core, &prompt).await?;
         } else {
             drop(initial_messages); // in interactive mode, --continue history is reused by later turns
             tui::run_tui_session(session.clone(), expand_rx, fullscreen, startup_notes).await?;
@@ -708,7 +710,13 @@ fn report_error(err: &(dyn std::error::Error + 'static)) {
         eprintln!("Error: {err}");
         return;
     }
-    let code = crate::error::error_code_boxed(err);
+    // A failed turn already carries a code: the core computed it from the error
+    // the run hit, and that error is gone by the time this runs. The registry
+    // maps a type to a code and could only answer GENERIC here.
+    let code = match err.downcast_ref::<crate::print::PrintError>() {
+        Some(failure) => failure.code(),
+        None => crate::error::error_code_boxed(err),
+    };
     let msg = crate::error::sanitize_msg(&err.to_string());
     eprintln!("[error] code={code} msg={msg}");
 }

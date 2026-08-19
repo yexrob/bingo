@@ -1153,6 +1153,54 @@ fn gapless(frames: &[Value]) {
     }
 }
 
+/// `--print` is the third client of this core, not a fourth answer.
+///
+/// It attaches, submits, and prints what the core publishes — so the same
+/// scripted provider that drives the wire scenarios drives this one, and what
+/// lands on stdout is the model's prose and nothing else (D155).
+#[test]
+fn the_print_client_runs_one_turn_through_the_same_core() {
+    let root = TempDir::new("print");
+    let provider = Provider::start(vec![says("the answer")]);
+    provider.configure(&root);
+    never_asks(&root);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_bingo"))
+        .args(["--print", "what is the answer"])
+        .current_dir(root.path())
+        .env("HOME", root.path())
+        .env("XDG_CONFIG_HOME", root.path().join("config"))
+        .env_remove("ANTHROPIC_API_KEY")
+        .env_remove("DEEPSEEK_API_KEY")
+        .env_remove("OPENAI_API_KEY")
+        .stdin(Stdio::null())
+        .output()
+        .expect("the print process must run");
+
+    let stdout = String::from_utf8(output.stdout).expect("stdout must be UTF-8");
+    let stderr = String::from_utf8(output.stderr).expect("stderr must be UTF-8");
+    assert!(
+        output.status.success(),
+        "a turn that ended well exits zero: {stderr}"
+    );
+    assert_eq!(
+        stdout.trim(),
+        "the answer",
+        "stdout carries the model's prose and nothing else; stderr had: {stderr}"
+    );
+    assert_eq!(provider.rounds(), 1, "one submission, one request");
+    assert!(
+        root.path()
+            .join(".local/share/bingo/transcripts")
+            .read_dir()
+            .into_iter()
+            .flatten()
+            .flatten()
+            .any(|entry| entry.path().extension().is_some_and(|ext| ext == "jsonl")),
+        "the run went through the core's turn, so it left a transcript behind"
+    );
+}
+
 /// One prose turn: what it says, what it thought, and what it cost.
 #[test]
 fn a_submission_becomes_a_turn_whose_text_reasoning_and_usage_all_reach_the_client() {

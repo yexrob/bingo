@@ -1,4 +1,6 @@
-use std::io::{BufRead, Write};
+use std::io::BufRead;
+#[cfg(test)]
+use std::io::Write;
 use std::sync::Arc;
 
 use thiserror::Error;
@@ -8,7 +10,9 @@ use crate::api::client::ClientError;
 use crate::api::types::{ContentBlock, Message, Role};
 use crate::budget::MAX_RESULT_CHARS;
 use crate::compact::{TokenGate, check_and_compact, compact_after_overflow};
-use crate::engine::events::{EngineEvent, EngineEvents, EngineHost, EngineRequests};
+use crate::engine::events::{EngineEvent, EngineHost};
+#[cfg(test)]
+use crate::engine::events::{EngineEvents, EngineRequests};
 use crate::error::ErrorCode;
 use crate::hooks::{run_post_tool_use, run_pre_tool_use, run_stop_hooks, run_user_prompt_submit};
 use crate::permission::{PermissionBehavior, PermissionMode, can_use_tool};
@@ -344,12 +348,14 @@ pub fn stdin_ask() -> Arc<AskFn> {
     })
 }
 
-/// The headless host: the model's prose on stdout, everything else on stderr,
-/// permissions and questions through stdin.
+/// The host a test drives a run through: the model's prose on stdout,
+/// everything else on stderr, permissions and questions through stdin.
 ///
-/// A headless run prints an answer rather than showing a conversation, so most
-/// of what a run reports has no surface here. A shim: B8 removes this when
-/// `--print` becomes a thin `AppCore` client.
+/// This was `--print`'s until B8, and it is why `--print` had its own idea of
+/// what a run reports — a third answer beside the console's and the wire's.
+/// `--print` is an `AppCore` client now (`crate::print`), and what is left here
+/// is a host for tests that need one: nothing in production assembles it.
+#[cfg(test)]
 pub fn headless_hooks() -> EngineHost {
     EngineHost::new(
         EngineEvents::new(|event| match event {
@@ -372,6 +378,7 @@ pub fn headless_hooks() -> EngineHost {
 }
 
 /// The stdin question prompt: the model's options, numbered, plus free text.
+#[cfg(test)]
 fn headless_ask_question() -> Arc<AskQuestionFn> {
     Arc::new(|title, question, options| {
         Box::pin(async move {
