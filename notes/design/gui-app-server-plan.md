@@ -447,6 +447,24 @@ Chat/App 管线换 AppLink 帧，删全部 shim；TuiEvent 本地化；按键动
 > drain bug（`submit_queued` 把 /compact 按散文喂模型）随 B7d-3 的 drain 统一消亡——
 > 又一个"核对了、控制台错了"的例证。⑤ rename 不动 locator：既有未引入，记录。
 
+> **B7d-3 落地记（2026-08-19）**：**写入面收官**（D154，六提交）。`Controller::submit`
+> 执行化（`Performed` 携带核做了什么，`serve_submit` 降为映射，`Command` 交回前端渲染）；
+> 控制台的核挂上 `SessionEngine`，`Chat::start_turn`/`start_bash_turn`/`submit_queued`/
+> `finish_turn`/`ui::tui_host` 全部删除（190 行 run loop），`Controller::drain_main` 成为唯一 drain
+> ——D153 smoke 抓到的 shell 模式 drain bug 随之消亡（真机复验：`❯ !/compact` 走 shell，不喂模型）。
+> `❯` 行改由 `turn/started.input_item_ids` 画（手打与排队 drain 一个生产者，digest turn 无输入项即无行）；
+> 排队命令的输出经 `ItemBody::Notice` 上屏（含 drain 拒绝的诊断行）。
+> 意图队列（`src/tui/intent.rs`）：按键记意图、async 循环执行并在下一帧前折叠，
+> 十处写入点迁移；`.now()` 在 `src/tui/` 生产路径归零（`cfg(test)` 内 `intend` 就地 settle，
+> 故 ~130 处 `chat.submit()` 一处未改）。config 双镜像亡：控制台经 action 应用于核、
+> 从投影读回（`tui::selection`），engine 单向镜像核的变更进 runtime，permission mode 每 run 直读核。
+> ctrl+b/esc 改走核（`AppCore::execute`/`AppCore::interrupt`），`Chat::live`/`cancel_tx` 删除。
+> `ToolReady.standalone` 与 `ToolInputDelta` 删除（无读者）。
+> 测试 1708→1711，黑盒 29 不变；删两测各由同不变量的新测替代；四门 + discipline 全绿；
+> 真机 smoke 13 项过、2 项未跑（无工具能力的脚本 provider 填不满 main 收件箱；D153 已覆盖的命令未重跑）。
+> **未做（B8）**：`ItemBody::Command` 作为独立 `!` 运行的正 home（D151 裁决④）；
+> `Answer::now` 本体仍在 `tool/`/`team*`/actor 自身，无法降 test-only。
+
 ### B8 · 收尾（S）
 `--print` 薄客户端；main.rs 启动统一；parity ledger 落成 CI 检查表（每个斜杠命令/提交分支/
 AppEvent 变体分类 shared|frontend-local，新增未分类即红）；schema 标 experimental；

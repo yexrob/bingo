@@ -8631,3 +8631,160 @@ gets all three right. Pre-existing and unmoved by this batch; it dies with
 | `Answer::now()` in `src/tui/` | 15 production sites — unchanged |
 | core/engine config double mirror | unchanged |
 | `Chat::submit_queued` / `Controller::drain_main` | two drains, one queue — B7d-3's, and now unblocked |
+
+## D154 — the write face, and the console that stopped driving
+
+**What it lands.** B7d-3, the write face: the terminal front end stops running
+the session and starts submitting to it. `Controller::submit` performs what it
+routed; the console's core gets the engine; `Chat::submit_queued` dies and
+`Controller::drain_main` becomes the one drain; the `❯` row is drawn from the
+turn's own input items; the digest wake is assembled and opened by the core; and
+every write a key handler used to make by blocking the render thread becomes an
+intent the loop performs.
+
+Six commits, four gates plus the discipline gate green after each. **1708 →
+1711 unit**, 29 → 29 black-box. Two tests deleted and replaced by tests of the
+invariant they existed for (below); nine added; the rest rewritten in place
+against the new authority.
+
+### One submission path, performed
+
+`Controller::submit` answers `Performed` — the turn that is open, the message
+that is in its inbox, the entry that is on the queue, the sentence the domain
+gave for a refusal. Everything it names exists by the time it is given.
+`serve_submit` is a mapping over it, so a GUI and the console cannot be told two
+different things about one line.
+
+One arm is not performed, on purpose: a slash command's *view* — `/status`,
+`/help`, the model picker — is the frontend's, so the line comes back with the
+page it was typed on. The wire has no surface to render one on, so `serve_submit`
+applies it through the same table a typed call goes through (D146).
+
+### The chain D152 found, taken in one step
+
+D152's wall was that the approved order could not hold: performing needs the
+engine, attaching the engine opens the core's drain, and two drains take the
+same entry twice. So the first commit is one step and says so:
+
+- `main.rs` attaches a `SessionEngine`, the same one `bingo app-server` attaches;
+- `Chat::start_turn`, `start_bash_turn`, `submit_queued`, `finish_turn`,
+  `close_core_turn`, `load_history` and `steering` are **gone** — 190 lines of
+  run loop, and with them the console's second `EngineHost` (`ui::tui_host`);
+- the interruption marker's commit moves into `engine/runner.rs`, where the run
+  that produced it is;
+- the `❯` row is drawn from `turn/started`'s `input_item_ids`, so a line typed a
+  moment ago and one the queue drained have one producer — and a turn with
+  nothing in its mouth (the digest wake) draws no row at all;
+- `MailWake` gains the second half of its own decision: the core opens the
+  digest turn (`TurnOrigin::Auto`), and the console's job is the bell.
+
+**A drained command's output reaches the screen.** The core applies it, records
+a `Notice`, and the console renders notices on the tiers it renders a `Said` on
+(D153's one implementation, two renderers, now with the second producer wired).
+A refusal is a notice too: a `/nope` queued minutes ago and silently dropped is
+a queue entry that vanished.
+
+### The intent queue: folding, not delay
+
+A key handler runs on the thread that draws. Every write it made blocked that
+thread on the actor's reply (`Answer::now`) — bounded, and the wrong shape.
+`tui::intent` records what the keystroke asked for; the loop performs it,
+`.await`ing each, and folds what came back **before the next frame is
+assembled**. Nothing a user can see moves a frame.
+
+Ten sites moved: the submission, the retry and the skill marker, the config
+actions, the mail digest and its bell, main's arrivals, join and leave, stopping
+an instance, cycling its permission mode, reclaiming the queue's tail,
+cancelling prompts, and answering one. An answer carries the receipt it earns,
+because only an answer the core *took* has earned one — D81's guard refuses one
+that came too fast, and the dialog stays where it was.
+
+**A test is its own loop.** `intend` settles on the spot under `cfg(test)`,
+exactly as `settle_store` takes the store's fold synchronously — which is why
+~130 `chat.submit()` call sites needed no edit at all.
+
+### Config: one authority, and what it cost to get there
+
+The model, the provider and the thinking level lived twice: the core's
+configuration, which `config/read` publishes and `action/execute` changes, and
+the runtime watches the console wrote. A `/model` typed in the terminal moved
+one, a client's `action/execute` moved the other.
+
+The console applies the action to the core and reads the selection back from the
+projection (`tui::selection`); the engine mirrors the core's *changes* into the
+runtime a run reads, so a `/model` drained off the queue or asked for by another
+client reaches the next turn. The permission mode is read straight through — a
+run takes it from the core when it starts, so shift+tab is no longer a copy the
+console keeps.
+
+Two things the tests forced out, both real:
+
+- **A session with nothing configured still has a provider and a model.**
+  `SessionSetup::default` named neither, so a core assembled that way disagreed
+  with every runtime built beside it. It names them now.
+- **A catalog that lists nothing has no opinion about which providers exist.**
+  `ProviderSelect` refused every name when the catalog had no client, which is
+  an answer it cannot give.
+
+### ctrl+b and esc
+
+The console held the foreground command's handle and the run's cancel channel.
+Neither is its own any more. ctrl+b names the item it can see — the newest open
+`Bash` call in the projection, the same rule the core applies — and the core
+checks the identifier before backgrounding anything, which is what keeps the
+key's other meaning when nothing is running. Esc asks the core to stop the turn
+on the page; the request is recorded against *that* turn, so a late check still
+sees it and the next turn cannot inherit it.
+
+The two tests that went: `cancel_reset_works_after_all_receivers_dropped` and
+the `cancel_tx` half of `esc_sets_interrupted_and_start_turn_resets`. Both were
+about the subscribe-then-reset dance a shared channel needed. The channel is
+gone; what replaced them asserts the invariant it existed for — an interrupt is
+aimed at a turn and cannot reach the one after it.
+
+### Two reports with no reader
+
+`ToolReady.standalone` said what the call's id already says
+(`run_bash_command` mints the `!` line's prefix, and the console reads that).
+`ToolInputDelta` crossed for a receiver that might count the argument JSON, and
+none ever did — the authoritative count arrives with the round, and B7c's review
+refused a second ruler. What reads the pieces is `Accumulator`, so the argument
+JSON joins the signature delta and the block stop as framing, and the test that
+says so gained a case.
+
+### Real-terminal smoke
+
+tmux, 120×40, a scripted Anthropic-protocol endpoint on loopback, an isolated
+`HOME`, no tokens, `bypassPermissions`.
+
+| item | result |
+| --- | --- |
+| prose turn | **pass** — `❯ run the tests` drawn from `input_item_ids`, then the reply |
+| `/status` | **pass** — model, provider, thinking and permission mode, all the core's |
+| `!echo hello-shell` | **pass** — `❯ !echo hello-shell`, the Bash row with its output, the model's follow-up |
+| ctrl+b on a running `!sleep 8` | **pass** — moved to the background, the turn ended, and the task notification woke a turn |
+| prose queued behind a running turn | **pass** — drained into `❯ hello queued` and answered |
+| `/compact` queued behind a running turn | **pass** — the core drained and ran it: "✓ compacted 15 messages → summary + the latest 12" |
+| a slash line queued **in shell mode** | **pass** — `❯ !/compact`, `Bash($ /compact)` → "no such file or directory". D153's bug is dead: it is read once, by one drain, as what the grammar says it is |
+| esc on a running turn | **pass** — `⎿ Interrupted` and `[Request interrupted by user]` |
+| shift+tab | **pass** — bypass ↔ default (the session's own ladder), badge and `/status` agree |
+| `/think low` while busy | **pass** — instant, footer updates, the queue is untouched |
+| `/model scripted-2` | **pass** — footer follows, and the next request carried `model=scripted-2`: the mirror reaches the engine |
+| `/clear` | **pass** — context back to 0/200k |
+| an image in a turn | **pass** — `#[image 1]` on the row, `user ['text', 'image']` in the transcript |
+| the mail digest with a real agent | **not run** — the scripted provider calls no tools, so nothing could fill main's inbox. The wake it shares is exercised above (the task notification), and `app/mail.rs` plus six console assertions cover the window itself |
+| `/team`, `/rewind`, `/share`, `/rename`, `/mcp`, `/provider login` | **not re-run** — unmoved by this batch (D153's smoke) except that a *drained* one now renders its notice, which `/compact` above proves |
+
+### Where the shims stand
+
+| shim | state |
+| --- | --- |
+| `Chat::submit_queued` / `Controller::drain_main` | **one drain** — the core's, on the turn ending it owns |
+| the console's run loop (`start_turn`, `start_bash_turn`, `ui::tui_host`) | **gone** |
+| `Answer::now()` in `src/tui/` | **gone from production** — the actor's own tables, the blocking workers an engine spawns, and tests are what is left |
+| core/engine config double mirror | **gone** — the core holds the selection, the engine mirrors it one way |
+| `Chat::permission_mode` as a field | **gone** — read from the projection |
+| `Chat::live` / `Chat::cancel_tx` | **gone** — ctrl+b and esc go through the core |
+| `ToolReady.standalone`, `ToolInputDelta` | **gone** |
+| `ItemBody::Command` for a standalone `!` run | still `ToolCall` + the call-id prefix — **B8's** (D151 ruling ④) |
+| `Answer::now` itself | still production outside `src/tui/`: `tool/`, `team*`, and the actor reading its own tables. Not test-only, and the module now says which callers are left |
