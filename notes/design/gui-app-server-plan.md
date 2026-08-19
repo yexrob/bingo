@@ -465,6 +465,16 @@ Chat/App 管线换 AppLink 帧，删全部 shim；TuiEvent 本地化；按键动
 > **未做（B8）**：`ItemBody::Command` 作为独立 `!` 运行的正 home（D151 裁决④）；
 > `Answer::now` 本体仍在 `tool/`/`team*`/actor 自身，无法降 test-only。
 
+> **B7d-3 review 裁决（2026-08-19，Fable）**：① 写入面完成核准；Fable 独立复核 src/tui
+> 生产路径 `.now()`=0（按花括号深度剥 cfg(test)）。② **战役首次删测试（2 个）核准**——
+> 它们测的通道已不存在，其守护的不变式（迟到中断够不到下一个 turn）由替代测试原样断言；
+> 机制随机制死、不变式不死，符合纪律精神，净计数仍 +3。③ `Answer::now` 余留（tool/team/
+> actor 自读）接受——B7 的承诺是控制台半边清零，已兑现；B8 终审复核无 actor 线程阻塞路径。
+> ④ shell 模式文法维持（显式模式压过斜杠——模式就该说话算话）；`!` 行后 composer 粘滞
+> 是另一件事，入 B8 清单作为**用户 UX 决定**，不许静默改。⑤ 两处 fixture 诚实化默认值
+> 核准（只影响无真目录的核装配）。⑥ 意图队列 cfg(test) 原地 settle 的设计使 ~130 调用点
+> 零编辑——正确的省力。⑦ chat.rs/chat_tests_b.rs 再近 4000 线，B8 关注。
+
 ### B8 · 收尾（S）
 `--print` 薄客户端；main.rs 启动统一；parity ledger 落成 CI 检查表（每个斜杠命令/提交分支/
 AppEvent 变体分类 shared|frontend-local，新增未分类即红）；schema 标 experimental；
