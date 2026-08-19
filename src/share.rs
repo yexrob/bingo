@@ -562,11 +562,17 @@ pub fn derive_share_doc(session: &str, messages: &[Message]) -> ShareDoc {
 }
 
 /// Resolve the transcript by session key (/resume semantics: substring match, newest first);
-/// without a key, take the newest session. On a miss, the error lists the available sessions (first 5, to avoid spam).
+/// without a key, take the newest session that was actually *used* (D158) — a
+/// transcript opens when its session starts (D155), so the newest file can be an
+/// empty launch-and-quit, and there is nothing in it to share. Same filter as
+/// `--continue`. On a miss, the error lists the available sessions (first 5, to avoid spam).
 pub fn resolve_transcript(home: &Path, key: Option<&str>) -> Result<Transcript, ShareError> {
     let all = crate::transcript::list(home)?;
     match key {
-        None => all.into_iter().next().ok_or(ShareError::NoSessions),
+        None => all
+            .into_iter()
+            .find(|held| held.line_count().unwrap_or(0) > 0)
+            .ok_or(ShareError::NoSessions),
         Some(key) => {
             let names: Vec<String> = all.iter().map(|t| t.name()).collect();
             all.into_iter()
@@ -1029,15 +1035,29 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(1100));
         let t_b = crate::transcript::create(&home, &root).unwrap_or_else(|e| panic!("{e}"));
         let _ = t_b.append(&msg("b"));
-        // No key: take the newest (b was created later, so it is newer).
+        // A launch-and-quit leaves the newest file behind, opened at session
+        // start (D155) and never written. No key skips it (D158): there is
+        // nothing in it to share — same filter as `--continue`.
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        let t_empty = crate::transcript::create(&home, &root).unwrap_or_else(|e| panic!("{e}"));
+        t_empty.activate().unwrap_or_else(|e| panic!("{e}"));
+        // No key: the newest *used* session (b was created later than a).
         let latest = resolve_transcript(&home, None).unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(latest.name(), t_b.name());
-        // Substring match (/resume semantics: list is newest-first by mtime; find takes the first hit).
+        // Substring match (/resume semantics: list is newest-first by mtime; find
+        // takes the first hit, and an explicit key is NOT filtered for use — the
+        // user names what they name, empty or not). The fragment is t_b's
+        // trailing timestamp, the one part the newer empty file cannot shadow.
         let hit = resolve_transcript(&home, Some(&t_a.name())).unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(hit.name(), t_a.name());
-        let fragment =
-            resolve_transcript(&home, Some(&t_b.name()[..8])).unwrap_or_else(|e| panic!("{e}"));
+        let b_name = t_b.name();
+        let fragment = resolve_transcript(&home, Some(&b_name[b_name.len() - 6..]))
+            .unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(fragment.name(), t_b.name());
+        // And the empty one is reachable by its own name — skipped only by default.
+        let named =
+            resolve_transcript(&home, Some(&t_empty.name())).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(named.name(), t_empty.name());
         // A miss errors.
         assert!(matches!(
             resolve_transcript(&home, Some("nope")),
