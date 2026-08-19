@@ -8798,3 +8798,304 @@ by brace depth leaves **0**.
 | `ToolReady.standalone`, `ToolInputDelta` | **gone** |
 | `ItemBody::Command` for a standalone `!` run | still `ToolCall` + the call-id prefix — **B8's** (D151 ruling ④) |
 | `Answer::now` itself | still production outside `src/tui/`: `tool/`, `team*`, and the actor reading its own tables. Not test-only, and the module now says which callers are left |
+
+## D155 — the campaign closes: a ledger, a third client, and the small accounts
+
+**What it lands.** B8, the last batch: the parity ledger becomes a checked table
+in CI, `--print` becomes the third client of the core, the documentation says the
+app-server exists, and the small accounts eight batches left behind are each
+either fixed or written down with the reason they were not.
+
+Nine commits, four gates plus the discipline gate green after each. **1711 →
+1722 unit**, 29 → 30 black-box. Nothing deleted.
+
+### The parity ledger (`src/app/parity.rs`)
+
+The specification asked for one thing of every user-observable behaviour: it is
+the core's and both frontends reach it, or it is presentation with no effect on
+bingo state. Nothing checked that until now, which meant the rule held by
+attention.
+
+Five inventories, **137 rows**:
+
+| Inventory | Rows | How a new entry with no home fails |
+| --- | --- | --- |
+| slash commands | 24 | set equality against `action::COMMANDS` |
+| typed actions | 28 | set equality against `action::ACTIONS` |
+| notification methods | 39 | set equality against `ServerNotification::METHODS` |
+| submission branches (`Composed` / `Decision` / `Performed`) | 5 + 6 + 8 | exhaustive `match` — a **compile** error |
+| the terminal's own events (`UiEvent`) | 27 | exhaustive `match` — a **compile** error |
+
+The two enum ledgers are worth the macro they cost: the row and the match arm
+are one text, so there is no arm to write separately from the classification and
+no way to add a variant and leave it unclassified. The three string tables can
+only be checked at test time, and are.
+
+**Nine rows are frontend-local**, and the ledger asserts that exact list so that
+moving a tenth into it is a decision somebody makes rather than a line somebody
+writes: `Performed::Command` (a command's *view* is the frontend's; what it
+changes is still the core's), `ModelsLoaded` and `ImageReady` (a picker's own
+fetch, and terminal cell geometry — the shared facts are `catalog/*` and
+`asset/*`), the four feedback tiers and `RewindDone`, and `PinPanel`/`Unpin`.
+The specification named five of these itself; the ledger argues for the rest
+instead of asserting them in a comment.
+
+**Two real findings came out of writing it**, both recorded in the rows
+themselves rather than fixed here:
+
+- `UiEvent::WatchEvent` and `command/changed` describe the same state — agent,
+  task and background-command transitions — and the console reads it from the
+  registry's broadcast rather than from the store. Shared state, two read paths.
+- `TeamStart{members}`, `TeamStop{member}` and `McpReconnect{server: None}` are
+  things the wire can ask for that no console line can (B7b ruling ③). They stay:
+  an action is a superset of what a slash line spells, not a mirror of it.
+
+### `--print` is a client, not a host
+
+It called `run_query` through a host of its own (`query::headless_hooks`), so a
+headless run had its own idea of what a submission is and its own subset of what
+a run reports. The subset was never wrong. It was a third answer to questions
+the core already answers, and a third answer is how the first two come apart.
+
+`src/print.rs` attaches with the label `print`, takes a snapshot cut, submits
+through `conversation/submit`, prints main's prose as `item/textDelta` publishes
+it, answers `interaction/opened` from stdin in the wording the old host used, and
+stops on the turn's one terminal state. What it kept: stdout is the model's prose
+and nothing else, stderr is everything else, a prompt is one line with a letter
+for an answer. That is presentation, and it belongs to this frontend the way rows
+belong to the console.
+
+Three things it inherits by being a client rather than a host: the history comes
+from the transcript through the same loader every turn uses, the images markers
+resolve through the session's attachment registry, and the memory pass runs
+because the engine runs it — `main.rs` no longer calls `extract_memory` itself.
+
+**The error contract survives the move, and needed a seam to do it.** A failed
+turn used to propagate the original error, and `error_code_boxed` found its code
+by downcasting a registered *type*. Through the core the original error is gone
+by the time the process exits; what survives is `TurnError.code`, a string the
+core already computed with `map_error`. So `PrintError::code()` carries it and
+`report_error` asks the error for its own code before falling back to the
+registry. Verified against a real process: an unreachable endpoint exits 1 with
+`[error] code=OFFLINE msg=…` and an **empty stdout** — a run that said nothing
+prints nothing, newline included.
+
+`headless_hooks` is now `#[cfg(test)]`: a host for the tests that need one.
+
+**Startup's last two frontend branches went with it.** Two `!cli.print` guards
+suppressed the "history will not persist" warning in headless mode. A session
+whose history will not persist is the same fact in all three frontends, and
+stderr is where all three say things. What remains keyed on the frontend is
+`quiet`, which is not a capability gate but the answer to "does this frontend own
+the terminal's output stream" — the app-server sets it too, and for the same
+reason.
+
+### The small accounts
+
+| # | Account | Where it went |
+| --- | --- | --- |
+| a | `/permissions` printed session grants under a `.bingo/settings.json` heading | **fixed** |
+| b | `BackgroundCommandResource.exit_code` always absent | **fixed** |
+| c | `session/start` opened the transcript; the console did not | **fixed** — unified on the wire's behaviour |
+| d | a `!` line's tool row stuck at `⎿ Running…` after a prompt | **fixed**, and it was never about `!` |
+| e | `ItemBody::Command` for a standalone `!` run | **known issue**, with the design points below |
+| f | rename did not move the core's `session.locator` | **fixed** |
+| g | `Answer::now`'s remaining actor-thread calls | **audited**, and the invariant is now enforced |
+| h | `chat.rs` / `chat_tests_b.rs` near the 4000-line cap | **measured**, cap holds |
+| i | two UX decisions | **written down, unchanged** — below |
+| j | wire-only action arguments | **classified** in the ledger |
+
+**(a) The heading was a lie about exactly the rule a user most wants the
+lifetime of.** The runtime's permission table is a flat list of strings: a rule
+settings declared and a grant D81's "don't ask again this session" installed are
+indistinguishable in it. The core keeps them apart (`PermissionRule.sessionScoped`,
+which `config/read` has carried since B7a), so `/permissions` reads which is
+which from there and prints them under two headings that are both true.
+
+**(b) The exit code was not lost, it was stringified.** Both places that finish a
+background command held a real `ExitStatus` and formatted it into a `detail`
+string, because the watch table had nowhere to keep a number. It has one now, set
+by `WatchHandle::finish_command` — its own method rather than a fifth argument on
+`set_state`, since agents, rooms and polled watchables have no exit status and
+would have had to say `None` at thirty call sites. A signal-killed command still
+reports nothing: `-1` would be this process claiming the shell said something it
+never said.
+
+**(c) One behaviour, and it is the wire's.** A session the console had started
+was one `/resume` could not find, `session/list` did not list, another process
+could claim the name of, and `/rename` failed on — while the same session over
+the wire was none of those things. Going the other way (making `session/start`
+lazy) would have meant re-plumbing session listing and locating so the core could
+inject a locator it would then hold twice. So the console opens its transcript
+when the session starts, as `session/start` always has. The cost is one empty
+file per launch-and-quit, so `--continue` now resumes the latest session that was
+*used*; `bingo gc` already reaps the rest.
+
+**(d) It was never a `!` bug.** Answering a permission prompt writes the receipt
+as a user line and opens a continuation under it — which moves the live message
+out from under the row the prompt was *about*. The result then settled nothing,
+because the settle loop only ever looked at `messages[stream_msg]`. Any visible
+tool behind a prompt stranded its row the same way, and a stranded row pins the
+flush cursor for the rest of the session, because a running activity is never
+static. The call's identifier finds its row now, and the turn's end-of-run repair
+reaches every message for the same reason.
+
+**(e) `ItemBody::Command` stays a known issue, and here is what it would take.**
+Bounded but not small, and — the reason it is not folded into a closing batch —
+**the compiler will not help**. Every `match` on `item.body` in the read paths
+uses `_ =>` or `find_map`, so adding the producer compiles clean and renders
+nothing; the checklist is a list somebody keeps, not a build error. Three design
+points for whoever does it:
+
+1. `exit_code` has no producer on this path. `ToolCallDone` carries none;
+   `tool/bash.rs` stringifies it into the output. A faithful `ItemBody::Command`
+   needs it through `EngineEvent` — the same value account (b) just gave the
+   watch table, from a different call site.
+2. The `!` item is the anchor for two lookups that key on `name == "Bash"`:
+   D84's live tail (`turn::foreground_item`) and ctrl+b's target
+   (`store::Transcript::foreground`). Moving the body moves both at once, and
+   neither has a fixture that fails loudly if an arm is missing.
+3. `BASH_CALL_PREFIX` cannot be deleted: `query.rs` still needs it to read
+   transcripts written before this. Only the `chat_feed::standalone_shell`
+   consumer goes away.
+
+**(f) Reported in, the way MCP state is.** `/rename` moves the transcript and the
+two sidecars that answer to its name; `/clear` makes a whole new one. Neither
+reached the core, so `session/read` kept naming the file the session started on
+for as long as it ran. Moving the file is the engine's work and saying which file
+this session is is the core's, so `AppCore::report_moved` is the seam — one
+`Control` variant, one method, two call sites, no wire change (`session/updated`
+already carries the whole summary).
+
+**(g) The audit: no actor-thread blocking path, and now it cannot appear.**
+Eleven `Answer::now` calls run on the actor's own thread. Every one is preceded
+by an inline call on a registry the loop owns, and those fill the reply before
+returning — so the first poll is ready and the parker is never reached. That is a
+local convention with nothing holding it up: route one of them through a *handle*
+instead, which is the obvious refactor since the handle methods have friendlier
+signatures, and the session hangs with no timeout and nothing on the screen.
+`answer::block_on` now asserts it is not on the actor's thread before parking,
+and the thread's name is the constant it recognises.
+
+Two claims in that module's own note were overstated and are corrected rather
+than defended: the loop does write settings synchronously from inside message
+handling (a latency the session shares, not a wait on anything that can wait
+back), and `/team start|assign|stop` still parks a **runtime worker** from the
+console's synchronous slash dispatch — `team_cmd` and `team::spawn_tree` hold
+nine `.now()` calls between them. Nothing deadlocks; it is a stall, and the
+honest place to say so is the module rather than a decision record nobody greps.
+
+**(h) The cap holds, and here is the margin.** `chat_tests_b.rs` 3933 (67 lines),
+`chat.rs` 3906 (94), `chat_tests_a.rs` 3843 (157), `chat_tail.rs` 3371. No file
+in the tree is over 4000 and the discipline gate is green. Not split: a closing
+batch that churns four files to buy headroom for a batch that does not exist is
+the wrong trade, and the next change to any of them will have to pay it. The
+numbers are here so it is a decision and not a surprise.
+
+### (i) Two decisions for the user, unchanged
+
+Both are UX rulings, not implementation choices, and B8 deliberately did not
+make either.
+
+**1. Rewind: the terminal's five answers against the wire's two modes.**
+`conversation.rewind` takes a `RewindMode` with two values — preview and apply —
+and a target. The console's esc-esc gesture asks a different question: after
+picking a turn it offers *Restore code and conversation* · *Restore conversation*
+· *Restore code* · *Summarize from here* · *Never mind*. Those are four
+operations, not two modes of one, and a GUI driving `action/execute` today can
+reach exactly one of them.
+
+- **Widen the action** — `RewindMode` becomes the four the console offers.
+  Honest to what rewind is; costs a contract change and admits that "preview"
+  and "which of four things to restore" were two questions wearing one field.
+- **Narrow the gesture** — the console asks for a scope first and then preview
+  or apply. Keeps the contract; changes a gesture users have.
+- **Leave it** — record that the wire reaches one of four, which is a parity gap
+  the ledger would then have to state as one.
+
+Related and already ruled: `RewindTarget::Item` is refused, because a checkpoint's
+identity is a transcript line and an item id has no corresponding record — B7d-2
+ruling ③, and guessing is what D135 exists to prevent.
+
+**2. Shell mode's stickiness against a slash escape.** The `!` prefix is sticky:
+after a `!` line the composer stays in shell mode, so `!/compact` runs `/compact`
+in the shell rather than compacting. That is the grammar working as ruled (B7d-3
+ruling ④: an explicit mode outranks a slash — a mode should say what it means).
+It is also, in a real session, the moment a user most often means the command.
+
+- **Keep it.** A mode that sometimes is not the mode is worse than a mode.
+- **Let a slash escape it.** `/` as the first character of a line in shell mode
+  leaves shell mode for that line. Convenient; makes the mode conditional, and
+  the condition is invisible until it fires.
+- **Make the exit explicit and visible.** Esc already leaves shell mode; the
+  composer could say so more loudly rather than changing what a line means.
+
+### Known issues carried past 1.0
+
+| What | Why it stands |
+| --- | --- |
+| `ItemBody::Command` for a standalone `!` | above; bounded, uncheckable by the compiler, needs `exit_code` plumbing first |
+| the console's watch rows come from the registry broadcast, not the store | shared state with two read paths; the ledger states it |
+| `/permissions` writes rules to the project layer, the core writes them scoped | the console's add never reaches the core's table, and the two persistence scopes differ (`upsert_project_settings` against `upsert_scoped_settings`). Unifying means choosing one scope, which is a product decision |
+| `Answer::now` in `tool/`, `team*`, and the actor's own reads | the actor's are proven non-parking and now guarded; `team_cmd`'s park a runtime worker |
+| an agent conversation's attention does not survive resume | 1.0 limit, stated in the specification |
+| `session/delete` guards the open session by locator equality | a `Stem` locator naming the open session slips past a `Path` one; `open_path` is the form that would not |
+| `--continue` skips a session with no lines | the cost of (c); an empty session is not one to come back to |
+
+### The campaign, in numbers
+
+From `84dbf5c` (the commit before B0) to here:
+
+| | |
+| --- | --- |
+| batches | B0 – B8, D140 – D155 |
+| commits | 108 |
+| files changed | 222 |
+| lines | +61030 / −10074 |
+| — of which `src/` and `tests/` | +45244 / −10039 across 118 files |
+| — of which the committed schema bundle | 92 new files |
+| tests | **1517 → 1752** (1504 → 1722 unit, 13 → 30 black-box) |
+| tests deleted | 2, both in D154, each replaced by a test of the invariant it existed for |
+| files deleted | `src/json_events.rs` (1836 lines), `src/steer.rs` |
+| new top-level modules | `src/app/` (26 files), `src/app_server/` (10), `src/engine/` (4), `src/print.rs` |
+
+What was there at the start: an application state machine living in
+`src/tui/chat.rs`, and a development-only JSON protocol that reproduced a
+fraction of it badly enough that a GUI built on it would have had to write bingo
+a second time. What is here now: one session actor that owns application truth
+and ordering, three frontends that are projections of it, a wire contract
+generated from the types with a fixture per variant, and a ledger that will not
+let a fourth answer appear quietly.
+
+### Verification
+
+Four gates plus `scripts/check_discipline.sh` green after every commit. Full
+suite green: 1722 unit + 23 app-server black-box + 7 CLI black-box.
+
+**Verified against a real process** (not only in tests): `--print` against a
+scripted provider on loopback prints the model's prose on stdout and nothing
+else (a black-box test, `the_print_client_runs_one_turn_through_the_same_core`);
+`--print` against an unreachable endpoint exits 1 with `[error] code=OFFLINE` and
+an empty stdout; `--print` with the prompt piped on stdin reaches the same path.
+
+**Two regressions were proved, not assumed**: the stranded-tool-row test fails on
+the parent commit, and the rename test reports `Latest` instead of the new path
+without `report_moved`.
+
+**Not run**: no terminal smoke this batch. Three commits touch `src/tui/`
+(`/permissions`, the tool-row settle, the rename assertion) and all three are
+covered by row-level tests, but a real terminal was not driven — the batch's own
+verification is the ledger, the black box, and the four gates.
+
+**One observation to record rather than explain away.** Twice, in a full
+`--all-targets` run immediately following a fresh rebuild, a timing-sensitive
+test failed and passed on every rerun:
+`tui::chat::tests_b::turn_end_triggers_auto_turn_when_wake_notification_pending`
+and `tui::zoom::tests::a_message_to_a_stopped_agent_resumes_it`. Eight
+consecutive runs of the same suite under normal load were clean, and three runs
+of the pre-B8 tree were clean too — but those three were under normal load, so
+they do not rule out the same sensitivity existing before this batch. What is
+established: both tests wait on the actor, both failures were under a machine
+compiling black-box binaries in parallel, and neither reproduces otherwise.
+D144's record noted the same shape. Worth a deterministic barrier in those two
+tests when somebody is next in them; **not** proven to predate B8.

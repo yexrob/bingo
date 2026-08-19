@@ -481,6 +481,33 @@ AppEvent 变体分类 shared|frontend-local，新增未分类即红）；schema 
 文档批：`guide.md`、README、`feedback-states.md`、规范文档终稿。
 **验收**：四门绿 + ledger 测试绿 + Fable 全量终审。
 
+> **B8 落地记（2026-08-19）**：**战役收官**（D155，九提交）。
+> **parity ledger** = `src/app/parity.rs`，五份清单 **137 行**：斜杠命令 24 / 动作 28 /
+> 通知方法 39 / 提交分支 5+6+8（`Composed`/`Decision`/`Performed`）/ `UiEvent` 27。
+> 前三份对源表做集合相等（新增无归属即测试红），后两份把归属写进穷尽 `match`
+> （新增变体**编译**即红）——一份文本同时是行和臂，没有可以单独忘掉的一半。
+> 九行判为 frontend-local 且被断言成固定名单：`Performed::Command`、`ModelsLoaded`、
+> `ImageReady`、四个反馈档位、`RewindDone`、`PinPanel`/`Unpin`。
+> 写 ledger 时暴出两条真事实，就地记录未修：控制台 watch 行走注册表广播而非 store
+> （与 `command/changed` 同一状态两条读路）；`TeamStart{members}`/`TeamStop{member}`/
+> `McpReconnect{None}` 是 wire 能说控制台没有的（B7b 裁决③，保留）。
+> **`--print` 成为第三个客户端**（`src/print.rs`）：attach → 快照切割 → `conversation/submit`
+> → 打 `item/textDelta` → 从 stdin 答 `interaction/opened` → 终态停。历史、图片、memory pass
+> 全部由此走内核；`headless_hooks` 降为 `#[cfg(test)]`；main.rs 最后两处 `!cli.print` 分支删除
+> （`quiet` 保留——它答的是「本前端是否占用终端输出流」，app-server 同样置真，不是能力门）。
+> 错误码保真需要一条缝：失败 turn 的原始错误在退出时已消失，故 `PrintError::code()`
+> 携带核算出的 `TurnError.code`，`report_error` 先问错误自己。真进程验：不可达端点
+> exit 1 + `[error] code=OFFLINE` + **stdout 为空**。黑盒 +1（脚本 provider 跑 `--print`）。
+> **小账十项**：a/b/c/d/f 修，e 记 known-issue 带三条设计要点（`exit_code` 无生产者、
+> `!` item 同时是 D84 tail 与 ctrl+b 的锚、`BASH_CALL_PREFIX` 删不掉，且**编译器不守表**），
+> g 审计完成（十一处 actor 线程调用全部非 park，`block_on` 加断言把约定变成守卫；
+> 同时纠正 answer.rs 两处过头断言：loop 确实同步写 settings，`/team start|assign|stop`
+> 仍 park 一个 runtime worker），h 记距离（`chat_tests_b` 3933 / `chat.rs` 3906 / `chat_tests_a` 3843，
+> 未拆，理由写在 D155），i 两项 UX 决策请求原样上呈，j 入 ledger。
+> 测试 1711→1722，黑盒 29→30；四门 + discipline 全绿；**未跑真机 smoke**（三处 `src/tui/`
+> 改动均有行级测试覆盖，如实记录未跑）。战役总账：108 提交、222 文件、+61030/−10074、
+> 测试 1517→1752。
+
 ---
 
 ## 5. 实施者守则（写进每个任务提示）
