@@ -324,7 +324,6 @@ pub async fn run_tui_session(
             session.interactions.clone(),
             crate::ui::ConvKey::Main,
         ));
-    session.agents.set_events(events.clone());
     let theme_setting = ThemeSetting::parse(session.settings.theme.as_deref());
     let mut chat = Chat::new(
         session.clone(),

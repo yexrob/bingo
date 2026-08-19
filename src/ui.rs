@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use tokio::sync::mpsc;
 
-use crate::engine::events::{EngineEvent, EngineEvents, EngineHost, EngineRequests};
+use crate::engine::events::{EngineEvents, EngineHost, EngineRequests};
 use crate::query::ToolCallDone;
 use crate::watch::WatchState;
 
@@ -133,17 +133,6 @@ impl EventSink {
         Self { to, tx }
     }
 
-    /// A sink nobody is listening to: an embedded or headless run, whose turns
-    /// reach no screen. Sends are dropped the same way a closed channel's are,
-    /// so no producer has to branch on having an audience.
-    pub fn detached() -> Self {
-        let (tx, _rx) = mpsc::unbounded_channel();
-        Self {
-            to: ConvKey::Main,
-            tx,
-        }
-    }
-
     /// Re-point at another conversation over the same channel.
     pub fn bound_to(&self, to: ConvKey) -> Self {
         Self {
@@ -230,17 +219,6 @@ pub enum UiEvent {
         meta: Option<ImageMeta>,
     },
     TurnEnd,
-    /// Prose that entered this conversation from outside its own turn: the task
-    /// an agent was dispatched with, the batch of mail a continuation absorbed,
-    /// a room relay claimed at a round boundary.
-    ///
-    /// Main's equivalent is the user pressing Enter, which the console holds
-    /// already — so main's hook does nothing and this is the one event an agent
-    /// produces that main does not. The text is the prompt exactly as the model
-    /// received it, markers and all; the console files it with the same
-    /// attribution walk that reads a committed history, so the two cannot
-    /// disagree about who said what.
-    Inbound(String),
     /// A direct message *landing in this conversation's inbox* — the moment it
     /// was sent, not the moment the receiver got round to reading it (D135).
     ///
@@ -269,13 +247,11 @@ pub enum UiEvent {
     /// [`UiEvent::ToolDone`] does. The rows live in the redrawn tail region and never
     /// reach scrollback: a running tool row keeps its message unsettled.
     BashTail(crate::live::LiveTail),
-    /// The user interrupted the turn. `marker` is the exact string the transcript
+    /// The user interrupted the turn. The string is exactly what the transcript
     /// recorded (`crate::query::INTERRUPT_MARKER` / `…_TOOL_USE`), echoed into the
     /// message flow so the screen and the model read the same sentence — a transient
     /// warning would have expired while the marker stayed in the history.
-    Interrupted {
-        marker: &'static str,
-    },
+    Interrupted(String),
     /// Non-fatal warning (e.g. MCP connection failure), shown above the input
     /// box; expires after `WARNING_TTL` (10s, filtered at render time).
     Warning(String),
@@ -306,7 +282,7 @@ pub enum UiEvent {
     /// triggering context — both are explicitly carried by the **producer** when emitting
     /// (not inferred by the render layer); level and context are guaranteed consistent by §4.4.
     Error {
-        code: &'static str,
+        code: String,
         msg: String,
         level: crate::error::ErrorLevel,
         context: crate::error::ErrorContext,
@@ -373,119 +349,20 @@ impl PermissionRequest {
     }
 }
 
-/// Translate one run's [`EngineEvent`]s onto the TUI's channels.
+/// What one console run needs answered, and nothing else.
 ///
-/// A shim: the console still consumes `UiEvent`, so this is where an engine
-/// report becomes one. B7 removes this — the TUI reads `AppFrame` from an
-/// `AppLink` and the translation goes with it.
-///
-/// **What it is waiting on** (D150): the console drives its own run loop, so
-/// its core has no engine and publishes no `item/*` events for a turn it did
-/// not run. Attaching the engine to the console's core is one line; what makes
-/// it a batch is the other end — the store projects no transcript on purpose,
-/// and every row on screen is built from the deltas below. Both halves move
-/// together or neither does.
-pub fn tui_hooks(
-    events: EventSink,
+/// There is no sink here any more. A run reports into the turn the core opened
+/// for it, the actor sequences the report, and the console reads its rows out of
+/// the projection that follows (`tui::chat_feed`) — so an engine report reaches
+/// the screen through exactly one door, the same door a GUI reads. What is left
+/// is the four questions a run cannot answer itself.
+pub fn tui_host(
     interactions: crate::app::interaction::InteractionHandle,
     steer: Arc<crate::query::SteerFn>,
     live: Arc<crate::live::LiveBash>,
 ) -> EngineHost {
-    // Live output-token estimate for the footer, reset by a retry (the failed
-    // attempt's output is withdrawn) and by each round boundary. The provider's
-    // own count replaces it whenever one arrives.
-    let round_tokens = Arc::new(std::sync::Mutex::new((0u64, None::<usize>)));
     EngineHost::new(
-        EngineEvents::new(move |event| match event {
-            EngineEvent::TextDelta { index, text } => {
-                let tokens = accumulate(&round_tokens, index, &text);
-                events.send(UiEvent::TextDelta(text));
-                events.send(UiEvent::OutputTokens {
-                    tokens,
-                    authoritative: false,
-                });
-            }
-            EngineEvent::ThinkingDelta { index, thinking } => {
-                let tokens = accumulate(&round_tokens, index, &thinking);
-                events.send(UiEvent::ThinkingDelta(thinking));
-                events.send(UiEvent::OutputTokens {
-                    tokens,
-                    authoritative: false,
-                });
-            }
-            EngineEvent::ToolInputDelta {
-                index,
-                partial_json,
-            } => {
-                // Nothing renders a half-built argument, but it is output the
-                // model paid for, so the footer counts it.
-                let tokens = accumulate(&round_tokens, index, &partial_json);
-                events.send(UiEvent::OutputTokens {
-                    tokens,
-                    authoritative: false,
-                });
-            }
-            EngineEvent::ToolUseStarted { name, .. } => {
-                events.send(UiEvent::ToolStart { name });
-            }
-            EngineEvent::StopReason {
-                output_tokens: Some(tokens),
-                ..
-            } => {
-                let mut state = round_tokens.lock().unwrap_or_else(|e| e.into_inner());
-                state.0 = tokens.saturating_mul(4);
-                events.send(UiEvent::OutputTokens {
-                    tokens,
-                    authoritative: true,
-                });
-            }
-            EngineEvent::StopReason { .. } => {}
-            // A retry that never got a word out has no live tail to withdraw:
-            // the console keeps the rows it drew for the round, because it drew
-            // none.
-            EngineEvent::StreamRetry {
-                discarded_output, ..
-            } => {
-                if discarded_output {
-                    *round_tokens.lock().unwrap_or_else(|e| e.into_inner()) = (0, None);
-                    events.send(UiEvent::StreamRetry);
-                }
-            }
-            EngineEvent::ContextUsage(usage) => {
-                events.send(UiEvent::ContextUsage(usage));
-            }
-            EngineEvent::ToolReady {
-                tool_call_id,
-                name,
-                input,
-                standalone,
-            } => {
-                events.send(UiEvent::ToolReady {
-                    tool_call_id,
-                    name,
-                    input,
-                    standalone,
-                });
-            }
-            EngineEvent::ToolDone(done) => {
-                events.send(UiEvent::ToolDone(done));
-            }
-            EngineEvent::RoundEnd => {
-                *round_tokens.lock().unwrap_or_else(|e| e.into_inner()) = (0, None);
-                events.send(UiEvent::RoundEnd);
-            }
-            EngineEvent::Warning(message) => {
-                events.send(UiEvent::Warning(message));
-            }
-            // Main's inbound is the composer: the console put the line in its
-            // own transcript before the turn ever started, and echoing it here
-            // would print it twice.
-            EngineEvent::Inbound(_) => {}
-            // The console's own tail arrives on the `LiveBash` handle it built
-            // and handed in, so it is already a `UiEvent` by the time it gets
-            // here. This is the same sample reaching the core (B7).
-            EngineEvent::CommandTail(_) => {}
-        }),
+        EngineEvents::new(|_| {}),
         EngineRequests {
             ask: crate::app::interaction::permission_ask(interactions.clone(), ConvKey::Main),
             ask_question: crate::app::interaction::question_ask(interactions, ConvKey::Main),
@@ -495,91 +372,19 @@ pub fn tui_hooks(
     )
 }
 
-/// The running estimate of a round's output: characters seen so far, in tokens.
-/// A block index that moves backwards means a new message started, so the count
-/// starts over.
-fn accumulate(state: &std::sync::Mutex<(u64, Option<usize>)>, index: usize, text: &str) -> u64 {
-    let mut state = state.lock().unwrap_or_else(|e| e.into_inner());
-    if state.1.is_some_and(|previous| previous > index) {
-        state.0 = 0;
-    }
-    state.1 = Some(index);
-    state.0 = state.0.saturating_add(crate::compact::text_units(text));
-    state.0.div_ceil(4)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn tui_hooks_emit_live_token_samples_before_final_usage() {
-        let (events_tx, mut events_rx) = mpsc::unbounded_channel();
-        let core = crate::app::AppCore::start(Default::default());
-        let ui = tui_hooks(
-            EventSink::new(ConvKey::Main, events_tx),
-            core.interactions(),
-            crate::query::no_steer(),
-            crate::live::LiveBash::detached(),
-        );
-
-        ui.events.emit(EngineEvent::ContextUsage(
-            crate::context_usage::ContextUsage::new(12_345, 128_000, 100_000),
-        ));
-        assert!(matches!(
-            events_rx.try_recv(),
-            Ok(Addressed { to: ConvKey::Main, event: UiEvent::ContextUsage(usage) })
-                if usage.used == 12_345 && usage.window == 128_000
-        ));
-
-        ui.events.emit(EngineEvent::TextDelta {
-            index: 0,
-            text: "abcdefghijkl".to_string(),
-        });
-        let next = |rx: &mut mpsc::UnboundedReceiver<Addressed>| rx.try_recv().map(|a| a.event);
-        assert!(matches!(next(&mut events_rx), Ok(UiEvent::TextDelta(_))));
-        assert!(matches!(
-            next(&mut events_rx),
-            Ok(UiEvent::OutputTokens {
-                tokens: 3,
-                authoritative: false
-            })
-        ));
-
-        ui.events.emit(EngineEvent::StreamRetry {
-            attempt: 1,
-            max_attempts: 10,
-            delay_ms: 1,
-            discarded_output: true,
-            code: None,
-            reason: None,
-        });
-        assert!(matches!(next(&mut events_rx), Ok(UiEvent::StreamRetry)));
-
-        ui.events.emit(EngineEvent::StopReason {
-            stop_reason: Some("end_turn".to_string()),
-            output_tokens: Some(10),
-        });
-        assert!(matches!(
-            next(&mut events_rx),
-            Ok(UiEvent::OutputTokens {
-                tokens: 10,
-                authoritative: true
-            })
-        ));
-    }
-
-    /// AskUserQuestion's TUI hook: the question becomes an interaction the core
-    /// holds, and the answer comes back through it.
+    /// AskUserQuestion's console host: the question becomes an interaction the
+    /// core holds, and the answer comes back through it.
     #[tokio::test]
     async fn ask_question_hook_maps_confirm_and_cancel() {
         use crate::app::snapshot::{ActivationKind, InteractionDecision};
 
-        let (events_tx, _events_rx) = mpsc::unbounded_channel();
         let core = crate::app::AppCore::start(Default::default());
         let interactions = core.interactions();
-        let ui = tui_hooks(
-            EventSink::new(ConvKey::Main, events_tx),
+        let ui = tui_host(
             interactions.clone(),
             crate::query::no_steer(),
             crate::live::LiveBash::detached(),

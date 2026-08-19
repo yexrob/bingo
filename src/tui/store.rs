@@ -672,6 +672,14 @@ pub struct Store {
     /// How many holes the stream has shown. Diagnostics: a healthy console
     /// never leaves zero.
     pub gaps: u64,
+    /// What was folded since the last look, in the order the core sequenced it.
+    ///
+    /// The projection is the state; this is the *change*, and a renderer that
+    /// builds rows incrementally needs both — the same pair a subscriber to a
+    /// JavaScript store gets. Draining it is the caller's, because folding
+    /// happens on two paths (the tick drain and a request's own wait) and the
+    /// rows are built once, on the render path.
+    taken: Vec<AppEvent>,
 }
 
 impl Store {
@@ -739,6 +747,10 @@ impl Store {
         match self.settle(pending).await? {
             AppReply::Session(snapshot) => {
                 self.cursor = Some(snapshot.event_cursor);
+                // A cut states everything, so deltas from before it describe a
+                // state that has been replaced. They are dropped rather than
+                // handed to a renderer that would apply them twice.
+                self.taken.clear();
                 self.view.replace(*snapshot);
                 for id in self.view.ids() {
                     self.read_transcript(&id).await?;
@@ -849,6 +861,7 @@ impl Store {
             return false;
         }
         self.cursor = Some(event.meta.seq);
+        self.taken.push(event.clone());
         // A rewrite — a compaction, a rewind — is the one change to a log that
         // no item event describes: the generation moves and everything read
         // under the old one belongs to a history that no longer exists. There is
@@ -927,6 +940,11 @@ impl Store {
         let id = self.mint();
         let id = self.ask(AppRequest::Query { id, query })?;
         self.settle(id).await
+    }
+
+    /// Everything folded since the last call, in order.
+    pub fn take_folded(&mut self) -> Vec<AppEvent> {
+        std::mem::take(&mut self.taken)
     }
 
     /// Re-read if the stream showed a hole. Idempotent: a store that is current

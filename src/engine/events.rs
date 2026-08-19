@@ -44,7 +44,9 @@ pub enum EngineEvent {
     /// still travels: it is the only sign of work while the model is otherwise
     /// silent, so a receiver that wants an honest token count needs it.
     ToolInputDelta {
+        #[allow(dead_code)]
         index: usize,
+        #[allow(dead_code)]
         partial_json: String,
     },
     /// The model started calling a tool. The arguments are not complete yet;
@@ -97,6 +99,11 @@ pub enum EngineEvent {
         tool_call_id: String,
         name: String,
         input: serde_json::Value,
+        /// The console's own `!` line rather than a call the model made. It is
+        /// the fold decision's one input, and it travels as the call's id shape
+        /// once the call is an item — so this field is the engine's statement of
+        /// the same fact and no receiver at this layer reads it.
+        #[allow(dead_code)]
         standalone: bool,
     },
     ToolDone(ToolCallDone),

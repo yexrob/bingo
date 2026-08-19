@@ -541,50 +541,27 @@ impl super::Chat {
         }
     }
 
-    /// Post-turn handling: send TurnEnd first (busy resets / the completion row appears immediately),
-    /// memory extraction is deferred — it is a non-streaming model call (seconds) and the wrap-up should not block
-    /// the turn-end UI; extraction runs fine in parallel with the next turn (e.g. a watch wake-up).
+    /// Post-turn handling.
+    ///
+    /// The turn's *end* is not here any more: the core closes it and publishes
+    /// the terminal state, and the console draws the completion row from that.
+    /// What is left are the two things the core does not know about — a
+    /// transient warning about how the turn ended, and the memory pass, which is
+    /// a non-streaming model call and must not hold the wrap-up up.
     async fn finish_turn(
         events: &crate::ui::EventSink,
         session: &Arc<Session>,
         outcome: &crate::query::QueryOutcome,
     ) {
-        if let Some(marker) = outcome.interrupt_marker {
-            events.send(UiEvent::Interrupted { marker });
+        if !outcome.aborted
+            && outcome.end_reason == crate::query::QueryEndReason::EmptyResponseRetried
+        {
+            events.send(UiEvent::Warning(
+                "model returned an empty response and was retried".to_string(),
+            ));
         }
-        if !outcome.aborted {
-            match outcome.end_reason {
-                crate::query::QueryEndReason::EmptyResponseRetried => {
-                    events.send(UiEvent::Warning(
-                        "model returned an empty response and was retried".to_string(),
-                    ));
-                }
-                crate::query::QueryEndReason::Completed => {}
-            }
-        }
-        events.send(UiEvent::TurnEnd);
         let cwd = session.cwd();
         crate::memory::extract_memory(session, &outcome.messages, &session.home, &cwd).await;
-    }
-
-    /// A turn task that dies without reporting an outcome (a panic inside the spawn) leaves
-    /// `busy` latched, and every interrupt and quit route is gated on `busy` — the session
-    /// then answers only to `kill`. Watching the handle turns a lost turn back into the
-    /// ordinary long-turn error state, which releases `busy` and offers retry / go back.
-    pub(crate) fn supervise_turn(
-        events: crate::ui::EventSink,
-        handle: tokio::task::JoinHandle<()>,
-    ) {
-        tokio::spawn(async move {
-            if handle.await.is_err() {
-                events.send(UiEvent::Error {
-                    code: crate::error::TURN_LOST,
-                    msg: "The turn ended unexpectedly; retry or go back.".to_string(),
-                    level: crate::error::ErrorLevel::Full,
-                    context: crate::error::ErrorContext::LongTurn,
-                });
-            }
-        });
     }
 
     pub(crate) fn start_turn(&mut self, text: String, show_user: bool) {
@@ -624,33 +601,19 @@ impl super::Chat {
         let turn = self.open_core_turn(crate::app::snapshot::TurnOrigin::User);
         let turns = self.session.turns.clone();
         let steer = self.steering(turn.clone());
-        let handle = tokio::spawn(async move {
-            events.send(UiEvent::TurnStart);
-            let mut host = crate::ui::tui_hooks(events.clone(), interactions, steer, live);
-            let guard = turn.map(|turn| {
+        tokio::spawn(async move {
+            let mut host = crate::ui::tui_host(interactions, steer, live);
+            let guard = turn.clone().map(|turn| {
                 host = host.clone().bound(turns.clone(), turn.clone());
                 turns.guard(turn, crate::app::snapshot::TurnStatus::Failed)
             });
             let history = Self::load_history(&session, &mut host.events.warn_sink());
             let result = run_query(&session, history, &text, &images, &host, Some(cancel_rx)).await;
-            Self::close_core_turn(guard, &result);
-            match result {
-                Ok(outcome) => {
-                    Self::finish_turn(&events, &session, &outcome).await;
-                }
-                Err(e) => {
-                    let code = crate::error::map_error(&e);
-                    events.send(UiEvent::Error {
-                        code,
-                        msg: Self::auth_error_hint(&session, code, e.to_string()),
-                        // Turn-level error = long-turn failure → full-flow full-screen state (AC-53).
-                        level: crate::error::ErrorLevel::Full,
-                        context: crate::error::ErrorContext::LongTurn,
-                    });
-                }
+            Self::close_core_turn(&turns, turn, guard, &result);
+            if let Ok(outcome) = &result {
+                Self::finish_turn(&events, &session, outcome).await;
             }
         });
-        Self::supervise_turn(self.events.clone(), handle);
     }
 
     /// This turn's tool barrier: what the composer queued while it worked (D83).
@@ -706,10 +669,30 @@ impl super::Chat {
     /// Close main's turn with the state the run actually reached. A run that is
     /// aborted instead of returning never gets here, and the guard's own `Drop`
     /// closes the turn for it.
+    ///
+    /// The interrupt marker is committed before the close, in the order it
+    /// happened: the exact sentence the transcript recorded becomes an item, so
+    /// the screen and the model read the same one and the console does not have
+    /// to be told twice.
     fn close_core_turn(
+        turns: &crate::app::turn::TurnHandle,
+        turn: Option<crate::app::ids::TurnId>,
         guard: Option<crate::app::turn::TurnGuard>,
         result: &Result<crate::query::QueryOutcome, crate::query::QueryError>,
     ) {
+        if let Ok(outcome) = result
+            && let Some(marker) = outcome.interrupt_marker
+        {
+            turns
+                .commit_item(
+                    crate::ui::ConvKey::Main,
+                    turn,
+                    crate::app::snapshot::ItemBody::Interruption {
+                        marker: marker.to_string(),
+                    },
+                )
+                .forget();
+        }
         let Some(guard) = guard else { return };
         match result {
             Ok(outcome) if outcome.aborted => {
@@ -720,7 +703,7 @@ impl super::Chat {
                 crate::app::snapshot::TurnStatus::Failed,
                 Some(crate::app::snapshot::TurnError {
                     code: crate::error::map_error(error).to_string(),
-                    message: error.to_string(),
+                    message: crate::error::sanitize_msg(&error.to_string()),
                 }),
             ),
         }
@@ -745,6 +728,12 @@ impl super::Chat {
             })
             .unwrap_or(false);
         auth_hint_for(oauth, &provider, code, msg)
+    }
+
+    /// The turn-level error message this session would show for a code, with the
+    /// provider guidance the raw body never carries.
+    pub(crate) fn auth_hint(&self, code: &str, msg: String) -> String {
+        Self::auth_error_hint(&self.session, code, msg)
     }
 
     /// bash-mode turn (processBashCommand): `!` commands execute directly,
@@ -777,10 +766,9 @@ impl super::Chat {
         let turn = self.open_core_turn(crate::app::snapshot::TurnOrigin::Shell);
         let turns = self.session.turns.clone();
         let steer = self.steering(turn.clone());
-        let handle = tokio::spawn(async move {
-            events.send(UiEvent::TurnStart);
-            let mut host = crate::ui::tui_hooks(events.clone(), interactions, steer, live);
-            let guard = turn.map(|turn| {
+        tokio::spawn(async move {
+            let mut host = crate::ui::tui_host(interactions, steer, live);
+            let guard = turn.clone().map(|turn| {
                 host = host.clone().bound(turns.clone(), turn.clone());
                 turns.guard(turn, crate::app::snapshot::TurnStatus::Failed)
             });
@@ -788,24 +776,11 @@ impl super::Chat {
             let result =
                 crate::query::run_bash_command(&session, &command, history, &host, Some(cancel_rx))
                     .await;
-            Self::close_core_turn(guard, &result);
-            match result {
-                Ok(outcome) => {
-                    Self::finish_turn(&events, &session, &outcome).await;
-                }
-                Err(e) => {
-                    let code = crate::error::map_error(&e);
-                    events.send(UiEvent::Error {
-                        code,
-                        msg: Self::auth_error_hint(&session, code, e.to_string()),
-                        // Turn-level error = long-turn failure → full-flow full-screen state (AC-53).
-                        level: crate::error::ErrorLevel::Full,
-                        context: crate::error::ErrorContext::LongTurn,
-                    });
-                }
+            Self::close_core_turn(&turns, turn, guard, &result);
+            if let Ok(outcome) = &result {
+                Self::finish_turn(&events, &session, outcome).await;
             }
         });
-        Self::supervise_turn(self.events.clone(), handle);
     }
 
     /// The answer lands mid-turn and the model keeps going. Without a message of its own, that

@@ -42,7 +42,6 @@
 use std::sync::Arc;
 
 use crate::agents::ToolAnswer;
-use crate::api::types::Message;
 use crate::app::projection::PostKind;
 use crate::app::projection::{Filed, Protagonist, Target, Work, walk};
 use crate::channels::USER_NAME;
@@ -220,46 +219,6 @@ pub(crate) fn agent_history(
         render,
         true,
     )
-}
-
-/// One inbound prompt → the messages it puts in the receiver's transcript.
-///
-/// `intake` says whether this is the task that created the instance, which is
-/// the one shape a continuation's mail can never be — the same flag the walk
-/// carries over a whole history, applied to the one message this is.
-///
-/// **Every direct message is dropped here** (D135). A DM reaches an instance
-/// twice: [`crate::ui::UiEvent::Mail`] when it is delivered, and again inside
-/// the prompt the run absorbs. The delivery is the one that happened at the
-/// moment somebody sent it, so it is the one that stays — and *this* copy would
-/// arrive whenever the receiver got round to reading it, which for a busy
-/// instance is minutes later and in the wrong place.
-///
-/// The rule is exactly the DM lane: mail from the user, from main, from another
-/// agent. Everything else in an absorbed prompt — the spawn task, a room relay,
-/// a chase, the task reminder — never passed through `deliver`, so it has no
-/// delivery event and lands here. A cold start keeps all of it, because there
-/// was no console to hear the deliveries.
-pub(crate) fn inbound_messages(
-    name: &str,
-    text: &str,
-    at: u64,
-    intake: bool,
-    render: &mut dyn FnMut(&str) -> Vec<Line>,
-) -> Vec<UiMessage> {
-    let mut who = Protagonist::of(name);
-    who.spawned = intake;
-    let history = [Message {
-        role: crate::api::types::Role::User,
-        content: vec![crate::api::types::ContentBlock::Text {
-            text: text.to_string(),
-        }],
-    }];
-    let filed = walk(who, &history, &[at])
-        .into_iter()
-        .filter(|f| !matches!(&f.target, Target::Dm(_)))
-        .collect();
-    file_walk(filed, name, render, false)
 }
 
 /// A filed walk → messages: the protagonist's own rows collected into runs by

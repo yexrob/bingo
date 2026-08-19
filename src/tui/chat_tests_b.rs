@@ -383,9 +383,10 @@ impl crate::watch::Watchable for FakeWatchable {
 #[tokio::test]
 async fn turn_end_triggers_auto_turn_when_wake_notification_pending() {
     let mut chat = test_chat();
-    chat.conv.messages.push(msg(Role::Assistant, ""));
-    chat.conv.stream_msg = Some(0);
     chat.start_test_turn();
+    // The turn's own message is the one `turn/started` opens; nothing on this
+    // side pushes it any more.
+    chat.settle_store();
     let watch = chat.session.watch.clone();
     let id = watch.register_with_conditions(Box::new(FakeWatchable), Vec::new(), None);
     watch.set_state(
@@ -396,14 +397,32 @@ async fn turn_end_triggers_auto_turn_when_wake_notification_pending() {
     );
     watch.settle().await;
     assert!(watch.has_wake_notifications(None), "notification queued");
-    chat.drain_events();
+    chat.drain_all();
     assert!(chat.conv.busy, "still busy, no auto turn mid-turn");
-    chat.events.send(UiEvent::TurnEnd);
-    chat.drain_events();
+    // The turn ends the way one ends: the core closes it and says so, and the
+    // console's wake decision hangs off that report rather than off a word this
+    // side put on its own channel.
+    chat.end_test_turn();
+    chat.settle_store();
+    assert_eq!(
+        chat.conv.messages.len(),
+        1,
+        "the turn keeps the message the watch row hangs on: {:?}",
+        chat.conv.messages
+    );
     tokio::task::yield_now().await;
-    chat.drain_events();
-    assert!(chat.conv.busy, "auto turn started after TurnEnd");
-    assert_eq!(chat.conv.messages.len(), 2, "new message for wake turn");
+    chat.settle_store();
+    assert!(chat.conv.busy, "auto turn started after the turn ended");
+    assert_eq!(
+        chat.conv.messages.len(),
+        2,
+        "new message for wake turn: {:?}",
+        chat.conv
+            .messages
+            .iter()
+            .map(|m| (m.role, m.text.clone()))
+            .collect::<Vec<_>>()
+    );
 }
 
 #[tokio::test]
@@ -1317,7 +1336,7 @@ fn ask_answer_message_survives_error_path() {
     );
 
     chat.apply_event(UiEvent::Error {
-        code: "SERVER_ERROR",
+        code: "SERVER_ERROR".to_string(),
         msg: "turn failed".to_string(),
         level: crate::error::ErrorLevel::Full,
         context: crate::error::ErrorContext::LongTurn,
@@ -2247,32 +2266,33 @@ fn a_new_turn_rearms_the_ordinary_interrupt() {
 
 /// A panic inside the turn task is swallowed by tokio (nothing joins the handle) and the
 /// terminal repaints over its message, so the only visible symptom was a session stuck
-/// on "Working…" forever. The supervisor turns it into the ordinary long-turn error.
-#[tokio::test]
-async fn a_lost_turn_reports_itself_instead_of_latching_busy() {
-    let (events, mut rx) = mpsc::unbounded_channel();
-    // The panic below prints its own backtrace line; that noise is the point — in the
-    // TUI it lands on the alternate screen and is repainted away within a frame.
-    let handle = tokio::spawn(async { panic!("turn task died") });
-
-    Chat::supervise_turn(
-        crate::ui::EventSink::new(crate::ui::ConvKey::Main, events),
-        handle,
+/// on "Working…" forever.
+///
+/// The console kept a supervisor for that once. It does not need one now: a task that
+/// dies executes none of its own code, and what closes the turn is the guard's `Drop` —
+/// a terminal state with no reason, which is exactly the shape of a lost turn. The
+/// console draws it from the core's report like any other ending.
+#[test]
+fn a_lost_turn_reports_itself_instead_of_latching_busy() {
+    let mut chat = test_chat();
+    let turn = chat
+        .start_test_turn()
+        .unwrap_or_else(|| panic!("main was idle"));
+    // Everything a dying task leaves behind, and nothing it would have said.
+    drop(
+        chat.session
+            .turns
+            .guard(turn, crate::app::snapshot::TurnStatus::Failed),
     );
+    chat.settle_store();
 
-    let event = rx.recv().await;
-    assert!(
-        matches!(
-            event,
-            Some(crate::ui::Addressed {
-                event: UiEvent::Error { code, context, .. },
-                ..
-            })
-                if code == crate::error::TURN_LOST
-                    && context == crate::error::ErrorContext::LongTurn
-        ),
-        "a lost turn reports itself: {event:?}"
-    );
+    let error = chat
+        .last_error
+        .as_ref()
+        .unwrap_or_else(|| panic!("a lost turn reports itself"));
+    assert_eq!(error.code, crate::error::TURN_LOST);
+    assert_eq!(error.context, crate::error::ErrorContext::LongTurn);
+    assert!(!chat.conv.busy, "and the session is not latched on it");
 }
 
 /// Esc walks the layer stack: with nothing open it interrupts a busy turn, it closes
@@ -3670,7 +3690,7 @@ fn short_sync_error_keeps_the_running_turn() {
     chat.start_test_turn();
     chat.conv.stream_msg = Some(0);
     chat.apply_event(UiEvent::Error {
-        code: "TIMEOUT",
+        code: "TIMEOUT".to_string(),
         msg: "list_models timeout".into(),
         level: crate::error::ErrorLevel::Page,
         context: crate::error::ErrorContext::ShortSync,
@@ -3683,7 +3703,7 @@ fn short_sync_error_keeps_the_running_turn() {
     assert!(chat.last_error.is_some(), "the error row is still recorded");
 
     chat.apply_event(UiEvent::Error {
-        code: "TIMEOUT",
+        code: "TIMEOUT".to_string(),
         msg: "turn died".into(),
         level: crate::error::ErrorLevel::Full,
         context: crate::error::ErrorContext::LongTurn,
@@ -3697,7 +3717,7 @@ fn short_sync_error_keeps_the_running_turn() {
 fn escape_dismisses_page_level_errors() {
     let mut chat = test_chat();
     chat.apply_event(UiEvent::Error {
-        code: "TIMEOUT",
+        code: "TIMEOUT".to_string(),
         msg: "x".into(),
         level: crate::error::ErrorLevel::Page,
         context: crate::error::ErrorContext::ShortSync,
@@ -3828,9 +3848,9 @@ fn interrupt_marker_renders_as_a_state_line_not_a_user_bubble() {
     chat.conv
         .messages
         .push(msg(Role::Assistant, "sure, starting"));
-    chat.events.send(UiEvent::Interrupted {
-        marker: crate::query::INTERRUPT_MARKER,
-    });
+    chat.events.send(UiEvent::Interrupted(
+        crate::query::INTERRUPT_MARKER.to_string(),
+    ));
     chat.drain_events();
 
     let last = chat.conv.messages.last().expect("the marker message");

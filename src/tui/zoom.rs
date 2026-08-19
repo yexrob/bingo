@@ -682,6 +682,9 @@ mod tests {
             .deliver("qa", "dev", "does the parser handle EOF?", Vec::new(), None)
             .now()
             .unwrap_or_else(|e| panic!("{e}"));
+        // The page is drawn from what the core published, so the core has to
+        // have finished saying it.
+        chat.settle_store();
         chat.switch_to(Some(ZoomTarget::Agent("qa".into())));
         let rows = page_rows(&mut chat);
         assert!(

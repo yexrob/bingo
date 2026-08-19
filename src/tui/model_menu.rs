@@ -249,7 +249,7 @@ impl super::Chat {
                     // Same visibility contract as a fetch failure: page-level
                     // error row + in-menu reason.
                     events.send(UiEvent::Error {
-                        code: "GENERIC",
+                        code: "GENERIC".to_string(),
                         msg: e.clone(),
                         level: crate::error::ErrorLevel::Page,
                         context: crate::error::ErrorContext::ShortSync,
@@ -269,7 +269,7 @@ impl super::Chat {
                     // #18/main #91: short-op failures must be visible (page-level error row, error color),
                     // behavior keeps degrading gracefully — "degraded + visible".
                     events.send(UiEvent::Error {
-                        code,
+                        code: code.to_string(),
                         msg: e.to_string(),
                         level: crate::error::ErrorLevel::Page,
                         context: crate::error::ErrorContext::ShortSync,

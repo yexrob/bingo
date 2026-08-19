@@ -11,7 +11,7 @@ use crate::channels::ChannelHandle;
 use crate::engine::events::{EngineEvent, EngineEvents, EngineHost, EngineRequests};
 use crate::query::Session;
 use crate::tool::{Tool, ToolContext, ToolError, ToolResult, parse_input};
-use crate::ui::{ConvKey, UiEvent};
+use crate::ui::ConvKey;
 use crate::watch::{NotifyCondition, WatchHandle, WatchId, WatchKind, WatchState};
 
 use crate::tool::address::{self, Address};
@@ -100,29 +100,26 @@ struct SubagentOutput {
     progress: Arc<Mutex<crate::agents::AgentProgress>>,
 }
 
-/// `TurnStart` on the way in, `TurnEnd` on the way out — including the way out
-/// an aborted task takes, which runs no code of its own.
+/// One instance turn, opened on the way in and closed on the way out —
+/// including the way out an aborted task takes, which runs no code of its own.
 ///
-/// Since B3 the same brackets open and close the core's turn: the guard inside
-/// closes it from its own `Drop`, so an aborted instance still reaches exactly
-/// one terminal state instead of leaving a turn running forever.
+/// It used to bracket two things: the core's turn and a pair of `UiEvent`s on
+/// the console's channel. The second pair is gone. A turn opening and ending is
+/// something the core publishes, and the console draws its rows from that
+/// report like any other client — so an instance's page is built by the same
+/// events main's is, which is what makes it one conversation model rather than
+/// two.
 struct TurnBrackets {
-    events: crate::ui::EventSink,
     turn: Option<crate::app::turn::TurnGuard>,
 }
 
 impl TurnBrackets {
-    fn open(
-        events: crate::ui::EventSink,
-        turns: &crate::app::turn::TurnHandle,
-        conversation: crate::ui::ConvKey,
-    ) -> Self {
-        events.send(UiEvent::TurnStart);
+    fn open(turns: &crate::app::turn::TurnHandle, conversation: crate::ui::ConvKey) -> Self {
         let turn = turns
             .open(conversation, TurnOrigin::Peer, Vec::new())
             .now()
             .map(|turn| turns.guard(turn, TurnStatus::Failed));
-        Self { events, turn }
+        Self { turn }
     }
 
     /// The turn this run reports into, for the host it is about to build.
@@ -135,12 +132,6 @@ impl TurnBrackets {
         if let Some(guard) = self.turn.take() {
             guard.finish(status, None);
         }
-    }
-}
-
-impl Drop for TurnBrackets {
-    fn drop(&mut self) {
-        self.events.send(UiEvent::TurnEnd);
     }
 }
 
@@ -165,9 +156,8 @@ struct AttemptCheckpoint {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn subagent_hooks(
+fn subagent_host(
     output: SubagentOutput,
-    events: Option<crate::ui::EventSink>,
     cell: Arc<AgentCell>,
     watch: WatchHandle,
     id: WatchId,
@@ -175,185 +165,101 @@ fn subagent_hooks(
     ask: Option<Arc<crate::query::AskFn>>,
 ) -> EngineHost {
     // `output.text` stays the flat reply — what the spawn returns and what
-    // `spoke` is judged on. Everything the *screen* needs travels as events, so
-    // an instance's page is built by the code that builds main's rather than by
-    // a second store polled per frame (D134).
+    // `spoke` is judged on. Everything the *screen* needs is the turn's, and the
+    // turn is the core's: a report reaches the actor through the binding this
+    // host is given, and the console reads its rows out of the projection that
+    // follows. There is no second copy of the stream any more, which is what
+    // makes an instance's page and main's page one renderer.
     //
-    // A shim, like `tui_hooks`: B7 removes this when the console reads
-    // `AppFrame` instead of translating an engine report into a `UiEvent`.
-    // It leaves with that one and for the same reason (see its note, D150).
-    let events = events.unwrap_or_else(crate::ui::EventSink::detached);
+    // What is left here is the bookkeeping only this side can do: the registry's
+    // liveness stamp, the run's own progress figures, the condition engine's
+    // content feed, and the checkpoint a stream retry rolls back to.
     let text_output = output.text;
     let progress_output = output.progress;
     let registry = cell.registry.clone();
-    let warn_instance = instance.clone();
     let event_instance = instance.clone();
-    let round_units = Arc::new(Mutex::new(0u64));
     let attempt_checkpoint = Arc::new(Mutex::new(AttemptCheckpoint::default()));
     EngineHost::new(
-        EngineEvents::new(move |event| {
-            let tokens = match event {
-                EngineEvent::TextDelta { text, .. } => {
-                    registry.touch(&event_instance);
-                    let tokens = {
-                        let mut units = round_units.lock().unwrap_or_else(|e| e.into_inner());
-                        *units = units.saturating_add(crate::compact::text_units(&text));
-                        units.div_ceil(4)
-                    };
-                    if let Ok(mut output) = text_output.lock() {
-                        output.push_str(&text);
-                        events.send(UiEvent::TextDelta(text.clone()));
-                        cell.record_chars(text.chars().count());
-                        // Feed produced text into the condition engine (notify_on hit → signal notification).
-                        watch.feed_content(id, &text);
-                    }
-                    tokens
+        EngineEvents::new(move |event| match event {
+            EngineEvent::TextDelta { text, .. } => {
+                registry.touch(&event_instance);
+                if let Ok(mut output) = text_output.lock() {
+                    output.push_str(&text);
+                    cell.record_chars(text.chars().count());
+                    // Feed produced text into the condition engine (notify_on hit → signal notification).
+                    watch.feed_content(id, &text);
                 }
-                EngineEvent::ThinkingDelta { thinking, .. } => {
-                    registry.touch(&event_instance);
-                    let tokens = {
-                        let mut units = round_units.lock().unwrap_or_else(|e| e.into_inner());
-                        *units = units.saturating_add(crate::compact::text_units(&thinking));
-                        units.div_ceil(4)
-                    };
-                    events.send(UiEvent::ThinkingDelta(thinking));
-                    tokens
+            }
+            EngineEvent::ThinkingDelta { .. } | EngineEvent::ToolInputDelta { .. } => {}
+            EngineEvent::ToolUseStarted { .. } => {}
+            EngineEvent::CommandTail(_) => {}
+            EngineEvent::StopReason { output_tokens, .. } => {
+                if let (Some(tokens), Ok(mut progress)) = (output_tokens, progress_output.lock()) {
+                    progress.add_output_tokens(tokens);
                 }
-                EngineEvent::ToolInputDelta { partial_json, .. } => {
-                    let mut units = round_units.lock().unwrap_or_else(|e| e.into_inner());
-                    *units = units.saturating_add(crate::compact::text_units(&partial_json));
-                    units.div_ceil(4)
+            }
+            EngineEvent::StreamRetry {
+                discarded_output: false,
+                ..
+            } => {}
+            EngineEvent::StreamRetry { .. } => {
+                let checkpoint = attempt_checkpoint
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone();
+                if let Ok(mut text) = text_output.lock() {
+                    text.truncate(checkpoint.text_len);
                 }
-                EngineEvent::ToolUseStarted { name, .. } => {
-                    events.send(UiEvent::ToolStart { name });
-                    return;
+                cell.set_chars(checkpoint.produced_chars);
+                if let Ok(mut progress) = progress_output.lock() {
+                    progress.restore_attempt(
+                        checkpoint.output_tokens,
+                        checkpoint.tool_uses,
+                        checkpoint.recent_activity,
+                    );
                 }
-                // A subagent's shell runs detached: there is no foreground slot
-                // for it to publish into, so a sample it somehow produced is not
-                // this surface's to draw.
-                EngineEvent::CommandTail(_) => return,
-                EngineEvent::StopReason {
-                    output_tokens: Some(tokens),
-                    ..
-                } => {
-                    *round_units.lock().unwrap_or_else(|e| e.into_inner()) =
-                        tokens.saturating_mul(4);
-                    if let Ok(mut progress) = progress_output.lock() {
-                        progress.add_output_tokens(tokens);
-                    }
-                    events.send(UiEvent::OutputTokens {
-                        tokens,
-                        authoritative: true,
-                    });
-                    return;
+            }
+            EngineEvent::ContextUsage(_) => {}
+            EngineEvent::ToolReady { name, input, .. } => {
+                registry.touch(&event_instance);
+                // The progress line is a label and stays one: it is what the
+                // roster's `Running · Read src/lib.rs` says, and since B7c it is
+                // on the wire too (`AgentResource.recentActivity`).
+                let glyph = crate::app::projection::tool_glyph(&name);
+                let shown = crate::app::projection::display_tool_name(&name);
+                let summary = crate::query::summarize_input(&name, &input);
+                let activity = if summary.is_empty() {
+                    format!("{glyph}{shown}")
+                } else {
+                    format!("{glyph}{shown}({summary})")
+                };
+                if let Ok(mut progress) = progress_output.lock() {
+                    progress.record_tool(activity);
                 }
-                EngineEvent::StreamRetry {
-                    discarded_output: false,
-                    ..
-                } => return,
-                EngineEvent::StreamRetry { .. } => {
-                    *round_units.lock().unwrap_or_else(|e| e.into_inner()) = 0;
-                    events.send(UiEvent::StreamRetry);
-                    let checkpoint = attempt_checkpoint
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .clone();
-                    if let Ok(mut text) = text_output.lock() {
-                        text.truncate(checkpoint.text_len);
-                    }
-                    cell.set_chars(checkpoint.produced_chars);
-                    if let Ok(mut progress) = progress_output.lock() {
-                        progress.restore_attempt(
-                            checkpoint.output_tokens,
-                            checkpoint.tool_uses,
-                            checkpoint.recent_activity,
-                        );
-                    }
-                    return;
-                }
-                // The surface D89 left this hook waiting for: an instance's page
-                // has a footer of its own now, and it reports the instance's
-                // window rather than borrowing main's.
-                EngineEvent::ContextUsage(usage) => {
-                    events.send(UiEvent::ContextUsage(usage));
-                    return;
-                }
-                EngineEvent::ToolReady {
-                    tool_call_id,
-                    name,
-                    input,
-                    standalone,
-                } => {
-                    registry.touch(&event_instance);
-                    // The progress line is a label and stays one; the call itself goes
-                    // on the channel, because the page builds its rows from the call.
-                    let glyph = crate::app::projection::tool_glyph(&name);
-                    let shown = crate::app::projection::display_tool_name(&name);
-                    let summary = crate::query::summarize_input(&name, &input);
-                    let activity = if summary.is_empty() {
-                        format!("{glyph}{shown}")
-                    } else {
-                        format!("{glyph}{shown}({summary})")
-                    };
-                    events.send(UiEvent::ToolReady {
-                        tool_call_id,
-                        name,
-                        input,
-                        standalone,
-                    });
-                    if let Ok(mut progress) = progress_output.lock() {
-                        progress.record_tool(activity);
-                    }
-                    return;
-                }
-                EngineEvent::ToolDone(done) => {
-                    registry.touch(&event_instance);
-                    events.send(UiEvent::ToolDone(done));
-                    return;
-                }
-                EngineEvent::RoundEnd => {
-                    *round_units.lock().unwrap_or_else(|e| e.into_inner()) = 0;
-                    events.send(UiEvent::RoundEnd);
-                    let (output_tokens, tool_uses, recent_activity) = progress_output
-                        .lock()
-                        .map(|progress| {
-                            (
-                                progress.output_tokens,
-                                progress.tool_uses,
-                                progress.recent_activity.clone(),
-                            )
-                        })
-                        .unwrap_or_default();
-                    *attempt_checkpoint.lock().unwrap_or_else(|e| e.into_inner()) =
-                        AttemptCheckpoint {
-                            text_len: text_output.lock().map_or(0, |text| text.len()),
-                            produced_chars: cell.chars(),
-                            output_tokens,
-                            tool_uses,
-                            recent_activity,
-                        };
-                    return;
-                }
-                // A reconnect notice used to be spliced into the instance's own prose,
-                // where it read as something the agent had said. It is a warning about
-                // the stream, so it takes the tier every other warning takes — wearing
-                // the name of whose stream it is about, because the tier is shared and
-                // an unattributed "Reconnecting…" on a page the user is not watching
-                // reads as the console's own (D134a).
-                EngineEvent::Warning(message) => {
-                    events.send(UiEvent::Warning(format!("@{warn_instance} · {message}")));
-                    return;
-                }
-                EngineEvent::Inbound(text) => {
-                    events.send(UiEvent::Inbound(text));
-                    return;
-                }
-                EngineEvent::StopReason { .. } => return,
-            };
-            events.send(UiEvent::OutputTokens {
-                tokens,
-                authoritative: false,
-            });
+            }
+            EngineEvent::ToolDone(_) => {
+                registry.touch(&event_instance);
+            }
+            EngineEvent::RoundEnd => {
+                let (output_tokens, tool_uses, recent_activity) = progress_output
+                    .lock()
+                    .map(|progress| {
+                        (
+                            progress.output_tokens,
+                            progress.tool_uses,
+                            progress.recent_activity.clone(),
+                        )
+                    })
+                    .unwrap_or_default();
+                *attempt_checkpoint.lock().unwrap_or_else(|e| e.into_inner()) = AttemptCheckpoint {
+                    text_len: text_output.lock().map_or(0, |text| text.len()),
+                    produced_chars: cell.chars(),
+                    output_tokens,
+                    tool_uses,
+                    recent_activity,
+                };
+            }
+            EngineEvent::Warning(_) | EngineEvent::Inbound(_) => {}
         }),
         EngineRequests {
             // A subagent has no prompt surface of its own, so its Ask decisions are forwarded to
@@ -812,39 +718,33 @@ pub(crate) fn spawn_agent_loop(
             loop_registry
                 .set_progress(&name, Some(progress.clone()))
                 .await;
-            let sink = loop_registry.sink_for(&name);
             // The turn's brackets, and the reason they are a guard: an instance
             // is stopped by aborting its task, which unwinds this future without
             // running another line. A `TurnEnd` sent on the way out is the only
             // one an abort cannot swallow — and a conversation left `busy`
             // forever is a spinner that never stops.
-            let turn = sink
-                .clone()
-                .map(|sink| TurnBrackets::open(sink, &session.turns, ConvKey::Agent(name.clone())));
-            let mut host = subagent_hooks(
+            let turn = TurnBrackets::open(&session.turns, ConvKey::Agent(name.clone()));
+            let mut host = subagent_host(
                 SubagentOutput {
                     text: output.clone(),
                     progress,
                 },
-                sink,
                 run.1.clone(),
                 watch.clone(),
                 run.0,
                 name.clone(),
                 loop_registry.ask_fn(),
             );
-            if let Some(id) = turn.as_ref().and_then(TurnBrackets::turn_id) {
+            if let Some(id) = turn.turn_id() {
                 host = host.bound(session.turns.clone(), id);
             }
             let outcome =
                 crate::query::run_query(&session, history, &prompt, &images, &host, None).await;
-            if let Some(turn) = turn {
-                turn.finish(match &outcome {
-                    Ok(outcome) if outcome.aborted => TurnStatus::Interrupted,
-                    Ok(_) => TurnStatus::Completed,
-                    Err(_) => TurnStatus::Failed,
-                });
-            }
+            turn.finish(match &outcome {
+                Ok(outcome) if outcome.aborted => TurnStatus::Interrupted,
+                Ok(_) => TurnStatus::Completed,
+                Err(_) => TurnStatus::Failed,
+            });
             match outcome {
                 Ok(outcome) => {
                     let text = output.lock().unwrap_or_else(|e| e.into_inner()).clone();
@@ -1412,23 +1312,19 @@ impl Tool for AgentTool {
             .agents
             .set_progress(&name, Some(progress.clone()))
             .await;
-        let sink = self.session.agents.sink_for(&name);
-        let turn = sink.clone().map(|sink| {
-            TurnBrackets::open(sink, &self.session.turns, ConvKey::Agent(name.clone()))
-        });
-        let mut host = subagent_hooks(
+        let turn = TurnBrackets::open(&self.session.turns, ConvKey::Agent(name.clone()));
+        let mut host = subagent_host(
             SubagentOutput {
                 text: output.clone(),
                 progress,
             },
-            sink,
             cell.clone(),
             ctx.watch.clone(),
             id,
             name.clone(),
             self.session.agents.ask_fn(),
         );
-        if let Some(turn_id) = turn.as_ref().and_then(TurnBrackets::turn_id) {
+        if let Some(turn_id) = turn.turn_id() {
             host = host.bound(self.session.turns.clone(), turn_id);
         }
         let images = self.session.attachments.resolve(&params.prompt);
@@ -1441,13 +1337,11 @@ impl Tool for AgentTool {
             None,
         )
         .await;
-        if let Some(turn) = turn {
-            turn.finish(match &sync_run {
-                Ok(outcome) if outcome.aborted => TurnStatus::Interrupted,
-                Ok(_) => TurnStatus::Completed,
-                Err(_) => TurnStatus::Failed,
-            });
-        }
+        turn.finish(match &sync_run {
+            Ok(outcome) if outcome.aborted => TurnStatus::Interrupted,
+            Ok(_) => TurnStatus::Completed,
+            Err(_) => TurnStatus::Failed,
+        });
         self.session.agents.set_progress(&name, None).await;
         match sync_run {
             Ok(outcome) => {

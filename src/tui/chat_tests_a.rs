@@ -71,10 +71,6 @@ pub(super) fn test_chat_home(home: std::path::PathBuf) -> Chat {
         instance: None,
         attachments: crate::api::image::Attachments::new(),
     });
-    session.agents.set_events(crate::ui::EventSink::new(
-        crate::ui::ConvKey::Main,
-        events_tx.clone(),
-    ));
     let mut chat = Chat::new(
         session,
         crate::ui::EventSink::new(crate::ui::ConvKey::Main, events_tx),
@@ -1121,6 +1117,8 @@ async fn bash_submit_runs_command_and_ends_turn() {
         crate::tui::theme::ThemeSetting::Auto,
         None,
     );
+    chat.connect_store_now()
+        .unwrap_or_else(|error| panic!("the test core would not attach: {error}"));
     chat.bash_mode = true;
     chat.input = "echo hello".to_string();
     chat.submit();

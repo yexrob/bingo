@@ -42,7 +42,7 @@ use crate::tui::statics::Block;
 /// `UiEvent::Error`; the level is decided by the triggering context (short sync = page-level, long turn = full-flow).
 #[derive(Debug, Clone)]
 pub struct ErrorState {
-    pub code: &'static str,
+    pub code: String,
     pub msg: String,
     pub level: crate::error::ErrorLevel,
     /// Triggering context (contract field: the event chain "producer → event → state" keeps
@@ -683,6 +683,10 @@ pub struct Chat {
     /// producer holds one bound to itself (`AgentHandle::sink_for`).
     pub(super) events: crate::ui::EventSink,
     pub(crate) events_rx: mpsc::UnboundedReceiver<crate::ui::Addressed>,
+    /// The running output estimate per page, in units, for the round that is
+    /// streaming. The provider's own count replaces it whenever one arrives;
+    /// until then this is the only number the footer's rate meter has.
+    pub(crate) stream_units: HashMap<crate::ui::ConvKey, u64>,
     /// The conversation on screen. Everything the running turn writes lives
     /// here; everything the console owns stays on `Chat`.
     pub conv: crate::tui::conversation::Conversation,
@@ -1024,7 +1028,7 @@ impl Chat {
     /// Echo the interrupt marker `query.rs` wrote into the message flow. It is a message,
     /// not a warning: the record it mirrors is permanent, and a 10s toast that expires
     /// while the marker stays in the history is exactly the split-brain this closes.
-    pub(crate) fn push_interrupt_marker(&mut self, marker: &'static str) {
+    pub(crate) fn push_interrupt_marker(&mut self, marker: &str) {
         // The turn's own cleanup still has to run against the message it opened, so the
         // continuation drop happens before the marker lands after it (TurnEnd's second
         // call then finds nothing to do).
@@ -1137,6 +1141,7 @@ impl Chat {
             store: crate::tui::store::Store::default(),
             events,
             events_rx,
+            stream_units: HashMap::new(),
             conv: crate::tui::conversation::Conversation::new(context_usage),
             parked: HashMap::new(),
             active: crate::ui::ConvKey::Main,
@@ -1318,6 +1323,7 @@ impl Chat {
     pub(crate) fn settle_store(&mut self) {
         self.session.core.settle_now();
         self.pump_store();
+        self.drain_frames();
     }
 
     /// Fold in everything the core has said since the last look.
@@ -1346,7 +1352,13 @@ impl Chat {
     }
 
     pub fn drain_all(&mut self) -> bool {
-        let mut changed = self.pump_store();
+        // The core's stream first, and its rows with it: everything a run
+        // reported is sequenced there, so reading the projection and building
+        // the rows it changed are one step. The local channel carries what the
+        // core does not know about — the transient tiers, the pinned panels, the
+        // watch board — and is drained after.
+        self.pump_store();
+        let mut changed = self.drain_frames();
         changed |= self.drain_events();
         changed |= self.drain_asks();
         if changed {
@@ -2185,25 +2197,6 @@ impl Chat {
                     context,
                 });
             }
-            UiEvent::Inbound(text) => {
-                // Prose that entered this conversation from outside its own turn.
-                // Filed by the same walk that reads a committed history, so a
-                // page cannot attribute the live half and the settled half
-                // differently — the class of bug D130 closed.
-                let Some(name) = to.agent() else {
-                    return follow;
-                };
-                let intake = !conv.intake_seen;
-                conv.intake_seen = true;
-                let name = name.to_string();
-                let at = crate::channels::now_unix();
-                let arrived =
-                    crate::tui::conv::inbound_messages(&name, &text, at, intake, &mut |t| {
-                        self.render_thinking(t)
-                    });
-                conv.absorb_inbound(arrived, self.tick);
-                self.dirty = true;
-            }
             UiEvent::Mail { from, text } => {
                 // A message that has been *delivered*. It is filed by the same
                 // builder an absorbed prompt is filed by, so a page cannot draw
@@ -2274,8 +2267,8 @@ impl Chat {
             UiEvent::Steered { items } => {
                 self.absorb_steered(&items);
             }
-            UiEvent::Interrupted { marker } => {
-                self.push_interrupt_marker(marker);
+            UiEvent::Interrupted(marker) => {
+                self.push_interrupt_marker(&marker);
             }
             UiEvent::Warning(message) => {
                 self.push_warning(message);
@@ -2594,6 +2587,41 @@ impl Chat {
         let turn = self.open_core_turn(crate::app::snapshot::TurnOrigin::User);
         self.main_conv().busy = true;
         turn
+    }
+
+    /// Open a turn on a page the way its own producer does, so the events that
+    /// follow have a turn to belong to.
+    #[cfg(test)]
+    pub(crate) fn start_test_turn_on(
+        &mut self,
+        key: &crate::ui::ConvKey,
+    ) -> crate::app::ids::TurnId {
+        let turn = self
+            .session
+            .turns
+            .open(
+                key.clone(),
+                crate::app::snapshot::TurnOrigin::Peer,
+                Vec::new(),
+            )
+            .now()
+            .unwrap_or_else(|| panic!("{key:?} was idle"));
+        self.settle_store();
+        turn
+    }
+
+    /// What a run reports as it opens: the prose it was handed, read by the
+    /// core's one walker and committed as the messages that entered the
+    /// conversation. The console draws them from that, which is the whole point
+    /// — a page cannot attribute the live half and the settled half differently
+    /// if there is only one reader.
+    #[cfg(test)]
+    pub(crate) fn report_inbound(&mut self, turn: &crate::app::ids::TurnId, text: &str) {
+        self.session.turns.report_event(
+            turn.clone(),
+            crate::engine::events::EngineEvent::Inbound(text.to_string()),
+        );
+        self.settle_store();
     }
 
     /// End the turn `start_test_turn` opened, and the console's flag with it.
@@ -3679,7 +3707,7 @@ impl Chat {
                     // #18/main #91: short-op failures must be visible (page-level error row),
                     // behavior keeps degrading gracefully (budget still shows 0).
                     events.send(UiEvent::Error {
-                        code: crate::error::map_error(&e),
+                        code: crate::error::map_error(&e).to_string(),
                         msg: e.to_string(),
                         level: crate::error::ErrorLevel::Page,
                         context: crate::error::ErrorContext::ShortSync,
@@ -3787,6 +3815,9 @@ use chat_setup::McpRequest;
 /// The overlay frame the ctrl+b manager draws, reused by the rewind selector
 /// (D91) so the two overlays are the same object in the same place.
 pub(crate) use chat_tail::manager_box;
+
+#[path = "chat_feed.rs"]
+mod chat_feed;
 
 #[path = "ask.rs"]
 mod ask;

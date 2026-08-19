@@ -857,13 +857,31 @@ mod tests {
         let mut messages = vec![text(Role::User, "hi"), text(Role::Assistant, "hello")];
         let estimate = estimate_tokens(&session.system, &messages, &[]);
 
-        let (events_tx, mut events_rx) = tokio::sync::mpsc::unbounded_channel();
-        let ui = crate::ui::tui_hooks(
-            crate::ui::EventSink::new(crate::ui::ConvKey::Main, events_tx),
-            session.interactions.clone(),
-            crate::query::no_steer(),
-            crate::live::LiveBash::detached(),
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorder = std::sync::Arc::clone(&seen);
+        let ui = crate::engine::events::EngineHost::new(
+            crate::engine::events::EngineEvents::new(move |event| {
+                if let crate::engine::events::EngineEvent::Warning(message) = event {
+                    recorder
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .push(message);
+                }
+            }),
+            crate::engine::events::EngineRequests {
+                ask: crate::app::interaction::permission_ask(
+                    session.interactions.clone(),
+                    crate::ui::ConvKey::Main,
+                ),
+                ask_question: crate::app::interaction::question_ask(
+                    session.interactions.clone(),
+                    crate::ui::ConvKey::Main,
+                ),
+                steer: crate::query::no_steer(),
+                live: crate::live::LiveBash::detached(),
+            },
         );
+        let warned = || seen.lock().unwrap_or_else(|error| error.into_inner()).len();
 
         let mut gate = gate_reading(warning_at.saturating_sub(1), estimate);
         let quiet = check_and_compact(
@@ -875,10 +893,7 @@ mod tests {
         )
         .await;
         assert_eq!(quiet, warning_at - 1);
-        assert!(
-            events_rx.try_recv().is_err(),
-            "one token below the band says nothing"
-        );
+        assert_eq!(warned(), 0, "one token below the band says nothing");
 
         let mut gate = gate_reading(warning_at, estimate);
         let tokens = check_and_compact(
@@ -890,15 +905,16 @@ mod tests {
         )
         .await;
         assert_eq!(tokens, warning_at);
-        match events_rx.try_recv() {
-            Ok(crate::ui::Addressed {
-                event: crate::ui::UiEvent::Warning(message),
-                ..
-            }) => assert_eq!(
+        match seen
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .as_slice()
+        {
+            [message] => assert_eq!(
                 message,
-                format!("context at {warning_at} tokens; auto-compact at {threshold}")
+                &format!("context at {warning_at} tokens; auto-compact at {threshold}")
             ),
-            other => panic!("expected a warning row, got {other:?}"),
+            other => panic!("expected one warning, got {other:?}"),
         }
         assert_eq!(
             messages.len(),

@@ -382,22 +382,24 @@ async fn an_absorbed_prompt_is_read_by_the_one_walker() {
     turns.close(turn, crate::app::snapshot::TurnStatus::Completed, None);
 
     let events = drain(&mut link).await;
-    let notices: Vec<String> = items(&events)
+    let absorbed: Vec<(String, String)> = items(&events)
         .into_iter()
         .filter_map(|item| match &item.body {
-            ItemBody::Notice { text, .. } => Some(text.clone()),
+            ItemBody::PeerMessage { from, text, .. } => Some((from.clone(), text.clone())),
             _ => None,
         })
         .collect();
     assert!(
-        notices
+        absorbed
             .iter()
-            .all(|text| !text.contains("look at the lexer")),
-        "the direct message already arrived when it was delivered (D135): {notices:?}"
+            .all(|(_, text)| !text.contains("look at the lexer")),
+        "the direct message already arrived when it was delivered (D135): {absorbed:?}"
     );
     assert!(
-        notices.iter().any(|text| text.contains("the suite is red")),
-        "a room relay never passed through a delivery, so it lands here: {notices:?}"
+        absorbed
+            .iter()
+            .any(|(_, text)| text.contains("the suite is red")),
+        "a room relay never passed through a delivery, so it lands here: {absorbed:?}"
     );
 }
 

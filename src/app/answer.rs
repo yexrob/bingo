@@ -52,6 +52,14 @@ impl<T> Answer<T> {
     {
         block_on(self)
     }
+
+    /// The question was a statement: the message is already on its way and the
+    /// caller does not want the receipt.
+    ///
+    /// A oneshot needs no cancellation — dropping the receiver is exactly this —
+    /// so the only thing here is saying so, because `Answer` is `#[must_use]`
+    /// precisely to stop that happening by accident.
+    pub fn forget(self) {}
 }
 
 impl<T: Unpin> Future for Answer<T> {

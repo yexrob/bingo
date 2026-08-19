@@ -2546,6 +2546,14 @@ impl Controller {
     }
 
     /// Read one inbound block with the one walker and commit what it names.
+    ///
+    /// Each line is a *message that entered this conversation from outside it* —
+    /// the task an instance was dispatched with, a room relay it was handed, a
+    /// chase it owes an answer to — so each becomes a `peerMessage` wearing the
+    /// name the walker attributed it to. It used to be a `notice` with a code
+    /// and no author, which meant a client could render the line and not who
+    /// said it; the walker knows, and dropping what it knows on the way into the
+    /// log made the log the poorer record of the two.
     fn absorb_inbound(&mut self, conversation: &ConvKey, text: &str, first: bool) {
         let who = match conversation {
             ConvKey::Agent(name) => name.clone(),
@@ -2553,16 +2561,13 @@ impl Controller {
         };
         let at = now_millis();
         for filed in crate::app::projection::inbound(&who, text, at / 1_000, first) {
-            let code = match filed.target {
-                crate::app::projection::Target::Intake => "intake",
-                _ => "runtime",
-            };
             self.commit_body(
                 conversation,
-                ItemBody::Notice {
-                    code: code.to_string(),
-                    level: NoticeLevel::Info,
+                ItemBody::PeerMessage {
+                    from: filed.post.from,
+                    to: None,
                     text: filed.post.text,
+                    delivery_id: None,
                 },
             );
         }

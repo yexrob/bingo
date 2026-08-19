@@ -2138,8 +2138,8 @@ fn an_inbound_prompt_lands_as_the_sender_who_wrote_it() {
     let mut chat = test_chat();
     seed_agent(&mut chat, "scout");
     let scout = crate::ui::ConvKey::Agent("scout".to_string());
-    chat.apply_event_to(scout.clone(), UiEvent::TurnStart);
-    chat.apply_event_to(scout.clone(), UiEvent::Inbound("map the parser".into()));
+    let turn = chat.start_test_turn_on(&scout);
+    chat.report_inbound(&turn, "map the parser");
     // What was said to it afterwards arrives as a *delivery* since D135 — the
     // moment main sent it, not the moment the run read it back.
     chat.apply_event_to(
@@ -2280,10 +2280,9 @@ async fn a_line_sent_to_an_agent_shows_on_its_page_once() {
 
     // The run absorbs both and hands the console the prompt it was given.
     // Every line of it is a repeat of a delivery, so none of it lands twice.
-    chat.apply_event(UiEvent::Inbound(
-        "[DM from user]\nlook at the lexer".to_string(),
-    ));
-    chat.apply_event(UiEvent::Inbound("map the parser".to_string()));
+    let turn = chat.start_test_turn_on(&crate::ui::ConvKey::Agent("scout".to_string()));
+    chat.report_inbound(&turn, "[DM from user]\nlook at the lexer");
+    chat.report_inbound(&turn, "map the parser");
     for needle in ["look at the lexer", "map the parser"] {
         let said: Vec<&String> = chat
             .conv
@@ -2489,8 +2488,8 @@ fn the_question_lands_above_the_answer_it_caused() {
     seed_agent(&mut chat, "scout");
     let scout = crate::ui::ConvKey::Agent("scout".into());
     chat.switch_to(Some(crate::tui::zoom::ZoomTarget::Agent("scout".into())));
-    chat.apply_event_to(scout.clone(), UiEvent::TurnStart);
-    chat.apply_event_to(scout.clone(), UiEvent::Inbound("map the parser".into()));
+    let turn = chat.start_test_turn_on(&scout);
+    chat.report_inbound(&turn, "map the parser");
     chat.apply_event_to(
         scout.clone(),
         UiEvent::TextDelta("the lexer owns it".into()),
@@ -2519,8 +2518,8 @@ fn mail_delivered_mid_turn_splits_the_run_around_it() {
     seed_agent(&mut chat, "scout");
     let scout = crate::ui::ConvKey::Agent("scout".into());
     chat.switch_to(Some(crate::tui::zoom::ZoomTarget::Agent("scout".into())));
-    chat.apply_event_to(scout.clone(), UiEvent::TurnStart);
-    chat.apply_event_to(scout.clone(), UiEvent::Inbound("map the parser".into()));
+    let turn = chat.start_test_turn_on(&scout);
+    chat.report_inbound(&turn, "map the parser");
     chat.apply_event_to(
         scout.clone(),
         UiEvent::TextDelta("reading the lexer".into()),
@@ -2652,7 +2651,10 @@ fn a_page_opened_over_undrained_events_does_not_double_the_turn() {
         .events
         .bound_to(crate::ui::ConvKey::Agent("scout".to_string()));
     sink.send(UiEvent::TurnStart);
-    sink.send(UiEvent::Inbound("fix the parser".to_string()));
+    sink.send(UiEvent::Mail {
+        from: crate::channels::MAIN_NAME.to_string(),
+        text: "fix the parser".to_string(),
+    });
     sink.send(UiEvent::TextDelta("the lexer drops a token at EOF".into()));
     sink.send(UiEvent::TurnEnd);
 
@@ -2738,7 +2740,7 @@ fn a_store_opened_by_mail_still_owes_its_record() {
         .agents
         .deliver("scout", "main", "and check EOF handling", Vec::new(), None)
         .now();
-    chat.drain_events();
+    chat.settle_store();
 
     let rows = agent_page(&mut chat, "scout");
     assert!(

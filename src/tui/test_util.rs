@@ -88,7 +88,6 @@ pub fn chat_at(width: usize, height: usize) -> Chat {
     let (events_tx, events_rx) = tokio::sync::mpsc::unbounded_channel();
     let session = test_session();
     let events = crate::ui::EventSink::new(crate::ui::ConvKey::Main, events_tx);
-    session.agents.set_events(events.clone());
     let mut chat = Chat::new(
         session,
         events,
@@ -357,7 +356,7 @@ impl ErrorFixture {
     /// `level`, the render side branches on it.
     pub fn inject(&self, events: &crate::ui::EventSink) {
         events.send(crate::ui::UiEvent::Error {
-            code: self.code,
+            code: self.code.to_string(),
             msg: self.msg.to_string(),
             level: self.level,
             context: self.context,

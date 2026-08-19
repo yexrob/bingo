@@ -542,11 +542,9 @@ pub struct Roster {
     /// Whether a share document is attached.
     #[cfg_attr(not(test), allow(dead_code))]
     shared: bool,
-    /// The permission prompt subagents borrow, and the console channel their
-    /// turns are written to. Attached once by whoever owns the screen; a
-    /// headless run has neither and says so rather than inventing one.
+    /// The permission prompt subagents borrow. Attached once by whoever owns the
+    /// screen; a headless run has none and says so rather than inventing one.
     ask: Option<Arc<crate::query::AskFn>>,
-    events: Option<crate::ui::EventSink>,
 }
 
 /// Which instances a change touched, so republishing can keep the rest.
@@ -572,11 +570,6 @@ pub struct AgentRegistry {
     /// they borrow this one; the registry is the single place every spawn path can reach it from
     /// (the Agent tool, channel delivery, and the TUI channel room alike).
     ask: Option<Arc<crate::query::AskFn>>,
-    /// The console's event channel, attached by whichever front end owns the
-    /// screen. Every spawn path reaches a run's UI through the registry already
-    /// (`ask`), and a run's stream is the same kind of borrowing: the instance
-    /// has no surface of its own, so it writes onto the surface that does.
-    events: Option<crate::ui::EventSink>,
     /// Monotonic message id source (registry-wide, so ids never collide across instances).
     next_msg: u64,
     /// Messages accepted since the actor last looked, in the order they were
@@ -604,14 +597,6 @@ impl AgentRegistry {
     fn attach_share(&mut self, store: Arc<crate::share::ShareStore>) {
         self.saver = Some(crate::share::ShareSaver::spawn(store.clone()));
         self.share = Some(store);
-    }
-
-    /// A sink bound to `name`'s conversation, or `None` with no front end
-    /// attached — an embedded or headless run, whose turns nobody is watching.
-    fn sink_for(&self, name: &str) -> Option<crate::ui::EventSink> {
-        self.events
-            .as_ref()
-            .map(|sink| sink.bound_to(crate::ui::ConvKey::Agent(name.to_string())))
     }
 
     /// Write an instance's latest snapshot into the share document (no-op without a store).
@@ -1181,12 +1166,6 @@ impl AgentRegistry {
             to: name.to_string(),
             text: message.to_string(),
         });
-        if let Some(sink) = self.sink_for(name) {
-            sink.send(crate::ui::UiEvent::Mail {
-                from: from.to_string(),
-                text: message.to_string(),
-            });
-        }
         self.notify_inbox();
         Ok(id)
     }
@@ -1321,7 +1300,6 @@ impl AgentRegistry {
             instances,
             shared: self.share.is_some(),
             ask: self.ask.clone(),
-            events: self.events.clone(),
         }));
     }
 
@@ -1345,7 +1323,6 @@ impl AgentRegistry {
         }
         self.inner.clear();
         self.ask = None;
-        self.events = None;
         self.delivered.clear();
         self.share = None;
         self.saver = None;
@@ -1373,10 +1350,6 @@ impl AgentRegistry {
             }
             AgentMsg::AttachAsk(ask) => {
                 self.ask = Some(ask);
-                (Touched::None, None)
-            }
-            AgentMsg::SetEvents(events) => {
-                self.events = Some(events);
                 (Touched::None, None)
             }
             AgentMsg::ClaimName { base, reply } => {
@@ -1738,7 +1711,6 @@ pub enum AgentMsg {
     AttachShare(Arc<crate::share::ShareStore>),
     DetachShare,
     AttachAsk(Arc<crate::query::AskFn>),
-    SetEvents(crate::ui::EventSink),
     ClaimName {
         base: String,
         reply: oneshot::Sender<String>,
@@ -1836,7 +1808,6 @@ pub(crate) fn attach(control: mpsc::UnboundedSender<Control>) -> (AgentRegistry,
         share: None,
         saver: None,
         ask: None,
-        events: None,
         next_msg: 1,
         delivered: Vec::new(),
         inbox_tx,
@@ -1906,21 +1877,6 @@ impl AgentHandle {
 
     pub fn ask_fn(&self) -> Option<Arc<crate::query::AskFn>> {
         self.view.borrow().ask.clone()
-    }
-
-    /// Attach the console's event channel (the front end does this once).
-    pub fn set_events(&self, events: crate::ui::EventSink) {
-        self.report(AgentMsg::SetEvents(events));
-    }
-
-    /// A sink bound to `name`'s conversation, or `None` with no front end
-    /// attached — an embedded or headless run, whose turns nobody is watching.
-    pub fn sink_for(&self, name: &str) -> Option<crate::ui::EventSink> {
-        self.view
-            .borrow()
-            .events
-            .as_ref()
-            .map(|sink| sink.bound_to(crate::ui::ConvKey::Agent(name.to_string())))
     }
 
     /// Claim an instance name: use the base name when free, otherwise append `-2`/`-3`…

@@ -1210,7 +1210,7 @@ mod tests {
 
         let mut chat = chat_at(80, 24);
         chat.last_error = Some(ErrorState {
-            code: "AUTH_REQUIRED",
+            code: "AUTH_REQUIRED".to_string(),
             msg: "login has expired; reconfigure the credentials and retry.".to_string(),
             level: ErrorLevel::Full,
             context: ErrorContext::LongTurn,
@@ -1314,7 +1314,7 @@ mod tests {
     fn fullscreen_frame_renders_page_error_row() {
         let mut chat = chat_at(80, 24);
         chat.last_error = Some(crate::tui::chat::ErrorState {
-            code: "TIMEOUT",
+            code: "TIMEOUT".to_string(),
             msg: "list_models timeout".into(),
             level: crate::error::ErrorLevel::Page,
             context: crate::error::ErrorContext::ShortSync,

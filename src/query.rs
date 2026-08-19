@@ -762,6 +762,14 @@ const INTERRUPTED_TOOL_RESULT: &str =
 /// Recorded when the user stops a reply mid-stream. Model-facing text, verbatim CC: the
 /// turn the user cut off has to say so in the history, or the model keeps answering a
 /// question it never learned was withdrawn.
+/// What the console's own `!` line calls its shell call.
+///
+/// The model never mints one: its call identifiers come from the provider. So
+/// the prefix is what says a `Bash` call was standalone — the console's own line
+/// rather than one the model made — which is the fold decision, and the only
+/// place that fact travels once the call is an item.
+pub const BASH_CALL_PREFIX: &str = "bash-";
+
 pub const INTERRUPT_MARKER: &str = "[Request interrupted by user]";
 /// Recorded when the interrupt landed while tools were running (the assistant message and
 /// the filled tool_results are already in history). Model-facing text, verbatim CC.
@@ -1653,7 +1661,7 @@ pub async fn run_bash_command(
     let mut messages = history;
 
     let tool_use_id = format!(
-        "bash-{}",
+        "{BASH_CALL_PREFIX}{}",
         BASH_CALL_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     );
     let input = serde_json::json!({ "command": command });

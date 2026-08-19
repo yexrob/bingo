@@ -1863,38 +1863,13 @@ fn sub_session_shares_parent_mcp_and_permissions() {
 
 /// A sink bound to `worker`, with the receiver to read back what a run put on
 /// it.
-fn worker_sink() -> (
-    crate::ui::EventSink,
-    tokio::sync::mpsc::UnboundedReceiver<crate::ui::Addressed>,
-) {
-    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-    (
-        crate::ui::EventSink::new(crate::ui::ConvKey::Agent("worker".into()), tx),
-        rx,
-    )
-}
-
-fn drain(rx: &mut tokio::sync::mpsc::UnboundedReceiver<crate::ui::Addressed>) -> Vec<UiEvent> {
-    let mut out = Vec::new();
-    while let Ok(addressed) = rx.try_recv() {
-        assert_eq!(
-            addressed.to,
-            crate::ui::ConvKey::Agent("worker".into()),
-            "every event names the conversation it happened in"
-        );
-        out.push(addressed.event);
-    }
-    out
-}
-
 /// A subagent's turn reaches the console as the same events main's does (D134),
 /// addressed to the instance — reasoning, the call, its answer and the prose,
 /// in the order they happened — while the flat reply stays prose-only, because
 /// that string is the spawn's return value.
 #[tokio::test]
-async fn a_subagents_turn_streams_as_addressed_events() {
+async fn a_subagents_turn_streams_as_the_conversation_it_belongs_to() {
     let output = Arc::new(Mutex::new(String::new()));
-    let (sink, mut rx) = worker_sink();
     let progress = Arc::new(Mutex::new(crate::agents::AgentProgress::default()));
     let core = crate::app::AppCore::start(Default::default());
     let watch = core.watch();
@@ -1909,18 +1884,27 @@ async fn a_subagents_turn_streams_as_addressed_events() {
         true,
         true,
     );
-    let ui = subagent_hooks(
+    let mut store = crate::tui::store::Store::open(&core, "agent-test")
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+    let page = crate::ui::ConvKey::Agent("worker".into());
+    let turn = core
+        .turns()
+        .open(page.clone(), TurnOrigin::Peer, Vec::new())
+        .await
+        .unwrap_or_else(|| panic!("the instance was idle"));
+    let ui = subagent_host(
         SubagentOutput {
             text: output.clone(),
             progress,
         },
-        Some(sink),
         cell,
         watch,
         id,
         "worker".into(),
         None,
-    );
+    )
+    .bound(core.turns(), turn.clone());
     ui.events
         .emit_stream(&crate::api::contract::StreamEvent::ThinkingDelta {
             index: 0,
@@ -1939,7 +1923,7 @@ async fn a_subagents_turn_streams_as_addressed_events() {
     });
     ui.events
         .emit_stream(&crate::api::contract::StreamEvent::ThinkingDelta {
-            index: 0,
+            index: 1,
             thinking: "second phase".into(),
         });
     ui.events
@@ -1954,43 +1938,48 @@ async fn a_subagents_turn_streams_as_addressed_events() {
         }));
     ui.events
         .emit_stream(&crate::api::contract::StreamEvent::TextDelta {
-            index: 0,
+            index: 2,
             text: "the answer".into(),
         });
+    core.settle_now();
+    core.turns().close(turn, TurnStatus::Completed, None);
+    core.settle_now();
+    store.pump();
 
-    let events = drain(&mut rx);
-    let thinking: Vec<&String> = events
+    // Everything the page draws is here, under the identity the core gave the
+    // conversation — the same stream main's page is drawn from, which is what
+    // makes an instance's page one renderer rather than two.
+    let held = store
+        .view()
+        .transcript(&page)
+        .unwrap_or_else(|| panic!("the instance has a transcript"));
+    let reasoning: Vec<&str> = held
+        .log()
         .iter()
-        .filter_map(|e| match e {
-            UiEvent::ThinkingDelta(text) => Some(text),
+        .filter_map(|item| match &item.body {
+            crate::app::snapshot::ItemBody::Reasoning { text } => Some(text.as_str()),
             _ => None,
         })
         .collect();
     assert_eq!(
-        thinking,
-        ["first ", "phase", "second phase"],
-        "reasoning streams delta by delta, as main's does — the console folds \
-         the phases, because folding them twice is what D132 was about: {events:?}"
+        reasoning,
+        ["first phase", "second phase"],
+        "reasoning streams delta by delta into the block it belongs to, as main's does"
     );
     // The call carries what was called and what came back (D132), and both
     // reach the console in the round they happen rather than at run end.
     assert!(
-        events
-            .iter()
-            .any(|e| matches!(e, UiEvent::ToolReady { name, input, .. }
-            if name == "Read" && input["file_path"] == "a")),
-        "{events:?}"
+        held.log().iter().any(|item| matches!(&item.body,
+            crate::app::snapshot::ItemBody::ToolCall { name, input, output, .. }
+            if name == "Read" && input["file_path"] == "a" && output == "one line")),
+        "{:?}",
+        held.log()
     );
     assert!(
-        events.iter().any(|e| matches!(e, UiEvent::ToolDone(done)
-            if done.tool_call_id == "test-tool" && done.output == "one line")),
-        "{events:?}"
-    );
-    assert!(
-        events
-            .iter()
-            .any(|e| matches!(e, UiEvent::TextDelta(text) if text == "the answer")),
-        "{events:?}"
+        held.log().iter().any(|item| matches!(&item.body,
+            crate::app::snapshot::ItemBody::AssistantMessage { text } if text == "the answer")),
+        "{:?}",
+        held.log()
     );
     assert_eq!(
         &*output.lock().unwrap_or_else(|e| e.into_inner()),
@@ -2002,7 +1991,6 @@ async fn a_subagents_turn_streams_as_addressed_events() {
 #[tokio::test]
 async fn subagent_retry_restores_the_current_attempt_checkpoint() {
     let output = Arc::new(Mutex::new(String::new()));
-    let (sink, mut rx) = worker_sink();
     let progress = Arc::new(Mutex::new(crate::agents::AgentProgress::default()));
     let core = crate::app::AppCore::start(Default::default());
     let watch = core.watch();
@@ -2017,12 +2005,11 @@ async fn subagent_retry_restores_the_current_attempt_checkpoint() {
         true,
         true,
     );
-    let ui = subagent_hooks(
+    let ui = subagent_host(
         SubagentOutput {
             text: output.clone(),
             progress: progress.clone(),
         },
-        Some(sink),
         cell.clone(),
         watch,
         id,
@@ -2071,23 +2058,11 @@ async fn subagent_retry_restores_the_current_attempt_checkpoint() {
         &*output.lock().unwrap_or_else(|e| e.into_inner()),
         "committedanswer"
     );
-    let events = drain(&mut rx);
-    // The *rendered* half of the rollback is the console's, and it always was:
-    // `StreamRetry` is what unwinds main's failed attempt, and an instance's
-    // turn is on the same channel now. What this hook still owns is the flat
-    // reply, the produced-character count and the progress cell.
-    assert!(
-        events.iter().any(|e| matches!(e, UiEvent::StreamRetry)),
-        "the console is told to unwind the attempt: {events:?}"
-    );
-    assert!(
-        events.iter().any(
-            |e| matches!(e, UiEvent::Warning(text) if text == "@worker · Reconnecting... 2/10")
-        ),
-        "a reconnect notice takes the warning tier instead of being spliced into the \
-         instance's own prose — and wears whose stream it is about, because the tier \
-         is shared and an unattributed one reads as the console's: {events:?}"
-    );
+    // The *rendered* half of the rollback is the core's: `turn/retrying` names
+    // the items the attempt produced and the console withdraws exactly those,
+    // and a reconnect notice is `feedback/raised` wearing the conversation it is
+    // about. What this host still owns is the flat reply, the produced-character
+    // count and the progress cell.
     let progress = progress.lock().unwrap_or_else(|e| e.into_inner());
     assert_eq!(progress.tool_uses, 1);
     assert_eq!(cell.chars(), "committedanswer".chars().count());
@@ -2113,12 +2088,11 @@ async fn subagent_progress_accumulates_tokens_tools_and_recent_activity() {
         true,
         true,
     );
-    let ui = subagent_hooks(
+    let ui = subagent_host(
         SubagentOutput {
             text: output,
             progress: progress.clone(),
         },
-        None,
         Arc::new(AgentCell::new(registry.clone())),
         watch,
         id,
@@ -2158,7 +2132,7 @@ async fn subagent_progress_accumulates_tokens_tools_and_recent_activity() {
 /// A subagent's Ask decision is forwarded to the attached prompt surface, stamped with the
 /// instance name — never silently auto-denied (or auto-allowed under bypass).
 #[tokio::test]
-async fn subagent_hooks_touch_activity_on_stream_and_tool_signals() {
+async fn a_subagent_host_touches_activity_on_stream_and_tool_signals() {
     let session = parent_session().0;
     session
         .agents
@@ -2181,12 +2155,11 @@ async fn subagent_hooks_touch_activity_on_stream_and_tool_signals() {
         true,
         true,
     );
-    let ui = subagent_hooks(
+    let ui = subagent_host(
         SubagentOutput {
             text: Arc::new(Mutex::new(String::new())),
             progress: Arc::new(Mutex::new(crate::agents::AgentProgress::default())),
         },
-        None,
         Arc::new(AgentCell::new(registry.clone())),
         watch,
         id,
@@ -2258,12 +2231,11 @@ async fn subagent_ask_forwards_to_attached_prompt() {
         true,
         true,
     );
-    let ui = subagent_hooks(
+    let ui = subagent_host(
         SubagentOutput {
             text: Arc::new(Mutex::new(String::new())),
             progress: Arc::new(Mutex::new(crate::agents::AgentProgress::default())),
         },
-        None,
         Arc::new(AgentCell::new(registry.clone())),
         watch.clone(),
         id,
@@ -2287,12 +2259,11 @@ async fn subagent_ask_forwards_to_attached_prompt() {
     );
 
     // Nothing attached (embedded/test path): deny rather than block on a modal nobody shows.
-    let ui = subagent_hooks(
+    let ui = subagent_host(
         SubagentOutput {
             text: Arc::new(Mutex::new(String::new())),
             progress: Arc::new(Mutex::new(crate::agents::AgentProgress::default())),
         },
-        None,
         Arc::new(AgentCell::new(registry.clone())),
         watch,
         id,

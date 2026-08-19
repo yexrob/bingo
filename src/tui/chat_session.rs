@@ -242,7 +242,7 @@ impl super::Chat {
             Ok(report) => self.push_slash_info(format!("✓ {}", report.summary())),
             Err(error) => {
                 self.last_error = Some(ErrorState {
-                    code: crate::error::map_error(&error),
+                    code: crate::error::map_error(&error).to_string(),
                     msg: format!(
                         "session storage cleanup failed: {error}; check disk permissions and retry /gc"
                     ),

@@ -375,7 +375,7 @@ fn only_a_flow_level_failure_announces_itself() {
     chat.apply_event(UiEvent::TurnStart);
     let _ = chat.notify.take();
     chat.apply_event(UiEvent::Error {
-        code: "SERVER_ERROR",
+        code: "SERVER_ERROR".to_string(),
         msg: "model list unavailable".into(),
         level: crate::error::ErrorLevel::Page,
         context: crate::error::ErrorContext::ShortSync,
@@ -387,7 +387,7 @@ fn only_a_flow_level_failure_announces_itself() {
 
     let idle = idle_title(&chat);
     chat.apply_event(UiEvent::Error {
-        code: "TIMEOUT",
+        code: "TIMEOUT".to_string(),
         msg: "long turn interrupted".into(),
         level: crate::error::ErrorLevel::Full,
         context: crate::error::ErrorContext::LongTurn,
@@ -410,7 +410,7 @@ fn the_default_chat_is_silent_on_every_trigger() {
     age_the_turn(&mut chat);
     chat.apply_event(UiEvent::TurnEnd);
     chat.apply_event(UiEvent::Error {
-        code: "TIMEOUT",
+        code: "TIMEOUT".to_string(),
         msg: "long turn interrupted".into(),
         level: crate::error::ErrorLevel::Full,
         context: crate::error::ErrorContext::LongTurn,
@@ -1027,9 +1027,7 @@ async fn ctrl_e_toggles_the_bounded_preview() {
 #[tokio::test]
 async fn ask_user_question_keeps_its_own_shape() {
     let mut chat = test_chat();
-    let (events_tx, _events_rx) = tokio::sync::mpsc::unbounded_channel();
-    let ui = crate::ui::tui_hooks(
-        crate::ui::EventSink::new(crate::ui::ConvKey::Main, events_tx),
+    let ui = crate::ui::tui_host(
         chat.session.interactions.clone(),
         crate::query::no_steer(),
         chat.live.clone(),
