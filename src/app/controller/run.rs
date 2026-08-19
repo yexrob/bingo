@@ -192,6 +192,32 @@ impl super::Controller {
     fn post(&mut self, name: &str, text: &str) -> Result<(ItemId, Run), AppError> {
         use crate::agents::InboxItem;
         use crate::channels::{ChannelMsg, PostOutcome};
+        // Speaking in a room is joining it (D103). The domain writes the
+        // membership line into the room's own log, so every member sees the same
+        // arrival the joiner does — which is exactly what keeps *reading* a room
+        // free. It happens here rather than in a frontend because a client that
+        // posts to a room it is only watching must join by the same door the
+        // console's `#room` line goes through.
+        let seated = self.channels.facts().into_iter().any(|room| {
+            room.name == name
+                && room
+                    .members
+                    .iter()
+                    .any(|member| member == crate::channels::USER_NAME)
+        });
+        if !seated {
+            let (reply, joined) = oneshot::channel();
+            self.channels.handle(ChannelMsg::Invite {
+                name: name.to_string(),
+                member: crate::channels::USER_NAME.to_string(),
+                reply,
+            });
+            self.absorb_posts();
+            self.announce_rooms();
+            Answer::new(joined, Err(String::new()))
+                .now()
+                .map_err(|_| AppError::Refused(ProtocolErrorKind::ConversationNotFound))?;
+        }
         let (reply, answer) = oneshot::channel();
         self.channels.handle(ChannelMsg::Post {
             from: crate::channels::USER_NAME.to_string(),
@@ -589,6 +615,48 @@ mod tests {
                 .map(|status| status.pending),
             Some(1),
             "every member got its copy"
+        );
+    }
+
+    /// Speaking in a room you are only watching joins you first, and the join is
+    /// announced in the room's own log (D103).
+    ///
+    /// It used to be the console that did this, which meant a client posting over
+    /// the wire was refused by name — "join the room before speaking in it" — for
+    /// doing exactly what a `#room` line does in the terminal. One door.
+    #[tokio::test]
+    async fn speaking_in_a_room_joins_it_and_the_room_is_told() {
+        let (core, _engine) = running();
+        core.channels()
+            .create("build", vec![MAIN_NAME.to_string()], ChannelMode::Free)
+            .await
+            .unwrap_or_else(|error| panic!("{error}"));
+        assert!(
+            !core.channels().is_member("build", USER_NAME),
+            "the user starts outside the room"
+        );
+        let mut link = attached(&core).await;
+        assert!(
+            matches!(
+                submit(&mut link, 5, "#build tests are green").await,
+                Ok(AppReply::Submitted(SubmitDisposition::Delivered { .. }))
+            ),
+            "the post goes through"
+        );
+        assert!(
+            core.channels().is_member("build", USER_NAME),
+            "speaking made them a member"
+        );
+        let log = core.channels().log_of("build");
+        assert!(
+            log.iter().any(|message| message.text.contains("joined")),
+            "the membership line is in the room's own log: {:?}",
+            log.iter().map(|m| &m.text).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            log.last().map(|message| message.text.as_str()),
+            Some("tests are green"),
+            "and the post follows it"
         );
     }
 

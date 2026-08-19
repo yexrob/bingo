@@ -879,7 +879,9 @@ impl Controller {
             // identifier that names anything else changes nothing rather than
             // backgrounding whatever happens to be running.
             Action::CommandPromote { item_id } => {
-                let engine = self.engine()?;
+                let Ok(engine) = self.engine() else {
+                    return Ok(ActionResultStatus::NoChange);
+                };
                 if self.turns.foreground(&ConvKey::Main) != Some(item_id.clone()) {
                     return Ok(ActionResultStatus::NoChange);
                 }
@@ -1409,7 +1411,14 @@ impl Controller {
     fn availability(&self) -> crate::app::action::Availability {
         crate::app::action::Availability {
             console_busy: self.turns.is_busy(&ConvKey::Main),
-            engine_attached: self.engine.is_some(),
+            // Not `self.engine.is_some()`, and the difference is the honest one:
+            // an attached engine is not the same thing as an action table that
+            // can *use* it. Thirteen actions — compact, rewind, share, the team
+            // family, a skill invocation — are still implemented in the console
+            // and answer `unavailable` here, so saying they were available would
+            // be a promise `action/execute` then breaks. B7d's record says what
+            // has to move for this to become the attachment.
+            engine_attached: false,
         }
     }
 

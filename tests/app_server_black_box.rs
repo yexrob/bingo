@@ -485,21 +485,21 @@ fn the_actions_the_core_owns_are_applied_and_the_rest_say_why_not() {
         .filter(|action| action["available"] == json!(false))
         .collect();
     assert!(
-        unavailable
-            .iter()
-            .all(|action| action["unavailableReason"].is_string()),
+        !unavailable.is_empty()
+            && unavailable
+                .iter()
+                .all(|action| action["unavailableReason"].is_string()),
         "an unavailable action says why: {unavailable:?}"
     );
-    // The session was given an engine, so the actions that need one are offered
-    // rather than refused. `action/list` used to answer from a constant here,
-    // which meant a client was told the whole engine family was out of reach in
-    // a session that could run every one of them.
+    // Backgrounding the foreground command is always reachable: what it depends
+    // on is a moment rather than a capability, so a session with nothing running
+    // answers `noChange` instead of being told the key does not exist.
     assert!(
         actions
             .iter()
-            .any(|action| action["id"] == json!("conversation.compact")
+            .any(|action| action["id"] == json!("command.promote")
                 && action["available"] == json!(true)),
-        "an attached engine is what the availability answers from: {actions:?}"
+        "a gesture whose subject is a moment is always offered: {actions:?}"
     );
 
     // Representatives of the fourteen the core owns: a setting, a selection, a

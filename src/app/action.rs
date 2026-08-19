@@ -821,9 +821,11 @@ pub const ACTIONS: &[ActionSpec] = &[
         description: "let the foreground command keep running out of the way",
         arguments: &[ArgumentSpec::free("itemId", true, "the command's item")],
         precondition: None,
-        // The handle on a running foreground command belongs to the run that
-        // started it, so promoting one needs the engine.
-        requires: Requires::ENGINE,
+        // Always reachable, because what it depends on is not a capability but a
+        // moment: there has to be a command running. A session with nothing in
+        // the foreground answers `noChange`, which is the truthful answer and the
+        // one a key that has a second meaning needs.
+        requires: Requires::NOTHING,
         // The terminal's gesture for this is a key on a running command's row,
         // not a typed line. A GUI gets it through `action/execute` like any
         // other.
