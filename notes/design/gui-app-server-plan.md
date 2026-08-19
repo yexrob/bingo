@@ -329,6 +329,17 @@ Chat/App 管线换 AppLink 帧，删全部 shim；TuiEvent 本地化；按键动
 > 详见 D150 末两节。另：roster 读取面搬不动，因 `AgentResource` 缺 `recentActivity`/`prompt`
 > ——真实 parity 缺口，**建议 B8 ledger 裁决**，未擅自加字段。
 
+> **B7b-2 review 裁决（2026-08-19，Fable）**：① `agent/removed` 契约增补**追认**——规范本就
+> 要求 keyed upsert *与 removal*，`task/removed` 是先例，缺它 wire 客户端的 roster 永不收缩；
+> 不加 `room/removed` 同样正确（无生产者的变体是服务端不守的承诺）。`last_active_at` 恒为
+> now 的修复与断链重连是真缺陷修复，核准。② `AgentResource` 补 `recentActivity`/`prompt`
+> **批准**，B7c 按加法流程落（roster 读取面与 GUI 画名册都需要）。③ 范围裁决：**B7c =
+> 最后的身份互换**——控制台的核挂上 engine（提交由核开 turn、核驱动 engine），store 获得
+> transcript/item 投影，控制台行渲染改从 store 取数。15 处 `.now()`、`tui_hooks`/
+> `subagent_hooks`、配置双镜像随之消亡——它们是同一事实的影子，不是三件事。渲染不变量
+> 红线不变：现有行断言测试是护栏。④ 真机发现的既有显示瑕疵（`!` 行经权限弹窗后工具行
+> 留在 `⎿ Running…`）：若随渲染取数源切换自然消除则顺手收，否则入 B8 清单。D151 归 B7c。
+
 ### B8 · 收尾（S）
 `--print` 薄客户端；main.rs 启动统一；parity ledger 落成 CI 检查表（每个斜杠命令/提交分支/
 AppEvent 变体分类 shared|frontend-local，新增未分类即红）；schema 标 experimental；
