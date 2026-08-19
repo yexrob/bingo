@@ -1,0 +1,19 @@
+{
+  "$id": "urn:bingo:app-server:v1:task.removed.params",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "description": "One notification's params: the event header, then the body's own fields.",
+  "properties": {
+    "event": {
+      "$ref": "../definitions.json#/definitions/EventMeta"
+    },
+    "taskId": {
+      "$ref": "../definitions.json#/definitions/TaskId"
+    }
+  },
+  "required": [
+    "event",
+    "taskId"
+  ],
+  "title": "NotificationParams_for_TaskRemoved",
+  "type": "object"
+}

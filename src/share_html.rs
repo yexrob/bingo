@@ -962,6 +962,7 @@ mod tests {
                     from: "scout".into(),
                     text: "hello everyone".into(),
                     at: 0,
+                    kind: crate::channels::MessageKind::Said,
                 }],
             }],
         }

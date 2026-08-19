@@ -1,0 +1,719 @@
+{
+  "$id": "urn:bingo:app-server:v1:envelope.notification",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "description": "A server notification frame.",
+  "oneOf": [
+    {
+      "properties": {
+        "method": {
+          "enum": [
+            "session/updated"
+          ],
+          "type": "string"
+        },
+        "params": {
+          "$ref": "../definitions.json#/definitions/NotificationParams_for_SessionUpdated"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
+            "session/closed"
+          ],
+          "type": "string"
+        },
+        "params": {
+          "$ref": "../definitions.json#/definitions/NotificationParams_for_SessionClosed"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
+            "session/deleted"
+          ],
+          "type": "string"
+        },
+        "params": {
+          "$ref": "../definitions.json#/definitions/NotificationParams_for_SessionDeleted"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
+            "conversation/created"
+          ],
+          "type": "string"
+        },
+        "params": {
+          "$ref": "../definitions.json#/definitions/NotificationParams_for_ConversationChanged"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
+            "conversation/updated"
+          ],
+          "type": "string"
+        },
+        "params": {
+          "$ref": "../definitions.json#/definitions/NotificationParams_for_ConversationChanged"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
+            "conversation/removed"
+          ],
+          "type": "string"
+        },
+        "params": {
+          "$ref": "../definitions.json#/definitions/NotificationParams_for_ConversationRemoved"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
+            "turn/started"
+          ],
+          "type": "string"
+        },
+        "params": {
+          "$ref": "../definitions.json#/definitions/NotificationParams_for_TurnChanged"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
+            "turn/roundStarted"
+          ],
+          "type": "string"
+        },
+        "params": {
+          "$ref": "../definitions.json#/definitions/NotificationParams_for_TurnRoundStarted"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
+            "turn/retrying"
+          ],
+          "type": "string"
+        },
+        "params": {
+          "$ref": "../definitions.json#/definitions/NotificationParams_for_TurnRetrying"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
+            "turn/roundCompleted"
+          ],
+          "type": "string"
+        },
+        "params": {
+          "$ref": "../definitions.json#/definitions/NotificationParams_for_TurnRoundCompleted"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
+            "turn/usageUpdated"
+          ],
+          "type": "string"
+        },
+        "params": {
+          "$ref": "../definitions.json#/definitions/NotificationParams_for_TurnUsageUpdated"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
+            "turn/completed"
+          ],
+          "type": "string"
+        },
+        "params": {
+          "$ref": "../definitions.json#/definitions/NotificationParams_for_TurnChanged"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
+            "item/started"
+          ],
+          "type": "string"
+        },
+        "params": {
+          "$ref": "../definitions.json#/definitions/NotificationParams_for_ItemChanged"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
+            "item/textDelta"
+          ],
+          "type": "string"
+        },
+        "params": {
+          "$ref": "../definitions.json#/definitions/NotificationParams_for_ItemDelta"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
+            "item/reasoningDelta"
+          ],
+          "type": "string"
+        },
+        "params": {
+          "$ref": "../definitions.json#/definitions/NotificationParams_for_ItemDelta"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
+            "item/commandTailUpdated"
+          ],
+          "type": "string"
+        },
+        "params": {
+          "$ref": "../definitions.json#/definitions/NotificationParams_for_ItemCommandTailUpdated"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
+            "item/updated"
+          ],
+          "type": "string"
+        },
+        "params": {
+          "$ref": "../definitions.json#/definitions/NotificationParams_for_ItemChanged"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
+            "item/completed"
+          ],
+          "type": "string"
+        },
+        "params": {
+          "$ref": "../definitions.json#/definitions/NotificationParams_for_ItemChanged"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
+            "queue/itemAdded"
+          ],
+          "type": "string"
+        },
+        "params": {
+          "$ref": "../definitions.json#/definitions/NotificationParams_for_QueueItemAdded"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
+            "queue/itemRemoved"
+          ],
+          "type": "string"
+        },
+        "params": {
+          "$ref": "../definitions.json#/definitions/NotificationParams_for_QueueItemRemoved"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
+            "queue/itemAbsorbed"
+          ],
+          "type": "string"
+        },
+        "params": {
+          "$ref": "../definitions.json#/definitions/NotificationParams_for_QueueItemAbsorbed"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
+            "interaction/opened"
+          ],
+          "type": "string"
+        },
+        "params": {
+          "$ref": "../definitions.json#/definitions/NotificationParams_for_InteractionOpened"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
+            "interaction/resolved"
+          ],
+          "type": "string"
+        },
+        "params": {
+          "$ref": "../definitions.json#/definitions/NotificationParams_for_InteractionResolved"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
+            "interaction/cancelled"
+          ],
+          "type": "string"
+        },
+        "params": {
+          "$ref": "../definitions.json#/definitions/NotificationParams_for_InteractionCancelled"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
+            "agent/changed"
+          ],
+          "type": "string"
+        },
+        "params": {
+          "$ref": "../definitions.json#/definitions/NotificationParams_for_AgentChanged"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
+            "agent/removed"
+          ],
+          "type": "string"
+        },
+        "params": {
+          "$ref": "../definitions.json#/definitions/NotificationParams_for_AgentRemoved"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
+            "room/changed"
+          ],
+          "type": "string"
+        },
+        "params": {
+          "$ref": "../definitions.json#/definitions/NotificationParams_for_RoomChanged"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
+            "task/changed"
+          ],
+          "type": "string"
+        },
+        "params": {
+          "$ref": "../definitions.json#/definitions/NotificationParams_for_TaskChanged"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
+            "task/removed"
+          ],
+          "type": "string"
+        },
+        "params": {
+          "$ref": "../definitions.json#/definitions/NotificationParams_for_TaskRemoved"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
+            "delivery/changed"
+          ],
+          "type": "string"
+        },
+        "params": {
+          "$ref": "../definitions.json#/definitions/NotificationParams_for_DeliveryChanged"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
+            "command/changed"
+          ],
+          "type": "string"
+        },
+        "params": {
+          "$ref": "../definitions.json#/definitions/NotificationParams_for_CommandChanged"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
+            "operation/started"
+          ],
+          "type": "string"
+        },
+        "params": {
+          "$ref": "../definitions.json#/definitions/NotificationParams_for_OperationChanged"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
+            "operation/progress"
+          ],
+          "type": "string"
+        },
+        "params": {
+          "$ref": "../definitions.json#/definitions/NotificationParams_for_OperationProgressed"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
+            "operation/completed"
+          ],
+          "type": "string"
+        },
+        "params": {
+          "$ref": "../definitions.json#/definitions/NotificationParams_for_OperationChanged"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
+            "config/changed"
+          ],
+          "type": "string"
+        },
+        "params": {
+          "$ref": "../definitions.json#/definitions/NotificationParams_for_ConfigChanged"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
+            "catalog/changed"
+          ],
+          "type": "string"
+        },
+        "params": {
+          "$ref": "../definitions.json#/definitions/NotificationParams_for_CatalogChanged"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
+            "asset/available"
+          ],
+          "type": "string"
+        },
+        "params": {
+          "$ref": "../definitions.json#/definitions/NotificationParams_for_AssetAvailable"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
+            "feedback/raised"
+          ],
+          "type": "string"
+        },
+        "params": {
+          "$ref": "../definitions.json#/definitions/NotificationParams_for_FeedbackRaised"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
+            "feedback/cleared"
+          ],
+          "type": "string"
+        },
+        "params": {
+          "$ref": "../definitions.json#/definitions/NotificationParams_for_FeedbackCleared"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "type": "object"
+    }
+  ],
+  "properties": {
+    "jsonrpc": {
+      "$ref": "../definitions.json#/definitions/JsonRpcVersion"
+    }
+  },
+  "required": [
+    "jsonrpc"
+  ],
+  "title": "NotificationFrame",
+  "type": "object"
+}

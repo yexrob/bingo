@@ -86,6 +86,12 @@ fn help_is_a_fast_path_even_with_invalid_settings() {
     assert!(stdout.contains("Inline mode: finalized output stays in the terminal scrollback"));
     assert!(stdout.contains("--fullscreen"));
     assert!(stdout.contains("Fullscreen mode (default)"));
+    // The v1 JSON protocol left with its flags (D140); `--continue` was never
+    // its own and stays.
+    assert!(stdout.contains("--continue"));
+    for gone in ["--json-events", "--probe", "--inspect", "--session"] {
+        assert!(!stdout.contains(gone), "{gone} must be gone from --help");
+    }
     assert!(output.stderr.is_empty());
 }
 
@@ -119,6 +125,27 @@ fn readme_command_tables_document_explicit_public_sharing() {
 }
 
 #[test]
+fn missing_home_never_falls_back_to_the_working_directory() {
+    let root = TempDir::new("missing-home");
+    let output = isolated_command(&root)
+        .env_remove("HOME")
+        .env_remove("USERPROFILE")
+        .args(["--print", "hello"])
+        .output()
+        .expect("bingo process must start");
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8(output.stderr).expect("error output must be UTF-8");
+    assert!(stderr.starts_with("[error] code=CONFIG_INVALID msg="));
+    assert!(stderr.contains("cannot determine the user home directory"));
+    assert!(
+        !root.path().join(".local").exists(),
+        "state must never be written below cwd when home cannot be resolved"
+    );
+}
+
+#[test]
 fn non_tty_errors_use_the_stable_single_line_contract() {
     let root = TempDir::new("error");
     fs::create_dir_all(root.path().join(".bingo")).expect("project config directory");
@@ -133,4 +160,30 @@ fn non_tty_errors_use_the_stable_single_line_contract() {
     assert!(stderr.starts_with("[error] code=CONFIG_INVALID msg="));
     assert_eq!(stderr.lines().count(), 1);
     assert!(!stderr.contains('\u{1b}'));
+}
+
+#[test]
+fn the_app_server_publishes_its_schema() {
+    let root = TempDir::new("app-server");
+    let out = root.path().join("schema");
+
+    let generated = run(
+        &root,
+        &[
+            "app-server",
+            "generate-schema",
+            "--out",
+            &out.to_string_lossy(),
+        ],
+    );
+    assert!(generated.status.success());
+    assert!(
+        generated.stdout.is_empty(),
+        "the app-server's stdout is protocol frames only; progress goes to stderr"
+    );
+    let manifest = fs::read_to_string(out.join("manifest.json")).expect("the manifest is written");
+    assert!(manifest.contains("\"conversation/submit\""));
+    assert!(manifest.contains("\"turn/retrying\""));
+    // Serving the bundle is `tests/app_server_black_box.rs`, which drives a real
+    // process over the wire.
 }

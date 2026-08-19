@@ -1,0 +1,22 @@
+{
+  "$id": "urn:bingo:app-server:v1:interaction.respond.params",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "properties": {
+    "activation": {
+      "$ref": "../definitions.json#/definitions/ActivationKind"
+    },
+    "decision": {
+      "$ref": "../definitions.json#/definitions/InteractionDecision"
+    },
+    "interactionId": {
+      "$ref": "../definitions.json#/definitions/InteractionId"
+    }
+  },
+  "required": [
+    "activation",
+    "decision",
+    "interactionId"
+  ],
+  "title": "InteractionRespondParams",
+  "type": "object"
+}

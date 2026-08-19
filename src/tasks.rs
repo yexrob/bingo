@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use std::sync::RwLock;
 use tokio::sync::Mutex;
 
 use crate::error::ErrorCode;
@@ -61,7 +62,9 @@ impl Task {
 /// Task store: `~/.local/share/bingo/tasks/<list_id>/<id>.json`.
 /// Disk persistence + in-process mutex (bingo is single-process; no cross-process concurrency).
 pub struct TaskStore {
-    dir: PathBuf,
+    root: PathBuf,
+    dir: RwLock<PathBuf>,
+    fixed_list_id: Option<String>,
     lock: Mutex<()>,
 }
 
@@ -74,29 +77,50 @@ pub fn project_task_key(cwd: &Path) -> String {
         .replace(['/', '\\'], "_")
 }
 
-fn list_id_from_env_or(key: &str) -> String {
-    if let Ok(id) = std::env::var("BINGO_TASK_LIST_ID")
-        && !id.is_empty()
-    {
-        return id;
-    }
-    // Session-level list: each session has its own todo (key = transcript file stem,
-    // --continue resumes the same session). The same key in-process means the same list.
-    key.to_string()
+fn list_id_override() -> Option<String> {
+    std::env::var("BINGO_TASK_LIST_ID")
+        .ok()
+        .filter(|id| !id.is_empty())
 }
 
 impl TaskStore {
     pub fn new(home: &Path, key: &str) -> Self {
-        let dir = home
-            .join(".local")
-            .join("share")
-            .join("bingo")
-            .join("tasks")
-            .join(list_id_from_env_or(key));
+        let root = crate::storage::tasks_dir(home);
+        let fixed_list_id = list_id_override();
+        let dir = root.join(fixed_list_id.as_deref().unwrap_or(key));
         Self {
-            dir,
+            root,
+            dir: RwLock::new(dir),
+            fixed_list_id,
             lock: Mutex::new(()),
         }
+    }
+
+    fn dir(&self) -> PathBuf {
+        self.dir
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
+    }
+
+    pub fn rebind(&self, key: &str) {
+        if self.fixed_list_id.is_some() {
+            return;
+        }
+        *self.dir.write().unwrap_or_else(|error| error.into_inner()) = self.root.join(key);
+    }
+
+    pub fn rename_key(&self, old: &str, new: &str) -> Result<(), TaskError> {
+        if self.fixed_list_id.is_some() || old == new {
+            return Ok(());
+        }
+        let old_dir = self.root.join(old);
+        let new_dir = self.root.join(new);
+        if old_dir.exists() {
+            std::fs::rename(&old_dir, &new_dir).map_err(TaskError::Io)?;
+        }
+        *self.dir.write().unwrap_or_else(|error| error.into_inner()) = new_dir;
+        Ok(())
     }
 
     /// TUI/query share the same store instance (Arc<TaskStore>).
@@ -108,7 +132,7 @@ impl TaskStore {
         {
             return Err(TaskError::InvalidId(id.to_string()));
         }
-        Ok(self.dir.join(format!("{id}.json")))
+        Ok(self.dir().join(format!("{id}.json")))
     }
 
     fn read_file(path: &Path) -> Result<Option<Task>, TaskError> {
@@ -145,7 +169,7 @@ impl TaskStore {
     /// Create under lock: id = max(existing max, 0) + 1; ifAbsent semantics (errors if it exists).
     pub async fn create(&self, task: &Task) -> Result<String, TaskError> {
         let _guard = self.lock.lock().await;
-        std::fs::create_dir_all(&self.dir).map_err(TaskError::Io)?;
+        std::fs::create_dir_all(self.dir()).map_err(TaskError::Io)?;
         let ids = self.list_ids_unlocked()?;
         let max = ids
             .iter()
@@ -260,10 +284,11 @@ impl TaskStore {
 
     fn list_ids_unlocked(&self) -> Result<Vec<String>, TaskError> {
         let mut ids = Vec::new();
-        if !self.dir.exists() {
+        let dir = self.dir();
+        if !dir.exists() {
             return Ok(ids);
         }
-        for entry in std::fs::read_dir(&self.dir).map_err(TaskError::Io)? {
+        for entry in std::fs::read_dir(dir).map_err(TaskError::Io)? {
             let entry = entry.map_err(TaskError::Io)?;
             let name = entry.file_name();
             let name = name.to_string_lossy().to_string();
@@ -292,12 +317,13 @@ impl TaskStore {
     /// TUI synchronous snapshot (called every frame; half-written files racing with tool
     /// writes are skipped — fault tolerant).
     pub fn list_ui(&self) -> Vec<Task> {
+        let dir = self.dir();
         let Ok(ids) = (|| -> Result<Vec<String>, TaskError> {
             let mut ids = Vec::new();
-            if !self.dir.exists() {
+            if !dir.exists() {
                 return Ok(ids);
             }
-            for entry in std::fs::read_dir(&self.dir).map_err(TaskError::Io)? {
+            for entry in std::fs::read_dir(&dir).map_err(TaskError::Io)? {
                 let name = entry.map_err(TaskError::Io)?.file_name();
                 let name = name.to_string_lossy().to_string();
                 if let Some(stripped) = name.strip_suffix(".json") {
@@ -404,6 +430,45 @@ mod tests {
                 "same session restores the same todo"
             );
             let _ = std::fs::remove_dir_all(&tmp);
+        });
+    }
+
+    #[test]
+    fn rebind_follows_the_session_key() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let tmp = env::temp_dir().join(format!("bingo-tasks-rebind-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&tmp);
+            let home = tmp.join("home");
+            let store = TaskStore::new(&home, "session-a");
+            store.create(&task("a")).await.unwrap();
+
+            store.rebind("session-b");
+            assert!(store.list().await.unwrap().is_empty());
+            store.create(&task("b")).await.unwrap();
+
+            store.rebind("session-a");
+            assert_eq!(store.list().await.unwrap()[0].subject, "a");
+            store.rename_key("session-a", "session-a-renamed").unwrap();
+            assert_eq!(
+                store.list().await.unwrap()[0].subject,
+                "a",
+                "renaming a session preserves its tasks under the new key"
+            );
+            let reopened = TaskStore::new(&home, "session-a-renamed");
+            assert_eq!(
+                reopened.list().await.unwrap()[0].subject,
+                "a",
+                "the renamed task list survives restart"
+            );
+            assert!(
+                TaskStore::new(&home, "session-a")
+                    .list()
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            let _ = std::fs::remove_dir_all(tmp);
         });
     }
 
@@ -537,14 +602,15 @@ mod tests {
             let store = store_in(&tmp);
             let id = store.create(&task("first")).await.unwrap();
             // Writes leave no temp-file leftovers.
-            let leftovers = std::fs::read_dir(&store.dir)
+            let dir = store.dir();
+            let leftovers = std::fs::read_dir(&dir)
                 .unwrap()
                 .flatten()
                 .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
                 .count();
             assert_eq!(leftovers, 0, "no .tmp leftovers after rename");
 
-            std::fs::write(store.dir.join(format!("{id}.json")), "{ not json").unwrap();
+            std::fs::write(dir.join(format!("{id}.json")), "{ not json").unwrap();
             assert!(
                 matches!(store.get(&id).await, Err(TaskError::Parse { .. })),
                 "parse failure must error"

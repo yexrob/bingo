@@ -49,7 +49,9 @@ When users reference a slash command or \"/<something>\" (e.g. \"/commit\"), or 
 
 Invoking returns a pointer to the skill's SKILL.md (\"✦ name — read <path>\"); read that file with Read to get the full instructions.
 
-IMPORTANT: When a skill matches the user's request, invoke the Skill tool BEFORE generating any other response about the task. NEVER mention a skill without actually calling this tool. Do not guess skill names — only use skills listed below."
+IMPORTANT: When a skill matches the user's request, invoke the Skill tool BEFORE generating any other response about the task. NEVER mention a skill without actually calling this tool. Do not guess skill names — only use skills listed below.
+
+The list below is authoritative and complete: when asked what skills are available, answer from it (the user-facing command is /skills). Never enumerate skill directories to answer that — a directory scan misses bundled skills and same-name override rules."
             .to_string();
         if !listing.is_empty() {
             desc.push_str("\n\nAvailable skills:\n");
@@ -124,7 +126,8 @@ mod tests {
         ToolContext {
             cwd: PathBuf::from("/tmp"),
             home: std::env::temp_dir(),
-            watch: crate::watch::WatchRegistry::new(),
+            watch: crate::app::AppCore::start(Default::default()).watch(),
+            live: Default::default(),
             http: reqwest::Client::new(),
             tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), "test")),
             hooks: crate::settings::HooksConfig::default(),
@@ -134,6 +137,7 @@ mod tests {
                 Box::pin(async { None })
             }),
             instance: None,
+            rewind: Default::default(),
         }
     }
 

@@ -1,0 +1,19 @@
+{
+  "$id": "urn:bingo:app-server:v1:turn.interrupt.params",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "description": "Idempotent, and aimed at a server-issued turn ID: a late interrupt cannot cancel the next turn.",
+  "properties": {
+    "conversationId": {
+      "$ref": "../definitions.json#/definitions/ConversationId"
+    },
+    "turnId": {
+      "$ref": "../definitions.json#/definitions/TurnId"
+    }
+  },
+  "required": [
+    "conversationId",
+    "turnId"
+  ],
+  "title": "TurnInterruptParams",
+  "type": "object"
+}

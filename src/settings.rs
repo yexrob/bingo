@@ -60,6 +60,10 @@ pub struct Settings {
     /// Default model (`model`): persisted here by /model selections.
     /// Precedence: `--model` > settings (user < project < local) > built-in default.
     pub model: Option<String>,
+    /// Declared model list of the default provider (`models`), same shape as
+    /// `providers.<name>.models`.
+    #[serde(default)]
+    pub models: Option<Vec<ModelEntry>>,
     /// Whether the default provider sends image attachments to the model (`sendImages`).
     /// Named providers use their own `supportsImages`. None = send: both protocols carry image
     /// blocks, so this is an opt-out for endpoints that speak the protocol but reject them.
@@ -79,6 +83,12 @@ pub struct Settings {
     /// motion effects (welcome-card update hints breathing etc.) rest at the base color; the hints themselves stay.
     /// This is bingo's first motion toggle, serving both user opt-out and test determinism.
     pub motion: Option<String>,
+    /// Attention channel (`notifications`): auto (default) / bell / iterm2 /
+    /// kitty / ghostty / off. Decides how a waiting permission prompt, a turn
+    /// that ran long, and a failed turn reach a user who has looked away;
+    /// `auto` picks the terminal's own notification protocol and falls back to
+    /// the bell. `off` also silences the terminal title.
+    pub notifications: Option<String>,
     /// Send cache_control (prompt caching). Off by default: non-official endpoints
     /// handle it unreliably.
     #[serde(rename = "cacheControl")]
@@ -87,6 +97,9 @@ pub struct Settings {
     /// (`respondToBashCommands`, default true; false = pure execution, no model query).
     #[serde(rename = "respondToBashCommands")]
     pub respond_to_bash_commands: Option<bool>,
+    /// Maximum characters returned by the Bash tool (`bashOutputMaxChars`, default 48,000).
+    #[serde(rename = "bashOutputMaxChars")]
+    pub bash_output_max_chars: Option<usize>,
     /// Shell program (`shell`) for the Bash tool and hooks. Default per platform:
     /// macOS /bin/zsh, other Unix /bin/bash, Windows powershell.exe (PowerShell-family
     /// shells run with -Command; any other configured shell with -c, e.g. Git Bash).
@@ -134,7 +147,8 @@ pub struct TeamSettings {
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 pub struct ExperimentalSettings {
     /// Agent channels (`agentChannels`): when enabled, the main session gains
-    /// Channel/Post tools and direct subagents gain the Post tool.
+    /// the Channel tool, and every session may address a room it is in with
+    /// `SendMessage`.
     #[serde(rename = "agentChannels", default)]
     pub agent_channels: bool,
     /// Per-channel total message cap (`channelMessageLimit`, default 500; beyond it the
@@ -144,11 +158,14 @@ pub struct ExperimentalSettings {
     /// Per-agent per-channel message cap (`agentMessageLimit`, default 50).
     #[serde(rename = "agentMessageLimit")]
     pub agent_message_limit: Option<u64>,
-    /// Faces in the main transcript (`chatAvatars`): when enabled, every message
-    /// gets a sender band (portrait + name) and a subagent watch row wears the
-    /// instance's portrait. Off = the transcript carries no portraits at all.
-    /// The workspace views (DM, channel, team) are not governed by this switch —
-    /// there the portrait sits in a gutter the layout already spends.
+    /// Every avatar in the interface (`chatAvatars`, the one switch — D110,
+    /// user ruling). Off (the default): no avatar gutter anywhere — console,
+    /// zoomed view, room view — no chips, and no portrait on a dispatch row;
+    /// the transcript reads as if the machinery did not exist. On: every
+    /// conversation wears the gutter (portraits where the terminal places
+    /// images, initial-on-colour chips elsewhere) and `◉ scout · task` wears
+    /// scout's face on image-capable terminals. Identity *colours* are not
+    /// avatars and ignore this switch.
     #[serde(rename = "chatAvatars", default)]
     pub chat_avatars: bool,
 }
@@ -178,6 +195,87 @@ pub struct ProviderConfig {
     /// None/default = send — set false to opt an endpoint out).
     #[serde(rename = "supportsImages", default)]
     pub supports_images: Option<bool>,
+    /// Environment variable holding the API key (`envKey`, D65): keeps the key
+    /// out of a committed project config. Credential order: `apiKey` > this
+    /// variable > the existing mechanisms (auth.json stored key / OAuth).
+    #[serde(rename = "envKey", default)]
+    pub env_key: Option<String>,
+    /// Declared model list (`models`, D65). Declared means authoritative: the
+    /// `/model` menu shows exactly these, with no request to the endpoint.
+    /// Absent = the list is pulled from the endpoint (and disk-cached).
+    #[serde(default)]
+    pub models: Option<Vec<ModelEntry>>,
+}
+
+/// One declared model: either a bare id or an object carrying the metadata
+/// the prefix table would otherwise have to guess (D65).
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(untagged)]
+pub enum ModelEntry {
+    Id(String),
+    Detailed {
+        id: String,
+        /// Menu label (defaults to the id).
+        #[serde(default)]
+        display: Option<String>,
+        #[serde(rename = "contextWindow", default)]
+        context_window: Option<u64>,
+        /// Output ceiling sent as `max_tokens`; also the headroom the input
+        /// window reserves.
+        #[serde(rename = "maxTokens", default)]
+        max_tokens: Option<u32>,
+        #[serde(default)]
+        thinking: Option<bool>,
+        /// Whether the model accepts image input (`vision`); absent defers to
+        /// the prefix table. Unlike `supportsImages` (endpoint-wide opt-out)
+        /// this is per-model capability, surfaced to the model itself.
+        #[serde(default)]
+        vision: Option<bool>,
+    },
+}
+
+impl ModelEntry {
+    pub fn id(&self) -> &str {
+        match self {
+            ModelEntry::Id(id) => id,
+            ModelEntry::Detailed { id, .. } => id,
+        }
+    }
+
+    pub fn display(&self) -> Option<&str> {
+        match self {
+            ModelEntry::Id(_) => None,
+            ModelEntry::Detailed { display, .. } => display.as_deref(),
+        }
+    }
+
+    pub fn context_window(&self) -> Option<u64> {
+        match self {
+            ModelEntry::Id(_) => None,
+            ModelEntry::Detailed { context_window, .. } => *context_window,
+        }
+    }
+
+    pub fn max_tokens(&self) -> Option<u32> {
+        match self {
+            ModelEntry::Id(_) => None,
+            ModelEntry::Detailed { max_tokens, .. } => *max_tokens,
+        }
+    }
+
+    pub fn thinking(&self) -> Option<bool> {
+        match self {
+            ModelEntry::Id(_) => None,
+            ModelEntry::Detailed { thinking, .. } => *thinking,
+        }
+    }
+
+    pub fn vision(&self) -> Option<bool> {
+        match self {
+            ModelEntry::Id(_) => None,
+            ModelEntry::Detailed { vision, .. } => *vision,
+        }
+    }
 }
 
 /// OAuth provider config (`providers.<name>.oauth`, D33).
@@ -304,6 +402,9 @@ fn merge(base: &mut Settings, layer: Settings) {
     if let Some(model) = layer.model {
         base.model = Some(model);
     }
+    if let Some(models) = layer.models {
+        base.models = Some(models);
+    }
     if let Some(v) = layer.send_images {
         base.send_images = Some(v);
     }
@@ -319,11 +420,17 @@ fn merge(base: &mut Settings, layer: Settings) {
     if let Some(motion) = layer.motion {
         base.motion = Some(motion);
     }
+    if let Some(notifications) = layer.notifications {
+        base.notifications = Some(notifications);
+    }
     if let Some(cache) = layer.cache_control {
         base.cache_control = Some(cache);
     }
     if let Some(respond) = layer.respond_to_bash_commands {
         base.respond_to_bash_commands = Some(respond);
+    }
+    if let Some(max_chars) = layer.bash_output_max_chars {
+        base.bash_output_max_chars = Some(max_chars);
     }
     if let Some(shell) = layer.shell {
         base.shell = Some(shell);
@@ -401,13 +508,16 @@ pub const KNOWN_KEYS: &[&str] = &[
     "providers",
     "provider",
     "model",
+    "models",
     "sendImages",
     "thinkingLevel",
     "permissionMode",
     "theme",
     "motion",
+    "notifications",
     "cacheControl",
     "respondToBashCommands",
+    "bashOutputMaxChars",
     "shell",
     "hooks",
     "mcpServers",
@@ -647,16 +757,21 @@ mod tests {
             "apiBaseUrl": "https://full.example",
             "providers": {"p": {"apiKey": "sk-p", "apiBaseUrl": "https://p.example",
                                 "protocol": "openai", "oauth": {"kind": "codex"},
-                                "supportsImages": true}},
+                                "supportsImages": true, "envKey": "P_KEY",
+                                "models": ["a", {"id": "b", "display": "B",
+                                                 "contextWindow": 1024, "thinking": false}]}},
             "provider": "p",
             "model": "model-full",
+            "models": [{"id": "top", "contextWindow": 2048}],
             "sendImages": true,
             "thinkingLevel": "high",
             "permissionMode": "plan",
             "theme": "dark",
             "motion": "off",
+            "notifications": "bell",
             "cacheControl": true,
             "respondToBashCommands": false,
+            "bashOutputMaxChars": 12345,
             "shell": "/bin/fish",
             "hooks": {
                 "PreToolUse": [{"matcher": "", "hooks": [{"type": "command", "command": "a"}]}],
@@ -726,6 +841,28 @@ mod tests {
         assert_eq!(settings.permission_mode.as_deref(), Some("plan"));
         assert_eq!(settings.hooks.pre_tool_use.len(), 1);
         assert_eq!(settings.hooks.pre_tool_use[0].hooks[0].command, "echo hi");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn merges_bash_output_max_chars() {
+        let tmp =
+            std::env::temp_dir().join(format!("bingo-settings-bash-cap-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        write(
+            &tmp,
+            "user/bingo/settings.json",
+            r#"{"bashOutputMaxChars":20000}"#,
+        );
+        write(
+            &tmp,
+            ".bingo/settings.json",
+            r#"{"bashOutputMaxChars":32000}"#,
+        );
+
+        let settings = load_settings(&tmp.join("user"), &tmp).unwrap();
+        assert_eq!(settings.bash_output_max_chars, Some(32_000));
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
@@ -914,6 +1051,77 @@ mod tests {
         assert_eq!(road.api_base_url, "https://sub2apis.ruobin.dev/");
     }
 
+    /// D65 settings v3: `models` accepts bare ids and objects in one list,
+    /// `envKey` names the variable holding the key. Both additive — the v1/v2
+    /// fixtures above parse unchanged.
+    #[test]
+    fn parses_declared_models_and_env_key() {
+        let json = r#"{
+            "models": ["claude-sonnet-5"],
+            "providers": {
+                "proxy": {
+                    "apiBaseUrl": "https://proxy.example",
+                    "protocol": "openai",
+                    "envKey": "MY_PROXY_API_KEY",
+                    "models": [
+                        "gpt-5.6-sol",
+                        {"id": "deepseek-v4", "display": "DeepSeek V4",
+                         "contextWindow": 131072, "thinking": false},
+                        {"id": "bare-object"}
+                    ]
+                }
+            }
+        }"#;
+        let settings: Settings = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            settings.models.as_ref().map(|m| m[0].id()),
+            Some("claude-sonnet-5"),
+            "the top level declares the default provider's models"
+        );
+        let proxy = settings.providers.get("proxy").unwrap();
+        assert_eq!(proxy.env_key.as_deref(), Some("MY_PROXY_API_KEY"));
+        let models = proxy.models.as_ref().unwrap();
+        assert_eq!(models.len(), 3);
+        // Bare string entry: id only, everything else falls back.
+        assert_eq!(models[0].id(), "gpt-5.6-sol");
+        assert_eq!(models[0].display(), None);
+        assert_eq!(models[0].context_window(), None);
+        assert_eq!(models[0].thinking(), None);
+        // Object entry: all four fields carried.
+        assert_eq!(models[1].id(), "deepseek-v4");
+        assert_eq!(models[1].display(), Some("DeepSeek V4"));
+        assert_eq!(models[1].context_window(), Some(131_072));
+        assert_eq!(models[1].thinking(), Some(false));
+        // Object with only `id` behaves like the bare string.
+        assert_eq!(models[2].id(), "bare-object");
+        assert_eq!(models[2].context_window(), None);
+    }
+
+    /// Provider entries are replaced whole, not merged field by field: a later
+    /// layer restating a provider must restate its models too (documented
+    /// semantics — the same rule that already governs apiKey/apiBaseUrl).
+    #[test]
+    fn provider_layers_replace_declared_models_wholesale() {
+        let tmp =
+            std::env::temp_dir().join(format!("bingo-settings-{}-models", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        write(
+            &tmp,
+            "user/bingo/settings.json",
+            r#"{"providers":{"p":{"apiKey":"k","models":["a","b"]}}}"#,
+        );
+        write(
+            &tmp,
+            ".bingo/settings.json",
+            r#"{"providers":{"p":{"apiKey":"k","models":["c"]}}}"#,
+        );
+        let settings = load_settings(&tmp.join("user"), &tmp).unwrap();
+        let models = settings.providers["p"].models.as_ref().unwrap();
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id(), "c", "project replaces the user entry whole");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
     /// An apiKey-less oauth config parses successfully (main-verified bug regression, D33 §5):
     /// `apiKey` may be omitted; OAuth providers carry no static key.
     #[test]
@@ -957,6 +1165,8 @@ mod tests {
         settings.providers.insert(
             "bogus".to_string(),
             ProviderConfig {
+                env_key: None,
+                models: None,
                 api_key: Some("k".into()),
                 api_base_url: String::new(),
                 protocol: Some("chatgpt".into()),

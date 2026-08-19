@@ -114,7 +114,7 @@ pub fn first_line(markdown: &str) -> String {
 /// User-level skills directory: `$XDG_CONFIG_HOME/bingo/skills` (mirrors the config convention in main.rs).
 /// Tests must not depend on the ambient XDG_CONFIG_HOME (CI runners may set it): the home
 /// parameter is the sole source of truth under test.
-fn user_skills_dir(home: &Path) -> PathBuf {
+pub(crate) fn user_skills_dir(home: &Path) -> PathBuf {
     #[cfg(not(test))]
     let config = std::env::var("XDG_CONFIG_HOME")
         .map(PathBuf::from)
@@ -338,6 +338,18 @@ pub fn expand_skill(skill: &Skill, args: &str) -> String {
     content.replace("${CLAUDE_SKILL_DIR}", &skill.base_dir.display().to_string())
 }
 
+/// The line a skill invocation submits.
+///
+/// Progressive disclosure: only the marker is submitted, and the model reads the
+/// body on demand through the Skill tool pointer and Read. It is model-facing
+/// text, so it has one author whichever frontend typed `/<skill name>`.
+pub fn invocation(name: &str, input: Option<&str>) -> String {
+    match input {
+        Some(input) => format!("✦ {name} {input}"),
+        None => format!("✦ {name}"),
+    }
+}
+
 /// Truncation length for listing entries.
 pub const MAX_LISTING_DESC_CHARS: usize = 250;
 /// Default char budget for the listing (1% of context).
@@ -422,6 +434,38 @@ mod tests {
     fn write(path: &Path, content: &str) {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, content).unwrap();
+    }
+
+    /// The bundled guide is user-facing: the decision ledger's D-numbers are
+    /// development vocabulary and must not ship in it. They kept leaking in —
+    /// every guide update quoted the ruling it came from — so the convention
+    /// is a test, not a habit.
+    #[test]
+    fn bundled_guide_speaks_no_ledger_numbers() {
+        let guide = bundled_skills()
+            .into_iter()
+            .find(|s| s.name == "guide")
+            .unwrap();
+        let text = format!(
+            "{} {} {}",
+            guide.description,
+            guide.when_to_use.as_deref().unwrap_or(""),
+            guide.content
+        );
+        let chars: Vec<char> = text.chars().collect();
+        for i in 0..chars.len() {
+            if chars[i] == 'D'
+                && (i == 0 || !chars[i - 1].is_ascii_alphanumeric())
+                && i + 2 < chars.len()
+                && chars[i + 1].is_ascii_digit()
+                && chars[i + 2].is_ascii_digit()
+            {
+                let context: String = chars[i.saturating_sub(30)..(i + 10).min(chars.len())]
+                    .iter()
+                    .collect();
+                panic!("ledger number in the bundled guide (development vocabulary): …{context}…");
+            }
+        }
     }
 
     #[test]

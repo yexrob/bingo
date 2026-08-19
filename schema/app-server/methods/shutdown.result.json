@@ -1,0 +1,24 @@
+{
+  "$id": "urn:bingo:app-server:v1:shutdown.result",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "properties": {
+    "deniedInteractions": {
+      "description": "Interactions that were open and were resolved closed.",
+      "format": "uint32",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "interruptedTurns": {
+      "description": "Work the shutdown interrupted on its way out.",
+      "format": "uint32",
+      "minimum": 0.0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "deniedInteractions",
+    "interruptedTurns"
+  ],
+  "title": "ShutdownResult",
+  "type": "object"
+}

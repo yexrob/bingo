@@ -1,0 +1,6735 @@
+{
+  "$id": "urn:bingo:app-server:v1:definitions",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "Action": {
+      "description": "Every uncommon CLI operation, as one union both frontends produce.\n\nAn action carries no origin of its own: `action/execute` names the conversation it was submitted from, so a queued action cannot retarget itself to whatever page happens to be visible when it drains.",
+      "oneOf": [
+        {
+          "description": "Clear the conversation and start a new session (`/clear`, `/reset`, `/new`).",
+          "properties": {
+            "type": {
+              "enum": [
+                "sessionReset"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "sessionRename"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "name",
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Clean expired session storage (`/gc`).",
+          "properties": {
+            "type": {
+              "enum": [
+                "sessionGarbageCollect"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "open": {
+              "type": "boolean"
+            },
+            "output": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "public": {
+              "type": "boolean"
+            },
+            "type": {
+              "enum": [
+                "sessionShare"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "open",
+            "public",
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "path": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "sessionChangeDirectory"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "path",
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Compact the context. It follows the page it was submitted on rather than the page that is visible when it runs.",
+          "properties": {
+            "instructions": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "enum": [
+                "conversationCompact"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "mode": {
+              "$ref": "#/definitions/RewindMode"
+            },
+            "target": {
+              "$ref": "#/definitions/RewindTarget"
+            },
+            "type": {
+              "enum": [
+                "conversationRewind"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "mode",
+            "target",
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "model": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "modelSelect"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "model",
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "provider": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "providerSelect"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "provider",
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "provider": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "providerLogin"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "provider",
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "provider": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "providerLogout"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "provider",
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "level": {
+              "$ref": "#/definitions/ThinkingLevel"
+            },
+            "type": {
+              "enum": [
+                "thinkingSelect"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "level",
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "mode": {
+              "$ref": "#/definitions/PermissionMode"
+            },
+            "type": {
+              "enum": [
+                "permissionModeSet"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "mode",
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "decision": {
+              "$ref": "#/definitions/PermissionRuleDecision"
+            },
+            "rule": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "permissionRuleAdd"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "decision",
+            "rule",
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "decision": {
+              "$ref": "#/definitions/PermissionRuleDecision"
+            },
+            "rule": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "permissionRuleRemove"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "decision",
+            "rule",
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "server": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "mcpEnable"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "server",
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "server": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "mcpDisable"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "server",
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "server": {
+              "description": "Absent reconnects every configured server.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "enum": [
+                "mcpReconnect"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "input": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "skill": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "skillInvoke"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "skill",
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "members": {
+              "description": "Absent starts the whole blueprint.",
+              "items": {
+                "type": "string"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            },
+            "type": {
+              "enum": [
+                "teamStart"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "member": {
+              "type": "string"
+            },
+            "task": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "teamAssign"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "member",
+            "task",
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "member": {
+              "description": "Absent stops the whole team.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "enum": [
+                "teamStop"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Write a starting chart and its agreement into the project (`/team new`).",
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "teamScaffold"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "name",
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Drop the crew's notes past their life (`/team memory gc`).",
+          "properties": {
+            "type": {
+              "enum": [
+                "teamMemoryGarbageCollect"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "room": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "roomJoin"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "room",
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "room": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "roomLeave"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "room",
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Send the foreground command to the background. Interrupting it is `turn/interrupt`, not an action.",
+          "properties": {
+            "itemId": {
+              "$ref": "#/definitions/ItemId"
+            },
+            "type": {
+              "enum": [
+                "commandPromote"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "itemId",
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A persisted theme preference. Which colours get painted is frontend-local; that the choice was saved is not.",
+          "properties": {
+            "theme": {
+              "$ref": "#/definitions/ThemeChoice"
+            },
+            "type": {
+              "enum": [
+                "themeSet"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "theme",
+            "type"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ActionArgument": {
+      "properties": {
+        "choices": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "description": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/definitions/ArgumentKind"
+        },
+        "name": {
+          "type": "string"
+        },
+        "required": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "choices",
+        "description",
+        "kind",
+        "name",
+        "required"
+      ],
+      "type": "object"
+    },
+    "ActionExecuteParams": {
+      "properties": {
+        "action": {
+          "$ref": "#/definitions/Action"
+        },
+        "originConversationId": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/ConversationId"
+            }
+          ],
+          "description": "The page the action was submitted on. It stays the action's origin even if the user switches pages before it drains."
+        },
+        "precondition": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ResourceRevision"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "action",
+        "originConversationId"
+      ],
+      "type": "object"
+    },
+    "ActionExecuteResult": {
+      "properties": {
+        "disposition": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/SubmitDisposition"
+            }
+          ],
+          "description": "The same dispositions a submission gets: an action asked for while a turn is busy queues like any other input."
+        }
+      },
+      "required": [
+        "disposition"
+      ],
+      "type": "object"
+    },
+    "ActionFamily": {
+      "description": "Which family an action belongs to, for grouping in a command menu.",
+      "enum": [
+        "session",
+        "conversation",
+        "model",
+        "provider",
+        "permission",
+        "mcp",
+        "skill",
+        "team",
+        "room",
+        "command",
+        "settings"
+      ],
+      "type": "string"
+    },
+    "ActionId": {
+      "description": "The stable identity of an action, shared by `action/list` metadata and the registry that dispatches it. Unlike every other identifier here it is a name rather than an epoch-scoped handle: a client may hard-code it.",
+      "type": "string"
+    },
+    "ActionInfo": {
+      "description": "What `action/list` publishes for one action. The command menu and `/help` derive from the same registry that dispatches it.",
+      "properties": {
+        "arguments": {
+          "items": {
+            "$ref": "#/definitions/ActionArgument"
+          },
+          "type": "array"
+        },
+        "available": {
+          "type": "boolean"
+        },
+        "description": {
+          "type": "string"
+        },
+        "family": {
+          "$ref": "#/definitions/ActionFamily"
+        },
+        "id": {
+          "$ref": "#/definitions/ActionId"
+        },
+        "label": {
+          "type": "string"
+        },
+        "preconditionScope": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/RevisionScope"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The revision a mutation of this action must carry, when it needs one."
+        },
+        "unavailableReason": {
+          "description": "Why it is unavailable right now, when it is.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "arguments",
+        "available",
+        "description",
+        "family",
+        "id",
+        "label"
+      ],
+      "type": "object"
+    },
+    "ActionListParams": {
+      "properties": {
+        "originConversationId": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ConversationId"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Availability is answered for this page; absent answers for main."
+        }
+      },
+      "type": "object"
+    },
+    "ActionListResult": {
+      "properties": {
+        "actions": {
+          "items": {
+            "$ref": "#/definitions/ActionInfo"
+          },
+          "type": "array"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "actions",
+        "revision"
+      ],
+      "type": "object"
+    },
+    "ActionResult": {
+      "description": "The outcome of a synchronously applied action. Views are not returned here — help, status, context, config, skills, tasks, and images are structured reads (`config/read`, `catalog/read`, `resource/read`), and each frontend renders its own.",
+      "properties": {
+        "message": {
+          "description": "One short English line worth showing. A projection, not a contract: clients branch on the status, never on this.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "revision": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ResourceRevision"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The new revision of whatever the action mutated, for a client holding a precondition."
+        },
+        "status": {
+          "$ref": "#/definitions/ActionResultStatus"
+        }
+      },
+      "required": [
+        "status"
+      ],
+      "type": "object"
+    },
+    "ActionResultStatus": {
+      "oneOf": [
+        {
+          "enum": [
+            "applied"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Valid, and nothing changed (selecting the model already selected).",
+          "enum": [
+            "noChange"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "ActivationKind": {
+      "description": "How the client's response was activated. Only keyboard approval inside the guard is premature; denial, cancellation, and pointer approval are immediate.",
+      "oneOf": [
+        {
+          "enum": [
+            "pointer",
+            "keyboard"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Neither — a programmatic client with no human activation to report.",
+          "enum": [
+            "programmatic"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "AgentId": {
+      "type": "string"
+    },
+    "AgentKind": {
+      "description": "A standing member of the project's crew, or someone hired for one task.",
+      "enum": [
+        "crew",
+        "hire"
+      ],
+      "type": "string"
+    },
+    "AgentResource": {
+      "description": "One agent instance. Each is its own session with its own engine, so the engine it runs on is reported rather than assumed to be the session's.",
+      "properties": {
+        "conversationId": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ConversationId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "cwd": {
+          "type": "string"
+        },
+        "def": {
+          "description": "The definition it was spawned from, when it had one.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "description": {
+          "type": "string"
+        },
+        "elapsedMs": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "id": {
+          "$ref": "#/definitions/AgentId"
+        },
+        "kind": {
+          "$ref": "#/definitions/AgentKind"
+        },
+        "lastActiveAt": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "model": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "outputTokens": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "pending": {
+          "description": "Messages waiting in the inbox for this instance to claim.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "prompt": {
+          "description": "The task this instance is working on, or last worked on. A roster's task line is drawn from it, and a client that had only the description would be showing what the instance *is* where it means to show what it is *doing*.",
+          "type": "string"
+        },
+        "provider": {
+          "type": "string"
+        },
+        "recentActivity": {
+          "description": "The tool lines this run has produced, oldest first and bounded. What a `Running` row says it is doing right now is the last of them; without it a client can only report that something is running.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "state": {
+          "$ref": "#/definitions/AgentState"
+        },
+        "thinking": {
+          "$ref": "#/definitions/ThinkingLevel"
+        },
+        "toolUses": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "unacked": {
+          "description": "Messages sent to it that nobody has answered yet.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "cwd",
+        "description",
+        "id",
+        "kind",
+        "lastActiveAt",
+        "model",
+        "name",
+        "outputTokens",
+        "pending",
+        "prompt",
+        "provider",
+        "recentActivity",
+        "state",
+        "thinking",
+        "toolUses",
+        "unacked"
+      ],
+      "type": "object"
+    },
+    "AgentState": {
+      "enum": [
+        "running",
+        "idle",
+        "stopped"
+      ],
+      "type": "string"
+    },
+    "ArgumentKind": {
+      "oneOf": [
+        {
+          "enum": [
+            "string",
+            "integer",
+            "boolean",
+            "path"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "One of `choices`.",
+          "enum": [
+            "enumeration"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "AssetId": {
+      "type": "string"
+    },
+    "AssetKind": {
+      "enum": [
+        "image",
+        "text",
+        "binary"
+      ],
+      "type": "string"
+    },
+    "AssetOrigin": {
+      "description": "Where an asset's bytes live. Session assets are cleaned up with the session; transcript assets stay reconstructable from durable content.",
+      "enum": [
+        "session",
+        "transcript"
+      ],
+      "type": "string"
+    },
+    "AssetReadChunkParams": {
+      "properties": {
+        "assetId": {
+          "$ref": "#/definitions/AssetId"
+        },
+        "length": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "offset": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "assetId",
+        "length",
+        "offset"
+      ],
+      "type": "object"
+    },
+    "AssetReadChunkResult": {
+      "properties": {
+        "data": {
+          "description": "Base64, bounded well below the server frame ceiling.",
+          "type": "string"
+        },
+        "eof": {
+          "type": "boolean"
+        },
+        "nextOffset": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "data",
+        "eof",
+        "nextOffset"
+      ],
+      "type": "object"
+    },
+    "AssetRecord": {
+      "description": "A registered asset. Registration snapshots the bytes into server-owned storage; the caller's path is never borrowed or deleted afterwards.",
+      "properties": {
+        "bytes": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "createdAt": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "height": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "id": {
+          "$ref": "#/definitions/AssetId"
+        },
+        "kind": {
+          "$ref": "#/definitions/AssetKind"
+        },
+        "mime": {
+          "type": "string"
+        },
+        "origin": {
+          "$ref": "#/definitions/AssetOrigin"
+        },
+        "sha256": {
+          "type": "string"
+        },
+        "width": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "bytes",
+        "createdAt",
+        "id",
+        "kind",
+        "mime",
+        "origin",
+        "sha256"
+      ],
+      "type": "object"
+    },
+    "AssetRegisterPathParams": {
+      "description": "Registration validates the file and snapshots its bytes into server-owned storage. The caller's path is never borrowed later and never deleted; a GUI holding clipboard bytes writes its own temporary file and may remove it once this succeeds.",
+      "properties": {
+        "expectedMime": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "expectedSha256": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "type": "object"
+    },
+    "AssetRegisterPathResult": {
+      "properties": {
+        "asset": {
+          "$ref": "#/definitions/AssetRecord"
+        }
+      },
+      "required": [
+        "asset"
+      ],
+      "type": "object"
+    },
+    "BackgroundCommandResource": {
+      "description": "A command running outside the foreground slot. Watch state only: the protocol invents no cancel or re-foreground capability the CLI does not have.",
+      "properties": {
+        "command": {
+          "type": "string"
+        },
+        "conversationId": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ConversationId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "durationMs": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "exitCode": {
+          "format": "int32",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "id": {
+          "$ref": "#/definitions/CommandId"
+        },
+        "itemId": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ItemId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "label": {
+          "type": "string"
+        },
+        "startedAt": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "state": {
+          "$ref": "#/definitions/BackgroundCommandState"
+        }
+      },
+      "required": [
+        "command",
+        "durationMs",
+        "id",
+        "label",
+        "startedAt",
+        "state"
+      ],
+      "type": "object"
+    },
+    "BackgroundCommandState": {
+      "oneOf": [
+        {
+          "enum": [
+            "running",
+            "done",
+            "failed",
+            "cancelled"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "One round finished; a periodic command may run again.",
+          "enum": [
+            "idle"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "Catalog": {
+      "oneOf": [
+        {
+          "description": "One page of a paginated read. `next_cursor` is absent at the end.",
+          "properties": {
+            "catalog": {
+              "enum": [
+                "models"
+              ],
+              "type": "string"
+            },
+            "items": {
+              "items": {
+                "$ref": "#/definitions/ModelInfo"
+              },
+              "type": "array"
+            },
+            "nextCursor": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "revision": {
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "catalog",
+            "items",
+            "revision"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "One page of a paginated read. `next_cursor` is absent at the end.",
+          "properties": {
+            "catalog": {
+              "enum": [
+                "providers"
+              ],
+              "type": "string"
+            },
+            "items": {
+              "items": {
+                "$ref": "#/definitions/ProviderInfo"
+              },
+              "type": "array"
+            },
+            "nextCursor": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "revision": {
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "catalog",
+            "items",
+            "revision"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "One page of a paginated read. `next_cursor` is absent at the end.",
+          "properties": {
+            "catalog": {
+              "enum": [
+                "skills"
+              ],
+              "type": "string"
+            },
+            "items": {
+              "items": {
+                "$ref": "#/definitions/SkillInfo"
+              },
+              "type": "array"
+            },
+            "nextCursor": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "revision": {
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "catalog",
+            "items",
+            "revision"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "One page of a paginated read. `next_cursor` is absent at the end.",
+          "properties": {
+            "catalog": {
+              "enum": [
+                "mcpServers"
+              ],
+              "type": "string"
+            },
+            "items": {
+              "items": {
+                "$ref": "#/definitions/McpServerState"
+              },
+              "type": "array"
+            },
+            "nextCursor": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "revision": {
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "catalog",
+            "items",
+            "revision"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "One page of a paginated read. `next_cursor` is absent at the end.",
+          "properties": {
+            "catalog": {
+              "enum": [
+                "images"
+              ],
+              "type": "string"
+            },
+            "items": {
+              "items": {
+                "$ref": "#/definitions/ImageInfo"
+              },
+              "type": "array"
+            },
+            "nextCursor": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "revision": {
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "catalog",
+            "items",
+            "revision"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "CatalogKind": {
+      "description": "Which catalog a read asks for. Every one of them is answerable before a session exists: a GUI picks a provider and a model on the way in.",
+      "enum": [
+        "models",
+        "providers",
+        "skills",
+        "mcpServers",
+        "images"
+      ],
+      "type": "string"
+    },
+    "CatalogReadParams": {
+      "description": "Answerable before `session/start`: a GUI picks its provider and model on the way in, which is the job `--inspect` used to have.",
+      "properties": {
+        "catalog": {
+          "$ref": "#/definitions/CatalogKind"
+        },
+        "cursor": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "limit": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "provider": {
+          "description": "Which provider's models to list. Ignored by the other catalogs.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "catalog"
+      ],
+      "type": "object"
+    },
+    "CatalogReadResult": {
+      "properties": {
+        "catalog": {
+          "$ref": "#/definitions/Catalog"
+        }
+      },
+      "required": [
+        "catalog"
+      ],
+      "type": "object"
+    },
+    "ClientCapabilities": {
+      "description": "What the client can do. A controlling client must be able to answer interactions; initialization fails otherwise rather than silently auto-denying a prompt that has not happened yet.",
+      "properties": {
+        "experimental": {
+          "default": [],
+          "description": "Experimental methods the client opts into by name.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "interactionResponse": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "interactionResponse"
+      ],
+      "type": "object"
+    },
+    "ClientInfo": {
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "version"
+      ],
+      "type": "object"
+    },
+    "Collection_for_AgentResource": {
+      "description": "A bounded slice of an otherwise unbounded collection: the revision it was read at, how many entries exist, and the ones worth carrying in a snapshot. The remainder is read through the paginated resource methods.",
+      "properties": {
+        "active": {
+          "items": {
+            "$ref": "#/definitions/AgentResource"
+          },
+          "type": "array"
+        },
+        "count": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "active",
+        "count",
+        "revision"
+      ],
+      "type": "object"
+    },
+    "Collection_for_BackgroundCommandResource": {
+      "description": "A bounded slice of an otherwise unbounded collection: the revision it was read at, how many entries exist, and the ones worth carrying in a snapshot. The remainder is read through the paginated resource methods.",
+      "properties": {
+        "active": {
+          "items": {
+            "$ref": "#/definitions/BackgroundCommandResource"
+          },
+          "type": "array"
+        },
+        "count": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "active",
+        "count",
+        "revision"
+      ],
+      "type": "object"
+    },
+    "Collection_for_ConversationSummary": {
+      "description": "A bounded slice of an otherwise unbounded collection: the revision it was read at, how many entries exist, and the ones worth carrying in a snapshot. The remainder is read through the paginated resource methods.",
+      "properties": {
+        "active": {
+          "items": {
+            "$ref": "#/definitions/ConversationSummary"
+          },
+          "type": "array"
+        },
+        "count": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "active",
+        "count",
+        "revision"
+      ],
+      "type": "object"
+    },
+    "Collection_for_DeliveryResource": {
+      "description": "A bounded slice of an otherwise unbounded collection: the revision it was read at, how many entries exist, and the ones worth carrying in a snapshot. The remainder is read through the paginated resource methods.",
+      "properties": {
+        "active": {
+          "items": {
+            "$ref": "#/definitions/DeliveryResource"
+          },
+          "type": "array"
+        },
+        "count": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "active",
+        "count",
+        "revision"
+      ],
+      "type": "object"
+    },
+    "Collection_for_RoomResource": {
+      "description": "A bounded slice of an otherwise unbounded collection: the revision it was read at, how many entries exist, and the ones worth carrying in a snapshot. The remainder is read through the paginated resource methods.",
+      "properties": {
+        "active": {
+          "items": {
+            "$ref": "#/definitions/RoomResource"
+          },
+          "type": "array"
+        },
+        "count": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "active",
+        "count",
+        "revision"
+      ],
+      "type": "object"
+    },
+    "Collection_for_TaskResource": {
+      "description": "A bounded slice of an otherwise unbounded collection: the revision it was read at, how many entries exist, and the ones worth carrying in a snapshot. The remainder is read through the paginated resource methods.",
+      "properties": {
+        "active": {
+          "items": {
+            "$ref": "#/definitions/TaskResource"
+          },
+          "type": "array"
+        },
+        "count": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "active",
+        "count",
+        "revision"
+      ],
+      "type": "object"
+    },
+    "CommandId": {
+      "description": "A background (promoted or detached) command run.",
+      "type": "string"
+    },
+    "CommandTail": {
+      "description": "A foreground command's live tail: bounded lines after carriage-return handling and escape removal, plus how many lines have completed. It replaces the previous sample and never appends to final output.",
+      "properties": {
+        "lines": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "totalLines": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "lines",
+        "totalLines"
+      ],
+      "type": "object"
+    },
+    "ComposerMode": {
+      "description": "How the composer reads the text it was handed.",
+      "oneOf": [
+        {
+          "enum": [
+            "normal"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "The `!` prefix: the line is a shell command.",
+          "enum": [
+            "shell"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "ConfigLayer": {
+      "description": "One settings layer that contributed to the effective configuration, so a frontend can show where a value came from without reading files itself.",
+      "properties": {
+        "keys": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "keys",
+        "path"
+      ],
+      "type": "object"
+    },
+    "ConfigReadParams": {
+      "properties": {
+        "sections": {
+          "description": "Absent reads every section.",
+          "items": {
+            "$ref": "#/definitions/ConfigSection"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "ConfigReadResult": {
+      "properties": {
+        "config": {
+          "$ref": "#/definitions/ConfigSnapshot"
+        }
+      },
+      "required": [
+        "config"
+      ],
+      "type": "object"
+    },
+    "ConfigSection": {
+      "enum": [
+        "selection",
+        "permissions",
+        "layers",
+        "mcp"
+      ],
+      "type": "string"
+    },
+    "ConfigSnapshot": {
+      "description": "The effective configuration. No credential values, only where they come from.",
+      "properties": {
+        "cwd": {
+          "type": "string"
+        },
+        "layers": {
+          "items": {
+            "$ref": "#/definitions/ConfigLayer"
+          },
+          "type": "array"
+        },
+        "mcpServers": {
+          "items": {
+            "$ref": "#/definitions/McpServerState"
+          },
+          "type": "array"
+        },
+        "model": {
+          "type": "string"
+        },
+        "permissionMode": {
+          "$ref": "#/definitions/PermissionMode"
+        },
+        "permissions": {
+          "items": {
+            "$ref": "#/definitions/PermissionRule"
+          },
+          "type": "array"
+        },
+        "provider": {
+          "type": "string"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "shell": {
+          "type": "string"
+        },
+        "shellDialect": {
+          "$ref": "#/definitions/ShellDialect"
+        },
+        "theme": {
+          "$ref": "#/definitions/ThemeChoice"
+        },
+        "thinking": {
+          "$ref": "#/definitions/ThinkingLevel"
+        }
+      },
+      "required": [
+        "cwd",
+        "layers",
+        "mcpServers",
+        "model",
+        "permissionMode",
+        "permissions",
+        "provider",
+        "revision",
+        "shell",
+        "shellDialect",
+        "theme",
+        "thinking"
+      ],
+      "type": "object"
+    },
+    "ContextUsage": {
+      "description": "Context window occupancy, with the point at which the core compacts on its own — the same three numbers the CLI's `/context` reads.",
+      "properties": {
+        "trigger": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "used": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "window": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "trigger",
+        "used",
+        "window"
+      ],
+      "type": "object"
+    },
+    "ConversationId": {
+      "type": "string"
+    },
+    "ConversationKind": {
+      "oneOf": [
+        {
+          "description": "The console: session actions, shell input, and the turn the user's prose starts. Rendered through the same projection as every other conversation.",
+          "properties": {
+            "type": {
+              "enum": [
+                "main"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "agentId": {
+              "$ref": "#/definitions/AgentId"
+            },
+            "type": {
+              "enum": [
+                "agent"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "agentId",
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "roomId": {
+              "$ref": "#/definitions/RoomId"
+            },
+            "type": {
+              "enum": [
+                "room"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "roomId",
+            "type"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ConversationListParams": {
+      "properties": {
+        "cursor": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "limit": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "ConversationListResult": {
+      "properties": {
+        "conversations": {
+          "$ref": "#/definitions/Page_for_ConversationSummary"
+        }
+      },
+      "required": [
+        "conversations"
+      ],
+      "type": "object"
+    },
+    "ConversationMarkReadParams": {
+      "description": "Called only once content is actually visible. Prefetch and resynchronization cannot clear unread or mention state, because reading never does.",
+      "properties": {
+        "conversationId": {
+          "$ref": "#/definitions/ConversationId"
+        },
+        "expectedRevision": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "lastItemId": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ItemId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "lastRoomSeq": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "conversationId",
+        "expectedRevision"
+      ],
+      "type": "object"
+    },
+    "ConversationMarkReadResult": {
+      "properties": {
+        "conversation": {
+          "$ref": "#/definitions/ConversationSummary"
+        }
+      },
+      "required": [
+        "conversation"
+      ],
+      "type": "object"
+    },
+    "ConversationReadParams": {
+      "properties": {
+        "conversationId": {
+          "$ref": "#/definitions/ConversationId"
+        },
+        "cursor": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ItemCursor"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Absent starts at the tail. A cursor from a stale `historyGeneration` is refused rather than mixing pre- and post-rewrite history."
+        },
+        "limit": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "conversationId"
+      ],
+      "type": "object"
+    },
+    "ConversationReadResult": {
+      "properties": {
+        "snapshot": {
+          "$ref": "#/definitions/ConversationSnapshot"
+        }
+      },
+      "required": [
+        "snapshot"
+      ],
+      "type": "object"
+    },
+    "ConversationRunState": {
+      "oneOf": [
+        {
+          "enum": [
+            "idle",
+            "running"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "An agent conversation whose instance was stopped; its history stays and a direct message revives it.",
+          "enum": [
+            "stopped"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "A room, which receives posts and never owns a turn.",
+          "enum": [
+            "passive"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "ConversationSnapshot": {
+      "description": "An atomic read of one conversation. Reading never marks it read.",
+      "properties": {
+        "activeTurn": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Turn"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "contextUsage": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ContextUsage"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "conversation": {
+          "$ref": "#/definitions/ConversationSummary"
+        },
+        "eventCursor": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "historyGeneration": {
+          "description": "The generation the item page was cut at; a continuation from a stale one is refused.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "interactions": {
+          "items": {
+            "$ref": "#/definitions/Interaction"
+          },
+          "type": "array"
+        },
+        "items": {
+          "$ref": "#/definitions/Page_for_Item"
+        },
+        "queue": {
+          "$ref": "#/definitions/Page_for_QueueEntry"
+        }
+      },
+      "required": [
+        "conversation",
+        "eventCursor",
+        "historyGeneration",
+        "interactions",
+        "items",
+        "queue"
+      ],
+      "type": "object"
+    },
+    "ConversationSubmitParams": {
+      "properties": {
+        "conversationId": {
+          "$ref": "#/definitions/ConversationId"
+        },
+        "input": {
+          "$ref": "#/definitions/Submission"
+        }
+      },
+      "required": [
+        "conversationId",
+        "input"
+      ],
+      "type": "object"
+    },
+    "ConversationSubmitResult": {
+      "properties": {
+        "disposition": {
+          "$ref": "#/definitions/SubmitDisposition"
+        }
+      },
+      "required": [
+        "disposition"
+      ],
+      "type": "object"
+    },
+    "ConversationSummary": {
+      "description": "The bounded state of one conversation, including the attention state a frontend cannot safely infer from text.",
+      "properties": {
+        "activeTurnId": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/TurnId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "historyGeneration": {
+          "description": "Bumped only by structural rewrites (rewind, compaction). Ordinary streaming and appends leave it alone, so an item cursor stays valid.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "id": {
+          "$ref": "#/definitions/ConversationId"
+        },
+        "isMember": {
+          "description": "The user may speak here. False for a room they have not joined.",
+          "type": "boolean"
+        },
+        "kind": {
+          "$ref": "#/definitions/ConversationKind"
+        },
+        "lastActivityAt": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "lastItemId": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ItemId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "mentions": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "obligations": {
+          "items": {
+            "$ref": "#/definitions/Obligation"
+          },
+          "type": "array"
+        },
+        "pendingInteractions": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "queueCount": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "queueRevision": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "readCursor": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ItemId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "revision": {
+          "description": "Bumped by every change to this summary; carried by `markRead` so a stale client cannot clear attention it never saw.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "runState": {
+          "$ref": "#/definitions/ConversationRunState"
+        },
+        "title": {
+          "type": "string"
+        },
+        "unread": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "historyGeneration",
+        "id",
+        "isMember",
+        "kind",
+        "mentions",
+        "obligations",
+        "pendingInteractions",
+        "queueCount",
+        "queueRevision",
+        "revision",
+        "runState",
+        "title",
+        "unread"
+      ],
+      "type": "object"
+    },
+    "CredentialSource": {
+      "description": "Where a credential came from. Presence, source, and status only — no key material reaches a snapshot or an event.",
+      "enum": [
+        "environment",
+        "settings",
+        "oauthStore",
+        "none"
+      ],
+      "type": "string"
+    },
+    "CredentialState": {
+      "properties": {
+        "configured": {
+          "type": "boolean"
+        },
+        "source": {
+          "$ref": "#/definitions/CredentialSource"
+        },
+        "status": {
+          "$ref": "#/definitions/CredentialStatus"
+        }
+      },
+      "required": [
+        "configured",
+        "source",
+        "status"
+      ],
+      "type": "object"
+    },
+    "CredentialStatus": {
+      "enum": [
+        "present",
+        "missing",
+        "expired",
+        "unknown"
+      ],
+      "type": "string"
+    },
+    "DeliveryId": {
+      "description": "One direct message's delivery record.",
+      "type": "string"
+    },
+    "DeliveryResource": {
+      "properties": {
+        "followUps": {
+          "description": "Follow-ups the runtime has chased with so far, and the bound on them.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "from": {
+          "type": "string"
+        },
+        "id": {
+          "$ref": "#/definitions/DeliveryId"
+        },
+        "maxFollowUps": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "messageItemId": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ItemId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "private": {
+          "description": "The private lane rather than a room.",
+          "type": "boolean"
+        },
+        "reason": {
+          "description": "Why a dropped message will never arrive.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "state": {
+          "$ref": "#/definitions/DeliveryState"
+        },
+        "to": {
+          "type": "string"
+        },
+        "updatedAt": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "followUps",
+        "from",
+        "id",
+        "maxFollowUps",
+        "private",
+        "state",
+        "to",
+        "updatedAt"
+      ],
+      "type": "object"
+    },
+    "DeliveryState": {
+      "description": "Where a direct message got to. A peer's turn prose does not settle this; only an observable message back does.",
+      "enum": [
+        "queued",
+        "delivered",
+        "read",
+        "answered",
+        "dropped"
+      ],
+      "type": "string"
+    },
+    "EpochId": {
+      "description": "One run of the server process. Every other identifier is scoped to it; a restart invalidates them all.",
+      "type": "string"
+    },
+    "ErrorData": {
+      "description": "The structured half of an error. Human-readable text is English and sanitized; clients never branch on it.",
+      "properties": {
+        "assetId": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/AssetId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "bingoCode": {
+          "type": "string"
+        },
+        "conversationId": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ConversationId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "interactionId": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/InteractionId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "itemId": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ItemId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "operationId": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/OperationId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "queueId": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/QueueId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "recoverable": {
+          "type": "boolean"
+        },
+        "scope": {
+          "$ref": "#/definitions/ErrorScope"
+        },
+        "sessionId": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/SessionId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "suggestedAction": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/SuggestedAction"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "turnId": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/TurnId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "bingoCode",
+        "recoverable",
+        "scope"
+      ],
+      "type": "object"
+    },
+    "ErrorScope": {
+      "description": "What the error is about, so a client knows what to re-read.",
+      "oneOf": [
+        {
+          "enum": [
+            "connection",
+            "session",
+            "conversation",
+            "turn",
+            "item",
+            "queue",
+            "interaction",
+            "operation",
+            "asset",
+            "action"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "The request itself was malformed or arrived out of order.",
+          "enum": [
+            "request"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "EventMeta": {
+      "description": "The header every event carries.\n\n`seq` is assigned when the actor mutates state, not when a transport serializes the event: it is strictly increasing and gapless within one server epoch. `ts` is stamped at the same instant. `caused_by` names the operation that asked for this, when one did.",
+      "properties": {
+        "causedBy": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/OperationId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "coalescedFrom": {
+          "description": "Set only when a transport merged a run of adjacent append deltas for one item into this frame: the `seq` that run began at. Every event from `coalescedFrom` through `seq` is represented here, so a client checking for gaps still reads a gapless stream. The core never sets it — merging is the transport's, and this is how it stays honest about what it did.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "seq": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "sessionId": {
+          "$ref": "#/definitions/SessionId"
+        },
+        "ts": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "seq",
+        "sessionId",
+        "ts"
+      ],
+      "type": "object"
+    },
+    "Feedback": {
+      "description": "A warning, notice, or error raised outside any single turn. It carries a stable code so a frontend branches on the code, never on the text.",
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "conversationId": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ConversationId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "detail": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "expiresAt": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "id": {
+          "$ref": "#/definitions/FeedbackId"
+        },
+        "level": {
+          "$ref": "#/definitions/NoticeLevel"
+        },
+        "message": {
+          "type": "string"
+        },
+        "raisedAt": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "code",
+        "id",
+        "level",
+        "message",
+        "raisedAt"
+      ],
+      "type": "object"
+    },
+    "FeedbackId": {
+      "description": "One raised warning/notice, so it can be cleared by identity.",
+      "type": "string"
+    },
+    "FrameLimits": {
+      "properties": {
+        "maxClientFrameBytes": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "maxServerFrameBytes": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "maxClientFrameBytes",
+        "maxServerFrameBytes"
+      ],
+      "type": "object"
+    },
+    "ImageInfo": {
+      "properties": {
+        "assetId": {
+          "$ref": "#/definitions/AssetId"
+        },
+        "bytes": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "createdAt": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "height": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "label": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "width": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "assetId",
+        "bytes",
+        "createdAt",
+        "height",
+        "width"
+      ],
+      "type": "object"
+    },
+    "InitializeParams": {
+      "properties": {
+        "capabilities": {
+          "$ref": "#/definitions/ClientCapabilities"
+        },
+        "client": {
+          "$ref": "#/definitions/ClientInfo"
+        },
+        "protocol": {
+          "$ref": "#/definitions/ProtocolRange"
+        }
+      },
+      "required": [
+        "capabilities",
+        "client",
+        "protocol"
+      ],
+      "type": "object"
+    },
+    "InitializeResult": {
+      "properties": {
+        "capabilities": {
+          "$ref": "#/definitions/ServerCapabilities"
+        },
+        "limits": {
+          "$ref": "#/definitions/FrameLimits"
+        },
+        "protocol": {
+          "$ref": "#/definitions/ProtocolVersion"
+        },
+        "server": {
+          "$ref": "#/definitions/ServerInfo"
+        }
+      },
+      "required": [
+        "capabilities",
+        "limits",
+        "protocol",
+        "server"
+      ],
+      "type": "object"
+    },
+    "InitializedParams": {
+      "type": "object"
+    },
+    "Interaction": {
+      "description": "A pending application request. It outlives the JSON-RPC call that announced it: a prompt recovered from a snapshot stays answerable.",
+      "properties": {
+        "conversationId": {
+          "$ref": "#/definitions/ConversationId"
+        },
+        "id": {
+          "$ref": "#/definitions/InteractionId"
+        },
+        "itemId": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ItemId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "openedAt": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "prompt": {
+          "$ref": "#/definitions/InteractionPrompt"
+        },
+        "remainingGuardMs": {
+          "description": "Milliseconds left on the confirmation guard, recomputed for every event and snapshot. Only keyboard approval is held back by it.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "turnId": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/TurnId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "conversationId",
+        "id",
+        "openedAt",
+        "prompt",
+        "remainingGuardMs"
+      ],
+      "type": "object"
+    },
+    "InteractionCancelReason": {
+      "enum": [
+        "interrupted",
+        "sessionClosed",
+        "turnEnded"
+      ],
+      "type": "string"
+    },
+    "InteractionDecision": {
+      "oneOf": [
+        {
+          "properties": {
+            "type": {
+              "enum": [
+                "allowOnce"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "scopeId": {
+              "$ref": "#/definitions/ScopeId"
+            },
+            "type": {
+              "enum": [
+                "allowSession"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "scopeId",
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "feedback": {
+              "description": "What the user wanted instead; it travels to the model through the permission-error path so a denial carries a direction.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "enum": [
+                "deny"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "optionId": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "text": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "enum": [
+                "answer"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "enum": [
+                "confirm"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The user dismissed the prompt. Fails closed.",
+          "properties": {
+            "type": {
+              "enum": [
+                "cancel"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "InteractionId": {
+      "type": "string"
+    },
+    "InteractionPreview": {
+      "oneOf": [
+        {
+          "properties": {
+            "command": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "command"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "command",
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "diff": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "diff"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "diff",
+            "type"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "InteractionPrompt": {
+      "description": "What the server is asking. Exactly the decisions it advertises are valid.",
+      "oneOf": [
+        {
+          "properties": {
+            "allowsFeedback": {
+              "type": "boolean"
+            },
+            "decisions": {
+              "items": {
+                "$ref": "#/definitions/PermissionDecisionKind"
+              },
+              "type": "array"
+            },
+            "preview": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/InteractionPreview"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "reason": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "sessionScope": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/SessionScope"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Absent when no verified session rule exists; `allowSession` is then rejected rather than invented."
+            },
+            "title": {
+              "type": "string"
+            },
+            "tool": {
+              "$ref": "#/definitions/ToolRequest"
+            },
+            "type": {
+              "enum": [
+                "permission"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "allowsFeedback",
+            "decisions",
+            "title",
+            "tool",
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "allowsFreeText": {
+              "type": "boolean"
+            },
+            "options": {
+              "items": {
+                "$ref": "#/definitions/QuestionOption"
+              },
+              "type": "array"
+            },
+            "question": {
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "question"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "allowsFreeText",
+            "options",
+            "question",
+            "title",
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "An explicit destructive confirmation (session delete, rewind apply).",
+          "properties": {
+            "confirmLabel": {
+              "type": "string"
+            },
+            "detail": {
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "confirmation"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "confirmLabel",
+            "detail",
+            "title",
+            "type"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "InteractionRespondParams": {
+      "properties": {
+        "activation": {
+          "$ref": "#/definitions/ActivationKind"
+        },
+        "decision": {
+          "$ref": "#/definitions/InteractionDecision"
+        },
+        "interactionId": {
+          "$ref": "#/definitions/InteractionId"
+        }
+      },
+      "required": [
+        "activation",
+        "decision",
+        "interactionId"
+      ],
+      "type": "object"
+    },
+    "InteractionRespondResult": {
+      "properties": {
+        "itemId": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ItemId"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The ordered item the resolution committed, when it commits one."
+        },
+        "status": {
+          "$ref": "#/definitions/RespondStatus"
+        }
+      },
+      "required": [
+        "status"
+      ],
+      "type": "object"
+    },
+    "Item": {
+      "description": "Ordered semantic content. Not a terminal row and not a provider event.\n\nAn item belongs to a conversation and may carry a `turnId`; the input item that opens a turn carries none. `item/completed` is authoritative over every delta that preceded it.",
+      "oneOf": [
+        {
+          "description": "Prose the user submitted.",
+          "properties": {
+            "attachments": {
+              "items": {
+                "$ref": "#/definitions/AssetId"
+              },
+              "type": "array"
+            },
+            "text": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "userMessage"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "attachments",
+            "text",
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Prose the model produced.",
+          "properties": {
+            "text": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "assistantMessage"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "text",
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A message that arrived from main or from a colleague. `to` is the private lane's target when it is not this conversation's own owner.",
+          "properties": {
+            "deliveryId": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/DeliveryId"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "from": {
+              "type": "string"
+            },
+            "text": {
+              "type": "string"
+            },
+            "to": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "enum": [
+                "peerMessage"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "from",
+            "text",
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A room post. Completed on arrival, with no turn of its own.",
+          "properties": {
+            "from": {
+              "type": "string"
+            },
+            "mentions": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "roomId": {
+              "$ref": "#/definitions/RoomId"
+            },
+            "roomSeq": {
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "text": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "roomMessage"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "from",
+            "mentions",
+            "roomId",
+            "roomSeq",
+            "text",
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Model reasoning, appended by `item/reasoningDelta`.",
+          "properties": {
+            "text": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "reasoning"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "text",
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A tool call and its authoritative result. Whether it succeeded is the item's own `status` — a tool-specific status beside it would be a second answer to the same question, and two answers can disagree.",
+          "properties": {
+            "artifact": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/AssetId"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Output too large for the item; read through `asset/readChunk`."
+            },
+            "diff": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "durationMs": {
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "input": {
+              "description": "The resolved input, exactly as the tool received it."
+            },
+            "name": {
+              "type": "string"
+            },
+            "output": {
+              "type": "string"
+            },
+            "summary": {
+              "type": "string"
+            },
+            "toolCallId": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "toolCall"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "durationMs",
+            "input",
+            "name",
+            "output",
+            "summary",
+            "toolCallId",
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A standalone shell run: the `!` command and its promoted background form.",
+          "properties": {
+            "artifact": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/AssetId"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "background": {
+              "description": "The run was promoted to the background; it is watch state from here.",
+              "type": "boolean"
+            },
+            "command": {
+              "type": "string"
+            },
+            "commandId": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/CommandId"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "dialect": {
+              "$ref": "#/definitions/ShellDialect"
+            },
+            "durationMs": {
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "exitCode": {
+              "format": "int32",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "output": {
+              "type": "string"
+            },
+            "tail": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/CommandTail"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "type": {
+              "enum": [
+                "command"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "background",
+            "command",
+            "dialect",
+            "durationMs",
+            "output",
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "History was summarized. The numbers are the compactor's own outcome.",
+          "properties": {
+            "afterTokens": {
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "beforeTokens": {
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "durationMs": {
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "replacedMessages": {
+              "format": "uint32",
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "type": {
+              "enum": [
+                "compaction"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "afterTokens",
+            "beforeTokens",
+            "durationMs",
+            "replacedMessages",
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "History was cut back to an earlier point.",
+          "properties": {
+            "mode": {
+              "$ref": "#/definitions/RewindMode"
+            },
+            "removedItems": {
+              "format": "uint32",
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "targetItemId": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/ItemId"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "type": {
+              "enum": [
+                "rewind"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "mode",
+            "removedItems",
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The user interrupted. `marker` is the exact string the transcript recorded, so the screen and the model read the same sentence.",
+          "properties": {
+            "marker": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "interruption"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "marker",
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Structured notice committed into the flow rather than raised as transient feedback.",
+          "properties": {
+            "code": {
+              "type": "string"
+            },
+            "level": {
+              "$ref": "#/definitions/NoticeLevel"
+            },
+            "text": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "notice"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "code",
+            "level",
+            "text",
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A question the user answered. This one does enter the model's context.",
+          "properties": {
+            "answer": {
+              "type": "string"
+            },
+            "interactionId": {
+              "$ref": "#/definitions/InteractionId"
+            },
+            "optionId": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "question": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "questionAnswer"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "answer",
+            "interactionId",
+            "question",
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A permission decision, for display and audit. Explicitly excluded from model input.",
+          "properties": {
+            "decision": {
+              "$ref": "#/definitions/PermissionDecisionKind"
+            },
+            "feedback": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "interactionId": {
+              "$ref": "#/definitions/InteractionId"
+            },
+            "scopeId": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/ScopeId"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "tool": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "permissionReceipt"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "decision",
+            "interactionId",
+            "tool",
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "An image or other asset, by opaque reference. No terminal cell geometry travels with it.",
+          "properties": {
+            "assetId": {
+              "$ref": "#/definitions/AssetId"
+            },
+            "label": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "enum": [
+                "asset"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "assetId",
+            "type"
+          ],
+          "type": "object"
+        }
+      ],
+      "properties": {
+        "completedAt": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "id": {
+          "$ref": "#/definitions/ItemId"
+        },
+        "startedAt": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "status": {
+          "$ref": "#/definitions/ItemStatus"
+        },
+        "turnId": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/TurnId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "status"
+      ],
+      "type": "object"
+    },
+    "ItemCursor": {
+      "description": "A cursor into one conversation's history. Bound to the generation it was issued under; a continuation from a stale one is refused rather than mixing pre- and post-rewrite history.",
+      "properties": {
+        "after": {
+          "$ref": "#/definitions/ItemId"
+        },
+        "historyGeneration": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "after",
+        "historyGeneration"
+      ],
+      "type": "object"
+    },
+    "ItemId": {
+      "type": "string"
+    },
+    "ItemStatus": {
+      "enum": [
+        "pending",
+        "streaming",
+        "completed",
+        "failed",
+        "cancelled"
+      ],
+      "type": "string"
+    },
+    "JsonRpcVersion": {
+      "const": "2.0",
+      "type": "string"
+    },
+    "McpServerState": {
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/definitions/McpStatus"
+        },
+        "tools": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "enabled",
+        "name",
+        "status",
+        "tools"
+      ],
+      "type": "object"
+    },
+    "McpStatus": {
+      "enum": [
+        "connecting",
+        "connected",
+        "disconnected",
+        "error"
+      ],
+      "type": "string"
+    },
+    "ModelInfo": {
+      "properties": {
+        "contextWindow": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "displayName": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "family": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "provider": {
+          "type": "string"
+        },
+        "supportsImages": {
+          "type": "boolean"
+        },
+        "supportsThinking": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "id",
+        "provider",
+        "supportsImages",
+        "supportsThinking"
+      ],
+      "type": "object"
+    },
+    "NoticeLevel": {
+      "enum": [
+        "info",
+        "warning",
+        "error"
+      ],
+      "type": "string"
+    },
+    "NotificationParams_for_AgentChanged": {
+      "description": "One notification's params: the event header, then the body's own fields.",
+      "properties": {
+        "agent": {
+          "$ref": "#/definitions/AgentResource"
+        },
+        "event": {
+          "$ref": "#/definitions/EventMeta"
+        }
+      },
+      "required": [
+        "agent",
+        "event"
+      ],
+      "type": "object"
+    },
+    "NotificationParams_for_AgentRemoved": {
+      "description": "One notification's params: the event header, then the body's own fields.",
+      "properties": {
+        "agentId": {
+          "$ref": "#/definitions/AgentId"
+        },
+        "event": {
+          "$ref": "#/definitions/EventMeta"
+        }
+      },
+      "required": [
+        "agentId",
+        "event"
+      ],
+      "type": "object"
+    },
+    "NotificationParams_for_AssetAvailable": {
+      "description": "One notification's params: the event header, then the body's own fields.",
+      "properties": {
+        "asset": {
+          "$ref": "#/definitions/AssetRecord"
+        },
+        "event": {
+          "$ref": "#/definitions/EventMeta"
+        }
+      },
+      "required": [
+        "asset",
+        "event"
+      ],
+      "type": "object"
+    },
+    "NotificationParams_for_CatalogChanged": {
+      "description": "One notification's params: the event header, then the body's own fields.",
+      "properties": {
+        "catalog": {
+          "$ref": "#/definitions/CatalogKind"
+        },
+        "event": {
+          "$ref": "#/definitions/EventMeta"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "catalog",
+        "event",
+        "revision"
+      ],
+      "type": "object"
+    },
+    "NotificationParams_for_CommandChanged": {
+      "description": "One notification's params: the event header, then the body's own fields.",
+      "properties": {
+        "command": {
+          "$ref": "#/definitions/BackgroundCommandResource"
+        },
+        "event": {
+          "$ref": "#/definitions/EventMeta"
+        }
+      },
+      "required": [
+        "command",
+        "event"
+      ],
+      "type": "object"
+    },
+    "NotificationParams_for_ConfigChanged": {
+      "description": "One notification's params: the event header, then the body's own fields.",
+      "properties": {
+        "config": {
+          "$ref": "#/definitions/ConfigSnapshot"
+        },
+        "event": {
+          "$ref": "#/definitions/EventMeta"
+        }
+      },
+      "required": [
+        "config",
+        "event"
+      ],
+      "type": "object"
+    },
+    "NotificationParams_for_ConversationChanged": {
+      "description": "One notification's params: the event header, then the body's own fields.",
+      "properties": {
+        "conversation": {
+          "$ref": "#/definitions/ConversationSummary"
+        },
+        "event": {
+          "$ref": "#/definitions/EventMeta"
+        }
+      },
+      "required": [
+        "conversation",
+        "event"
+      ],
+      "type": "object"
+    },
+    "NotificationParams_for_ConversationRemoved": {
+      "description": "One notification's params: the event header, then the body's own fields.",
+      "properties": {
+        "conversationId": {
+          "$ref": "#/definitions/ConversationId"
+        },
+        "event": {
+          "$ref": "#/definitions/EventMeta"
+        }
+      },
+      "required": [
+        "conversationId",
+        "event"
+      ],
+      "type": "object"
+    },
+    "NotificationParams_for_DeliveryChanged": {
+      "description": "One notification's params: the event header, then the body's own fields.",
+      "properties": {
+        "delivery": {
+          "$ref": "#/definitions/DeliveryResource"
+        },
+        "event": {
+          "$ref": "#/definitions/EventMeta"
+        }
+      },
+      "required": [
+        "delivery",
+        "event"
+      ],
+      "type": "object"
+    },
+    "NotificationParams_for_FeedbackCleared": {
+      "description": "One notification's params: the event header, then the body's own fields.",
+      "properties": {
+        "event": {
+          "$ref": "#/definitions/EventMeta"
+        },
+        "feedbackId": {
+          "$ref": "#/definitions/FeedbackId"
+        }
+      },
+      "required": [
+        "event",
+        "feedbackId"
+      ],
+      "type": "object"
+    },
+    "NotificationParams_for_FeedbackRaised": {
+      "description": "One notification's params: the event header, then the body's own fields.",
+      "properties": {
+        "event": {
+          "$ref": "#/definitions/EventMeta"
+        },
+        "feedback": {
+          "$ref": "#/definitions/Feedback"
+        }
+      },
+      "required": [
+        "event",
+        "feedback"
+      ],
+      "type": "object"
+    },
+    "NotificationParams_for_InteractionCancelled": {
+      "description": "One notification's params: the event header, then the body's own fields.",
+      "properties": {
+        "conversationId": {
+          "$ref": "#/definitions/ConversationId"
+        },
+        "event": {
+          "$ref": "#/definitions/EventMeta"
+        },
+        "interactionId": {
+          "$ref": "#/definitions/InteractionId"
+        },
+        "reason": {
+          "$ref": "#/definitions/InteractionCancelReason"
+        }
+      },
+      "required": [
+        "conversationId",
+        "event",
+        "interactionId",
+        "reason"
+      ],
+      "type": "object"
+    },
+    "NotificationParams_for_InteractionOpened": {
+      "description": "One notification's params: the event header, then the body's own fields.",
+      "properties": {
+        "event": {
+          "$ref": "#/definitions/EventMeta"
+        },
+        "interaction": {
+          "$ref": "#/definitions/Interaction"
+        }
+      },
+      "required": [
+        "event",
+        "interaction"
+      ],
+      "type": "object"
+    },
+    "NotificationParams_for_InteractionResolved": {
+      "description": "One notification's params: the event header, then the body's own fields.",
+      "properties": {
+        "conversationId": {
+          "$ref": "#/definitions/ConversationId"
+        },
+        "decision": {
+          "$ref": "#/definitions/InteractionDecision"
+        },
+        "event": {
+          "$ref": "#/definitions/EventMeta"
+        },
+        "interactionId": {
+          "$ref": "#/definitions/InteractionId"
+        },
+        "itemId": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ItemId"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The ordered item the resolution committed, before execution continued."
+        }
+      },
+      "required": [
+        "conversationId",
+        "decision",
+        "event",
+        "interactionId"
+      ],
+      "type": "object"
+    },
+    "NotificationParams_for_ItemChanged": {
+      "description": "One notification's params: the event header, then the body's own fields.",
+      "properties": {
+        "conversationId": {
+          "$ref": "#/definitions/ConversationId"
+        },
+        "event": {
+          "$ref": "#/definitions/EventMeta"
+        },
+        "item": {
+          "$ref": "#/definitions/Item"
+        },
+        "turnId": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/TurnId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "conversationId",
+        "event",
+        "item"
+      ],
+      "type": "object"
+    },
+    "NotificationParams_for_ItemCommandTailUpdated": {
+      "description": "One notification's params: the event header, then the body's own fields.",
+      "properties": {
+        "conversationId": {
+          "$ref": "#/definitions/ConversationId"
+        },
+        "event": {
+          "$ref": "#/definitions/EventMeta"
+        },
+        "itemId": {
+          "$ref": "#/definitions/ItemId"
+        },
+        "tail": {
+          "$ref": "#/definitions/CommandTail"
+        },
+        "turnId": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/TurnId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "conversationId",
+        "event",
+        "itemId",
+        "tail"
+      ],
+      "type": "object"
+    },
+    "NotificationParams_for_ItemDelta": {
+      "description": "One notification's params: the event header, then the body's own fields.",
+      "properties": {
+        "conversationId": {
+          "$ref": "#/definitions/ConversationId"
+        },
+        "delta": {
+          "type": "string"
+        },
+        "deltaSeq": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "event": {
+          "$ref": "#/definitions/EventMeta"
+        },
+        "itemId": {
+          "$ref": "#/definitions/ItemId"
+        },
+        "turnId": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/TurnId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "conversationId",
+        "delta",
+        "deltaSeq",
+        "event",
+        "itemId"
+      ],
+      "type": "object"
+    },
+    "NotificationParams_for_OperationChanged": {
+      "description": "One notification's params: the event header, then the body's own fields.",
+      "properties": {
+        "event": {
+          "$ref": "#/definitions/EventMeta"
+        },
+        "operation": {
+          "$ref": "#/definitions/Operation"
+        }
+      },
+      "required": [
+        "event",
+        "operation"
+      ],
+      "type": "object"
+    },
+    "NotificationParams_for_OperationProgressed": {
+      "description": "One notification's params: the event header, then the body's own fields.",
+      "properties": {
+        "event": {
+          "$ref": "#/definitions/EventMeta"
+        },
+        "operationId": {
+          "$ref": "#/definitions/OperationId"
+        },
+        "progress": {
+          "$ref": "#/definitions/OperationProgress"
+        }
+      },
+      "required": [
+        "event",
+        "operationId",
+        "progress"
+      ],
+      "type": "object"
+    },
+    "NotificationParams_for_QueueItemAbsorbed": {
+      "description": "One notification's params: the event header, then the body's own fields.",
+      "properties": {
+        "conversationId": {
+          "$ref": "#/definitions/ConversationId"
+        },
+        "event": {
+          "$ref": "#/definitions/EventMeta"
+        },
+        "itemId": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/ItemId"
+            }
+          ],
+          "description": "The conversation item the absorbed input became."
+        },
+        "queueId": {
+          "$ref": "#/definitions/QueueId"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "turnId": {
+          "$ref": "#/definitions/TurnId"
+        }
+      },
+      "required": [
+        "conversationId",
+        "event",
+        "itemId",
+        "queueId",
+        "revision",
+        "turnId"
+      ],
+      "type": "object"
+    },
+    "NotificationParams_for_QueueItemAdded": {
+      "description": "One notification's params: the event header, then the body's own fields.",
+      "properties": {
+        "conversationId": {
+          "$ref": "#/definitions/ConversationId"
+        },
+        "entry": {
+          "$ref": "#/definitions/QueueEntry"
+        },
+        "event": {
+          "$ref": "#/definitions/EventMeta"
+        },
+        "position": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "conversationId",
+        "entry",
+        "event",
+        "position",
+        "revision"
+      ],
+      "type": "object"
+    },
+    "NotificationParams_for_QueueItemRemoved": {
+      "description": "One notification's params: the event header, then the body's own fields.",
+      "properties": {
+        "conversationId": {
+          "$ref": "#/definitions/ConversationId"
+        },
+        "event": {
+          "$ref": "#/definitions/EventMeta"
+        },
+        "queueId": {
+          "$ref": "#/definitions/QueueId"
+        },
+        "reason": {
+          "$ref": "#/definitions/QueueRemovalReason"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "conversationId",
+        "event",
+        "queueId",
+        "reason",
+        "revision"
+      ],
+      "type": "object"
+    },
+    "NotificationParams_for_RoomChanged": {
+      "description": "One notification's params: the event header, then the body's own fields.",
+      "properties": {
+        "event": {
+          "$ref": "#/definitions/EventMeta"
+        },
+        "room": {
+          "$ref": "#/definitions/RoomResource"
+        }
+      },
+      "required": [
+        "event",
+        "room"
+      ],
+      "type": "object"
+    },
+    "NotificationParams_for_SessionClosed": {
+      "description": "One notification's params: the event header, then the body's own fields.",
+      "properties": {
+        "event": {
+          "$ref": "#/definitions/EventMeta"
+        },
+        "reason": {
+          "$ref": "#/definitions/SessionCloseReason"
+        },
+        "sessionId": {
+          "$ref": "#/definitions/SessionId"
+        }
+      },
+      "required": [
+        "event",
+        "reason",
+        "sessionId"
+      ],
+      "type": "object"
+    },
+    "NotificationParams_for_SessionDeleted": {
+      "description": "One notification's params: the event header, then the body's own fields.",
+      "properties": {
+        "event": {
+          "$ref": "#/definitions/EventMeta"
+        },
+        "locator": {
+          "$ref": "#/definitions/SessionLocator"
+        }
+      },
+      "required": [
+        "event",
+        "locator"
+      ],
+      "type": "object"
+    },
+    "NotificationParams_for_SessionUpdated": {
+      "description": "One notification's params: the event header, then the body's own fields.",
+      "properties": {
+        "event": {
+          "$ref": "#/definitions/EventMeta"
+        },
+        "session": {
+          "$ref": "#/definitions/SessionSummary"
+        }
+      },
+      "required": [
+        "event",
+        "session"
+      ],
+      "type": "object"
+    },
+    "NotificationParams_for_TaskChanged": {
+      "description": "One notification's params: the event header, then the body's own fields.",
+      "properties": {
+        "event": {
+          "$ref": "#/definitions/EventMeta"
+        },
+        "task": {
+          "$ref": "#/definitions/TaskResource"
+        }
+      },
+      "required": [
+        "event",
+        "task"
+      ],
+      "type": "object"
+    },
+    "NotificationParams_for_TaskRemoved": {
+      "description": "One notification's params: the event header, then the body's own fields.",
+      "properties": {
+        "event": {
+          "$ref": "#/definitions/EventMeta"
+        },
+        "taskId": {
+          "$ref": "#/definitions/TaskId"
+        }
+      },
+      "required": [
+        "event",
+        "taskId"
+      ],
+      "type": "object"
+    },
+    "NotificationParams_for_TurnChanged": {
+      "description": "One notification's params: the event header, then the body's own fields.",
+      "properties": {
+        "conversationId": {
+          "$ref": "#/definitions/ConversationId"
+        },
+        "event": {
+          "$ref": "#/definitions/EventMeta"
+        },
+        "turn": {
+          "$ref": "#/definitions/Turn"
+        }
+      },
+      "required": [
+        "conversationId",
+        "event",
+        "turn"
+      ],
+      "type": "object"
+    },
+    "NotificationParams_for_TurnRetrying": {
+      "description": "One notification's params: the event header, then the body's own fields.",
+      "properties": {
+        "attempt": {
+          "description": "Attempts made so far, including the one that just failed.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "code": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "conversationId": {
+          "$ref": "#/definitions/ConversationId"
+        },
+        "delayMs": {
+          "description": "How long the core waits before the next attempt.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "event": {
+          "$ref": "#/definitions/EventMeta"
+        },
+        "maxAttempts": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "removedItemIds": {
+          "items": {
+            "$ref": "#/definitions/ItemId"
+          },
+          "type": "array"
+        },
+        "round": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "turnId": {
+          "$ref": "#/definitions/TurnId"
+        }
+      },
+      "required": [
+        "attempt",
+        "conversationId",
+        "delayMs",
+        "event",
+        "maxAttempts",
+        "removedItemIds",
+        "round",
+        "turnId"
+      ],
+      "type": "object"
+    },
+    "NotificationParams_for_TurnRoundCompleted": {
+      "description": "One notification's params: the event header, then the body's own fields.",
+      "properties": {
+        "conversationId": {
+          "$ref": "#/definitions/ConversationId"
+        },
+        "event": {
+          "$ref": "#/definitions/EventMeta"
+        },
+        "round": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "turnId": {
+          "$ref": "#/definitions/TurnId"
+        },
+        "usage": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/TurnUsage"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "conversationId",
+        "event",
+        "round",
+        "turnId"
+      ],
+      "type": "object"
+    },
+    "NotificationParams_for_TurnRoundStarted": {
+      "description": "One notification's params: the event header, then the body's own fields.",
+      "properties": {
+        "conversationId": {
+          "$ref": "#/definitions/ConversationId"
+        },
+        "event": {
+          "$ref": "#/definitions/EventMeta"
+        },
+        "round": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "turnId": {
+          "$ref": "#/definitions/TurnId"
+        }
+      },
+      "required": [
+        "conversationId",
+        "event",
+        "round",
+        "turnId"
+      ],
+      "type": "object"
+    },
+    "NotificationParams_for_TurnUsageUpdated": {
+      "description": "One notification's params: the event header, then the body's own fields.",
+      "properties": {
+        "contextUsage": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ContextUsage"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "conversationId": {
+          "$ref": "#/definitions/ConversationId"
+        },
+        "event": {
+          "$ref": "#/definitions/EventMeta"
+        },
+        "turnId": {
+          "$ref": "#/definitions/TurnId"
+        },
+        "usage": {
+          "$ref": "#/definitions/TurnUsage"
+        }
+      },
+      "required": [
+        "conversationId",
+        "event",
+        "turnId",
+        "usage"
+      ],
+      "type": "object"
+    },
+    "Obligation": {
+      "properties": {
+        "from": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "itemId": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ItemId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "kind": {
+          "$ref": "#/definitions/ObligationKind"
+        },
+        "since": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "kind",
+        "since"
+      ],
+      "type": "object"
+    },
+    "ObligationKind": {
+      "description": "Something the conversation is waiting on the user for, stated rather than inferred from prose.",
+      "oneOf": [
+        {
+          "description": "The user was mentioned and has not replied.",
+          "enum": [
+            "mentionDebt"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "A question is open on the user.",
+          "enum": [
+            "awaitingUser"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "A message the user sent has not been answered.",
+          "enum": [
+            "unansweredMessage"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "Operation": {
+      "description": "Accepted asynchronous work that is not naturally a turn. Exactly one terminal state, like a turn.",
+      "properties": {
+        "completedAt": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "conversationId": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ConversationId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "error": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/TurnError"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "id": {
+          "$ref": "#/definitions/OperationId"
+        },
+        "kind": {
+          "$ref": "#/definitions/OperationKind"
+        },
+        "progress": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/OperationProgress"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "startedAt": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "status": {
+          "$ref": "#/definitions/OperationStatus"
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "startedAt",
+        "status"
+      ],
+      "type": "object"
+    },
+    "OperationId": {
+      "type": "string"
+    },
+    "OperationKind": {
+      "enum": [
+        "providerLogin",
+        "providerLogout",
+        "share",
+        "mcpReconnect",
+        "teamStart",
+        "garbageCollect",
+        "compact",
+        "rewind",
+        "sessionDelete",
+        "skillInvoke"
+      ],
+      "type": "string"
+    },
+    "OperationProgress": {
+      "properties": {
+        "done": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "label": {
+          "type": "string"
+        },
+        "total": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "label"
+      ],
+      "type": "object"
+    },
+    "OperationStatus": {
+      "enum": [
+        "running",
+        "completed",
+        "failed",
+        "cancelled"
+      ],
+      "type": "string"
+    },
+    "Page_for_ConversationSummary": {
+      "description": "One page of a paginated read. `next_cursor` is absent at the end.",
+      "properties": {
+        "items": {
+          "items": {
+            "$ref": "#/definitions/ConversationSummary"
+          },
+          "type": "array"
+        },
+        "nextCursor": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "items",
+        "revision"
+      ],
+      "type": "object"
+    },
+    "Page_for_Item": {
+      "description": "One page of a paginated read. `next_cursor` is absent at the end.",
+      "properties": {
+        "items": {
+          "items": {
+            "$ref": "#/definitions/Item"
+          },
+          "type": "array"
+        },
+        "nextCursor": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "items",
+        "revision"
+      ],
+      "type": "object"
+    },
+    "Page_for_QueueEntry": {
+      "description": "One page of a paginated read. `next_cursor` is absent at the end.",
+      "properties": {
+        "items": {
+          "items": {
+            "$ref": "#/definitions/QueueEntry"
+          },
+          "type": "array"
+        },
+        "nextCursor": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "items",
+        "revision"
+      ],
+      "type": "object"
+    },
+    "Page_for_SessionListEntry": {
+      "description": "One page of a paginated read. `next_cursor` is absent at the end.",
+      "properties": {
+        "items": {
+          "items": {
+            "$ref": "#/definitions/SessionListEntry"
+          },
+          "type": "array"
+        },
+        "nextCursor": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "items",
+        "revision"
+      ],
+      "type": "object"
+    },
+    "PermissionDecisionKind": {
+      "description": "What the user chose at a permission prompt, and what the server advertises as choosable.",
+      "enum": [
+        "allowOnce",
+        "allowSession",
+        "deny"
+      ],
+      "type": "string"
+    },
+    "PermissionMode": {
+      "enum": [
+        "default",
+        "acceptEdits",
+        "bypassPermissions",
+        "dontAsk",
+        "plan"
+      ],
+      "type": "string"
+    },
+    "PermissionRule": {
+      "properties": {
+        "decision": {
+          "$ref": "#/definitions/PermissionRuleDecision"
+        },
+        "rule": {
+          "type": "string"
+        },
+        "sessionScoped": {
+          "description": "Installed for this session only (an `allowSession` grant), rather than read from settings.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "decision",
+        "rule",
+        "sessionScoped"
+      ],
+      "type": "object"
+    },
+    "PermissionRuleDecision": {
+      "enum": [
+        "allow",
+        "deny",
+        "ask"
+      ],
+      "type": "string"
+    },
+    "ProtocolRange": {
+      "description": "The major the client speaks and the minor window it accepts.",
+      "properties": {
+        "major": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "maxMinor": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "minMinor": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "major",
+        "maxMinor",
+        "minMinor"
+      ],
+      "type": "object"
+    },
+    "ProtocolVersion": {
+      "properties": {
+        "major": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "minor": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "major",
+        "minor"
+      ],
+      "type": "object"
+    },
+    "ProviderInfo": {
+      "properties": {
+        "apiBaseUrl": {
+          "type": "string"
+        },
+        "builtin": {
+          "type": "boolean"
+        },
+        "credential": {
+          "$ref": "#/definitions/CredentialState"
+        },
+        "name": {
+          "type": "string"
+        },
+        "protocol": {
+          "type": "string"
+        },
+        "supportsImages": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "apiBaseUrl",
+        "builtin",
+        "credential",
+        "name",
+        "protocol",
+        "supportsImages"
+      ],
+      "type": "object"
+    },
+    "QuestionOption": {
+      "properties": {
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "label"
+      ],
+      "type": "object"
+    },
+    "QueueEntry": {
+      "description": "One entry of a conversation's input queue. The page it was submitted on is immutable: a queued command runs where it was typed.",
+      "properties": {
+        "attachments": {
+          "items": {
+            "$ref": "#/definitions/AssetId"
+          },
+          "type": "array"
+        },
+        "id": {
+          "$ref": "#/definitions/QueueId"
+        },
+        "originConversationId": {
+          "$ref": "#/definitions/ConversationId"
+        },
+        "queuedAt": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "steerEligible": {
+          "description": "Plain, attachment-free input in the eligible FIFO prefix may be absorbed at a tool barrier. A command or an attachment blocks everything behind it.",
+          "type": "boolean"
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "attachments",
+        "id",
+        "originConversationId",
+        "queuedAt",
+        "steerEligible",
+        "text"
+      ],
+      "type": "object"
+    },
+    "QueueId": {
+      "description": "One entry in a conversation's input queue.",
+      "type": "string"
+    },
+    "QueueReadParams": {
+      "properties": {
+        "conversationId": {
+          "$ref": "#/definitions/ConversationId"
+        },
+        "cursor": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "limit": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "conversationId"
+      ],
+      "type": "object"
+    },
+    "QueueReadResult": {
+      "properties": {
+        "count": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "entries": {
+          "$ref": "#/definitions/Page_for_QueueEntry"
+        }
+      },
+      "required": [
+        "count",
+        "entries"
+      ],
+      "type": "object"
+    },
+    "QueueReclaimTailParams": {
+      "properties": {
+        "conversationId": {
+          "$ref": "#/definitions/ConversationId"
+        },
+        "expectedRevision": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "conversationId"
+      ],
+      "type": "object"
+    },
+    "QueueReclaimTailResult": {
+      "properties": {
+        "outcome": {
+          "$ref": "#/definitions/ReclaimOutcome"
+        }
+      },
+      "required": [
+        "outcome"
+      ],
+      "type": "object"
+    },
+    "QueueRemovalReason": {
+      "oneOf": [
+        {
+          "description": "Drained from the front into a new turn.",
+          "enum": [
+            "drained"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Pulled back by the user.",
+          "enum": [
+            "reclaimed"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Dropped with the conversation or by a reset.",
+          "enum": [
+            "cleared"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "ReclaimOutcome": {
+      "description": "Reclaim and absorption are one race with one winner.",
+      "oneOf": [
+        {
+          "properties": {
+            "entry": {
+              "$ref": "#/definitions/QueueEntry"
+            },
+            "revision": {
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "type": {
+              "enum": [
+                "reclaimed"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "entry",
+            "revision",
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A tool barrier took it first; it is in the running turn's context now.",
+          "properties": {
+            "queueId": {
+              "$ref": "#/definitions/QueueId"
+            },
+            "type": {
+              "enum": [
+                "alreadyAbsorbed"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "queueId",
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "enum": [
+                "empty"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "RequestId": {
+      "anyOf": [
+        {
+          "format": "int64",
+          "type": "integer"
+        },
+        {
+          "type": "string"
+        },
+        {
+          "description": "JSON-RPC's null id, which a reply carries when the request it answers could not be read at all — a parse error or a frame that is JSON but not a request has no id to echo.",
+          "type": "null"
+        }
+      ],
+      "description": "Correlates one wire request with its reply. It correlates transport calls only: application resources are named by their own server-minted IDs."
+    },
+    "ResourceKind": {
+      "enum": [
+        "agents",
+        "rooms",
+        "tasks",
+        "deliveries",
+        "backgroundCommands"
+      ],
+      "type": "string"
+    },
+    "ResourcePage": {
+      "oneOf": [
+        {
+          "description": "One page of a paginated read. `next_cursor` is absent at the end.",
+          "properties": {
+            "items": {
+              "items": {
+                "$ref": "#/definitions/AgentResource"
+              },
+              "type": "array"
+            },
+            "nextCursor": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "resource": {
+              "enum": [
+                "agents"
+              ],
+              "type": "string"
+            },
+            "revision": {
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "items",
+            "resource",
+            "revision"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "One page of a paginated read. `next_cursor` is absent at the end.",
+          "properties": {
+            "items": {
+              "items": {
+                "$ref": "#/definitions/RoomResource"
+              },
+              "type": "array"
+            },
+            "nextCursor": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "resource": {
+              "enum": [
+                "rooms"
+              ],
+              "type": "string"
+            },
+            "revision": {
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "items",
+            "resource",
+            "revision"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "One page of a paginated read. `next_cursor` is absent at the end.",
+          "properties": {
+            "items": {
+              "items": {
+                "$ref": "#/definitions/TaskResource"
+              },
+              "type": "array"
+            },
+            "nextCursor": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "resource": {
+              "enum": [
+                "tasks"
+              ],
+              "type": "string"
+            },
+            "revision": {
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "items",
+            "resource",
+            "revision"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "One page of a paginated read. `next_cursor` is absent at the end.",
+          "properties": {
+            "items": {
+              "items": {
+                "$ref": "#/definitions/DeliveryResource"
+              },
+              "type": "array"
+            },
+            "nextCursor": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "resource": {
+              "enum": [
+                "deliveries"
+              ],
+              "type": "string"
+            },
+            "revision": {
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "items",
+            "resource",
+            "revision"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "One page of a paginated read. `next_cursor` is absent at the end.",
+          "properties": {
+            "items": {
+              "items": {
+                "$ref": "#/definitions/BackgroundCommandResource"
+              },
+              "type": "array"
+            },
+            "nextCursor": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "resource": {
+              "enum": [
+                "backgroundCommands"
+              ],
+              "type": "string"
+            },
+            "revision": {
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "items",
+            "resource",
+            "revision"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ResourceReadParams": {
+      "properties": {
+        "cursor": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "limit": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "resource": {
+          "$ref": "#/definitions/ResourceKind"
+        }
+      },
+      "required": [
+        "resource"
+      ],
+      "type": "object"
+    },
+    "ResourceReadResult": {
+      "properties": {
+        "resource": {
+          "$ref": "#/definitions/ResourcePage"
+        }
+      },
+      "required": [
+        "resource"
+      ],
+      "type": "object"
+    },
+    "ResourceRevision": {
+      "description": "An expected revision carried by a mutation, so a stale write fails instead of overwriting a concurrently refreshed view.",
+      "properties": {
+        "revision": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "scope": {
+          "$ref": "#/definitions/RevisionScope"
+        }
+      },
+      "required": [
+        "revision",
+        "scope"
+      ],
+      "type": "object"
+    },
+    "RespondStatus": {
+      "enum": [
+        "accepted"
+      ],
+      "type": "string"
+    },
+    "ResponseResult": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/InitializeResult"
+        },
+        {
+          "$ref": "#/definitions/ShutdownResult"
+        },
+        {
+          "$ref": "#/definitions/SessionListResult"
+        },
+        {
+          "$ref": "#/definitions/SessionStartResult"
+        },
+        {
+          "$ref": "#/definitions/SessionResumeResult"
+        },
+        {
+          "$ref": "#/definitions/SessionReadResult"
+        },
+        {
+          "$ref": "#/definitions/SessionCloseResult"
+        },
+        {
+          "$ref": "#/definitions/SessionDeleteResult"
+        },
+        {
+          "$ref": "#/definitions/ConversationListResult"
+        },
+        {
+          "$ref": "#/definitions/ConversationReadResult"
+        },
+        {
+          "$ref": "#/definitions/ConversationMarkReadResult"
+        },
+        {
+          "$ref": "#/definitions/ConversationSubmitResult"
+        },
+        {
+          "$ref": "#/definitions/TurnInterruptResult"
+        },
+        {
+          "$ref": "#/definitions/QueueReadResult"
+        },
+        {
+          "$ref": "#/definitions/QueueReclaimTailResult"
+        },
+        {
+          "$ref": "#/definitions/InteractionRespondResult"
+        },
+        {
+          "$ref": "#/definitions/ActionListResult"
+        },
+        {
+          "$ref": "#/definitions/ActionExecuteResult"
+        },
+        {
+          "$ref": "#/definitions/ConfigReadResult"
+        },
+        {
+          "$ref": "#/definitions/CatalogReadResult"
+        },
+        {
+          "$ref": "#/definitions/ResourceReadResult"
+        },
+        {
+          "$ref": "#/definitions/AssetRegisterPathResult"
+        },
+        {
+          "$ref": "#/definitions/AssetReadChunkResult"
+        }
+      ],
+      "description": "A successful reply's payload. Its shape is decided by the method that was called, and the frame does not repeat the method — so decoding takes one, exactly as a client holding its own request does."
+    },
+    "RevisionScope": {
+      "description": "Which revisioned resource a precondition or change refers to.",
+      "enum": [
+        "session",
+        "conversation",
+        "queue",
+        "config",
+        "catalog",
+        "agents",
+        "rooms",
+        "tasks",
+        "team"
+      ],
+      "type": "string"
+    },
+    "RewindMode": {
+      "enum": [
+        "preview",
+        "applied"
+      ],
+      "type": "string"
+    },
+    "RewindTarget": {
+      "description": "Where a rewind cuts back to.",
+      "oneOf": [
+        {
+          "description": "Back to the state before this item.",
+          "properties": {
+            "itemId": {
+              "$ref": "#/definitions/ItemId"
+            },
+            "type": {
+              "enum": [
+                "item"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "itemId",
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The most recent checkpoint, which is what `/rewind` with no argument means.",
+          "properties": {
+            "type": {
+              "enum": [
+                "latest"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "RoomId": {
+      "type": "string"
+    },
+    "RoomMode": {
+      "oneOf": [
+        {
+          "description": "Everyone in the roster reads every post.",
+          "enum": [
+            "broadcast"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Posts reach the room's members when they next look.",
+          "enum": [
+            "relay"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "RoomResource": {
+      "properties": {
+        "conversationId": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ConversationId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "id": {
+          "$ref": "#/definitions/RoomId"
+        },
+        "lastSeq": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "members": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "mentions": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "messageCount": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "mode": {
+          "$ref": "#/definitions/RoomMode"
+        },
+        "name": {
+          "type": "string"
+        },
+        "topic": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "unread": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "userIsMember": {
+          "description": "The user joined, and may therefore speak.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "id",
+        "lastSeq",
+        "members",
+        "mentions",
+        "messageCount",
+        "mode",
+        "name",
+        "unread",
+        "userIsMember"
+      ],
+      "type": "object"
+    },
+    "RpcError": {
+      "description": "A JSON-RPC error object.",
+      "properties": {
+        "code": {
+          "format": "int32",
+          "type": "integer"
+        },
+        "data": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ErrorData"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "message": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "message"
+      ],
+      "type": "object"
+    },
+    "RuntimeCollections": {
+      "description": "The unbounded collections a session owns, each as a revision plus the entries worth carrying inline.",
+      "properties": {
+        "agents": {
+          "$ref": "#/definitions/Collection_for_AgentResource"
+        },
+        "backgroundCommands": {
+          "$ref": "#/definitions/Collection_for_BackgroundCommandResource"
+        },
+        "deliveries": {
+          "$ref": "#/definitions/Collection_for_DeliveryResource"
+        },
+        "mcpServers": {
+          "items": {
+            "$ref": "#/definitions/McpServerState"
+          },
+          "type": "array"
+        },
+        "rooms": {
+          "$ref": "#/definitions/Collection_for_RoomResource"
+        },
+        "tasks": {
+          "$ref": "#/definitions/Collection_for_TaskResource"
+        }
+      },
+      "required": [
+        "agents",
+        "backgroundCommands",
+        "deliveries",
+        "mcpServers",
+        "rooms",
+        "tasks"
+      ],
+      "type": "object"
+    },
+    "ScopeId": {
+      "description": "A permission rule the server derived and would install for the session. Handed out with the prompt so `allowSession` names a scope the server verified rather than one the client composed.",
+      "type": "string"
+    },
+    "ServerCapabilities": {
+      "description": "What this build can do, reported rather than inferred from model or provider names.",
+      "properties": {
+        "images": {
+          "type": "boolean"
+        },
+        "multiConversation": {
+          "type": "boolean"
+        },
+        "reasoning": {
+          "type": "boolean"
+        },
+        "rooms": {
+          "type": "boolean"
+        },
+        "shell": {
+          "type": "boolean"
+        },
+        "teams": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "images",
+        "multiConversation",
+        "reasoning",
+        "rooms",
+        "shell",
+        "teams"
+      ],
+      "type": "object"
+    },
+    "ServerInfo": {
+      "properties": {
+        "epoch": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/EpochId"
+            }
+          ],
+          "description": "This process's run. Every resource ID belongs to it and dies with it."
+        },
+        "name": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "epoch",
+        "name",
+        "version"
+      ],
+      "type": "object"
+    },
+    "SessionCloseParams": {
+      "type": "object"
+    },
+    "SessionCloseReason": {
+      "oneOf": [
+        {
+          "description": "The client asked for it.",
+          "enum": [
+            "requested"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "The transport reached EOF and the shutdown policy ran.",
+          "enum": [
+            "disconnected"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "The session was replaced by a reset or a resume.",
+          "enum": [
+            "replaced"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "SessionCloseResult": {
+      "properties": {
+        "sessionId": {
+          "$ref": "#/definitions/SessionId"
+        }
+      },
+      "required": [
+        "sessionId"
+      ],
+      "type": "object"
+    },
+    "SessionDeleteParams": {
+      "properties": {
+        "locator": {
+          "$ref": "#/definitions/SessionLocator"
+        }
+      },
+      "required": [
+        "locator"
+      ],
+      "type": "object"
+    },
+    "SessionDeleteResult": {
+      "properties": {
+        "deleted": {
+          "type": "boolean"
+        },
+        "locator": {
+          "$ref": "#/definitions/SessionLocator"
+        }
+      },
+      "required": [
+        "deleted",
+        "locator"
+      ],
+      "type": "object"
+    },
+    "SessionId": {
+      "description": "The open session. Immutable within an epoch — a rename moves the storage locator and the display name, not this.",
+      "type": "string"
+    },
+    "SessionListEntry": {
+      "description": "One persisted session as `session/list` reports it.",
+      "properties": {
+        "cwd": {
+          "type": "string"
+        },
+        "locator": {
+          "$ref": "#/definitions/SessionLocator"
+        },
+        "messageCount": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "open": {
+          "description": "This session is the one currently open on this connection.",
+          "type": "boolean"
+        },
+        "title": {
+          "type": "string"
+        },
+        "updatedAt": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "cwd",
+        "locator",
+        "messageCount",
+        "open",
+        "title",
+        "updatedAt"
+      ],
+      "type": "object"
+    },
+    "SessionListParams": {
+      "properties": {
+        "cursor": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "limit": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "SessionListResult": {
+      "properties": {
+        "sessions": {
+          "$ref": "#/definitions/Page_for_SessionListEntry"
+        }
+      },
+      "required": [
+        "sessions"
+      ],
+      "type": "object"
+    },
+    "SessionLocator": {
+      "description": "How a persisted session is named on the wire. Opaque session IDs die with their epoch, so selection uses an explicit transcript locator instead.",
+      "oneOf": [
+        {
+          "description": "The most recently active session, which is what `/resume` with no argument and `--continue` both mean.",
+          "properties": {
+            "type": {
+              "enum": [
+                "latest"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Exact transcript stem (`{slug}-{ts}`).",
+          "properties": {
+            "stem": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "stem"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "stem",
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Exact transcript path.",
+          "properties": {
+            "path": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "path"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "path",
+            "type"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "SessionReadParams": {
+      "type": "object"
+    },
+    "SessionReadResult": {
+      "properties": {
+        "snapshot": {
+          "$ref": "#/definitions/SessionSnapshot"
+        }
+      },
+      "required": [
+        "snapshot"
+      ],
+      "type": "object"
+    },
+    "SessionResumeParams": {
+      "properties": {
+        "locator": {
+          "$ref": "#/definitions/SessionLocator"
+        }
+      },
+      "required": [
+        "locator"
+      ],
+      "type": "object"
+    },
+    "SessionResumeResult": {
+      "properties": {
+        "snapshot": {
+          "$ref": "#/definitions/SessionSnapshot"
+        }
+      },
+      "required": [
+        "snapshot"
+      ],
+      "type": "object"
+    },
+    "SessionScope": {
+      "description": "A permission rule the server derived and verified, offered as the scope of an `allowSession` decision. Session-lived: never written to settings or the transcript.",
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/ScopeId"
+        },
+        "label": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "label"
+      ],
+      "type": "object"
+    },
+    "SessionSnapshot": {
+      "description": "An atomic read of the session. Valid through `event_cursor`: the first event a client sees afterwards has a strictly greater `seq`.",
+      "properties": {
+        "activeTurns": {
+          "items": {
+            "$ref": "#/definitions/Turn"
+          },
+          "type": "array"
+        },
+        "capabilities": {
+          "$ref": "#/definitions/ServerCapabilities"
+        },
+        "collections": {
+          "$ref": "#/definitions/RuntimeCollections"
+        },
+        "config": {
+          "$ref": "#/definitions/ConfigSnapshot"
+        },
+        "conversations": {
+          "$ref": "#/definitions/Collection_for_ConversationSummary"
+        },
+        "eventCursor": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "feedback": {
+          "items": {
+            "$ref": "#/definitions/Feedback"
+          },
+          "type": "array"
+        },
+        "interactions": {
+          "items": {
+            "$ref": "#/definitions/Interaction"
+          },
+          "type": "array"
+        },
+        "operations": {
+          "items": {
+            "$ref": "#/definitions/Operation"
+          },
+          "type": "array"
+        },
+        "session": {
+          "$ref": "#/definitions/SessionSummary"
+        }
+      },
+      "required": [
+        "activeTurns",
+        "capabilities",
+        "collections",
+        "config",
+        "conversations",
+        "eventCursor",
+        "feedback",
+        "interactions",
+        "operations",
+        "session"
+      ],
+      "type": "object"
+    },
+    "SessionStartParams": {
+      "properties": {
+        "cwd": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "permissionMode": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/PermissionMode"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "provider": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "thinking": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ThinkingLevel"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "SessionStartResult": {
+      "properties": {
+        "snapshot": {
+          "$ref": "#/definitions/SessionSnapshot"
+        }
+      },
+      "required": [
+        "snapshot"
+      ],
+      "type": "object"
+    },
+    "SessionState": {
+      "enum": [
+        "active",
+        "closed"
+      ],
+      "type": "string"
+    },
+    "SessionSummary": {
+      "description": "The session's own bounded state. Everything unbounded it owns is a collection.",
+      "properties": {
+        "createdAt": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "cwd": {
+          "type": "string"
+        },
+        "epoch": {
+          "$ref": "#/definitions/EpochId"
+        },
+        "id": {
+          "$ref": "#/definitions/SessionId"
+        },
+        "locator": {
+          "$ref": "#/definitions/SessionLocator"
+        },
+        "model": {
+          "type": "string"
+        },
+        "permissionMode": {
+          "$ref": "#/definitions/PermissionMode"
+        },
+        "provider": {
+          "type": "string"
+        },
+        "resumed": {
+          "description": "The session resumed a persisted transcript rather than starting empty.",
+          "type": "boolean"
+        },
+        "state": {
+          "$ref": "#/definitions/SessionState"
+        },
+        "thinking": {
+          "$ref": "#/definitions/ThinkingLevel"
+        },
+        "title": {
+          "type": "string"
+        },
+        "updatedAt": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "createdAt",
+        "cwd",
+        "epoch",
+        "id",
+        "locator",
+        "model",
+        "permissionMode",
+        "provider",
+        "resumed",
+        "state",
+        "thinking",
+        "title",
+        "updatedAt"
+      ],
+      "type": "object"
+    },
+    "ShellDialect": {
+      "description": "Syntax family of the resolved shell, so a frontend can render (and a model can be told) what a command line will be parsed as.",
+      "enum": [
+        "posix",
+        "powershell",
+        "cmd",
+        "unknown"
+      ],
+      "type": "string"
+    },
+    "ShutdownParams": {
+      "description": "EOF does the same thing. The shutdown policy interrupts active work and resolves interactions fail-closed before persistence and exit.",
+      "type": "object"
+    },
+    "ShutdownResult": {
+      "properties": {
+        "deniedInteractions": {
+          "description": "Interactions that were open and were resolved closed.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "interruptedTurns": {
+          "description": "Work the shutdown interrupted on its way out.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "deniedInteractions",
+        "interruptedTurns"
+      ],
+      "type": "object"
+    },
+    "SkillInfo": {
+      "properties": {
+        "description": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "source": {
+          "$ref": "#/definitions/SkillSource"
+        }
+      },
+      "required": [
+        "description",
+        "name",
+        "source"
+      ],
+      "type": "object"
+    },
+    "SkillSource": {
+      "enum": [
+        "bundled",
+        "user",
+        "project",
+        "plugin"
+      ],
+      "type": "string"
+    },
+    "Submission": {
+      "description": "What a client submitted to a conversation.\n\n`Composer` is the human path — leading slash, shell mode, and direct-address syntax all mean what they mean in the CLI, so a GUI cannot silently bypass them. `SendProse` is the explicit programmatic delivery that parses none of those forms.",
+      "oneOf": [
+        {
+          "properties": {
+            "attachments": {
+              "items": {
+                "$ref": "#/definitions/AssetId"
+              },
+              "type": "array"
+            },
+            "mode": {
+              "$ref": "#/definitions/ComposerMode"
+            },
+            "text": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "composer"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "attachments",
+            "mode",
+            "text",
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "attachments": {
+              "items": {
+                "$ref": "#/definitions/AssetId"
+              },
+              "type": "array"
+            },
+            "text": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "sendProse"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "attachments",
+            "text",
+            "type"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "SubmitDisposition": {
+      "description": "What the core did with a submission. The caller never chooses between these: queue-versus-steer, delivery-versus-turn, and command scope are the core's.",
+      "oneOf": [
+        {
+          "properties": {
+            "turnId": {
+              "$ref": "#/definitions/TurnId"
+            },
+            "type": {
+              "enum": [
+                "turnStarted"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "turnId",
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Accepted behind a busy turn. Queueing never promises that steering will happen — if a tool barrier absorbs the entry, `queue/itemAbsorbed` says so.",
+          "properties": {
+            "position": {
+              "format": "uint32",
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "queueId": {
+              "$ref": "#/definitions/QueueId"
+            },
+            "steerEligible": {
+              "type": "boolean"
+            },
+            "type": {
+              "enum": [
+                "queued"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "position",
+            "queueId",
+            "steerEligible",
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Handed to a conversation that does not run a turn for it.",
+          "properties": {
+            "messageId": {
+              "$ref": "#/definitions/ItemId"
+            },
+            "type": {
+              "enum": [
+                "delivered"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "messageId",
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Parsed as an action and applied synchronously.",
+          "properties": {
+            "result": {
+              "$ref": "#/definitions/ActionResult"
+            },
+            "type": {
+              "enum": [
+                "applied"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "result",
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "operationId": {
+              "$ref": "#/definitions/OperationId"
+            },
+            "type": {
+              "enum": [
+                "operationStarted"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "operationId",
+            "type"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "SuggestedAction": {
+      "description": "What would plausibly make it work. Advice, not a promise.",
+      "enum": [
+        "retry",
+        "reinitialize",
+        "refreshSession",
+        "refreshConversation",
+        "refreshQueue",
+        "refreshActions",
+        "reauthenticate",
+        "resubmit"
+      ],
+      "type": "string"
+    },
+    "TaskId": {
+      "type": "string"
+    },
+    "TaskResource": {
+      "properties": {
+        "activeForm": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "blockedBy": {
+          "items": {
+            "$ref": "#/definitions/TaskId"
+          },
+          "type": "array"
+        },
+        "blocks": {
+          "items": {
+            "$ref": "#/definitions/TaskId"
+          },
+          "type": "array"
+        },
+        "description": {
+          "type": "string"
+        },
+        "id": {
+          "$ref": "#/definitions/TaskId"
+        },
+        "owner": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "$ref": "#/definitions/TaskStatus"
+        },
+        "subject": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "blockedBy",
+        "blocks",
+        "description",
+        "id",
+        "status",
+        "subject"
+      ],
+      "type": "object"
+    },
+    "TaskStatus": {
+      "enum": [
+        "pending",
+        "inProgress",
+        "completed",
+        "cancelled"
+      ],
+      "type": "string"
+    },
+    "ThemeChoice": {
+      "description": "A persisted theme preference. Which colours a frontend actually paints is its own business; that this choice was saved is not.",
+      "enum": [
+        "auto",
+        "dark",
+        "light"
+      ],
+      "type": "string"
+    },
+    "ThinkingLevel": {
+      "description": "Thinking budget. `off` is a level rather than an absent value so a snapshot always answers the question.",
+      "enum": [
+        "off",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "type": "string"
+    },
+    "ToolRequest": {
+      "properties": {
+        "input": true,
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "input",
+        "name"
+      ],
+      "type": "object"
+    },
+    "Turn": {
+      "description": "One model or standalone shell run attached to a runnable conversation.",
+      "properties": {
+        "completedAt": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "conversationId": {
+          "$ref": "#/definitions/ConversationId"
+        },
+        "error": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/TurnError"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Why a failed turn failed. Present only with `status: failed`; the terminal event is still the turn's, not an error frame's."
+        },
+        "id": {
+          "$ref": "#/definitions/TurnId"
+        },
+        "inputItemIds": {
+          "description": "The completed items this turn consumed. They are ordered before `turn/started` and carry no `turnId` of their own.",
+          "items": {
+            "$ref": "#/definitions/ItemId"
+          },
+          "type": "array"
+        },
+        "origin": {
+          "$ref": "#/definitions/TurnOrigin"
+        },
+        "round": {
+          "description": "Model requests inside the tool loop so far; a retry re-runs the same one.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "startedAt": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "status": {
+          "$ref": "#/definitions/TurnStatus"
+        },
+        "usage": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/TurnUsage"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "conversationId",
+        "id",
+        "inputItemIds",
+        "origin",
+        "round",
+        "startedAt",
+        "status"
+      ],
+      "type": "object"
+    },
+    "TurnError": {
+      "description": "A turn's failure, in the same stable-code vocabulary as a request error.",
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "message"
+      ],
+      "type": "object"
+    },
+    "TurnId": {
+      "type": "string"
+    },
+    "TurnInterruptParams": {
+      "description": "Idempotent, and aimed at a server-issued turn ID: a late interrupt cannot cancel the next turn.",
+      "properties": {
+        "conversationId": {
+          "$ref": "#/definitions/ConversationId"
+        },
+        "turnId": {
+          "$ref": "#/definitions/TurnId"
+        }
+      },
+      "required": [
+        "conversationId",
+        "turnId"
+      ],
+      "type": "object"
+    },
+    "TurnInterruptResult": {
+      "properties": {
+        "accepted": {
+          "description": "False when the turn had already reached its terminal state.",
+          "type": "boolean"
+        },
+        "turnId": {
+          "$ref": "#/definitions/TurnId"
+        }
+      },
+      "required": [
+        "accepted",
+        "turnId"
+      ],
+      "type": "object"
+    },
+    "TurnOrigin": {
+      "description": "What started this turn. The console starts turns the user never typed — a mail digest wakes main on every frontend (`auto`).",
+      "oneOf": [
+        {
+          "description": "Prose the user submitted.",
+          "enum": [
+            "user"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "The next entry of the input queue draining.",
+          "enum": [
+            "queue"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "A message from main or a peer that woke this conversation.",
+          "enum": [
+            "peer"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "The core decided to run without an input of its own (mail digest wake).",
+          "enum": [
+            "auto"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "A standalone shell run.",
+          "enum": [
+            "shell"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "TurnStatus": {
+      "enum": [
+        "running",
+        "completed",
+        "failed",
+        "cancelled",
+        "interrupted"
+      ],
+      "type": "string"
+    },
+    "TurnUsage": {
+      "properties": {
+        "authoritative": {
+          "description": "This is the end-of-round accounting total rather than freshly streamed output: a rate sampler must not read the jump as a burst.",
+          "type": "boolean"
+        },
+        "cacheReadTokens": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "cacheWriteTokens": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "inputTokens": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "outputTokens": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "authoritative",
+        "cacheReadTokens",
+        "cacheWriteTokens",
+        "inputTokens",
+        "outputTokens"
+      ],
+      "type": "object"
+    }
+  }
+}

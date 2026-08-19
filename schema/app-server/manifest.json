@@ -1,0 +1,911 @@
+{
+  "bundleVersion": 1,
+  "protocol": {
+    "major": 1,
+    "minor": 0
+  },
+  "schemaDialect": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "id": "urn:bingo:app-server:v1:definitions",
+    "file": "definitions.json"
+  },
+  "transport": {
+    "framing": "ndjson",
+    "connectionErrors": [
+      "FRAME_TOO_LARGE",
+      "CLIENT_TOO_SLOW"
+    ]
+  },
+  "envelopes": [
+    {
+      "name": "request",
+      "direction": "clientToServer",
+      "schema": {
+        "id": "urn:bingo:app-server:v1:envelope.request",
+        "file": "envelopes/envelope.request.json"
+      }
+    },
+    {
+      "name": "clientNotification",
+      "direction": "clientToServer",
+      "schema": {
+        "id": "urn:bingo:app-server:v1:envelope.clientNotification",
+        "file": "envelopes/envelope.clientNotification.json"
+      }
+    },
+    {
+      "name": "response",
+      "direction": "serverToClient",
+      "schema": {
+        "id": "urn:bingo:app-server:v1:envelope.response",
+        "file": "envelopes/envelope.response.json"
+      }
+    },
+    {
+      "name": "notification",
+      "direction": "serverToClient",
+      "schema": {
+        "id": "urn:bingo:app-server:v1:envelope.notification",
+        "file": "envelopes/envelope.notification.json"
+      }
+    },
+    {
+      "name": "error",
+      "direction": "serverToClient",
+      "schema": {
+        "id": "urn:bingo:app-server:v1:envelope.error",
+        "file": "envelopes/envelope.error.json"
+      }
+    }
+  ],
+  "methods": [
+    {
+      "method": "initialize",
+      "direction": "clientToServer",
+      "params": {
+        "id": "urn:bingo:app-server:v1:initialize.params",
+        "file": "methods/initialize.params.json"
+      },
+      "result": {
+        "id": "urn:bingo:app-server:v1:initialize.result",
+        "file": "methods/initialize.result.json"
+      },
+      "errors": [
+        "PROTOCOL_UNSUPPORTED",
+        "CAPABILITY_REQUIRED",
+        "ALREADY_INITIALIZED",
+        "BAD_ARGUMENT"
+      ]
+    },
+    {
+      "method": "shutdown",
+      "direction": "clientToServer",
+      "params": {
+        "id": "urn:bingo:app-server:v1:shutdown.params",
+        "file": "methods/shutdown.params.json"
+      },
+      "result": {
+        "id": "urn:bingo:app-server:v1:shutdown.result",
+        "file": "methods/shutdown.result.json"
+      },
+      "errors": [
+        "NOT_INITIALIZED"
+      ]
+    },
+    {
+      "method": "session/list",
+      "direction": "clientToServer",
+      "params": {
+        "id": "urn:bingo:app-server:v1:session.list.params",
+        "file": "methods/session.list.params.json"
+      },
+      "result": {
+        "id": "urn:bingo:app-server:v1:session.list.result",
+        "file": "methods/session.list.result.json"
+      },
+      "errors": [
+        "NOT_INITIALIZED",
+        "BAD_ARGUMENT"
+      ]
+    },
+    {
+      "method": "session/start",
+      "direction": "clientToServer",
+      "params": {
+        "id": "urn:bingo:app-server:v1:session.start.params",
+        "file": "methods/session.start.params.json"
+      },
+      "result": {
+        "id": "urn:bingo:app-server:v1:session.start.result",
+        "file": "methods/session.start.result.json"
+      },
+      "errors": [
+        "NOT_INITIALIZED",
+        "BAD_ARGUMENT"
+      ]
+    },
+    {
+      "method": "session/resume",
+      "direction": "clientToServer",
+      "params": {
+        "id": "urn:bingo:app-server:v1:session.resume.params",
+        "file": "methods/session.resume.params.json"
+      },
+      "result": {
+        "id": "urn:bingo:app-server:v1:session.resume.result",
+        "file": "methods/session.resume.result.json"
+      },
+      "errors": [
+        "NOT_INITIALIZED",
+        "SESSION_NOT_FOUND",
+        "BAD_ARGUMENT"
+      ]
+    },
+    {
+      "method": "session/read",
+      "direction": "clientToServer",
+      "params": {
+        "id": "urn:bingo:app-server:v1:session.read.params",
+        "file": "methods/session.read.params.json"
+      },
+      "result": {
+        "id": "urn:bingo:app-server:v1:session.read.result",
+        "file": "methods/session.read.result.json"
+      },
+      "errors": [
+        "NOT_INITIALIZED",
+        "NO_ACTIVE_SESSION"
+      ]
+    },
+    {
+      "method": "session/close",
+      "direction": "clientToServer",
+      "params": {
+        "id": "urn:bingo:app-server:v1:session.close.params",
+        "file": "methods/session.close.params.json"
+      },
+      "result": {
+        "id": "urn:bingo:app-server:v1:session.close.result",
+        "file": "methods/session.close.result.json"
+      },
+      "errors": [
+        "NOT_INITIALIZED",
+        "NO_ACTIVE_SESSION"
+      ]
+    },
+    {
+      "method": "session/delete",
+      "direction": "clientToServer",
+      "params": {
+        "id": "urn:bingo:app-server:v1:session.delete.params",
+        "file": "methods/session.delete.params.json"
+      },
+      "result": {
+        "id": "urn:bingo:app-server:v1:session.delete.result",
+        "file": "methods/session.delete.result.json"
+      },
+      "errors": [
+        "NOT_INITIALIZED",
+        "SESSION_NOT_FOUND",
+        "BAD_ARGUMENT"
+      ]
+    },
+    {
+      "method": "conversation/list",
+      "direction": "clientToServer",
+      "params": {
+        "id": "urn:bingo:app-server:v1:conversation.list.params",
+        "file": "methods/conversation.list.params.json"
+      },
+      "result": {
+        "id": "urn:bingo:app-server:v1:conversation.list.result",
+        "file": "methods/conversation.list.result.json"
+      },
+      "errors": [
+        "NOT_INITIALIZED",
+        "NO_ACTIVE_SESSION",
+        "BAD_ARGUMENT"
+      ]
+    },
+    {
+      "method": "conversation/read",
+      "direction": "clientToServer",
+      "params": {
+        "id": "urn:bingo:app-server:v1:conversation.read.params",
+        "file": "methods/conversation.read.params.json"
+      },
+      "result": {
+        "id": "urn:bingo:app-server:v1:conversation.read.result",
+        "file": "methods/conversation.read.result.json"
+      },
+      "errors": [
+        "NOT_INITIALIZED",
+        "NO_ACTIVE_SESSION",
+        "CONVERSATION_NOT_FOUND",
+        "STALE_PAGE",
+        "BAD_ARGUMENT"
+      ]
+    },
+    {
+      "method": "conversation/markRead",
+      "direction": "clientToServer",
+      "params": {
+        "id": "urn:bingo:app-server:v1:conversation.markRead.params",
+        "file": "methods/conversation.markRead.params.json"
+      },
+      "result": {
+        "id": "urn:bingo:app-server:v1:conversation.markRead.result",
+        "file": "methods/conversation.markRead.result.json"
+      },
+      "errors": [
+        "NOT_INITIALIZED",
+        "NO_ACTIVE_SESSION",
+        "CONVERSATION_NOT_FOUND",
+        "STALE_REVISION"
+      ]
+    },
+    {
+      "method": "conversation/submit",
+      "direction": "clientToServer",
+      "params": {
+        "id": "urn:bingo:app-server:v1:conversation.submit.params",
+        "file": "methods/conversation.submit.params.json"
+      },
+      "result": {
+        "id": "urn:bingo:app-server:v1:conversation.submit.result",
+        "file": "methods/conversation.submit.result.json"
+      },
+      "errors": [
+        "NOT_INITIALIZED",
+        "NO_ACTIVE_SESSION",
+        "CONVERSATION_NOT_FOUND",
+        "ACTION_UNAVAILABLE",
+        "ASSET_NOT_FOUND",
+        "BAD_ARGUMENT"
+      ]
+    },
+    {
+      "method": "turn/interrupt",
+      "direction": "clientToServer",
+      "params": {
+        "id": "urn:bingo:app-server:v1:turn.interrupt.params",
+        "file": "methods/turn.interrupt.params.json"
+      },
+      "result": {
+        "id": "urn:bingo:app-server:v1:turn.interrupt.result",
+        "file": "methods/turn.interrupt.result.json"
+      },
+      "errors": [
+        "NOT_INITIALIZED",
+        "NO_ACTIVE_SESSION",
+        "CONVERSATION_NOT_FOUND",
+        "TURN_CLOSED"
+      ]
+    },
+    {
+      "method": "queue/read",
+      "direction": "clientToServer",
+      "params": {
+        "id": "urn:bingo:app-server:v1:queue.read.params",
+        "file": "methods/queue.read.params.json"
+      },
+      "result": {
+        "id": "urn:bingo:app-server:v1:queue.read.result",
+        "file": "methods/queue.read.result.json"
+      },
+      "errors": [
+        "NOT_INITIALIZED",
+        "NO_ACTIVE_SESSION",
+        "CONVERSATION_NOT_FOUND",
+        "BAD_ARGUMENT"
+      ]
+    },
+    {
+      "method": "queue/reclaimTail",
+      "direction": "clientToServer",
+      "params": {
+        "id": "urn:bingo:app-server:v1:queue.reclaimTail.params",
+        "file": "methods/queue.reclaimTail.params.json"
+      },
+      "result": {
+        "id": "urn:bingo:app-server:v1:queue.reclaimTail.result",
+        "file": "methods/queue.reclaimTail.result.json"
+      },
+      "errors": [
+        "NOT_INITIALIZED",
+        "NO_ACTIVE_SESSION",
+        "CONVERSATION_NOT_FOUND",
+        "STALE_REVISION"
+      ]
+    },
+    {
+      "method": "interaction/respond",
+      "direction": "clientToServer",
+      "params": {
+        "id": "urn:bingo:app-server:v1:interaction.respond.params",
+        "file": "methods/interaction.respond.params.json"
+      },
+      "result": {
+        "id": "urn:bingo:app-server:v1:interaction.respond.result",
+        "file": "methods/interaction.respond.result.json"
+      },
+      "errors": [
+        "NOT_INITIALIZED",
+        "NO_ACTIVE_SESSION",
+        "INTERACTION_CLOSED",
+        "INTERACTION_NOT_READY",
+        "INTERACTION_INVALID_DECISION"
+      ]
+    },
+    {
+      "method": "action/list",
+      "direction": "clientToServer",
+      "params": {
+        "id": "urn:bingo:app-server:v1:action.list.params",
+        "file": "methods/action.list.params.json"
+      },
+      "result": {
+        "id": "urn:bingo:app-server:v1:action.list.result",
+        "file": "methods/action.list.result.json"
+      },
+      "errors": [
+        "NOT_INITIALIZED",
+        "NO_ACTIVE_SESSION",
+        "CONVERSATION_NOT_FOUND"
+      ]
+    },
+    {
+      "method": "action/execute",
+      "direction": "clientToServer",
+      "params": {
+        "id": "urn:bingo:app-server:v1:action.execute.params",
+        "file": "methods/action.execute.params.json"
+      },
+      "result": {
+        "id": "urn:bingo:app-server:v1:action.execute.result",
+        "file": "methods/action.execute.result.json"
+      },
+      "errors": [
+        "NOT_INITIALIZED",
+        "NO_ACTIVE_SESSION",
+        "CONVERSATION_NOT_FOUND",
+        "ACTION_UNAVAILABLE",
+        "STALE_REVISION",
+        "BAD_ARGUMENT"
+      ]
+    },
+    {
+      "method": "config/read",
+      "direction": "clientToServer",
+      "params": {
+        "id": "urn:bingo:app-server:v1:config.read.params",
+        "file": "methods/config.read.params.json"
+      },
+      "result": {
+        "id": "urn:bingo:app-server:v1:config.read.result",
+        "file": "methods/config.read.result.json"
+      },
+      "errors": [
+        "NOT_INITIALIZED",
+        "NO_ACTIVE_SESSION"
+      ]
+    },
+    {
+      "method": "catalog/read",
+      "direction": "clientToServer",
+      "params": {
+        "id": "urn:bingo:app-server:v1:catalog.read.params",
+        "file": "methods/catalog.read.params.json"
+      },
+      "result": {
+        "id": "urn:bingo:app-server:v1:catalog.read.result",
+        "file": "methods/catalog.read.result.json"
+      },
+      "errors": [
+        "NOT_INITIALIZED",
+        "BAD_ARGUMENT"
+      ]
+    },
+    {
+      "method": "resource/read",
+      "direction": "clientToServer",
+      "params": {
+        "id": "urn:bingo:app-server:v1:resource.read.params",
+        "file": "methods/resource.read.params.json"
+      },
+      "result": {
+        "id": "urn:bingo:app-server:v1:resource.read.result",
+        "file": "methods/resource.read.result.json"
+      },
+      "errors": [
+        "NOT_INITIALIZED",
+        "NO_ACTIVE_SESSION",
+        "BAD_ARGUMENT"
+      ]
+    },
+    {
+      "method": "asset/registerPath",
+      "direction": "clientToServer",
+      "params": {
+        "id": "urn:bingo:app-server:v1:asset.registerPath.params",
+        "file": "methods/asset.registerPath.params.json"
+      },
+      "result": {
+        "id": "urn:bingo:app-server:v1:asset.registerPath.result",
+        "file": "methods/asset.registerPath.result.json"
+      },
+      "errors": [
+        "NOT_INITIALIZED",
+        "NO_ACTIVE_SESSION",
+        "ASSET_REJECTED",
+        "BAD_ARGUMENT"
+      ]
+    },
+    {
+      "method": "asset/readChunk",
+      "direction": "clientToServer",
+      "params": {
+        "id": "urn:bingo:app-server:v1:asset.readChunk.params",
+        "file": "methods/asset.readChunk.params.json"
+      },
+      "result": {
+        "id": "urn:bingo:app-server:v1:asset.readChunk.result",
+        "file": "methods/asset.readChunk.result.json"
+      },
+      "errors": [
+        "NOT_INITIALIZED",
+        "ASSET_NOT_FOUND",
+        "BAD_ARGUMENT"
+      ]
+    }
+  ],
+  "notifications": [
+    {
+      "method": "session/updated",
+      "direction": "serverToClient",
+      "params": {
+        "id": "urn:bingo:app-server:v1:session.updated.params",
+        "file": "notifications/session.updated.params.json"
+      }
+    },
+    {
+      "method": "session/closed",
+      "direction": "serverToClient",
+      "params": {
+        "id": "urn:bingo:app-server:v1:session.closed.params",
+        "file": "notifications/session.closed.params.json"
+      }
+    },
+    {
+      "method": "session/deleted",
+      "direction": "serverToClient",
+      "params": {
+        "id": "urn:bingo:app-server:v1:session.deleted.params",
+        "file": "notifications/session.deleted.params.json"
+      }
+    },
+    {
+      "method": "conversation/created",
+      "direction": "serverToClient",
+      "params": {
+        "id": "urn:bingo:app-server:v1:conversation.created.params",
+        "file": "notifications/conversation.created.params.json"
+      }
+    },
+    {
+      "method": "conversation/updated",
+      "direction": "serverToClient",
+      "params": {
+        "id": "urn:bingo:app-server:v1:conversation.updated.params",
+        "file": "notifications/conversation.updated.params.json"
+      }
+    },
+    {
+      "method": "conversation/removed",
+      "direction": "serverToClient",
+      "params": {
+        "id": "urn:bingo:app-server:v1:conversation.removed.params",
+        "file": "notifications/conversation.removed.params.json"
+      }
+    },
+    {
+      "method": "turn/started",
+      "direction": "serverToClient",
+      "params": {
+        "id": "urn:bingo:app-server:v1:turn.started.params",
+        "file": "notifications/turn.started.params.json"
+      }
+    },
+    {
+      "method": "turn/roundStarted",
+      "direction": "serverToClient",
+      "params": {
+        "id": "urn:bingo:app-server:v1:turn.roundStarted.params",
+        "file": "notifications/turn.roundStarted.params.json"
+      }
+    },
+    {
+      "method": "turn/retrying",
+      "direction": "serverToClient",
+      "params": {
+        "id": "urn:bingo:app-server:v1:turn.retrying.params",
+        "file": "notifications/turn.retrying.params.json"
+      }
+    },
+    {
+      "method": "turn/roundCompleted",
+      "direction": "serverToClient",
+      "params": {
+        "id": "urn:bingo:app-server:v1:turn.roundCompleted.params",
+        "file": "notifications/turn.roundCompleted.params.json"
+      }
+    },
+    {
+      "method": "turn/usageUpdated",
+      "direction": "serverToClient",
+      "params": {
+        "id": "urn:bingo:app-server:v1:turn.usageUpdated.params",
+        "file": "notifications/turn.usageUpdated.params.json"
+      }
+    },
+    {
+      "method": "turn/completed",
+      "direction": "serverToClient",
+      "params": {
+        "id": "urn:bingo:app-server:v1:turn.completed.params",
+        "file": "notifications/turn.completed.params.json"
+      }
+    },
+    {
+      "method": "item/started",
+      "direction": "serverToClient",
+      "params": {
+        "id": "urn:bingo:app-server:v1:item.started.params",
+        "file": "notifications/item.started.params.json"
+      }
+    },
+    {
+      "method": "item/textDelta",
+      "direction": "serverToClient",
+      "params": {
+        "id": "urn:bingo:app-server:v1:item.textDelta.params",
+        "file": "notifications/item.textDelta.params.json"
+      }
+    },
+    {
+      "method": "item/reasoningDelta",
+      "direction": "serverToClient",
+      "params": {
+        "id": "urn:bingo:app-server:v1:item.reasoningDelta.params",
+        "file": "notifications/item.reasoningDelta.params.json"
+      }
+    },
+    {
+      "method": "item/commandTailUpdated",
+      "direction": "serverToClient",
+      "params": {
+        "id": "urn:bingo:app-server:v1:item.commandTailUpdated.params",
+        "file": "notifications/item.commandTailUpdated.params.json"
+      }
+    },
+    {
+      "method": "item/updated",
+      "direction": "serverToClient",
+      "params": {
+        "id": "urn:bingo:app-server:v1:item.updated.params",
+        "file": "notifications/item.updated.params.json"
+      }
+    },
+    {
+      "method": "item/completed",
+      "direction": "serverToClient",
+      "params": {
+        "id": "urn:bingo:app-server:v1:item.completed.params",
+        "file": "notifications/item.completed.params.json"
+      }
+    },
+    {
+      "method": "queue/itemAdded",
+      "direction": "serverToClient",
+      "params": {
+        "id": "urn:bingo:app-server:v1:queue.itemAdded.params",
+        "file": "notifications/queue.itemAdded.params.json"
+      }
+    },
+    {
+      "method": "queue/itemRemoved",
+      "direction": "serverToClient",
+      "params": {
+        "id": "urn:bingo:app-server:v1:queue.itemRemoved.params",
+        "file": "notifications/queue.itemRemoved.params.json"
+      }
+    },
+    {
+      "method": "queue/itemAbsorbed",
+      "direction": "serverToClient",
+      "params": {
+        "id": "urn:bingo:app-server:v1:queue.itemAbsorbed.params",
+        "file": "notifications/queue.itemAbsorbed.params.json"
+      }
+    },
+    {
+      "method": "interaction/opened",
+      "direction": "serverToClient",
+      "params": {
+        "id": "urn:bingo:app-server:v1:interaction.opened.params",
+        "file": "notifications/interaction.opened.params.json"
+      }
+    },
+    {
+      "method": "interaction/resolved",
+      "direction": "serverToClient",
+      "params": {
+        "id": "urn:bingo:app-server:v1:interaction.resolved.params",
+        "file": "notifications/interaction.resolved.params.json"
+      }
+    },
+    {
+      "method": "interaction/cancelled",
+      "direction": "serverToClient",
+      "params": {
+        "id": "urn:bingo:app-server:v1:interaction.cancelled.params",
+        "file": "notifications/interaction.cancelled.params.json"
+      }
+    },
+    {
+      "method": "agent/changed",
+      "direction": "serverToClient",
+      "params": {
+        "id": "urn:bingo:app-server:v1:agent.changed.params",
+        "file": "notifications/agent.changed.params.json"
+      }
+    },
+    {
+      "method": "agent/removed",
+      "direction": "serverToClient",
+      "params": {
+        "id": "urn:bingo:app-server:v1:agent.removed.params",
+        "file": "notifications/agent.removed.params.json"
+      }
+    },
+    {
+      "method": "room/changed",
+      "direction": "serverToClient",
+      "params": {
+        "id": "urn:bingo:app-server:v1:room.changed.params",
+        "file": "notifications/room.changed.params.json"
+      }
+    },
+    {
+      "method": "task/changed",
+      "direction": "serverToClient",
+      "params": {
+        "id": "urn:bingo:app-server:v1:task.changed.params",
+        "file": "notifications/task.changed.params.json"
+      }
+    },
+    {
+      "method": "task/removed",
+      "direction": "serverToClient",
+      "params": {
+        "id": "urn:bingo:app-server:v1:task.removed.params",
+        "file": "notifications/task.removed.params.json"
+      }
+    },
+    {
+      "method": "delivery/changed",
+      "direction": "serverToClient",
+      "params": {
+        "id": "urn:bingo:app-server:v1:delivery.changed.params",
+        "file": "notifications/delivery.changed.params.json"
+      }
+    },
+    {
+      "method": "command/changed",
+      "direction": "serverToClient",
+      "params": {
+        "id": "urn:bingo:app-server:v1:command.changed.params",
+        "file": "notifications/command.changed.params.json"
+      }
+    },
+    {
+      "method": "operation/started",
+      "direction": "serverToClient",
+      "params": {
+        "id": "urn:bingo:app-server:v1:operation.started.params",
+        "file": "notifications/operation.started.params.json"
+      }
+    },
+    {
+      "method": "operation/progress",
+      "direction": "serverToClient",
+      "params": {
+        "id": "urn:bingo:app-server:v1:operation.progress.params",
+        "file": "notifications/operation.progress.params.json"
+      }
+    },
+    {
+      "method": "operation/completed",
+      "direction": "serverToClient",
+      "params": {
+        "id": "urn:bingo:app-server:v1:operation.completed.params",
+        "file": "notifications/operation.completed.params.json"
+      }
+    },
+    {
+      "method": "config/changed",
+      "direction": "serverToClient",
+      "params": {
+        "id": "urn:bingo:app-server:v1:config.changed.params",
+        "file": "notifications/config.changed.params.json"
+      }
+    },
+    {
+      "method": "catalog/changed",
+      "direction": "serverToClient",
+      "params": {
+        "id": "urn:bingo:app-server:v1:catalog.changed.params",
+        "file": "notifications/catalog.changed.params.json"
+      }
+    },
+    {
+      "method": "asset/available",
+      "direction": "serverToClient",
+      "params": {
+        "id": "urn:bingo:app-server:v1:asset.available.params",
+        "file": "notifications/asset.available.params.json"
+      }
+    },
+    {
+      "method": "feedback/raised",
+      "direction": "serverToClient",
+      "params": {
+        "id": "urn:bingo:app-server:v1:feedback.raised.params",
+        "file": "notifications/feedback.raised.params.json"
+      }
+    },
+    {
+      "method": "feedback/cleared",
+      "direction": "serverToClient",
+      "params": {
+        "id": "urn:bingo:app-server:v1:feedback.cleared.params",
+        "file": "notifications/feedback.cleared.params.json"
+      }
+    }
+  ],
+  "errors": [
+    {
+      "bingoCode": "PROTOCOL_UNSUPPORTED",
+      "code": -32001,
+      "scope": "connection",
+      "recoverable": false,
+      "message": "This server does not speak the requested protocol major."
+    },
+    {
+      "bingoCode": "CAPABILITY_REQUIRED",
+      "code": -32002,
+      "scope": "connection",
+      "recoverable": false,
+      "message": "A controlling client must support interaction/respond."
+    },
+    {
+      "bingoCode": "NOT_INITIALIZED",
+      "code": -32003,
+      "scope": "connection",
+      "recoverable": true,
+      "message": "The connection is not initialized yet."
+    },
+    {
+      "bingoCode": "ALREADY_INITIALIZED",
+      "code": -32004,
+      "scope": "connection",
+      "recoverable": true,
+      "message": "The connection is already initialized."
+    },
+    {
+      "bingoCode": "NO_ACTIVE_SESSION",
+      "code": -32005,
+      "scope": "session",
+      "recoverable": true,
+      "message": "No session is open on this connection."
+    },
+    {
+      "bingoCode": "SESSION_NOT_FOUND",
+      "code": -32006,
+      "scope": "session",
+      "recoverable": true,
+      "message": "No session matches that locator."
+    },
+    {
+      "bingoCode": "CONVERSATION_NOT_FOUND",
+      "code": -32007,
+      "scope": "conversation",
+      "recoverable": true,
+      "message": "The conversation does not exist."
+    },
+    {
+      "bingoCode": "TURN_CLOSED",
+      "code": -32010,
+      "scope": "turn",
+      "recoverable": true,
+      "message": "The turn is no longer active."
+    },
+    {
+      "bingoCode": "STALE_PAGE",
+      "code": -32011,
+      "scope": "conversation",
+      "recoverable": true,
+      "message": "The page cursor belongs to an older history generation."
+    },
+    {
+      "bingoCode": "STALE_REVISION",
+      "code": -32012,
+      "scope": "session",
+      "recoverable": true,
+      "message": "The resource changed since that revision."
+    },
+    {
+      "bingoCode": "INTERACTION_NOT_READY",
+      "code": -32013,
+      "scope": "interaction",
+      "recoverable": true,
+      "message": "The confirmation guard has not elapsed."
+    },
+    {
+      "bingoCode": "INTERACTION_CLOSED",
+      "code": -32014,
+      "scope": "interaction",
+      "recoverable": true,
+      "message": "The interaction is already resolved."
+    },
+    {
+      "bingoCode": "INTERACTION_INVALID_DECISION",
+      "code": -32015,
+      "scope": "interaction",
+      "recoverable": true,
+      "message": "That decision was not offered for this prompt."
+    },
+    {
+      "bingoCode": "ACTION_UNAVAILABLE",
+      "code": -32016,
+      "scope": "action",
+      "recoverable": true,
+      "message": "The action is not available in this state."
+    },
+    {
+      "bingoCode": "ASSET_NOT_FOUND",
+      "code": -32017,
+      "scope": "asset",
+      "recoverable": true,
+      "message": "The asset does not exist."
+    },
+    {
+      "bingoCode": "ASSET_REJECTED",
+      "code": -32018,
+      "scope": "asset",
+      "recoverable": true,
+      "message": "The file could not be registered as an asset."
+    },
+    {
+      "bingoCode": "FRAME_TOO_LARGE",
+      "code": -32019,
+      "scope": "connection",
+      "recoverable": false,
+      "message": "The frame exceeds the negotiated size limit."
+    },
+    {
+      "bingoCode": "CLIENT_TOO_SLOW",
+      "code": -32020,
+      "scope": "connection",
+      "recoverable": false,
+      "message": "The client is not reading fast enough to stay attached."
+    },
+    {
+      "bingoCode": "BAD_ARGUMENT",
+      "code": -32602,
+      "scope": "request",
+      "recoverable": true,
+      "message": "The request arguments are invalid."
+    }
+  ]
+}

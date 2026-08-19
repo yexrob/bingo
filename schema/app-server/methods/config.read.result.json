@@ -1,0 +1,14 @@
+{
+  "$id": "urn:bingo:app-server:v1:config.read.result",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "properties": {
+    "config": {
+      "$ref": "../definitions.json#/definitions/ConfigSnapshot"
+    }
+  },
+  "required": [
+    "config"
+  ],
+  "title": "ConfigReadResult",
+  "type": "object"
+}

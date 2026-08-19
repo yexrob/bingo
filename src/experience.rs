@@ -462,49 +462,44 @@ pub fn delete_entry(home: &Path, project_key: &str, id: &str) -> Result<(), Expe
     }
 }
 
-/// Shared prefix length of two lowercase tokens (char by char).
-fn shared_prefix_len(a: &str, b: &str) -> usize {
-    a.chars().zip(b.chars()).take_while(|(x, y)| x == y).count()
+/// The BM25 document for one entry: triggers carry the most intent, the
+/// summary names the pattern, steps and notes fill in vocabulary (D75).
+pub fn entry_document(entry: &ExperienceEntry) -> crate::bm25::Document {
+    crate::bm25::Document::default()
+        .field(&entry.trigger.join(" "), 3.0)
+        .field(&entry.summary, 2.0)
+        .field(&entry.steps.join("\n"), 1.0)
+        .field(&entry.notes, 1.0)
 }
 
-/// Token matching: lowercased query contains any trigger keyword, or some query token
-/// (≥3 chars) shares a ≥4-char prefix with a trigger ("migrate now" hits trigger
-/// "migration").
-/// Results sort by lifecycle status, explicit observed outcomes, then legacy hits.
+/// BM25 relevance over trigger/summary/steps/notes (D75); zero-score entries
+/// are out. Among equal scores the old ordering holds: lifecycle status,
+/// explicit observed outcomes, then legacy hits.
 pub fn query<'a>(
     entries: &'a [ExperienceEntry],
     text: &str,
     limit: usize,
 ) -> Vec<&'a ExperienceEntry> {
-    let needle = text.to_lowercase();
-    let tokens: Vec<String> = needle
-        .split(|c: char| !c.is_alphanumeric())
-        .filter(|t| t.len() >= 3)
-        .map(str::to_string)
-        .collect();
-    let mut matched: Vec<&ExperienceEntry> = entries
+    let corpus = crate::bm25::Bm25::new(entries.iter().map(entry_document).collect());
+    let mut matched: Vec<(&ExperienceEntry, f64)> = entries
         .iter()
-        .filter(|e| {
-            e.trigger.iter().any(|t| {
-                let t = t.to_lowercase();
-                !t.is_empty()
-                    && (needle.contains(&t)
-                        || tokens.iter().any(|tok| shared_prefix_len(&t, tok) >= 4))
-            })
-        })
+        .zip(corpus.score(text))
+        .filter(|(_, score)| *score > 0.0)
         .collect();
-    matched.sort_by(|a, b| {
+    matched.sort_by(|(a, score_a), (b, score_b)| {
         let a_active = a.status == ExperienceStatus::Active;
         let b_active = b.status == ExperienceStatus::Active;
-        b_active
-            .cmp(&a_active)
+        score_b
+            .partial_cmp(score_a)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(b_active.cmp(&a_active))
             .then_with(|| b.helpful.cmp(&a.helpful))
             .then_with(|| a.harmful.cmp(&b.harmful))
             .then_with(|| b.hits.cmp(&a.hits))
             .then_with(|| a.id.cmp(&b.id))
     });
     matched.truncate(limit);
-    matched
+    matched.into_iter().map(|(entry, _)| entry).collect()
 }
 
 /// Resident injection index: active entries ranked by observed outcomes, then legacy hits
@@ -893,6 +888,23 @@ mod tests {
         let parsed = ExperienceEntry::parse(raw).unwrap();
         assert_eq!((parsed.helpful, parsed.harmful), (0, 0));
         assert!(parsed.outcome_history.is_empty());
+    }
+
+    /// D75: CJK queries match through bigrams — the old substring matcher
+    /// needed the exact trigger phrase inside the query.
+    #[test]
+    fn query_matches_cjk_bigrams() {
+        let entry = ExperienceEntry::new(
+            "k",
+            vec!["上下文压缩".into()],
+            "压缩历史保留缓存".into(),
+            vec![],
+            None,
+            None,
+        );
+        let entries = vec![entry];
+        assert_eq!(query(&entries, "怎么处理上下文压缩", 5).len(), 1);
+        assert!(query(&entries, "完全无关的话题", 5).is_empty());
     }
 
     #[test]

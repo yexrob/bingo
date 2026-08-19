@@ -1,0 +1,6 @@
+{
+  "$id": "urn:bingo:app-server:v1:session.read.params",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "SessionReadParams",
+  "type": "object"
+}

@@ -1,0 +1,36 @@
+{
+  "$id": "urn:bingo:app-server:v1:catalog.read.params",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "description": "Answerable before `session/start`: a GUI picks its provider and model on the way in, which is the job `--inspect` used to have.",
+  "properties": {
+    "catalog": {
+      "$ref": "../definitions.json#/definitions/CatalogKind"
+    },
+    "cursor": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "limit": {
+      "format": "uint32",
+      "minimum": 0.0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "provider": {
+      "description": "Which provider's models to list. Ignored by the other catalogs.",
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "catalog"
+  ],
+  "title": "CatalogReadParams",
+  "type": "object"
+}

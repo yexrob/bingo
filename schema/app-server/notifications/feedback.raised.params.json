@@ -1,0 +1,19 @@
+{
+  "$id": "urn:bingo:app-server:v1:feedback.raised.params",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "description": "One notification's params: the event header, then the body's own fields.",
+  "properties": {
+    "event": {
+      "$ref": "../definitions.json#/definitions/EventMeta"
+    },
+    "feedback": {
+      "$ref": "../definitions.json#/definitions/Feedback"
+    }
+  },
+  "required": [
+    "event",
+    "feedback"
+  ],
+  "title": "NotificationParams_for_FeedbackRaised",
+  "type": "object"
+}

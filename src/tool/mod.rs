@@ -9,7 +9,9 @@ use crate::tasks::TaskStore;
 
 use crate::error::ErrorCode;
 
+pub mod address;
 pub mod agent;
+pub mod agent_notes;
 pub mod ask;
 pub mod bash;
 pub mod channel;
@@ -34,7 +36,11 @@ pub struct ToolContext {
     /// User home directory (the Experience tools locate the user-level experience root here).
     pub home: PathBuf,
     /// Watchable registry (background task lifecycle and notifications).
-    pub watch: std::sync::Arc<crate::watch::WatchRegistry>,
+    pub watch: crate::watch::WatchHandle,
+    /// Foreground liveness (D84): where a running shell command publishes its
+    /// output tail, and where the host's ctrl+b reaches it. Defaults to a
+    /// detached handle — a host with no foreground surface sees no difference.
+    pub live: std::sync::Arc<crate::live::LiveBash>,
     /// Shared HTTP client (WebFetch/WebSearch reuse the connection pool; does not follow redirects).
     pub http: reqwest::Client,
     /// Task store (Task tool family; shared with the TUI task panel).
@@ -51,6 +57,10 @@ pub struct ToolContext {
     /// Instance name of the calling session (None = main session). Watches registered here are
     /// addressed to it, so its notifications land at its own turn boundary.
     pub instance: Option<String>,
+    /// Rewind snapshots (D91): the pre-image a file-mutating tool takes before
+    /// it writes. Every host shares one recorder, so what rewind can undo does
+    /// not depend on which surface asked for the edit.
+    pub rewind: std::sync::Arc<crate::rewind::Recorder>,
 }
 
 impl ToolContext {
@@ -122,11 +132,30 @@ pub trait Tool: Send + Sync {
     fn confirm_reason(&self, _input: &serde_json::Value) -> Option<String> {
         None
     }
+    /// A dry run of the change this call would make, as a unified diff, so the
+    /// approval prompt can show what it is approving instead of naming it.
+    /// Reads the current file and nothing else — it must never write.
+    /// `None`: nothing to preview (or the change cannot be computed yet).
+    fn preview_diff(&self, _input: &serde_json::Value, _cwd: &std::path::Path) -> Option<String> {
+        None
+    }
     async fn call(
         &self,
         input: serde_json::Value,
         ctx: &ToolContext,
     ) -> Result<ToolResult, ToolError>;
+}
+
+/// A tool's `file_path` against the session cwd: absolute paths stand, relative
+/// ones hang off `cwd`. The approval preview and the write itself must resolve
+/// the same way, or the diff shown belongs to a different file.
+pub(crate) fn resolve_path(path: &str, cwd: &std::path::Path) -> std::path::PathBuf {
+    let path = std::path::PathBuf::from(path);
+    if path.is_absolute() {
+        path
+    } else {
+        cwd.join(path)
+    }
 }
 
 /// Model-returned parameters → target type. Failure info is visible to the model (fed back via is_error).
@@ -182,6 +211,8 @@ mod tests {
     use serde_json::json;
 
     use crate::tool::bash::BashTool;
+    use crate::tool::glob::GlobTool;
+    use crate::tool::grep::GrepTool;
     use crate::tool::read::ReadTool;
 
     #[test]
@@ -210,6 +241,42 @@ mod tests {
             schema["properties"]["file_path"]["description"],
             "File path to read (absolute or relative)"
         );
+    }
+
+    #[test]
+    fn file_tool_optional_parameters_stay_optional() {
+        let read = ReadTool::new().input_schema();
+        assert_eq!(read["required"], json!(["file_path"]));
+        for name in ["start_line", "end_line"] {
+            assert!(
+                read["properties"][name].is_object(),
+                "missing {name}: {read}"
+            );
+        }
+
+        let grep = GrepTool.input_schema();
+        assert_eq!(grep["required"], json!(["pattern"]));
+        for name in [
+            "context",
+            "case_insensitive",
+            "whole_word",
+            "fixed_string",
+            "files_with_matches",
+        ] {
+            assert!(
+                grep["properties"][name].is_object(),
+                "missing {name}: {grep}"
+            );
+        }
+
+        let glob = GlobTool.input_schema();
+        assert_eq!(glob["required"], json!(["pattern"]));
+        for name in ["exclude", "max_depth"] {
+            assert!(
+                glob["properties"][name].is_object(),
+                "missing {name}: {glob}"
+            );
+        }
     }
 
     #[test]

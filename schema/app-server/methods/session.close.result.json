@@ -1,0 +1,14 @@
+{
+  "$id": "urn:bingo:app-server:v1:session.close.result",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "properties": {
+    "sessionId": {
+      "$ref": "../definitions.json#/definitions/SessionId"
+    }
+  },
+  "required": [
+    "sessionId"
+  ],
+  "title": "SessionCloseResult",
+  "type": "object"
+}

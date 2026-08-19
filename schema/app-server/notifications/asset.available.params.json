@@ -1,0 +1,19 @@
+{
+  "$id": "urn:bingo:app-server:v1:asset.available.params",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "description": "One notification's params: the event header, then the body's own fields.",
+  "properties": {
+    "asset": {
+      "$ref": "../definitions.json#/definitions/AssetRecord"
+    },
+    "event": {
+      "$ref": "../definitions.json#/definitions/EventMeta"
+    }
+  },
+  "required": [
+    "asset",
+    "event"
+  ],
+  "title": "NotificationParams_for_AssetAvailable",
+  "type": "object"
+}

@@ -1,0 +1,33 @@
+{
+  "$id": "urn:bingo:app-server:v1:item.updated.params",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "description": "One notification's params: the event header, then the body's own fields.",
+  "properties": {
+    "conversationId": {
+      "$ref": "../definitions.json#/definitions/ConversationId"
+    },
+    "event": {
+      "$ref": "../definitions.json#/definitions/EventMeta"
+    },
+    "item": {
+      "$ref": "../definitions.json#/definitions/Item"
+    },
+    "turnId": {
+      "anyOf": [
+        {
+          "$ref": "../definitions.json#/definitions/TurnId"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "required": [
+    "conversationId",
+    "event",
+    "item"
+  ],
+  "title": "NotificationParams_for_ItemChanged",
+  "type": "object"
+}

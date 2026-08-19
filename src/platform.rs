@@ -47,17 +47,44 @@ pub fn default_shell() -> &'static str {
     }
 }
 
+/// Syntax family of the resolved shell. The model-facing contract (system
+/// prompt environment block, Bash tool description) and the JSON protocol
+/// report this so generated commands match the real executor — the tool is
+/// named `Bash` for wire compatibility, which otherwise primes POSIX syntax
+/// even when the executor is PowerShell (#42).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShellDialect {
+    Posix,
+    PowerShell,
+    Cmd,
+    Unknown,
+}
+
+/// Dialect of the process-wide resolved shell.
+pub fn shell_dialect() -> ShellDialect {
+    dialect_of(shell())
+}
+
+/// Classify a shell by executable basename. Splits on both separators so
+/// Windows paths parse the same on Unix hosts; an unrecognized basename
+/// (e.g. fish) is Unknown rather than assumed POSIX.
+fn dialect_of(shell: &str) -> ShellDialect {
+    let last = shell.rsplit(['/', '\\']).next().unwrap_or(shell);
+    let lower = last.to_ascii_lowercase();
+    let base = lower.strip_suffix(".exe").unwrap_or(&lower);
+    match base {
+        "powershell" | "pwsh" => ShellDialect::PowerShell,
+        "cmd" => ShellDialect::Cmd,
+        "sh" | "bash" | "zsh" | "dash" | "ksh" | "ash" => ShellDialect::Posix,
+        _ => ShellDialect::Unknown,
+    }
+}
+
 /// PowerShell-family shells take `-Command` instead of the POSIX `-c` flag.
 /// Only the Windows branch consults this; the test keeps it exercised everywhere.
-/// Splits on both separators so Windows paths parse the same on Unix hosts.
 #[cfg(any(windows, test))]
 fn is_powershell(shell: &str) -> bool {
-    let last = shell.rsplit(['/', '\\']).next().unwrap_or(shell);
-    let base = last
-        .strip_suffix(".exe")
-        .map(|s| s.to_ascii_lowercase())
-        .unwrap_or_else(|| last.to_ascii_lowercase());
-    base == "powershell" || base == "pwsh"
+    dialect_of(shell) == ShellDialect::PowerShell
 }
 
 /// Build a Command running `command` through the current shell in `cwd`.
@@ -175,6 +202,24 @@ mod tests {
             ("bash", false),
         ] {
             assert_eq!(is_powershell(shell), is_ps, "{shell}");
+        }
+    }
+
+    #[test]
+    fn dialect_classification() {
+        for (shell, dialect) in [
+            ("powershell.exe", ShellDialect::PowerShell),
+            ("POWERSHELL.EXE", ShellDialect::PowerShell),
+            ("pwsh", ShellDialect::PowerShell),
+            ("C:\\Windows\\System32\\cmd.exe", ShellDialect::Cmd),
+            ("cmd", ShellDialect::Cmd),
+            ("/bin/bash", ShellDialect::Posix),
+            ("/bin/zsh", ShellDialect::Posix),
+            ("/usr/bin/dash", ShellDialect::Posix),
+            ("C:\\Program Files\\Git\\bin\\bash.exe", ShellDialect::Posix),
+            ("/opt/homebrew/bin/fish", ShellDialect::Unknown),
+        ] {
+            assert_eq!(dialect_of(shell), dialect, "{shell}");
         }
     }
 

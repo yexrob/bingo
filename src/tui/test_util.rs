@@ -27,7 +27,8 @@ use crate::tui::theme::Theme;
 
 /// A minimal offline session (no real endpoint is ever contacted in tests).
 pub fn test_session() -> Arc<Session> {
-    Arc::new(Session {
+    let core = crate::app::AppCore::start(Default::default());
+    let session = Arc::new(Session {
         client: crate::api::client::Client::new(
             "test-key".to_string(),
             "https://example.com".to_string(),
@@ -42,33 +43,161 @@ pub fn test_session() -> Arc<Session> {
         user_config_dir: std::env::temp_dir().join(".config"),
         quiet: true,
         compact_failures: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-        watch: crate::watch::WatchRegistry::new(),
+        core: core.clone(),
+        watch: core.watch(),
         tasks: Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), "test")),
         expand_tasks: tokio::sync::watch::channel(false).0,
-        agents: crate::agents::AgentRegistry::new(),
-        channels: crate::channels::ChannelRegistry::new(Default::default()),
+        agents: core.agents(),
+        channels: core.channels(),
+        turns: core.turns(),
+        queue: core.queue(),
+        submit: core.submit(),
+        interactions: core.interactions(),
+        mail: core.mail(),
+        operations: core.operations(),
         instance: None,
         attachments: crate::api::image::Attachments::new(),
-    })
+    });
+    attach_test_engine(&session);
+    session
+}
+
+/// Edit the session a test holds, exclusively.
+///
+/// The session is shared with the engine that runs its turns since D154, so
+/// nothing holds it alone any more. Rebuilding it hands the caller the only
+/// reference to what it is about to edit; every field it does not touch is a
+/// shared handle and still points at the same state.
+pub fn session_mut(chat: &mut Chat) -> &mut Session {
+    let fresh = (*chat.session).clone();
+    chat.session = Arc::new(fresh);
+    Arc::get_mut(&mut chat.session).unwrap_or_else(|| panic!("just rebuilt"))
+}
+
+/// Give a test session the thing that runs a turn.
+///
+/// A console whose core cannot run one is not the console: since D154 the
+/// submission path opens the turn *inside* the core, so a test that submits
+/// needs an engine attached exactly as a terminal does. With a runtime in scope
+/// it is the real one — a run against the offline endpoint fails the way it
+/// always did; without one there is nothing to spawn on, and the recorder keeps
+/// the core's half honest for the synchronous tests.
+pub fn attach_test_engine(session: &Arc<Session>) {
+    // A real assembly builds the core and the runtime from the same settings
+    // (`main.rs`, `app_server::session`); a test builds the `Session` by hand, so
+    // the core is told what it was built with. Since D154 the mode a run obeys
+    // is the core's, and a session whose two halves disagreed would be a test
+    // fixture no terminal could produce.
+    for action in [
+        crate::app::command::Action::PermissionModeSet {
+            mode: crate::tui::selection::app_permission_mode(session.permission_mode),
+        },
+        crate::app::command::Action::ModelSelect {
+            model: session.runtime.model.borrow().clone(),
+        },
+    ] {
+        let _ = session.core.execute(crate::ui::ConvKey::Main, action).now();
+    }
+    match crate::engine::runner::SessionEngine::new(session.clone()) {
+        Some(engine) => session.core.attach_engine(engine),
+        None => session
+            .core
+            .attach_engine(Arc::new(crate::app::engine::Recorder::default())),
+    }
+}
+
+/// One document row with its avatar gutter taken off — the message column
+/// alone.
+///
+/// A conversation row wears a gutter when `experimental.chatAvatars` is on
+/// (D110: the one switch every avatar follows), spliced in as whole segments
+/// after the body was built. A test that enables the switch and asserts what
+/// a row *says*, or what colour the first thing on it is, drops the leading
+/// segments the gutter occupies and reads what is left. With the switch off
+/// there is nothing to strip and this helper must not be used.
+pub fn body(line: &crate::tui::line::Line, images: bool) -> crate::tui::line::Line {
+    let want = crate::tui::avatar::gutter_width(images);
+    let mut taken = 0;
+    let mut segs = line.segs.clone();
+    while taken < want && !segs.is_empty() {
+        taken += crate::tui::line::text_width(&segs[0].text);
+        segs.remove(0);
+    }
+    crate::tui::line::Line {
+        segs,
+        image: line.image.clone(),
+    }
 }
 
 /// A [`Chat`] sized to the given terminal (dark theme, offline session).
 pub fn chat_at(width: usize, height: usize) -> Chat {
     let (events_tx, events_rx) = tokio::sync::mpsc::unbounded_channel();
-    let (asks_tx, asks_rx) = tokio::sync::mpsc::unbounded_channel();
+    let session = test_session();
+    let events = crate::ui::EventSink::new(crate::ui::ConvKey::Main, events_tx);
     let mut chat = Chat::new(
-        test_session(),
-        events_tx,
+        session,
+        events,
         events_rx,
-        asks_tx,
-        asks_rx,
         Theme::dark(),
         crate::tui::theme::ThemeSetting::Auto,
         None,
     );
     chat.width = width;
     chat.height = height;
+    // The console is an attachment, in a test exactly as in a terminal: it takes
+    // its cut before anything reads it, so a test asserts against the projection
+    // the real console renders rather than a second, emptier kind of console.
+    chat.connect_store_now()
+        .unwrap_or_else(|error| panic!("the test core would not attach: {error}"));
     chat
+}
+
+/// Let the actor apply everything already asked of it, then fold what it said
+/// into the console's store — see [`Chat::settle_store`].
+pub fn settled(chat: &mut Chat) {
+    chat.settle_store();
+}
+
+/// Put the session's permission mode where a test wants it, through the door a
+/// key press goes through: the core holds it, and the console reads it back
+/// (D154).
+pub fn set_permission_mode(chat: &mut Chat, mode: crate::permission::PermissionMode) {
+    apply(
+        chat,
+        crate::app::command::Action::PermissionModeSet {
+            mode: crate::tui::selection::app_permission_mode(mode),
+        },
+    );
+}
+
+/// Put the session's model where a test wants it, through the door a slash line
+/// goes through: the core holds the selection, and the console reads it back
+/// (D154).
+pub fn set_model(chat: &mut Chat, model: &str) {
+    apply(
+        chat,
+        crate::app::command::Action::ModelSelect {
+            model: model.to_string(),
+        },
+    );
+}
+
+/// The same for the thinking level. `None` is `off`.
+pub fn set_thinking(chat: &mut Chat, level: Option<&str>) {
+    let level = crate::app::snapshot::ThinkingLevel::ALL
+        .into_iter()
+        .find(|held| Some(held.as_str()) == level)
+        .unwrap_or(crate::app::snapshot::ThinkingLevel::Off);
+    apply(chat, crate::app::command::Action::ThinkingSelect { level });
+}
+
+fn apply(chat: &mut Chat, action: crate::app::command::Action) {
+    let _ = chat
+        .session
+        .core
+        .execute(crate::ui::ConvKey::Main, action)
+        .now();
+    settled(chat);
 }
 
 /// TestBackend plus the raw-byte sink and command counters the driver needs asserting on.
@@ -313,9 +442,9 @@ impl ErrorFixture {
     /// channel. Zero production changes — `UiEvent::Error` is already a
     /// structured event; the chat consumer records the error state by
     /// `level`, the render side branches on it.
-    pub fn inject(&self, events: &tokio::sync::mpsc::UnboundedSender<crate::ui::UiEvent>) {
-        let _ = events.send(crate::ui::UiEvent::Error {
-            code: self.code,
+    pub fn inject(&self, events: &crate::ui::EventSink) {
+        events.send(crate::ui::UiEvent::Error {
+            code: self.code.to_string(),
             msg: self.msg.to_string(),
             level: self.level,
             context: self.context,

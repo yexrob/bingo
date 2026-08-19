@@ -29,6 +29,60 @@ const SYNC_BEGIN: &[u8] = b"\x1b[?2026h";
 /// CSI ? 2026 l — end synchronized update.
 const SYNC_END: &[u8] = b"\x1b[?2026l";
 
+/// Whether the terminal answered the kitty keyboard-protocol query (D86).
+static KEYBOARD_ENHANCEMENT: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+/// Whether the flags are pushed right now, so [`pop_keyboard_enhancement`] can
+/// be called blind from every teardown path and emit exactly when there is
+/// something to pop.
+static ENHANCEMENT_PUSHED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Ask the terminal whether it speaks the kitty keyboard protocol (D86).
+///
+/// Runs once at startup, before raw mode, alongside the other `/dev/tty`
+/// probes: it is a query/response round trip, and crossterm pairs it with a
+/// primary-device-attributes query so a terminal that does not know the
+/// protocol still answers *something* and the call returns straight away. The
+/// answer is remembered, so the resume after an `$EDITOR` suspend pushes the
+/// flags again without asking twice.
+pub(crate) fn probe_keyboard_enhancement() {
+    let supported = crossterm::terminal::supports_keyboard_enhancement().unwrap_or(false);
+    KEYBOARD_ENHANCEMENT.store(supported, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Push `DISAMBIGUATE_ESCAPE_CODES` if the terminal admitted to understanding
+/// it. That one flag is the whole point: with it, `shift+enter` arrives as its
+/// own key instead of as a bare `\r` indistinguishable from Enter, which is
+/// what makes the newline binding every other editor has possible here. No
+/// other flag is pushed — event types and release events would change what
+/// every existing binding sees.
+pub(crate) fn push_keyboard_enhancement(out: &mut impl IoWrite) {
+    use std::sync::atomic::Ordering;
+    if !KEYBOARD_ENHANCEMENT.load(Ordering::SeqCst)
+        || ENHANCEMENT_PUSHED.swap(true, Ordering::SeqCst)
+    {
+        return;
+    }
+    let _ = crossterm::execute!(
+        out,
+        crossterm::event::PushKeyboardEnhancementFlags(
+            crossterm::event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+        )
+    );
+}
+
+/// Pop the flags. Safe to call from any teardown path including the panic
+/// hook: with nothing pushed it writes nothing, and the flag it swaps makes a
+/// second call a no-op rather than a second pop off the terminal's stack.
+pub(crate) fn pop_keyboard_enhancement(out: &mut impl IoWrite) {
+    use std::sync::atomic::Ordering;
+    if !ENHANCEMENT_PUSHED.swap(false, Ordering::SeqCst) {
+        return;
+    }
+    let _ = crossterm::execute!(out, crossterm::event::PopKeyboardEnhancementFlags);
+}
+
 /// Raw byte access on top of a [`Backend`].
 ///
 /// Two concerns need bytes the `Backend` trait cannot express: synchronized-update bracketing and
@@ -79,6 +133,24 @@ impl<W: IoWrite> RawWrite for CrosstermBackend<W> {
 /// paints no cells), so no cursor bookkeeping and no synchronized-update
 /// bracket are needed.
 pub fn write_transmits<B: RawWrite>(backend: &mut B, bytes: &[u8]) -> Result<(), B::Error> {
+    write_out_of_band(backend, bytes)
+}
+
+/// Write attention bytes — bell, desktop-notification OSC, `OSC 2` title — and
+/// flush. Built by [`crate::tui::notify`], emitted here: this module stays the
+/// only writer of escape sequences, so the payload lands between frames instead
+/// of inside a viewport diff.
+///
+/// Position-independent for the same reason the transmits are: none of these
+/// sequences moves the cursor or paints a cell, so they need no cursor
+/// bookkeeping and no synchronized-update bracket.
+pub fn write_attention<B: RawWrite>(backend: &mut B, bytes: &[u8]) -> Result<(), B::Error> {
+    write_out_of_band(backend, bytes)
+}
+
+/// Bytes that belong to no cell: written verbatim at whatever position the
+/// cursor happens to be parked at, then flushed.
+fn write_out_of_band<B: RawWrite>(backend: &mut B, bytes: &[u8]) -> Result<(), B::Error> {
     if bytes.is_empty() {
         return Ok(());
     }
@@ -164,6 +236,12 @@ impl<B: Backend + RawWrite> InlineTerm<B> {
     /// Emit image transmit bytes; see [`write_transmits`].
     pub fn write_transmits(&mut self, bytes: &[u8]) -> Result<(), B::Error> {
         write_transmits(&mut self.backend, bytes)
+    }
+
+    /// Emit attention bytes (bell / notification OSC / title); see
+    /// [`write_attention`]. Called between frames, never inside one.
+    pub fn write_attention(&mut self, bytes: &[u8]) -> Result<(), B::Error> {
+        write_attention(&mut self.backend, bytes)
     }
 
     /// Accept a new terminal size.
@@ -310,6 +388,48 @@ impl<B: Backend + RawWrite> InlineTerm<B> {
         let area = Rect::new(0, 0, self.size.width, height);
         self.buffers = [Buffer::empty(area), Buffer::empty(area)];
         self.batch(|this| {
+            let home = Position::new(0, 0);
+            this.backend.set_cursor_position(home)?;
+            this.backend.clear_region(ClearType::All)?;
+            this.backend.set_cursor_position(home)?;
+            this.parked = home;
+            this.cursor_synced = true;
+            Ok(())
+        })
+    }
+
+    /// End the page on screen and begin a new one at the top (D98, revived for
+    /// v6's page switch).
+    ///
+    /// The screen is two things at this moment, and they end differently.
+    /// *Above* the viewport are the page's own rows, written once by
+    /// [`Self::insert_history`] and still on screen only because the viewport
+    /// has not migrated to the bottom yet; they go up into the terminal's own
+    /// history, because they are record. *Inside* the viewport are the live tail
+    /// and the chrome — states and furniture, which have never belonged in
+    /// scrollback — and they are simply erased, the way `clear` erases a
+    /// screenful.
+    ///
+    /// Getting that division wrong is how a page turn breaks write-once in
+    /// either direction: erase the whole screen and the rows a flush just
+    /// printed are lost before the terminal ever kept them; scroll the whole
+    /// screen and the composer box lands in the scrollback for good.
+    ///
+    /// That division is also the whole difference from [`Self::clear_visible`],
+    /// which discards a garbled screen entire because none of it can be trusted.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn page_break(&mut self) -> Result<(), B::Error> {
+        // The page region: everything above the viewport. Scrollback pushes are
+        // counted from the screen top, so the region and the distance are the
+        // same number.
+        let printed = self.viewport.top();
+        let height = self.viewport.height.clamp(0, self.max_viewport_height());
+        self.gap_above = 0;
+        self.viewport = Rect::new(0, 0, self.size.width, height);
+        let area = Rect::new(0, 0, self.size.width, height);
+        self.buffers = [Buffer::empty(area), Buffer::empty(area)];
+        self.batch(|this| {
+            this.backend.scroll_into_scrollback(printed, printed)?;
             let home = Position::new(0, 0);
             this.backend.set_cursor_position(home)?;
             this.backend.clear_region(ClearType::All)?;
@@ -772,6 +892,71 @@ mod tests {
     use super::*;
     use crate::tui::test_util::Recorder;
 
+    /// The keyboard-enhancement pair is a latch, not a counter (D86): the pop
+    /// is called blind from every teardown path — clean exit, panic hook, the
+    /// `$EDITOR` suspend — so it has to write nothing when nothing is pushed
+    /// and never pop twice off the terminal's own stack. One test, because the
+    /// flags are process-global and two would race.
+    #[test]
+    fn the_keyboard_enhancement_pair_is_a_latch() {
+        use std::sync::atomic::Ordering;
+        let probed = KEYBOARD_ENHANCEMENT.swap(false, Ordering::SeqCst);
+        let pushed = ENHANCEMENT_PUSHED.swap(false, Ordering::SeqCst);
+
+        // Unsupported terminal: no sequence, and the pop is still safe.
+        let mut out: Vec<u8> = Vec::new();
+        push_keyboard_enhancement(&mut out);
+        assert!(
+            out.is_empty(),
+            "nothing is emitted at a terminal that said no"
+        );
+        pop_keyboard_enhancement(&mut out);
+        assert!(out.is_empty(), "and the blind pop writes nothing");
+
+        // Supported: pushed once, popped once, whatever the call count.
+        //
+        // The bytes are asserted everywhere but Windows, where crossterm
+        // declares both commands `is_ansi_code_supported() == false` and routes
+        // them to a winapi path that only returns `Unsupported`. Nothing reaches
+        // the writer there, by the library's decision rather than this latch's —
+        // and the latch itself is what the rest of the test is about.
+        KEYBOARD_ENHANCEMENT.store(true, Ordering::SeqCst);
+        #[cfg(not(windows))]
+        {
+            push_keyboard_enhancement(&mut out);
+            let after_push = out.len();
+            assert!(after_push > 0, "the push reaches the terminal");
+            push_keyboard_enhancement(&mut out);
+            assert_eq!(
+                out.len(),
+                after_push,
+                "a second push is not a second stack entry"
+            );
+
+            pop_keyboard_enhancement(&mut out);
+            let after_pop = out.len();
+            assert!(after_pop > after_push, "the pop reaches the terminal");
+            pop_keyboard_enhancement(&mut out);
+            assert_eq!(out.len(), after_pop, "and only the first pop does");
+        }
+        // The latch itself is the platform-independent half: two pushes leave it
+        // set once, and the second pop finds nothing to undo.
+        push_keyboard_enhancement(&mut out);
+        push_keyboard_enhancement(&mut out);
+        assert!(
+            ENHANCEMENT_PUSHED.load(Ordering::SeqCst),
+            "the push latched"
+        );
+        pop_keyboard_enhancement(&mut out);
+        assert!(
+            !ENHANCEMENT_PUSHED.load(Ordering::SeqCst),
+            "and the pop cleared it"
+        );
+
+        KEYBOARD_ENHANCEMENT.store(probed, Ordering::SeqCst);
+        ENHANCEMENT_PUSHED.store(pushed, Ordering::SeqCst);
+    }
+
     fn term(width: u16, height: u16, row: u16) -> InlineTerm<Recorder> {
         let mut backend = Recorder::new(width, height);
         backend.set_cursor_position(Position::new(0, row)).unwrap();
@@ -790,6 +975,26 @@ mod tests {
         write_transmits(&mut backend, b"\x1b_Ga=T\x1b\\").unwrap();
         let raw = String::from_utf8_lossy(&backend.raw);
         assert_eq!(raw, "\x1b_Ga=T\x1b\\");
+    }
+
+    /// D79: the attention bytes take the same out-of-band path as the image
+    /// transmits — verbatim, no synchronized-update bracket, no cursor move —
+    /// and the driver still owns the write, so nothing else in the crate has to
+    /// touch stdout to ring a bell.
+    #[test]
+    fn write_attention_is_verbatim_and_skips_empty() {
+        let mut backend = Recorder::new(20, 6);
+        write_attention(&mut backend, &[]).unwrap();
+        assert!(backend.raw.is_empty(), "empty bytes are a no-op");
+
+        let mut term = term(20, 6, 3);
+        term.write_attention(b"\x07\x1b]2;bingo\x07").unwrap();
+        let backend = term.finish().unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&backend.raw),
+            "\x07\x1b]2;bingo\x07",
+            "the payload goes out as it was built"
+        );
     }
 
     /// Fill the viewport buffer with `rows`, top-down.
@@ -973,6 +1178,88 @@ mod tests {
             Position::new(0, 4),
             "cursor restored to the parked position"
         );
+    }
+
+    /// The page turn (D98, revived for v6). The page's rows go up into the
+    /// terminal's own history — including the ones a flush had printed but the
+    /// viewport had not yet migrated past — and the viewport's own contents,
+    /// the tail and the chrome, are erased with the screen. One
+    /// synchronized-update batch, and the viewport re-anchored at the top ready
+    /// for the next page.
+    #[test]
+    fn page_break_banks_the_page_and_erases_the_tail() {
+        let mut term = term(6, 8, 3);
+        // The viewport: the live tail and the chrome, on screen and nowhere else.
+        term.draw(2, paint(&["a", "b"]), None).unwrap();
+        // The page's record: settled rows, flushed the only way they ever are.
+        // The viewport is not at the bottom yet, so these are still on screen.
+        let texts: Vec<String> = (0..2).map(|i| format!("h{i}")).collect();
+        term.insert_history(lines(&texts)).unwrap();
+        assert!(
+            term.backend().scrollback().is_empty(),
+            "precondition: the flushed rows have not reached scrollback yet"
+        );
+        term.backend_mut().reset_counters();
+
+        term.page_break().unwrap();
+
+        let scrollback = term.backend().scrollback();
+        for kept in ["h0", "h1"] {
+            assert_eq!(
+                scrollback.iter().filter(|row| *row == kept).count(),
+                1,
+                "{kept:?} reached scrollback exactly once: {scrollback:?}"
+            );
+        }
+        for dropped in ["a", "b"] {
+            assert!(
+                !scrollback.iter().any(|row| row == dropped),
+                "{dropped:?} was a state, not record: {scrollback:?}"
+            );
+        }
+        assert!(
+            term.backend().screen().iter().all(String::is_empty),
+            "and the screen is clear for the next page: {:?}",
+            term.backend().screen()
+        );
+        assert_eq!(term.viewport(), Rect::new(0, 0, 6, 2));
+        let raw = term.backend().raw.clone();
+        assert!(raw.starts_with(SYNC_BEGIN), "one batch: {raw:?}");
+        assert!(raw.ends_with(SYNC_END), "one batch: {raw:?}");
+
+        // The new page paints from the top of the screen.
+        term.draw(2, paint(&["c", "d"]), None).unwrap();
+        assert_eq!(term.backend().screen()[0], "c");
+        assert_eq!(term.backend().screen()[1], "d");
+    }
+
+    /// The bytes the other half of a page turn is made of: finishing the page
+    /// means pushing its settled rows into scrollback, and a push is a
+    /// top-anchored DECSTBM region, the cursor on its last row, one line feed
+    /// per row, and the region released. Line feeds rather than `CSI S` because
+    /// kitty-family terminals send `CSI S` scrolls to the bit bucket instead of
+    /// to scrollback.
+    #[test]
+    fn a_scrollback_push_is_line_feeds_inside_a_top_anchored_region() {
+        let mut out: Vec<u8> = Vec::new();
+        CrosstermBackend::new(&mut out)
+            .scroll_into_scrollback(5, 3)
+            .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&out),
+            "\x1b[1;5r\x1b[5;1H\n\n\n\x1b[r"
+        );
+
+        // A region of fewer than two rows is silently ignored by DECSTBM, and
+        // the scroll that followed would hit the whole screen: nothing is
+        // written at all rather than corrupting the viewport.
+        let mut out: Vec<u8> = Vec::new();
+        {
+            let mut backend = CrosstermBackend::new(&mut out);
+            backend.scroll_into_scrollback(1, 3).unwrap();
+            backend.scroll_into_scrollback(5, 0).unwrap();
+        }
+        assert!(out.is_empty(), "{out:?}");
     }
 
     #[test]

@@ -1,0 +1,35 @@
+{
+  "$id": "urn:bingo:app-server:v1:queue.itemAdded.params",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "description": "One notification's params: the event header, then the body's own fields.",
+  "properties": {
+    "conversationId": {
+      "$ref": "../definitions.json#/definitions/ConversationId"
+    },
+    "entry": {
+      "$ref": "../definitions.json#/definitions/QueueEntry"
+    },
+    "event": {
+      "$ref": "../definitions.json#/definitions/EventMeta"
+    },
+    "position": {
+      "format": "uint32",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "revision": {
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "conversationId",
+    "entry",
+    "event",
+    "position",
+    "revision"
+  ],
+  "title": "NotificationParams_for_QueueItemAdded",
+  "type": "object"
+}

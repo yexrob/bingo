@@ -1,0 +1,33 @@
+{
+  "$id": "urn:bingo:app-server:v1:action.execute.params",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "properties": {
+    "action": {
+      "$ref": "../definitions.json#/definitions/Action"
+    },
+    "originConversationId": {
+      "allOf": [
+        {
+          "$ref": "../definitions.json#/definitions/ConversationId"
+        }
+      ],
+      "description": "The page the action was submitted on. It stays the action's origin even if the user switches pages before it drains."
+    },
+    "precondition": {
+      "anyOf": [
+        {
+          "$ref": "../definitions.json#/definitions/ResourceRevision"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "required": [
+    "action",
+    "originConversationId"
+  ],
+  "title": "ActionExecuteParams",
+  "type": "object"
+}

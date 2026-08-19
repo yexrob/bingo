@@ -23,6 +23,58 @@ pub const SLASH_ERROR_BAD_ARGUMENT: &str = "BAD_ARGUMENT";
 /// The turn's task ended without reporting an outcome (a panic inside the spawn).
 /// Distinct from `SERVER_ERROR`: nothing was wrong upstream, the harness lost the turn.
 pub const TURN_LOST: &str = "TURN_LOST";
+/// Something went wrong inside a run that did not end it — the engine's own
+/// warning, raised as feedback so a frontend branches on the code rather than on
+/// the sentence.
+pub const RUNTIME_WARNING: &str = "RUNTIME_WARNING";
+/// Mail is waiting for the main agent and a digest turn has not run yet — the
+/// "reading the mail" state a frontend shows while the debounce window runs.
+pub const MAIL_WAITING: &str = "MAIL_WAITING";
+
+/// Stable app-server codes (`notes/design/gui-app-server.md` §Errors): the
+/// JSON-RPC `error.data.bingoCode` a client branches on. They live here rather
+/// than in the protocol module because there is one code registry, not one per
+/// exit; `crate::app_server::protocol::ProtocolErrorKind` maps each to its
+/// JSON-RPC number, scope, and recoverability, and its drift guard asserts the
+/// pairing.
+/// The client asked for a protocol major this build does not speak.
+pub const PROTOCOL_UNSUPPORTED: &str = "PROTOCOL_UNSUPPORTED";
+/// The client cannot answer interactions, so it may not control a session.
+pub const CAPABILITY_REQUIRED: &str = "CAPABILITY_REQUIRED";
+/// A call arrived before `initialize` completed.
+pub const NOT_INITIALIZED: &str = "NOT_INITIALIZED";
+/// `initialize` arrived twice on one connection.
+pub const ALREADY_INITIALIZED: &str = "ALREADY_INITIALIZED";
+/// A session-scoped call arrived with no session open.
+pub const NO_ACTIVE_SESSION: &str = "NO_ACTIVE_SESSION";
+pub const SESSION_NOT_FOUND: &str = "SESSION_NOT_FOUND";
+pub const CONVERSATION_NOT_FOUND: &str = "CONVERSATION_NOT_FOUND";
+/// The turn already reached its terminal state.
+pub const TURN_CLOSED: &str = "TURN_CLOSED";
+/// The item cursor was issued under an older `historyGeneration`.
+pub const STALE_PAGE: &str = "STALE_PAGE";
+/// The precondition revision no longer matches the resource.
+pub const STALE_REVISION: &str = "STALE_REVISION";
+/// Keyboard approval arrived inside the confirmation guard (D81).
+pub const INTERACTION_NOT_READY: &str = "INTERACTION_NOT_READY";
+/// The interaction was already answered or cancelled.
+pub const INTERACTION_CLOSED: &str = "INTERACTION_CLOSED";
+/// A decision the server did not advertise for this prompt.
+pub const INTERACTION_INVALID_DECISION: &str = "INTERACTION_INVALID_DECISION";
+/// The action exists but is not available in this state.
+pub const ACTION_UNAVAILABLE: &str = "ACTION_UNAVAILABLE";
+pub const ASSET_NOT_FOUND: &str = "ASSET_NOT_FOUND";
+/// The path was unreadable, or its type or digest did not match.
+pub const ASSET_REJECTED: &str = "ASSET_REJECTED";
+/// A frame exceeded the negotiated ceiling.
+pub const FRAME_TOO_LARGE: &str = "FRAME_TOO_LARGE";
+/// Bounded backpressure and the write timeout both ran out; best-effort only,
+/// because the transport is already unusable.
+pub const CLIENT_TOO_SLOW: &str = "CLIENT_TOO_SLOW";
+/// The stdio stream stopped being framable — bytes that are not UTF-8, or a
+/// stdout that will not take frames. It is the connection that failed, not a
+/// request, so it has no JSON-RPC number: it is the process's exit code.
+pub const TRANSPORT_FAILED: &str = "TRANSPORT_FAILED";
 
 /// Stable error code: `SCREAMING_SNAKE` (e.g. `CONFIG_INVALID`).
 pub trait ErrorCode {
@@ -165,7 +217,9 @@ fn downcast_error_code(err: &(dyn std::error::Error + 'static)) -> Option<&'stat
         crate::hooks::HookError,
         crate::mcp::McpError,
         crate::share::ShareError,
+        crate::storage::StorageError,
         crate::update::UpdateError,
+        crate::app_server::AppServerError,
     )
 }
 
@@ -344,6 +398,19 @@ mod tests {
             TranscriptError::Parse(serde_json::from_str::<()>("x").unwrap_err()).error_code(),
             "STORAGE_ERROR"
         );
+        // StorageError's 2 variants explicitly enumerated (AC-40).
+        use crate::storage::StorageError;
+        let storage_variants = vec![
+            StorageError::HomeUnavailable,
+            StorageError::Io {
+                operation: "read",
+                path: std::path::PathBuf::from("p"),
+                source: std::io::Error::other("x"),
+            },
+        ];
+        assert_stable_codes("storage::StorageError", &storage_variants);
+        assert_eq!(storage_variants[0].error_code(), "CONFIG_INVALID");
+        assert_eq!(storage_variants[1].error_code(), "STORAGE_ERROR");
         // All 6 ShareError variants explicitly enumerated (AC-40).
         use crate::share::ShareError;
         let share_variants = vec![
@@ -449,7 +516,7 @@ mod tests {
     }
 
     /// The macro registry covers all ErrorCode-implementing types (guardrail 4
-    /// "registry is the contract's second place"): each of the 11 registered types is
+    /// "registry is the contract's second place"): each of the 13 registered types is
     /// asserted non-GENERIC through the boxed exit — a type implementing ErrorCode that
     /// only takes effect on the TUI exit while missing from the downcast macro would
     /// silently fall to GENERIC on the CLI exit and turn this test red. Cross-checked
@@ -463,6 +530,7 @@ mod tests {
         use crate::query::QueryError;
         use crate::settings::SettingsError;
         use crate::share::ShareError;
+        use crate::storage::StorageError;
         use crate::tasks::TaskError;
         use crate::team::TeamError;
         use crate::tool::ToolError;
@@ -483,12 +551,14 @@ mod tests {
                 detail: "d".into(),
             }),
             Box::new(ShareError::SessionNotFound("x".into())),
+            Box::new(StorageError::HomeUnavailable),
             Box::new(UpdateError::Http { status: 503 }),
+            Box::new(crate::app_server::AppServerError::ClientTooSlow),
         ];
         assert_eq!(
             samples.len(),
-            12,
-            "the boxed exit should have 12 registered types: new ErrorCode implementors must be \
+            14,
+            "the boxed exit should have 14 registered types: new ErrorCode implementors must be \
              `downcast_error_code` macro registration + an instance in this test; missing either turns CI red"
         );
         for e in &samples {

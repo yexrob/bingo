@@ -12,8 +12,8 @@ use serde::{Deserialize, Serialize};
 
 use super::{backoff, retryable};
 use crate::api::contract::{
-    AuthStatus, BoxStream, Capabilities, ClientError, NeutralRequest, ProviderClient, StreamEvent,
-    SystemBlock, ThinkingLevel,
+    AuthStatus, BoxStream, Capabilities, ClientError, NeutralRequest, ProviderClient,
+    StreamApiErrorKind, StreamEvent, SystemBlock, ThinkingLevel,
 };
 use crate::api::sse::SseParser;
 use crate::api::types::{DEFAULT_MAX_TOKENS, Message};
@@ -133,15 +133,21 @@ struct WireRequest {
 
 impl WireRequest {
     fn from_neutral(request: &NeutralRequest) -> Self {
+        // One breakpoint, on the last cacheable block: a breakpoint caches the
+        // whole prefix (tools + system) up to it, and the API caps requests at
+        // 4 cache_control blocks — memory + crew + experience blocks together
+        // already push past that, which 400s the request.
+        let last_cache = request.system.iter().rposition(|b| b.cache);
         Self {
             model: request.model.clone(),
             max_tokens: request.max_tokens,
             system: request
                 .system
                 .iter()
-                .map(|b| WireSystemBlock {
+                .enumerate()
+                .map(|(index, b)| WireSystemBlock {
                     text: b.text.clone(),
-                    cache: b.cache,
+                    cache: Some(index) == last_cache,
                 })
                 .collect(),
             messages: request.messages.clone(),
@@ -182,8 +188,10 @@ impl Serialize for WireSystemBlock {
 /// The Claude 5 family (including the default `claude-sonnet-5`) rejects
 /// `{"type":"enabled","budget_tokens":N}` with a 400 — `adaptive` is the only
 /// on-mode, so every enabled level sends the same adaptive shape; depth goes
-/// through [`wire_effort`] instead. None sends no parameter at all (keeps
-/// DeepSeek/ollama endpoints happy).
+/// through [`wire_effort`] instead. None sends no parameter at all — the `off`
+/// level, and what an endpoint refusing the parameter is given (DeepSeek's
+/// Anthropic-compatible endpoint was assumed to be one and is not: verified
+/// 200 with this pair, D126).
 fn wire_thinking(level: Option<ThinkingLevel>) -> Option<serde_json::Value> {
     level.map(|_| serde_json::json!({ "type": "adaptive" }))
 }
@@ -346,6 +354,14 @@ pub fn parse_sse_event(event: &str, data: &str) -> Result<Option<StreamEvent>, S
                 serde_json::from_str(data).map_err(|e| format!("bad error event: {e}"))?;
             Ok(Some(StreamEvent::ApiError {
                 message: format!("{}: {}", p.error.kind, p.error.message),
+                kind: match p.error.kind.as_str() {
+                    "overloaded_error" | "server_error" | "api_error" => {
+                        StreamApiErrorKind::Retryable
+                    }
+                    "invalid_request_error" => StreamApiErrorKind::NonRetryable,
+                    _ => StreamApiErrorKind::Unknown,
+                },
+                retry_after: None,
             }))
         }
         _other => Ok(None), // unknown event type: ignore, stay forward-compatible
@@ -635,12 +651,9 @@ impl ProviderClient for AnthropicProvider {
         model: &str,
         system: &[SystemBlock],
         messages: &[Message],
+        tools: &[serde_json::Value],
     ) -> Result<u64, ClientError> {
-        let payload = serde_json::json!({
-            "model": model,
-            "system": system.iter().map(|b| WireSystemBlock { text: b.text.clone(), cache: b.cache }).collect::<Vec<_>>(),
-            "messages": messages,
-        });
+        let payload = count_tokens_payload(model, system, messages, tools);
         let base_url = self
             .endpoint
             .read()
@@ -670,6 +683,28 @@ impl ProviderClient for AnthropicProvider {
             .and_then(|v| v.as_u64())
             .unwrap_or(0))
     }
+}
+
+/// count_tokens body: the same system/messages/tools payload the streaming
+/// request carries — a count that skipped the tool schemas (10k+ tokens for the
+/// base pool) read under the real input size, and auto-compact fired too late.
+/// tools are omitted when empty for compatibility with anthropic-shaped
+/// endpoints that reject the field.
+fn count_tokens_payload(
+    model: &str,
+    system: &[SystemBlock],
+    messages: &[Message],
+    tools: &[serde_json::Value],
+) -> serde_json::Value {
+    let mut payload = serde_json::json!({
+        "model": model,
+        "system": system.iter().map(|b| WireSystemBlock { text: b.text.clone(), cache: b.cache }).collect::<Vec<_>>(),
+        "messages": messages,
+    });
+    if !tools.is_empty() {
+        payload["tools"] = serde_json::Value::Array(tools.to_vec());
+    }
+    payload
 }
 
 /// Idle-timeout wrapper for `stream.next()`: if not a single event arrives
@@ -729,6 +764,26 @@ fn trailing_number(text: &str) -> Option<(u64, usize)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The count must measure the payload the streaming request sends: skipping
+    /// the tool schemas undercounted the input by their full size and let the
+    /// context overrun the window before auto-compact fired.
+    #[test]
+    fn count_tokens_payload_carries_the_request_tools() {
+        let tools = vec![serde_json::json!({
+            "name": "Bash",
+            "description": "Run a command",
+            "input_schema": {"type": "object"},
+        })];
+        let payload = count_tokens_payload("m", &[], &[], &tools);
+        assert_eq!(payload["tools"], serde_json::Value::Array(tools));
+
+        let empty = count_tokens_payload("m", &[], &[], &[]);
+        assert!(
+            empty.get("tools").is_none(),
+            "an empty tools field stays off the wire: {empty}"
+        );
+    }
 
     /// AC-12/13/14: short-sync feedback-layer timeouts are tiered — read
     /// 10s / write 15s, never confused (read must fire before 11s and write
@@ -994,7 +1049,9 @@ mod tests {
         assert_eq!(
             ev,
             StreamEvent::ApiError {
-                message: "overloaded_error: Overloaded".into()
+                message: "overloaded_error: Overloaded".into(),
+                kind: StreamApiErrorKind::Retryable,
+                retry_after: None,
             }
         );
     }
@@ -1024,5 +1081,43 @@ mod tests {
         };
         let json = serde_json::to_value(&wire).unwrap();
         assert_eq!(json, serde_json::json!({"type": "text", "text": "sys"}));
+    }
+
+    /// Many cacheable blocks collapse to one breakpoint on the last: one
+    /// breakpoint caches the whole prefix before it, and the API rejects
+    /// requests carrying more than 4 cache_control blocks.
+    #[test]
+    fn from_neutral_collapses_cache_breakpoints_to_the_last_block() {
+        let block = |text: &str, cache: bool| crate::api::contract::SystemBlock {
+            text: text.into(),
+            cache,
+        };
+        let request = crate::api::contract::NeutralRequest {
+            model: "m".into(),
+            max_tokens: 16,
+            system: vec![
+                block("base", true),
+                block("env", true),
+                block("memory", true),
+                block("crew", true),
+                block("experience", true),
+                block("capabilities", false),
+            ],
+            messages: Vec::new(),
+            tools: Vec::new(),
+            stream: false,
+            thinking: None,
+        };
+        let wire = WireRequest::from_neutral(&request);
+        let flags: Vec<bool> = wire.system.iter().map(|b| b.cache).collect();
+        assert_eq!(flags, [false, false, false, false, true, false]);
+
+        // cache_control off everywhere stays off everywhere.
+        let request = crate::api::contract::NeutralRequest {
+            system: vec![block("base", false), block("env", false)],
+            ..request
+        };
+        let wire = WireRequest::from_neutral(&request);
+        assert!(wire.system.iter().all(|b| !b.cache));
     }
 }

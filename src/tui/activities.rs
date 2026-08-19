@@ -5,28 +5,36 @@
 //! Only the kinds bingo uses are kept (Thinking / Tool / Diff / Watch);
 //! SubAgent is presented by bingo as a Tool.
 
+use crate::app::projection::{display_tool_name, tool_glyph};
 use crate::tui::line::Line;
 use crate::tui::theme::Theme;
 use crate::watch::WatchState;
-
-/// Spinner frames: a star that grows and shrinks (`·` → `✻`/`✽` → `·`),
-/// driven by the host tick. The sequence is a there-and-back cycle, so the
-/// glyph never jumps between sizes.
-pub const SPINNERS: [char; 8] = ['·', '✢', '*', '✻', '✽', '✻', '*', '✢'];
-
-/// Spinner frame for a given tick.
-pub fn spinner(frame: u64) -> char {
-    SPINNERS[(frame as usize) % SPINNERS.len()]
-}
 
 /// Result connector under a tool header (CC `  ⎿  `). Continuation lines line
 /// up with the text after it.
 pub const RESULT_CONNECTOR: &str = "  ⎿  ";
 /// Indentation of the lines that continue a result block.
 pub const RESULT_INDENT: &str = "     ";
+
+/// Narrowest code column a diff row will wrap to. Below this the gutter would
+/// be eating the content it exists to index, so the row is allowed to overrun
+/// and be clipped instead — the same thing every other over-wide row does.
+const MIN_DIFF_BODY: usize = 16;
 /// Only commands slower than this get a duration on their result line —
 /// a millisecond count on every row is noise.
 pub const SLOW_TOOL_MS: u64 = 2_000;
+
+/// Progress lines shown under a running dispatch row — CC's
+/// `MAX_PROGRESS_MESSAGES_TO_SHOW` (`tools/AgentTool/UI.tsx:33`).
+pub const PROGRESS_LINES: usize = 3;
+
+/// What a dispatch row says before its instance has done anything —
+/// CC `INITIALIZING_TEXT` (`tools/AgentTool/UI.tsx:443`).
+pub const INITIALIZING: &str = "Initializing…";
+
+/// The opening of the condensed progress line CC falls back to when the window
+/// is too short to carry the per-tool rows (`tools/AgentTool/UI.tsx:497`).
+pub const IN_PROGRESS: &str = "In progress…";
 
 /// Tool-call lifecycle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -37,6 +45,9 @@ pub enum ToolStatus {
     Done,
     /// Failed.
     Error,
+    /// Cut short by the user's interrupt: it neither finished nor failed, and the row must
+    /// not claim either.
+    Interrupted,
 }
 
 /// One tool call: `✓ bash · cargo test · 12ms`.
@@ -55,6 +66,15 @@ pub struct ToolCall {
     /// Result summary shown when expanded (CC `⎿ Read 173 lines`), rendered
     /// before the content.
     pub result_summary: Option<String>,
+    /// The protocol's own id for this call, recorded at `ToolReady` so the
+    /// answer can find the call that made it.
+    ///
+    /// A round runs its tools concurrently and they do not come back in call
+    /// order, so matching an answer to "the first running call with this name"
+    /// puts one `Read`'s output under another `Read`'s row. `None` for calls
+    /// the protocol never named — the `!` command's synthesized rows — which
+    /// fall back to that name match.
+    pub id: Option<String>,
 }
 
 impl ToolCall {
@@ -67,8 +87,22 @@ impl ToolCall {
             duration_ms: 0,
             output: None,
             result_summary: None,
+            id: None,
         }
     }
+}
+
+/// What a dispatched run has cost so far: the two numbers CC's `Done (…)` line
+/// and its condensed progress line are both built from
+/// (`tools/AgentTool/UI.tsx:376`, `:497-499`).
+///
+/// Sampled from the registry while the run is alive and **frozen at the
+/// terminal event**, because the registry drops a run's progress the instant it
+/// finishes (`spawn_agent_loop` clears it one line before it reports `Done`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RunStats {
+    pub tool_uses: usize,
+    pub tokens: u64,
 }
 
 /// A watched entity (command/agent): header + round detail + expandable
@@ -85,6 +119,19 @@ pub struct WatchCall {
     pub detail: Option<String>,
     /// Milliseconds elapsed.
     pub duration_ms: u64,
+    /// Live progress under a running dispatch row (D106): the last
+    /// [`PROGRESS_LINES`] activity lines of the instance, oldest first, exactly
+    /// as CC shows the last three of a subagent's progress messages
+    /// (`tools/AgentTool/UI.tsx:33`, `:510`).
+    ///
+    /// Transient by construction: a message holding a *running* watch row never
+    /// settles ([`crate::tui::chat::Chat::message_settled`] asks
+    /// `Activity::is_running`), so these rows can never reach scrollback. What
+    /// does reach it is the settled form built from [`WatchCall::run_stats`].
+    pub progress: Vec<String>,
+    /// The run's cost. Live while the run is, frozen at the terminal event —
+    /// which is the row that settles.
+    pub run_stats: Option<RunStats>,
 }
 
 /// Whether a thinking block is still running.
@@ -118,12 +165,19 @@ pub struct Thinking {
     /// between body text merge into one block; the folded row shows
     /// `✻ Thinking · N segments`).
     pub segments: usize,
+    /// Whether a clock was taken (D130). The console times every block it
+    /// streams, even one that finishes inside a tick; a page rebuilt from
+    /// history has no measurement to report, because none is in the record.
+    /// [`thinking_completion_line`] is that report, so `false` suppresses it —
+    /// a zero would otherwise read as "measured, and instant".
+    pub timed: bool,
 }
 
 /// Task lifecycle (pending → in_progress → completed).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TodoStatus {
     /// Not started.
+    #[default]
     Pending,
     /// In progress.
     InProgress,
@@ -132,12 +186,24 @@ pub enum TodoStatus {
 }
 
 /// A task item.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Carries the store's `id`, `owner` and `blocked_by` since D104: the panel
+/// names an owner who is a live instance and marks what a task is waiting on,
+/// and both are answers the row can only give if the snapshot brought them.
+/// **Display only** — there is no assignment protocol and no claiming here.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TodoItem {
+    /// Store id, which is what `blocked_by` names.
+    pub id: String,
     /// Task text.
     pub text: String,
     /// Lifecycle status.
     pub status: TodoStatus,
+    /// Who the store says is on it. Rendered only when it resolves to an
+    /// instance that is still on the roster.
+    pub owner: Option<String>,
+    /// Ids this task is waiting on. Rendered as those of them that are not done.
+    pub blocked_by: Vec<String>,
 }
 
 /// One line of a unified diff.
@@ -156,8 +222,62 @@ pub enum DiffLine {
 pub struct Hunk {
     /// `@@ -a,b +c,d @@`
     pub header: String,
+    /// First line number on the old side (`a`), 1-based.
+    pub old_start: usize,
+    /// First line number on the new side (`c`), 1-based.
+    pub new_start: usize,
     /// Context / removed / added lines.
     pub lines: Vec<DiffLine>,
+}
+
+impl Hunk {
+    /// Walk the hunk, pairing each line with the numbers it carries: context
+    /// advances both sides, an addition only the new one, a removal only the
+    /// old one. This is the whole arithmetic behind the gutter.
+    fn numbered(&self) -> Vec<(Option<usize>, Option<usize>, &DiffLine)> {
+        let mut old = self.old_start;
+        let mut new = self.new_start;
+        let mut out = Vec::with_capacity(self.lines.len());
+        for line in &self.lines {
+            let entry = match line {
+                DiffLine::Context(_) => {
+                    let e = (Some(old), Some(new), line);
+                    old += 1;
+                    new += 1;
+                    e
+                }
+                DiffLine::Removed(_) => {
+                    let e = (Some(old), None, line);
+                    old += 1;
+                    e
+                }
+                DiffLine::Added(_) => {
+                    let e = (None, Some(new), line);
+                    new += 1;
+                    e
+                }
+            };
+            out.push(entry);
+        }
+        out
+    }
+}
+
+/// Parse the two starting line numbers out of `@@ -a,b +c,d @@`.
+///
+/// A malformed or absent header falls back to 1/1 rather than refusing to
+/// render: a diff we cannot number is still a diff worth showing.
+fn hunk_starts(header: &str) -> (usize, usize) {
+    let number = |part: Option<&str>, sigil: char| -> usize {
+        part.and_then(|p| p.strip_prefix(sigil))
+            .map(|p| p.split(',').next().unwrap_or(p))
+            .and_then(|p| p.parse::<usize>().ok())
+            .unwrap_or(1)
+    };
+    let mut parts = header.trim_start_matches('@').split_whitespace();
+    let old = number(parts.next(), '-');
+    let new = number(parts.next(), '+');
+    (old, new)
 }
 
 /// One file edit, presented as a git-style unified diff.
@@ -170,6 +290,19 @@ pub struct Diff {
 }
 
 impl Diff {
+    /// Digits the line-number gutter needs: the widest number anywhere in the
+    /// diff, so the code column sits at the same place in every hunk. A diff
+    /// that crosses from line 99 to line 100 does not shift under the reader.
+    fn gutter_digits(&self) -> usize {
+        let mut max = 1;
+        for hunk in &self.hunks {
+            for (old, new, _) in hunk.numbered() {
+                max = max.max(old.unwrap_or(0)).max(new.unwrap_or(0));
+            }
+        }
+        max.to_string().len()
+    }
+
     /// Count added/removed lines across all hunks.
     pub fn stats(&self) -> (usize, usize) {
         let mut added = 0;
@@ -201,8 +334,11 @@ impl Diff {
             }
             if let Some(header) = line.strip_prefix("@@") {
                 let header = format!("@@{header}");
+                let (old_start, new_start) = hunk_starts(&header);
                 hunks.push(Hunk {
                     header,
+                    old_start,
+                    new_start,
                     lines: Vec::new(),
                 });
                 continue;
@@ -234,23 +370,77 @@ impl Diff {
     }
 }
 
-/// Render a diff as styled lines: `@@` hunk headers, `-` red, `+` green.
-pub fn diff_lines(d: &Diff, theme: &Theme) -> Vec<Line> {
+/// Render a diff as styled lines: `@@` hunk headers, a muted old/new line-number
+/// gutter, then `-` red / `+` green.
+///
+/// `width` is the display width the rows have to live in *after* whatever the
+/// caller indents them by. Code lines are wrapped rather than clipped, and a
+/// continuation row gets a blank gutter and a blank marker column, so the code
+/// column stays a straight edge no matter how long a line is.
+///
+/// The hunk header stays flush left. It is a statement about the numbers, not a
+/// numbered line, and indenting it into the gutter would say otherwise.
+pub fn diff_lines(d: &Diff, theme: &Theme, width: usize) -> Vec<Line> {
+    let digits = d.gutter_digits();
+    // "{old:>digits} {new:>digits} " — two columns, one space between, one after.
+    let gutter_width = digits * 2 + 2;
+    // …and one more column for the -/+/space marker.
+    let body = width.saturating_sub(gutter_width + 1).max(MIN_DIFF_BODY);
+    let blank_gutter = " ".repeat(gutter_width);
     let mut out = Vec::new();
     for hunk in &d.hunks {
         out.push(Line::styled(hunk.header.clone(), theme.diff_hunk()));
-        for line in &hunk.lines {
-            let (prefix, style) = match line {
-                DiffLine::Context(_) => (" ", theme.diff_context()),
-                DiffLine::Removed(_) => ("-", theme.diff_removed()),
-                DiffLine::Added(_) => ("+", theme.diff_added()),
+        for (old, new, line) in hunk.numbered() {
+            let (marker, style) = match line {
+                DiffLine::Context(_) => (' ', theme.diff_context()),
+                DiffLine::Removed(_) => ('-', theme.diff_removed()),
+                DiffLine::Added(_) => ('+', theme.diff_added()),
             };
-            let text = match line {
-                DiffLine::Context(t) | DiffLine::Removed(t) | DiffLine::Added(t) => t.clone(),
+            let (DiffLine::Context(text) | DiffLine::Removed(text) | DiffLine::Added(text)) = line;
+            let cell = |n: Option<usize>| match n {
+                Some(n) => format!("{n:>digits$}"),
+                None => " ".repeat(digits),
             };
-            out.push(Line::styled(format!("{prefix}{text}"), style));
+            let gutter = format!("{} {} ", cell(old), cell(new));
+            for (i, chunk) in wrap_columns(text, body).into_iter().enumerate() {
+                let mut row = Line::styled(
+                    if i == 0 {
+                        gutter.clone()
+                    } else {
+                        blank_gutter.clone()
+                    },
+                    theme.muted(),
+                );
+                row.push_styled(
+                    format!("{}{chunk}", if i == 0 { marker } else { ' ' }),
+                    style,
+                );
+                out.push(row);
+            }
         }
     }
+    out
+}
+
+/// Hard-wrap by display columns (CJK-aware).
+///
+/// Code does not wrap on words — a break mid-identifier is honest, a break that
+/// silently reflows indentation is not — so this splits on columns and nothing
+/// else. Always returns at least one chunk, so an empty line still gets a row.
+fn wrap_columns(text: &str, width: usize) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut current = String::new();
+    let mut col = 0usize;
+    for ch in text.chars() {
+        let w = crate::tui::line::char_width(ch);
+        if col + w > width && !current.is_empty() {
+            out.push(std::mem::take(&mut current));
+            col = 0;
+        }
+        current.push(ch);
+        col += w;
+    }
+    out.push(current);
     out
 }
 
@@ -302,7 +492,10 @@ impl Activity {
         self.auto_expanded = false;
     }
 
-    /// Whether expanding reveals any content.
+    /// Whether expanding reveals any content. Production reads the content
+    /// directly (the layout decides row by row); this is the predicate the
+    /// retention tests assert on.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn expandable(&self) -> bool {
         !self.content.is_empty()
     }
@@ -363,43 +556,28 @@ fn thinking_header(theme: &Theme) -> Line {
 
 /// Thinking completion line: `✻ {done_verb} for 40.0s`, rendered at the end
 /// of the message (after the body and all tools).
-pub fn thinking_completion_line(t: &Thinking, theme: &Theme) -> Line {
+///
+/// `settling` is the [`crate::tui::motion::Motion::settle`] token: for one
+/// 120 ms window after the turn ends the line carries the accent, then rests.
+/// The blink happens while the row is still live — it freezes into scrollback
+/// at rest, so write-once is never broken by it.
+pub fn thinking_completion_line(t: &Thinking, theme: &Theme, settling: bool) -> Line {
     let verb = t.done_verb.unwrap_or(t.stage);
-    Line::styled(
-        format!("✻ {verb} for {:.1}s", t.duration_ms as f64 / 1000.0),
-        theme.thinking(),
-    )
+    let text = format!("✻ {verb} for {:.1}s", t.duration_ms as f64 / 1000.0);
+    if settling {
+        return Line::styled(text, crate::tui::line::SegStyle::fg(theme.claude));
+    }
+    Line::styled(text, theme.thinking())
 }
 
 /// Status colour of the leading marker: running is muted, done is green,
-/// failure is red.
+/// failure is red, an interrupted call is amber (it did not fail — it was stopped).
 fn dot_style(status: ToolStatus, theme: &Theme) -> crate::tui::line::SegStyle {
     match status {
         ToolStatus::Running => theme.dim(),
         ToolStatus::Done => theme.tool_done(),
         ToolStatus::Error => theme.tool_error(),
-    }
-}
-
-/// Tool-category icon: built-in `⏺` / MCP `◆` / Skill `✦`. Shape encodes
-/// category, colour encodes status (dot_style unchanged); agents have no tool
-/// row, their watch-row icon lives in [`watch_header`].
-pub fn tool_glyph(name: &str) -> &'static str {
-    if name.starts_with("mcp__") {
-        "◆ "
-    } else if name == "Skill" {
-        "✦ "
-    } else {
-        "⏺ "
-    }
-}
-
-/// The MCP full name `mcp__server__tool` displays as `server:tool`;
-/// permission rules still use the full name.
-pub fn display_tool_name(name: &str) -> String {
-    match name.strip_prefix("mcp__") {
-        Some(rest) => rest.replacen("__", ":", 1),
-        None => name.to_string(),
+        ToolStatus::Interrupted => theme.tool_interrupted(),
     }
 }
 
@@ -421,6 +599,9 @@ fn tool_header(t: &ToolCall, theme: &Theme) -> Line {
 fn tool_result(t: &ToolCall, act: &Activity, theme: &Theme) -> Line {
     let mut body = match t.status {
         ToolStatus::Running => "Running…".to_string(),
+        // The state is the whole result: an interrupted call has no output to summarize,
+        // and borrowing one from a half-finished run would read as completion.
+        ToolStatus::Interrupted => "Interrupted".to_string(),
         _ => t
             .result_summary
             .clone()
@@ -433,21 +614,44 @@ fn tool_result(t: &ToolCall, act: &Activity, theme: &Theme) -> Line {
     if t.status != ToolStatus::Running && t.duration_ms > SLOW_TOOL_MS {
         body.push_str(&format!(" · Ran in {:.1}s", t.duration_ms as f64 / 1000.0));
     }
-    let style = if t.status == ToolStatus::Error {
-        theme.tool_error()
-    } else {
-        theme.dim()
+    let style = match t.status {
+        ToolStatus::Error => theme.tool_error(),
+        ToolStatus::Interrupted => theme.tool_interrupted(),
+        _ => theme.dim(),
     };
     let mut line = Line::styled(format!("{RESULT_CONNECTOR}{body}"), style);
     if let Some(hint) = expand_hint(act) {
-        line.push_styled(format!(" ({hint})"), theme.dim());
+        line.push_styled(format!(" ({hint})"), theme.muted());
     }
     line
+}
+
+/// Who a run's watch label addresses. Every shape a dispatch label takes —
+/// `scout · fix the parser`, `scout #3 · look again`, `scout #7 receipt` —
+/// opens with the instance name, and that is the only part of it any surface
+/// needs in order to find the agent's colour, its face or its row.
+pub fn watch_instance(label: &str) -> &str {
+    label.split_whitespace().next().unwrap_or(label)
+}
+
+/// What a run's watch label says the run is *for*: everything after the first
+/// ` · `. A label without one (the ack watchdog's `scout #7 receipt`) has no
+/// description, and the row says nothing rather than repeating the address.
+pub fn watch_description(label: &str) -> &str {
+    label.split_once(" · ").map(|(_, rest)| rest).unwrap_or("")
 }
 
 /// `⏺ watch -n 2 ls` — same shape as a tool, driven by the watch lifecycle.
 /// A subagent's watch row (`WatchKind::Agent`) uses `◉`: a core inside a
 /// ring, a session inside a session.
+///
+/// **A dispatch row is written `@scout: fix the parser`** (D106), which is CC's
+/// own shape for a *named* spawn: `AgentProgressLine`'s `hideType` branch is
+/// `<Text bold>{name}</Text><Text dimColor>: {description}</Text>`
+/// (`components/AgentProgressLine.tsx` sourcesContent, and
+/// `tools/AgentTool/UI.tsx:687` where a named spawn's `agentType` becomes
+/// `@name`). It is also, letter for letter, the shape D104 gave the agent
+/// tree's rows — so the same run reads the same way wherever it is drawn.
 fn watch_header(w: &WatchCall, theme: &Theme, portrait: Option<&Portrait>) -> Line {
     let style = match w.status {
         WatchState::Running | WatchState::Idle => theme.dim(),
@@ -468,41 +672,138 @@ fn watch_header(w: &WatchCall, theme: &Theme, portrait: Option<&Portrait>) -> Li
             Line::styled(glyph, style)
         }
     };
-    line.push_styled(w.label.clone(), theme.text());
+    if w.kind == crate::watch::WatchKind::Agent {
+        line.push_styled(format!("@{}", watch_instance(&w.label)), theme.text());
+        let description = watch_description(&w.label);
+        if !description.is_empty() {
+            line.push_styled(format!(": {description}"), theme.dim());
+        }
+    } else {
+        line.push_styled(w.label.clone(), theme.text());
+    }
     line
 }
 
-fn watch_result(w: &WatchCall, act: &Activity, theme: &Theme, portrait: Option<&Portrait>) -> Line {
-    let mut body = match (&w.detail, w.status) {
-        (Some(detail), _) => detail.clone(),
-        (None, WatchState::Running) => "Running…".to_string(),
-        (None, WatchState::Idle) => "Waiting…".to_string(),
-        (None, WatchState::Done) => "Done".to_string(),
-        (None, WatchState::Failed) => "Failed".to_string(),
-        (None, WatchState::Cancelled) => "Cancelled".to_string(),
+/// `Done (12 tool uses · 8.3k tokens · 1m 4s)` — CC
+/// `tools/AgentTool/UI.tsx:376-377`, whose three parts are joined by ` · ` and
+/// whose duration is `formatDuration`. The stats formatter is D104's, shared
+/// rather than forked; the duration formatter is D104's too.
+pub fn dispatch_done_line(stats: Option<RunStats>, duration_ms: u64) -> String {
+    let stats = stats.unwrap_or_default();
+    format!(
+        "Done ({} · {})",
+        crate::tui::tree::stats_body(stats.tool_uses, stats.tokens),
+        crate::tui::tree::duration_label(std::time::Duration::from_millis(duration_ms))
+    )
+}
+
+/// `In progress… · 3 tool uses · 8.3k tokens` — CC's condensed progress line
+/// (`tools/AgentTool/UI.tsx:495-503`), the one it falls back to when the window
+/// is too short to carry a row per tool.
+pub fn dispatch_condensed_line(stats: Option<RunStats>) -> String {
+    let stats = stats.unwrap_or_default();
+    format!(
+        "{IN_PROGRESS} · {}",
+        crate::tui::tree::stats_body(stats.tool_uses, stats.tokens)
+    )
+}
+
+/// What hangs under a dispatch row (D106). One entry per row, first on the `⎿`
+/// connector and the rest on [`RESULT_INDENT`].
+///
+/// - **running**, room to spare: the instance's last [`PROGRESS_LINES`]
+///   activity lines, oldest first — CC keeps the tail of its progress messages
+///   and renders each in condensed style (`tools/AgentTool/UI.tsx:510`,
+///   `:553-556`); bingo's `recent_activity` entries are already exactly that
+///   line (`⏺ Read(src/lexer.rs)`), built by the same `tool_glyph` /
+///   `display_tool_name` / `summarize_input` the console uses. CC's grouping of
+///   consecutive read/search calls is not ported: its own comment marks it
+///   *ants only* (`:501`), so the shipped renderer prints the rows as they come.
+/// - **running**, short window: one [`dispatch_condensed_line`].
+/// - **finished**: one [`dispatch_done_line`], which is the form that settles.
+fn dispatch_body(w: &WatchCall, narrow: bool) -> Vec<String> {
+    match w.status {
+        WatchState::Done => vec![dispatch_done_line(w.run_stats, w.duration_ms)],
+        WatchState::Running | WatchState::Idle => {
+            if w.progress.is_empty() {
+                return vec![INITIALIZING.to_string()];
+            }
+            if narrow {
+                return vec![dispatch_condensed_line(w.run_stats)];
+            }
+            w.progress
+                .iter()
+                .rev()
+                .take(PROGRESS_LINES)
+                .rev()
+                .cloned()
+                .collect()
+        }
+        // A failure keeps D98's wording and its colour: the reason the run gave
+        // is the only useful thing left to say, and the `⚠` alert line below
+        // repeats the name for a reader who is not looking here.
+        WatchState::Failed => vec![w.detail.clone().unwrap_or_else(|| "Failed".to_string())],
+        WatchState::Cancelled => vec![w.detail.clone().unwrap_or_else(|| "Cancelled".to_string())],
+    }
+}
+
+/// The rows under a watch row's header. Commands and channels keep their single
+/// state line; a dispatch gets [`dispatch_body`], which is one row while it is
+/// finished or the window is short and up to [`PROGRESS_LINES`] while it works.
+fn watch_result(
+    w: &WatchCall,
+    act: &Activity,
+    theme: &Theme,
+    portrait: Option<&Portrait>,
+    narrow: bool,
+) -> Vec<Line> {
+    let agent = w.kind == crate::watch::WatchKind::Agent;
+    let mut bodies = if agent {
+        dispatch_body(w, narrow)
+    } else {
+        let mut body = match (&w.detail, w.status) {
+            (Some(detail), _) => detail.clone(),
+            (None, WatchState::Running) => "Running…".to_string(),
+            (None, WatchState::Idle) => "Waiting…".to_string(),
+            (None, WatchState::Done) => "Done".to_string(),
+            (None, WatchState::Failed) => "Failed".to_string(),
+            (None, WatchState::Cancelled) => "Cancelled".to_string(),
+        };
+        if w.status != WatchState::Running && w.duration_ms > SLOW_TOOL_MS {
+            body.push_str(&format!(" · Ran in {:.1}s", w.duration_ms as f64 / 1000.0));
+        }
+        vec![body]
     };
-    if w.status != WatchState::Running && w.duration_ms > SLOW_TOOL_MS {
-        body.push_str(&format!(" · Ran in {:.1}s", w.duration_ms as f64 / 1000.0));
+    if bodies.is_empty() {
+        bodies.push(INITIALIZING.to_string());
     }
     let style = if w.status == WatchState::Failed {
         theme.tool_error()
     } else {
         theme.dim()
     };
-    // The portrait's second row stands in for the `⎿` connector: it occupies the
-    // same gutter columns, so the body still hangs where the eye expects it.
-    let mut line = match portrait {
-        Some(p) => {
-            let mut line = p.bottom.clone();
-            line.push_styled(body, style);
-            line
+    let mut rows: Vec<Line> = Vec::with_capacity(bodies.len());
+    for (i, body) in bodies.into_iter().enumerate() {
+        // The portrait's second row stands in for the `⎿` connector: it occupies
+        // the same gutter columns, so the body still hangs where the eye expects
+        // it. Only the first row can take it — a face is two cells tall.
+        let mut line = match (i, portrait) {
+            (0, Some(p)) => {
+                let mut line = p.bottom.clone();
+                line.push_styled(body, style);
+                line
+            }
+            (0, None) => Line::styled(format!("{RESULT_CONNECTOR}{body}"), style),
+            _ => Line::styled(format!("{RESULT_INDENT}{body}"), style),
+        };
+        if i == 0
+            && let Some(hint) = expand_hint(act)
+        {
+            line.push_styled(format!(" ({hint})"), theme.muted());
         }
-        None => Line::styled(format!("{RESULT_CONNECTOR}{body}"), style),
-    };
-    if let Some(hint) = expand_hint(act) {
-        line.push_styled(format!(" ({hint})"), theme.dim());
+        rows.push(line);
     }
-    line
+    rows
 }
 
 fn header_for(h: &Activity, theme: &Theme, portrait: Option<&Portrait>) -> Line {
@@ -513,6 +814,11 @@ fn header_for(h: &Activity, theme: &Theme, portrait: Option<&Portrait>) -> Line 
         ActivityKind::Watch(w) => watch_header(w, theme, portrait),
     }
 }
+
+/// How a folded activity says it can be opened. One string, because a row that
+/// advertised a different key than the transcript binds would be worse than a
+/// row that advertised none.
+pub const EXPAND_HINT: &str = "ctrl+o to expand";
 
 /// The result line of a collapsed activity advertises how to open it.
 fn expand_hint(act: &Activity) -> Option<&str> {
@@ -580,17 +886,22 @@ pub struct ActivityRowRange {
 /// `render_reply` renders a subagent's markdown reply (this module stays
 /// display-independent; bingo presents SubAgent as a Tool, so no recursion is
 /// needed — the parameter is kept to match the original contract).
+///
+/// `narrow` is CC's short-window fallback for dispatch rows
+/// (`tools/AgentTool/UI.tsx:469`): the caller measures the window, this decides
+/// what a row may spend on it.
 pub fn layout_activity(
     act: &Activity,
     path: &[usize],
     base_row: u16,
     theme: &Theme,
     portrait: Option<&Portrait>,
+    narrow: bool,
     render_reply: &mut dyn FnMut(&str) -> Vec<Line>,
 ) -> (Vec<Line>, Vec<ActivityRowRange>) {
     let mut header = header_for(act, theme, portrait);
     if let Some(tail) = fold_tail(act) {
-        header.push_styled(format!(" {tail}"), theme.dim());
+        header.push_styled(format!(" {tail}"), theme.muted());
     }
     let mut rows = vec![header];
     // Result line (CC `  ⎿  …`): tools, edits and watches always carry one —
@@ -598,7 +909,7 @@ pub fn layout_activity(
     match &act.kind {
         ActivityKind::Tool(t) => rows.push(tool_result(t, act, theme)),
         ActivityKind::Diff(d) => rows.push(diff_result(d, theme)),
-        ActivityKind::Watch(w) => rows.push(watch_result(w, act, theme, portrait)),
+        ActivityKind::Watch(w) => rows.extend(watch_result(w, act, theme, portrait, narrow)),
         ActivityKind::Thinking(_) => {}
     }
     let thinking = matches!(act.kind, ActivityKind::Thinking(_));
@@ -656,6 +967,7 @@ mod tests {
             done_verb: None,
             start_tick: 0,
             segments: 1,
+            timed: true,
         }));
         if state == ThinkingState::Done {
             h.set_content(vec![Line::plain("reasoning line")]);
@@ -669,7 +981,7 @@ mod tests {
 
     fn render_lines_with(h: &Activity, portrait: Option<&Portrait>) -> Vec<Line> {
         let mut render = |_: &str| Vec::new();
-        let (rows, _) = layout_activity(h, &[0], 0, &Theme::dark(), portrait, &mut render);
+        let (rows, _) = layout_activity(h, &[0], 0, &Theme::dark(), portrait, false, &mut render);
         rows
     }
 
@@ -731,8 +1043,9 @@ mod tests {
             done_verb: Some("Churned"),
             start_tick: 0,
             segments: 1,
+            timed: true,
         };
-        let line = thinking_completion_line(&t, &Theme::dark());
+        let line = thinking_completion_line(&t, &Theme::dark(), false);
         assert_eq!(text(&line), "✻ Churned for 40.0s");
         // None falls back to stage.
         let t2 = Thinking {
@@ -740,7 +1053,7 @@ mod tests {
             done_verb: None,
             ..t
         };
-        let line2 = thinking_completion_line(&t2, &Theme::dark());
+        let line2 = thinking_completion_line(&t2, &Theme::dark(), false);
         assert_eq!(text(&line2), "✻ Churning for 40.0s");
     }
 
@@ -755,6 +1068,7 @@ mod tests {
             duration_ms: 12,
             output: Some("54 passed".into()),
             result_summary: None,
+            id: None,
         }));
         h.expand_hint = Some("ctrl+o to expand".to_string());
         h.set_content(vec![
@@ -790,7 +1104,10 @@ mod tests {
         assert_eq!(text(&lines[0]), "⏺ Read(src/main.rs)");
         assert_eq!(text(&lines[1]), "  ⎿  Running…");
         // The running dot uses the weak colour and turns green when done.
-        assert_eq!(lines[0].segs[0].style.fg, Some(Theme::dark().inactive));
+        assert_eq!(
+            lines[0].segs[0].style.fg,
+            Some(Theme::dark().text_secondary)
+        );
     }
 
     /// Slow commands (>2s) fold the duration into the result line; error
@@ -804,6 +1121,7 @@ mod tests {
             duration_ms: 2_300,
             output: Some("Compiling".into()),
             result_summary: None,
+            id: None,
         }));
         assert_eq!(
             text(&render_lines(&slow)[1]),
@@ -816,11 +1134,40 @@ mod tests {
             duration_ms: 5,
             output: None,
             result_summary: None,
+            id: None,
         }));
         let lines = render_lines(&failed);
         assert_eq!(text(&lines[1]), "  ⎿  Failed");
         assert_eq!(lines[0].segs[0].style.fg, Some(Theme::dark().error));
         assert_eq!(lines[1].segs[0].style.fg, Some(Theme::dark().error));
+    }
+
+    /// D76: a call the user stopped is neither done nor failed. It reads `Interrupted` in
+    /// the warning colour — the green completion glyph used to claim a result that was
+    /// never produced.
+    #[test]
+    fn interrupted_tool_is_amber_and_says_interrupted() {
+        let stopped = Activity::new(ActivityKind::Tool(ToolCall {
+            name: "Bash",
+            status: ToolStatus::Interrupted,
+            summary: "sleep 30".into(),
+            duration_ms: 0,
+            // Even with output on hand, the state is the result.
+            output: Some("partial output".into()),
+            result_summary: None,
+            id: None,
+        }));
+        let lines = render_lines(&stopped);
+        assert_eq!(text(&lines[0]), "⏺ Bash(sleep 30)");
+        assert_eq!(text(&lines[1]), "  ⎿  Interrupted");
+        let warning = Some(Theme::dark().warning);
+        assert_eq!(lines[0].segs[0].style.fg, warning, "glyph");
+        assert_eq!(lines[1].segs[0].style.fg, warning, "result line");
+        assert_ne!(
+            lines[0].segs[0].style.fg,
+            Some(Theme::dark().success),
+            "never wears the completion colour"
+        );
     }
 
     /// Edit/Write: `⏺ Update(path)` + `  ⎿  Updated path with N additions…`.
@@ -837,20 +1184,103 @@ mod tests {
         );
     }
 
+    /// The gutter's arithmetic, on a hunk that has all three line kinds:
+    /// context advances both sides, an addition only the new one, a removal
+    /// only the old one.
     #[test]
-    fn spinner_cycles() {
-        let a = spinner(0);
-        let b = spinner(1);
-        assert_ne!(a, b);
-        assert_eq!(
-            spinner(SPINNERS.len() as u64),
-            a,
-            "cycles after full rotation"
+    fn diff_gutter_numbers_a_mixed_hunk() {
+        let d = Diff::parse_unified(
+            "--- a/f.rs\n+++ b/f.rs\n@@ -10,4 +10,4 @@\n keep\n-gone\n+new\n tail\n",
         );
-        // Starburst glyph (CC): no longer braille.
-        assert_eq!(SPINNERS[0], '·');
-        assert!(SPINNERS.contains(&'✻'));
-        assert!(!SPINNERS.contains(&'⠋'));
+        let rows: Vec<String> = diff_lines(&d, &Theme::dark(), 40)
+            .iter()
+            .map(text)
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                "@@ -10,4 +10,4 @@".to_string(),
+                "10 10  keep".to_string(),
+                "11    -gone".to_string(),
+                "   11 +new".to_string(),
+                "12 12  tail".to_string(),
+            ],
+        );
+    }
+
+    /// The gutter is sized from the largest number in the whole diff, not per
+    /// hunk: a diff that crosses 99 → 100 must not shift its code column
+    /// halfway down.
+    #[test]
+    fn diff_gutter_width_is_stable_across_digit_widths() {
+        let d = Diff::parse_unified("+++ b/f.rs\n@@ -1,1 +1,1 @@\n a\n@@ -99,2 +99,2 @@\n b\n+c\n");
+        let rows: Vec<String> = diff_lines(&d, &Theme::dark(), 40)
+            .iter()
+            .map(text)
+            .collect();
+        // Three digits, because the new side reaches 100.
+        assert_eq!(rows[1], "  1   1  a");
+        assert_eq!(rows[3], " 99  99  b");
+        assert_eq!(rows[4], "    100 +c");
+        // Same marker column in every row, first hunk and last alike: three
+        // digits, a space, three digits, a space, then the marker.
+        for row in rows.iter().filter(|r| !r.starts_with("@@")) {
+            assert!(
+                matches!(row.chars().nth(8), Some(' ' | '+' | '-')),
+                "the marker must sit at column 8: {row:?}"
+            );
+        }
+    }
+
+    /// A line too long for the width wraps instead of being clipped, and the
+    /// continuation carries a blank gutter and a blank marker — the code column
+    /// stays a straight edge.
+    #[test]
+    fn diff_wrapped_lines_get_blank_gutters() {
+        let long = "x".repeat(45);
+        let d = Diff::parse_unified(&format!("+++ b/f.rs\n@@ -1,1 +1,1 @@\n+{long}\n"));
+        // digits=1 → the gutter "  1 " is 4 wide and the marker 1, so 25 columns
+        // leave a 20-column body: 45 characters need three rows.
+        let rows: Vec<String> = diff_lines(&d, &Theme::dark(), 25)
+            .iter()
+            .map(text)
+            .collect();
+        assert_eq!(rows.len(), 4, "header + three wrapped rows, got {rows:?}");
+        assert_eq!(rows[1], format!("  1 +{}", "x".repeat(20)));
+        assert_eq!(
+            rows[2],
+            format!("     {}", "x".repeat(20)),
+            "blank gutter, blank marker"
+        );
+        assert_eq!(rows[3], format!("     {}", "x".repeat(5)));
+    }
+
+    /// The gutter is muted furniture; the markers keep the colours that carry
+    /// the meaning.
+    #[test]
+    fn diff_gutter_is_muted_and_markers_keep_their_colours() {
+        let theme = Theme::dark();
+        let d = Diff::parse_unified("+++ b/f.rs\n@@ -1,1 +1,2 @@\n a\n+b\n");
+        let rows = diff_lines(&d, &theme, 40);
+        for row in &rows[1..] {
+            assert_eq!(
+                row.segs[0].style.fg,
+                Some(theme.text_muted),
+                "gutter is tier 3"
+            );
+        }
+        assert_eq!(rows[1].segs[1].style.fg, Some(theme.diff_context));
+        assert_eq!(rows[2].segs[1].style.fg, Some(theme.success));
+    }
+
+    /// A diff with no `@@` header still renders: the numbers start at 1 rather
+    /// than the rows disappearing.
+    #[test]
+    fn diff_without_a_parsable_header_still_numbers_from_one() {
+        assert_eq!(hunk_starts("@@ -7,3 +9,4 @@"), (7, 9));
+        assert_eq!(hunk_starts("@@ -7 +9 @@"), (7, 9));
+        assert_eq!(hunk_starts("@@ garbage @@"), (1, 1));
+        assert_eq!(hunk_starts(""), (1, 1));
     }
 
     #[test]
@@ -875,6 +1305,7 @@ mod tests {
             duration_ms: 5,
             output: None,
             result_summary: None,
+            id: None,
         }));
         assert_eq!(
             text(&render_lines(&mcp)[0]),
@@ -894,6 +1325,7 @@ mod tests {
             duration_ms: 0,
             output: None,
             result_summary: None,
+            id: None,
         }));
         assert_eq!(text(&render_lines(&skill)[0]), "✦ Skill(review doc.md)");
 
@@ -903,10 +1335,12 @@ mod tests {
             status: WatchState::Running,
             detail: None,
             duration_ms: 0,
+            progress: Vec::new(),
+            run_stats: None,
         }));
         assert_eq!(
             text(&render_lines(&agent_watch)[0]),
-            "◉ reviewer · organizing notes"
+            "◉ @reviewer: organizing notes"
         );
 
         let channel_watch = Activity::new(ActivityKind::Watch(WatchCall {
@@ -915,6 +1349,8 @@ mod tests {
             status: WatchState::Running,
             detail: Some("3 msgs · latest a: report".into()),
             duration_ms: 0,
+            progress: Vec::new(),
+            run_stats: None,
         }));
         let lines = render_lines(&channel_watch);
         assert_eq!(text(&lines[0]), "◇ #table");
@@ -929,10 +1365,117 @@ mod tests {
             status: WatchState::Done,
             detail: Some("round 2".into()),
             duration_ms: 9000,
+            progress: Vec::new(),
+            run_stats: None,
         };
         let h = Activity::new(ActivityKind::Watch(w));
         let lines = render_lines(&h);
         assert_eq!(text(&lines[0]), "⏺ watch -n 2 ls");
         assert_eq!(text(&lines[1]), "  ⎿  round 2 · Ran in 9.0s");
+    }
+
+    /// Every shape a run's label takes opens with the instance name, and says
+    /// what the run is for after the first ` · ` — or says nothing, which is
+    /// better than repeating the address.
+    #[test]
+    fn a_label_names_the_instance_and_then_the_task() {
+        for (label, instance, description) in [
+            ("scout · fix the parser", "scout", "fix the parser"),
+            ("scout #3 · look again", "scout", "look again"),
+            ("scout #7 receipt", "scout", ""),
+            ("scout", "scout", ""),
+            ("林夏 · UI review", "林夏", "UI review"),
+            // A description may carry the separator itself; only the first
+            // one divides the label.
+            (
+                "zoe · run tests · then report",
+                "zoe",
+                "run tests · then report",
+            ),
+        ] {
+            assert_eq!(watch_instance(label), instance, "{label:?}");
+            assert_eq!(watch_description(label), description, "{label:?}");
+        }
+    }
+
+    /// D106's dispatch row: the last three activity lines while it works, one
+    /// condensed line when the window is short, and what the run cost once it
+    /// is over — which is the only one of the three that ever settles.
+    #[test]
+    fn a_dispatch_row_says_progress_then_cost() {
+        let mut w = WatchCall {
+            label: "scout · fix the parser".into(),
+            kind: crate::watch::WatchKind::Agent,
+            status: WatchState::Running,
+            detail: Some("produced 200 chars".into()),
+            duration_ms: 0,
+            progress: Vec::new(),
+            run_stats: None,
+        };
+
+        let rows = |w: &WatchCall, narrow: bool| -> Vec<String> {
+            let act = Activity::new(ActivityKind::Watch(w.clone()));
+            let mut render = |_: &str| Vec::new();
+            layout_activity(&act, &[0], 0, &Theme::dark(), None, narrow, &mut render)
+                .0
+                .iter()
+                .map(text)
+                .collect()
+        };
+
+        assert_eq!(
+            rows(&w, false),
+            vec![
+                "◉ @scout: fix the parser".to_string(),
+                format!("  ⎿  {INITIALIZING}"),
+            ],
+            "a run with nothing behind it yet"
+        );
+
+        w.progress = vec![
+            "⏺ Grep(fn main)".into(),
+            "⏺ Read(src/lexer.rs)".into(),
+            "⏺ Bash(cargo test)".into(),
+            "⏺ Edit(src/lexer.rs)".into(),
+        ];
+        w.run_stats = Some(RunStats {
+            tool_uses: 4,
+            tokens: 8_300,
+        });
+        assert_eq!(
+            rows(&w, false),
+            vec![
+                "◉ @scout: fix the parser",
+                "  ⎿  ⏺ Read(src/lexer.rs)",
+                "     ⏺ Bash(cargo test)",
+                "     ⏺ Edit(src/lexer.rs)",
+            ],
+            "the last three, oldest first, the first on the connector"
+        );
+
+        assert_eq!(
+            rows(&w, true),
+            vec![
+                "◉ @scout: fix the parser",
+                "  ⎿  In progress… · 4 tool uses · 8.3k tokens",
+            ],
+            "a short window trades the rows for the numbers"
+        );
+
+        w.status = WatchState::Done;
+        w.duration_ms = 64_000;
+        assert_eq!(
+            rows(&w, false),
+            vec![
+                "◉ @scout: fix the parser",
+                "  ⎿  Done (4 tool uses · 8.3k tokens · 1m 4s)",
+            ],
+            "and the settled form is the one that reaches scrollback"
+        );
+
+        // The `detail` a failure carries is its reason, and it keeps saying it.
+        w.status = WatchState::Failed;
+        w.detail = Some("connection reset".into());
+        assert_eq!(rows(&w, false)[1], "  ⎿  connection reset");
     }
 }

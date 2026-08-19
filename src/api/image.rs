@@ -22,6 +22,7 @@ pub struct PreparedImage {
 }
 
 /// Image placeholder reference (`#[image N]` → the Nth attachment, 1-based).
+#[allow(clippy::expect_used)]
 static MARKER_RE: std::sync::LazyLock<regex::Regex> =
     std::sync::LazyLock::new(|| regex::Regex::new(r"#\[image (\d+)\]").expect("static regex"));
 
@@ -33,6 +34,15 @@ pub fn marker(id: usize) -> String {
 /// Whether the text references an attachment at all.
 pub fn has_marker(text: &str) -> bool {
     MARKER_RE.is_match(text)
+}
+
+/// The first attachment id a line references, for a reader that has a row and
+/// wants the picture behind it (D97's click targets). One regex, one place.
+pub fn first_marker(text: &str) -> Option<usize> {
+    MARKER_RE
+        .captures(text)
+        .and_then(|c| c.get(1))
+        .and_then(|m| m.as_str().parse().ok())
 }
 
 /// Session-scoped attachment table. Images the user mounts on the input box live here as

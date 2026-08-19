@@ -12,10 +12,7 @@ pub const HISTORY_MAX: usize = 500;
 
 /// `~/.local/share/bingo/history` (mirrors [`crate::transcript::transcripts_dir`]).
 pub fn history_dir(home: &Path) -> PathBuf {
-    home.join(".local")
-        .join("share")
-        .join("bingo")
-        .join("history")
+    crate::storage::history_dir(home)
 }
 
 /// FNV-1a of the absolute cwd: keeps same-named projects in different parents
@@ -72,13 +69,31 @@ pub fn save(home: &Path, cwd: &Path, entries: &[String]) -> std::io::Result<()> 
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
+    // The sidecar serializes concurrent writers; the file itself is never locked, so a
+    // reader in another process is never failed by a write in progress (D72).
+    let lock_path = path.with_extension("jsonl.lock");
+    let lock_file = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock_path)?;
+    lock_file.lock()?;
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(&path)?;
     let start = entries.len().saturating_sub(HISTORY_MAX);
     let body: String = entries[start..]
         .iter()
         .filter_map(|entry| serde_json::to_string(entry).ok())
         .map(|line| line + "\n")
         .collect();
-    std::fs::write(path, body)
+    file.set_len(0)?;
+    use std::io::Write;
+    (&file).write_all(body.as_bytes())
 }
 
 /// Prompt history with a navigation cursor and the draft it displaced.

@@ -131,7 +131,7 @@ impl PickerModel {
         let current = self.current == Some(index);
         let mut line = Line::empty();
         // Marker column: ❯ = browsed selection (moves), ● = currently active (fixed); on overlap ❯ takes the prefix slot and ● sits before the name.
-        line.push_styled("  ", SegStyle::fg(theme.inactive));
+        line.push_styled("  ", SegStyle::fg(theme.text_secondary));
         if selected {
             line.push_styled("❯ ", SegStyle::fg(theme.permission));
             line.push_styled(
@@ -139,7 +139,7 @@ impl PickerModel {
                 SegStyle::fg(theme.claude),
             );
         } else {
-            line.push_styled("  ", SegStyle::fg(theme.inactive));
+            line.push_styled("  ", SegStyle::fg(theme.text_secondary));
             line.push_styled(
                 if current { "● " } else { "  " },
                 SegStyle::fg(theme.claude),
@@ -150,7 +150,7 @@ impl PickerModel {
         } else if current {
             theme.claude
         } else {
-            theme.inactive
+            theme.text_secondary
         };
         let name_col = self
             .items
@@ -165,10 +165,10 @@ impl PickerModel {
             // Normal width: name and desc each carry their own style.
             let desc_budget = avail - name_text.chars().count() - 2;
             line.push_styled(name_text, SegStyle::fg(name_style));
-            line.push_styled("  ", SegStyle::fg(theme.inactive));
+            line.push_styled("  ", SegStyle::fg(theme.text_secondary));
             line.push_styled(
                 crate::tui::markdown::truncate(&item.description, desc_budget),
-                SegStyle::fg(theme.inactive),
+                SegStyle::fg(theme.text_secondary),
             );
         } else {
             // Narrow terminal: the whole name+desc segment truncates as one.
@@ -195,7 +195,7 @@ impl PickerModel {
         let more_row = |n: usize| {
             Row::new(Line::styled(
                 crate::tui::markdown::truncate(&format!("  … {n} more"), width.saturating_sub(2)),
-                SegStyle::fg(theme.inactive),
+                SegStyle::fg(theme.text_secondary),
             ))
         };
         let body = max_rows.saturating_sub(2).max(1);
@@ -223,7 +223,7 @@ impl PickerModel {
         );
         Row::new(Line::styled(
             format!("  {hint}"),
-            SegStyle::fg(theme.inactive),
+            SegStyle::fg(theme.text_secondary),
         ))
     }
 }

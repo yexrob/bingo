@@ -1,0 +1,25 @@
+{
+  "$id": "urn:bingo:app-server:v1:catalog.changed.params",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "description": "One notification's params: the event header, then the body's own fields.",
+  "properties": {
+    "catalog": {
+      "$ref": "../definitions.json#/definitions/CatalogKind"
+    },
+    "event": {
+      "$ref": "../definitions.json#/definitions/EventMeta"
+    },
+    "revision": {
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "catalog",
+    "event",
+    "revision"
+  ],
+  "title": "NotificationParams_for_CatalogChanged",
+  "type": "object"
+}

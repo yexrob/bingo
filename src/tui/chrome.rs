@@ -12,11 +12,11 @@ use ratatui::style::Color;
 
 use crate::permission::PermissionMode;
 use crate::tui::chat::{
-    Chat, ModelMenu, ProviderMenu, ResumeMenu, Row, SlashSuggestion, ThemeMenu, ThinkMenu,
-    model_footer_label,
+    Chat, ProviderMenu, ResumeMenu, Row, SlashSuggestion, ThemeMenu, ThinkMenu, model_footer_label,
 };
 use crate::tui::el::El;
 use crate::tui::line::{Line, SegStyle, text_width};
+use crate::tui::model_menu::ModelMenu;
 use crate::tui::theme::Theme;
 
 /// The currently active selector menu (mutually exclusive: at most one at any time; rendering groups reads of the shell by this).
@@ -27,33 +27,102 @@ pub(crate) struct Menus<'a> {
     pub theme: Option<&'a ThemeMenu>,
     pub resume: Option<&'a ResumeMenu>,
     pub provider: Option<&'a ProviderMenu>,
+    pub images: Option<&'a crate::tui::chat::ImagesMenu>,
+    /// The `@` mention dropdown (D85). Not a picker menu — it renders in the
+    /// same area and at the same tier as the slash dropdown, below every
+    /// selector, so it is carried here rather than in a second parameter.
+    pub mention: Option<&'a crate::tui::complete::MentionState>,
 }
 
 /// A dim row indented two columns (help / queue / notice / search share it).
 pub(crate) fn dim_row(text: impl Into<String>, theme: &Theme) -> Row {
     Row::new(Line::styled(
         format!("  {}", text.into()),
-        SegStyle::fg(theme.inactive),
+        SegStyle::fg(theme.text_secondary),
     ))
 }
 
 /// Running status row (ActivityIndicator):
 /// `✻ {verb}… (esc to interrupt · {N}s · ↓ {tokens} tokens)`.
-fn status_row(status: &crate::tui::chat::RunningStatus, spinner: char, theme: &Theme) -> Row {
-    let mut meta = format!(
-        "(esc to interrupt · {}s",
-        status.elapsed.round().max(0.0) as u64
-    );
+///
+/// `esc_hint` is derived from the Esc layer stack, not assumed: with a dropdown
+/// or panel open over the turn, Esc closes that and the turn keeps running (D80).
+///
+/// This is the row the motion layer is for (D87): the spinner takes its glyph
+/// from `pulse`, the verb is swept by `beam`, and `stalled` — three seconds
+/// without a single event — repaints both in the warning colour and puts the
+/// glimmer out, because a stalled turn should look like one.
+fn status_row(
+    status: &crate::tui::chat::RunningStatus,
+    motion: crate::tui::motion::Motion,
+    tick: u64,
+    stalled: bool,
+    esc_hint: &str,
+    theme: &Theme,
+) -> Row {
+    let mut meta = format!("({esc_hint} · {}s", status.elapsed.round().max(0.0) as u64);
     if status.tokens > 0 {
         meta.push_str(&format!(" · ↓ {} tokens", status.tokens));
     }
     meta.push(')');
-    let mut line = Line::styled(
-        format!("  {spinner} {}… ", status.verb),
-        SegStyle::fg(theme.claude),
+    let base = if stalled { theme.warning } else { theme.claude };
+    let mut line = Line::styled(format!("  {} ", motion.pulse(tick)), SegStyle::fg(base));
+    // The glimmer travels over the verb and its ellipsis; a stalled turn is not
+    // glimmering at anything, so the sweep stops with the news.
+    let verb = format!("{}…", status.verb);
+    let window = (!stalled).then(|| motion.beam(tick, verb.chars().count()));
+    push_swept(
+        &mut line,
+        &verb,
+        window.flatten(),
+        base,
+        crate::tui::motion::beam_color(theme, base),
     );
-    line.push_styled(meta, SegStyle::fg(theme.inactive));
+    line.push_styled(" ".to_string(), SegStyle::fg(base));
+    line.push_styled(meta, SegStyle::fg(theme.text_secondary));
     Row::new(line)
+}
+
+/// Push `text` with the half-open character window `[start, end)` brightened —
+/// the rendered half of the `beam` token. Splitting on character indices (not
+/// bytes) is what keeps a CJK or accented verb from being cut mid-scalar.
+///
+/// The lit run carries weight as well as colour (D93): hue alone, at the step
+/// the old glimmer moved, was invisible on a real dark terminal, and bold is
+/// the one emphasis every terminal renders — including the 256-colour ones
+/// where `bright` collapses onto a neighbouring index.
+fn push_swept(
+    line: &mut Line,
+    text: &str,
+    window: Option<(usize, usize)>,
+    base: Color,
+    bright: Color,
+) {
+    let Some((start, end)) = window else {
+        line.push_styled(text.to_string(), SegStyle::fg(base));
+        return;
+    };
+    let mut before = String::new();
+    let mut lit = String::new();
+    let mut after = String::new();
+    for (i, ch) in text.chars().enumerate() {
+        if i < start {
+            before.push(ch);
+        } else if i < end {
+            lit.push(ch);
+        } else {
+            after.push(ch);
+        }
+    }
+    for (part, style) in [
+        (before, SegStyle::fg(base)),
+        (lit, SegStyle::fg(bright).bold()),
+        (after, SegStyle::fg(base)),
+    ] {
+        if !part.is_empty() {
+            line.push_styled(part, style);
+        }
+    }
 }
 
 /// Permission-mode badge (`⏸ plan mode on`) + the `·` separator after it.
@@ -67,7 +136,7 @@ fn mode_badge(mode: PermissionMode, theme: &Theme) -> Vec<(String, Color)> {
     };
     vec![
         (format!("{symbol} {label}"), color),
-        ("·".to_string(), theme.inactive),
+        ("·".to_string(), theme.text_secondary),
     ]
 }
 
@@ -77,7 +146,18 @@ fn mode_badge(mode: PermissionMode, theme: &Theme) -> Vec<(String, Color)> {
 /// is omitted when it is default (keeps it terse); think off omits the level (P1-D).
 fn footer_row(chat: &Chat, width: usize) -> Row {
     let theme = &chat.theme;
-    let hints = if chat.busy {
+    let away = !chat.active.is_main();
+    let hints = if away {
+        // The page's own ladder, said out loud (D39: a key with two meanings
+        // declares which one is armed). A room has no run and no mode.
+        if chat.zoom_stoppable() {
+            "esc stops the run · shift+tab to cycle mode".to_string()
+        } else if chat.zoomed().is_some() {
+            "esc to return · shift+tab to cycle mode".to_string()
+        } else {
+            "esc to return".to_string()
+        }
+    } else if chat.conv.busy {
         crate::tui::keys::FOOTER_EXPAND_HINT.to_string()
     } else {
         format!(
@@ -86,26 +166,37 @@ fn footer_row(chat: &Chat, width: usize) -> Row {
             crate::tui::keys::FOOTER_EXPAND_HINT
         )
     };
-    let mut left = mode_badge(chat.permission_mode, theme);
+    // On a page the badge is the **viewed agent's** permission mode — the one
+    // shift+tab cycles there; showing main's would misdescribe the key (CC
+    // swaps the teammate's mode into this slot, `PromptInput.tsx:342-351`).
+    let mut left = if away {
+        match chat.zoom_permission_mode() {
+            Some(mode) => mode_badge(mode, theme),
+            None => Vec::new(),
+        }
+    } else {
+        mode_badge(chat.permission_mode(), theme)
+    };
     if chat.bash_mode {
         left.push(("! for shell mode".to_string(), theme.bash_border));
     }
-    left.push((hints, theme.inactive));
+    left.push((hints, theme.text_secondary));
 
-    let model_name = chat.session.runtime.model.borrow().clone();
-    let thinking = chat.session.runtime.thinking.borrow().clone();
+    let model_name = chat.model();
+    let thinking = chat.thinking();
     let (model, model_color) = if let Some(menu) = &chat.think_menu {
-        let level = crate::tui::chat::THINK_LEVELS
-            [menu.selected.min(crate::tui::chat::THINK_LEVELS.len() - 1)]
+        let level = crate::tui::chat::think_levels()[menu
+            .selected
+            .min(crate::tui::chat::think_levels().len() - 1)]
         .0;
         (format!("{model_name} · think {level} ▸"), theme.claude)
     } else {
         (
             model_footer_label(&model_name, thinking.as_deref()),
-            theme.inactive,
+            theme.text_secondary,
         )
     };
-    let provider = chat.session.runtime.provider.borrow().clone();
+    let provider = chat.provider();
     let model = if provider == "default" {
         model
     } else {
@@ -115,7 +206,7 @@ fn footer_row(chat: &Chat, width: usize) -> Row {
     let usage = chat.context_usage();
     let usage_label = usage.label();
     let usage_color = match usage.band() {
-        crate::context_usage::ContextUsageBand::Normal => theme.inactive,
+        crate::context_usage::ContextUsageBand::Normal => theme.text_secondary,
         crate::context_usage::ContextUsageBand::Warning => theme.warning,
         crate::context_usage::ContextUsageBand::Danger => theme.error,
     };
@@ -123,7 +214,7 @@ fn footer_row(chat: &Chat, width: usize) -> Row {
     let mut status = Line::empty();
     if let Some(rate) = rate.as_deref() {
         status.push_styled(rate, SegStyle::fg(theme.claude));
-        status.push_styled(" · ", SegStyle::fg(theme.inactive));
+        status.push_styled(" · ", theme.muted());
     }
     status.push_styled(usage_label.clone(), SegStyle::fg(usage_color));
 
@@ -144,24 +235,24 @@ fn footer_row(chat: &Chat, width: usize) -> Row {
         let mut prefix = Line::styled("  ", SegStyle::fg(theme.text));
         for (i, (text, color)) in left.iter().enumerate() {
             if i > 0 {
-                prefix.push_styled(" ", SegStyle::fg(theme.inactive));
+                prefix.push_styled(" ", SegStyle::fg(theme.text_secondary));
             }
             prefix.push_styled(text.clone(), SegStyle::fg(*color));
         }
         let left_text = crate::tui::chat::one_line(&prefix.plain_text(), prefix_width);
-        line = Line::styled(left_text.clone(), SegStyle::fg(theme.inactive));
+        line = Line::styled(left_text.clone(), SegStyle::fg(theme.text_secondary));
         let model_width = prefix_width.saturating_sub(text_width(&left_text) + 1);
         if model_width > 0 {
             let model = crate::tui::chat::one_line(&model, model_width);
             let gap = prefix_width
                 .saturating_sub(text_width(&left_text) + text_width(&model))
                 .max(1);
-            line.push_styled(" ".repeat(gap), SegStyle::fg(theme.inactive));
+            line.push_styled(" ".repeat(gap), SegStyle::fg(theme.text_secondary));
             line.push_styled(model, SegStyle::fg(model_color));
         }
     }
     let gap = content_width.saturating_sub(text_width(&line.plain_text()) + status_width);
-    line.push_styled(" ".repeat(gap), SegStyle::fg(theme.inactive));
+    line.push_styled(" ".repeat(gap), SegStyle::fg(theme.text_secondary));
     line.segs.extend(status.segs);
     Row::new(line)
 }
@@ -170,6 +261,7 @@ fn footer_row(chat: &Chat, width: usize) -> Row {
 fn suggestion_rows(
     slash: &[SlashSuggestion],
     slash_selected: usize,
+    slash_arg: bool,
     menus: Menus<'_>,
     no_match: bool,
     theme: &Theme,
@@ -200,6 +292,15 @@ fn suggestion_rows(
                 rows.push(core.hint_row(crate::tui::chat::ThemeMenu::keys(), width, theme));
                 return rows;
             }
+            // `/images` picker (D97): the same thin-shell rendering.
+            if let Some(images_menu) = menus.images {
+                let core = images_menu.picker();
+                let mut rows: Vec<Row> = (0..core.items.len())
+                    .map(|i| core.row(i, width, theme))
+                    .collect();
+                rows.push(core.hint_row(crate::tui::chat::ImagesMenu::keys(), width, theme));
+                return rows;
+            }
             // `/provider` selector (picker-model.md commit D): the same thin-shell rendering.
             if let Some(provider_menu) = menus.provider {
                 let core = provider_menu.picker();
@@ -225,23 +326,26 @@ fn suggestion_rows(
                                 width.saturating_sub(2),
                             )
                         ),
-                        SegStyle::fg(theme.inactive),
+                        SegStyle::fg(theme.text_secondary),
                     )));
                 }
                 return rows;
             }
-            // No menu open: fall through to the slash dropdown / no-match hint.
+            // No menu open: the `@` dropdown, then the slash dropdown / no-match hint.
+            if let Some(mention) = menus.mention {
+                return crate::tui::complete::mention_rows(mention, theme, width);
+            }
             if slash.is_empty() {
                 // G9: a bare `/`-query with zero matches gets one dim hint row.
                 if no_match {
                     return vec![Row::new(Line::styled(
                         "  (no matching commands · type /help to see the available commands)",
-                        SegStyle::fg(theme.inactive),
+                        SegStyle::fg(theme.text_secondary),
                     ))];
                 }
                 return Vec::new();
             }
-            return slash_rows(slash, slash_selected, theme, width);
+            return slash_rows(slash, slash_selected, slash_arg, theme, width);
         };
         // `/model` two-level selector: level one `provider` (PickerModel core rendering,
         // with the same endpoint/auth description column as /provider), level two `model` (the same Picker
@@ -260,7 +364,7 @@ fn suggestion_rows(
                     "  {}",
                     crate::tui::markdown::truncate(&hint, width.saturating_sub(2))
                 ),
-                SegStyle::fg(theme.inactive),
+                SegStyle::fg(theme.text_secondary),
             )));
             return rows;
         };
@@ -274,11 +378,15 @@ fn suggestion_rows(
             return note(format!("… fetching {}'s model list", m.provider));
         }
         // Failure reasons are attributed honestly (a 401 used to be swallowed as "the endpoint returned no models").
-        if let Some(reason) = &m.failed {
+        // A failure with a list still shows the list: that is the cached one,
+        // stale but usable — degraded and visible, never silently empty.
+        if let Some(reason) = &m.failed
+            && m.models.is_empty()
+        {
             let mut rows = note(reason.clone());
             rows.push(Row::new(Line::styled(
                 "  Esc goes back up",
-                SegStyle::fg(theme.inactive),
+                SegStyle::fg(theme.text_secondary),
             )));
             return rows;
         }
@@ -287,8 +395,18 @@ fn suggestion_rows(
         }
         let core = m.picker();
         let mut rows = core.window_rows(crate::tui::chat::SLASH_SUGGESTIONS_MAX + 5, width, theme);
+        if let Some(reason) = &m.failed {
+            rows.push(Row::new(Line::styled(
+                crate::tui::markdown::truncate(
+                    &format!("  ⚠ {reason}; showing the last known list"),
+                    width.saturating_sub(2),
+                ),
+                SegStyle::fg(theme.permission),
+            )));
+        }
+        let refresh = if m.declared { "" } else { " · r refreshes" };
         let hint = format!(
-            "↑↓ select · Enter confirms and saves · 1-{} jumps · Esc goes back up",
+            "↑↓ select · Enter confirms and saves · 1-{} jumps{refresh} · Esc goes back up",
             core.items.len().min(9)
         );
         rows.push(Row::new(Line::styled(
@@ -296,7 +414,7 @@ fn suggestion_rows(
                 "  {}",
                 crate::tui::markdown::truncate(&hint, width.saturating_sub(2))
             ),
-            SegStyle::fg(theme.inactive),
+            SegStyle::fg(theme.text_secondary),
         )));
         rows
     }
@@ -308,6 +426,7 @@ fn suggestion_rows(
 fn slash_rows(
     slash: &[SlashSuggestion],
     slash_selected: usize,
+    slash_arg: bool,
     theme: &Theme,
     width: usize,
 ) -> Vec<Row> {
@@ -315,7 +434,7 @@ fn slash_rows(
         let color = if selected {
             theme.permission
         } else {
-            theme.inactive
+            theme.text_secondary
         };
         Row::new(Line::styled(line, SegStyle::fg(color)))
     };
@@ -339,7 +458,7 @@ fn slash_rows(
     let more = |n: usize| {
         Row::new(Line::styled(
             crate::tui::markdown::truncate(&format!("  … {n} more"), width.saturating_sub(2)),
-            SegStyle::fg(theme.inactive),
+            SegStyle::fg(theme.text_secondary),
         ))
     };
     let mut rows = Vec::new();
@@ -349,10 +468,13 @@ fn slash_rows(
     rows.extend(slash[start..end].iter().enumerate().map(|(offset, s)| {
         let i = start + offset;
         let selected = i == slash_selected;
-        let cmd = if s.hint.is_empty() {
-            format!("/{}", s.name)
-        } else {
-            format!("/{} {}", s.name, s.hint)
+        // The argument phase lists values, not commands: no `/` in front of
+        // them. That single character is the whole visual difference — the
+        // rows are the same rows, in the same place, for the same keys.
+        let cmd = match (slash_arg, s.hint.is_empty()) {
+            (true, _) => s.name.clone(),
+            (false, true) => format!("/{}", s.name),
+            (false, false) => format!("/{} {}", s.name, s.hint),
         };
         let name_text = format!("{cmd:<name_col$}");
         let desc = crate::tui::markdown::truncate(&s.description, desc_width);
@@ -373,12 +495,15 @@ fn suggestions(chat: &Chat, width: usize) -> El {
     El::Rows(suggestion_rows(
         &chat.slash_suggestions,
         chat.slash_selected,
+        chat.slash_arg_start.is_some(),
         Menus {
             model: chat.model_menu.as_ref(),
             think: chat.think_menu.as_ref(),
             theme: chat.theme_menu.as_ref(),
             resume: chat.resume_menu.as_ref(),
             provider: chat.provider_menu.as_ref(),
+            images: chat.images_menu.as_ref(),
+            mention: chat.mention.as_ref(),
         },
         chat.slash_no_match,
         &chat.theme,
@@ -386,8 +511,9 @@ fn suggestions(chat: &Chat, width: usize) -> El {
     ))
 }
 
-/// Caret position inside the input box (row offset, column) — same source as where
-/// [`Chat::prompt_lines`] draws `▋`.
+/// Caret position inside the input box (row offset, column) — indexes the rows
+/// [`Chat::prompt_lines`] returns. This is the app's only caret: the frame hands it to
+/// `Frame::set_cursor_position`, so shape and blink stay the user's terminal defaults.
 fn caret_cell(chat: &Chat) -> (usize, usize) {
     if let Some(search) = &chat.search {
         let hit = search.hit.clone().unwrap_or_default();
@@ -402,24 +528,40 @@ fn caret_cell(chat: &Chat) -> (usize, usize) {
     (row - start, col)
 }
 
+/// The identity colour of whoever the composer is addressing, or `None` for
+/// main — which has the composer's own colour and always did.
+fn addressee_color(chat: &Chat) -> Option<Color> {
+    let name = chat.zoom_subject()?;
+    let palette = crate::tui::avatar::Palette::new(&chat.theme);
+    let gutter = crate::tui::avatar::Gutter::new(false, false, &palette, &chat.faces_pinned);
+    Some(palette.avatars[gutter.index_for(&name) % palette.avatars.len()])
+}
+
 /// Input box (top border + input rows + bottom border) with the caret attached
 /// to the input line it sits on.
 pub(crate) fn prompt(chat: &Chat, width: usize) -> El {
     let theme = &chat.theme;
+    // Bash mode is the one thing that recolours the box: `!` changes what the
+    // box *does*. D90's teammate tint retired with the DM buffer it belonged
+    // to; D105 gives the colour back — to the *zoom's* composer, where there is
+    // somebody on the other end again. CC tints the same two things there, the
+    // prompt character and the rule around the box
+    // (`PromptInputModeIndicator.tsx:79-82`, `useSwarmBanner.ts:92-100`).
+    let addressee = addressee_color(chat);
     let border_color = if chat.bash_mode {
         theme.bash_border
     } else {
-        theme.prompt_border
+        addressee.unwrap_or(theme.prompt_border)
     };
-    let prompt_style = if chat.busy {
-        theme.inactive
+    let prompt_style = if chat.conv.busy && addressee.is_none() {
+        theme.text_secondary
     } else {
         theme.text
     };
     let (prefix, prefix_color) = if chat.bash_mode {
         ("! ".to_string(), theme.bash_border)
     } else {
-        ("❯ ".to_string(), prompt_style)
+        ("❯ ".to_string(), addressee.unwrap_or(prompt_style))
     };
     let bar = "─".repeat(width.saturating_sub(2));
     let mut children = vec![El::Line(Line::styled(
@@ -457,14 +599,29 @@ pub(crate) fn prompt(chat: &Chat, width: usize) -> El {
 
 /// Every row outside the transcript, top to bottom. `fullscreen` only moves the suggestion area
 /// (fullscreen: above the input; inline: below, aligned with slash output).
+/// Chrome height, measured by rendering it — the same source the frame
+/// assembler draws from, shared with the page engine's rehydrate budget (v6).
+pub(crate) fn chrome_height_of(chat: &Chat, width: usize, fullscreen: bool) -> usize {
+    crate::tui::el::height(chrome(chat, width, fullscreen))
+}
+
 pub(crate) fn chrome(chat: &Chat, width: usize, fullscreen: bool) -> El {
     let theme = &chat.theme;
     let mut children: Vec<El> = Vec::new();
 
-    if let Some(status) = chat.running_status() {
+    // The row belongs to whatever page is on screen (D132). Main's own turn
+    // stays home — describing it on somebody else's page would be describing a
+    // turn the screen is not showing — but a page whose agent is running gets
+    // its own: the spinner, the clock and the token count are what tell a reader
+    // that anything is happening at all, and a page without them reads as stalled
+    // however fresh its rows are.
+    if let Some(status) = chat.page_running_status() {
         children.push(El::Row(status_row(
             &status,
-            crate::tui::activities::spinner(chat.tick),
+            chat.motion,
+            chat.tick,
+            chat.stalled(),
+            &chat.busy_hint(),
             theme,
         )));
     }
@@ -478,9 +635,8 @@ pub(crate) fn chrome(chat: &Chat, width: usize, fullscreen: bool) -> El {
     for line in chat.help_lines() {
         children.push(El::Row(dim_row(line, theme)));
     }
-    // Bottom entity area (running agents + channels; arrows open a DM, Ctrl+G opens the workspace).
-    children.push(El::Lines(chat.entity_rows(width)));
-    children.push(El::Rows(chat.agent_manager_rows(width)));
+    children.push(El::Rows(chat.dialog_view_rows(width)));
+    children.push(El::Rows(chat.rewind_rows(width)));
 
     // Pinned panels (login flows, long-operation progress): persistent until
     // the owning flow unpins them — the one place a device code can wait out
@@ -506,8 +662,15 @@ pub(crate) fn chrome(chat: &Chat, width: usize, fullscreen: bool) -> El {
     if let Some(line) = chat.search_line() {
         children.push(El::Row(dim_row(line, theme)));
     }
-    for line in chat.queue_lines() {
-        children.push(El::Row(dim_row(line, theme)));
+    // The queue is main's turn state; a page's own sends never queue (the
+    // domain absorbs them), so its rows stay home with the turn they describe.
+    if chat.active.is_main() {
+        for line in chat.queue_lines() {
+            children.push(El::Row(dim_row(line, theme)));
+        }
+        if let Some(hint) = chat.queue_hint() {
+            children.push(El::Row(dim_row(hint, theme)));
+        }
     }
     if let Some(s) = suggestion_area.take() {
         children.push(s);
@@ -519,11 +682,14 @@ pub(crate) fn chrome(chat: &Chat, width: usize, fullscreen: bool) -> El {
     if chat.pending_ask.is_some() {
         children.push(El::Row(dim_row("Waiting for permission…", theme)));
     }
+    // The roster (v6): the conversation list under everything else, the way
+    // the user's own CC screenshot has it — constant rows, the `↓`
+    // fallthrough their only door. It takes the slot the pills held (D104),
+    // which took it from the conversation bar (D97).
+    children.push(El::Rows(chat.roster_rows(width)));
     El::Col(children)
 }
 
-/// #18 full-flow full-screen error-state skeleton (AC-26/53, ui/ux #68 spec): error title +
-/// stable code + description (what happened + what you can do) + primary action (retry/back) + exit hint.
 /// Actions are bound at the key layer (chat.rs: Enter=retry, Esc=back on the full-screen state); this function only draws.
 pub(crate) fn error_screen(err: &crate::tui::chat::ErrorState, theme: &Theme) -> El {
     El::Lines(vec![
@@ -536,7 +702,7 @@ pub(crate) fn error_screen(err: &crate::tui::chat::ErrorState, theme: &Theme) ->
         Line::plain(""),
         Line::styled(
             "Enter retries · Esc goes back",
-            SegStyle::fg(theme.inactive),
+            SegStyle::fg(theme.text_secondary),
         ),
     ])
 }
@@ -565,25 +731,24 @@ mod tests {
         // Idle: input 3 rows (two borders + one placeholder row) + footer 1 row.
         assert_eq!(base, 4);
 
-        chat.busy = true;
+        chat.start_test_turn();
         chat.push_warning("mcp connection failed".to_string());
-        let (tx, _rx) = tokio::sync::oneshot::channel();
-        chat.pending_ask = Some((
-            crate::ui::PermissionRequest::new("t", "q", vec!["a".into()]),
-            tx,
+        chat.stub_ask(crate::ui::PermissionRequest::new(
+            "t",
+            "q",
+            vec!["a".into()],
         ));
         chat.set_input("a\nb\nc");
         chat.help_visible = true;
-        chat.queued.push(crate::tui::chat::QueuedInput {
-            text: "queued message".into(),
-            is_slash: false,
-        });
+        chat.enqueue("queued message".to_string(), crate::ui::ConvKey::Main);
         chat.notice = Some("Press ctrl-c again to exit");
         chat.search = Some(crate::tui::chat::HistorySearch::default());
         let rows = rows_of(chrome(&chat, 100, false));
         let text: Vec<String> = rows.iter().map(row_text).collect();
+        // Every layer is open here, so Esc closes one of them before it reaches
+        // the interrupt — the status row says what the key will actually do (D80).
         assert!(
-            text.iter().any(|l| l.contains("esc to interrupt")),
+            text.iter().any(|l| l.contains("esc to close")),
             "status row"
         );
         assert!(
@@ -623,15 +788,19 @@ mod tests {
                 + (2 + chat.prompt_lines().len())
                 + 1
                 + chat.queue_lines().len()
+                + usize::from(chat.queue_hint().is_some())
                 + suggestion_rows(
                     &chat.slash_suggestions,
                     chat.slash_selected,
+                    chat.slash_arg_start.is_some(),
                     Menus {
                         model: chat.model_menu.as_ref(),
                         think: chat.think_menu.as_ref(),
                         theme: chat.theme_menu.as_ref(),
                         resume: chat.resume_menu.as_ref(),
                         provider: chat.provider_menu.as_ref(),
+                        images: chat.images_menu.as_ref(),
+                        mention: chat.mention.as_ref(),
                     },
                     chat.slash_no_match,
                     &chat.theme,
@@ -644,11 +813,38 @@ mod tests {
         );
     }
 
+    /// The roster (v6) takes the last rows of the window — constant furniture
+    /// once a conversation exists, nothing at all before one does.
+    #[test]
+    fn the_roster_takes_the_last_rows() {
+        let mut chat = chat_at(100, 40);
+        let base = rows_of(chrome(&chat, 100, false)).len();
+        chat.session
+            .agents
+            .insert(
+                "scout",
+                crate::agents::AgentKind::Hire,
+                None,
+                "test instance".to_string(),
+                chat.session.clone(),
+            )
+            .now();
+        chat.settle_store();
+
+        let rows = rows_of(chrome(&chat, 100, false));
+        let text: Vec<String> = rows.iter().map(row_text).collect();
+        assert_eq!(rows.len(), base + 2, "main's row and the agent's: {text:?}");
+        let tail = &text[text.len() - 2..];
+        assert!(tail[0].contains("@main"), "{text:?}");
+        assert!(tail[1].contains("@scout"), "{text:?}");
+    }
+
     /// The suggestion area's row count and content are naturally one source (the old two-branch rules once disagreed,
     /// overflowing the canvas).
     #[test]
     fn suggestion_rows_cover_every_menu_state() {
-        use crate::tui::chat::{ModelMenuModels, SlashSuggestion, THINK_LEVELS, ThinkMenu};
+        use crate::tui::chat::{SlashSuggestion, ThinkMenu, think_levels};
+        use crate::tui::model_menu::{ModelChoice, ModelMenuModels};
         let theme = Theme::dark();
         let mut menu = ModelMenu {
             providers: vec!["default".into(), "openrouter".into()],
@@ -658,11 +854,11 @@ mod tests {
             models: None,
         };
         assert_eq!(
-            suggestion_rows(&[], 0, Menus::default(), false, &theme, 80).len(),
+            suggestion_rows(&[], 0, false, Menus::default(), false, &theme, 80).len(),
             0
         );
         // G9: no-match shows one dim hint row instead of an empty gap.
-        let no_match = suggestion_rows(&[], 0, Menus::default(), true, &theme, 80);
+        let no_match = suggestion_rows(&[], 0, false, Menus::default(), true, &theme, 80);
         assert_eq!(no_match.len(), 1);
         assert!(
             row_text(&no_match[0]).contains("no matching commands"),
@@ -674,12 +870,15 @@ mod tests {
             suggestion_rows(
                 &[],
                 0,
+                false,
                 Menus {
                     model: Some(&menu),
                     think: None,
                     theme: None,
                     resume: None,
-                    provider: None
+                    provider: None,
+                    images: None,
+                    mention: None,
                 },
                 false,
                 &theme,
@@ -696,17 +895,21 @@ mod tests {
             selected: 0,
             current: None,
             failed: None,
+            declared: false,
         });
         assert_eq!(
             suggestion_rows(
                 &[],
                 0,
+                false,
                 Menus {
                     model: Some(&menu),
                     think: None,
                     theme: None,
                     resume: None,
-                    provider: None
+                    provider: None,
+                    images: None,
+                    mention: None,
                 },
                 false,
                 &theme,
@@ -722,17 +925,21 @@ mod tests {
             selected: 0,
             current: None,
             failed: None,
+            declared: false,
         });
         assert_eq!(
             suggestion_rows(
                 &[],
                 0,
+                false,
                 Menus {
                     model: Some(&menu),
                     think: None,
                     theme: None,
                     resume: None,
-                    provider: None
+                    provider: None,
+                    images: None,
+                    mention: None,
                 },
                 false,
                 &theme,
@@ -749,16 +956,20 @@ mod tests {
             selected: 0,
             current: None,
             failed: Some("authentication failed: default credentials invalid or not logged in (/provider login default)".into()),
+            declared: false,
         });
         let failed_rows = suggestion_rows(
             &[],
             0,
+            false,
             Menus {
                 model: Some(&menu),
                 think: None,
                 theme: None,
                 resume: None,
                 provider: None,
+                images: None,
+                mention: None,
             },
             false,
             &theme,
@@ -775,22 +986,28 @@ mod tests {
         // stay reachable by moving the selection.
         menu.models = Some(ModelMenuModels {
             provider: "default".into(),
-            models: (0..30).map(|i| format!("m{i}")).collect(),
+            models: (0..30)
+                .map(|i| ModelChoice::from(format!("m{i}")))
+                .collect(),
             loading: false,
             selected: 0,
             current: Some(0),
             failed: None,
+            declared: false,
         });
         assert_eq!(
             suggestion_rows(
                 &[],
                 0,
+                false,
                 Menus {
                     model: Some(&menu),
                     think: None,
                     theme: None,
                     resume: None,
-                    provider: None
+                    provider: None,
+                    images: None,
+                    mention: None,
                 },
                 false,
                 &theme,
@@ -808,12 +1025,15 @@ mod tests {
         let think_rows = suggestion_rows(
             &[],
             0,
+            false,
             Menus {
                 model: None,
                 think: Some(&think),
                 theme: None,
                 resume: None,
                 provider: None,
+                images: None,
+                mention: None,
             },
             false,
             &theme,
@@ -821,7 +1041,7 @@ mod tests {
         );
         assert_eq!(
             think_rows.len(),
-            THINK_LEVELS.len() + 1,
+            think_levels().len() + 1,
             "6 levels + a hint row"
         );
         assert!(
@@ -847,12 +1067,15 @@ mod tests {
         let rows = suggestion_rows(
             &[],
             0,
+            false,
             Menus {
                 model: None,
                 think: Some(&overlap),
                 theme: None,
                 resume: None,
                 provider: None,
+                images: None,
+                mention: None,
             },
             false,
             &theme,
@@ -870,12 +1093,15 @@ mod tests {
             suggestion_rows(
                 &[],
                 0,
+                false,
                 Menus {
                     model: Some(&menu),
                     think: Some(&think),
                     theme: None,
                     resume: None,
-                    provider: None
+                    provider: None,
+                    images: None,
+                    mention: None,
                 },
                 false,
                 &theme,
@@ -895,12 +1121,15 @@ mod tests {
         let rows = suggestion_rows(
             &slash,
             0,
+            false,
             Menus {
                 model: Some(&menu),
                 think: None,
                 theme: None,
                 resume: None,
                 provider: None,
+                images: None,
+                mention: None,
             },
             false,
             &theme,
@@ -911,7 +1140,7 @@ mod tests {
             "menu visible (rendering and key dispatch in the same order)"
         );
         // Without a menu the dropdown works as usual.
-        let rows = suggestion_rows(&slash, 0, Menus::default(), false, &theme, 80);
+        let rows = suggestion_rows(&slash, 0, false, Menus::default(), false, &theme, 80);
         assert_eq!(rows.len(), 1);
         assert!(
             row_text(&rows[0]).starts_with("❯ /help"),
@@ -924,7 +1153,7 @@ mod tests {
             hint: "[off|low|medium|high|xhigh|max]".into(),
             description: "set the thinking level".into(),
         }];
-        let rows = suggestion_rows(&with_hint, 0, Menus::default(), false, &theme, 80);
+        let rows = suggestion_rows(&with_hint, 0, false, Menus::default(), false, &theme, 80);
         assert_eq!(rows.len(), 1);
         assert!(
             row_text(&rows[0]).contains("/think [off|low|medium|high|xhigh|max]"),
@@ -936,12 +1165,15 @@ mod tests {
             for row in suggestion_rows(
                 &slash,
                 0,
+                false,
                 Menus {
                     model: Some(&menu),
                     think: None,
                     theme: None,
                     resume: None,
                     provider: None,
+                    images: None,
+                    mention: None,
                 },
                 false,
                 &theme,
@@ -952,12 +1184,15 @@ mod tests {
             for row in suggestion_rows(
                 &[],
                 0,
+                false,
                 Menus {
                     model: None,
                     think: Some(&think),
                     theme: None,
                     resume: None,
                     provider: None,
+                    images: None,
+                    mention: None,
                 },
                 false,
                 &theme,
@@ -977,7 +1212,16 @@ mod tests {
             elapsed: 12.5,
             tokens: 0,
         };
-        let text = row_text(&status_row(&status, '✻', &theme));
+        let motion = crate::tui::motion::Motion::new(true);
+        // Tick 0 = the first pulse frame; the sequence's mid-size star is frame 3.
+        let text = row_text(&status_row(
+            &status,
+            motion,
+            12,
+            false,
+            "esc to interrupt",
+            &theme,
+        ));
         assert!(
             text.contains("✻ Working… (esc to interrupt · 13s)"),
             "{text}"
@@ -992,10 +1236,91 @@ mod tests {
             elapsed: 3.2,
             tokens: 1200,
         };
-        let text = row_text(&status_row(&status, '✽', &theme));
+        let text = row_text(&status_row(
+            &status,
+            motion,
+            15,
+            false,
+            "esc to interrupt",
+            &theme,
+        ));
         assert!(
             text.contains("✽ $ cargo test… (esc to interrupt · 3s · ↓ 1200 tokens)"),
             "{text}"
+        );
+    }
+
+    /// A busy status row: `pulse` picks the glyph, `beam` brightens a moving
+    /// window of the verb, and neither changes a single character of the copy.
+    #[test]
+    fn status_row_glimmers_without_changing_its_text() {
+        let theme = Theme::dark();
+        let motion = crate::tui::motion::Motion::new(true);
+        let status = crate::tui::chat::RunningStatus {
+            verb: "Synthesizing".to_string(),
+            elapsed: 4.0,
+            tokens: 0,
+        };
+        // Everything but the spinner glyph, which `pulse` owns and does change.
+        let copy = "Synthesizing… (esc · 4s)";
+        let beam = crate::tui::motion::beam_color(&theme, theme.claude);
+        let mut brightened = 0;
+        for tick in 0..61 {
+            let row = status_row(&status, motion, tick, false, "esc", &theme);
+            let text = row_text(&row);
+            assert!(
+                text.contains(copy),
+                "the sweep never edits the text: {text}"
+            );
+            if row
+                .line
+                .segs
+                .iter()
+                .any(|seg| seg.style.fg == Some(beam) && seg.style.bold)
+            {
+                brightened += 1;
+            }
+        }
+        assert!(brightened > 0, "the verb is lit during the sweep");
+        assert!(brightened < 61, "and dark again between passes");
+        // Motion off: one colour, one glyph, all the way down.
+        let still = crate::tui::motion::Motion::new(false);
+        for tick in [0u64, 7, 40] {
+            let row = status_row(&status, still, tick, false, "esc", &theme);
+            let text = row_text(&row);
+            assert_eq!(text, format!("  ✻ {copy}"), "one glyph, all the way down");
+            assert!(
+                !row.line.segs.iter().any(|seg| seg.style.fg == Some(beam)),
+                "nothing glimmers under the gate"
+            );
+        }
+    }
+
+    /// Three seconds without an event: the row says so in the warning colour and
+    /// stops glimmering — a stalled turn should not look like a busy one. The
+    /// copy is untouched, because nothing new is actually known.
+    #[test]
+    fn a_stalled_status_row_turns_warning_and_stops_sweeping() {
+        let theme = Theme::dark();
+        let motion = crate::tui::motion::Motion::new(true);
+        let status = crate::tui::chat::RunningStatus {
+            verb: "Churning".to_string(),
+            elapsed: 9.0,
+            tokens: 0,
+        };
+        let running = status_row(&status, motion, 20, false, "esc", &theme);
+        let stalled = status_row(&status, motion, 20, true, "esc", &theme);
+        assert_eq!(row_text(&running), row_text(&stalled), "same words");
+        let colors = |row: &Row| -> Vec<Option<Color>> {
+            row.line.segs.iter().map(|seg| seg.style.fg).collect()
+        };
+        assert!(colors(&running).contains(&Some(theme.claude)));
+        assert!(!colors(&running).contains(&Some(theme.warning)));
+        assert!(colors(&stalled).contains(&Some(theme.warning)));
+        assert!(!colors(&stalled).contains(&Some(theme.claude)));
+        assert!(
+            !colors(&stalled).contains(&Some(theme.claude_strong)),
+            "the glimmer stops with the news"
         );
     }
 
@@ -1016,7 +1341,7 @@ mod tests {
         // 2 columns of padding on each side (CC footer padding): the model name's right edge lands at width-2.
         assert_eq!(text_width(&text), 78, "model name right-aligned to width-2");
 
-        chat.busy = true;
+        chat.start_test_turn();
         let text = row_text(&footer_row(&chat, 80));
         assert!(
             !text.contains("? for shortcuts"),
@@ -1024,9 +1349,9 @@ mod tests {
         );
         assert!(text.contains("ctrl+o to expand"), "{text}");
 
-        chat.busy = false;
+        chat.end_test_turn();
         chat.bash_mode = true;
-        chat.permission_mode = PermissionMode::Plan;
+        crate::tui::test_util::set_permission_mode(&mut chat, PermissionMode::Plan);
         let text = row_text(&footer_row(&chat, 80));
         assert!(text.contains("⏸ plan mode on ·"), "{text}");
         assert!(text.contains("! for shell mode"), "{text}");
@@ -1035,7 +1360,7 @@ mod tests {
     #[test]
     fn footer_keeps_context_usage_idle_and_colors_thresholds() {
         let mut chat = chat_at(100, 24);
-        chat.context_usage = crate::context_usage::ContextUsage::new(74_240, 128_000);
+        chat.conv.context_usage = crate::context_usage::ContextUsage::new(74_240, 128_000, 100_000);
         let normal = footer_row(&chat, 100);
         let text = row_text(&normal);
         assert!(text.contains("▓▓░░ 58% 74240/128k"), "{text}");
@@ -1045,10 +1370,11 @@ mod tests {
                 .line
                 .segs
                 .iter()
-                .any(|seg| seg.text.contains("58%") && seg.style.fg == Some(chat.theme.inactive))
+                .any(|seg| seg.text.contains("58%")
+                    && seg.style.fg == Some(chat.theme.text_secondary))
         );
 
-        chat.context_usage = crate::context_usage::ContextUsage::new(70, 100);
+        chat.conv.context_usage = crate::context_usage::ContextUsage::new(70, 100, 90);
         let warning = footer_row(&chat, 100);
         assert!(
             warning.line.segs.iter().any(|seg| {
@@ -1056,7 +1382,7 @@ mod tests {
             })
         );
 
-        chat.context_usage = crate::context_usage::ContextUsage::new(91, 100);
+        chat.conv.context_usage = crate::context_usage::ContextUsage::new(91, 100, 90);
         let danger = footer_row(&chat, 100);
         assert!(
             danger
@@ -1075,11 +1401,14 @@ mod tests {
         assert!(row_text(&footer_row(&chat, 100)).contains("0% 0/200k"));
 
         let start = std::time::Instant::now() - std::time::Duration::from_secs(1);
-        chat.busy = true;
-        chat.token_rate.start(start);
-        chat.token_rate
+        chat.start_test_turn();
+        chat.conv.token_rate.start(start);
+        chat.conv
+            .token_rate
             .observe_round(8, start + std::time::Duration::from_millis(500));
-        chat.token_rate.observe_round(24, std::time::Instant::now());
+        chat.conv
+            .token_rate
+            .observe_round(24, std::time::Instant::now());
         let text = row_text(&footer_row(&chat, 100));
         assert!(text.contains("tok/s"), "{text}");
         assert!(text.contains("0% 0/200k"), "{text}");
@@ -1089,7 +1418,7 @@ mod tests {
             "{text}"
         );
 
-        chat.busy = false;
+        chat.end_test_turn();
         assert!(!row_text(&footer_row(&chat, 100)).contains("tok/s"));
     }
 
@@ -1099,11 +1428,7 @@ mod tests {
     #[test]
     fn footer_previews_browsed_think_level() {
         let mut chat = chat_at(80, 24);
-        let _ = chat
-            .session
-            .runtime
-            .thinking_tx
-            .send(Some("high".to_string()));
+        crate::tui::test_util::set_thinking(&mut chat, Some("high"));
         let text = row_text(&footer_row(&chat, 80));
         assert!(text.contains("test-model · think high"), "{text}");
         assert!(
@@ -1135,25 +1460,29 @@ mod tests {
         assert!(!text.contains('▸'), "restored after Esc: {text}");
     }
 
-    /// Input box: prefix + `▋` fake caret; the real caret (the tree's Caret
-    /// node) lands on the same cell — row offsets fall out of the render walk.
+    /// Input box: prefix + the raw text, no cursor glyph anywhere; the tree's Caret node
+    /// carries the only caret — row offsets fall out of the render walk.
     #[test]
     fn prompt_rows_and_caret_agree() {
         let mut chat = chat_at(80, 24);
         chat.set_input("hi");
         let out = el::render(prompt(&chat, 80));
         assert_eq!(out.rows.len(), 3, "top/bottom borders + one input row");
-        assert_eq!(row_text(&out.rows[1]), "❯ hi▋");
+        assert_eq!(row_text(&out.rows[1]), "❯ hi");
         assert_eq!(
             out.caret,
             Some((1, 4)),
-            "caret sits on ▋ (the first row after the border)"
+            "caret sits past the text (the first row after the border)"
         );
 
         chat.set_input("");
         let out = el::render(prompt(&chat, 80));
         assert_eq!(out.caret, Some((1, 2)));
-        assert!(row_text(&out.rows[1]).starts_with("❯ ▋"));
+        let empty = row_text(&out.rows[1]);
+        assert!(
+            empty.starts_with(&format!("❯ {}", crate::tui::keys::INPUT_PLACEHOLDER)),
+            "the placeholder keeps its first character: {empty}"
+        );
 
         // Multi-line input: the caret row follows the input row.
         chat.set_input("a\nb\nc");
@@ -1161,15 +1490,59 @@ mod tests {
         assert_eq!(out.rows.len(), 5);
         assert_eq!(out.caret, Some((3, 3)));
 
+        // Wide glyphs count two columns each: the caret lands past the CJK run, not past its char count.
+        chat.set_input("你好a");
+        let out = el::render(prompt(&chat, 80));
+        assert_eq!(row_text(&out.rows[1]), "❯ 你好a");
+        assert_eq!(out.caret, Some((1, 7)), "2 prefix + 2 + 2 + 1");
+
         chat.bash_mode = true;
         chat.set_input("ls");
         let out = el::render(prompt(&chat, 80));
-        assert_eq!(row_text(&out.rows[1]), "! ls▋");
+        assert_eq!(row_text(&out.rows[1]), "! ls");
         // bash mode swaps the border color (CC bashBorder).
         assert_eq!(
             out.rows[0].line.segs[0].style.fg,
             Some(chat.theme.bash_border),
             "border color swaps"
         );
+    }
+
+    /// Every state that writes near the bottom composes around the composer
+    /// without overlapping it or displacing it: busy status, an open picker, a
+    /// pending permission. Rewritten for D103, which retired the conversation
+    /// bar that used to own the last row — the floor is the footer again.
+    #[test]
+    fn the_bottom_states_compose_around_the_composer() {
+        let mut chat = chat_at(100, 40);
+        chat.start_test_turn();
+        // A turn that has only just opened draws its thinking placeholder; what
+        // this test is about is the row *around* the composer, so the flow is
+        // emptied and the busy row falls back to its own verb.
+        chat.conv.messages.clear();
+        chat.set_input("/theme");
+        chat.run_slash("theme");
+
+        for fullscreen in [false, true] {
+            let rows = rows_of(chrome(&chat, 100, fullscreen));
+            let text: Vec<String> = rows.iter().map(row_text).collect();
+            assert_eq!(
+                text.iter().filter(|r| r.starts_with('╭')).count(),
+                1,
+                "one composer, once: {text:?}"
+            );
+            assert!(
+                text.iter().any(|r| r.contains("dark theme")),
+                "the open picker still renders: {text:?}"
+            );
+            assert!(
+                text.iter().any(|r| r.contains("Working")),
+                "and the busy row renders with it: {text:?}"
+            );
+            assert!(
+                !text.iter().any(|r| r.contains("@main")),
+                "and nothing draws a conversation bar any more: {text:?}"
+            );
+        }
     }
 }

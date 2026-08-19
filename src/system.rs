@@ -40,6 +40,21 @@ You are bingo, an agent CLI running on the user's machine.
   so rather than implying it succeeded. Never claim all tests pass when the
   output shows failures.
 
+# Your own judgment
+- You are a collaborator, not a transcriber. When planning surfaces a
+  materially better solution than the one the user asked for — simpler,
+  safer, more idiomatic — raise it before building: the trade-off in a
+  sentence or two, your recommendation, and the question. Proceed as the
+  user decides.
+- When a request suggests the user may not know a domain's established
+  practice (an anti-pattern, a deprecated API, a security foot-gun), say
+  so briefly and offer the standard way — inform, don't lecture.
+- \"Materially\" is the bar: differences of taste are not worth a question.
+  If the answer would not change what you build, state your assumption and
+  keep going.
+- When the user has already heard the alternative and wants it their way,
+  build it their way without relitigating.
+
 # Executing actions with care
 - Freely take local, reversible actions (editing files, running tests).
 - For hard-to-reverse or shared-system actions (deleting branches, force
@@ -116,7 +131,7 @@ pub fn load_memory(home: &Path, cwd: &Path) -> Memory {
 /// come and go depending on which files exist.
 /// `cache_control` controls whether cache_control is sent (off by default; non-official
 /// endpoints handle it unreliably).
-/// Dynamic environment segment (OS/date/arch).
+/// Dynamic environment segment (OS/date/arch/shell).
 fn env_info_block(cwd: &Path) -> String {
     let os = std::env::consts::OS;
     let arch = std::env::consts::ARCH;
@@ -125,11 +140,37 @@ fn env_info_block(cwd: &Path) -> String {
         .map(|d| d.as_secs())
         .unwrap_or(0);
     format!(
-        "# Environment\nOS: {os} ({arch})\nUnix timestamp: {date}\nWorking directory: {}",
+        "# Environment\nOS: {os} ({arch})\n{}\nUnix timestamp: {date}\nWorking directory: {}",
+        shell_line(),
         cwd.display()
     )
 }
 
+/// Resolved-shell line: names the real executor of Bash tool commands, with a
+/// syntax directive whenever the dialect is not the POSIX the tool's name
+/// primes for (#42 — `OS: windows` alone does not override that prior).
+fn shell_line() -> String {
+    use crate::platform::ShellDialect;
+    let shell = crate::platform::shell();
+    match crate::platform::shell_dialect() {
+        ShellDialect::Posix => format!("Shell: {shell} (POSIX)"),
+        ShellDialect::PowerShell => format!(
+            "Shell: {shell} (PowerShell) — Bash tool commands are executed by PowerShell; \
+             use PowerShell syntax, not POSIX (e.g. Get-ChildItem, not ls -la)"
+        ),
+        ShellDialect::Cmd => format!(
+            "Shell: {shell} (cmd) — Bash tool commands are executed by cmd.exe; \
+             use cmd syntax, not POSIX"
+        ),
+        ShellDialect::Unknown => format!(
+            "Shell: {shell} — Bash tool commands are executed by this shell; match its syntax"
+        ),
+    }
+}
+
+/// The main session's system blocks. Subagents are assembled from the parent's
+/// (see `tool::agent`), so anything main-only here has to be findable by a
+/// heading the spawn path can drop.
 pub fn build_system(
     memory: &Memory,
     project_memory: Option<String>,
@@ -157,9 +198,156 @@ pub fn build_system(
     blocks
 }
 
+/// The main session's project blocks beyond [`build_system`]: the crew pinned
+/// to this project (D53), main's half of the room etiquette (D119), and the
+/// active experience index. One assembly for every frontend (D156) — the
+/// console grew these one campaign at a time and the app-server's session
+/// never heard, so a GUI turn ran without the crew routing rule, the room
+/// etiquette, or the project's experience. Pushed between [`build_system`] and
+/// the model-capability block, the order `main.rs` always used.
+pub fn push_main_extras(
+    system: &mut Vec<SystemBlock>,
+    home: &Path,
+    cwd: &Path,
+    settings: &crate::settings::Settings,
+) {
+    let cache = settings.cache_control.unwrap_or(false);
+    // The crew, and the rule that decides between giving a member work and
+    // hiring someone new (D53). A system block rather than a tool description:
+    // compaction rewrites the message history and leaves the system prompt
+    // alone, so the routing rule is still there on turn fifty, when the roster
+    // matters most. The whole tree is named (D54) — a department main cannot
+    // see is one it will re-hire.
+    if let Ok(Some(tree)) = crate::team::load_team_tree(cwd) {
+        system.push(SystemBlock {
+            text: crate::team::crew_note(&tree, home),
+            cache,
+        });
+    }
+    // Main's half of the room etiquette (D119): its room lines arrive inside
+    // the <messages> envelope with nothing else explaining them, and the base
+    // prompt's instinct — talk to the user — is exactly the narration flood
+    // the note forbids. Same gate and same system-block reasoning as the
+    // member-side CHANNEL_NOTE.
+    if settings.experimental.agent_channels {
+        system.push(SystemBlock {
+            text: crate::tool::agent_notes::MAIN_CHANNEL_NOTE.to_string(),
+            cache,
+        });
+    }
+    // This project's active experience index (≤10 lines; full entries via
+    // ExperienceQuery and applied-use feedback via ExperienceOutcome).
+    let experience_index = crate::tool::experience::session_index(home, cwd);
+    if !experience_index.is_empty() {
+        system.push(SystemBlock {
+            text: format!("Project experience (reusable patterns from past sessions):\n{experience_index}\n(Query full details with ExperienceQuery; after applying one, record verified helpful/harmful evidence with ExperienceOutcome; propose new ones with ExperiencePropose)"),
+            cache,
+        });
+    }
+}
+
+/// The `# Model capabilities` heading — the stable marker callers use to
+/// find and replace the block when the active model changes (subagent with
+/// its own model, /model switch rebuilds are appended, never stacked).
+pub const MODEL_CAPABILITIES_HEADING: &str = "# Model capabilities";
+
+/// A system block telling the model what it can and cannot do, so a task
+/// whose value depends on a capability (image input above all) is not taken
+/// to an endpoint that lacks it. Read from the model resolver, so the
+/// declaration, the family-catalog overrides and the prefix table all feed
+/// it. Uncached: cheap to rebuild, and cacheability varies per endpoint.
+pub fn model_capability_block(
+    model: &str,
+    provider: &str,
+    resolver: &crate::api::models::ModelResolver,
+) -> SystemBlock {
+    let vision = resolver.supports_vision(model);
+    let thinking = resolver.supports_thinking(model);
+    let vision_line = if vision {
+        "yes — accepts image input; you can act on screenshots and rendered output"
+    } else {
+        "no — text only; do not take image-first tasks, say you cannot see images"
+    };
+    let thinking_line = if thinking {
+        "yes — bingo may send thinking parameters for this model"
+    } else {
+        "no — bingo sends no thinking parameter for this model"
+    };
+    SystemBlock {
+        text: format!(
+            "{MODEL_CAPABILITIES_HEADING}\nActive model: {model} (provider: {provider})\n\
+             - Vision: {vision_line}\n- Thinking: {thinking_line}"
+        ),
+        cache: false,
+    }
+}
+
+/// The request's system with the capability block refreshed for the model
+/// actually speaking. The persisted `Session::system` carries one built at
+/// startup (and subagent spawn), but `/model`/`/provider` switch mid-session
+/// without touching it — so every request rebuilds it from the runtime state,
+/// keeping the vision/thinking facts honest turn after turn.
+pub fn with_model_capabilities(
+    system: &[SystemBlock],
+    model: &str,
+    provider: &str,
+    resolver: &crate::api::models::ModelResolver,
+) -> Vec<SystemBlock> {
+    let mut blocks: Vec<SystemBlock> = system
+        .iter()
+        .filter(|b| !b.text.starts_with(MODEL_CAPABILITIES_HEADING))
+        .cloned()
+        .collect();
+    blocks.push(model_capability_block(model, provider, resolver));
+    blocks
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// D70: both halves of the judgment rule must survive edits — the duty to
+    /// raise a materially better solution, and the escape hatch that stops the
+    /// agent from relitigating a call the user already made.
+    #[test]
+    fn base_prompt_keeps_the_judgment_rule_paired() {
+        assert!(
+            BASE_PROMPT.contains("materially better solution"),
+            "must keep the duty to raise a better approach — otherwise the agent silently \
+             builds what it knows is worse"
+        );
+        assert!(
+            BASE_PROMPT.contains("without relitigating"),
+            "must keep the escape hatch — otherwise the duty degrades into arguing with \
+             a user who already decided"
+        );
+    }
+
+    /// D156: the main-extras assembly is one function both frontends call.
+    /// The gates it holds — a crew file, the channels flag, a non-empty
+    /// experience index — must each stay closed on an empty project, and the
+    /// channels flag alone must open exactly the etiquette block.
+    #[test]
+    fn main_extras_gate_on_flag_and_project_state() {
+        let tmp = std::env::temp_dir().join(format!("bingo-extras-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let mut settings = crate::settings::Settings::default();
+        let mut system = Vec::new();
+        push_main_extras(&mut system, &tmp, &tmp, &settings);
+        assert!(
+            system.is_empty(),
+            "an empty project with channels off adds nothing"
+        );
+        settings.experimental.agent_channels = true;
+        push_main_extras(&mut system, &tmp, &tmp, &settings);
+        assert_eq!(system.len(), 1, "the flag opens only the etiquette block");
+        assert_eq!(
+            system[0].text,
+            crate::tool::agent_notes::MAIN_CHANNEL_NOTE,
+            "the block is the member-facing note's main-side half, verbatim"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 
     #[test]
     fn builds_blocks_with_base_first() {
@@ -215,6 +403,82 @@ mod tests {
         assert!(text.contains(std::env::consts::ARCH));
         assert!(text.contains("Unix timestamp"));
         assert!(text.contains("Working directory"));
+    }
+
+    /// The capability block names the active model and tells it honestly
+    /// whether it can see images — the rule that keeps image-first work away
+    /// from text-only endpoints.
+    #[test]
+    fn model_capability_block_reports_vision_and_thinking() {
+        let resolver = crate::api::models::ModelResolver::default();
+        let vision = model_capability_block("gpt-5.6-sol", "road", &resolver);
+        assert!(vision.text.starts_with(MODEL_CAPABILITIES_HEADING));
+        assert!(vision.text.contains("Active model: gpt-5.6-sol"));
+        assert!(vision.text.contains("provider: road"));
+        assert!(vision.text.contains("Vision: yes"));
+        assert!(!vision.cache, "uncached, like the subagent note");
+        let text_only = model_capability_block("deepseek-v4-flash", "default", &resolver);
+        assert!(text_only.text.contains("Vision: no"));
+        assert!(text_only.text.contains("cannot see images"));
+        assert!(
+            text_only.text.contains("Thinking: yes"),
+            "the two capabilities are independent: DeepSeek reasons and cannot see"
+        );
+        let no_thinking = model_capability_block("qwen-max-2026", "proxy", &resolver);
+        assert!(no_thinking.text.contains("Thinking: no"));
+    }
+
+    /// The per-request refresh replaces any existing capability block instead
+    /// of stacking: switching models must update the facts, never accumulate
+    /// stale ones.
+    #[test]
+    fn with_model_capabilities_replaces_not_stacks() {
+        let resolver = crate::api::models::ModelResolver::default();
+        let base = vec![
+            SystemBlock {
+                text: "base".into(),
+                cache: false,
+            },
+            model_capability_block("gpt-5.6-sol", "road", &resolver),
+        ];
+        let refreshed = with_model_capabilities(&base, "deepseek-v4-flash", "default", &resolver);
+        let texts: Vec<&str> = refreshed.iter().map(|b| b.text.as_str()).collect();
+        assert_eq!(texts.len(), 2, "exactly one capability block survives");
+        assert_eq!(texts[0], "base");
+        assert!(texts[1].contains("Active model: deepseek-v4-flash"));
+        assert!(texts[1].contains("Vision: no"));
+        assert_eq!(
+            refreshed
+                .iter()
+                .filter(|b| b.text.starts_with(MODEL_CAPABILITIES_HEADING))
+                .count(),
+            1
+        );
+    }
+
+    /// #42: the environment block names the real executor of Bash tool
+    /// commands, and a non-POSIX dialect carries an explicit syntax directive.
+    #[test]
+    fn env_block_reports_resolved_shell() {
+        let text = env_info_block(Path::new("/tmp/project"));
+        assert!(
+            text.contains(&format!("Shell: {}", crate::platform::shell())),
+            "{text}"
+        );
+        match crate::platform::shell_dialect() {
+            crate::platform::ShellDialect::Posix => {
+                assert!(!text.contains("use PowerShell syntax"), "{text}")
+            }
+            crate::platform::ShellDialect::PowerShell => {
+                assert!(text.contains("use PowerShell syntax, not POSIX"), "{text}")
+            }
+            crate::platform::ShellDialect::Cmd => {
+                assert!(text.contains("use cmd syntax, not POSIX"), "{text}")
+            }
+            crate::platform::ShellDialect::Unknown => {
+                assert!(text.contains("match its syntax"), "{text}")
+            }
+        }
     }
 
     #[test]

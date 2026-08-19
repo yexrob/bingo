@@ -10,7 +10,7 @@
 //! [tasks]       todo · N/M tasks
 //! [warning]     `⚠ …`
 //! [help]        `?` panel
-//! [prompt]      ╭──╮ / `❯ {input}▋` / ╰──╯
+//! [prompt]      ╭──╮ / `❯ {input}` (the real terminal cursor sits in it) / ╰──╯
 //! [search]      `(reverse-i-search)…`
 //! [queue]       `> queued message`
 //! [suggestions] slash menu / `/model` picker
@@ -33,9 +33,7 @@
 use std::io::Stdout;
 use std::time::{Duration, Instant};
 
-use crossterm::event::{
-    Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind,
-};
+use crossterm::event::{Event, EventStream, KeyEvent, KeyEventKind, MouseEvent, MouseEventKind};
 use futures_util::StreamExt;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
@@ -50,12 +48,13 @@ use crate::tui::el;
 use crate::tui::gfx;
 use crate::tui::line::{Line, SegStyle};
 use crate::tui::statics::pick_flush_mark;
-use crate::tui::term::{StdoutTerm, write_transmits};
+use crate::tui::term::{StdoutTerm, write_attention, write_transmits};
 use crate::tui::view;
 use ratatui::text::Line as TextLine;
 
-/// Per-frame tick interval (spinner/thinking timing).
-const TICK_MS: u64 = 33;
+/// Per-frame tick interval. Owned by the motion layer, which converts ticks to
+/// the milliseconds every animation cadence is actually specified in (D87).
+use crate::tui::motion::TICK_MS;
 /// Disk-snapshot refresh interval for the task list (in ticks).
 const TASKS_REFRESH_TICKS: u64 = 15;
 /// Rows scrolled per mouse wheel notch (fullscreen only).
@@ -203,7 +202,7 @@ fn flush_items(chat: &Chat, width: usize, end: usize) -> Vec<TextLine<'static>> 
 /// layer do the placing, whether they went out before or after the data —
 /// so a block whose head row is scrolled off still transmits, keyed by any
 /// of its rows.
-fn image_transmits(
+pub(super) fn image_transmits(
     cap: gfx::ImageCap,
     images: &HashMap<String, Arc<crate::ui::ImageMeta>>,
     rows: &[Row],
@@ -249,33 +248,14 @@ fn avatar_transmits(
 /// Chrome height, measured by rendering the tree (never predicted — the same
 /// source the frame assembler draws from).
 fn chrome_height(chat: &Chat, width: usize, fullscreen: bool) -> usize {
-    el::height(chrome::chrome(chat, width, fullscreen))
+    crate::tui::chrome::chrome_height_of(chat, width, fullscreen)
 }
 
-/// Key dispatch. In inline mode ctrl+o toggles expand/collapse (CC non-fullscreen semantics);
-/// neither direction touches the already-printed scrollback: expand = replay the whole transcript and freeze it
-/// into scrollback (readable by scrolling up); collapse = fold back to aggregates, then close up like resize (clear-redraw +
-/// rehydration). All other keys (including Ctrl+C's interrupt/clear/quit three states) go to
-/// [`Chat`]; quitting is expressed via `chat.exit`.
-fn dispatch_key(chat: &mut Chat, key: KeyEvent, inline: bool) {
+/// Key dispatch. Every key (including Ctrl+C's interrupt/clear/quit three
+/// states and Ctrl+O's transcript view) goes to [`Chat`]; quitting is expressed
+/// via `chat.exit`, opening the pager via `chat.open_transcript`.
+fn dispatch_key(chat: &mut Chat, key: KeyEvent) {
     if key.kind == KeyEventKind::Release {
-        return;
-    }
-    if inline && key.code == KeyCode::Char('o') && key.modifiers.contains(KeyModifiers::CONTROL) {
-        if chat.transcript_fully_expanded() {
-            if chat.collapse_transcript() {
-                // Cancel the not-yet-rendered replay (pressing twice = net effect of collapse),
-                // clear the visible screen and redraw by rehydrating to the collapsed height — the expanded
-                // replay rows on screen stay only in scrollback.
-                chat.dump_transcript = false;
-                chat.force_redraw = true;
-                let chrome_len = chrome_height(chat, chat.width, false);
-                let budget = chat.height.saturating_sub(2).saturating_sub(chrome_len);
-                chat.rehydrate(chat.width, budget);
-            }
-        } else {
-            chat.expand_transcript();
-        }
         return;
     }
     // Dialog keys are handled inside on_key (single dispatch order for both
@@ -302,8 +282,13 @@ fn rebuild(chat: &mut Chat, size: Size, fullscreen: bool) {
     chat.viewport_height = viewport;
     if chat.dirty {
         chat.dirty = false;
-        chat.reconcile_scroll(viewport);
+        // Build first, reconcile second (D93). Reconciling against the document
+        // as it stood *before* the rebuild pinned the scroll to the old last
+        // row, so every batch of rows that arrived in one frame — a buffer
+        // switch's divider and replay, most visibly — landed below the fold
+        // even for a viewer who had never scrolled away from the bottom.
         chat.build_rows(width);
+        chat.reconcile_scroll(viewport);
     }
 }
 
@@ -329,7 +314,7 @@ pub async fn run_inline(
         tokio::select! {
             event = events.next() => match event {
                 Some(Ok(Event::Key(key))) => {
-                    dispatch_key(&mut chat, key, true);
+                    dispatch_key(&mut chat, key);
                     dirty = true;
                 }
                 Some(Ok(Event::Paste(text))) => {
@@ -367,9 +352,14 @@ pub async fn run_inline(
                     chat.dirty = true;
                     dirty = true;
                 }
-                if chat.needs_tick() {
+                // The store is drained before the idle gate, not after it: the
+                // core never waits on a frontend, so an attachment that stops
+                // reading is dropped. A console with nothing to draw still has
+                // to listen.
+                let told = chat.pump_store();
+                if chat.needs_tick() || told {
                     chat.tick();
-                    if chat.drain_all() {
+                    if chat.drain_all() || told {
                         ticks = 0;
                     }
                     // Skip disk reads while the task area is hidden.
@@ -397,10 +387,57 @@ pub async fn run_inline(
             },
         }
 
-        // Entity view (Ctrl+G): the alternate-screen modal takes over; afterwards, a deterministic
-        // redraw goes through the resize channel (clear + rehydrate, without guessing whether alt-screen restore works).
-        if let Some(open) = chat.open_entity.take() {
-            crate::tui::entity::run_entity_modal(&mut chat, &mut events, open, false).await?;
+        // Transcript view (Ctrl+O, D82): the same alternate-screen contract as the
+        // entity modal. Scrollback is untouched while it is open — that is what
+        // lets a fold be opened at all in a host that can never rewrite a printed
+        // row — and the return goes through the resize channel so the inline
+        // window is rebuilt rather than guessed at.
+        if std::mem::take(&mut chat.open_transcript) {
+            crate::tui::transcript::run_transcript_modal(&mut chat, &mut events, false).await?;
+            if let Ok((w, h)) = crossterm::terminal::size() {
+                pending_resize = Some((Size::new(w, h), Instant::now()));
+            } else {
+                chat.force_redraw = true;
+            }
+            chat.dirty = true;
+            dirty = true;
+        }
+
+        // What the frame asked the core for, performed and folded in before the
+        // frame that shows it (D154). Here rather than in the key handler for
+        // the same reason the repair below is here: a key handler runs on the
+        // thread that draws, and asking the actor is `async`.
+        if chat.settle_intents().await {
+            chat.dirty = true;
+            dirty = true;
+        }
+
+        // A hole in the event stream, repaired the way the protocol says: read
+        // a fresh cut and replace local state with it, rather than patching a
+        // projection that is no longer the core's ("Snapshots and recovery").
+        // Here rather than in the tick arm because re-reading is `async` and the
+        // render path is not.
+        if chat.reconcile_store().await {
+            chat.dirty = true;
+            dirty = true;
+        }
+
+        // A page turn (v6): the page being left banks its printed rows into
+        // the terminal's own scrollback and the next page starts at the top
+        // of a clean screen — the D98 primitive, revived.
+        if std::mem::take(&mut chat.page_turn) {
+            term.page_break()?;
+            chat.dirty = true;
+            dirty = true;
+        }
+
+        // `$EDITOR` compose (ctrl+g / ctrl+x ctrl+e, D86). Unlike the pager
+        // this hands the terminal to a foreign process, so the event stream is
+        // replaced rather than reused; the return goes through the resize
+        // channel for the same reason the pager's does — the editor may well
+        // have been resized while it had the screen.
+        if std::mem::take(&mut chat.open_editor) {
+            crate::tui::composer::run_editor(&mut chat, &mut events);
             if let Ok((w, h)) = crossterm::terminal::size() {
                 pending_resize = Some((Size::new(w, h), Instant::now()));
             } else {
@@ -447,32 +484,20 @@ pub async fn run_inline(
         // are written into them right away, so settling migrates without flicker or blank bands.
         let mut items = Vec::new();
         let mut flushed = None;
-        if std::mem::take(&mut chat.dump_transcript) {
-            // ctrl+o full replay: the cursor has rewound and the doc fully rebuilt from the welcome card (everything
-            // expanded); the settled part freezes into scrollback in one go — the user scrolls up to see it all,
-            // while the dynamic tail stays in the viewport as usual.
-            if let Some(mark) = chat.doc.settled_marks.last().copied() {
-                flushed = Some((chat.tail_start, mark.row_end.min(chat.doc.rows.len())));
-                items = flush_items(&chat, size.width as usize, mark.row_end);
-                chat.advance_flushed_upto(mark);
-            }
-        } else {
-            let chrome_len = chrome_height(&chat, size.width as usize, false);
-            // The window counts "persistent content": transient slash output (gone after TTL) squeezing the window
-            // is no reason to freeze live content — it merely covers it temporarily, not evicts it.
-            let persistent = chat.doc.rows.len().saturating_sub(chat.doc.transient_rows);
-            let (win_start, _) = tail_window(
-                persistent,
-                chat.tail_start,
-                chrome_len,
-                size.height as usize,
-            );
-            if let Some(mark) = pick_flush_mark(&chat.doc.settled_marks, chat.tail_start, win_start)
-            {
-                flushed = Some((chat.tail_start, mark.row_end.min(chat.doc.rows.len())));
-                items = flush_items(&chat, size.width as usize, mark.row_end);
-                chat.advance_flushed_upto(mark);
-            }
+        let chrome_len = chrome_height(&chat, size.width as usize, false);
+        // The window counts "persistent content": transient slash output (gone after TTL) squeezing the window
+        // is no reason to freeze live content — it merely covers it temporarily, not evicts it.
+        let persistent = chat.doc.rows.len().saturating_sub(chat.doc.transient_rows);
+        let (win_start, _) = tail_window(
+            persistent,
+            chat.tail_start,
+            chrome_len,
+            size.height as usize,
+        );
+        if let Some(mark) = pick_flush_mark(&chat.doc.settled_marks, chat.tail_start, win_start) {
+            flushed = Some((chat.tail_start, mark.row_end.min(chat.doc.rows.len())));
+            items = flush_items(&chat, size.width as usize, mark.row_end);
+            chat.advance_flushed_upto(mark);
         }
 
         let frame = Frame::assemble(&chat, size);
@@ -505,6 +530,9 @@ pub async fn run_inline(
             bytes.extend_from_slice(&avatar_transmits(cap, &chat.faces, &mut transmits));
             term.write_transmits(&bytes)?;
         }
+        // Attention channel (D79): bell / notification OSC / terminal title,
+        // emitted after the frame so it never lands mid-diff.
+        term.write_attention(&chat.notify.take())?;
         if chat.exit {
             break;
         }
@@ -592,7 +620,7 @@ pub async fn run_fullscreen(
         tokio::select! {
             event = events.next() => match event {
                 Some(Ok(Event::Key(key))) => {
-                    dispatch_key(&mut chat, key, false);
+                    dispatch_key(&mut chat, key);
                     dirty = true;
                 }
                 Some(Ok(Event::Paste(text))) => {
@@ -617,9 +645,12 @@ pub async fn run_fullscreen(
                 Some(Err(_)) | None => break,
             },
             _ = ticker.tick() => {
-                if chat.needs_tick() {
+                // Drained before the idle gate, for the reason `run_inline`
+                // states: an attachment that stops reading is dropped.
+                let told = chat.pump_store();
+                if chat.needs_tick() || told {
                     chat.tick();
-                    if chat.drain_all() {
+                    if chat.drain_all() || told {
                         ticks = 0;
                     }
                     if ticks.is_multiple_of(TASKS_REFRESH_TICKS) && chat.tasks_visible {
@@ -645,9 +676,42 @@ pub async fn run_fullscreen(
             },
         }
 
-        // Entity view: already on the alternate screen, the modal takes over the canvas directly; full repaint after return.
-        if let Some(open) = chat.open_entity.take() {
-            crate::tui::entity::run_entity_modal(&mut chat, &mut events, open, true).await?;
+        // Transcript view: already on the alternate screen, so the pager takes the
+        // canvas over directly; full repaint after return.
+        if std::mem::take(&mut chat.open_transcript) {
+            crate::tui::transcript::run_transcript_modal(&mut chat, &mut events, true).await?;
+            chat.force_redraw = true;
+            chat.dirty = true;
+            dirty = true;
+        }
+
+        // What the frame asked the core for, performed and folded in before the
+        // frame that shows it (D154). Here rather than in the key handler for
+        // the same reason the repair below is here: a key handler runs on the
+        // thread that draws, and asking the actor is `async`.
+        if chat.settle_intents().await {
+            chat.dirty = true;
+            dirty = true;
+        }
+
+        // The same repair `run_inline` makes, for the same reason.
+        if chat.reconcile_store().await {
+            chat.dirty = true;
+            dirty = true;
+        }
+
+        // A page turn (v6): fullscreen redraws whole every frame, so the swap
+        // is the doc's — the flag only forces the repaint.
+        if std::mem::take(&mut chat.page_turn) {
+            chat.force_redraw = true;
+            chat.dirty = true;
+            dirty = true;
+        }
+
+        // `$EDITOR` compose (D86): the suspend leaves the alternate screen and
+        // the resume re-enters it, so the canvas is repainted from scratch.
+        if std::mem::take(&mut chat.open_editor) {
+            crate::tui::composer::run_editor(&mut chat, &mut events);
             chat.force_redraw = true;
             chat.dirty = true;
             dirty = true;
@@ -689,6 +753,9 @@ pub async fn run_fullscreen(
             bytes.extend_from_slice(&avatar_transmits(cap, &chat.faces, &mut transmits));
             write_transmits(terminal.backend_mut(), &bytes)?;
         }
+        // Attention channel (D79). The fullscreen host has no inline driver, so
+        // its single write point is the crossterm backend behind the Terminal.
+        write_attention(terminal.backend_mut(), &chat.notify.take())?;
         if chat.exit {
             break;
         }
@@ -721,6 +788,8 @@ fn mouse_event(chat: &mut Chat, mouse: MouseEvent) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crossterm::event::{KeyCode, KeyModifiers};
+
     use crate::tui::line::{ImageRef, text_width};
     use crate::tui::test_util::chat_at;
 
@@ -759,6 +828,69 @@ mod tests {
         assert_eq!(tail_window(3, 0, 4, 4), (3, 0));
     }
 
+    /// D93: a rebuild reconciles the scroll against the document it just built,
+    /// not the one it replaced.
+    ///
+    /// Rows that arrive as a batch inside a single frame — a conversation
+    /// switch's rule and replay, most visibly — used to land below the fold
+    /// even for a viewer sitting at the bottom, because `max_scroll` had been
+    /// computed before they existed.
+    #[test]
+    fn a_batch_of_new_rows_is_visible_on_the_frame_it_arrives() {
+        let mut chat = chat_at(80, 24);
+        for i in 0..80 {
+            chat.conv.messages.push(crate::tui::chat::UiMessage {
+                speaker: None,
+                role: crate::tui::chat::Role::User,
+                text: format!("line {i}"),
+                at: 0,
+                activities: Vec::new(),
+                insert_points: Vec::new(),
+                groups: Vec::new(),
+                group_of: Vec::new(),
+            });
+        }
+        chat.dirty = true;
+        rebuild(&mut chat, size(80, 24), true);
+        let viewport = chat.viewport_height;
+        assert_eq!(
+            chat.scroll,
+            chat.doc.rows.len().saturating_sub(viewport),
+            "a settled document sits at its tail"
+        );
+
+        // A batch lands in one frame: the tail has to be the tail of the new
+        // document, not of the one that was there when the frame started.
+        for i in 0..20 {
+            chat.conv.messages.push(crate::tui::chat::UiMessage {
+                speaker: None,
+                role: crate::tui::chat::Role::User,
+                text: format!("arrived {i}"),
+                at: 0,
+                activities: Vec::new(),
+                insert_points: Vec::new(),
+                groups: Vec::new(),
+                group_of: Vec::new(),
+            });
+        }
+        chat.dirty = true;
+        rebuild(&mut chat, size(80, 24), true);
+        assert_eq!(
+            chat.scroll,
+            chat.doc.rows.len().saturating_sub(chat.viewport_height),
+            "the batch is on screen, not below the fold"
+        );
+        let tail: String = chat
+            .doc
+            .rows
+            .iter()
+            .skip(chat.scroll)
+            .map(row_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(tail.contains("arrived 19"), "{tail}");
+    }
+
     /// Frame height = the assembled row count, always < terminal height: no second chrome
     /// formula can drift from the actual assembly.
     #[test]
@@ -783,7 +915,7 @@ mod tests {
     #[test]
     fn tiny_terminal_keeps_the_prompt_and_footer() {
         let mut chat = chat_at(60, 6);
-        chat.busy = true;
+        chat.start_test_turn();
         chat.push_warning("mcp connection failed".to_string());
         let frame = Frame::assemble(&chat, size(60, 6));
         assert_eq!(frame.rows.len(), 4, "height-2 cap");
@@ -803,7 +935,8 @@ mod tests {
         );
     }
 
-    /// The frame caret lands on the input row's `▋` (still aligned after the assembly offsets).
+    /// The frame caret lands one cell past the input text (still aligned after the assembly
+    /// offsets), and no row draws a cursor glyph — the terminal cursor is the only caret.
     #[test]
     fn frame_cursor_points_at_the_caret() {
         let mut chat = chat_at(80, 24);
@@ -815,7 +948,18 @@ mod tests {
         let (x, y) = frame.cursor.expect("caret visible");
         assert_eq!(x, 7, "❯ + hello");
         let row = row_text(&frame.rows[y as usize]);
-        assert_eq!(row, "❯ hello▋");
+        assert_eq!(row, "❯ hello");
+        assert!(
+            !frame.rows.iter().any(|r| r.line.plain_text().contains('▋')),
+            "no fake cursor glyph survives anywhere in the frame"
+        );
+
+        // Wide glyphs: the caret column counts display cells, not chars.
+        chat.set_input("你好");
+        let frame = Frame::assemble(&chat, size(80, 24));
+        let (x, y) = frame.cursor.expect("caret visible");
+        assert_eq!(x, 6, "❯ + two double-width glyphs");
+        assert_eq!(row_text(&frame.rows[y as usize]), "❯ 你好");
     }
 
     /// Flushing: the settled prefix becomes scrollback entries; bubble rows fill the terminal width.
@@ -997,9 +1141,11 @@ mod tests {
     #[test]
     fn flush_cursor_survives_a_width_change() {
         let mut chat = chat_at(80, 24);
-        chat.messages.push(crate::tui::chat::UiMessage {
+        chat.conv.messages.push(crate::tui::chat::UiMessage {
+            speaker: None,
             role: crate::tui::chat::Role::User,
             text: "a long-enough user message whose wrap count changes with the width".repeat(2),
+            at: 0,
             activities: Vec::new(),
             insert_points: Vec::new(),
             groups: Vec::new(),
@@ -1027,81 +1173,39 @@ mod tests {
         );
     }
 
-    /// Inline ctrl+o: full replay — the flush cursor rewinds + the replay flag is set; the replay frame
-    /// freezes every settled segment into scrollback, leaving only the dynamic tail and chrome in the viewport.
+    /// Ctrl+O requests the transcript view instead of rewriting the screen, and
+    /// a permission dialog outranks it: the pager would bury the question that
+    /// is blocking the turn.
     #[test]
-    fn ctrl_o_replays_the_full_transcript_inline() {
+    fn ctrl_o_requests_the_transcript_view() {
         let mut chat = chat_at(80, 24);
         let key = |code, modifiers| KeyEvent::new(code, modifiers);
-        // Empty session, everything on screen → no-op: no characters inserted, no replay.
         chat.set_input("hi");
-        dispatch_key(
-            &mut chat,
-            key(KeyCode::Char('o'), KeyModifiers::CONTROL),
-            true,
-        );
+        dispatch_key(&mut chat, key(KeyCode::Char('o'), KeyModifiers::CONTROL));
         assert_eq!(chat.input, "hi", "ctrl+o does not insert characters");
-        assert!(
-            !chat.dump_transcript,
-            "everything is already on screen; no replay needed"
-        );
+        assert!(chat.open_transcript, "the host is asked to open the pager");
 
         // Esc always passes through (menu exits happen inside on_key).
+        chat.open_transcript = false;
         chat.set_input("/model");
         chat.submit();
         assert!(chat.model_menu.is_some(), "menu is open");
-        dispatch_key(&mut chat, key(KeyCode::Esc, KeyModifiers::empty()), true);
+        dispatch_key(&mut chat, key(KeyCode::Esc, KeyModifiers::empty()));
         assert!(
             chat.model_menu.is_none(),
             "Esc exits the menu through the gate"
         );
 
-        // A message has flushed → ctrl+o requests the replay; simulate the replay frame: rebuild the full doc
-        // and freeze everything up to the last checkpoint.
-        chat.messages.push(crate::tui::chat::UiMessage {
-            role: crate::tui::chat::Role::Assistant,
-            text: "reply".into(),
-            activities: Vec::new(),
-            insert_points: Vec::new(),
-            groups: Vec::new(),
-            group_of: Vec::new(),
-        });
-        chat.build_rows(80);
-        chat.advance_flushed();
-        dispatch_key(
-            &mut chat,
-            key(KeyCode::Char('o'), KeyModifiers::CONTROL),
-            true,
-        );
-        assert!(chat.dump_transcript, "flushed content → replay");
+        // With a question on screen the key is inert.
+        chat.stub_ask(crate::ui::PermissionRequest::new(
+            "Allow Bash",
+            "cargo test",
+            vec![crate::ui::ASK_YES.into(), crate::ui::ASK_NO.into()],
+        ));
+        dispatch_key(&mut chat, key(KeyCode::Char('o'), KeyModifiers::CONTROL));
         assert!(
-            chat.force_redraw,
-            "the replay frame first clears the visible screen (topmost)"
-        );
-        assert!(chat.dirty, "a rebuild is forced before the replay frame");
-        chat.dirty = false;
-        chat.build_rows(80);
-        let mark = chat
-            .doc
-            .settled_marks
-            .last()
-            .copied()
-            .expect("the full document has checkpoints");
-        let items = flush_items(&chat, 80, mark.row_end);
-        let texts: Vec<String> = items.iter().map(history_text).collect();
-        assert!(
-            texts.iter().any(|l| l.contains("Welcome")),
-            "the replay starts at the welcome card: {texts:?}"
-        );
-        assert!(
-            texts.iter().any(|l| l.contains("reply")),
-            "the replay includes flushed messages: {texts:?}"
-        );
-        chat.advance_flushed_upto(mark);
-        chat.build_rows(80);
-        assert!(
-            chat.doc.rows.is_empty(),
-            "after the replay the live document holds only the dynamic tail"
+            !chat.open_transcript,
+            "a pending dialog keeps priority over the pager"
         );
     }
 
@@ -1111,7 +1215,7 @@ mod tests {
         let mut chat = chat_at(80, 24);
         let mut key = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::empty());
         key.kind = KeyEventKind::Release;
-        dispatch_key(&mut chat, key, true);
+        dispatch_key(&mut chat, key);
         assert!(chat.input.is_empty());
     }
 
@@ -1124,7 +1228,7 @@ mod tests {
 
         let mut chat = chat_at(80, 24);
         chat.last_error = Some(ErrorState {
-            code: "AUTH_REQUIRED",
+            code: "AUTH_REQUIRED".to_string(),
             msg: "login has expired; reconfigure the credentials and retry.".to_string(),
             level: ErrorLevel::Full,
             context: ErrorContext::LongTurn,
@@ -1228,7 +1332,7 @@ mod tests {
     fn fullscreen_frame_renders_page_error_row() {
         let mut chat = chat_at(80, 24);
         chat.last_error = Some(crate::tui::chat::ErrorState {
-            code: "TIMEOUT",
+            code: "TIMEOUT".to_string(),
             msg: "list_models timeout".into(),
             level: crate::error::ErrorLevel::Page,
             context: crate::error::ErrorContext::ShortSync,
@@ -1252,7 +1356,7 @@ mod tests {
     #[test]
     fn fullscreen_tiny_terminal_keeps_the_prompt_and_footer() {
         let mut chat = chat_at(60, 6);
-        chat.busy = true;
+        chat.start_test_turn();
         chat.push_warning("mcp connection failed".to_string());
         chat.help_visible = true;
         let frame = fullscreen_frame(&chat, size(60, 6));

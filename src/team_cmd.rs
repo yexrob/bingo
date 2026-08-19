@@ -12,44 +12,45 @@ use crate::agents::AgentState;
 use crate::query::Session;
 use crate::team::{TeamNode, TeamTree};
 
-/// Main entry: `/team <subcommand>`, returns the lines to display. Unknown subcommands get usage.
-pub fn run(session: &Arc<Session>, cwd: &Path, arg: &str) -> Vec<String> {
-    let mut parts = arg.split_whitespace();
-    let sub = parts.next().unwrap_or("");
-    match sub {
-        "" => usage(),
-        "list" | "ls" => list(session, cwd),
-        "start" | "up" => start(session, cwd),
-        "status" | "st" => status(session, cwd),
-        "assign" | "say" => assign(session, cwd, parts.collect::<Vec<_>>().join(" ")),
-        "stop" | "down" => stop(session, cwd),
-        "validate" | "check" => validate(session, cwd),
-        "new" => new_team(session, cwd, parts.next().unwrap_or("")),
-        "norms" => norms(cwd),
-        "memory" => memory(session, cwd, parts.next().unwrap_or("")),
-        other => {
-            let mut out = vec![format!("unknown subcommand: /team {other}"), String::new()];
-            out.extend(usage());
-            out
-        }
+/// One of `/team`'s reads, as the action registry named it.
+///
+/// The registry decides which of these a line is; this file no longer splits
+/// that line a second time to decide the same thing.
+pub fn read(session: &Arc<Session>, cwd: &Path, what: crate::app::action::TeamRead) -> Vec<String> {
+    use crate::app::action::TeamRead;
+    match what {
+        TeamRead::Chart => list(session, cwd),
+        TeamRead::Status => status(session, cwd),
+        TeamRead::Validate => validate(session, cwd),
+        TeamRead::Norms => norms(cwd),
+        TeamRead::Memory => memory(session, cwd, "list"),
     }
 }
 
-fn usage() -> Vec<String> {
-    vec![
-        "usage: /team <list|start|status|assign|stop|validate|new|norms|memory>".to_string(),
-        "  list       definition zone (blueprint) + runtime zone (worksite) side by side"
-            .to_string(),
-        "  start      bring up the team (members on standby · idempotent reuse)".to_string(),
-        "  status     member states (●standby ◐busy ✗failed ○offline)".to_string(),
-        "  assign     assign a task to a member (/team assign <member> <task>)".to_string(),
-        "  stop       stop the team (members stop receiving instructions)".to_string(),
-        "  validate   validate team.json (same source as start)".to_string(),
-        "  new        scaffold: generate .bingo/team.json (the output must pass validate)"
-            .to_string(),
-        "  norms      the crew's working agreement (.bingo/team-norms.md)".to_string(),
-        "  memory     memory management (list to view / gc to clean)".to_string(),
-    ]
+/// One of `/team`'s actions, likewise.
+///
+/// **A known gap, and not a new one** (D149): `TeamStart { members }` and
+/// `TeamStop { member }` can name who, and this front end has only ever started
+/// and stopped the whole formation. It still does exactly that; naming members
+/// is behaviour nobody has written yet, on either side. Recorded rather than
+/// invented here.
+pub fn act(
+    session: &Arc<Session>,
+    cwd: &Path,
+    action: &crate::app::command::Action,
+) -> Vec<String> {
+    use crate::app::command::Action;
+    match action {
+        Action::TeamStart { .. } => start(session, cwd),
+        Action::TeamStop { .. } => stop(session, cwd),
+        Action::TeamAssign { member, task } => assign(session, cwd, format!("{member} {task}")),
+        Action::TeamScaffold { name } => new_team(session, cwd, name),
+        Action::TeamMemoryGarbageCollect => memory(session, cwd, "gc"),
+        // The registry routes only the five above here; anything else is a
+        // dispatch bug, and saying so beats printing a usage block that answers
+        // a question nobody asked.
+        other => vec![format!("/team cannot perform {}", other.id())],
+    }
 }
 
 /// Load the whole org chart. Parse errors (invalid JSON, a broken reference, a name
@@ -151,14 +152,26 @@ fn list(session: &Arc<Session>, cwd: &Path) -> Vec<String> {
         out.push("  runtime zone: not up (/team start to bring it up)".to_string());
     } else {
         out.push(format!("  runtime zone ({} instances)", running.len()));
+        let here = session.cwd();
         for a in &running {
-            out.push(format!(
+            // Each member is its own session: the engine, the thinking budget and
+            // the directory are the instance's answer, not this session's, and a
+            // sub-team node genuinely sits somewhere else. Only the parts that
+            // differ are printed, so the common case stays one short line.
+            let mut line = format!(
                 "  {} · {} · {} @ {}",
                 a.name,
                 state_mark(a.state),
                 a.model,
                 a.provider
-            ));
+            );
+            if let Some(thinking) = a.thinking.as_deref() {
+                line.push_str(&format!(" · thinking {thinking}"));
+            }
+            if a.cwd != here {
+                line.push_str(&format!(" · {}", a.cwd.display()));
+            }
+            out.push(line);
         }
     }
     // Hires are listed apart from the crew, never among it: they are not in the blueprint,
@@ -206,8 +219,8 @@ fn start(session: &Arc<Session>, cwd: &Path) -> Vec<String> {
     let name = &tree.root().def.name;
     match crate::team::spawn_tree(session, &tree, &session.home) {
         Ok(summary) => {
-            let total = summary.spawned.len() + summary.reused.len() + summary.failed.len();
-            let ready = total - summary.failed.len();
+            let ready = summary.ready();
+            let total = ready + summary.failed.len();
             let scope = if tree.nodes().len() > 1 {
                 format!(" across {} teams", tree.nodes().len())
             } else {
@@ -218,6 +231,13 @@ fn start(session: &Arc<Session>, cwd: &Path) -> Vec<String> {
                 let names = summary.spawned.join(" · ");
                 out.push(format!(
                     "[team] {name} up · {ready}/{total} on standby{scope} ({names})"
+                ));
+            } else if !summary.refreshed.is_empty() {
+                // The headline says what actually happened: a start whose only effect was
+                // re-reading definitions is not "already running, nothing to do".
+                let names = summary.refreshed.join(" · ");
+                out.push(format!(
+                    "[team] {name} up to date · definitions re-read for {names} (history kept)"
                 ));
             } else if !summary.reused.is_empty() {
                 out.push(format!(
@@ -295,7 +315,18 @@ fn assign(session: &Arc<Session>, cwd: &Path, rest: String) -> Vec<String> {
         )];
     };
     let (team, dir) = (node.def.name.clone(), node.dir.clone());
-    match session.agents.deliver(member, message, Vec::new(), None) {
+    // The human typed the assignment, so it arrives under their name, not main's.
+    match session
+        .agents
+        .deliver(
+            member,
+            crate::channels::USER_NAME,
+            message,
+            Vec::new(),
+            None,
+        )
+        .now()
+    {
         Ok(_) => {
             // Use the same dispatcher as SendMessage so a slash-command assignment starts now.
             crate::tool::agent::flush_agent_inbox(session, &session.watch);
@@ -325,7 +356,7 @@ fn stop(session: &Arc<Session>, cwd: &Path) -> Vec<String> {
     };
     let mut stopped = Vec::new();
     for (_, m) in tree.members() {
-        if session.agents.stop(&m.name).is_ok() {
+        if session.agents.stop(&m.name).now().is_ok() {
             stopped.push(m.name.clone());
         }
     }
@@ -362,18 +393,22 @@ fn validate(session: &Arc<Session>, cwd: &Path) -> Vec<String> {
     }
 }
 
-/// The portraits a scaffolded crew may wear: every one except the two the hub
-/// and the human already occupy in the transcript.
+/// The portraits a scaffolded crew may wear: every one except the two the main
+/// agent and the human already occupy in the transcript.
+///
+/// Filtered by the portrait each id *resolves to* rather than by its position in
+/// the list — since D99 reserved main's face, `ids()` no longer starts at
+/// portrait 0 and the two numbers are not the same.
 fn crew_portraits() -> Vec<&'static str> {
     let taken = [
-        crate::tui::avatar::index_of(crate::channels::HUB_NAME),
+        crate::tui::avatar::index_of(crate::channels::MAIN_NAME),
         crate::tui::avatar::index_of(crate::channels::USER_NAME),
     ];
     crate::tui::avatar::ids()
         .into_iter()
-        .enumerate()
-        .filter(|(i, _)| !taken.contains(i))
-        .map(|(_, id)| id)
+        .filter(|id| {
+            crate::tui::avatar::index_of_id(id).is_some_and(|index| !taken.contains(&index))
+        })
         .collect()
 }
 
@@ -414,7 +449,7 @@ fn new_team(session: &Arc<Session>, cwd: &Path, name: &str) -> Vec<String> {
         teams: Vec::new(),
         // Portraits handed out in roster order rather than by hashing the name:
         // a scaffolded crew should come out with distinct faces, and a hash of
-        // four role names collides more often than not. The two the hub and the
+        // four role names collides more often than not. The two main and the
         // human wear are dealt out of the deck (D50) — they are in every room the
         // crew appears in, so a member sharing one collides on sight. Derived
         // from the same hash they use rather than named here, so the reservation
@@ -621,6 +656,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         let project = root.join("proj");
         std::fs::create_dir_all(project.join(".bingo/agents")).unwrap();
+        let core = crate::app::AppCore::start(Default::default());
         let s = Arc::new(Session {
             client: crate::api::client::Client::new("k".into(), "http://x".into()),
             runtime: crate::query::Runtime::new("m".into(), None, Default::default()),
@@ -633,11 +669,18 @@ mod tests {
             user_config_dir: root.join("home").join(".config"),
             quiet: true,
             compact_failures: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            watch: crate::watch::WatchRegistry::new(),
+            core: core.clone(),
+            watch: core.watch(),
             tasks: Arc::new(crate::tasks::TaskStore::new(&root, "t")),
             expand_tasks: tokio::sync::watch::channel(false).0,
-            agents: crate::agents::AgentRegistry::new(),
-            channels: crate::channels::ChannelRegistry::new(Default::default()),
+            agents: core.agents(),
+            channels: core.channels(),
+            turns: core.turns(),
+            queue: core.queue(),
+            submit: core.submit(),
+            interactions: core.interactions(),
+            mail: core.mail(),
+            operations: core.operations(),
             instance: None,
             attachments: crate::api::image::Attachments::new(),
         });
@@ -674,11 +717,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(project.parent().unwrap());
     }
 
-    /// A scaffolded crew never wears the hub's or the human's face: those two are
+    /// A scaffolded crew never wears main's or the human's face: those two are
     /// in every room the crew shows up in, so a member sharing one collides on
     /// sight — the very confusion pinning a portrait exists to prevent.
     #[test]
-    fn scaffolded_crew_avoids_the_hub_and_human_faces() {
+    fn scaffolded_crew_avoids_main_and_human_faces() {
         let (s, project) = session("faces");
         // More members than there are free portraits, so the deal wraps and any
         // reserved face would certainly surface.
@@ -692,7 +735,7 @@ mod tests {
         let _ = new_team(&s, &project, "wide");
         let def = crate::team::load_team_file(&project).unwrap().unwrap();
         let taken = [
-            crate::tui::avatar::index_of(crate::channels::HUB_NAME),
+            crate::tui::avatar::index_of(crate::channels::MAIN_NAME),
             crate::tui::avatar::index_of(crate::channels::USER_NAME),
         ];
         for m in &def.members {
@@ -778,13 +821,15 @@ mod tests {
         std::fs::write(project.join(".bingo/agents/qa.md"), "You are QA.\n").unwrap();
         let _ = new_team(&s, &project, "crew");
         let _ = start(&s, &project);
-        s.agents.insert(
-            "temp",
-            crate::agents::AgentKind::Hire,
-            None,
-            "one-off audit".into(),
-            s.clone(),
-        );
+        s.agents
+            .insert(
+                "temp",
+                crate::agents::AgentKind::Hire,
+                None,
+                "one-off audit".into(),
+                s.clone(),
+            )
+            .now();
 
         let out = list(&s, &project);
         let text = out.join("\n");

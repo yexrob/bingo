@@ -1,0 +1,9 @@
+# One line ending in every working tree.
+#
+# The app-server schema bundle is a byte contract: `schema/app-server/**` is
+# compared, string for string, against a bundle generated in memory — which
+# always writes `\n`. A Windows checkout that translated the committed copy
+# would drift on line endings alone, and CI said so. Nothing here is a shell
+# script Windows needs `\r\n` for, so the rule is the repository's, not the
+# bundle's.
+* text=auto eol=lf

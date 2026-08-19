@@ -3,6 +3,7 @@
 //! and the `/model` menu. Protocol behavior lives in the adapters
 //! (`api::providers`); consumers never see wire JSON.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -28,18 +29,29 @@ fn protocol_default_base_url(protocol: Option<&str>) -> String {
     }
 }
 
-/// User home (auth.json lives under ~/.local/share/bingo; bingo requires
-/// HOME at startup, so a missing var degrades to an empty path).
-fn home_dir() -> std::path::PathBuf {
-    std::env::var("HOME")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_default()
+/// A provider's static key: `apiKey` first, then the variable named by
+/// `envKey` (D65). None hands the decision down to the existing mechanisms
+/// (auth.json stored key / OAuth) — an `envKey` pointing at an unset variable
+/// is not a credential, so it must not shadow them.
+fn resolve_key(
+    cfg: &crate::settings::ProviderConfig,
+    env: &impl Fn(&str) -> std::result::Result<String, std::env::VarError>,
+) -> Option<String> {
+    cfg.api_key.clone().or_else(|| {
+        cfg.env_key
+            .as_deref()
+            .and_then(|name| env(name).ok())
+            .filter(|key| !key.is_empty())
+    })
 }
 
 /// Display info for a provider (the `/provider` listing and `/model` menu):
 /// auth material (masked by the caller) + endpoint URL.
 #[derive(Clone)]
 struct EndpointInfo {
+    /// Provider name this endpoint is registered under — the catalog key, so
+    /// the current endpoint can name its own ruler (D65).
+    name: String,
     /// Static key (None = OAuth/stored-key provider — no key to mask).
     api_key: Option<String>,
     base_url: String,
@@ -62,30 +74,39 @@ pub struct Client {
     /// Names coming from the built-in preset registry (D34): the /provider
     /// listing shows them with a built-in badge.
     preset_names: Vec<String>,
+    /// Settings' declared models (D65), resolved once: the `/model` menu reads
+    /// it instead of the endpoint, and every context-window measurement goes
+    /// through the resolver it hands out.
+    catalog: Arc<crate::api::models::ModelCatalog>,
 }
 
 impl Client {
-    /// Settings first, falling back to environment variables
-    /// (ANTHROPIC_API_KEY/DEEPSEEK_API_KEY, ANTHROPIC_BASE_URL). Reports
-    /// MissingApiKey when neither settings nor env has a key.
+    #[cfg(test)]
     pub fn from_settings(settings: &crate::settings::Settings) -> Result<Self, ClientError> {
-        Self::from_settings_with(settings, |name| std::env::var(name))
+        Self::from_settings_at(settings, std::path::Path::new("/tmp/bingo-test-home"))
     }
 
-    /// Injectable variant of from_settings (tests use a fake env, avoiding
-    /// real environment variables). The auth store resolves against the
-    /// user's HOME.
+    #[cfg(test)]
     pub(crate) fn from_settings_with(
         settings: &crate::settings::Settings,
         env: impl Fn(&str) -> std::result::Result<String, std::env::VarError>,
     ) -> Result<Self, ClientError> {
-        Self::build(settings, env, &home_dir())
+        Self::from_settings_at_with(settings, env, std::path::Path::new("/tmp/bingo-test-home"))
     }
 
-    /// Build against an explicit home (tests isolate the auth.json read;
-    /// production main passes the same HOME).
+    /// Build against an explicitly resolved home. Production passes the same home used
+    /// by every state store so HOME-less Windows never falls back to cwd.
+    pub fn from_settings_at(
+        settings: &crate::settings::Settings,
+        home: &std::path::Path,
+    ) -> Result<Self, ClientError> {
+        Self::build(settings, |name| std::env::var(name), home)
+    }
+
+    /// Build against an explicit home and injected environment (tests isolate auth.json
+    /// and avoid real environment variables).
     #[cfg(test)]
-    pub(crate) fn from_settings_at(
+    pub(crate) fn from_settings_at_with(
         settings: &crate::settings::Settings,
         env: impl Fn(&str) -> std::result::Result<String, std::env::VarError>,
         home: &std::path::Path,
@@ -125,7 +146,7 @@ impl Client {
             // apiKey presets (opencode-go) resolve their key from auth.json
             // live per request (`stored_key` below) — a /provider login in
             // the running session takes effect without a restart.
-            let api_key = user.and_then(|c| c.api_key.clone());
+            let api_key = user.and_then(|c| resolve_key(c, &env));
             let base_url = match user {
                 Some(c) if !c.api_base_url.is_empty() => c.api_base_url.clone(),
                 _ => preset.base_url.to_string(),
@@ -139,9 +160,6 @@ impl Client {
                     account: None,
                 })
             });
-            let allowlist = preset.model_allowlist.map(|models| {
-                providers::openai::ModelAllowlist(models.iter().map(|m| m.to_string()).collect())
-            });
             let built = providers::build_provider(
                 preset.name,
                 http.clone(),
@@ -151,7 +169,6 @@ impl Client {
                 supports_images,
                 oauth.as_ref(),
                 home,
-                allowlist,
                 true,
             )
             .map_err(|message| {
@@ -162,6 +179,7 @@ impl Client {
                 (
                     built.adapter,
                     EndpointInfo {
+                        name: preset.name.to_string(),
                         api_key,
                         base_url,
                         protocol,
@@ -182,11 +200,12 @@ impl Client {
             } else {
                 cfg.api_base_url.clone()
             };
+            let api_key = resolve_key(cfg, &env);
             let built = providers::build_provider(
                 name,
                 http.clone(),
                 protocol,
-                cfg.api_key.clone(),
+                api_key.clone(),
                 base_url.clone(),
                 // Both protocols define image content blocks: the capability is the
                 // baseline, and `supportsImages: false` is the opt-out for an endpoint that
@@ -194,7 +213,6 @@ impl Client {
                 cfg.supports_images.unwrap_or(true),
                 cfg.oauth.as_ref(),
                 home,
-                None,
                 false,
             )
             .map_err(|message| {
@@ -208,7 +226,8 @@ impl Client {
                 (
                     built.adapter,
                     EndpointInfo {
-                        api_key: cfg.api_key.clone(),
+                        name: name.clone(),
+                        api_key,
                         base_url,
                         protocol: protocol.unwrap_or("anthropic").to_string(),
                         oauth: built.token_provider,
@@ -230,6 +249,7 @@ impl Client {
             None => providers::unconfigured(),
         };
         let default_info = EndpointInfo {
+            name: "default".to_string(),
             api_key,
             base_url,
             protocol: "anthropic".to_string(),
@@ -244,6 +264,18 @@ impl Client {
             endpoint: Arc::new(std::sync::RwLock::new((default_adapter, default_info))),
             providers,
             preset_names,
+            catalog: Arc::new(
+                crate::api::models::ModelCatalog::from_settings(settings).with_families(
+                    // Same derivation as main's user_dir: the catalog file
+                    // lives next to settings.json. Read-only here — startup
+                    // maintenance already ran (and reported) in main.
+                    crate::model_families::load_overrides(
+                        &env("XDG_CONFIG_HOME")
+                            .map(std::path::PathBuf::from)
+                            .unwrap_or_else(|_| home.join(".config")),
+                    ),
+                ),
+            ),
         })
     }
 
@@ -252,6 +284,7 @@ impl Client {
         let http = reqwest::Client::new();
         let adapter = providers::anthropic(http.clone(), api_key.clone(), base_url.clone(), false);
         let info = EndpointInfo {
+            name: "default".to_string(),
             api_key: Some(api_key),
             base_url,
             protocol: "anthropic".to_string(),
@@ -262,6 +295,7 @@ impl Client {
             endpoint: Arc::new(std::sync::RwLock::new((adapter.clone(), info.clone()))),
             providers: HashMap::from([("default".to_string(), (adapter, info))]),
             preset_names: Vec::new(),
+            catalog: Arc::new(crate::api::models::ModelCatalog::default()),
         }
     }
 
@@ -356,23 +390,64 @@ impl Client {
             endpoint: Arc::new(std::sync::RwLock::new((adapter, info))),
             providers: self.providers.clone(),
             preset_names: self.preset_names.clone(),
+            catalog: self.catalog.clone(),
         })
+    }
+
+    /// Vision projection (D93): a model that cannot see never receives base64
+    /// image bytes, whoever built the request.
+    ///
+    /// This sits at the send seam rather than at the point the history is
+    /// built, for the same reason the D74 cache markers do: the history is the
+    /// record and the request is a *view* of it. The image blocks stay on disk
+    /// and in memory, so switching to a model with vision shows them again;
+    /// only the payload loses them. Being here also means the paths that never
+    /// touched the input box — tool results carrying screenshots, a retried
+    /// turn, the compaction summarizer — inherit it without knowing it exists.
+    fn project_images<'a>(&self, request: &'a NeutralRequest) -> Cow<'a, NeutralRequest> {
+        if self.models().supports_vision(&request.model) {
+            return Cow::Borrowed(request);
+        }
+        let note = crate::api::types::image_omitted_note(&request.model);
+        match crate::api::types::project_images_out(&request.messages, &note) {
+            Some(messages) => Cow::Owned(NeutralRequest {
+                messages,
+                ..request.clone()
+            }),
+            None => Cow::Borrowed(request),
+        }
     }
 
     /// Start a streaming request on the current provider.
     pub async fn stream(&self, request: &NeutralRequest) -> Result<BoxStream, ClientError> {
-        self.current().stream(request).await
+        self.current()
+            .stream(self.project_images(request).as_ref())
+            .await
     }
 
     /// Non-streaming completion on the current provider (compact summaries,
     /// memory extraction).
     pub async fn complete_text(&self, request: &NeutralRequest) -> Result<String, ClientError> {
-        self.current().complete_text(request).await
+        self.current()
+            .complete_text(self.project_images(request).as_ref())
+            .await
     }
 
-    /// List the models the current endpoint supports (the `/model` menu).
+    /// The models the current provider offers. A settings declaration answers
+    /// without asking the endpoint (D65) — this is the single authority, so
+    /// the `/model` menu and the JSON protocol's models.list cannot disagree
+    /// about what a provider offers.
     pub async fn list_models(&self) -> Result<Vec<String>, ClientError> {
-        self.current().list_models().await
+        let declared = {
+            let current = self.endpoint.read().unwrap_or_else(|p| p.into_inner());
+            self.catalog
+                .declared(&current.1.name)
+                .map(|models| models.iter().map(|m| m.id.clone()).collect())
+        };
+        match declared {
+            Some(models) => Ok(models),
+            None => self.current().list_models().await,
+        }
     }
 
     /// Input token count on the current provider (D12: the budget display
@@ -382,8 +457,26 @@ impl Client {
         model: &str,
         system: &[SystemBlock],
         messages: &[Message],
+        tools: &[serde_json::Value],
     ) -> Result<u64, ClientError> {
-        self.current().count_tokens(model, system, messages).await
+        // The count has to measure the payload it predicts (contract), and a
+        // model without vision is no longer sent its images (D93) — counting
+        // them here would put the footer's context band permanently ahead of
+        // the request that follows it.
+        let projected = (!self.models().supports_vision(model))
+            .then(|| {
+                let note = crate::api::types::image_omitted_note(model);
+                crate::api::types::project_images_out(messages, &note)
+            })
+            .flatten();
+        self.current()
+            .count_tokens(
+                model,
+                system,
+                projected.as_deref().unwrap_or(messages),
+                tools,
+            )
+            .await
     }
 
     /// Whether the provider comes from the built-in preset registry (D34) —
@@ -418,19 +511,32 @@ impl Client {
         }
     }
 
-    /// The model a provider starts with when none was remembered: preset
-    /// allowlists lead with their flagship; anthropic-protocol endpoints get
-    /// the built-in default. None = no safe guess (the caller warns).
+    /// The model a provider starts with when none was remembered: a declared
+    /// list leads with its first entry (the user's own ranking); anthropic-
+    /// protocol endpoints get the built-in default. None = no safe guess (the
+    /// caller warns).
     pub fn provider_default_model(&self, name: &str) -> Option<String> {
-        if let Some(preset) = providers::presets::preset(name)
-            && let Some(first) = preset.model_allowlist.and_then(|list| list.first())
-        {
-            return Some(first.to_string());
+        if let Some(first) = self.catalog.declared(name).and_then(<[_]>::first) {
+            return Some(first.id.clone());
         }
         match self.provider_protocol(name).as_deref() {
             Some("anthropic") => Some(crate::api::types::DEFAULT_MODEL.to_string()),
             _ => None,
         }
+    }
+
+    /// The models a provider declared in settings (D65). Some = authoritative,
+    /// the `/model` menu shows exactly this and never asks the endpoint.
+    pub fn declared_models(&self, name: &str) -> Option<Vec<crate::api::models::CatalogModel>> {
+        self.catalog.declared(name).map(<[_]>::to_vec)
+    }
+
+    /// Metadata ruler for the current endpoint: every context-window and
+    /// thinking-gate decision measures with this one, so a provider's
+    /// declaration cannot apply in one place and not the next.
+    pub fn models(&self) -> crate::api::models::ModelResolver {
+        let current = self.endpoint.read().unwrap_or_else(|p| p.into_inner());
+        crate::api::models::ModelResolver::new(self.catalog.clone(), current.1.name.clone())
     }
 
     fn current(&self) -> Arc<dyn ProviderClient> {
@@ -445,6 +551,125 @@ impl Client {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A request for a model with no vision carries no image bytes — not the
+    /// ones the user pasted, and not the ones a tool read off disk (D93).
+    ///
+    /// The request the caller holds is left alone, which is the whole point of
+    /// projecting here: the transcript on disk and the history in memory keep
+    /// the real blocks, so switching to a model that can see shows them again.
+    #[test]
+    fn a_model_without_vision_is_sent_no_image_bytes() {
+        use crate::api::types::{
+            ContentBlock, ImageAttachment, ImageSource, Role, tool_result_blocks,
+        };
+
+        let client = Client::from_settings_at_with(
+            &crate::settings::Settings::default(),
+            |_| Err(std::env::VarError::NotPresent),
+            &std::env::temp_dir().join(format!("bingo-vision-{}", std::process::id())),
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+
+        let pasted = Message {
+            role: Role::User,
+            content: vec![
+                ContentBlock::Text {
+                    text: "what is this".into(),
+                },
+                ContentBlock::Image {
+                    source: ImageSource::base64("image/png", "QUJDREVGRw=="),
+                },
+            ],
+        };
+        // The road the input-time gate never covered: a screenshot a tool read.
+        let from_a_tool = Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "t1".into(),
+                content: tool_result_blocks(
+                    "read shot.png",
+                    &[ImageAttachment {
+                        media_type: "image/png".into(),
+                        data: "SElKS0xNTk8=".into(),
+                    }],
+                ),
+                is_error: false,
+            }],
+        };
+        let request = NeutralRequest {
+            model: "deepseek-v4-flash".into(),
+            max_tokens: 1024,
+            system: Vec::new(),
+            messages: vec![pasted, from_a_tool],
+            tools: Vec::new(),
+            stream: true,
+            thinking: None,
+        };
+        assert!(
+            !client.models().supports_vision(&request.model),
+            "the fixture model has to be one that cannot see"
+        );
+
+        let projected = client.project_images(&request);
+        let wire = serde_json::to_string(&projected.messages).unwrap_or_default();
+        assert!(!wire.contains("\"type\":\"image\""), "{wire}");
+        assert!(
+            !wire.contains("QUJDREVGRw=="),
+            "pasted bytes reached the wire"
+        );
+        assert!(
+            !wire.contains("SElKS0xNTk8="),
+            "tool bytes reached the wire"
+        );
+        assert!(
+            wire.contains("[image omitted: deepseek-v4-flash has no vision]"),
+            "the gap is explained, and by which model: {wire}"
+        );
+        assert!(wire.contains("read shot.png"), "the tool's text survives");
+        assert!(wire.contains("what is this"), "the question survives");
+
+        // The record is not the payload: what the caller holds still has both.
+        let held = serde_json::to_string(&request.messages).unwrap_or_default();
+        assert!(held.contains("QUJDREVGRw=="), "history lost the image");
+        assert!(held.contains("SElKS0xNTk8="), "history lost the tool image");
+
+        // A model that can see gets the request untouched, borrowed not cloned.
+        let seeing = NeutralRequest {
+            model: "claude-sonnet-5".into(),
+            ..request.clone()
+        };
+        assert!(client.models().supports_vision(&seeing.model));
+        let untouched = client.project_images(&seeing);
+        assert!(matches!(untouched, std::borrow::Cow::Borrowed(_)));
+        assert_eq!(untouched.messages, seeing.messages);
+    }
+
+    #[test]
+    fn explicit_home_routes_stored_credentials_outside_cwd() {
+        let home = std::env::temp_dir().join(format!("bingo-client-home-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        crate::auth::AuthStore::new(&home)
+            .set(
+                "opencode-go",
+                crate::auth::AuthEntry::Api {
+                    key: "stored-key".into(),
+                },
+            )
+            .unwrap();
+        let settings = crate::settings::Settings::default();
+
+        let client = Client::from_settings_at_with(
+            &settings,
+            |_| Err(std::env::VarError::NotPresent),
+            &home,
+        )
+        .unwrap();
+
+        assert!(client.is_configured("opencode-go"));
+        assert!(crate::auth::auth_path(&home).exists());
+        let _ = std::fs::remove_dir_all(home);
+    }
 
     #[test]
     fn from_settings_prefers_settings_over_env() {
@@ -517,6 +742,8 @@ mod tests {
         settings.providers.insert(
             "deepseek".to_string(),
             crate::settings::ProviderConfig {
+                env_key: None,
+                models: None,
                 api_key: Some("sk-ds".into()),
                 api_base_url: "https://api.deepseek.com".into(),
                 supports_images: None,
@@ -527,6 +754,8 @@ mod tests {
         settings.providers.insert(
             "local".to_string(),
             crate::settings::ProviderConfig {
+                env_key: None,
+                models: None,
                 api_key: Some("sk-local".into()),
                 api_base_url: "http://127.0.0.1:11434".into(),
                 supports_images: None,
@@ -568,6 +797,8 @@ mod tests {
         settings.providers.insert(
             "deepseek".to_string(),
             crate::settings::ProviderConfig {
+                env_key: None,
+                models: None,
                 api_key: Some("sk-ds".into()),
                 api_base_url: "https://api.deepseek.com".into(),
                 supports_images: None,
@@ -621,6 +852,8 @@ mod tests {
         settings.providers.insert(
             "codex".to_string(),
             crate::settings::ProviderConfig {
+                env_key: None,
+                models: None,
                 api_key: Some("sk-static".into()),
                 api_base_url: String::new(),
                 supports_images: None,
@@ -649,6 +882,8 @@ mod tests {
         settings.providers.insert(
             "bare".to_string(),
             crate::settings::ProviderConfig {
+                env_key: None,
+                models: None,
                 api_key: None,
                 api_base_url: String::new(),
                 supports_images: None,
@@ -663,6 +898,166 @@ mod tests {
         assert!(err.to_string().contains("missing apiKey or oauth"), "{err}");
     }
 
+    /// D65 credential order: `apiKey` > `envKey`'s variable > the existing
+    /// mechanisms. `is_configured` must agree — the JSON protocol's
+    /// providers.result reads it, and a second opinion there is how #43
+    /// started.
+    #[test]
+    fn env_key_resolves_between_api_key_and_the_stored_credential() {
+        let home = std::env::temp_dir().join(format!("bingo-envkey-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let env = |name: &str| -> Result<String, std::env::VarError> {
+            match name {
+                "PROXY_KEY" => Ok("sk-from-env".into()),
+                _ => Err(std::env::VarError::NotPresent),
+            }
+        };
+        let provider =
+            |api_key: Option<&str>, env_key: Option<&str>| crate::settings::ProviderConfig {
+                api_key: api_key.map(str::to_string),
+                api_base_url: "https://proxy.example".into(),
+                protocol: Some("openai".into()),
+                oauth: None,
+                supports_images: None,
+                env_key: env_key.map(str::to_string),
+                models: None,
+            };
+        let mut settings = crate::settings::Settings::default();
+        settings
+            .providers
+            .insert("from-env".to_string(), provider(None, Some("PROXY_KEY")));
+        settings.providers.insert(
+            "settings-wins".to_string(),
+            provider(Some("sk-explicit"), Some("PROXY_KEY")),
+        );
+        // An envKey naming an unset variable must not shadow the fallbacks —
+        // for an openai provider with no oauth that is a config error, the
+        // same one an omitted key produces.
+        settings
+            .providers
+            .insert("unset".to_string(), provider(None, Some("NOT_SET")));
+
+        let err = Client::from_settings_at_with(&settings, env, &home)
+            .err()
+            .unwrap();
+        assert_eq!(crate::error::map_error(&err), "CONFIG_INVALID");
+        assert!(err.to_string().contains("missing apiKey or oauth"), "{err}");
+
+        settings.providers.remove("unset");
+        let client = Client::from_settings_at_with(&settings, env, &home).unwrap();
+        assert_eq!(
+            client.provider_endpoint("from-env").unwrap().0.as_deref(),
+            Some("sk-from-env"),
+            "envKey supplies the key"
+        );
+        assert!(client.is_configured("from-env"));
+        assert_eq!(
+            client
+                .provider_endpoint("settings-wins")
+                .unwrap()
+                .0
+                .as_deref(),
+            Some("sk-explicit"),
+            "apiKey outranks envKey"
+        );
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// D65: declared models are the menu's source and the endpoint's default
+    /// model; a provider that declares nothing keeps pulling its own list.
+    #[test]
+    fn declared_models_reach_the_menu_and_the_default_model() {
+        let settings: crate::settings::Settings = serde_json::from_str(
+            r#"{
+                "apiKey": "sk-main",
+                "models": ["claude-opus-5"],
+                "providers": {
+                    "opencode-go": {"models": [{"id": "gpt-5.6-luna", "display": "Luna"}]},
+                    "proxy": {"apiKey": "k", "protocol": "openai"}
+                }
+            }"#,
+        )
+        .unwrap();
+        let client =
+            Client::from_settings_with(&settings, |_| Err(std::env::VarError::NotPresent)).unwrap();
+        let declared = client.declared_models("opencode-go").unwrap();
+        assert_eq!(declared[0].id, "gpt-5.6-luna");
+        assert_eq!(declared[0].label(), "Luna");
+        assert_eq!(
+            client.provider_default_model("opencode-go").as_deref(),
+            Some("gpt-5.6-luna"),
+            "a declared list leads with the user's own first entry"
+        );
+        assert_eq!(
+            client.declared_models("proxy"),
+            None,
+            "no declaration → the endpoint's list"
+        );
+        assert_eq!(
+            client.provider_default_model("proxy"),
+            None,
+            "nothing safe to guess for an undeclared openai endpoint"
+        );
+        // The top-level `models` belongs to "default".
+        assert_eq!(
+            client.declared_models("default").map(|m| m[0].id.clone()),
+            Some("claude-opus-5".to_string())
+        );
+    }
+
+    /// list_models is the one authority: a declaration answers it too, so the
+    /// JSON protocol's models.list and the `/model` menu describe the same
+    /// provider. Reaching the endpoint here would be a network call — the
+    /// unreachable base URL proves none was made.
+    #[tokio::test]
+    async fn list_models_answers_from_the_declaration() {
+        let settings: crate::settings::Settings = serde_json::from_str(
+            r#"{
+                "apiKey": "sk-main",
+                "apiBaseUrl": "http://127.0.0.1:1",
+                "models": ["declared-a", {"id": "declared-b", "display": "B"}]
+            }"#,
+        )
+        .unwrap();
+        let client =
+            Client::from_settings_with(&settings, |_| Err(std::env::VarError::NotPresent)).unwrap();
+        assert_eq!(
+            client.list_models().await.unwrap(),
+            vec!["declared-a".to_string(), "declared-b".to_string()],
+            "ids, in declaration order"
+        );
+    }
+
+    /// The ruler follows the endpoint switch: a provider's declared window
+    /// must not measure another provider's model (#40's root cause was one
+    /// measurement site disagreeing with another).
+    #[test]
+    fn model_resolver_follows_the_provider_switch() {
+        let settings: crate::settings::Settings = serde_json::from_str(
+            r#"{
+                "apiKey": "sk-main",
+                "providers": {
+                    "narrow": {"apiKey": "k", "models": [{"id": "claude-sonnet-5",
+                                                          "contextWindow": 32000}]}
+                }
+            }"#,
+        )
+        .unwrap();
+        let client =
+            Client::from_settings_with(&settings, |_| Err(std::env::VarError::NotPresent)).unwrap();
+        assert_eq!(
+            client.models().context_window("claude-sonnet-5"),
+            1_000_000,
+            "default provider: the prefix table"
+        );
+        client.set_provider("narrow").unwrap();
+        assert_eq!(client.models().context_window("claude-sonnet-5"), 32_000);
+        // A forked client pins its own provider's ruler.
+        let fork = client.with_provider("default").unwrap();
+        assert_eq!(fork.models().context_window("claude-sonnet-5"), 1_000_000);
+        assert_eq!(client.models().context_window("claude-sonnet-5"), 32_000);
+    }
+
     /// P5 (D34): with empty settings the built-in presets are visible with correct endpoints/auth; an apiKey-style
     /// preset (opencode-go) with no key configured gets an empty auth string (leading to a 401).
     #[test]
@@ -674,7 +1069,7 @@ mod tests {
             ..Default::default()
         };
         let client =
-            Client::from_settings_at(&settings, |_| Err(std::env::VarError::NotPresent), &tmp)
+            Client::from_settings_at_with(&settings, |_| Err(std::env::VarError::NotPresent), &tmp)
                 .unwrap();
         assert_eq!(
             client.provider_names(),
@@ -710,7 +1105,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
-    /// P5 merge matrix: the user only overrides apiBaseUrl → protocol/oauth/allowlist fall back to the preset.
+    /// P5 merge matrix: the user only overrides apiBaseUrl → protocol/oauth fall back to the preset.
     #[test]
     fn preset_field_merge_keeps_template() {
         let mut settings = crate::settings::Settings {
@@ -720,6 +1115,8 @@ mod tests {
         settings.providers.insert(
             "codex".to_string(),
             crate::settings::ProviderConfig {
+                env_key: None,
+                models: None,
                 api_key: None,
                 api_base_url: "https://custom.example".into(),
                 supports_images: None,
@@ -775,6 +1172,8 @@ mod tests {
         settings.providers.insert(
             "vision".to_string(),
             crate::settings::ProviderConfig {
+                env_key: None,
+                models: None,
                 api_key: Some("sk-v".into()),
                 api_base_url: "https://vision.example".into(),
                 supports_images: Some(true),
@@ -785,6 +1184,8 @@ mod tests {
         settings.providers.insert(
             "text-only".to_string(),
             crate::settings::ProviderConfig {
+                env_key: None,
+                models: None,
                 api_key: Some("sk-t".into()),
                 api_base_url: "https://text.example".into(),
                 supports_images: Some(false),

@@ -1,0 +1,30 @@
+{
+  "$id": "urn:bingo:app-server:v1:envelope.error",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "description": "A JSON-RPC error object.",
+  "properties": {
+    "code": {
+      "format": "int32",
+      "type": "integer"
+    },
+    "data": {
+      "anyOf": [
+        {
+          "$ref": "../definitions.json#/definitions/ErrorData"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "message": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "code",
+    "message"
+  ],
+  "title": "RpcError",
+  "type": "object"
+}

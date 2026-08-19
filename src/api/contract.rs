@@ -233,6 +233,89 @@ pub struct NeutralRequest {
     pub thinking: Option<ThinkingLevel>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamApiErrorKind {
+    Retryable,
+    NonRetryable,
+    Unknown,
+}
+
+impl StreamApiErrorKind {
+    /// Classify a free-form provider message when no structured error code decides:
+    /// quota/plan/prompt-size errors are terminal, transient-looking ones retry.
+    pub fn from_message(message: &str) -> Self {
+        let message = message.to_ascii_lowercase();
+        if [
+            "insufficient_quota",
+            "usage_not_included",
+            "invalid_prompt",
+            "context_length_exceeded",
+            "context overflow",
+            "context window",
+            "prompt is too long",
+            "input is too long",
+        ]
+        .iter()
+        .any(|pattern| message.contains(pattern))
+        {
+            return Self::NonRetryable;
+        }
+        if status_5xx(&message)
+            || [
+                "overloaded",
+                "server_error",
+                "server error",
+                "internal_error",
+                "internal error",
+                "service_unavailable",
+                "service unavailable",
+                "too_many_requests",
+                "too many requests",
+                "rate_limit",
+                "rate limit",
+                "resource_exhausted",
+                "resource exhausted",
+                "bad gateway",
+                "gateway timeout",
+                "429",
+                "try again later",
+            ]
+            .iter()
+            .any(|pattern| message.contains(pattern))
+        {
+            return Self::Retryable;
+        }
+        Self::Unknown
+    }
+
+    /// Final in-stream retry decision; `Unknown` falls back to message classification.
+    pub fn retryable(self, message: &str) -> bool {
+        match self {
+            Self::Retryable => true,
+            Self::NonRetryable => false,
+            Self::Unknown => Self::from_message(message) == Self::Retryable,
+        }
+    }
+}
+
+/// A 5xx number only counts as an HTTP status when it opens the message or follows a
+/// status marker: a bare "512 characters" elsewhere must not look transient.
+fn status_5xx(message: &str) -> bool {
+    let mut after_marker = true;
+    for token in message.split(|character: char| !character.is_ascii_alphanumeric()) {
+        if token.is_empty() {
+            continue;
+        }
+        if after_marker
+            && matches!(token.parse::<u16>(), Ok(status) if (500..600).contains(&status))
+        {
+            return true;
+        }
+        after_marker = matches!(token, "http" | "https" | "status" | "code");
+    }
+    false
+}
+
 /// Normalized streaming event, consumed by the query loop and the TUI.
 #[derive(Debug, Clone, PartialEq)]
 pub enum StreamEvent {
@@ -277,6 +360,8 @@ pub enum StreamEvent {
     Done,
     ApiError {
         message: String,
+        kind: StreamApiErrorKind,
+        retry_after: Option<std::time::Duration>,
     },
 }
 
@@ -302,11 +387,14 @@ pub trait ProviderClient: Send + Sync {
 
     /// Exact input token count (D6). Protocols without a count endpoint
     /// fall back to local estimation (see compact.rs).
+    /// tools are the schemas the streaming request carries: they are input
+    /// tokens too, so the count must measure the same payload it predicts.
     async fn count_tokens(
         &self,
         model: &str,
         system: &[SystemBlock],
         messages: &[Message],
+        tools: &[serde_json::Value],
     ) -> Result<u64, ClientError>;
 }
 
@@ -486,6 +574,34 @@ impl AssistantAccumulator {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retryable_stream_api_errors_follow_provider_semantics() {
+        for message in [
+            "api_error: Our servers are currently overloaded. Please try again later.",
+            "server_error: upstream unavailable",
+            "HTTP 503: Service Unavailable",
+            "HTTP 599: upstream proxy failed",
+            "502 Bad Gateway",
+            "Error code: 504",
+            "429 too many requests",
+        ] {
+            assert!(StreamApiErrorKind::Unknown.retryable(message), "{message}");
+        }
+
+        for message in [
+            "insufficient_quota: check billing",
+            "usage_not_included: upgrade your plan",
+            "invalid_prompt: malformed input",
+            "context_length_exceeded: reduce the prompt",
+            "field exceeds the maximum of 512 characters",
+            "opaque provider error",
+        ] {
+            assert!(!StreamApiErrorKind::Unknown.retryable(message), "{message}");
+        }
+        assert!(StreamApiErrorKind::Retryable.retryable("opaque provider error"));
+        assert!(!StreamApiErrorKind::NonRetryable.retryable("HTTP 503"));
+    }
 
     #[test]
     fn context_overflow_response_classification() {

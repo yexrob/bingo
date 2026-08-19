@@ -6,33 +6,45 @@ use clap::Parser;
 
 use crate::api::client::Client;
 use crate::api::types::{DEFAULT_MODEL, Message};
-use crate::memory::{extract_memory, load_project_memory};
+use crate::memory::load_project_memory;
 use crate::permission::PermissionMode;
-use crate::query::{Session, headless_hooks, run_query};
+use crate::query::Session;
 use crate::settings::load_settings;
 use crate::system::{build_system, load_memory};
 use crate::transcript::{Transcript, create as create_transcript, latest as latest_transcript};
 
 mod agents;
 mod api;
+mod app;
+mod app_server;
 mod auth;
+mod bm25;
 mod budget;
 mod channels;
 mod compact;
 mod context_usage;
+mod engine;
 mod error;
 mod experience;
 mod hooks;
+mod live;
 mod mcp;
 mod memory;
+mod model_cache;
+mod model_families;
 mod permission;
 mod platform;
 mod preapproved;
+mod print;
 mod query;
+mod query_session;
+mod query_turn;
+mod rewind;
 mod settings;
 mod share;
 mod share_html;
 mod skills;
+mod storage;
 mod system;
 mod tasks;
 mod team;
@@ -116,6 +128,21 @@ enum Command {
         #[arg(long)]
         check: bool,
     },
+    /// The GUI app-server (JSON-RPC 2.0 over NDJSON on stdio)
+    AppServer {
+        #[command(subcommand)]
+        command: Option<AppServerCommand>,
+    },
+}
+
+#[derive(Debug, clap::Subcommand)]
+enum AppServerCommand {
+    /// Write the deterministic JSON Schema bundle for the app-server protocol
+    GenerateSchema {
+        /// Output directory (the committed bundle lives in `schema/app-server`)
+        #[arg(long)]
+        out: PathBuf,
+    },
 }
 
 /// Top-level exit (C exit mapping): all errors propagated to the top with `?` are
@@ -123,26 +150,21 @@ enum Command {
 /// contract `[error] code=... msg=...` (AC-30/31/32); TTY keeps it as-is.
 #[tokio::main]
 async fn main() {
-    if let Err(e) = run().await {
+    let cli = Cli::parse();
+    if let Err(e) = run(cli).await {
         report_error(&*e);
         std::process::exit(1);
     }
 }
 
 /// The actual main flow (formerly the `main` body). Errors propagate upward and exit through [`main`].
-async fn run() -> Result<(), Box<dyn std::error::Error>> {
-    let cli = Cli::parse();
+async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let fullscreen = cli.fullscreen_mode();
 
-    let home = match std::env::var("HOME") {
-        Ok(h) => PathBuf::from(h),
-        Err(_) => {
-            if !cli.print {
-                eprintln!("[bingo] warning: HOME is not set; using current dir for state");
-            }
-            PathBuf::new()
-        }
-    };
+    let home = crate::storage::resolve_home()?;
+    if let Err(error) = crate::storage::cleanup(&home, None) {
+        eprintln!("[bingo] warning: session storage cleanup failed: {error}; run /gc to retry");
+    }
     // Subcommand fast path: share only needs home (transcript/shares dirs), update only needs home (cache),
     // neither touches settings/API.
     if let Some(Command::Share {
@@ -159,6 +181,26 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         crate::update::run_update(&home, check).await?;
         return Ok(());
     }
+    // The app-server owns its own startup: it resolves its directories, and the
+    // session it serves is the one a client asks for rather than one this
+    // function builds on the way past.
+    if let Some(Command::AppServer { command }) = cli.command {
+        match command {
+            Some(AppServerCommand::GenerateSchema { out }) => {
+                let written = crate::app_server::schema::generate(&out)?;
+                eprintln!(
+                    "[bingo] wrote {} schema files to {}",
+                    written.len(),
+                    out.display()
+                );
+                return Ok(());
+            }
+            None => {
+                crate::app_server::stdio::serve().await?;
+                return Ok(());
+            }
+        }
+    }
     let project_dir = std::env::current_dir()?;
     let user_dir = std::env::var("XDG_CONFIG_HOME")
         .map(PathBuf::from)
@@ -170,6 +212,9 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     // Config lint → startup notes: unknown top-level keys (typos parse fine
     // and silently do nothing) and enum values that silently fall back.
     let mut config_notes: Vec<String> = Vec::new();
+    // Family-catalog file (D73): seed on first run, refresh its builtin
+    // section after an upgrade; any problem becomes a note, never a refusal.
+    config_notes.extend(crate::model_families::maintain(&user_dir));
     for path in crate::settings::layer_paths(&user_dir, &project_dir) {
         for key in crate::settings::layer_keys(&path) {
             if !crate::settings::KNOWN_KEYS.contains(&key.as_str()) {
@@ -205,71 +250,66 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_else(|| "default".to_string())
         .parse()?;
 
-    let client = Client::from_settings(&settings)?;
+    let client = Client::from_settings_at(&settings, &home)?;
     let mut system = build_system(
         &load_memory(&home, &project_dir),
         load_project_memory(&home, &project_dir),
         settings.cache_control.unwrap_or(false),
         &project_dir,
     );
-    // The crew pinned to this project, and the rule that decides between giving a member
-    // work and hiring someone new (D53). A system block rather than a tool description:
-    // compaction rewrites the message history and leaves `Session::system` alone, so the
-    // routing rule is still there on turn fifty, when the roster matters most. The whole
-    // tree is named (D54) — a department the hub cannot see is one it will re-hire.
-    if let Ok(Some(tree)) = crate::team::load_team_tree(&project_dir) {
-        system.push(crate::api::contract::SystemBlock {
-            text: crate::team::crew_note(&tree, &home),
-            cache: settings.cache_control.unwrap_or(false),
-        });
-    }
-    // Inject this project's active experience index at session start (≤10 lines;
-    // full entries via ExperienceQuery and applied-use feedback via ExperienceOutcome).
-    let experience_index = crate::tool::experience::session_index(&home, &project_dir);
-    if !experience_index.is_empty() {
-        system.push(crate::api::contract::SystemBlock {
-            text: format!("Project experience (reusable patterns from past sessions):\n{experience_index}\n(Query full details with ExperienceQuery; after applying one, record verified helpful/harmful evidence with ExperienceOutcome; propose new ones with ExperiencePropose)"),
-            cache: settings.cache_control.unwrap_or(false),
-        });
-    }
+    // The crew note, room etiquette and experience index — shared with the
+    // app-server frontend (D156), because a prompt block only the console
+    // pushes is a fourth answer the parity ledger would never see.
+    crate::system::push_main_extras(&mut system, &home, &project_dir, &settings);
 
     // Startup notes for the TUI: everything printed to stderr before the
     // alternate screen opens is wiped by it — the fullscreen (default) host
     // never showed these. They still go to stderr for headless/log capture.
     let mut startup_notes: Vec<String> = config_notes;
+    // A started session opens its transcript, rather than waiting for the first
+    // thing written to it (D155). `session/start` has always done this over the
+    // wire, and the two frontends must not disagree about whether a session that
+    // exists is one `--continue`, `/resume` and `session/list` can find, or one
+    // another process could claim the name of. Failing to open it is the same
+    // condition as failing to create it: history will not persist, and the
+    // warning below says so.
+    let started = |held: Transcript| -> Result<Transcript, crate::transcript::TranscriptError> {
+        held.activate()?;
+        Ok(held)
+    };
     let (transcript, initial_messages): (Option<Transcript>, Vec<Message>) = if cli.continue_ {
         match latest_transcript(&home)? {
             Some(t) => {
+                t.activate()?;
                 eprintln!("[bingo] continuing transcript: {}", t.path().display());
                 (Some(t.clone()), t.load_messages()?)
             }
-            None => match create_transcript(&home, &project_dir) {
+            None => match create_transcript(&home, &project_dir).and_then(started) {
                 Ok(t) => (Some(t), Vec::new()),
                 Err(e) => {
-                    if !cli.print {
-                        eprintln!(
-                            "[bingo] warning: cannot create transcript (history will not persist): {e}"
-                        );
-                        startup_notes.push(format!(
-                            "⚠ cannot create transcript (history will not persist): {e}"
-                        ));
-                    }
-                    (None, Vec::new())
-                }
-            },
-        }
-    } else {
-        match create_transcript(&home, &project_dir) {
-            Ok(t) => (Some(t), Vec::new()),
-            Err(e) => {
-                if !cli.print {
                     eprintln!(
                         "[bingo] warning: cannot create transcript (history will not persist): {e}"
                     );
                     startup_notes.push(format!(
                         "⚠ cannot create transcript (history will not persist): {e}"
                     ));
+                    (None, Vec::new())
                 }
+            },
+        }
+    } else {
+        match create_transcript(&home, &project_dir).and_then(started) {
+            Ok(t) => (Some(t), Vec::new()),
+            Err(e) => {
+                // Said whichever frontend is starting: a session whose history
+                // will not persist is the same fact in all three, and the
+                // startup note below is simply read by only one of them.
+                eprintln!(
+                    "[bingo] warning: cannot create transcript (history will not persist): {e}"
+                );
+                startup_notes.push(format!(
+                    "⚠ cannot create transcript (history will not persist): {e}"
+                ));
                 (None, Vec::new())
             }
         }
@@ -290,8 +330,11 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         .model
         .or_else(|| settings.model.clone())
         .unwrap_or_else(|| DEFAULT_MODEL.to_string());
-    let mut runtime =
-        crate::query::Runtime::new(model, transcript.clone(), settings.permissions.clone());
+    let mut runtime = crate::query::Runtime::new(
+        model.clone(),
+        transcript.clone(),
+        settings.permissions.clone(),
+    );
     runtime.mcp = Arc::new(tokio::sync::Mutex::new(crate::mcp::McpManager::new(
         settings.mcp_servers.clone(),
         settings.disabled_mcp_servers.iter().cloned().collect(),
@@ -308,15 +351,73 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 eprintln!(
                     "[bingo] warning: provider \"{name}\" is no longer valid, falling back to default: {e}"
                 );
-                // The single most consequential silent fallback: it changes
-                // WHO the session talks to.
                 startup_notes.push(format!(
                     "⚠ the provider \"{name}\" in settings is no longer valid; fell back to default: {e}"
                 ));
             }
         }
     }
-    let channel_limits = crate::channels::ChannelLimits::from_settings(&settings);
+    // Tell the model what it is and what it can do (vision above all): a text-only
+    // model must not be handed image-first work. Built after the provider restore so
+    // the capabilities resolve against the provider actually in use.
+    system.push(crate::system::model_capability_block(
+        &model,
+        &runtime.provider.borrow().clone(),
+        &client.models(),
+    ));
+    // What the core reports about this session. The frontends still drive it
+    // themselves (B7 attaches them), but `config/read` and `catalog/read` answer
+    // out of this from the moment the actor starts.
+    let core = crate::app::AppCore::start(crate::app::SessionSetup {
+        title: transcript
+            .as_ref()
+            .map(crate::transcript::Transcript::name)
+            .unwrap_or_default(),
+        cwd: project_dir.clone(),
+        locator: match transcript.as_ref() {
+            Some(t) => crate::app::snapshot::SessionLocator::Path {
+                path: t.path().to_path_buf(),
+            },
+            None => crate::app::snapshot::SessionLocator::Latest,
+        },
+        provider: runtime.provider.borrow().clone(),
+        model: model.clone(),
+        thinking: crate::app::snapshot::ThinkingLevel::ALL
+            .into_iter()
+            .find(|level| Some(level.as_str()) == settings.thinking_level.as_deref())
+            .unwrap_or(crate::app::snapshot::ThinkingLevel::Off),
+        permission_mode: match permission_mode {
+            PermissionMode::Default => crate::app::snapshot::PermissionMode::Default,
+            PermissionMode::AcceptEdits => crate::app::snapshot::PermissionMode::AcceptEdits,
+            PermissionMode::BypassPermissions => {
+                crate::app::snapshot::PermissionMode::BypassPermissions
+            }
+            PermissionMode::DontAsk => crate::app::snapshot::PermissionMode::DontAsk,
+            PermissionMode::Plan => crate::app::snapshot::PermissionMode::Plan,
+        },
+        theme: crate::app::snapshot::ThemeChoice::ALL
+            .into_iter()
+            .find(|theme| Some(theme.as_str()) == settings.theme.as_deref())
+            .unwrap_or(crate::app::snapshot::ThemeChoice::Auto),
+        shell: crate::platform::shell().to_string(),
+        shell_dialect: match crate::platform::shell_dialect() {
+            crate::platform::ShellDialect::Posix => crate::app::snapshot::ShellDialect::Posix,
+            crate::platform::ShellDialect::PowerShell => {
+                crate::app::snapshot::ShellDialect::Powershell
+            }
+            crate::platform::ShellDialect::Cmd => crate::app::snapshot::ShellDialect::Cmd,
+            crate::platform::ShellDialect::Unknown => crate::app::snapshot::ShellDialect::Unknown,
+        },
+        resumed: cli.continue_,
+        channel_limits: crate::channels::ChannelLimits::from_settings(&settings),
+        catalog: crate::app::catalog::CatalogSource::load(
+            &home,
+            &user_dir,
+            &project_dir,
+            settings.clone(),
+        ),
+        ..Default::default()
+    });
     let session = Arc::new(Session {
         client,
         runtime,
@@ -329,14 +430,29 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         user_config_dir: user_dir.clone(),
         quiet: !cli.print,
         compact_failures: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
-        watch: crate::watch::WatchRegistry::new(),
+        core: core.clone(),
+        watch: core.watch(),
         tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(&home, &task_list_key)),
         expand_tasks: expand_tx,
-        agents: crate::agents::AgentRegistry::new(),
-        channels: crate::channels::ChannelRegistry::new(channel_limits),
+        agents: core.agents(),
+        channels: core.channels(),
+        turns: core.turns(),
+        queue: core.queue(),
+        submit: core.submit(),
+        interactions: core.interactions(),
+        mail: core.mail(),
+        operations: core.operations(),
         instance: None,
         attachments: crate::api::image::Attachments::new(),
     });
+
+    // The thing that runs a turn (D154). The console stopped driving its own
+    // model calls here: it submits, the core opens the turn, and this runs it —
+    // the same engine `bingo app-server` attaches, so the two frontends are one
+    // product rather than two that agree by hand.
+    if let Some(engine) = crate::engine::runner::SessionEngine::new(session.clone()) {
+        core.attach_engine(engine);
+    }
 
     // Share persistence: incrementally records subagent/channel snapshots per session (the data source for `bingo share`).
     // Same key as the task list = transcript file stem; create/read failures only warn (an enhancement, not a contract).
@@ -355,6 +471,13 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 "[bingo] warning: share store unavailable ({e}); bingo share will have the conversation view only"
             ),
         }
+        // The room sidecar (Amendment #6): replay first, so a resumed session
+        // comes back to the rooms it left, and only then start appending.
+        let rooms = crate::app::roomlog::path(&home, &stem);
+        session
+            .channels
+            .restore_rooms(crate::app::roomlog::replay(&rooms));
+        session.channels.attach_sidecar(rooms);
     }
 
     let mode_str = session.permission_mode_str();
@@ -371,9 +494,8 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 let teams = tree.nodes().len();
                 match crate::team::spawn_tree(&session, &tree, &home) {
                     Ok(summary) => {
-                        let total =
-                            summary.spawned.len() + summary.reused.len() + summary.failed.len();
-                        let ready = total - summary.failed.len();
+                        let ready = summary.ready();
+                        let total = ready + summary.failed.len();
                         let scope = if teams > 1 {
                             format!(" across {teams} teams")
                         } else {
@@ -423,11 +545,12 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             // Subagents borrow the same stdin prompt (serialized in the Agent tool), so a
             // background instance can still ask rather than having the call auto-denied.
             session.agents.attach_ask(crate::query::stdin_ask());
-            let mut ui = headless_hooks();
-            let outcome =
-                run_query(&session, initial_messages, &prompt, &[], &mut ui, None).await?;
-            let cwd = session.cwd();
-            extract_memory(&session, &outcome.messages, &home, &cwd).await;
+            // The history is the transcript's, and the run reads it there: a
+            // turn the core opened is run by the engine assembled above, which
+            // is the same engine `bingo app-server` attaches. The memory pass is
+            // that engine's too, after the turn closes.
+            drop(initial_messages);
+            crate::print::run(&core, &prompt).await?;
         } else {
             drop(initial_messages); // in interactive mode, --continue history is reused by later turns
             tui::run_tui_session(session.clone(), expand_rx, fullscreen, startup_notes).await?;
@@ -442,6 +565,10 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         persist_team_memory(&session, &home, &session.cwd());
     }
     crate::hooks::run_session_end(&session.settings.hooks, mode_str, &session.cwd()).await;
+    // The session actor is what everything else was reachable through, so it goes
+    // last: it interrupts whatever is still running, fails every pending prompt
+    // closed, and lets go of the instances that were holding it open (B3).
+    core.close().await;
     result
 }
 
@@ -457,7 +584,9 @@ async fn run_share(
 ) -> Result<(), crate::share::ShareError> {
     let transcript = crate::share::resolve_transcript(home, key)?;
     let stem = transcript.name();
-    let messages = transcript.load_messages()?;
+    // Human-facing export: the full canonical conversation, not the compacted
+    // projection the model sees.
+    let messages = transcript.load_canonical()?;
 
     // Fall back to an empty doc when the share file is missing/corrupt (conversation-only view; the old-session main path).
     let share_path = crate::share::shares_dir(home).join(format!("{stem}.json"));
@@ -554,7 +683,13 @@ fn report_error(err: &(dyn std::error::Error + 'static)) {
         eprintln!("Error: {err}");
         return;
     }
-    let code = crate::error::error_code_boxed(err);
+    // A failed turn already carries a code: the core computed it from the error
+    // the run hit, and that error is gone by the time this runs. The registry
+    // maps a type to a code and could only answer GENERIC here.
+    let code = match err.downcast_ref::<crate::print::PrintError>() {
+        Some(failure) => failure.code(),
+        None => crate::error::error_code_boxed(err),
+    };
     let msg = crate::error::sanitize_msg(&err.to_string());
     eprintln!("[error] code={code} msg={msg}");
 }
@@ -612,6 +747,21 @@ mod tests {
             .unwrap_or_else(|error| panic!("{error}"));
 
         assert!(cli.fullscreen_mode());
+    }
+
+    /// The v1 JSON protocol's flags are gone with it (D140): the app-server
+    /// replaces them, and a flag left parsing is a flag a client will find.
+    #[test]
+    fn the_deleted_json_protocol_flags_are_no_longer_arguments() {
+        for args in [
+            vec!["bingo", "--json-events"],
+            vec!["bingo", "--probe"],
+            vec!["bingo", "--inspect"],
+            vec!["bingo", "--session", "project-123"],
+        ] {
+            let error = Cli::try_parse_from(args).expect_err("the flag must not parse");
+            assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
+        }
     }
 
     #[test]

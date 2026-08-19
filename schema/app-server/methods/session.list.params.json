@@ -1,0 +1,22 @@
+{
+  "$id": "urn:bingo:app-server:v1:session.list.params",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "properties": {
+    "cursor": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "limit": {
+      "format": "uint32",
+      "minimum": 0.0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    }
+  },
+  "title": "SessionListParams",
+  "type": "object"
+}

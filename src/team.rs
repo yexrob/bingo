@@ -867,16 +867,16 @@ pub fn norms_block(team: &str, norms: &str) -> String {
     )
 }
 
-/// What the hub is told about the crew standing behind it: who is on it, which rooms
+/// What main is told about the crew standing behind it: who is on it, which rooms
 /// reach whom, and the rule that decides between giving a member work and hiring
 /// someone new.
 ///
-/// Without this the crew is invisible at the moment it matters. The hub sees a list of
+/// Without this the crew is invisible at the moment it matters. Main sees a list of
 /// *agent definitions* in the Agent tool's description and spawns from it, so a pinned
 /// crew — already spawned, already carrying this branch's memory, already paid for —
 /// sits idle while a fresh subagent redoes what a member knows.
 ///
-/// The whole tree is named, not just the root: a department the hub cannot see is a
+/// The whole tree is named, not just the root: a department main cannot see is a
 /// department it will re-hire from scratch. Each team is listed under its own directory,
 /// because that is where its work is and a member of it is not sitting in the session's
 /// cwd.
@@ -956,7 +956,7 @@ pub fn team_root_note(team: &str, dir: &Path) -> String {
     )
 }
 
-/// What a temporary hire is told about its own standing. The crew note tells the hub how
+/// What a temporary hire is told about its own standing. The crew note tells main how
 /// to treat a hire; this tells the hire, so "temporary" is a fact it can plan against
 /// rather than a bookkeeping detail it never learns.
 pub fn hire_note(team: &str) -> String {
@@ -964,7 +964,7 @@ pub fn hire_note(team: &str) -> String {
         "# You are a temporary hire\n\n\
          This project has a standing crew ({team}) and you are not on it. You were brought in \
          for one task because no member covered it: you are not written into {TEAM_FILE}, you \
-         are not in the crew's channel, and you are released once your result is in and the hub \
+         are not in the crew's channel, and you are released once your result is in and main \
          has had its chance to follow up. Put everything worth keeping in your final text — \
          there is no next session in which you are asked again."
     )
@@ -1061,18 +1061,30 @@ fn sanitize_name(name: &str) -> String {
 pub struct SpawnSummary {
     /// Newly spawned instance names.
     pub spawned: Vec<String>,
-    /// Reused existing instances (idempotent: not re-spawned).
+    /// Reused existing instances (idempotent: not re-spawned, definition unchanged).
     pub reused: Vec<String>,
+    /// Existing instances whose definition had moved and was re-read (D69): same
+    /// instance, same history, new system prompt/model/provider/thinking.
+    pub refreshed: Vec<String>,
     /// Failed members: (instance name, reason).
     pub failed: Vec<(String, String)>,
 }
 
 impl SpawnSummary {
-    /// Event wording (QA acceptance: `spawned ×N` vs `reused ×N` are greppable/assertable).
+    /// Every member the start left standing, whatever it had to do to get there.
+    pub fn ready(&self) -> usize {
+        self.spawned.len() + self.reused.len() + self.refreshed.len()
+    }
+
+    /// Event wording (QA acceptance: `spawned ×N` / `refreshed ×N` / `reused ×N` are
+    /// greppable/assertable).
     pub fn events(&self) -> Vec<String> {
         let mut out = Vec::new();
         if !self.spawned.is_empty() {
             out.push(format!("spawned ×{}", self.spawned.len()));
+        }
+        if !self.refreshed.is_empty() {
+            out.push(format!("refreshed ×{}", self.refreshed.len()));
         }
         if !self.reused.is_empty() {
             out.push(format!("reused ×{}", self.reused.len()));
@@ -1092,6 +1104,10 @@ impl SpawnSummary {
 /// The two phases are not cosmetic — a parent may convene a room holding a child's
 /// members, so no room can be opened until the tree has finished spawning.
 ///
+/// Start is also where an instance already up catches up with its files (D69): a member
+/// that is not mid-turn has its definition re-read and re-applied, keeping the history it
+/// has built. Editing a member used to mean deleting it and losing that history.
+///
 /// Each node is spawned against its own directory: its agent definitions, its
 /// working agreement, its git branch and its memory partition all come from there,
 /// so reaching a team from the root gives the same crew as opening a session inside
@@ -1102,13 +1118,25 @@ pub fn spawn_tree(
     tree: &TeamTree,
     home: &Path,
 ) -> Result<SpawnSummary, TeamError> {
+    // Bringing a team up is accepted work that is not a turn: it takes a while,
+    // it has a shape a frontend can draw, and it ends exactly once (spec
+    // "Operation and interaction"). Validation runs first, so a chart with a bad
+    // reference fails before an operation is opened for it.
     validate_tree(tree, session, home)?;
+    let operation = session
+        .operations
+        .start(crate::app::snapshot::OperationKind::TeamStart, None)
+        .now();
     let mut summary = SpawnSummary::default();
     // The name a member ends up running under, when the registry had to claim a
     // different one. Rooms are declared in blueprint names, so without this a
     // renamed member would come up outside every room that names it.
     let mut claimed = HashMap::new();
-    for node in tree.nodes() {
+    let total = tree.nodes().len() as u32;
+    for (done, node) in tree.nodes().iter().enumerate() {
+        session
+            .operations
+            .progress(&operation, &node.def.name, done as u32, total);
         let defs = crate::agents::load_agent_defs(home, &node.dir);
         let branch = current_branch(&node.dir);
         // The note remains useful context even though D56 now gives the member that cwd directly.
@@ -1128,6 +1156,21 @@ pub fn spawn_tree(
     for node in tree.nodes() {
         open_rooms(session, &node.def, &claimed, &mut summary);
     }
+    session.operations.finish(
+        &operation,
+        if summary.failed.is_empty() {
+            crate::app::snapshot::OperationStatus::Completed
+        } else {
+            crate::app::snapshot::OperationStatus::Failed
+        },
+        summary
+            .failed
+            .first()
+            .map(|(name, why)| crate::app::snapshot::TurnError {
+                code: crate::error::GENERIC.to_string(),
+                message: format!("{name}: {why}"),
+            }),
+    );
     Ok(summary)
 }
 
@@ -1149,12 +1192,6 @@ fn spawn_members(
 
     let by_name: HashMap<&str, &AgentDef> = defs.iter().map(|d| (d.name.as_str(), d)).collect();
     for member in &def.members {
-        // Idempotency key = instance name: already exists (Idle/Running) → reuse, no re-spawn.
-        let exists = session.agents.is_in_project(&member.name, project_dir);
-        if exists {
-            summary.reused.push(member.name.clone());
-            continue;
-        }
         let Some(agent_def) = by_name.get(member.agent.as_str()) else {
             summary.failed.push((
                 member.name.clone(),
@@ -1162,46 +1199,106 @@ fn spawn_members(
             ));
             continue;
         };
-        let name = session.agents.claim_name(&member.name);
+        // Idempotency key = instance name. An instance that is already here is never
+        // re-spawned — but it is brought up to date (D69): the definition files are what
+        // the user edits between runs, and the alternative was deleting the instance,
+        // which took its history with it.
+        let existing = session.agents.is_in_project(&member.name, project_dir);
+        let name = if existing {
+            member.name.clone()
+        } else {
+            session.agents.claim_name(&member.name).now()
+        };
         if name != member.name {
             claimed.insert(member.name.clone(), name.clone());
         }
-        // Memory is a pointer, not a preload (D51): the member is told where its
-        // past is and starts with an empty context.
-        ensure_transcript(home, project_dir, branch, &def.name, &name);
-        let context = crate::tool::agent::MemberContext {
-            memory: member_memory_note(home, project_dir, branch, &def.name, &name),
-            norms: norms.clone(),
-            standing: standing.clone(),
-            cwd: Some(project_dir.to_path_buf()),
-        };
-        let sub = match crate::tool::agent::build_sub_session(
+        let sub = match build_member(
             session,
-            member.model.clone(),
-            member.provider.clone(),
-            member.thinking.clone(),
-            Some(agent_def),
+            &def.name,
+            member,
+            agent_def,
+            home,
+            project_dir,
+            branch,
+            norms.clone(),
+            standing.clone(),
             &name,
-            context,
         ) {
             Ok(s) => s,
             Err(e) => {
-                summary.failed.push((member.name.clone(), e.to_string()));
+                summary.failed.push((member.name.clone(), e));
                 continue;
             }
         };
         let description = agent_def.description.clone();
-        session.agents.insert(
-            &name,
-            crate::agents::AgentKind::Crew,
-            Some(member.agent.clone()),
-            description,
-            sub,
-        );
+        if existing {
+            match session
+                .agents
+                .refresh(&name, Some(member.agent.clone()), description, sub)
+                .now()
+            {
+                // Everything else counts as the reuse it has always been: a member
+                // mid-turn keeps the definition it started under (the next start catches
+                // it), a name a hire took first is not the blueprint's to rewrite, and
+                // Missing cannot happen — the name was just seen in the registry.
+                crate::agents::Refresh::Refreshed => summary.refreshed.push(name),
+                _ => summary.reused.push(name),
+            }
+            continue;
+        }
+        session
+            .agents
+            .insert(
+                &name,
+                crate::agents::AgentKind::Crew,
+                Some(member.agent.clone()),
+                description,
+                sub,
+            )
+            .now();
         // Spawn ≠ wake: mark Idle after insert (zero-token standby; the turn only starts with SendMessage).
         session.agents.mark_idle(&name);
         summary.spawned.push(name);
     }
+}
+
+/// The session one member runs under, built from what is on disk right now: its
+/// definition, the blueprint's per-member overrides, the crew's agreement, and the pointer
+/// to its own past (memory is a pointer, not a preload — D51).
+///
+/// One builder for both paths on purpose. A refresh that built its instance differently
+/// from a spawn would mean "start" and "start again" produce different members, and the
+/// comparison that decides whether anything changed would be comparing two dialects.
+#[allow(clippy::too_many_arguments)]
+fn build_member(
+    session: &Arc<Session>,
+    team: &str,
+    member: &TeamMember,
+    agent_def: &AgentDef,
+    home: &Path,
+    project_dir: &Path,
+    branch: &str,
+    norms: Option<String>,
+    standing: Option<String>,
+    name: &str,
+) -> Result<Arc<Session>, String> {
+    ensure_transcript(home, project_dir, branch, team, name);
+    let context = crate::tool::agent::MemberContext {
+        memory: member_memory_note(home, project_dir, branch, team, name),
+        norms,
+        standing,
+        cwd: Some(project_dir.to_path_buf()),
+    };
+    crate::tool::agent::build_sub_session(
+        session,
+        member.model.clone(),
+        member.provider.clone(),
+        member.thinking.clone(),
+        Some(agent_def),
+        name,
+        context,
+    )
+    .map_err(|e| e.to_string())
 }
 
 /// Open a team's rooms, idempotently: create the ones that aren't there, and invite
@@ -1224,18 +1321,29 @@ fn open_rooms(
             .filter(|m| running.iter().any(|a| &a.name == m))
             .collect();
         if session.channels.info(&room.name).is_none() {
-            if let Err(e) = session.channels.create(&room.name, live, room.mode) {
+            // A room the blueprint declares is the project's room, so the two
+            // standing members of the project are seated in it: the user, who
+            // asked for the formation, and the main agent, who runs it. Since
+            // D95 the domain seats nobody on its own, so what used to be
+            // implicit is written here — the one place that knows these rooms
+            // are the user's rather than an agent's private working group.
+            let mut roster = vec![
+                crate::channels::MAIN_NAME.to_string(),
+                crate::channels::USER_NAME.to_string(),
+            ];
+            roster.extend(live);
+            if let Err(e) = session.channels.create(&room.name, roster, room.mode).now() {
                 summary.failed.push((room.name.clone(), e));
                 continue;
             }
         } else {
             // Late joiners get no backlog; they listen from the current head.
             for member in live {
-                let _ = session.channels.invite(&room.name, &member);
+                let _ = session.channels.invite(&room.name, &member).now();
             }
         }
         if let Some(limit) = room.message_limit {
-            let _ = session.channels.set_message_limit(&room.name, limit);
+            let _ = session.channels.set_message_limit(&room.name, limit).now();
         }
     }
 }
@@ -1453,9 +1561,6 @@ pub fn append_decision(
 mod tests {
     use super::*;
     use std::sync::Arc;
-
-    use crate::agents::AgentRegistry;
-    use crate::channels::{ChannelLimits, ChannelRegistry};
 
     fn tmp(name: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("bingo-team-{}-{}", name, std::process::id()));
@@ -1742,6 +1847,7 @@ mod tests {
     }
 
     fn session() -> Arc<Session> {
+        let core = crate::app::AppCore::start(Default::default());
         Arc::new(Session {
             client: crate::api::client::Client::new("k".into(), "http://x".into()),
             runtime: crate::query::Runtime::new("m".into(), None, Default::default()),
@@ -1754,11 +1860,18 @@ mod tests {
             user_config_dir: std::env::temp_dir().join(".config"),
             quiet: true,
             compact_failures: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            watch: crate::watch::WatchRegistry::new(),
+            core: core.clone(),
+            watch: core.watch(),
             tasks: Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), "t")),
             expand_tasks: tokio::sync::watch::channel(false).0,
-            agents: AgentRegistry::new(),
-            channels: ChannelRegistry::new(ChannelLimits::default()),
+            agents: core.agents(),
+            channels: core.channels(),
+            turns: core.turns(),
+            queue: core.queue(),
+            submit: core.submit(),
+            interactions: core.interactions(),
+            mail: core.mail(),
+            operations: core.operations(),
             instance: None,
             attachments: crate::api::image::Attachments::new(),
         })
@@ -1788,7 +1901,7 @@ mod tests {
         assert_eq!(first.spawned.len(), 3, "{first:?}");
         assert!(first.reused.is_empty());
         assert!(first.failed.is_empty());
-        // Members in Idle standby (zero tokens, no turn started); channel built with hub/user + three members.
+        // Members in Idle standby (zero tokens, no turn started); channel built with main/user + three members.
         let states = s.agents.list();
         assert_eq!(states.len(), 3);
         assert!(
@@ -1806,8 +1919,275 @@ mod tests {
         let second = spawn_tree(&s, &tree_of(&project), &home).unwrap_or_else(|e| panic!("{e}"));
         assert!(second.spawned.is_empty());
         assert_eq!(second.reused.len(), 3, "{second:?}");
+        assert!(second.refreshed.is_empty(), "nothing moved: {second:?}");
         assert_eq!(s.agents.list().len(), 3, "no duplicate instances");
         std::fs::remove_dir_all(&home).unwrap();
+    }
+
+    /// One member's history, as a turn would have left it.
+    fn worked(s: &Arc<Session>, who: &str, said: &str) -> Vec<crate::api::types::Message> {
+        use crate::api::types::{ContentBlock, Message, Role};
+        let history = vec![Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text { text: said.into() }],
+        }];
+        s.agents.finish(who, history.clone(), said.len()).now();
+        history
+    }
+
+    fn history_of(s: &Arc<Session>, who: &str) -> Vec<crate::api::types::Message> {
+        s.agents.view_of(who).map(|v| v.0).unwrap_or_default()
+    }
+
+    fn prompt_of(s: &Arc<Session>, who: &str) -> String {
+        s.agents
+            .session_of(who)
+            .map(|sub| {
+                sub.system
+                    .iter()
+                    .map(|b| b.text.clone())
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+            .unwrap_or_default()
+    }
+
+    fn write_persona(project: &std::path::Path, name: &str, front: &str, body: &str) {
+        let agents = project.join(".bingo/agents");
+        std::fs::create_dir_all(&agents).unwrap_or_else(|e| panic!("{e}"));
+        std::fs::write(
+            agents.join(format!("{}.md", sanitize_name(name))),
+            format!("---\nname: {name}\n{front}---\n\n{body}\n"),
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+    }
+
+    /// D69: a member whose definition moved is brought up to date where it stands —
+    /// new prompt, new engine, same instance, same history. The old idempotency read
+    /// the instance name and stopped there, so the only way to change a member was to
+    /// delete it, which threw away everything it had done for the crew.
+    #[test]
+    fn start_re_reads_a_definition_that_moved_and_keeps_the_history() {
+        let s = session();
+        let home = tmp("spawn-refresh");
+        let project = home.join("proj");
+        s.set_cwd(project.clone());
+        write_agent(&project, "qa");
+        write_team_file(&project, &team_def("t", &[("qa", "qa")]))
+            .unwrap_or_else(|e| panic!("{e}"));
+        let first = spawn_tree(&s, &tree_of(&project), &home).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(first.spawned, vec!["qa".to_string()], "{first:?}");
+        let history = worked(&s, "qa", "shipped v0.3.3");
+
+        // The user rewrites the persona and pins a different engine.
+        write_persona(
+            &project,
+            "qa",
+            "description: sharper qa\nmodel: pinned-model\n",
+            "You are qa, and you read the tests before the diff.",
+        );
+
+        let second = spawn_tree(&s, &tree_of(&project), &home).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(second.refreshed, vec!["qa".to_string()], "{second:?}");
+        assert!(
+            second.spawned.is_empty() && second.reused.is_empty(),
+            "a refresh is neither a spawn nor a plain reuse: {second:?}"
+        );
+        assert_eq!(s.agents.list().len(), 1, "in place, not a second instance");
+        assert!(
+            prompt_of(&s, "qa").contains("read the tests before the diff"),
+            "the new prompt is what the member now runs under: {}",
+            prompt_of(&s, "qa")
+        );
+        let status = s.agents.list().remove(0);
+        assert_eq!(status.model, "pinned-model", "and the new engine");
+        assert_eq!(status.description, "sharper qa");
+        assert_eq!(status.state, crate::agents::AgentState::Idle);
+        assert_eq!(
+            history_of(&s, "qa"),
+            history,
+            "the point of refreshing rather than re-creating: the past stays"
+        );
+        std::fs::remove_dir_all(&home).unwrap();
+    }
+
+    /// A start that changes nothing must say nothing changed. Were the comparison
+    /// unreliable, every start would report a refresh and the word would stop
+    /// meaning anything — including for a member that has already worked, whose
+    /// history is the input most likely to drift under the comparison.
+    #[test]
+    fn start_reports_no_refresh_when_the_definition_is_untouched() {
+        let s = session();
+        let home = tmp("spawn-refresh-noop");
+        let project = home.join("proj");
+        s.set_cwd(project.clone());
+        write_agent(&project, "qa");
+        write_team_file(&project, &team_def("t", &[("qa", "qa")]))
+            .unwrap_or_else(|e| panic!("{e}"));
+        spawn_tree(&s, &tree_of(&project), &home).unwrap_or_else(|e| panic!("{e}"));
+        worked(&s, "qa", "a turn happened");
+
+        // Rewriting the same bytes is not a change either — a mtime is not a definition.
+        write_agent(&project, "qa");
+        let again = spawn_tree(&s, &tree_of(&project), &home).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(again.reused, vec!["qa".to_string()], "{again:?}");
+        assert!(again.refreshed.is_empty(), "{again:?}");
+        std::fs::remove_dir_all(&home).unwrap();
+    }
+
+    /// A member mid-turn keeps the definition it started under: swapping a persona
+    /// under a running turn is a character change mid-sentence, and the turn is
+    /// already holding the old session anyway. The next start catches it.
+    #[test]
+    fn start_leaves_a_member_mid_turn_on_its_old_definition() {
+        let s = session();
+        let home = tmp("spawn-refresh-busy");
+        let project = home.join("proj");
+        s.set_cwd(project.clone());
+        write_agent(&project, "qa");
+        write_team_file(&project, &team_def("t", &[("qa", "qa")]))
+            .unwrap_or_else(|e| panic!("{e}"));
+        spawn_tree(&s, &tree_of(&project), &home).unwrap_or_else(|e| panic!("{e}"));
+        s.agents
+            .deliver(
+                "qa",
+                crate::channels::MAIN_NAME,
+                "look at #41",
+                Vec::new(),
+                None,
+            )
+            .now()
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(
+            s.agents.flush_pending().now().len(),
+            1,
+            "the member is now running"
+        );
+
+        write_persona(
+            &project,
+            "qa",
+            "description: qa description\n",
+            "You are qa, rewritten mid-turn.",
+        );
+        let mid = spawn_tree(&s, &tree_of(&project), &home).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(mid.reused, vec!["qa".to_string()], "{mid:?}");
+        assert!(mid.refreshed.is_empty(), "no hot swap: {mid:?}");
+        assert!(
+            !prompt_of(&s, "qa").contains("rewritten mid-turn"),
+            "the running turn keeps its persona: {}",
+            prompt_of(&s, "qa")
+        );
+
+        // Turn over → the next start applies what the user wrote.
+        s.agents.finish("qa", Vec::new(), 0).now();
+        let after = spawn_tree(&s, &tree_of(&project), &home).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(after.refreshed, vec!["qa".to_string()], "{after:?}");
+        assert!(prompt_of(&s, "qa").contains("rewritten mid-turn"));
+        std::fs::remove_dir_all(&home).unwrap();
+    }
+
+    /// The documented loop, end to end: stop the member, edit it, start again. Stop
+    /// promises start brings it back, so start must both revive it and hand it the
+    /// definition the user went to the trouble of editing.
+    #[test]
+    fn a_stopped_member_comes_back_on_the_edited_definition() {
+        let s = session();
+        let home = tmp("spawn-refresh-stopped");
+        let project = home.join("proj");
+        s.set_cwd(project.clone());
+        write_agent(&project, "qa");
+        write_team_file(&project, &team_def("t", &[("qa", "qa")]))
+            .unwrap_or_else(|e| panic!("{e}"));
+        spawn_tree(&s, &tree_of(&project), &home).unwrap_or_else(|e| panic!("{e}"));
+        let history = worked(&s, "qa", "before the edit");
+        s.agents.stop("qa").now().unwrap_or_else(|e| panic!("{e}"));
+
+        write_persona(
+            &project,
+            "qa",
+            "description: qa description\n",
+            "You are qa, with the new brief.",
+        );
+        let back = spawn_tree(&s, &tree_of(&project), &home).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(back.refreshed, vec!["qa".to_string()], "{back:?}");
+        let status = s.agents.list().remove(0);
+        assert_eq!(
+            status.state,
+            crate::agents::AgentState::Idle,
+            "/team stop says start brings it back"
+        );
+        assert!(prompt_of(&s, "qa").contains("with the new brief"));
+        assert_eq!(history_of(&s, "qa"), history);
+        // And it can be worked again: a revived member that refuses mail is not back.
+        assert!(
+            s.agents
+                .deliver(
+                    "qa",
+                    crate::channels::MAIN_NAME,
+                    "carry on",
+                    Vec::new(),
+                    None
+                )
+                .now()
+                .is_ok()
+        );
+        std::fs::remove_dir_all(&home).unwrap();
+    }
+
+    /// A hire holding a member's name is left exactly as it was. A hire is not a
+    /// member (D53): it was spawned for one task, it is released when that task is
+    /// done, and a blueprint reaching in to rewrite its persona would change the
+    /// job someone is in the middle of asking for.
+    #[test]
+    fn start_does_not_rewrite_a_hire_that_holds_the_name() {
+        let s = session();
+        let home = tmp("spawn-refresh-hire");
+        let project = home.join("proj");
+        s.set_cwd(project.clone());
+        write_agent(&project, "qa");
+        write_team_file(&project, &team_def("t", &[("qa", "qa")]))
+            .unwrap_or_else(|e| panic!("{e}"));
+        // The name was taken by an ad-hoc spawn in this same project before the crew came up.
+        s.agents
+            .insert(
+                "qa",
+                crate::agents::AgentKind::Hire,
+                None,
+                "hired for one task".into(),
+                s.clone(),
+            )
+            .now();
+
+        let out = spawn_tree(&s, &tree_of(&project), &home).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(out.reused, vec!["qa".to_string()], "{out:?}");
+        assert!(out.refreshed.is_empty(), "{out:?}");
+        let status = s.agents.list().remove(0);
+        assert_eq!(status.kind, crate::agents::AgentKind::Hire);
+        assert_eq!(status.description, "hired for one task");
+        std::fs::remove_dir_all(&home).unwrap();
+    }
+
+    /// Start counts what it did in three buckets, and the event line is the wording
+    /// QA greps for.
+    #[test]
+    fn summary_events_name_all_three_outcomes() {
+        let summary = SpawnSummary {
+            spawned: vec!["a".into()],
+            reused: vec!["b".into(), "c".into()],
+            refreshed: vec!["d".into()],
+            failed: vec![("e".into(), "no def".into())],
+        };
+        assert_eq!(
+            summary.events(),
+            vec![
+                "spawned ×1".to_string(),
+                "refreshed ×1".to_string(),
+                "reused ×2".to_string()
+            ]
+        );
+        assert_eq!(summary.ready(), 4, "the failed member is not standing");
+        assert!(SpawnSummary::default().events().is_empty());
     }
 
     /// The model a member pins is the model its instance ends up running, and a
@@ -2092,7 +2472,7 @@ mod tests {
         std::fs::remove_dir_all(&project).unwrap_or_else(|e| panic!("{e}"));
     }
 
-    /// What the hub is told: who is on the crew, which rooms reach whom, and the rule
+    /// What main is told: who is on the crew, which rooms reach whom, and the rule
     /// that sends work to a member before it spawns a stand-in for one.
     #[test]
     fn the_crew_note_names_the_roster_and_the_routing_rule() {
@@ -2647,7 +3027,7 @@ mod tests {
     }
 
     /// A blueprint may ask for a name the registry cannot give — `main` and `user` are
-    /// reserved for the hub and the human — so the member runs under a claimed one.
+    /// reserved for main and the human — so the member runs under a claimed one.
     /// Rooms are declared in blueprint names and have to follow that rename: otherwise
     /// the member comes up running but outside every room that asked for it, which
     /// reads as a member that never started.
@@ -2680,7 +3060,7 @@ mod tests {
         std::fs::remove_dir_all(&home).unwrap_or_else(|e| panic!("{e}"));
     }
 
-    /// What the hub is told about a chart: every department under its own directory,
+    /// What main is told about a chart: every department under its own directory,
     /// and the fact that a bare name reaches anyone in it.
     #[test]
     fn the_crew_note_names_the_whole_chart() {

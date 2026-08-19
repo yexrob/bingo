@@ -3,13 +3,14 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde::Deserialize;
-use tokio::io::AsyncBufReadExt;
 
 use async_trait::async_trait;
 
 use super::{Tool, ToolContext, ToolError, ToolResult, parse_input};
 
 const DEFAULT_TIMEOUT_SECS: u64 = 120;
+pub const DEFAULT_OUTPUT_MAX_CHARS: usize = 48_000;
+pub const MAX_OUTPUT_MAX_CHARS: usize = 48_000;
 /// Default check interval for periodic commands (when no explicit -n is given).
 pub const DEFAULT_WATCH_INTERVAL_SECS: u64 = 5;
 /// Upper bound for waiting on readers to drain after the command exits (so we don't
@@ -387,11 +388,19 @@ struct BashInput {
     background: Option<bool>,
 }
 
-pub struct BashTool;
+pub struct BashTool {
+    output_max_chars: usize,
+}
 
 impl BashTool {
     pub fn new() -> Self {
-        Self
+        Self::with_output_max_chars(DEFAULT_OUTPUT_MAX_CHARS)
+    }
+
+    pub fn with_output_max_chars(output_max_chars: usize) -> Self {
+        Self {
+            output_max_chars: output_max_chars.min(MAX_OUTPUT_MAX_CHARS),
+        }
     }
 }
 
@@ -408,8 +417,26 @@ impl Tool for BashTool {
     }
 
     fn description(&self) -> String {
-        "Execute a command in the local shell, returning stdout/stderr and the exit code. Prefer background:true for long-running tasks (e.g. cargo build, npm install, big test suites) — even when you need the result later: it returns async_launched immediately and tells the user the task runs in the background; continue when the completion notification arrives. Periodic commands (watch/while/until/for/tail -f) become background tasks automatically and can be given notify_on/notify_regex conditions — a hit in the output notifies (no need to wait for the command to finish). Interactive commands that need a TTY (top/htop/vim/bare ssh etc. — full-screen or session programs) are rejected."
-            .to_string()
+        // #42: name the real executor and its dialect — the tool name `Bash`
+        // primes POSIX syntax even when the resolved shell is PowerShell.
+        use crate::platform::ShellDialect;
+        let shell = crate::platform::shell();
+        let syntax = match crate::platform::shell_dialect() {
+            ShellDialect::Posix => String::new(),
+            ShellDialect::PowerShell => {
+                " Commands are interpreted by PowerShell — use PowerShell syntax, not POSIX."
+                    .to_string()
+            }
+            ShellDialect::Cmd => {
+                " Commands are interpreted by cmd.exe — use cmd syntax, not POSIX.".to_string()
+            }
+            ShellDialect::Unknown => {
+                format!(" Commands are interpreted by {shell} — match its syntax.")
+            }
+        };
+        format!(
+            "Execute a command in the local shell ({shell}), returning stdout/stderr and the exit code.{syntax} Prefer background:true for long-running tasks (e.g. cargo build, npm install, big test suites) — even when you need the result later: it returns async_launched immediately and tells the user the task runs in the background; continue when the completion notification arrives. Periodic commands (watch/while/until/for/tail -f) become background tasks automatically and can be given notify_on/notify_regex conditions — a hit in the output notifies (no need to wait for the command to finish). Interactive commands that need a TTY (top/htop/vim/bare ssh etc. — full-screen or session programs) are rejected."
+        )
     }
 
     fn input_schema(&self) -> serde_json::Value {
@@ -440,60 +467,241 @@ impl Tool for BashTool {
         // Periodic commands (watch/while/until/for/tail -f) are backgrounded automatically:
         // immediately return async_launched; background execution + per-round checks + completion notification.
         if let Some(interval) = periodic_bash_interval(&params.command) {
-            return launch_background(&params, ctx, Some(interval)).await;
+            return launch_background(&params, ctx, Some(interval), self.output_max_chars).await;
         }
         // Explicit backgrounding: for non-dependent/long-running commands (e.g. cargo build,
         // npm install), the main agent does not wait when the result is not needed immediately.
         if params.background.unwrap_or(false) {
-            return launch_background(&params, ctx, None).await;
+            return launch_background(&params, ctx, None, self.output_max_chars).await;
         }
 
-        let mut command = shell_command(&params.command, &ctx.cwd);
-        // When the turn is interrupted (Esc), dropping the future kills the child process too,
-        // leaving no orphans.
-        command.kill_on_drop(true);
-        let child = command
-            .spawn()
-            .map_err(|e| ToolError::failed(format!("failed to run command: {e}")))?;
-        // Process-tree root = the child shell itself: on timeout the whole tree is cleaned
-        // up; grandchild processes are not orphaned.
-        let child_pid = child.id();
-
-        let output = match tokio::time::timeout(timeout, child.wait_with_output()).await {
-            Ok(Ok(output)) => output,
-            Ok(Err(e)) => {
-                return Err(ToolError::failed(format!("failed to run command: {e}")));
+        match run_foreground(&params, ctx, timeout, self.output_max_chars).await? {
+            Foreground::Finished(output) => {
+                let mut text = format!("$ {}\n{}", params.command, output.text);
+                text.push_str(&format!("\n[Exited with code {}]", output.exit_code));
+                Ok(ToolResult {
+                    content: serde_json::Value::String(text),
+                    is_error: output.exit_code != 0,
+                    diff: None,
+                })
             }
-            Err(_) => {
-                if let Some(child_pid) = child_pid {
-                    crate::platform::kill_process_tree(child_pid).await;
-                }
-                return Err(ToolError::failed(format!(
-                    "command timed out after {}s",
-                    timeout.as_secs()
-                )));
-            }
-        };
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let exit_code = output.status.code().unwrap_or(-1);
-
-        let mut text = format!("$ {}\n", params.command);
-        if !stdout.is_empty() {
-            text.push_str(&stdout);
+            // The user pressed ctrl+b (D84). The result has the shape it would have
+            // had with `background: true`, so nothing new has to be learned to read
+            // it — plus the reason, so the model does not conclude it asked for this.
+            Foreground::Promoted { task_id, label } => Ok(ToolResult {
+                content: serde_json::Value::String(
+                    serde_json::json!({
+                        "status": "async_launched",
+                        "task_id": task_id,
+                        "label": label,
+                        "note": "the user moved this command to the background while it was running; it is still running and its completion will be reported",
+                    })
+                    .to_string(),
+                ),
+                is_error: false,
+                diff: None,
+            }),
         }
-        if !stderr.is_empty() {
-            text.push_str(&stderr);
-        }
-        text.push_str(&format!("\n[Exited with code {exit_code}]"));
-
-        Ok(ToolResult {
-            content: serde_json::Value::String(text),
-            is_error: false,
-            diff: None,
-        })
     }
+}
+
+fn truncation_note(total: usize, max_chars: usize) -> String {
+    format!(
+        "\n[Content truncated: {total} characters total, showing first {max_chars}. Use Read on a redirected output file for the complete content.]"
+    )
+}
+
+struct CommandOutput {
+    text: String,
+    exit_code: i32,
+}
+
+/// How a foreground run ended.
+enum Foreground {
+    /// The command exited on its own.
+    Finished(CommandOutput),
+    /// The user pressed ctrl+b: the same process, the same output buffer and the
+    /// same reader tasks now belong to a background task.
+    Promoted { task_id: u64, label: String },
+}
+
+/// How often the tail is sampled. Faster than [`crate::live::TAIL_MIN_INTERVAL`]
+/// on purpose: the floor decides how often an event may go out, this decides how
+/// soon the last write of a burst can go out once the floor passes.
+const TAIL_POLL: Duration = Duration::from_millis(50);
+
+/// Run a command in the foreground: stream its tail to the host while it runs,
+/// and hand it to the background registry if the user promotes it mid-flight.
+async fn run_foreground(
+    params: &BashInput,
+    ctx: &ToolContext,
+    timeout: Duration,
+    output_max_chars: usize,
+) -> Result<Foreground, ToolError> {
+    let mut child = shell_command(&params.command, &ctx.cwd)
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|e| ToolError::failed(format!("failed to run command: {e}")))?;
+    let child_pid = child.id();
+    let output = Arc::new(Mutex::new(BoundedOutput::new(output_max_chars)));
+    // The line accounting starts here rather than at promotion: a command the user
+    // backgrounds after two minutes should report the two minutes it has run, not
+    // start its life over in the task panel.
+    let cell = Arc::new(BashCell::new());
+    let sink = Arc::new(OutputSink::foreground(cell.clone(), ctx.live.tails()));
+    let readers = spawn_output_readers(&mut child, output.clone(), sink.clone());
+    // Registering before the first await: ctrl+b between spawn and here would find
+    // no target and fall through to its other meaning, which is merely a miss.
+    let (_run, mut promote) = ctx.live.arm();
+    let _tail = TailTicker::start(&sink, &ctx.live);
+    // Neither arm touches `child`: the borrow the wait future holds has to end
+    // before the promote path can move the process into its own task.
+    let exited = tokio::select! {
+        status = tokio::time::timeout(timeout, child.wait()) => Some(status),
+        () = crate::live::promote_requested(&mut promote) => None,
+    };
+    let status = match exited {
+        Some(Ok(Ok(status))) => status,
+        Some(Ok(Err(e))) => return Err(ToolError::failed(format!("failed to run command: {e}"))),
+        Some(Err(_)) => {
+            if let Some(child_pid) = child_pid {
+                crate::platform::kill_process_tree(child_pid).await;
+            }
+            let _ = child.kill().await;
+            return Err(ToolError::failed(format!(
+                "command timed out after {}s",
+                timeout.as_secs()
+            )));
+        }
+        None => {
+            return Ok(promote_to_background(
+                params, ctx, child, child_pid, readers, output, sink, cell,
+            ));
+        }
+    };
+    drain_readers(readers, child_pid).await;
+    Ok(Foreground::Finished(CommandOutput {
+        text: output.lock().map(|b| b.finish()).unwrap_or_default(),
+        exit_code: status.code().unwrap_or(-1),
+    }))
+}
+
+/// Hand a running foreground command to the background registry (D84).
+///
+/// Nothing is restarted and nothing is thrown away: the child keeps running, the
+/// reader tasks keep filling the same buffer, and the watchable that appears in
+/// the task panel is fed by the same [`BashCell`] that has been counting lines
+/// since the command started. Only the audience changes — the tail stops, and
+/// the completion goes out as a notification instead of a tool result.
+#[allow(clippy::too_many_arguments)]
+fn promote_to_background(
+    params: &BashInput,
+    ctx: &ToolContext,
+    mut child: tokio::process::Child,
+    child_pid: Option<u32>,
+    readers: Vec<OutputReader>,
+    output: Arc<Mutex<BoundedOutput>>,
+    sink: Arc<OutputSink>,
+    cell: Arc<BashCell>,
+) -> Foreground {
+    let label = format!("$ {}", params.command);
+    let id = ctx.watch.register_with_conditions(
+        Box::new(BashWatch {
+            cell,
+            label: label.clone(),
+            interval: Duration::from_secs(DEFAULT_WATCH_INTERVAL_SECS),
+            // A promoted command is whatever it was: an ordinary command that now
+            // runs in the background, with no round semantics to report.
+            periodic: false,
+        }),
+        notify_conditions(params),
+        ctx.instance.clone(),
+    );
+    // From here the readers feed the condition engine instead of the tail. Output
+    // written before the promotion is not replayed into the conditions: it has
+    // already been on screen, and the completion payload still carries all of it.
+    sink.promote(ctx.watch.clone(), id);
+    let watch = ctx.watch.clone();
+    tokio::spawn(async move {
+        // No timeout any more: a background task is not bounded by the foreground
+        // call's budget, exactly as an explicitly backgrounded one is not.
+        let status = child.wait().await;
+        drain_readers(readers, child_pid).await;
+        let text = output.lock().map(|b| b.finish()).unwrap_or_default();
+        match status {
+            // `code()` and not `code().unwrap_or(-1)`: a command a signal
+            // killed left no exit status, and `-1` would be this process
+            // saying the shell said something it never said.
+            Ok(status) => watch.finish_command(
+                id,
+                crate::watch::WatchState::Done,
+                Some(format!("exit code {}", status.code().unwrap_or(-1))),
+                Some(serde_json::json!(text)),
+                status.code(),
+            ),
+            Err(e) => watch.set_state(
+                id,
+                crate::watch::WatchState::Failed,
+                Some(format!("failed to wait: {e}")),
+                None,
+            ),
+        }
+    });
+    Foreground::Promoted {
+        task_id: id.0,
+        label,
+    }
+}
+
+/// Samples the tail while a foreground command runs, and stops the moment it is
+/// dropped — a finished (or promoted) command owns no rows on screen.
+struct TailTicker(Option<tokio::task::JoinHandle<()>>);
+
+impl TailTicker {
+    fn start(sink: &Arc<OutputSink>, live: &Arc<crate::live::LiveBash>) -> Self {
+        if !live.tails() {
+            return Self(None);
+        }
+        let sink = sink.clone();
+        let live = live.clone();
+        Self(Some(tokio::spawn(async move {
+            let mut coalescer = crate::live::TailCoalescer::new();
+            loop {
+                tokio::time::sleep(TAIL_POLL).await;
+                let Some(tail) = sink.tail_sample() else {
+                    // The tail was handed off (promotion): nothing left to paint.
+                    return;
+                };
+                if coalescer.admit(Instant::now(), &tail) {
+                    live.emit(tail);
+                }
+            }
+        })))
+    }
+}
+
+impl Drop for TailTicker {
+    fn drop(&mut self) {
+        if let Some(handle) = self.0.take() {
+            handle.abort();
+        }
+    }
+}
+
+/// Notification conditions for a background run: the ones the model asked for,
+/// or the default "tell me if it fails".
+fn notify_conditions(params: &BashInput) -> Vec<crate::watch::NotifyCondition> {
+    let mut conditions = Vec::new();
+    if let Some(patterns) = params.notify_on.clone() {
+        conditions.push(crate::watch::NotifyCondition::Contains(patterns));
+    }
+    if let Some(re) = params.notify_regex.clone() {
+        conditions.push(crate::watch::NotifyCondition::Regex(re));
+    }
+    if conditions.is_empty() {
+        conditions.push(crate::watch::NotifyCondition::Errors);
+    }
+    conditions
 }
 
 /// Child shell command: its own process tree (whole tree cleaned up on timeout/cancel),
@@ -514,17 +722,9 @@ async fn launch_background(
     params: &BashInput,
     ctx: &ToolContext,
     interval: Option<Duration>,
+    output_max_chars: usize,
 ) -> Result<ToolResult, ToolError> {
-    let mut conditions = Vec::new();
-    if let Some(patterns) = params.notify_on.clone() {
-        conditions.push(crate::watch::NotifyCondition::Contains(patterns));
-    }
-    if let Some(re) = params.notify_regex.clone() {
-        conditions.push(crate::watch::NotifyCondition::Regex(re));
-    }
-    if conditions.is_empty() {
-        conditions.push(crate::watch::NotifyCondition::Errors);
-    }
+    let conditions = notify_conditions(params);
     let cell = Arc::new(BashCell::new());
     let label = format!("$ {}", params.command);
     // Round semantics for periodic commands (Idle = one round) only apply to watch/loop-style
@@ -545,13 +745,24 @@ async fn launch_background(
     let cwd = ctx.cwd.clone();
     tokio::spawn(async move {
         // Background tasks have their own lifecycle: periodic commands are not limited by a single timeout.
-        match run_streaming(&command, &cwd, None, cell, watch.clone(), id).await {
+        match run_streaming(
+            &command,
+            &cwd,
+            None,
+            output_max_chars,
+            cell,
+            watch.clone(),
+            id,
+        )
+        .await
+        {
             Ok((text, code)) => {
-                watch.set_state(
+                watch.finish_command(
                     id,
                     crate::watch::WatchState::Done,
                     Some(format!("exit code {code}")),
                     Some(serde_json::json!(text)),
+                    Some(code),
                 );
             }
             Err(e) => {
@@ -579,8 +790,9 @@ async fn run_streaming(
     command: &str,
     cwd: &std::path::Path,
     timeout: Option<Duration>,
+    output_max_chars: usize,
     cell: Arc<BashCell>,
-    watch: std::sync::Arc<crate::watch::WatchRegistry>,
+    watch: crate::watch::WatchHandle,
     id: crate::watch::WatchId,
 ) -> Result<(String, i32), String> {
     let mut child = shell_command(command, cwd)
@@ -588,42 +800,12 @@ async fn run_streaming(
         .spawn()
         .map_err(|e| format!("failed to spawn: {e}"))?;
     let child_pid = child.id();
-    let buf = Arc::new(Mutex::new(String::new()));
-    let mut readers = Vec::new();
-    let streams: Vec<Box<dyn tokio::io::AsyncRead + Unpin + Send>> = [
-        child
-            .stdout
-            .take()
-            .map(|s| Box::new(s) as Box<dyn tokio::io::AsyncRead + Unpin + Send>),
-        child
-            .stderr
-            .take()
-            .map(|s| Box::new(s) as Box<dyn tokio::io::AsyncRead + Unpin + Send>),
-    ]
-    .into_iter()
-    .flatten()
-    .collect();
-    for stream in streams {
-        let cell = cell.clone();
-        let buf = buf.clone();
-        let watch = watch.clone();
-        readers.push(tokio::spawn(async move {
-            let mut reader = tokio::io::BufReader::new(stream);
-            loop {
-                let mut line = String::new();
-                match reader.read_line(&mut line).await {
-                    Ok(0) | Err(_) => break,
-                    Ok(_) => {
-                        cell.record_line(&line);
-                        watch.feed_content(id, &line);
-                        if let Ok(mut b) = buf.lock() {
-                            b.push_str(&line);
-                        }
-                    }
-                }
-            }
-        }));
-    }
+    let buf = Arc::new(Mutex::new(BoundedOutput::new(output_max_chars)));
+    let readers = spawn_output_readers(
+        &mut child,
+        buf.clone(),
+        Arc::new(OutputSink::background(cell.clone(), watch.clone(), id)),
+    );
     let status = match timeout {
         Some(t) => match tokio::time::timeout(t, child.wait()).await {
             Ok(Ok(status)) => status,
@@ -643,8 +825,165 @@ async fn run_streaming(
             Err(e) => return Err(format!("failed to wait: {e}")),
         },
     };
-    // Grandchild processes may still hold stdout: guard the join with a timeout, otherwise
-    // readers hang forever and the watch entry stays Running.
+    drain_readers(readers, child_pid).await;
+    let code = status.code().unwrap_or(-1);
+    let text = buf.lock().map(|b| b.finish()).unwrap_or_default();
+    Ok((text, code))
+}
+
+type OutputReader = tokio::task::JoinHandle<()>;
+
+fn spawn_output_readers(
+    child: &mut tokio::process::Child,
+    output: Arc<Mutex<BoundedOutput>>,
+    sink: Arc<OutputSink>,
+) -> Vec<OutputReader> {
+    let streams: Vec<Box<dyn tokio::io::AsyncRead + Unpin + Send>> = [
+        child
+            .stdout
+            .take()
+            .map(|s| Box::new(s) as Box<dyn tokio::io::AsyncRead + Unpin + Send>),
+        child
+            .stderr
+            .take()
+            .map(|s| Box::new(s) as Box<dyn tokio::io::AsyncRead + Unpin + Send>),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    streams
+        .into_iter()
+        .map(|mut stream| {
+            let output = output.clone();
+            let sink = sink.clone();
+            tokio::spawn(async move {
+                use tokio::io::AsyncReadExt;
+
+                let mut bytes = [0u8; 8 * 1024];
+                let mut utf8_tail = Vec::new();
+                loop {
+                    let read = match stream.read(&mut bytes).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(read) => read,
+                    };
+                    utf8_tail.extend_from_slice(&bytes[..read]);
+                    loop {
+                        match std::str::from_utf8(&utf8_tail) {
+                            Ok(_) => {
+                                if !utf8_tail.is_empty() {
+                                    feed_bash_output(&utf8_tail, &output, &sink);
+                                    utf8_tail.clear();
+                                }
+                                break;
+                            }
+                            Err(error) if error.error_len().is_none() => {
+                                let valid = error.valid_up_to();
+                                if valid > 0 {
+                                    feed_bash_output(&utf8_tail[..valid], &output, &sink);
+                                    utf8_tail.drain(..valid);
+                                }
+                                break;
+                            }
+                            Err(error) => {
+                                let valid = error.valid_up_to();
+                                if valid > 0 {
+                                    feed_bash_output(&utf8_tail[..valid], &output, &sink);
+                                }
+                                if let Ok(mut output) = output.lock() {
+                                    output.mark_invalid_utf8();
+                                    output.push("�");
+                                }
+                                utf8_tail.drain(..valid + error.error_len().unwrap_or(1));
+                            }
+                        }
+                    }
+                }
+                if !utf8_tail.is_empty()
+                    && let Ok(mut output) = output.lock()
+                {
+                    output.mark_invalid_utf8();
+                    output.push("�");
+                }
+            })
+        })
+        .collect()
+}
+
+fn feed_bash_output(bytes: &[u8], output: &Arc<Mutex<BoundedOutput>>, sink: &OutputSink) {
+    let Ok(text) = std::str::from_utf8(bytes) else {
+        return;
+    };
+    sink.feed(text);
+    if let Ok(mut output) = output.lock() {
+        output.push(text);
+    }
+}
+
+/// Everything a chunk of output has to reach besides the buffer the model will
+/// read: the line accounting, the registry's condition engine, and — while the
+/// command is in the foreground — the tail on screen.
+///
+/// A foreground run starts with a tail and no task id, and promotion (ctrl+b)
+/// swaps one for the other **without restarting the readers**, which is what
+/// lets a command change audience mid-flight without losing a byte.
+struct OutputSink {
+    cell: Arc<BashCell>,
+    /// Set once the run is a background task.
+    task: Mutex<Option<(crate::watch::WatchHandle, crate::watch::WatchId)>>,
+    /// Set while the run is the foreground command of a host that shows a tail.
+    tail: Mutex<Option<crate::live::TailBuffer>>,
+}
+
+impl OutputSink {
+    fn background(
+        cell: Arc<BashCell>,
+        watch: crate::watch::WatchHandle,
+        id: crate::watch::WatchId,
+    ) -> Self {
+        Self {
+            cell,
+            task: Mutex::new(Some((watch, id))),
+            tail: Mutex::new(None),
+        }
+    }
+
+    fn foreground(cell: Arc<BashCell>, tails: bool) -> Self {
+        Self {
+            cell,
+            task: Mutex::new(None),
+            tail: Mutex::new(tails.then(crate::live::TailBuffer::new)),
+        }
+    }
+
+    fn feed(&self, text: &str) {
+        self.cell.record_text(text);
+        if let Some((registry, id)) = &*self.task.lock().unwrap_or_else(|e| e.into_inner()) {
+            registry.feed_content(*id, text);
+        }
+        if let Some(tail) = &mut *self.tail.lock().unwrap_or_else(|e| e.into_inner()) {
+            tail.push(text);
+        }
+    }
+
+    /// The rows to paint, or `None` once this run has no tail (never had one, or
+    /// stopped having one at promotion).
+    fn tail_sample(&self) -> Option<crate::live::LiveTail> {
+        self.tail
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map(crate::live::TailBuffer::sample)
+    }
+
+    /// The run became a background task: feed the condition engine from now on,
+    /// and stop tailing (the rows it was painting are gone).
+    fn promote(&self, watch: crate::watch::WatchHandle, id: crate::watch::WatchId) {
+        *self.task.lock().unwrap_or_else(|e| e.into_inner()) = Some((watch, id));
+        *self.tail.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
+}
+
+async fn drain_readers(readers: Vec<OutputReader>, child_pid: Option<u32>) {
     for mut reader in readers {
         if tokio::time::timeout(READER_DRAIN_TIMEOUT, &mut reader)
             .await
@@ -657,9 +996,53 @@ async fn run_streaming(
             reader.abort();
         }
     }
-    let code = status.code().unwrap_or(-1);
-    let text = buf.lock().map(|b| b.clone()).unwrap_or_default();
-    Ok((text, code))
+}
+
+struct BoundedOutput {
+    text: String,
+    max_chars: usize,
+    total_chars: usize,
+    saw_invalid_utf8: bool,
+}
+
+impl BoundedOutput {
+    fn new(max_chars: usize) -> Self {
+        Self {
+            text: String::new(),
+            max_chars,
+            total_chars: 0,
+            saw_invalid_utf8: false,
+        }
+    }
+
+    fn push(&mut self, text: &str) {
+        let remaining = self.max_chars.saturating_sub(self.text.chars().count());
+        let mut chars = text.chars();
+        let mut kept = 0usize;
+        self.text
+            .extend(chars.by_ref().take(remaining).inspect(|_| {
+                kept += 1;
+            }));
+        self.total_chars = self
+            .total_chars
+            .saturating_add(kept)
+            .saturating_add(chars.count());
+    }
+
+    fn mark_invalid_utf8(&mut self) {
+        self.saw_invalid_utf8 = true;
+    }
+
+    fn finish(&self) -> String {
+        let mut text = self.text.clone();
+        if self.total_chars > self.max_chars {
+            text.push_str(&truncation_note(self.total_chars, self.max_chars));
+        }
+        if self.saw_invalid_utf8 {
+            text.push_str("\n[Invalid UTF-8 replaced while decoding command output]");
+        }
+        text
+    }
 }
 
 /// Shared execution state for background Bash: a round = new output lines since the last poll.
@@ -668,6 +1051,7 @@ struct BashCell {
     rounds: AtomicUsize,
     line_delta: AtomicUsize,
     total_lines: AtomicUsize,
+    partial_line: std::sync::atomic::AtomicBool,
 }
 
 impl BashCell {
@@ -677,11 +1061,19 @@ impl BashCell {
             rounds: AtomicUsize::new(0),
             line_delta: AtomicUsize::new(0),
             total_lines: AtomicUsize::new(0),
+            partial_line: std::sync::atomic::AtomicBool::new(false),
         }
     }
-    fn record_line(&self, _line: &str) {
-        self.line_delta.fetch_add(1, Ordering::SeqCst);
-        self.total_lines.fetch_add(1, Ordering::SeqCst);
+    fn record_text(&self, text: &str) {
+        let complete = text.bytes().filter(|byte| *byte == b'\n').count();
+        let had_partial = self.partial_line.load(Ordering::SeqCst);
+        let has_partial = !text.ends_with('\n');
+        self.partial_line.store(has_partial, Ordering::SeqCst);
+        let lines = complete + usize::from(has_partial && !had_partial);
+        if lines > 0 {
+            self.line_delta.fetch_add(lines, Ordering::SeqCst);
+            self.total_lines.fetch_add(lines, Ordering::SeqCst);
+        }
     }
     fn poll(&self, periodic: bool) -> crate::watch::WatchPoll {
         let delta = self.line_delta.swap(0, Ordering::SeqCst);
@@ -735,15 +1127,43 @@ impl crate::watch::Watchable for BashWatch {
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    async fn explicit_background_non_periodic_command_notifies() {
-        use crate::watch::WatchState;
+    #[test]
+    fn configured_output_limit_cannot_exceed_the_model_result_budget() {
+        let tool = BashTool::with_output_max_chars(usize::MAX);
+        assert_eq!(tool.output_max_chars, MAX_OUTPUT_MAX_CHARS);
+    }
 
-        let watch = crate::watch::WatchRegistry::new();
+    /// #42: the description names the real executor so the tool name `Bash`
+    /// does not prime POSIX syntax against a PowerShell/cmd executor.
+    #[test]
+    fn description_names_the_resolved_shell() {
+        let text = BashTool::new().description();
+        assert!(text.contains(crate::platform::shell()), "{text}");
+        if crate::platform::shell_dialect() == crate::platform::ShellDialect::PowerShell {
+            assert!(text.contains("use PowerShell syntax, not POSIX"), "{text}");
+        }
+    }
+
+    #[test]
+    fn bounded_output_counts_characters_without_growing_past_limit() {
+        let mut output = BoundedOutput::new(3);
+        output.push("❤❤");
+        output.push("❤❤❤");
+        let text = output.finish();
+        assert!(
+            text.starts_with("❤❤❤\n[Content truncated: 5 characters total, showing first 3."),
+            "{text}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn utf8_split_across_pipe_reads_is_preserved() {
         let ctx = ToolContext {
             home: std::env::temp_dir(),
             cwd: std::env::temp_dir(),
-            watch: watch.clone(),
+            watch: crate::app::AppCore::start(Default::default()).watch(),
+            live: Default::default(),
             http: reqwest::Client::new(),
             tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), "test")),
             hooks: Default::default(),
@@ -751,6 +1171,134 @@ mod tests {
             expand_tasks: tokio::sync::watch::channel(false).0,
             ask_question: std::sync::Arc::new(|_t, _q, _o| Box::pin(async { None })),
             instance: None,
+            rewind: Default::default(),
+        };
+        let command = r#"python3 -c 'import os,time; b="❤".encode(); os.write(1,b[:1]); time.sleep(.05); os.write(1,b[1:])'"#;
+        let result = BashTool::new()
+            .call(serde_json::json!({"command": command}), &ctx)
+            .await
+            .unwrap();
+        let text = result.content.as_str().unwrap_or_default();
+        assert!(text.contains("❤"), "{text}");
+        assert!(!text.contains("Invalid UTF-8"), "{text}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn newline_free_output_is_streamed_through_the_cap() {
+        let ctx = ToolContext {
+            home: std::env::temp_dir(),
+            cwd: std::env::temp_dir(),
+            watch: crate::app::AppCore::start(Default::default()).watch(),
+            live: Default::default(),
+            http: reqwest::Client::new(),
+            tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), "test")),
+            hooks: Default::default(),
+            permission_mode: "default".into(),
+            expand_tasks: tokio::sync::watch::channel(false).0,
+            ask_question: std::sync::Arc::new(|_t, _q, _o| Box::pin(async { None })),
+            instance: None,
+            rewind: Default::default(),
+        };
+        let result = BashTool::with_output_max_chars(32)
+            .call(
+                serde_json::json!({"command": r#"python3 -c 'print("x" * 100000, end="")'"#}),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        let text = result.content.as_str().unwrap_or_default();
+        assert!(text.contains("showing first 32"), "{text}");
+        assert!(text.chars().count() < 512, "{}", text.chars().count());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn invalid_utf8_output_is_lossy_not_dropped() {
+        let ctx = ToolContext {
+            home: std::env::temp_dir(),
+            cwd: std::env::temp_dir(),
+            watch: crate::app::AppCore::start(Default::default()).watch(),
+            live: Default::default(),
+            http: reqwest::Client::new(),
+            tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), "test")),
+            hooks: Default::default(),
+            permission_mode: "default".into(),
+            expand_tasks: tokio::sync::watch::channel(false).0,
+            ask_question: std::sync::Arc::new(|_t, _q, _o| Box::pin(async { None })),
+            instance: None,
+            rewind: Default::default(),
+        };
+        let result = BashTool::new()
+            .call(serde_json::json!({"command": r"printf '\377ok\n'"}), &ctx)
+            .await
+            .unwrap();
+        let text = result.content.as_str().unwrap_or_default();
+        assert!(text.contains("�ok"), "{text}");
+        assert!(text.contains("[Invalid UTF-8 replaced"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn truncates_stdout_and_stderr_at_configured_limit() {
+        let ctx = ToolContext {
+            home: std::env::temp_dir(),
+            cwd: std::env::temp_dir(),
+            watch: crate::app::AppCore::start(Default::default()).watch(),
+            live: Default::default(),
+            http: reqwest::Client::new(),
+            tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), "test")),
+            hooks: Default::default(),
+            permission_mode: "default".into(),
+            expand_tasks: tokio::sync::watch::channel(false).0,
+            ask_question: std::sync::Arc::new(|_t, _q, _o| Box::pin(async { None })),
+            instance: None,
+            rewind: Default::default(),
+        };
+        #[cfg(unix)]
+        let command = "printf 12345; printf 67890 >&2";
+        #[cfg(windows)]
+        let command = "[Console]::Out.Write('12345'); [Console]::Error.Write('67890')";
+        let result = BashTool::with_output_max_chars(7)
+            .call(serde_json::json!({"command": command}), &ctx)
+            .await
+            .unwrap();
+        let text = result.content.as_str().unwrap_or_default();
+        let body = text
+            .split_once('\n')
+            .map(|(_, body)| body)
+            .unwrap_or_default();
+        let shown = body.lines().next().unwrap_or_default();
+        assert_eq!(shown.chars().count(), 7, "{text}");
+        assert!(shown.chars().all(|c| c.is_ascii_digit()), "{text}");
+        assert!(
+            text.contains("[Content truncated: 10 characters total, showing first 7."),
+            "{text}"
+        );
+        assert!(
+            text.contains("Use Read on a redirected output file"),
+            "{text}"
+        );
+        assert!(text.ends_with("[Exited with code 0]"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn explicit_background_non_periodic_command_notifies() {
+        use crate::watch::WatchState;
+
+        let watch = crate::app::AppCore::start(Default::default()).watch();
+        let ctx = ToolContext {
+            home: std::env::temp_dir(),
+            cwd: std::env::temp_dir(),
+            watch: watch.clone(),
+            live: Default::default(),
+            http: reqwest::Client::new(),
+            tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), "test")),
+            hooks: Default::default(),
+            permission_mode: "default".into(),
+            expand_tasks: tokio::sync::watch::channel(false).0,
+            ask_question: std::sync::Arc::new(|_t, _q, _o| Box::pin(async { None })),
+            instance: None,
+            rewind: Default::default(),
         };
         let tool = BashTool::new();
         let result = tool
@@ -775,7 +1323,7 @@ mod tests {
             }
         }
         assert!(done, "explicit background reaches Done");
-        let notes = watch.consume_notifications(None);
+        let notes = watch.consume_notifications(None).await;
         assert!(
             notes.iter().any(|n| n.contains("finished")),
             "output in notification: {notes:?}"
@@ -783,14 +1331,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn periodic_command_backgrounds_and_notifies() {
-        use crate::watch::WatchState;
-
-        let watch = crate::watch::WatchRegistry::new();
+    async fn non_zero_exit_is_flagged_as_error() {
+        let watch = crate::app::AppCore::start(Default::default()).watch();
         let ctx = ToolContext {
             home: std::env::temp_dir(),
             cwd: std::env::temp_dir(),
             watch: watch.clone(),
+            live: Default::default(),
             http: reqwest::Client::new(),
             tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), "test")),
             hooks: Default::default(),
@@ -798,6 +1345,40 @@ mod tests {
             expand_tasks: tokio::sync::watch::channel(false).0,
             ask_question: std::sync::Arc::new(|_t, _q, _o| Box::pin(async { None })),
             instance: None,
+            rewind: Default::default(),
+        };
+        let tool = BashTool::new();
+        #[cfg(unix)]
+        let command = "sh -c 'exit 7'";
+        #[cfg(windows)]
+        let command = "exit 7";
+        let result = tool
+            .call(serde_json::json!({"command": command}), &ctx)
+            .await
+            .unwrap();
+        assert!(result.is_error, "non-zero exit must be an error result");
+        let text = result.content.as_str().unwrap();
+        assert!(text.contains("[Exited with code 7]"), "output: {text}");
+    }
+
+    #[tokio::test]
+    async fn periodic_command_backgrounds_and_notifies() {
+        use crate::watch::WatchState;
+
+        let watch = crate::app::AppCore::start(Default::default()).watch();
+        let ctx = ToolContext {
+            home: std::env::temp_dir(),
+            cwd: std::env::temp_dir(),
+            watch: watch.clone(),
+            live: Default::default(),
+            http: reqwest::Client::new(),
+            tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), "test")),
+            hooks: Default::default(),
+            permission_mode: "default".into(),
+            expand_tasks: tokio::sync::watch::channel(false).0,
+            ask_question: std::sync::Arc::new(|_t, _q, _o| Box::pin(async { None })),
+            instance: None,
+            rewind: Default::default(),
         };
         let tool = BashTool::new();
         #[cfg(unix)]
@@ -824,7 +1405,7 @@ mod tests {
             }
         }
         assert!(done, "background bash reaches Done");
-        let notes = watch.consume_notifications(None);
+        let notes = watch.consume_notifications(None).await;
         assert!(
             notes.iter().any(|n| n.contains("tick")),
             "payload in notification: {notes:?}"
@@ -980,7 +1561,8 @@ mod tests {
         let ctx = ToolContext {
             home: std::env::temp_dir(),
             cwd: std::env::temp_dir(),
-            watch: crate::watch::WatchRegistry::new(),
+            watch: crate::app::AppCore::start(Default::default()).watch(),
+            live: Default::default(),
             http: reqwest::Client::new(),
             tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), "test")),
             hooks: Default::default(),
@@ -988,6 +1570,7 @@ mod tests {
             expand_tasks: tokio::sync::watch::channel(false).0,
             ask_question: std::sync::Arc::new(|_t, _q, _o| Box::pin(async { None })),
             instance: None,
+            rewind: Default::default(),
         };
         // The grandchild writes its pid then sleeps; the parent shell also sleeps to trigger the timeout.
         let command = format!(
@@ -1074,11 +1657,12 @@ mod tests {
     /// notify_on no longer silently fails.
     #[tokio::test]
     async fn explicit_background_conditions_fire() {
-        let watch = crate::watch::WatchRegistry::new();
+        let watch = crate::app::AppCore::start(Default::default()).watch();
         let ctx = ToolContext {
             home: std::env::temp_dir(),
             cwd: std::env::temp_dir(),
             watch: watch.clone(),
+            live: Default::default(),
             http: reqwest::Client::new(),
             tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), "test")),
             hooks: Default::default(),
@@ -1086,6 +1670,7 @@ mod tests {
             expand_tasks: tokio::sync::watch::channel(false).0,
             ask_question: std::sync::Arc::new(|_t, _q, _o| Box::pin(async { None })),
             instance: None,
+            rewind: Default::default(),
         };
         let result = BashTool::new()
             .call(
@@ -1111,6 +1696,7 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(200)).await;
             if watch
                 .consume_notifications(None)
+                .await
                 .iter()
                 .any(|n| n.contains("BOOM_MARKER"))
             {
@@ -1130,7 +1716,8 @@ mod tests {
         let ctx = ToolContext {
             home: std::env::temp_dir(),
             cwd: std::env::temp_dir(),
-            watch: crate::watch::WatchRegistry::new(),
+            watch: crate::app::AppCore::start(Default::default()).watch(),
+            live: Default::default(),
             http: reqwest::Client::new(),
             tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), "test")),
             hooks: Default::default(),
@@ -1138,6 +1725,7 @@ mod tests {
             expand_tasks: tokio::sync::watch::channel(false).0,
             ask_question: std::sync::Arc::new(|_t, _q, _o| Box::pin(async { None })),
             instance: None,
+            rewind: Default::default(),
         };
         let tool = BashTool::new();
         let err = tool
@@ -1148,5 +1736,187 @@ mod tests {
             err.to_string().contains("TTY"),
             "rejection reason should mention TTY: {err}"
         );
+    }
+
+    /// Test context that differs from the others only in its liveness handle:
+    /// D84's tests are about what the host sees and what ctrl+b does, and nothing
+    /// else in the context participates.
+    #[cfg(unix)]
+    fn live_ctx(
+        watch: crate::watch::WatchHandle,
+        live: std::sync::Arc<crate::live::LiveBash>,
+    ) -> ToolContext {
+        ToolContext {
+            home: std::env::temp_dir(),
+            cwd: std::env::temp_dir(),
+            watch,
+            live,
+            http: reqwest::Client::new(),
+            tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), "test")),
+            hooks: Default::default(),
+            permission_mode: "default".into(),
+            expand_tasks: tokio::sync::watch::channel(false).0,
+            ask_question: std::sync::Arc::new(|_t, _q, _o| Box::pin(async { None })),
+            instance: None,
+            rewind: Default::default(),
+        }
+    }
+
+    /// Collects every tail sample a run publishes.
+    #[cfg(unix)]
+    fn recording_live() -> (
+        std::sync::Arc<crate::live::LiveBash>,
+        Arc<Mutex<Vec<crate::live::LiveTail>>>,
+    ) {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let sink = seen.clone();
+        let live =
+            crate::live::LiveBash::new(std::sync::Arc::new(move |tail: crate::live::LiveTail| {
+                sink.lock().unwrap_or_else(|e| e.into_inner()).push(tail);
+            }));
+        (live, seen)
+    }
+
+    /// D84: a foreground command used to be a spinner and nothing else. Its output
+    /// now reaches the host while it runs — bounded, coalesced, and never more than
+    /// the last few lines.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_foreground_command_streams_its_tail_while_it_runs() {
+        let (live, seen) = recording_live();
+        let ctx = live_ctx(crate::app::AppCore::start(Default::default()).watch(), live);
+        let result = BashTool::new()
+            .call(
+                // No loop keyword: `for`/`while`/`tail -f` are auto-backgrounded
+                // (periodic commands), and this is a test about the foreground.
+                serde_json::json!({
+                    "command": "echo line 1; sleep 0.08; echo line 2; sleep 0.08; \
+                                echo line 3; sleep 0.08; echo line 4; sleep 0.08; echo line 5"
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        let text = result.content.as_str().unwrap_or_default();
+        assert!(text.contains("line 5"), "the result is unchanged: {text}");
+
+        let seen = seen.lock().unwrap_or_else(|e| e.into_inner());
+        assert!(!seen.is_empty(), "the host saw the command working");
+        assert!(
+            seen.len() <= 12,
+            "~0.5s of output is coalesced into a handful of events, got {}",
+            seen.len()
+        );
+        let last = seen.last().unwrap_or_else(|| panic!("a sample"));
+        assert!(
+            last.lines.len() <= crate::live::TAIL_LINES,
+            "the tail stays bounded: {:?}",
+            last.lines
+        );
+        assert!(
+            last.lines.iter().all(|l| l.starts_with("line ")),
+            "the tail is the command's own output: {:?}",
+            last.lines
+        );
+        assert!(last.total_lines > 0, "the counter follows the whole stream");
+    }
+
+    /// D84: ctrl+b mid-flight. The same process keeps running, the buffer it has
+    /// already filled comes along, and the model gets the result it would have got
+    /// from `background: true` plus the reason it did.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn ctrl_b_moves_a_running_command_to_the_background_without_restarting_it() {
+        use crate::watch::WatchState;
+
+        let watch = crate::app::AppCore::start(Default::default()).watch();
+        let live = crate::live::LiveBash::detached();
+        let ctx = live_ctx(watch.clone(), live.clone());
+        let call = tokio::spawn(async move {
+            BashTool::new()
+                .call(
+                    serde_json::json!({"command": "echo before; sleep 0.8; echo after"}),
+                    &ctx,
+                )
+                .await
+        });
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !live.running() && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(live.promote(), "a foreground command was in flight");
+
+        let result = call.await.unwrap().unwrap();
+        let text = result.content.as_str().unwrap_or_default();
+        assert!(!result.is_error, "backgrounding is not a failure");
+        assert!(text.contains("async_launched"), "shape: {text}");
+        assert!(
+            text.contains("the user moved this command to the background"),
+            "the model learns why it got a task id: {text}"
+        );
+
+        let mut rx = watch.subscribe();
+        let deadline = Instant::now() + Duration::from_secs(8);
+        let mut done = false;
+        while Instant::now() < deadline {
+            match tokio::time::timeout(Duration::from_millis(200), rx.recv()).await {
+                Ok(Ok(ev)) if ev.state == WatchState::Done => {
+                    done = true;
+                    break;
+                }
+                _ => continue,
+            }
+        }
+        assert!(done, "the promoted command finishes as a background task");
+        let notes = watch.consume_notifications(None).await;
+        assert!(
+            notes.iter().any(|n| n.contains("after")),
+            "the process was never restarted or killed: {notes:?}"
+        );
+        assert!(
+            notes.iter().any(|n| n.contains("before")),
+            "output from before the promotion came along: {notes:?}"
+        );
+    }
+
+    /// D84 must not soften the interrupt: a dropped tool future still takes the
+    /// command with it, tail or no tail.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn dropping_a_tailing_command_still_kills_it() {
+        let marker = std::env::temp_dir().join(format!(
+            "bingo-d84-interrupt-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_file(&marker);
+        let (live, seen) = recording_live();
+        let ctx = live_ctx(crate::app::AppCore::start(Default::default()).watch(), live);
+        let command = format!(
+            "echo started; sleep 2; echo end > '{}'",
+            marker.to_string_lossy()
+        );
+        let tool = BashTool::new();
+        {
+            let call = tool.call(serde_json::json!({"command": command}), &ctx);
+            tokio::pin!(call);
+            assert!(
+                tokio::time::timeout(Duration::from_millis(400), &mut call)
+                    .await
+                    .is_err(),
+                "the command is still running when the turn is cut off"
+            );
+        }
+        assert!(
+            !seen.lock().unwrap_or_else(|e| e.into_inner()).is_empty(),
+            "it was tailing when it was dropped"
+        );
+        tokio::time::sleep(Duration::from_millis(2_500)).await;
+        assert!(
+            !marker.exists(),
+            "the interrupted command must not have run to completion"
+        );
+        let _ = std::fs::remove_file(&marker);
     }
 }

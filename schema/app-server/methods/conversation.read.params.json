@@ -1,0 +1,33 @@
+{
+  "$id": "urn:bingo:app-server:v1:conversation.read.params",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "properties": {
+    "conversationId": {
+      "$ref": "../definitions.json#/definitions/ConversationId"
+    },
+    "cursor": {
+      "anyOf": [
+        {
+          "$ref": "../definitions.json#/definitions/ItemCursor"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Absent starts at the tail. A cursor from a stale `historyGeneration` is refused rather than mixing pre- and post-rewrite history."
+    },
+    "limit": {
+      "format": "uint32",
+      "minimum": 0.0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "conversationId"
+  ],
+  "title": "ConversationReadParams",
+  "type": "object"
+}

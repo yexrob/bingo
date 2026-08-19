@@ -227,7 +227,8 @@ mod tests {
         let ctx = ToolContext {
             home: std::env::temp_dir(),
             cwd: std::env::temp_dir(),
-            watch: crate::watch::WatchRegistry::new(),
+            watch: crate::app::AppCore::start(Default::default()).watch(),
+            live: Default::default(),
             http: reqwest::Client::new(),
             tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), "test")),
             hooks: Default::default(),
@@ -246,6 +247,7 @@ mod tests {
                 Box::pin(async { Some(crate::query::AskAnswer::Option(1)) })
             }),
             instance: None,
+            rewind: Default::default(),
         };
         let tool = AskUserQuestionTool;
         let result = tool
@@ -272,7 +274,8 @@ mod tests {
         let ctx = ToolContext {
             home: std::env::temp_dir(),
             cwd: std::env::temp_dir(),
-            watch: crate::watch::WatchRegistry::new(),
+            watch: crate::app::AppCore::start(Default::default()).watch(),
+            live: Default::default(),
             http: reqwest::Client::new(),
             tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), "test")),
             hooks: Default::default(),
@@ -282,6 +285,7 @@ mod tests {
                 Box::pin(async { Some(crate::query::AskAnswer::Other("use serde".to_string())) })
             }),
             instance: None,
+            rewind: Default::default(),
         };
         let tool = AskUserQuestionTool;
         let result = tool
@@ -304,7 +308,8 @@ mod tests {
         let ctx = ToolContext {
             home: std::env::temp_dir(),
             cwd: std::env::temp_dir(),
-            watch: crate::watch::WatchRegistry::new(),
+            watch: crate::app::AppCore::start(Default::default()).watch(),
+            live: Default::default(),
             http: reqwest::Client::new(),
             tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), "test")),
             hooks: Default::default(),
@@ -312,6 +317,7 @@ mod tests {
             expand_tasks: tokio::sync::watch::channel(false).0,
             ask_question: std::sync::Arc::new(|_t, _q, _o| Box::pin(async { None })),
             instance: None,
+            rewind: Default::default(),
         };
         let tool = AskUserQuestionTool;
         let result = tool
@@ -334,7 +340,8 @@ mod tests {
         let ctx = ToolContext {
             home: std::env::temp_dir(),
             cwd: std::env::temp_dir(),
-            watch: crate::watch::WatchRegistry::new(),
+            watch: crate::app::AppCore::start(Default::default()).watch(),
+            live: Default::default(),
             http: reqwest::Client::new(),
             tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), "test")),
             hooks: Default::default(),
@@ -342,6 +349,7 @@ mod tests {
             expand_tasks: tokio::sync::watch::channel(false).0,
             ask_question: std::sync::Arc::new(|_t, _q, _o| Box::pin(async { None })),
             instance: None,
+            rewind: Default::default(),
         };
         let tool = AskUserQuestionTool;
         let err = tool
@@ -364,7 +372,8 @@ mod tests {
         let ctx = ToolContext {
             home: std::env::temp_dir(),
             cwd: std::env::temp_dir(),
-            watch: crate::watch::WatchRegistry::new(),
+            watch: crate::app::AppCore::start(Default::default()).watch(),
+            live: Default::default(),
             http: reqwest::Client::new(),
             tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), "test")),
             hooks: Default::default(),
@@ -372,6 +381,7 @@ mod tests {
             expand_tasks: tokio::sync::watch::channel(false).0,
             ask_question: std::sync::Arc::new(|_t, _q, _o| Box::pin(async { None })),
             instance: None,
+            rewind: Default::default(),
         };
         let ask = AskUserQuestionTool;
         let bash = BashTool::new();

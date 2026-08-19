@@ -16,6 +16,16 @@ pub struct EditInput {
     pub replace_all: bool,
 }
 
+/// The replacement itself. The approval preview and the write share it, so what
+/// the user approves is exactly what lands.
+fn replace(content: &str, params: &EditInput) -> String {
+    if params.replace_all {
+        content.replace(&params.old_string, &params.new_string)
+    } else {
+        content.replacen(&params.old_string, &params.new_string, 1)
+    }
+}
+
 /// Edit: exact replacement of old_string → new_string.
 pub struct EditTool;
 
@@ -41,18 +51,25 @@ impl Tool for EditTool {
     fn is_edit_tool(&self, _input: &serde_json::Value) -> bool {
         true
     }
+    fn preview_diff(&self, input: &serde_json::Value, cwd: &std::path::Path) -> Option<String> {
+        let params: EditInput = parse_input(input).ok()?;
+        if params.old_string.is_empty() {
+            return None;
+        }
+        let content = std::fs::read_to_string(super::resolve_path(&params.file_path, cwd)).ok()?;
+        if !content.contains(&params.old_string) {
+            return None;
+        }
+        let replaced = replace(&content, &params);
+        super::diff::unified_diff(&params.file_path, &content, &replaced)
+    }
     async fn call(
         &self,
         input: serde_json::Value,
         ctx: &ToolContext,
     ) -> Result<ToolResult, ToolError> {
         let params: EditInput = parse_input(&input)?;
-        let path = std::path::PathBuf::from(&params.file_path);
-        let path = if path.is_absolute() {
-            path
-        } else {
-            ctx.cwd.join(path)
-        };
+        let path = super::resolve_path(&params.file_path, &ctx.cwd);
         if params.old_string.is_empty() {
             return Err(ToolError::failed("old_string must not be empty"));
         }
@@ -65,11 +82,11 @@ impl Tool for EditTool {
                 params.file_path
             )));
         }
-        let replaced = if params.replace_all {
-            content.replace(&params.old_string, &params.new_string)
-        } else {
-            content.replacen(&params.old_string, &params.new_string, 1)
-        };
+        let replaced = replace(&content, &params);
+        // The pre-image, before the bytes change (D91). A snapshot that fails
+        // is written down as a miss and skipped: an edit the user asked for
+        // does not wait on the ability to undo it.
+        ctx.rewind.snapshot(&path);
         std::fs::write(&path, &replaced)
             .map_err(|e| ToolError::failed(format!("cannot write {}: {e}", path.display())))?;
         let mut text = format!(
@@ -102,7 +119,8 @@ mod tests {
         let context = ToolContext {
             cwd: root.clone(),
             home: std::env::temp_dir(),
-            watch: crate::watch::WatchRegistry::new(),
+            watch: crate::app::AppCore::start(Default::default()).watch(),
+            live: Default::default(),
             http: reqwest::Client::new(),
             tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), "test")),
             hooks: Default::default(),
@@ -110,6 +128,7 @@ mod tests {
             expand_tasks: tokio::sync::watch::channel(false).0,
             ask_question: std::sync::Arc::new(|_t, _q, _o| Box::pin(async { None })),
             instance: None,
+            rewind: Default::default(),
         };
 
         EditTool
@@ -145,7 +164,8 @@ mod tests {
                 &ToolContext {
                     cwd: Default::default(),
                     home: std::env::temp_dir(),
-                    watch: crate::watch::WatchRegistry::new(),
+                    watch: crate::app::AppCore::start(Default::default()).watch(),
+                    live: Default::default(),
                     http: reqwest::Client::new(),
                     tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(
                         &std::env::temp_dir(),
@@ -156,6 +176,7 @@ mod tests {
                     expand_tasks: tokio::sync::watch::channel(false).0,
                     ask_question: std::sync::Arc::new(|_t, _q, _o| Box::pin(async { None })),
                     instance: None,
+                    rewind: Default::default(),
                 },
             )
             .await
@@ -179,7 +200,8 @@ mod tests {
                 &ToolContext {
                     cwd: Default::default(),
                     home: std::env::temp_dir(),
-                    watch: crate::watch::WatchRegistry::new(),
+                    watch: crate::app::AppCore::start(Default::default()).watch(),
+                    live: Default::default(),
                     http: reqwest::Client::new(),
                     tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(
                         &std::env::temp_dir(),
@@ -190,6 +212,7 @@ mod tests {
                     expand_tasks: tokio::sync::watch::channel(false).0,
                     ask_question: std::sync::Arc::new(|_t, _q, _o| Box::pin(async { None })),
                     instance: None,
+                    rewind: Default::default(),
                 },
             )
             .await

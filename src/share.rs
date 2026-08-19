@@ -97,16 +97,45 @@ impl ShareDoc {
 
 /// The shares dir: ~/.local/share/bingo/shares (sibling of transcripts).
 pub fn shares_dir(home: &Path) -> PathBuf {
-    home.join(".local")
-        .join("share")
-        .join("bingo")
-        .join("shares")
+    crate::storage::shares_dir(home)
+}
+
+pub fn rename_session_sidecars(home: &Path, old: &str, new: &str) -> Result<(), ShareError> {
+    let dir = shares_dir(home);
+    std::fs::create_dir_all(&dir)?;
+    let old_lock_path = dir.join(format!("{old}.json.lock"));
+    let old_lock = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(&old_lock_path)?;
+    old_lock.lock()?;
+    for suffix in ["json", "json.bak", "json.tmp"] {
+        let old_path = dir.join(format!("{old}.{suffix}"));
+        if !old_path.exists() {
+            continue;
+        }
+        let new_path = dir.join(format!("{new}.{suffix}"));
+        std::fs::rename(old_path, new_path)?;
+    }
+    let new_lock_path = dir.join(format!("{new}.json.lock"));
+    let _ = std::fs::rename(&old_lock_path, &new_lock_path);
+    let path = dir.join(format!("{new}.json"));
+    if path.exists() {
+        let mut doc: ShareDoc = serde_json::from_str(&std::fs::read_to_string(&path)?)?;
+        doc.session = new.to_string();
+        std::fs::write(&path, serde_json::to_string_pretty(&doc)?)?;
+    }
+    drop(old_lock);
+    Ok(())
 }
 
 /// Per-session shared-document store (Session holds an Arc; sub-sessions share it via the registry).
 pub struct ShareStore {
     path: PathBuf,
     inner: Mutex<ShareDoc>,
+    save_lock: Mutex<()>,
 }
 
 impl ShareStore {
@@ -132,6 +161,7 @@ impl ShareStore {
         Ok(Arc::new(Self {
             path: path.to_path_buf(),
             inner: Mutex::new(doc),
+            save_lock: Mutex::new(()),
         }))
     }
 
@@ -197,12 +227,22 @@ impl ShareStore {
 
     /// Atomic write: tmp file + rename (readers see either the old or the new document).
     pub fn save(&self) -> Result<(), ShareError> {
-        let json = serde_json::to_string_pretty(&*self.lock())?;
+        let _save_guard = self.save_lock.lock().unwrap_or_else(|e| e.into_inner());
+        let doc = self.lock();
+        let json = serde_json::to_string_pretty(&*doc)?;
         if let Some(parent) = self.path.parent()
             && !parent.as_os_str().is_empty()
         {
             std::fs::create_dir_all(parent)?;
         }
+        let lock_path = self.path.with_extension("json.lock");
+        let lock_file = std::fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(&lock_path)?;
+        lock_file.lock()?;
         let tmp = self.path.with_extension("json.tmp");
         std::fs::write(&tmp, json)?;
         std::fs::rename(&tmp, &self.path)?;
@@ -213,6 +253,71 @@ impl ShareStore {
     pub fn persist(&self) {
         if let Err(e) = self.save() {
             eprintln!("[bingo] warning: share save failed: {e}");
+        }
+    }
+}
+
+/// Where a share document's disk writes happen.
+///
+/// The session actor updates the document in memory — a lock held for the length
+/// of a `push` — and then asks for a save. The write itself happens here, on a
+/// thread of its own, because the actor is the process's one ordering point and
+/// must never be found waiting on a file. A burst of changes coalesces into one
+/// write, which is also why this is a queue rather than a spawn per change.
+pub struct ShareSaver {
+    requests: std::sync::mpsc::Sender<SaveRequest>,
+}
+
+enum SaveRequest {
+    Save,
+    // Nothing in a running session asks; the tests that assert on the file do.
+    #[cfg_attr(not(test), allow(dead_code))]
+    /// Answered once the write that follows it has happened. The actor hands
+    /// this channel over rather than waiting on it — a barrier for whoever wants
+    /// one, never a pause in the session.
+    Flush(tokio::sync::oneshot::Sender<()>),
+}
+
+impl ShareSaver {
+    pub fn spawn(store: Arc<ShareStore>) -> Self {
+        let (requests, pending) = std::sync::mpsc::channel::<SaveRequest>();
+        // Named for the same reason the actor's thread is: a stack in a crash
+        // report should say whose work it was.
+        let _ = std::thread::Builder::new()
+            .name("bingo-share".to_string())
+            .spawn(move || {
+                while let Ok(request) = pending.recv() {
+                    // Everything asked for while the last write was running is
+                    // answered by the next one: the document is a snapshot, not
+                    // a log.
+                    let mut waiting = Vec::new();
+                    let mut queued = Some(request);
+                    while let Some(request) = queued.take() {
+                        if let SaveRequest::Flush(ack) = request {
+                            waiting.push(ack);
+                        }
+                        queued = pending.try_recv().ok();
+                    }
+                    store.persist();
+                    for ack in waiting {
+                        let _ = ack.send(());
+                    }
+                }
+            });
+        Self { requests }
+    }
+
+    /// Ask for the document as it now stands to reach the disk.
+    pub fn save(&self) {
+        let _ = self.requests.send(SaveRequest::Save);
+    }
+
+    /// Ask, and be told when it has.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn flush(&self, ack: tokio::sync::oneshot::Sender<()>) {
+        if self.requests.send(SaveRequest::Flush(ack)).is_err() {
+            // The writer is gone; nothing more will be written and the caller
+            // learns it from the dropped channel.
         }
     }
 }
@@ -314,7 +419,8 @@ pub fn open_in_browser(target: &str) -> Result<(), ShareError> {
 /// - `SendMessage` → appends a user message to that agent's history
 /// - `AgentControl stop/delete` → state=stopped
 /// - `Channel create` → ChannelShare metadata (members include main/user)
-/// - `Post` → a channel message (from=main, seq increments)
+/// - `Post` (pre-D98; `SendMessage(to: "#room")` since) → a channel message
+///   (from=main, seq increments)
 pub fn derive_share_doc(session: &str, messages: &[Message]) -> ShareDoc {
     let mut doc = ShareDoc::new(session.to_string());
     let mut agent_index: HashMap<String, usize> = HashMap::new();
@@ -444,6 +550,7 @@ pub fn derive_share_doc(session: &str, messages: &[Message]) -> ShareDoc {
                             from: "main".to_string(),
                             text: text.to_string(),
                             at: 0,
+                            kind: crate::channels::MessageKind::Said,
                         });
                     }
                 }
@@ -455,11 +562,17 @@ pub fn derive_share_doc(session: &str, messages: &[Message]) -> ShareDoc {
 }
 
 /// Resolve the transcript by session key (/resume semantics: substring match, newest first);
-/// without a key, take the newest session. On a miss, the error lists the available sessions (first 5, to avoid spam).
+/// without a key, take the newest session that was actually *used* (D158) — a
+/// transcript opens when its session starts (D155), so the newest file can be an
+/// empty launch-and-quit, and there is nothing in it to share. Same filter as
+/// `--continue`. On a miss, the error lists the available sessions (first 5, to avoid spam).
 pub fn resolve_transcript(home: &Path, key: Option<&str>) -> Result<Transcript, ShareError> {
     let all = crate::transcript::list(home)?;
     match key {
-        None => all.into_iter().next().ok_or(ShareError::NoSessions),
+        None => all
+            .into_iter()
+            .find(|held| held.line_count().unwrap_or(0) > 0)
+            .ok_or(ShareError::NoSessions),
         Some(key) => {
             let names: Vec<String> = all.iter().map(|t| t.name()).collect();
             all.into_iter()
@@ -519,9 +632,31 @@ mod tests {
                 from: "scout".into(),
                 text: "hello everyone".into(),
                 at: 0,
+                kind: crate::channels::MessageKind::Said,
             },
         );
         store
+    }
+
+    #[test]
+    fn rename_session_sidecars_moves_snapshot_and_updates_key() {
+        let home = temp_dir("rename-sidecars");
+        let old_path = shares_dir(&home).join("old.json");
+        let store = sample_store(&old_path);
+        store.persist();
+        let old_backup = shares_dir(&home).join("old.json.bak");
+        std::fs::write(&old_backup, "backup").unwrap();
+
+        rename_session_sidecars(&home, "old", "new").unwrap();
+
+        assert!(!old_path.exists());
+        assert!(!old_backup.exists());
+        assert!(shares_dir(&home).join("new.json.bak").exists());
+        let reloaded = ShareStore::load_or_create(&shares_dir(&home).join("new.json"))
+            .unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(reloaded.snapshot().session, "new");
+        assert_eq!(reloaded.snapshot().agents.len(), 1);
+        let _ = std::fs::remove_dir_all(home);
     }
 
     #[test]
@@ -627,6 +762,7 @@ mod tests {
                 from: "a".into(),
                 text: "t".into(),
                 at: 0,
+                kind: crate::channels::MessageKind::Said,
             },
         );
         let doc = store.snapshot();
@@ -646,6 +782,7 @@ mod tests {
                 from: "x".into(),
                 text: "y".into(),
                 at: 0,
+                kind: crate::channels::MessageKind::Said,
             },
         );
         assert_eq!(store.snapshot().channels.len(), 1);
@@ -898,15 +1035,29 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(1100));
         let t_b = crate::transcript::create(&home, &root).unwrap_or_else(|e| panic!("{e}"));
         let _ = t_b.append(&msg("b"));
-        // No key: take the newest (b was created later, so it is newer).
+        // A launch-and-quit leaves the newest file behind, opened at session
+        // start (D155) and never written. No key skips it (D158): there is
+        // nothing in it to share — same filter as `--continue`.
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        let t_empty = crate::transcript::create(&home, &root).unwrap_or_else(|e| panic!("{e}"));
+        t_empty.activate().unwrap_or_else(|e| panic!("{e}"));
+        // No key: the newest *used* session (b was created later than a).
         let latest = resolve_transcript(&home, None).unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(latest.name(), t_b.name());
-        // Substring match (/resume semantics: list is newest-first by mtime; find takes the first hit).
+        // Substring match (/resume semantics: list is newest-first by mtime; find
+        // takes the first hit, and an explicit key is NOT filtered for use — the
+        // user names what they name, empty or not). The fragment is t_b's
+        // trailing timestamp, the one part the newer empty file cannot shadow.
         let hit = resolve_transcript(&home, Some(&t_a.name())).unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(hit.name(), t_a.name());
-        let fragment =
-            resolve_transcript(&home, Some(&t_b.name()[..8])).unwrap_or_else(|e| panic!("{e}"));
+        let b_name = t_b.name();
+        let fragment = resolve_transcript(&home, Some(&b_name[b_name.len() - 6..]))
+            .unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(fragment.name(), t_b.name());
+        // And the empty one is reachable by its own name — skipped only by default.
+        let named =
+            resolve_transcript(&home, Some(&t_empty.name())).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(named.name(), t_empty.name());
         // A miss errors.
         assert!(matches!(
             resolve_transcript(&home, Some("nope")),

@@ -497,6 +497,13 @@ impl TeamTool {
                 summary.spawned.join(", ")
             ));
         }
+        if !summary.refreshed.is_empty() {
+            out.push(format!(
+                "refreshed {} already running (definition re-read, history kept): {}",
+                summary.refreshed.len(),
+                summary.refreshed.join(", ")
+            ));
+        }
         if !summary.reused.is_empty() {
             out.push(format!(
                 "reused {} already running: {}",
@@ -525,7 +532,7 @@ impl TeamTool {
         };
         let mut stopped = Vec::new();
         for (_, m) in tree.members() {
-            let Ok((watch, _dropped)) = self.session.agents.stop(&m.name) else {
+            let Ok((watch, _dropped)) = self.session.agents.stop(&m.name).now() else {
                 continue;
             };
             if let Some(id) = watch {
@@ -674,8 +681,9 @@ impl Tool for TeamTool {
          other directories, so one session manages a whole org chart; every action here spans it. status reads \
          every team's blueprint, rooms, member runtime states and the definitions available to draft with; \
          validate checks the chart against them; start opens the rooms and spawns every member in the tree \
-         (idempotent — members already up are reused, and each one restores its memory for its own team's \
-         directory and branch); stop takes them down keeping their histories; save writes this directory's \
+         (idempotent — members already up are kept, re-reading their definition when it has changed so an \
+         edited member picks it up with its history intact, and each one restores its memory for its own \
+         team's directory and branch); stop takes them down keeping their histories; save writes this directory's \
          blueprint (whole document: send the complete roster, since whoever you leave out is removed — child \
          teams are the exception and are always carried unchanged). Every action except status and validate is a \
          change the user confirms in person before it happens, so propose it in your reply first and say why — \
@@ -749,6 +757,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         let project = root.join("proj");
         std::fs::create_dir_all(project.join(".bingo/agents")).unwrap_or_default();
+        let core = crate::app::AppCore::start(Default::default());
         let session = Arc::new(Session {
             client: crate::api::client::Client::new("k".into(), "http://x".into()),
             runtime: crate::query::Runtime::new("m".into(), None, Default::default()),
@@ -761,11 +770,18 @@ mod tests {
             user_config_dir: root.join("home").join(".config"),
             quiet: true,
             compact_failures: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            watch: crate::watch::WatchRegistry::new(),
+            core: core.clone(),
+            watch: core.watch(),
             tasks: Arc::new(crate::tasks::TaskStore::new(&root, "t")),
             expand_tasks: tokio::sync::watch::channel(false).0,
-            agents: crate::agents::AgentRegistry::new(),
-            channels: crate::channels::ChannelRegistry::new(Default::default()),
+            agents: core.agents(),
+            channels: core.channels(),
+            turns: core.turns(),
+            queue: core.queue(),
+            submit: core.submit(),
+            interactions: core.interactions(),
+            mail: core.mail(),
+            operations: core.operations(),
             instance: None,
             attachments: crate::api::image::Attachments::new(),
         });
@@ -777,6 +793,7 @@ mod tests {
             cwd: cwd.to_path_buf(),
             home: session.home.clone(),
             watch: session.watch.clone(),
+            live: Default::default(),
             http: reqwest::Client::new(),
             tasks: session.tasks.clone(),
             hooks: Default::default(),
@@ -784,6 +801,7 @@ mod tests {
             expand_tasks: tokio::sync::watch::channel(false).0,
             ask_question: Arc::new(|_t, _q, _o| Box::pin(async { None })),
             instance: None,
+            rewind: Default::default(),
         }
     }
 

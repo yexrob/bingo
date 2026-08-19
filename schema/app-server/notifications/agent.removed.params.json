@@ -1,0 +1,19 @@
+{
+  "$id": "urn:bingo:app-server:v1:agent.removed.params",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "description": "One notification's params: the event header, then the body's own fields.",
+  "properties": {
+    "agentId": {
+      "$ref": "../definitions.json#/definitions/AgentId"
+    },
+    "event": {
+      "$ref": "../definitions.json#/definitions/EventMeta"
+    }
+  },
+  "required": [
+    "agentId",
+    "event"
+  ],
+  "title": "NotificationParams_for_AgentRemoved",
+  "type": "object"
+}

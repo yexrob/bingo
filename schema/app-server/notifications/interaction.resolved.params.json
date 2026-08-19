@@ -1,0 +1,38 @@
+{
+  "$id": "urn:bingo:app-server:v1:interaction.resolved.params",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "description": "One notification's params: the event header, then the body's own fields.",
+  "properties": {
+    "conversationId": {
+      "$ref": "../definitions.json#/definitions/ConversationId"
+    },
+    "decision": {
+      "$ref": "../definitions.json#/definitions/InteractionDecision"
+    },
+    "event": {
+      "$ref": "../definitions.json#/definitions/EventMeta"
+    },
+    "interactionId": {
+      "$ref": "../definitions.json#/definitions/InteractionId"
+    },
+    "itemId": {
+      "anyOf": [
+        {
+          "$ref": "../definitions.json#/definitions/ItemId"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "The ordered item the resolution committed, before execution continued."
+    }
+  },
+  "required": [
+    "conversationId",
+    "decision",
+    "event",
+    "interactionId"
+  ],
+  "title": "NotificationParams_for_InteractionResolved",
+  "type": "object"
+}

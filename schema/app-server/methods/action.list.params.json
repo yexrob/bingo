@@ -1,0 +1,19 @@
+{
+  "$id": "urn:bingo:app-server:v1:action.list.params",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "properties": {
+    "originConversationId": {
+      "anyOf": [
+        {
+          "$ref": "../definitions.json#/definitions/ConversationId"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Availability is answered for this page; absent answers for main."
+    }
+  },
+  "title": "ActionListParams",
+  "type": "object"
+}

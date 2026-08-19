@@ -1,0 +1,14 @@
+{
+  "$id": "urn:bingo:app-server:v1:session.resume.params",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "properties": {
+    "locator": {
+      "$ref": "../definitions.json#/definitions/SessionLocator"
+    }
+  },
+  "required": [
+    "locator"
+  ],
+  "title": "SessionResumeParams",
+  "type": "object"
+}

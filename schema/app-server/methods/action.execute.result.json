@@ -1,0 +1,19 @@
+{
+  "$id": "urn:bingo:app-server:v1:action.execute.result",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "properties": {
+    "disposition": {
+      "allOf": [
+        {
+          "$ref": "../definitions.json#/definitions/SubmitDisposition"
+        }
+      ],
+      "description": "The same dispositions a submission gets: an action asked for while a turn is busy queues like any other input."
+    }
+  },
+  "required": [
+    "disposition"
+  ],
+  "title": "ActionExecuteResult",
+  "type": "object"
+}

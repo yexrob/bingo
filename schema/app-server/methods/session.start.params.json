@@ -1,0 +1,46 @@
+{
+  "$id": "urn:bingo:app-server:v1:session.start.params",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "properties": {
+    "cwd": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "model": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "permissionMode": {
+      "anyOf": [
+        {
+          "$ref": "../definitions.json#/definitions/PermissionMode"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "provider": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "thinking": {
+      "anyOf": [
+        {
+          "$ref": "../definitions.json#/definitions/ThinkingLevel"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "title": "SessionStartParams",
+  "type": "object"
+}

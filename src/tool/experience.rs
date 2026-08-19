@@ -253,7 +253,7 @@ impl Tool for ExperienceCommitTool {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ExperienceQueryInput {
-    /// Search text: token-matched against trigger keywords (case-insensitive).
+    /// Search text: BM25-matched against triggers, summaries, steps and notes.
     pub query: String,
     /// Maximum number of results (default 5).
     #[serde(default)]
@@ -273,8 +273,8 @@ const EXPERIENCE_QUERY_PROMPT: &str = r#"Use this tool to search the current pro
 
 ## Behavior
 
-- Matches if the query text contains any trigger keyword (case-insensitive substring match)
-- Active entries rank above stale/degraded; observed helpful/harmful outcomes rank before the legacy commit count
+- BM25 relevance over trigger keywords, summary, steps and notes (English word stems and CJK bigrams both match)
+- Equal relevance breaks ties the old way: active entries above stale/degraded, observed helpful/harmful outcomes before the legacy commit count
 - Returns full content plus outcome counters and append-only outcome history"#;
 
 #[async_trait]
@@ -527,7 +527,8 @@ mod tests {
     fn ctx_at(home: &Path, cwd: &std::path::Path) -> ToolContext {
         ToolContext {
             cwd: cwd.to_path_buf(),
-            watch: crate::watch::WatchRegistry::new(),
+            watch: crate::app::AppCore::start(Default::default()).watch(),
+            live: Default::default(),
             http: reqwest::Client::new(),
             tasks: Arc::new(crate::tasks::TaskStore::new(home, "test")),
             hooks: Settings::default().hooks,
@@ -536,6 +537,7 @@ mod tests {
             ask_question: Arc::new(|_t, _q, _o| Box::pin(async { None })),
             home: home.to_path_buf(),
             instance: None,
+            rewind: Default::default(),
         }
     }
 

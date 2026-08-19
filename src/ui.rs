@@ -1,16 +1,13 @@
 //! Renderer-agnostic contract between the agent core and any front end.
 //!
 //! Nothing here may depend on a terminal library: [`UiEvent`] and the dialog
-//! transport types are what a TUI, a GUI or a test harness all consume, and
-//! [`tui_hooks`] is the adapter that turns [`UiHooks`] callbacks into channel
-//! traffic. Front-end implementations live outside this module.
+//! transport types are what a TUI, a GUI or a test harness all consume. Front-end
+//! implementations live outside this module, and since D154 so does every host a
+//! run reports through — the console submits, and the core's engine runs it.
 
-use std::sync::Arc;
+use tokio::sync::mpsc;
 
-use tokio::sync::{mpsc, oneshot};
-
-use crate::api::contract::StreamEvent;
-use crate::query::{ToolCallDone, UiHooks};
+use crate::query::ToolCallDone;
 use crate::watch::WatchState;
 
 /// A loaded image payload: target cell size plus renderer-ready PNG bytes.
@@ -21,19 +18,33 @@ pub struct ImageMeta {
     pub bytes: Vec<u8>,
 }
 
-/// Permission prompt: request + result receipt.
-pub type AskRequest = (PermissionRequest, oneshot::Sender<DialogAction>);
-
-/// Permission dialog result.
+/// What approving a permission request would actually do, rendered above the
+/// options. The prompt names the tool; this shows the act.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DialogAction {
-    /// Option `index` (0-based) confirmed.
-    Confirm(usize),
-    /// AskUserQuestion's Other free-form input submitted.
-    Answer(String),
-    /// Dialog cancelled with Esc.
-    Cancel,
+pub enum AskPreview {
+    /// The shell command that would run.
+    Command(String),
+    /// A dry-run unified diff of the file change that would be made — computed
+    /// without touching the file.
+    Diff(String),
 }
+
+/// Which dialog shape a request wants.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AskKind {
+    /// AskUserQuestion: the model's own options plus an Other free-text row.
+    #[default]
+    Question,
+    /// The permission gate: the three-option approval shape, whose refusal
+    /// option opens a feedback row instead of resolving immediately.
+    Permission,
+}
+
+/// Approval options, in CC's wording. Option 2 is only offered when a session
+/// rule could actually be installed ([`PermissionRequest::scope`]).
+pub const ASK_YES: &str = "Yes";
+pub const ASK_YES_SESSION: &str = "Yes, and don't ask again this session";
+pub const ASK_NO: &str = "No, and tell bingo what to do differently (esc)";
 
 /// Permission/question block to display.
 #[derive(Debug, Clone)]
@@ -46,8 +57,17 @@ pub struct PermissionRequest {
     pub options: Vec<String>,
     /// Description of options[i] (CC Select sub-line, dimmed).
     pub descriptions: Vec<Option<String>>,
-    /// AskUserQuestion: a "Other" free-form input is appended automatically (CC behavior).
+    /// A free-form input row is open: AskUserQuestion's "Other" (set from the
+    /// start), or a permission prompt's refusal feedback (opened on demand).
     pub free_text: bool,
+    /// Dialog shape.
+    pub kind: AskKind,
+    /// What approving would do (permission prompts).
+    pub preview: Option<AskPreview>,
+    /// The session-scoped allow rule the "don't ask again" option installs.
+    /// `None`: that option is not offered, because nothing could make the gate
+    /// stop asking about this call.
+    pub scope: Option<String>,
 }
 
 impl PermissionRequest {
@@ -62,30 +82,105 @@ impl PermissionRequest {
             options,
             descriptions: Vec::new(),
             free_text: false,
+            kind: AskKind::Question,
+            preview: None,
+            scope: None,
         }
+    }
+
+    /// Index of the "don't ask again this session" option, when it is offered.
+    pub fn session_option(&self) -> Option<usize> {
+        (self.kind == AskKind::Permission && self.scope.is_some()).then_some(1)
+    }
+
+    /// Index of the refusal option (always last on a permission prompt).
+    pub fn refusal_option(&self) -> Option<usize> {
+        (self.kind == AskKind::Permission).then(|| self.options.len().saturating_sub(1))
+    }
+}
+
+/// Which conversation an event, or a page, belongs to.
+///
+/// It lives in the application core now (B3): a conversation is the core's
+/// resource, and a key that named one thing here and another there would be two
+/// vocabularies for one idea. Re-exported because every front end still reaches
+/// it through this module.
+pub use crate::app::conversation::ConvKey;
+
+/// One [`UiEvent`] and the conversation that produced it.
+#[derive(Debug, Clone)]
+pub struct Addressed {
+    pub to: ConvKey,
+    pub event: UiEvent,
+}
+
+/// A [`UiEvent`] sender bound to one conversation.
+///
+/// The binding is what makes a subagent's stream reach the same handler main's
+/// does: the producer says what happened, the sink says whose turn it happened
+/// in, and nothing downstream has to guess.
+#[derive(Debug, Clone)]
+pub struct EventSink {
+    to: ConvKey,
+    tx: mpsc::UnboundedSender<Addressed>,
+}
+
+impl EventSink {
+    pub fn new(to: ConvKey, tx: mpsc::UnboundedSender<Addressed>) -> Self {
+        Self { to, tx }
+    }
+
+    /// Re-point at another conversation over the same channel.
+    pub fn bound_to(&self, to: ConvKey) -> Self {
+        Self {
+            to,
+            tx: self.tx.clone(),
+        }
+    }
+
+    /// A closed channel means the console is gone; a turn still finishing then
+    /// has nobody to tell, which is not an error.
+    pub fn send(&self, event: UiEvent) {
+        let _ = self.tx.send(Addressed {
+            to: self.to.clone(),
+            event,
+        });
     }
 }
 
 /// Event channel from the agent task to components.
 #[derive(Debug, Clone)]
 pub enum UiEvent {
+    /// One input item of the turn that is about to start: the prose the core
+    /// recorded, drawn as the user's own row. It arrives before
+    /// [`TurnStart`](UiEvent::TurnStart) because the item is ordered before the
+    /// turn, and a turn with no input of its own (the digest wake) sends none.
+    Submitted(String),
     TurnStart,
+    /// Discard all live output and tool rows produced by the current model-response attempt before
+    /// a transparent stream reconnect. Persisted history is unchanged because the attempt has not
+    /// committed yet.
+    StreamRetry,
     /// All tool calls in a batch finished (one query loop round closed).
     RoundEnd,
     TextDelta(String),
     ThinkingDelta(String),
-    ContextUsage {
-        used: u64,
-        window: u64,
-    },
+    ContextUsage(crate::context_usage::ContextUsage),
     /// Cumulative output token count for the current model response while it streams.
-    OutputTokens(u64),
+    /// `authoritative`: the end-of-round usage total (message_delta), an accounting
+    /// correction rather than freshly streamed output — the rate sampler must not
+    /// read the jump as an instantaneous burst.
+    OutputTokens {
+        tokens: u64,
+        authoritative: bool,
+    },
     ToolStart {
         name: String,
     },
     /// Tool block fully received while streaming (including input): the fold decision point.
     /// standalone=true: non-model tools like the `!` command — summary only, not part of a fold group.
     ToolReady {
+        tool_call_id: String,
         name: String,
         input: serde_json::Value,
         standalone: bool,
@@ -100,6 +195,15 @@ pub enum UiEvent {
         duration_ms: u64,
         payload: Option<serde_json::Value>,
         signal: Option<String>,
+        /// This transition put a task notification in **main's** queue (D106):
+        /// the flow prints one line when one arrives, and only the registry can
+        /// answer whether one did.
+        notifies_main: bool,
+        /// The run was born from an `Agent` call (D114). The flow's whitelist:
+        /// only a dispatched run staples a row into a streaming turn or prints
+        /// the dim `●` notice; deliveries and continuations stay in the tree
+        /// and the dialog.
+        dispatch: bool,
     },
     /// `/model` secondary selector: a provider's model list finished fetching asynchronously
     /// (appended to the menu).
@@ -117,6 +221,39 @@ pub enum UiEvent {
         meta: Option<ImageMeta>,
     },
     TurnEnd,
+    /// A direct message *landing in this conversation's inbox* — the moment it
+    /// was sent, not the moment the receiver got round to reading it (D135).
+    ///
+    /// [`Inbound`](UiEvent::Inbound) is the reading: it fires when a run absorbs
+    /// its prompt, which for a busy instance is its next tool barrier, minutes
+    /// later. A user watching that instance could see what *they* had asked for
+    /// (the console echoed it at send time) and nothing of what main had. So the
+    /// echo moves to the one place every sender passes through
+    /// ([`crate::agents::AgentHandle::deliver`]) and covers all of them, and
+    /// the absorbed prompt's DM lines are dropped as the repeat they are.
+    Mail {
+        from: String,
+        text: String,
+    },
+    /// The running turn took these queued messages into its own context at a tool
+    /// barrier (D83). They are already in the request, so the composer must drop them
+    /// from its queue and show them in the flow where the model read them — the turn
+    /// side is the authority here, and a pull-back racing this event loses.
+    Steered {
+        items: Vec<crate::app::queue::SteerItem>,
+    },
+    /// A foreground shell command's output so far (D84): the last few lines, dim,
+    /// under the running tool row, replaced on every sample. No tool id travels with
+    /// it — Phase 2 runs non-concurrency-safe tools serially, so exactly one
+    /// foreground command can be in flight, and the renderer finds it the same way
+    /// [`UiEvent::ToolDone`] does. The rows live in the redrawn tail region and never
+    /// reach scrollback: a running tool row keeps its message unsettled.
+    BashTail(crate::live::LiveTail),
+    /// The user interrupted the turn. The string is exactly what the transcript
+    /// recorded (`crate::query::INTERRUPT_MARKER` / `…_TOOL_USE`), echoed into the
+    /// message flow so the screen and the model read the same sentence — a transient
+    /// warning would have expired while the marker stayed in the history.
+    Interrupted(String),
     /// Non-fatal warning (e.g. MCP connection failure), shown above the input
     /// box; expires after `WARNING_TTL` (10s, filtered at render time).
     Warning(String),
@@ -128,6 +265,9 @@ pub enum UiEvent {
     /// Informational slash output (async producers): persists until the next
     /// input or Esc.
     SlashInfo(String),
+    /// A rewind that finished off the key path (D91): its state line, for the
+    /// flow rather than for a tier that expires.
+    RewindDone(String),
     /// Pin/replace a persistent panel (login flows, long operations): shown
     /// above the prompt until `Unpin` with the same id.
     PinPanel {
@@ -144,146 +284,70 @@ pub enum UiEvent {
     /// triggering context — both are explicitly carried by the **producer** when emitting
     /// (not inferred by the render layer); level and context are guaranteed consistent by §4.4.
     Error {
-        code: &'static str,
+        code: String,
         msg: String,
         level: crate::error::ErrorLevel,
         context: crate::error::ErrorContext,
     },
 }
 
-/// Permission prompt backed by the TUI modal. Shared by `tui_hooks` and the subagent prompt
-/// surface attached to the registry, so a subagent's request lands in the same modal queue.
-pub fn modal_ask(asks: mpsc::UnboundedSender<AskRequest>) -> Arc<crate::query::AskFn> {
-    Arc::new(move |tool_name, reason| {
-        let request = PermissionRequest::new(
-            format!("Allow running {tool_name}"),
-            reason,
-            vec!["Allow".to_string(), "Deny".to_string()],
-        );
-        let (tx, rx) = oneshot::channel();
-        if asks.send((request, tx)).is_err() {
-            return Box::pin(async { false });
-        }
-        Box::pin(async move { matches!(rx.await, Ok(DialogAction::Confirm(0))) })
-    })
-}
-
-/// Wire query's UiHooks to the TUI channels.
-pub fn tui_hooks(
-    events: mpsc::UnboundedSender<UiEvent>,
-    asks: mpsc::UnboundedSender<AskRequest>,
-) -> UiHooks {
-    let tool_events = events.clone();
-    let ready_events = events.clone();
-    let round_events = events.clone();
-    let context_events = events.clone();
-    let warn_events = events.clone();
-    let ask_asks = asks.clone();
-    let round_tokens = Arc::new(std::sync::Mutex::new((0u64, None::<usize>)));
-    let event_round_tokens = round_tokens.clone();
-    UiHooks {
-        on_event: Box::new(move |event| match event {
-            StreamEvent::TextDelta { index, text } => {
-                let tokens = {
-                    let mut state = event_round_tokens.lock().unwrap_or_else(|e| e.into_inner());
-                    if state.1.is_some_and(|previous| previous > *index) {
-                        state.0 = 0;
-                    }
-                    state.1 = Some(*index);
-                    state.0 = state.0.saturating_add(text.chars().count() as u64);
-                    state.0.div_ceil(4)
-                };
-                let _ = events.send(UiEvent::TextDelta(text.clone()));
-                let _ = events.send(UiEvent::OutputTokens(tokens));
-            }
-            StreamEvent::ThinkingDelta { index, thinking } => {
-                let tokens = {
-                    let mut state = event_round_tokens.lock().unwrap_or_else(|e| e.into_inner());
-                    if state.1.is_some_and(|previous| previous > *index) {
-                        state.0 = 0;
-                    }
-                    state.1 = Some(*index);
-                    state.0 = state.0.saturating_add(thinking.chars().count() as u64);
-                    state.0.div_ceil(4)
-                };
-                let _ = events.send(UiEvent::ThinkingDelta(thinking.clone()));
-                let _ = events.send(UiEvent::OutputTokens(tokens));
-            }
-            StreamEvent::InputJsonDelta {
-                index,
-                partial_json,
-            } => {
-                let tokens = {
-                    let mut state = event_round_tokens.lock().unwrap_or_else(|e| e.into_inner());
-                    if state.1.is_some_and(|previous| previous > *index) {
-                        state.0 = 0;
-                    }
-                    state.1 = Some(*index);
-                    state.0 = state.0.saturating_add(partial_json.chars().count() as u64);
-                    state.0.div_ceil(4)
-                };
-                let _ = events.send(UiEvent::OutputTokens(tokens));
-            }
-            StreamEvent::ToolUseStart { name, .. } => {
-                let _ = events.send(UiEvent::ToolStart { name: name.clone() });
-            }
-            StreamEvent::StopReason {
-                output_tokens: Some(tokens),
+/// One open prompt, as the dialog draws it.
+///
+/// The prompt itself is the core's since B3 — the actor holds the answer and
+/// enforces the confirmation guard. This is its render model, and the conversion
+/// below is the only thing that knows both shapes.
+impl PermissionRequest {
+    pub fn of(interaction: &crate::app::snapshot::Interaction) -> Self {
+        use crate::app::snapshot::{InteractionPreview, InteractionPrompt};
+        match &interaction.prompt {
+            InteractionPrompt::Permission {
+                title,
+                reason,
+                preview,
+                session_scope,
                 ..
             } => {
-                let mut state = event_round_tokens.lock().unwrap_or_else(|e| e.into_inner());
-                state.0 = tokens.saturating_mul(4);
-                let _ = events.send(UiEvent::OutputTokens(*tokens));
-            }
-            _ => {}
-        }),
-        on_context_usage: Arc::new(move |used, window| {
-            let _ = context_events.send(UiEvent::ContextUsage { used, window });
-        }),
-        on_tool_ready: Box::new(move |name, input, standalone| {
-            let _ = ready_events.send(UiEvent::ToolReady {
-                name,
-                input,
-                standalone,
-            });
-        }),
-        on_tool_done: Box::new(move |done| {
-            let _ = tool_events.send(UiEvent::ToolDone(crate::query::ToolCallDone {
-                name: done.name.clone(),
-                summary: done.summary.clone(),
-                output: done.output.clone(),
-                is_error: done.is_error,
-                diff: done.diff.clone(),
-                duration_ms: done.duration_ms,
-            }));
-        }),
-        on_round_end: Box::new(move || {
-            *round_tokens.lock().unwrap_or_else(|e| e.into_inner()) = (0, None);
-            let _ = round_events.send(UiEvent::RoundEnd);
-        }),
-        on_warning: Box::new(move |message| {
-            let _ = warn_events.send(UiEvent::Warning(message));
-        }),
-        ask: modal_ask(ask_asks),
-        ask_question: Arc::new(move |title, question, options| {
-            let mut request = PermissionRequest::new(title, question, Vec::new());
-            request.free_text = true;
-            request.options = options.iter().map(|(l, _d)| l.clone()).collect();
-            request.descriptions = options.into_iter().map(|(_l, d)| d).collect();
-            let (tx, rx) = oneshot::channel();
-            if asks.send((request, tx)).is_err() {
-                return Box::pin(async { None });
-            }
-            Box::pin(async move {
-                match rx.await {
-                    Ok(DialogAction::Confirm(index)) => {
-                        Some(crate::query::AskAnswer::Option(index))
-                    }
-                    Ok(DialogAction::Answer(text)) => Some(crate::query::AskAnswer::Other(text)),
-                    Ok(DialogAction::Cancel) | Err(_) => None,
+                let mut options = vec![ASK_YES.to_string()];
+                if session_scope.is_some() {
+                    options.push(ASK_YES_SESSION.to_string());
                 }
-            })
-        }),
+                options.push(ASK_NO.to_string());
+                let mut request =
+                    Self::new(title.clone(), reason.clone().unwrap_or_default(), options);
+                request.kind = AskKind::Permission;
+                request.scope = session_scope.as_ref().map(|scope| scope.label.clone());
+                request.preview = preview.as_ref().map(|preview| match preview {
+                    InteractionPreview::Command { command } => AskPreview::Command(command.clone()),
+                    InteractionPreview::Diff { diff } => AskPreview::Diff(diff.clone()),
+                });
+                request
+            }
+            InteractionPrompt::Question {
+                title,
+                question,
+                options,
+                ..
+            } => {
+                let mut request = Self::new(title.clone(), question.clone(), Vec::new());
+                request.free_text = true;
+                request.options = options.iter().map(|option| option.label.clone()).collect();
+                request.descriptions = options
+                    .iter()
+                    .map(|option| option.description.clone())
+                    .collect();
+                request
+            }
+            InteractionPrompt::Confirmation {
+                title,
+                detail,
+                confirm_label,
+            } => {
+                let mut request =
+                    Self::new(title.clone(), detail.clone(), vec![confirm_label.clone()]);
+                request.kind = AskKind::Permission;
+                request
+            }
+        }
     }
 }
 
@@ -291,55 +355,50 @@ pub fn tui_hooks(
 mod tests {
     use super::*;
 
-    #[test]
-    fn tui_hooks_emit_live_token_samples_before_final_usage() {
-        let (events_tx, mut events_rx) = mpsc::unbounded_channel();
-        let (asks_tx, _asks_rx) = mpsc::unbounded_channel();
-        let mut ui = tui_hooks(events_tx, asks_tx);
-
-        (ui.on_context_usage)(12_345, 128_000);
-        assert!(matches!(
-            events_rx.try_recv(),
-            Ok(UiEvent::ContextUsage {
-                used: 12_345,
-                window: 128_000
-            })
-        ));
-
-        (ui.on_event)(&StreamEvent::TextDelta {
-            index: 0,
-            text: "abcdefghijkl".to_string(),
-        });
-        assert!(matches!(events_rx.try_recv(), Ok(UiEvent::TextDelta(_))));
-        assert!(matches!(events_rx.try_recv(), Ok(UiEvent::OutputTokens(3))));
-
-        (ui.on_event)(&StreamEvent::StopReason {
-            stop_reason: Some("end_turn".to_string()),
-            output_tokens: Some(10),
-        });
-        assert!(matches!(
-            events_rx.try_recv(),
-            Ok(UiEvent::OutputTokens(10))
-        ));
-    }
-
-    /// AskUserQuestion's TUI hook: requests go through the permission modal
-    /// (title/question/options); confirm → Some(index), Esc cancel → None.
+    /// AskUserQuestion's console host: the question becomes an interaction the
+    /// core holds, and the answer comes back through it.
     #[tokio::test]
     async fn ask_question_hook_maps_confirm_and_cancel() {
-        let (events_tx, _events_rx) = mpsc::unbounded_channel();
-        let (asks_tx, mut asks_rx) = mpsc::unbounded_channel();
-        let ui = tui_hooks(events_tx, asks_tx);
+        use crate::app::snapshot::{ActivationKind, InteractionDecision};
 
-        let fut = (ui.ask_question)(
+        let core = crate::app::AppCore::start(Default::default());
+        let interactions = core.interactions();
+        let ui = crate::engine::events::EngineHost::new(
+            crate::engine::events::EngineEvents::detached(),
+            crate::engine::events::EngineRequests {
+                ask: crate::app::interaction::permission_ask(interactions.clone(), ConvKey::Main),
+                ask_question: crate::app::interaction::question_ask(
+                    interactions.clone(),
+                    ConvKey::Main,
+                ),
+                steer: crate::query::no_steer(),
+                live: crate::live::LiveBash::detached(),
+            },
+        );
+
+        /// The prompt the core has open, once it does.
+        async fn opened(
+            interactions: &crate::app::interaction::InteractionHandle,
+        ) -> crate::app::interaction::Pending {
+            for _ in 0..200 {
+                if let Some(pending) = interactions.view().head() {
+                    return pending.clone();
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            }
+            panic!("the prompt never opened");
+        }
+
+        let fut = tokio::spawn((ui.requests.ask_question)(
             "Tech stack".to_string(),
             "Which library?".to_string(),
             vec![
                 ("A".to_string(), None),
                 ("B".to_string(), Some("faster".to_string())),
             ],
-        );
-        let (request, tx) = asks_rx.try_recv().expect("modal request was sent");
+        ));
+        let pending = opened(&interactions).await;
+        let request = PermissionRequest::of(&pending.interaction);
         assert_eq!(request.title, "Tech stack");
         assert_eq!(request.question, "Which library?");
         assert_eq!(request.options, vec!["A", "B"]);
@@ -347,31 +406,67 @@ mod tests {
             request.free_text,
             "AskUserQuestion requests carry Other free-text input"
         );
-        tx.send(DialogAction::Confirm(1)).unwrap();
         assert_eq!(
-            fut.await,
+            pending.remaining_guard(),
+            std::time::Duration::ZERO,
+            "a question has no confirmation guard: D81 is the permission gate's"
+        );
+        assert_eq!(
+            interactions
+                .respond(
+                    pending.interaction.id.clone(),
+                    ActivationKind::Keyboard,
+                    InteractionDecision::Answer {
+                        option_id: Some("1".to_string()),
+                        text: None,
+                    },
+                )
+                .await,
+            Ok(())
+        );
+        assert_eq!(
+            fut.await.unwrap_or_else(|error| panic!("{error}")),
             Some(crate::query::AskAnswer::Option(1)),
             "press 2 selects B"
         );
 
-        let fut = (ui.ask_question)(
+        let fut = tokio::spawn((ui.requests.ask_question)(
             "t".to_string(),
             "q?".to_string(),
             vec![("a".to_string(), None)],
-        );
-        let (_request, tx) = asks_rx.try_recv().expect("second modal request");
-        tx.send(DialogAction::Cancel).unwrap();
-        assert_eq!(fut.await, None, "Esc cancels → no answer");
-
-        let fut = (ui.ask_question)(
-            "t".to_string(),
-            "q?".to_string(),
-            vec![("a".to_string(), None)],
-        );
-        let (_request, tx) = asks_rx.try_recv().expect("third modal request");
-        tx.send(DialogAction::Answer("custom".into())).unwrap();
+        ));
+        let pending = opened(&interactions).await;
+        let _ = interactions
+            .respond(
+                pending.interaction.id,
+                ActivationKind::Keyboard,
+                InteractionDecision::Cancel,
+            )
+            .await;
         assert_eq!(
-            fut.await,
+            fut.await.unwrap_or_else(|error| panic!("{error}")),
+            None,
+            "Esc cancels → no answer"
+        );
+
+        let fut = tokio::spawn((ui.requests.ask_question)(
+            "t".to_string(),
+            "q?".to_string(),
+            vec![("a".to_string(), None)],
+        ));
+        let pending = opened(&interactions).await;
+        let _ = interactions
+            .respond(
+                pending.interaction.id,
+                ActivationKind::Keyboard,
+                InteractionDecision::Answer {
+                    option_id: None,
+                    text: Some("custom".to_string()),
+                },
+            )
+            .await;
+        assert_eq!(
+            fut.await.unwrap_or_else(|error| panic!("{error}")),
             Some(crate::query::AskAnswer::Other("custom".to_string())),
             "Other free-text answer is backfilled"
         );
