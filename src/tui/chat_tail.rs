@@ -620,9 +620,9 @@ impl super::Chat {
     ///
     /// The take is atomic because it happens inside the actor — whatever comes back
     /// is out of the queue and on its way to the model, so a pull-back racing it
-    /// has already lost. The console is told through `Steered`, which is where the
-    /// `↪` rows come from; B7 replaces that with the absorption events the core
-    /// already publishes.
+    /// has already lost. What the screen does about it is the core's to say:
+    /// `queue/itemAbsorbed` names the item the entry became, and the `↪` row is
+    /// drawn from that, in the one order everything else on the page is drawn in.
     ///
     /// A turn the core did not open steers nothing: there is no turn to absorb into.
     fn steering(
@@ -630,22 +630,14 @@ impl super::Chat {
         turn: Option<crate::app::ids::TurnId>,
     ) -> std::sync::Arc<crate::query::SteerFn> {
         let queue = self.session.queue.clone();
-        let events = self.events.clone();
         std::sync::Arc::new(move || {
             let queue = queue.clone();
-            let events = events.clone();
             let turn = turn.clone();
             Box::pin(async move {
                 let Some(turn) = turn else {
                     return Vec::new();
                 };
-                let items = queue.absorb(crate::ui::ConvKey::Main, turn).await;
-                if !items.is_empty() {
-                    events.send(UiEvent::Steered {
-                        items: items.clone(),
-                    });
-                }
-                items
+                queue.absorb(crate::ui::ConvKey::Main, turn).await
             })
         })
     }

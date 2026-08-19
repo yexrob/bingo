@@ -225,6 +225,36 @@ impl super::Chat {
                     );
                 }
             }
+            // The barrier took what was queued. The row is drawn from the item the
+            // entry became — the core commits it first and names it here, so the
+            // `↪` lands exactly where the model read it rather than wherever the
+            // deltas of the round happened to have got to.
+            AppEventPayload::QueueItemAbsorbed(absorbed) => {
+                let Some(to) = self.key_of(&absorbed.conversation_id) else {
+                    return out;
+                };
+                let Some(text) = self
+                    .store
+                    .view()
+                    .transcript_of(&absorbed.conversation_id)
+                    .and_then(|held| held.items().find(|item| item.id == absorbed.item_id))
+                    .and_then(|item| match &item.body {
+                        ItemBody::UserMessage { text, .. } => Some(text.clone()),
+                        _ => None,
+                    })
+                else {
+                    return out;
+                };
+                send(
+                    &to,
+                    UiEvent::Steered {
+                        items: vec![crate::app::queue::SteerItem {
+                            id: absorbed.queue_id.clone(),
+                            text,
+                        }],
+                    },
+                );
+            }
             // A warning a run raised. The console has one shared warning tier, so
             // an unattributed "Reconnecting…" about somebody else's stream would
             // read as its own — the name comes off the conversation the core
