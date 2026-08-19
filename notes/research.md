@@ -8335,11 +8335,12 @@ each true on its own and each verified end to end.
 
 1. **The engine runs a console-grade turn.** `SessionEngine` resolves a prompt's
    `#[image N]` markers against the session's own attachment registry, so a
-   picture reaches the model whichever frontend submitted the line; the memory
-   pass and the empty-response warning happen inside the run, after the turn is
-   closed, rather than in the console's `finish_turn`; and the foreground shell
-   command's handle is held where `Run::Promote` can reach it, so ctrl+b has an
-   address that is not a frontend's private field.
+   picture reaches the model whichever frontend submitted the line; the
+   empty-response warning and the memory pass happen inside the run — the warning
+   before the turn closes, the pass after — rather than in the console's
+   `finish_turn`; and the foreground shell command's handle is held where
+   `Run::Promote` can reach it, so ctrl+b has an address that is not a frontend's
+   private field.
 2. **Speaking in a room joins it, whichever client speaks.** The
    join-before-posting rule (D103) lived in `tui::bufferview::deliver_direct`,
    which meant a wire client posting to a room it was only watching was refused
@@ -8347,9 +8348,19 @@ each true on its own and each verified end to end.
    `#room` line does in the terminal. It is `app/controller/run.rs`'s now, and
    the join is announced in the room's own log the way it always was.
 
-Two commits, four gates green after each, plus the discipline gate. **1703 →
-1704 unit**, 27 → 28 black-box. No test deleted; one black-box assertion
-rewritten in place (below), two tests added.
+Three commits, four gates green after each, plus the discipline gate. **1703 →
+1704 unit**, 27 → 29 black-box. No test deleted; one black-box assertion
+rewritten in place (below), three tests added.
+
+### The warning was written into a closed turn
+
+Moving the empty-response warning into the run was not a move of one line. A
+report into a turn that has already reached its terminal state is *dropped* —
+`TurnRegistry::report` returns on `status.is_terminal()`, which is what makes
+"exactly one terminal state" hold — so the warning went out after `guard.finish`
+and reached nobody. It goes out before the close now. The black-box test for it
+was checked against the wrong order first and fails there, which is the only
+evidence that a test of an ordering is a test at all.
 
 `src/tui/` is byte-unchanged by this record, which is why no terminal smoke was
 re-run: nothing the console draws or drives moved. What did move is exercised by
