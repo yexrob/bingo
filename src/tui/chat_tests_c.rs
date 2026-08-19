@@ -1258,6 +1258,64 @@ fn tail(chat: &mut Chat, lines: &[&str], total_lines: usize) {
     chat.drain_events();
 }
 
+/// Answering a permission prompt writes the receipt as a user line and opens a
+/// continuation under it, which moves the live message out from under the row
+/// the prompt was about. The result then settled nothing and `⎿ Running…` stayed
+/// on the screen for the rest of the session, pinning the flush cursor with it
+/// (D155). The call's identifier is what finds its row now.
+#[test]
+fn a_tool_row_settles_after_a_prompt_moved_the_live_message() {
+    let mut chat = test_chat();
+    running_bash(&mut chat, "rm -rf build", true);
+    chat.push_user_line(ASK_RECEIPT_YES.to_string());
+    chat.open_continuation_message();
+    assert_ne!(
+        chat.conv.stream_msg,
+        Some(0),
+        "the receipt moved the live message off the one holding the row"
+    );
+
+    chat.events
+        .send(UiEvent::ToolDone(crate::query::ToolCallDone {
+            tool_call_id: "bash-1".into(),
+            name: "Bash".into(),
+            summary: "rm -rf build".into(),
+            output: "".into(),
+            status: crate::query::ToolCallStatus::Done,
+            duration_ms: 7,
+            diff: None,
+        }));
+    chat.drain_events();
+    assert!(
+        chat.conv.messages[0]
+            .activities
+            .iter()
+            .all(|hint| !matches!(
+                &hint.kind,
+                ActivityKind::Tool(call) if call.status == ToolStatus::Running
+            )),
+        "the result settled the row it names, wherever that row is"
+    );
+
+    // And the turn's own repair reaches it too, for a call that never got one.
+    let mut chat = test_chat();
+    running_bash(&mut chat, "sleep 100", true);
+    chat.push_user_line(ASK_RECEIPT_YES.to_string());
+    chat.open_continuation_message();
+    chat.events.send(UiEvent::TurnEnd);
+    chat.drain_events();
+    assert!(
+        chat.conv.messages[0]
+            .activities
+            .iter()
+            .all(|hint| !matches!(
+                &hint.kind,
+                ActivityKind::Tool(call) if call.status == ToolStatus::Running
+            )),
+        "a turn that ended under a call leaves no row running, on any message"
+    );
+}
+
 /// D84: a folded Bash call gets one row — the command — and used to say nothing
 /// else until it exited. Its output now hangs under that row while it runs, and
 /// leaves with it.

@@ -159,6 +159,39 @@ impl Conversation {
         }
     }
 
+    /// The message holding the running row this tool result belongs to.
+    ///
+    /// Almost always the live one, and for most of this console's life that was
+    /// assumed rather than looked up. It is not always true: answering a
+    /// permission prompt writes the receipt as a user line and opens a
+    /// continuation under it, which moves the live message out from under a row
+    /// the prompt was *about*. The result then settled nothing, and `⎿ Running…`
+    /// stayed on the screen for the rest of the session — pinning the flush
+    /// cursor with it, because a running activity is never static.
+    ///
+    /// So the call's identifier is what finds it, newest message first, and the
+    /// live message is only where the search starts. A row the protocol never
+    /// named still falls back to the first running one wearing this tool's name
+    /// (D134).
+    pub(crate) fn tool_row_message(&self, tool_call_id: &str, name: &str) -> Option<usize> {
+        let holds = |message: &crate::tui::chat::UiMessage| {
+            message.activities.iter().any(|hint| {
+                matches!(&hint.kind, crate::tui::activities::ActivityKind::Tool(call)
+                if call.status == crate::tui::activities::ToolStatus::Running
+                    && match &call.id {
+                        Some(id) => id == tool_call_id,
+                        None => call.name == name,
+                    })
+            })
+        };
+        if let Some(live) = self.stream_msg
+            && self.messages.get(live).is_some_and(holds)
+        {
+            return Some(live);
+        }
+        self.messages.iter().rposition(holds)
+    }
+
     /// A tool call, message text, or a mid-turn answer all end the current reasoning segment.
     /// Open a fresh streaming message under whatever the turn has already said.
     ///

@@ -1969,7 +1969,10 @@ impl Chat {
                     self.image_registry
                         .register_file(&path, crate::tui::buffer::now(), bytes);
                 }
-                let Some(i) = conv.stream_msg else {
+                let Some(i) = conv
+                    .tool_row_message(&done.tool_call_id, &done.name)
+                    .or(conv.stream_msg)
+                else {
                     return follow;
                 };
                 if let Some(diff_text) = &done.diff
@@ -2134,27 +2137,33 @@ impl Chat {
                                     .saturating_mul(crate::tui::motion::TICK_MS);
                                 hint.expanded = false;
                             }
-                            // A call still running when the turn ends never got a
-                            // `ToolDone`: the run was aborted under it. Left as it
-                            // was it reads `Running…` for the rest of the session
-                            // and pins the flush cursor with it, because
-                            // `message_static_settled` refuses a running activity
-                            // and settlement is prefix-monotone — an unbounded
-                            // redrawable tail on that page. Before D134 a stop was
-                            // survivable because the page re-read the committed
-                            // history; the live store is authoritative now and has
-                            // to correct itself.
-                            ActivityKind::Tool(call)
-                                if call.status == crate::tui::activities::ToolStatus::Running =>
-                            {
-                                call.status = crate::tui::activities::ToolStatus::Interrupted;
-                            }
                             _ => {}
                         }
                     }
                     // Text is settled → asynchronously load its images (reply with ImageReady when done).
                     let text = conv.messages[i].text.clone();
                     self.load_message_images(&text);
+                }
+                // A call still running when the turn ends never got a `ToolDone`:
+                // the run was aborted under it. Left as it was it reads
+                // `Running…` for the rest of the session and pins the flush
+                // cursor with it, because `message_static_settled` refuses a
+                // running activity and settlement is prefix-monotone — an
+                // unbounded redrawable tail on that page. Before D134 a stop was
+                // survivable because the page re-read the committed history; the
+                // live store is authoritative now and has to correct itself.
+                //
+                // Every message, not only the live one: a permission receipt
+                // opens a continuation, so the row the turn abandoned can be two
+                // messages up (D155).
+                for message in &mut conv.messages {
+                    for hint in &mut message.activities {
+                        if let ActivityKind::Tool(call) = &mut hint.kind
+                            && call.status == crate::tui::activities::ToolStatus::Running
+                        {
+                            call.status = crate::tui::activities::ToolStatus::Interrupted;
+                        }
+                    }
                 }
                 conv.stream_msg = None;
                 conv.stream_attempt_checkpoint = None;
