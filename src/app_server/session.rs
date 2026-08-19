@@ -477,14 +477,15 @@ mod tests {
             .map(Transcript::name)
             .unwrap_or_default();
         assert!(!stem.is_empty());
-        // The file only exists once something is written to it; the name is the
-        // durable half, and it is what resume takes.
-        started
-            .transcript
-            .as_ref()
-            .map(|transcript| transcript.activate())
-            .transpose()
-            .unwrap_or_else(|error| panic!("{error}"));
+        // Starting opens the file, so resume can find it before a word has been
+        // said in it — the console does the same since D155.
+        assert!(
+            started
+                .transcript
+                .as_ref()
+                .is_some_and(|transcript| transcript.path().exists()),
+            "a started session has a transcript on disk"
+        );
         let resumed = resume(
             &boot,
             &SessionLocator::Stem { stem: stem.clone() },

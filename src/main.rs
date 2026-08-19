@@ -292,6 +292,17 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // alternate screen opens is wiped by it — the fullscreen (default) host
     // never showed these. They still go to stderr for headless/log capture.
     let mut startup_notes: Vec<String> = config_notes;
+    // A started session opens its transcript, rather than waiting for the first
+    // thing written to it (D155). `session/start` has always done this over the
+    // wire, and the two frontends must not disagree about whether a session that
+    // exists is one `--continue`, `/resume` and `session/list` can find, or one
+    // another process could claim the name of. Failing to open it is the same
+    // condition as failing to create it: history will not persist, and the
+    // warning below says so.
+    let started = |held: Transcript| -> Result<Transcript, crate::transcript::TranscriptError> {
+        held.activate()?;
+        Ok(held)
+    };
     let (transcript, initial_messages): (Option<Transcript>, Vec<Message>) = if cli.continue_ {
         match latest_transcript(&home)? {
             Some(t) => {
@@ -299,7 +310,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 eprintln!("[bingo] continuing transcript: {}", t.path().display());
                 (Some(t.clone()), t.load_messages()?)
             }
-            None => match create_transcript(&home, &project_dir) {
+            None => match create_transcript(&home, &project_dir).and_then(started) {
                 Ok(t) => (Some(t), Vec::new()),
                 Err(e) => {
                     if !cli.print {
@@ -315,7 +326,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             },
         }
     } else {
-        match create_transcript(&home, &project_dir) {
+        match create_transcript(&home, &project_dir).and_then(started) {
             Ok(t) => (Some(t), Vec::new()),
             Err(e) => {
                 if !cli.print {

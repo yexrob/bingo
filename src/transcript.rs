@@ -120,8 +120,15 @@ pub fn list(home: &Path) -> Result<Vec<Transcript>, TranscriptError> {
 }
 
 /// Resume the latest session (--continue).
+///
+/// The latest one that was *used*. A transcript is opened when its session
+/// starts (D155), so launching bingo and quitting without saying anything
+/// leaves a file behind — and coming back to that instead of the conversation
+/// the user actually had is not what `--continue` means. `bingo gc` reaps them.
 pub fn latest(home: &Path) -> Result<Option<Transcript>, TranscriptError> {
-    Ok(list(home)?.into_iter().next())
+    Ok(list(home)?
+        .into_iter()
+        .find(|held| held.line_count().unwrap_or(0) > 0))
 }
 
 impl Transcript {
@@ -645,6 +652,41 @@ mod tests {
 
         let latest = latest(&home).unwrap().unwrap();
         assert_eq!(latest.load_messages().unwrap().len(), 1);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// Starting a session opens its transcript (D155), so quitting without
+    /// saying anything leaves an empty file that is newer than the conversation
+    /// the user actually had. `--continue` means the latter.
+    #[test]
+    fn continuing_skips_a_session_nothing_was_said_in() {
+        let tmp =
+            std::env::temp_dir().join(format!("bingo-transcript-empty-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let home = tmp.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+
+        // Two projects, so the two names differ within the same second.
+        let spoken = create(&home, &tmp.join("spoken")).unwrap();
+        spoken
+            .append(&crate::api::types::Message::user_text("hi"))
+            .unwrap();
+        // Opened after it, and empty: what a launch-and-quit leaves behind.
+        let empty = create(&home, &tmp.join("quit")).unwrap();
+        empty.activate().unwrap();
+        assert!(empty.path().exists(), "a started session is on disk");
+        assert_eq!(
+            list(&home).unwrap().len(),
+            2,
+            "both are sessions; only one is one to come back to"
+        );
+
+        let latest = latest(&home).unwrap().expect("a session to continue");
+        assert_eq!(
+            latest.path(),
+            spoken.path(),
+            "--continue comes back to the conversation, not to the empty file after it"
+        );
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
