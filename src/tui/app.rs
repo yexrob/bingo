@@ -352,9 +352,14 @@ pub async fn run_inline(
                     chat.dirty = true;
                     dirty = true;
                 }
-                if chat.needs_tick() {
+                // The store is drained before the idle gate, not after it: the
+                // core never waits on a frontend, so an attachment that stops
+                // reading is dropped. A console with nothing to draw still has
+                // to listen.
+                let told = chat.pump_store();
+                if chat.needs_tick() || told {
                     chat.tick();
-                    if chat.drain_all() {
+                    if chat.drain_all() || told {
                         ticks = 0;
                     }
                     // Skip disk reads while the task area is hidden.
@@ -394,6 +399,16 @@ pub async fn run_inline(
             } else {
                 chat.force_redraw = true;
             }
+            chat.dirty = true;
+            dirty = true;
+        }
+
+        // A hole in the event stream, repaired the way the protocol says: read
+        // a fresh cut and replace local state with it, rather than patching a
+        // projection that is no longer the core's ("Snapshots and recovery").
+        // Here rather than in the tick arm because re-reading is `async` and the
+        // render path is not.
+        if chat.reconcile_store().await {
             chat.dirty = true;
             dirty = true;
         }
@@ -621,9 +636,12 @@ pub async fn run_fullscreen(
                 Some(Err(_)) | None => break,
             },
             _ = ticker.tick() => {
-                if chat.needs_tick() {
+                // Drained before the idle gate, for the reason `run_inline`
+                // states: an attachment that stops reading is dropped.
+                let told = chat.pump_store();
+                if chat.needs_tick() || told {
                     chat.tick();
-                    if chat.drain_all() {
+                    if chat.drain_all() || told {
                         ticks = 0;
                     }
                     if ticks.is_multiple_of(TASKS_REFRESH_TICKS) && chat.tasks_visible {
@@ -654,6 +672,12 @@ pub async fn run_fullscreen(
         if std::mem::take(&mut chat.open_transcript) {
             crate::tui::transcript::run_transcript_modal(&mut chat, &mut events, true).await?;
             chat.force_redraw = true;
+            chat.dirty = true;
+            dirty = true;
+        }
+
+        // The same repair `run_inline` makes, for the same reason.
+        if chat.reconcile_store().await {
             chat.dirty = true;
             dirty = true;
         }

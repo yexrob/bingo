@@ -671,6 +671,14 @@ struct Follow {
 /// bingo chat component state: message stream + activity notices + input + permission requests.
 pub struct Chat {
     pub session: Arc<Session>,
+    /// What the core has said, materialized (B7b).
+    ///
+    /// The console is an attachment like any other: it takes one snapshot cut
+    /// and folds the ordered event stream that follows it into a local
+    /// projection a key handler and a render pass can read without waiting. A
+    /// store with no link holds an empty view rather than a wrong one — an
+    /// attachment that has heard nothing holds the same.
+    pub store: crate::tui::store::Store,
     /// The console's own sink, bound to main. Every other conversation's
     /// producer holds one bound to itself (`AgentHandle::sink_for`).
     pub(super) events: crate::ui::EventSink,
@@ -1117,6 +1125,10 @@ impl Chat {
         }));
         Self {
             session,
+            // Detached until the host attaches it: building a `Chat` is
+            // synchronous and attaching is not, so the console connects on the
+            // way into its loop (`Chat::connect_store`).
+            store: crate::tui::store::Store::default(),
             events,
             events_rx,
             conv: crate::tui::conversation::Conversation::new(context_usage),
@@ -1270,8 +1282,37 @@ impl Chat {
     }
 
     /// Drains all channels. Returns whether there is any new state.
+    /// Attach the console's store to the core and take its first cut.
+    ///
+    /// Separate from `new` because attaching is `async` and constructing is not.
+    /// A console that never calls this reads an empty view — which is what an
+    /// attachment that has heard nothing reads, and is why a test without a
+    /// runtime is not a second kind of console.
+    pub async fn connect_store(
+        &mut self,
+        core: &crate::app::AppCore,
+    ) -> Result<(), crate::app::AppError> {
+        self.store.connect(core, "tui").await
+    }
+
+    /// Fold in everything the core has said since the last look.
+    ///
+    /// Synchronous on purpose: it sits on the render path, which cannot wait.
+    /// A hole in the stream is only *noticed* here; repairing it is the
+    /// `async` half ([`Chat::reconcile_store`]) the event loop runs.
+    pub fn pump_store(&mut self) -> bool {
+        self.store.pump().changed
+    }
+
+    /// Repair the store if the stream showed a hole: read a fresh cut and
+    /// replace local state with it, exactly as a wire client would.
+    pub async fn reconcile_store(&mut self) -> bool {
+        matches!(self.store.reconcile().await, Ok(true))
+    }
+
     pub fn drain_all(&mut self) -> bool {
-        let mut changed = self.drain_events();
+        let mut changed = self.pump_store();
+        changed |= self.drain_events();
         changed |= self.drain_asks();
         if changed {
             self.dirty = true;

@@ -558,7 +558,8 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             extract_memory(&session, &outcome.messages, &home, &cwd).await;
         } else {
             drop(initial_messages); // in interactive mode, --continue history is reused by later turns
-            tui::run_tui_session(session.clone(), expand_rx, fullscreen, startup_notes).await?;
+            tui::run_tui_session(session.clone(), &core, expand_rx, fullscreen, startup_notes)
+                .await?;
         }
         Ok::<(), Box<dyn std::error::Error>>(())
     }
