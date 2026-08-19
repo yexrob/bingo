@@ -31,16 +31,20 @@ use std::collections::BTreeMap;
 use crate::app::command::{AppCommand, AppQuery};
 use crate::app::conversation::ConvKey;
 use crate::app::event::{AppEvent, AppEventPayload};
-use crate::app::ids::{ConversationId, InteractionId, TurnId};
+use crate::app::ids::{ConversationId, InteractionId, ItemId, TurnId};
 use crate::app::snapshot::{
-    AgentResource, BackgroundCommandResource, Collection, ConfigSnapshot, ConversationKind,
-    ConversationSummary, DeliveryResource, Feedback, Interaction, McpServerState, Operation,
-    QueueEntry, RoomResource, ServerCapabilities, SessionSnapshot, SessionSummary, TaskResource,
-    Turn,
+    AgentResource, BackgroundCommandResource, Collection, CommandTail, ConfigSnapshot,
+    ConversationKind, ConversationSummary, DeliveryResource, Feedback, Interaction, Item, ItemBody,
+    ItemCursor, McpServerState, Operation, QueueEntry, RoomResource, ServerCapabilities,
+    SessionSnapshot, SessionSummary, TaskResource, Turn,
 };
 use crate::app::{
     AppCore, AppError, AppFrame, AppLink, AppReply, AppRequest, AttachRequest, RequestId,
 };
+
+/// How much of a log one read asks for. Big enough that an ordinary session is
+/// one round trip and small enough that a long one is still paged.
+const TRANSCRIPT_PAGE: u32 = 500;
 
 /// What the core last said, materialized.
 ///
@@ -72,6 +76,114 @@ pub struct View {
     feedback: Vec<Feedback>,
     /// Each conversation's queue as the core reports it, in order.
     queues: BTreeMap<ConversationId, Queue>,
+    /// Each conversation's transcript as the core reports it.
+    transcripts: BTreeMap<ConversationId, Transcript>,
+}
+
+/// One conversation's ordered content, in the two states the contract gives it.
+///
+/// `log` is what the core has committed — `conversation/read` pages exactly this,
+/// and `item/completed` appends to it through the core's one door. `live` is what
+/// is still being produced: an item opens there, grows by deltas, and moves into
+/// the log when its terminal snapshot arrives. Nothing is ever in both.
+#[derive(Debug, Clone, Default)]
+pub struct Transcript {
+    log: Vec<Item>,
+    live: Vec<Item>,
+    /// The generation the log was read at. A rewrite moves it, and a log read
+    /// under the old one is no longer this conversation's history.
+    generation: u64,
+    /// The last sample of the one foreground command, and the item it belongs
+    /// to. A replacement rather than content: it never becomes the item's output,
+    /// so it is kept beside the item rather than inside it.
+    tail: Option<(ItemId, CommandTail)>,
+}
+
+impl Transcript {
+    /// What the core has committed, oldest first.
+    pub fn log(&self) -> &[Item] {
+        &self.log
+    }
+
+    /// What is still being produced, in the order it opened.
+    pub fn live(&self) -> &[Item] {
+        &self.live
+    }
+
+    /// The whole conversation as it stands: the committed history, then whatever
+    /// is still arriving.
+    pub fn items(&self) -> impl Iterator<Item = &Item> {
+        self.log.iter().chain(self.live.iter())
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// The foreground command's output so far, for the item it belongs to.
+    pub fn tail_of(&self, item: &ItemId) -> Option<&CommandTail> {
+        self.tail
+            .as_ref()
+            .filter(|(held, _)| held == item)
+            .map(|(_, tail)| tail)
+    }
+
+    /// The cursor a continuation of this log carries, or `None` when there is
+    /// nothing to continue from.
+    fn cursor(&self) -> Option<ItemCursor> {
+        Some(ItemCursor {
+            history_generation: self.generation,
+            after: self.log.last()?.id.clone(),
+        })
+    }
+
+    fn open(&mut self, item: Item) {
+        match self.live.iter().position(|held| held.id == item.id) {
+            Some(at) => self.live[at] = item,
+            None => self.live.push(item),
+        }
+    }
+
+    fn append(&mut self, id: &ItemId, delta: &str, reasoning: bool) {
+        let Some(item) = self.live.iter_mut().find(|held| &held.id == id) else {
+            return;
+        };
+        match (&mut item.body, reasoning) {
+            (ItemBody::AssistantMessage { text }, false) | (ItemBody::Reasoning { text }, true) => {
+                text.push_str(delta)
+            }
+            _ => {}
+        }
+    }
+
+    /// The item reached its authoritative state: it leaves the live set and joins
+    /// the log, where a re-read would find it.
+    fn commit(&mut self, item: Item) {
+        self.live.retain(|held| held.id != item.id);
+        if self.tail.as_ref().is_some_and(|(held, _)| held == &item.id) {
+            self.tail = None;
+        }
+        match self.log.iter().position(|held| held.id == item.id) {
+            Some(at) => self.log[at] = item,
+            None => self.log.push(item),
+        }
+    }
+
+    /// Take back exactly the items a retry checkpoint withdrew (invariant #7).
+    fn withdraw(&mut self, removed: &[ItemId]) {
+        if removed.is_empty() {
+            return;
+        }
+        self.live.retain(|held| !removed.contains(&held.id));
+        self.log.retain(|held| !removed.contains(&held.id));
+        if self
+            .tail
+            .as_ref()
+            .is_some_and(|(held, _)| removed.contains(held))
+        {
+            self.tail = None;
+        }
+    }
 }
 
 /// One conversation's input queue, as the events describe it.
@@ -109,6 +221,7 @@ impl Default for View {
             mcp: Vec::new(),
             feedback: Vec::new(),
             queues: BTreeMap::new(),
+            transcripts: BTreeMap::new(),
         }
     }
 }
@@ -176,6 +289,10 @@ impl View {
         self.commands = collections.background_commands;
         self.mcp = collections.mcp_servers;
         self.feedback = feedback;
+        // The transcripts are not in the session cut either: an item log is
+        // paged by `conversation/read`, and the store fills them in beside the
+        // cut rather than pretending an empty log is an empty conversation.
+        self.transcripts.clear();
         // The queues are not in the session cut — a conversation carries its
         // revision and its count there, and the rows themselves come from
         // `conversation/readQueue`. Dropping them is honest: what is left is a
@@ -196,6 +313,7 @@ impl View {
         }
         self.conversations.remove(id);
         self.queues.remove(id);
+        self.transcripts.remove(id);
     }
 
     /// Fold one event in. Nothing here decides anything: a named resource is
@@ -230,6 +348,13 @@ impl View {
                 if let Some(turn) = self.turns.get_mut(&retry.turn_id) {
                     turn.round = retry.round;
                 }
+                // The attempt's items are withdrawn by name rather than guessed
+                // at: `removedItemIds` is exactly what the failed attempt
+                // produced (invariant #7).
+                self.transcripts
+                    .entry(retry.conversation_id.clone())
+                    .or_default()
+                    .withdraw(&retry.removed_item_ids);
             }
             AppEventPayload::TurnRoundCompleted(round) => {
                 if let Some(turn) = self.turns.get_mut(&round.turn_id)
@@ -243,16 +368,44 @@ impl View {
                     turn.usage = Some(usage.usage);
                 }
             }
-            // Items are the transcript's, and the transcript is not projected
-            // here: the console builds its rows from the conversation stores it
-            // already owns. What the store carries about history is the summary
-            // the core publishes beside it (`last_item_id`, `unread`).
-            AppEventPayload::ItemStarted(_)
-            | AppEventPayload::ItemTextDelta(_)
-            | AppEventPayload::ItemReasoningDelta(_)
-            | AppEventPayload::ItemCommandTailUpdated(_)
-            | AppEventPayload::ItemUpdated(_)
-            | AppEventPayload::ItemCompleted(_) => {}
+            AppEventPayload::ItemStarted(changed) => {
+                self.transcripts
+                    .entry(changed.conversation_id.clone())
+                    .or_default()
+                    .open(changed.item.clone());
+            }
+            AppEventPayload::ItemTextDelta(delta) => {
+                self.transcripts
+                    .entry(delta.conversation_id.clone())
+                    .or_default()
+                    .append(&delta.item_id, &delta.delta, false);
+            }
+            AppEventPayload::ItemReasoningDelta(delta) => {
+                self.transcripts
+                    .entry(delta.conversation_id.clone())
+                    .or_default()
+                    .append(&delta.item_id, &delta.delta, true);
+            }
+            AppEventPayload::ItemCommandTailUpdated(updated) => {
+                self.transcripts
+                    .entry(updated.conversation_id.clone())
+                    .or_default()
+                    .tail = Some((updated.item_id.clone(), updated.tail.clone()));
+            }
+            // An update replaces what is in flight, never the log: an item that
+            // has already reached its terminal snapshot is final.
+            AppEventPayload::ItemUpdated(changed) => {
+                self.transcripts
+                    .entry(changed.conversation_id.clone())
+                    .or_default()
+                    .open(changed.item.clone());
+            }
+            AppEventPayload::ItemCompleted(changed) => {
+                self.transcripts
+                    .entry(changed.conversation_id.clone())
+                    .or_default()
+                    .commit(changed.item.clone());
+            }
             AppEventPayload::QueueItemAdded(added) => {
                 let queue = self
                     .queues
@@ -463,6 +616,22 @@ impl View {
     pub fn queue(&self, key: &ConvKey) -> Option<&Queue> {
         self.ids.get(key).and_then(|id| self.queues.get(id))
     }
+
+    /// One conversation's transcript, by the console's key.
+    pub fn transcript(&self, key: &ConvKey) -> Option<&Transcript> {
+        self.ids.get(key).and_then(|id| self.transcripts.get(id))
+    }
+
+    /// The same, by the identity the core minted.
+    pub fn transcript_of(&self, id: &ConversationId) -> Option<&Transcript> {
+        self.transcripts.get(id)
+    }
+
+    /// Every conversation the core has named, whether or not its log has been
+    /// read yet.
+    fn ids(&self) -> Vec<ConversationId> {
+        self.conversations.keys().cloned().collect()
+    }
 }
 
 /// Replace one member of a bounded collection, or add it.
@@ -571,11 +740,52 @@ impl Store {
             AppReply::Session(snapshot) => {
                 self.cursor = Some(snapshot.event_cursor);
                 self.view.replace(*snapshot);
+                for id in self.view.ids() {
+                    self.read_transcript(&id).await?;
+                }
                 Ok(())
             }
             // The core answers `ReadSession` with a session and nothing else;
             // anything here would be a core that stopped meaning what it says.
             _ => Err(AppError::Stopped),
+        }
+    }
+
+    /// Page one conversation's log into the projection, from wherever this side
+    /// has read to.
+    ///
+    /// Events that arrive during the paging are folded as they always are — the
+    /// cut is already taken, so the cursor is live — and a completed item that
+    /// the page also carries replaces rather than duplicates, because the log is
+    /// keyed by identity.
+    async fn read_transcript(&mut self, id: &ConversationId) -> Result<(), AppError> {
+        loop {
+            let cursor = self.view.transcripts.get(id).and_then(Transcript::cursor);
+            let request = self.mint();
+            let pending = self.ask(AppRequest::Query {
+                id: request,
+                query: AppQuery::ReadConversation {
+                    conversation_id: id.clone(),
+                    cursor,
+                    limit: Some(TRANSCRIPT_PAGE),
+                },
+            })?;
+            let snapshot = match self.settle(pending).await {
+                Ok(AppReply::Conversation(snapshot)) => snapshot,
+                // A conversation that went away between the cut and the read is
+                // not an error: the events that removed it are behind this.
+                Ok(_) | Err(AppError::Refused(_)) => return Ok(()),
+                Err(error) => return Err(error),
+            };
+            let more = snapshot.items.next_cursor.is_some();
+            let held = self.view.transcripts.entry(id.clone()).or_default();
+            held.generation = snapshot.history_generation;
+            for item in snapshot.items.items {
+                held.commit(item);
+            }
+            if !more {
+                return Ok(());
+            }
         }
     }
 
@@ -639,6 +849,20 @@ impl Store {
             return false;
         }
         self.cursor = Some(event.meta.seq);
+        // A rewrite — a compaction, a rewind — is the one change to a log that
+        // no item event describes: the generation moves and everything read
+        // under the old one belongs to a history that no longer exists. There is
+        // nothing to patch, so this takes the repair the store already has.
+        if let AppEventPayload::ConversationCreated(changed)
+        | AppEventPayload::ConversationUpdated(changed) = &event.payload
+            && self
+                .view
+                .transcripts
+                .get(&changed.conversation.id)
+                .is_some_and(|held| held.generation != changed.conversation.history_generation)
+        {
+            self.stale = true;
+        }
         self.view.apply(event);
         true
     }
@@ -795,6 +1019,16 @@ mod tests {
             tool_uses: 0,
             recent_activity: Vec::new(),
             last_active_at: 0,
+        }
+    }
+
+    /// What an item says, for a test that is about ordering rather than shape.
+    fn body_text(item: &Item) -> String {
+        match &item.body {
+            ItemBody::AssistantMessage { text }
+            | ItemBody::Reasoning { text }
+            | ItemBody::UserMessage { text, .. } => text.clone(),
+            other => format!("{other:?}"),
         }
     }
 
@@ -1129,6 +1363,165 @@ mod tests {
         assert!(
             chat.store.view().session.is_some(),
             "with a fresh cut, not the stale projection"
+        );
+    }
+
+    /// The transcript projection, driven by the events a real run produces.
+    ///
+    /// An item opens, grows by deltas, and is replaced whole by its terminal
+    /// snapshot — which is when it stops being live and becomes history. That
+    /// last step is the one that matters: `item/completed` is authoritative over
+    /// every delta before it, so the log holds the core's answer and never a
+    /// sum this side kept.
+    #[test]
+    fn an_item_streams_while_it_is_live_and_joins_the_log_when_it_is_done() {
+        let mut chat = crate::tui::test_util::chat_at(100, 40);
+        let turn = chat
+            .session
+            .turns
+            .open(ConvKey::Main, TurnOrigin::User, Vec::new())
+            .now()
+            .unwrap_or_else(|| panic!("main was idle"));
+        for delta in ["thinking ", "about it"] {
+            chat.session.turns.report_event(
+                turn.clone(),
+                crate::engine::events::EngineEvent::ThinkingDelta {
+                    index: 0,
+                    thinking: delta.to_string(),
+                },
+            );
+        }
+        for delta in ["the ", "answer"] {
+            chat.session.turns.report_event(
+                turn.clone(),
+                crate::engine::events::EngineEvent::TextDelta {
+                    index: 1,
+                    text: delta.to_string(),
+                },
+            );
+        }
+        chat.settle_store();
+
+        let live: Vec<String> = chat
+            .store
+            .view()
+            .transcript(&ConvKey::Main)
+            .map(|held| held.live().iter().map(body_text).collect())
+            .unwrap_or_default();
+        assert_eq!(
+            live,
+            vec!["thinking about it".to_string(), "the answer".to_string()],
+            "each block is its own item, and each holds what was streamed into it"
+        );
+        assert_eq!(
+            chat.store
+                .view()
+                .transcript(&ConvKey::Main)
+                .map(|held| held.log().len()),
+            Some(0),
+            "nothing is history until the core says it is"
+        );
+
+        chat.session
+            .turns
+            .report_event(turn.clone(), crate::engine::events::EngineEvent::RoundEnd);
+        chat.settle_store();
+        let held = chat
+            .store
+            .view()
+            .transcript(&ConvKey::Main)
+            .unwrap_or_else(|| panic!("main has a transcript"));
+        assert!(held.live().is_empty(), "the round closed what it opened");
+        assert_eq!(
+            held.log().iter().map(body_text).collect::<Vec<_>>(),
+            vec!["thinking about it".to_string(), "the answer".to_string()],
+            "and the log holds them in the order they were produced"
+        );
+        chat.session.turns.close(turn, TurnStatus::Completed, None);
+    }
+
+    /// A retry withdraws exactly what the attempt produced, by name. A client
+    /// that guessed would either keep half a sentence or throw away a round it
+    /// had already been told was committed.
+    #[test]
+    fn a_retry_takes_back_the_items_it_names_and_nothing_else() {
+        let mut chat = crate::tui::test_util::chat_at(100, 40);
+        let turn = chat
+            .session
+            .turns
+            .open(ConvKey::Main, TurnOrigin::User, Vec::new())
+            .now()
+            .unwrap_or_else(|| panic!("main was idle"));
+        chat.session.turns.report_event(
+            turn.clone(),
+            crate::engine::events::EngineEvent::TextDelta {
+                index: 0,
+                text: "half a sen".to_string(),
+            },
+        );
+        chat.settle_store();
+        assert_eq!(
+            chat.store
+                .view()
+                .transcript(&ConvKey::Main)
+                .map(|held| held.live().len()),
+            Some(1)
+        );
+
+        chat.session.turns.report_event(
+            turn.clone(),
+            crate::engine::events::EngineEvent::StreamRetry {
+                attempt: 1,
+                max_attempts: 10,
+                delay_ms: 1,
+                discarded_output: true,
+                code: None,
+                reason: None,
+            },
+        );
+        chat.settle_store();
+        let held = chat
+            .store
+            .view()
+            .transcript(&ConvKey::Main)
+            .unwrap_or_else(|| panic!("main has a transcript"));
+        assert!(held.live().is_empty(), "the failed attempt was withdrawn");
+        assert!(held.log().is_empty());
+        assert_eq!(chat.store.gaps, 0);
+        chat.session.turns.close(turn, TurnStatus::Completed, None);
+    }
+
+    /// A committed item is history the moment the core commits it, whoever
+    /// produced it — and a store that attaches later reads the same history out
+    /// of `conversation/read` rather than out of nothing.
+    #[test]
+    fn a_log_committed_before_the_attachment_is_read_by_it() {
+        let chat = crate::tui::test_util::chat_at(100, 40);
+        chat.session
+            .turns
+            .commit_item(
+                ConvKey::Main,
+                None,
+                ItemBody::UserMessage {
+                    text: "run the tests".to_string(),
+                    attachments: Vec::new(),
+                },
+            )
+            .now();
+        chat.session.core.settle_now();
+
+        let mut fresh = Store::default();
+        fresh
+            .connect_now(&chat.session.core, "tui-late")
+            .unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(
+            fresh.view().transcript(&ConvKey::Main).map(|held| held
+                .log()
+                .iter()
+                .map(body_text)
+                .collect::<Vec<_>>()),
+            Some(vec!["run the tests".to_string()]),
+            "the cut is a session, and the log beside it is read"
         );
     }
 
