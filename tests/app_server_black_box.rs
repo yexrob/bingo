@@ -1464,3 +1464,80 @@ fn input_queues_behind_a_turn_drains_at_its_end_and_an_interrupt_reaches_it() {
     let ended = server.finish();
     assert_eq!(ended.code, Some(0));
 }
+
+/// D81's session grant is configuration, and a client reads it where the console
+/// reads it (B5 ruling ⑤).
+///
+/// The console's `/permissions` lists the live rules table, and an `allowSession`
+/// grant is installed into exactly that table before the tool that asked for it
+/// runs. `config/read` therefore has to carry it too, marked for what it is — a
+/// rule that lives as long as this session and is never written to settings.
+#[test]
+fn an_allow_session_grant_reaches_config_read_and_never_reaches_settings() {
+    let provider = Provider::start(vec![
+        message_open()
+            + &tool_block(0, "toolu_1", "Bash", json!({"command": "echo once"}))
+            + &message_close("tool_use", 6),
+        says("done"),
+    ]);
+    let root = TempDir::new("grant");
+    provider.configure(&root);
+    let mut server = Server::start(&root);
+    server.handshake();
+    let main = server.open_main(2);
+
+    let before = server.call(3, "config/read", json!({}));
+    assert_eq!(
+        before["result"]["config"]["permissions"],
+        json!([]),
+        "{before}"
+    );
+
+    server.submit(4, &main, "run it");
+    let opening = server.until("interaction/opened");
+    let prompt = of(&opening, "interaction/opened")[0]["params"]["interaction"].clone();
+    let scope = prompt["prompt"]["sessionScope"].clone();
+    assert!(
+        scope["id"].is_string() && scope["label"].is_string(),
+        "the server advertises the scope it will install: {prompt}"
+    );
+
+    let answered = server.call(
+        5,
+        "interaction/respond",
+        json!({
+            "interactionId": prompt["id"],
+            "activation": "programmatic",
+            "decision": {"type": "allowSession", "scopeId": scope["id"]}
+        }),
+    );
+    assert_eq!(
+        answered["result"]["status"],
+        json!("accepted"),
+        "{answered}"
+    );
+    server.until("turn/completed");
+
+    let after = server.call(6, "config/read", json!({}));
+    let rules = after["result"]["config"]["permissions"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(rules.len(), 1, "{after}");
+    assert_eq!(rules[0]["decision"], json!("allow"));
+    assert_eq!(rules[0]["rule"], scope["label"]);
+    assert_eq!(
+        rules[0]["sessionScoped"],
+        json!(true),
+        "it is a grant, not a setting"
+    );
+
+    let ended = server.finish();
+    assert_eq!(ended.code, Some(0));
+    let settings = std::fs::read_to_string(root.path().join(".bingo/settings.json"))
+        .expect("the project settings are still there");
+    assert!(
+        !settings.contains("permissions"),
+        "a session grant is never written to settings: {settings}"
+    );
+}

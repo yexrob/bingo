@@ -939,6 +939,30 @@ impl Controller {
         }
     }
 
+    /// Record an `allowSession` grant (D81) in the effective configuration.
+    ///
+    /// Never persisted, and marked as what it is: the console's `/permissions`
+    /// has always listed these — the grant goes into the live rules table the
+    /// gate reads — so a client that could not see them would be reading a
+    /// different session from the one that is running (B5 ruling ⑤).
+    fn grant_for_session(&mut self, rule: String) {
+        use crate::app::snapshot::{PermissionRule, PermissionRuleDecision};
+        let held = self
+            .config
+            .permissions
+            .iter()
+            .any(|entry| entry.decision == PermissionRuleDecision::Allow && entry.rule == rule);
+        if held {
+            return;
+        }
+        self.config.permissions.push(PermissionRule {
+            decision: PermissionRuleDecision::Allow,
+            rule,
+            session_scoped: true,
+        });
+        self.config_changed();
+    }
+
     /// Add or drop one permission rule, in the core's own table.
     fn permission_rule(
         &mut self,
@@ -2343,12 +2367,22 @@ impl Controller {
                     id,
                     decision,
                     item,
-                } => AppEventPayload::InteractionResolved(InteractionResolved {
-                    interaction_id: id,
-                    conversation_id: self.conversation_id(&conversation),
-                    decision,
-                    item_id: item,
-                }),
+                    granted,
+                } => {
+                    // D81's grant is configuration from the moment it is made:
+                    // it is in the table the gate reads, so it is in the table a
+                    // client reads. Marked `sessionScoped` and never persisted —
+                    // it lives as long as this session does and no longer.
+                    if let Some(rule) = granted {
+                        self.grant_for_session(rule);
+                    }
+                    AppEventPayload::InteractionResolved(InteractionResolved {
+                        interaction_id: id,
+                        conversation_id: self.conversation_id(&conversation),
+                        decision,
+                        item_id: item,
+                    })
+                }
                 InteractionChange::Cancelled {
                     conversation,
                     id,

@@ -173,6 +173,11 @@ pub(crate) enum InteractionChange {
         id: InteractionId,
         decision: InteractionDecision,
         item: Option<ItemId>,
+        /// The rule an `allowSession` grant installed for the rest of this
+        /// session (D81). The gate derived and verified it and the prompt
+        /// advertised it as the scope's label, so this is that same string —
+        /// the core does not derive a second one.
+        granted: Option<String>,
     },
     Cancelled {
         conversation: ConvKey,
@@ -448,11 +453,15 @@ impl InteractionRegistry {
                         item: Box::new(item),
                     });
                 }
+                let granted = matches!(decision, InteractionDecision::AllowSession { .. })
+                    .then(|| scope_label(&held.pending.interaction))
+                    .flatten();
                 changes.push(InteractionChange::Resolved {
                     conversation: held.conversation.clone(),
                     id,
                     decision,
                     item: item_id,
+                    granted,
                 });
                 // The run continues only once the ordered item is committed.
                 let _ = held.answer.send(verdict);
@@ -587,6 +596,16 @@ fn verdict_of(prompt: &InteractionPrompt, decision: &InteractionDecision) -> Ver
 
 /// The ordered item a resolution commits.
 ///
+/// The rule an `allowSession` grant on this prompt installs.
+fn scope_label(interaction: &Interaction) -> Option<String> {
+    match &interaction.prompt {
+        InteractionPrompt::Permission { session_scope, .. } => {
+            session_scope.as_ref().map(|scope| scope.label.clone())
+        }
+        _ => None,
+    }
+}
+
 /// A question's answer enters the model's context through the existing answer
 /// path; a permission receipt is display and audit state and is explicitly
 /// excluded from model input (spec "Item").
