@@ -628,6 +628,7 @@ fn recording_viewer(root: &std::path::Path, receipt: &std::path::Path) -> String
 /// The receipt the viewer wrote. The spawn is detached by design — the TUI must
 /// not wait on somebody's image viewer — so the test does the waiting the
 /// production path deliberately does not.
+#[cfg(unix)]
 fn wait_for(path: &std::path::Path) -> String {
     for _ in 0..200 {
         if let Ok(text) = std::fs::read_to_string(path)

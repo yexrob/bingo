@@ -24,6 +24,7 @@ fn info(chat: &Chat) -> String {
 
 /// A directory this test owns: pid-tagged, created here, and removed here —
 /// only ever this path.
+#[cfg(unix)]
 fn scratch(tag: &str) -> std::path::PathBuf {
     let root = std::env::temp_dir().join(format!("bingo-d86-{}-{tag}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);

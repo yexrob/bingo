@@ -1741,6 +1741,7 @@ mod tests {
     /// Test context that differs from the others only in its liveness handle:
     /// D84's tests are about what the host sees and what ctrl+b does, and nothing
     /// else in the context participates.
+    #[cfg(unix)]
     fn live_ctx(
         watch: crate::watch::WatchHandle,
         live: std::sync::Arc<crate::live::LiveBash>,
@@ -1762,6 +1763,7 @@ mod tests {
     }
 
     /// Collects every tail sample a run publishes.
+    #[cfg(unix)]
     fn recording_live() -> (
         std::sync::Arc<crate::live::LiveBash>,
         Arc<Mutex<Vec<crate::live::LiveTail>>>,
@@ -1892,7 +1894,7 @@ mod tests {
         let (live, seen) = recording_live();
         let ctx = live_ctx(crate::app::AppCore::start(Default::default()).watch(), live);
         let command = format!(
-            "echo started; sleep 2; echo end > {}",
+            "echo started; sleep 2; echo end > '{}'",
             marker.to_string_lossy()
         );
         let tool = BashTool::new();
