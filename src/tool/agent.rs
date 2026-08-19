@@ -190,7 +190,7 @@ fn subagent_host(
                     watch.feed_content(id, &text);
                 }
             }
-            EngineEvent::ThinkingDelta { .. } | EngineEvent::ToolInputDelta { .. } => {}
+            EngineEvent::ThinkingDelta { .. } => {}
             EngineEvent::ToolUseStarted { .. } => {}
             EngineEvent::CommandTail(_) => {}
             EngineEvent::StopReason { output_tokens, .. } => {

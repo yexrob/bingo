@@ -40,15 +40,6 @@ pub enum EngineEvent {
         index: usize,
         thinking: String,
     },
-    /// A tool call's arguments arriving in pieces. No surface renders it, and it
-    /// still travels: it is the only sign of work while the model is otherwise
-    /// silent, so a receiver that wants an honest token count needs it.
-    ToolInputDelta {
-        #[allow(dead_code)]
-        index: usize,
-        #[allow(dead_code)]
-        partial_json: String,
-    },
     /// The model started calling a tool. The arguments are not complete yet;
     /// [`EngineEvent::ToolReady`] carries them when they are. The block index and
     /// the call's id travel because the report is complete: today's two frontends
@@ -93,18 +84,15 @@ pub enum EngineEvent {
     /// ruler.
     ContextUsage(crate::context_usage::ContextUsage),
     /// A tool call is complete down to its input, which the fold decision needs.
-    /// `standalone` marks a call the model did not make (the `!` command), which
-    /// belongs to no batch.
+    ///
+    /// Whether the model made the call is *not* a field here. It travels as the
+    /// call's id — `run_bash_command` mints the `!` line's own prefix — and one
+    /// fact stated twice is one fact that can disagree with itself. Giving the
+    /// standalone run an item body of its own (`ItemBody::Command`) is B8's.
     ToolReady {
         tool_call_id: String,
         name: String,
         input: serde_json::Value,
-        /// The console's own `!` line rather than a call the model made. It is
-        /// the fold decision's one input, and it travels as the call's id shape
-        /// once the call is an item — so this field is the engine's statement of
-        /// the same fact and no receiver at this layer reads it.
-        #[allow(dead_code)]
-        standalone: bool,
     },
     ToolDone(ToolCallDone),
     /// The foreground shell command's output so far (D84): last lines and the
@@ -144,13 +132,6 @@ impl EngineEvent {
                 index: *index,
                 thinking: thinking.clone(),
             }),
-            StreamEvent::InputJsonDelta {
-                index,
-                partial_json,
-            } => Some(Self::ToolInputDelta {
-                index: *index,
-                partial_json: partial_json.clone(),
-            }),
             StreamEvent::ToolUseStart { index, id, name } => Some(Self::ToolUseStarted {
                 index: *index,
                 id: id.clone(),
@@ -167,6 +148,7 @@ impl EngineEvent {
             | StreamEvent::TextStart { .. }
             | StreamEvent::ThinkingStart { .. }
             | StreamEvent::SignatureDelta { .. }
+            | StreamEvent::InputJsonDelta { .. }
             | StreamEvent::BlockStop { .. }
             | StreamEvent::Done
             | StreamEvent::ApiError { .. } => None,
@@ -344,10 +326,6 @@ mod tests {
             index: 2,
             thinking: "weighing it".to_string(),
         });
-        events.emit_stream(&StreamEvent::InputJsonDelta {
-            index: 3,
-            partial_json: "{\"path\":".to_string(),
-        });
         events.emit_stream(&StreamEvent::StopReason {
             stop_reason: Some("max_tokens".to_string()),
             output_tokens: Some(4096),
@@ -357,17 +335,12 @@ mod tests {
         match &seen[..] {
             [
                 EngineEvent::ThinkingDelta { index, thinking },
-                EngineEvent::ToolInputDelta {
-                    index: json_index,
-                    partial_json,
-                },
                 EngineEvent::StopReason {
                     stop_reason,
                     output_tokens,
                 },
             ] => {
                 assert_eq!((*index, thinking.as_str()), (2, "weighing it"));
-                assert_eq!((*json_index, partial_json.as_str()), (3, "{\"path\":"));
                 assert_eq!(stop_reason.as_deref(), Some("max_tokens"));
                 assert_eq!(
                     *output_tokens,
@@ -376,12 +349,18 @@ mod tests {
                      second ruler"
                 );
             }
-            other => panic!("the reasoning, the argument JSON and the count all travel: {other:?}"),
+            other => panic!("the reasoning and the provider's own count both travel: {other:?}"),
         }
     }
 
     /// Framing is not progress: the events that describe how the bytes arrived
     /// stop at the accumulator that reads them.
+    ///
+    /// A tool call's argument JSON is one of them (D154). It used to cross as
+    /// `ToolInputDelta` for a receiver that might want to count it, and no
+    /// receiver ever did — the authoritative count arrives with the round, and a
+    /// second ruler is what B7c's review refused. What reads the pieces is
+    /// `Accumulator`, exactly as it reads a signature delta and a block stop.
     #[test]
     fn stream_scaffolding_is_not_an_engine_event() {
         for event in [
@@ -394,6 +373,10 @@ mod tests {
             StreamEvent::SignatureDelta {
                 index: 0,
                 signature: "sig".to_string(),
+            },
+            StreamEvent::InputJsonDelta {
+                index: 0,
+                partial_json: "{\"path\":".to_string(),
             },
             StreamEvent::BlockStop { index: 0 },
             StreamEvent::Done,

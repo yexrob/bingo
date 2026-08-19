@@ -291,7 +291,6 @@ async fn one_turn(
                         tool_call_id: id.clone(),
                         name: name.clone(),
                         input: input.clone(),
-                        standalone: false,
                     });
                 }
             }

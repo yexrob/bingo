@@ -687,7 +687,6 @@ impl TurnRegistry {
             // Arguments arriving in pieces are not an item's content: the call is
             // announced when it starts and carries its resolved input when it is
             // ready.
-            EngineEvent::ToolInputDelta { .. } => {}
             // The tail belongs to the one shell call that is running. Which one
             // that is needs no guess: the foreground slot holds one command at a
             // time, so at most one shell item is open when a sample arrives, and
@@ -716,7 +715,6 @@ impl TurnRegistry {
                 tool_call_id,
                 name,
                 input,
-                standalone: _,
             } => {
                 changes.extend(open_round(record));
                 let fresh = !record.live.tools.contains_key(&tool_call_id);

@@ -1680,7 +1680,6 @@ pub async fn run_bash_command(
         tool_call_id: tool_use_id.clone(),
         name: "Bash".to_string(),
         input: input.clone(),
-        standalone: true,
     });
 
     let Some(tool) = find_tool(&tools, "Bash") else {

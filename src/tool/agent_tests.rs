@@ -1919,7 +1919,6 @@ async fn a_subagents_turn_streams_as_the_conversation_it_belongs_to() {
         tool_call_id: "test-tool".into(),
         name: "Read".into(),
         input: serde_json::json!({"file_path": "a"}),
-        standalone: false,
     });
     ui.events
         .emit_stream(&crate::api::contract::StreamEvent::ThinkingDelta {
@@ -2025,7 +2024,6 @@ async fn subagent_retry_restores_the_current_attempt_checkpoint() {
         tool_call_id: "test-tool".into(),
         name: "Read".into(),
         input: serde_json::json!({"file_path":"a"}),
-        standalone: false,
     });
     ui.events.emit(EngineEvent::RoundEnd);
     ui.events
@@ -2037,7 +2035,6 @@ async fn subagent_retry_restores_the_current_attempt_checkpoint() {
         tool_call_id: "test-tool".into(),
         name: "Bash".into(),
         input: serde_json::json!({"command":"bad"}),
-        standalone: false,
     });
     ui.events.emit(EngineEvent::StreamRetry {
         attempt: 1,
@@ -2108,7 +2105,6 @@ async fn subagent_progress_accumulates_tokens_tools_and_recent_activity() {
         tool_call_id: "test-tool".into(),
         name: "Read".into(),
         input: serde_json::json!({"file_path":"src/main.rs"}),
-        standalone: false,
     });
     ui.events
         .emit_stream(&crate::api::contract::StreamEvent::StopReason {
@@ -2119,7 +2115,6 @@ async fn subagent_progress_accumulates_tokens_tools_and_recent_activity() {
         tool_call_id: "test-tool".into(),
         name: "Bash".into(),
         input: serde_json::json!({"command":"cargo check"}),
-        standalone: false,
     });
     let progress = progress.lock().unwrap_or_else(|e| e.into_inner());
     assert_eq!(progress.output_tokens, 19);
@@ -2182,7 +2177,6 @@ async fn a_subagent_host_touches_activity_on_stream_and_tool_signals() {
         tool_call_id: "test-tool".into(),
         name: "Read".into(),
         input: serde_json::json!({"file_path": "a"}),
-        standalone: false,
     });
     session.agents.settle().await;
     let ready = session.agents.list()[0].last_active;
