@@ -107,9 +107,7 @@ impl super::Controller {
                 state: command_state(fact.state),
                 started_at: now_millis().saturating_sub(fact.elapsed_ms),
                 duration_ms: fact.elapsed_ms,
-                // The watch table records a state and a line about it, not an
-                // exit status; saying `0` here would be inventing one.
-                exit_code: None,
+                exit_code: fact.exit_code,
                 conversation_id: None,
                 item_id: None,
             })
@@ -127,7 +125,9 @@ impl super::Controller {
         for fact in facts {
             let state = command_state(fact.state);
             let known = self.told.commands.get(&fact.id.0);
-            if known.is_some_and(|(_, told, detail)| *told == state && detail == &fact.detail) {
+            if known.is_some_and(|(_, told, detail, code)| {
+                *told == state && detail == &fact.detail && *code == fact.exit_code
+            }) {
                 continue;
             }
             let id = match known {
@@ -136,7 +136,7 @@ impl super::Controller {
             };
             self.told
                 .commands
-                .insert(fact.id.0, (id.clone(), state, fact.detail));
+                .insert(fact.id.0, (id.clone(), state, fact.detail, fact.exit_code));
             changed.push(BackgroundCommandResource {
                 id,
                 label: fact.label,
@@ -144,7 +144,7 @@ impl super::Controller {
                 state,
                 started_at: now_millis().saturating_sub(fact.elapsed_ms),
                 duration_ms: fact.elapsed_ms,
-                exit_code: None,
+                exit_code: fact.exit_code,
                 conversation_id: None,
                 item_id: None,
             });

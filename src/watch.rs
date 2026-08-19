@@ -292,6 +292,9 @@ struct Entry {
     state: WatchState,
     detail: Option<String>,
     payload: Option<serde_json::Value>,
+    /// What the process it ran left behind, when it was a process and it left
+    /// one. `None` after a signal, and for everything that is not a command.
+    exit_code: Option<i32>,
     born: Instant,
     conditions: Vec<ConditionState>,
     /// Content fed in this round (between two ticks).
@@ -372,6 +375,7 @@ pub enum WatchMsg {
         state: WatchState,
         detail: Option<String>,
         payload: Option<serde_json::Value>,
+        exit_code: Option<i32>,
     },
     MatchConditions {
         id: WatchId,
@@ -468,6 +472,8 @@ pub(crate) struct CommandFacts {
     pub elapsed_ms: u64,
     /// What it last reported it was doing.
     pub detail: Option<String>,
+    /// What the process left behind, once it has left one.
+    pub exit_code: Option<i32>,
 }
 
 impl WatchRegistry {
@@ -495,6 +501,7 @@ impl WatchRegistry {
                     .to_string(),
                 elapsed_ms: entry.born.elapsed().as_millis() as u64,
                 detail: entry.detail.clone(),
+                exit_code: entry.exit_code,
             })
             .collect();
         out.sort_by_key(|fact| fact.id.0);
@@ -528,7 +535,8 @@ impl WatchRegistry {
                 state,
                 detail,
                 payload,
-            } => self.set_state(id, state, detail, payload),
+                exit_code,
+            } => self.set_state(id, state, detail, payload, exit_code),
             WatchMsg::MatchConditions { id, reply } => {
                 let _ = reply.send(self.match_conditions(id));
                 None
@@ -610,6 +618,7 @@ impl WatchRegistry {
                 state: poll.state,
                 detail: poll.detail.clone(),
                 payload: poll.payload.clone(),
+                exit_code: None,
                 born: Instant::now(),
                 conditions: conditions.into_iter().map(ConditionState::new).collect(),
                 feed_buffer: Vec::new(),
@@ -739,6 +748,7 @@ impl WatchRegistry {
         state: WatchState,
         detail: Option<String>,
         payload: Option<serde_json::Value>,
+        exit_code: Option<i32>,
     ) -> Option<WatchEvent> {
         let entry = self.entries.get_mut(&id)?;
         // Terminal freeze: non-terminal updates after Done/Failed (e.g. a polling
@@ -746,12 +756,15 @@ impl WatchRegistry {
         if entry.state.is_terminal() && !state.is_terminal() {
             return None;
         }
-        if entry.state == state && entry.detail == detail {
+        // The exit code joins the idempotency test: it is a fact of its own, and
+        // a transition carrying one nobody has heard yet is a transition.
+        if entry.state == state && entry.detail == detail && entry.exit_code == exit_code {
             return None;
         }
         entry.state = state;
         entry.detail = detail.clone();
         entry.payload = payload.clone();
+        entry.exit_code = exit_code;
         let label = entry.label.clone();
         let kind = entry.kind;
         let dispatch = entry.dispatch;
@@ -989,6 +1002,31 @@ impl WatchHandle {
             state,
             detail,
             payload,
+            exit_code: None,
+        });
+    }
+
+    /// A background command reached its end, and this is what the process left.
+    ///
+    /// Its own method rather than a fifth argument on [`set_state`](Self::set_state):
+    /// agents, rooms and polled watchables have no exit status, and asking each
+    /// of their thirty call sites to say `None` would be thirty opinions nobody
+    /// holds. `None` here too when a signal killed it — inventing `-1` would
+    /// make a client believe the shell said so.
+    pub fn finish_command(
+        &self,
+        id: WatchId,
+        state: WatchState,
+        detail: Option<String>,
+        payload: Option<serde_json::Value>,
+        exit_code: Option<i32>,
+    ) {
+        self.report(WatchMsg::SetState {
+            id,
+            state,
+            detail,
+            payload,
+            exit_code,
         });
     }
 

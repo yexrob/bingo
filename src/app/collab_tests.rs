@@ -721,11 +721,12 @@ async fn a_background_command_reports_its_transitions_as_a_resource() {
         Vec::new(),
         None,
     );
-    watch.set_state(
+    watch.finish_command(
         id,
         crate::watch::WatchState::Done,
-        Some("ok".to_string()),
+        Some("exit code 2".to_string()),
         None,
+        Some(2),
     );
 
     let events = drain(&mut link).await;
@@ -750,6 +751,15 @@ async fn a_background_command_reports_its_transitions_as_a_resource() {
             assert_eq!(
                 done.state,
                 crate::app::snapshot::BackgroundCommandState::Done
+            );
+            assert_eq!(
+                started.exit_code, None,
+                "a command still running has left nothing behind"
+            );
+            assert_eq!(
+                done.exit_code,
+                Some(2),
+                "what the shell said, not a number this side made up"
             );
             assert_eq!(done.id, started.id, "one command, one identifier");
         }

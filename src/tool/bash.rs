@@ -629,11 +629,15 @@ fn promote_to_background(
         drain_readers(readers, child_pid).await;
         let text = output.lock().map(|b| b.finish()).unwrap_or_default();
         match status {
-            Ok(status) => watch.set_state(
+            // `code()` and not `code().unwrap_or(-1)`: a command a signal
+            // killed left no exit status, and `-1` would be this process
+            // saying the shell said something it never said.
+            Ok(status) => watch.finish_command(
                 id,
                 crate::watch::WatchState::Done,
                 Some(format!("exit code {}", status.code().unwrap_or(-1))),
                 Some(serde_json::json!(text)),
+                status.code(),
             ),
             Err(e) => watch.set_state(
                 id,
@@ -753,11 +757,12 @@ async fn launch_background(
         .await
         {
             Ok((text, code)) => {
-                watch.set_state(
+                watch.finish_command(
                     id,
                     crate::watch::WatchState::Done,
                     Some(format!("exit code {code}")),
                     Some(serde_json::json!(text)),
+                    Some(code),
                 );
             }
             Err(e) => {

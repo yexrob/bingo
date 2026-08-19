@@ -413,7 +413,15 @@ struct Told {
     /// Where each direct message was last reported to stand.
     deliveries: std::collections::HashMap<u64, (DeliveryId, DeliveryState, u32)>,
     /// Where each background command was last reported to stand.
-    commands: std::collections::HashMap<u64, (CommandId, BackgroundCommandState, Option<String>)>,
+    commands: std::collections::HashMap<
+        u64,
+        (
+            CommandId,
+            BackgroundCommandState,
+            Option<String>,
+            Option<i32>,
+        ),
+    >,
 }
 
 /// What decides whether an instance's change is worth an event. Progress
