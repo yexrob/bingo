@@ -8327,3 +8327,133 @@ write like any other.
 | core/engine config double mirror | unchanged — same face |
 | `store.rs` `#![allow(dead_code)]` | kept: the read face still has readers to come |
 | `rg "B7 removes this"` | **0** |
+
+## D152 — the write face stops at the action table, not at the engine
+
+**What it lands.** Two things the write face needs before anything else can move,
+each true on its own and each verified end to end.
+
+1. **The engine runs a console-grade turn.** `SessionEngine` resolves a prompt's
+   `#[image N]` markers against the session's own attachment registry, so a
+   picture reaches the model whichever frontend submitted the line; the memory
+   pass and the empty-response warning happen inside the run, after the turn is
+   closed, rather than in the console's `finish_turn`; and the foreground shell
+   command's handle is held where `Run::Promote` can reach it, so ctrl+b has an
+   address that is not a frontend's private field.
+2. **Speaking in a room joins it, whichever client speaks.** The
+   join-before-posting rule (D103) lived in `tui::bufferview::deliver_direct`,
+   which meant a wire client posting to a room it was only watching was refused
+   by name — "join the room before speaking in it" — for doing exactly what a
+   `#room` line does in the terminal. It is `app/controller/run.rs`'s now, and
+   the join is announced in the room's own log the way it always was.
+
+Two commits, four gates green after each, plus the discipline gate. **1703 →
+1704 unit**, 27 → 28 black-box. No test deleted; one black-box assertion
+rewritten in place (below), two tests added.
+
+`src/tui/` is byte-unchanged by this record, which is why no terminal smoke was
+re-run: nothing the console draws or drives moved. What did move is exercised by
+the black-box suite, which is a real `bingo app-server` process against a scripted
+provider on loopback.
+
+### What the fake provider had to learn
+
+The memory pass is a non-streaming completion made *after* a turn has ended. The
+black-box provider answered every request from the same script and counted every
+request as a turn, so moving the pass into the engine made two tests see one
+round too many. It now answers a non-streaming request the way it already
+answered `count_tokens` — out of band, uncounted, with nothing worth remembering
+— because an aside is not a turn and a test's script is a script of its turns.
+
+### `command.promote` was unavailable by construction
+
+`Availability::engine_attached` was a constant `false` — a placeholder from before
+the engine reached the wire. `command.promote` declared `Requires::ENGINE`, so it
+had been permanently unavailable since the day it was published: `action/list`
+said no, and `action/execute` refused.
+
+Making the constant truthful is the obvious fix and it is **wrong**, which is the
+finding this record is really about (below): thirteen actions declare
+`Requires::ENGINE` or `IDLE_ENGINE`, and `Controller::apply_action` implements
+*none* of them. With the constant honest, `action/list` starts promising a family
+`action/execute` then refuses. So the constant stays `false` and now says why,
+and `command.promote` stops declaring a capability it never needed: what it
+depends on is a *moment* — something has to be running — so a session with an
+idle foreground answers `noChange`. That is the answer a key with two meanings
+needs, and it is what the terminal's ctrl+b has always done.
+
+### The wall: `Controller::submit` performing requires the whole action table
+
+B7d's approved order was `Controller::submit` from deciding to performing → the
+console's intent queue → the digest wake's door → **the engine attached last**.
+The order cannot hold, and the reason is a chain each of whose links is forced:
+
+1. `Controller::submit` performing `Turn`/`Shell`/`Deliver` means calling
+   `self.engine()?`. A core with no engine refuses all three by name — that is
+   `run.rs`'s stated invariant and one of its tests. So the console's core must
+   have an engine **before** its submissions can be performed, not after.
+2. Attaching the engine to the console's core turns on `Controller::drain_main`,
+   which is gated on exactly that (`if self.engine.is_none() { return }`). The
+   console's own `submit_queued` still drains the same queue; two drains take the
+   same entry twice, so the console's drain has to go in the same step.
+3. The core's drain applies a queued slash line through `serve_command_line` →
+   `apply_action`. **`apply_action` implements fourteen of the twenty-eight
+   actions**; every one that needs a model, a transcript rewrite or a network
+   round trip — `conversation.compact`, `conversation.rewind`, `session.reset`,
+   `session.rename`, `session.share`, `skill.invoke`, `provider.login`,
+   `mcp.reconnect`, and the five `team.*` — falls through to
+   `_ => Err(unavailable())` and is implemented in `tui::chat::run_command`.
+
+So a `/compact` queued behind a running turn — a real path, and item eleven of
+B7c's smoke list — would drain into a silent `ActionUnavailable` the moment the
+engine is attached. The write face is not blocked by the engine, by the intent
+queue, or by the digest wake. It is blocked by **the half of the action table
+that never moved**, which B5 left in the console and which nothing since has
+been asked to take.
+
+Work was carried far enough to be sure of this before it was reverted: the
+`Submitted` disposition (a report of what the core *did*, with `Command` handed
+back for the frontend to render), `serve_submit` reduced to a mapping over it,
+the `❯` row drawn from `turn/started`'s `input_item_ids` so that a drained queue
+entry and a line typed a moment ago have one producer, and the console's submit
+arms rewritten against it. All of it is sound and none of it can be green until
+the drain has somewhere honest to go.
+
+### What has to be decided
+
+Three ways out, and the choice is a scope ruling rather than an implementation
+detail:
+
+- **(a) Move the engine half of the action table into the core**, as its own
+  batch, before the write face. Thirteen handlers, each of which currently reads
+  console state and writes console rows; the split is the same one B4 ruling ②
+  made for a turn — the ledger half is the core's, the work half leaves through
+  `Engine`. It is the only option that leaves no fork behind, and it is not
+  small.
+- **(b) Say who drains, in the session's setup.** One boolean: the transport sets
+  it, the console does not, and the console's drain moves into its `async` loop
+  (where `drain_front` is `.await`, so the `.now()` count still reaches zero).
+  Honest as a *statement* — the frontend that owns half the action table owns the
+  drain of the lines that carry it — but it is a behavioural fork between
+  frontends introduced at the end of a campaign whose purpose was to remove them.
+- **(c) Publish the drained line and let each frontend render it.** A minimal
+  contract addition, and it does not solve the problem: the core would still
+  apply the fourteen it can and refuse the thirteen it cannot, so the console
+  would have to branch on `spec_of(&action).requires.engine` to decide whether to
+  apply as well. Two authorities for one line.
+
+The recommendation is **(a)**, taken as B7d-2 with the write face after it. What
+is already landed here belongs to the write face either way.
+
+### Where the shims stand
+
+| shim | state |
+| --- | --- |
+| the memory pass in `tui::chat_tail::finish_turn` | **gone from the engine's path**; the console's copy dies with its run loop |
+| images missing from `Run::Turn` | **gone** — resolved from the session's registry |
+| `command.promote` with no producer | **gone** — `Run::Promote`, and the core names the item |
+| the join-before-posting rule in the console | **gone** — the core's, for every client |
+| `Availability::engine_attached` | still constant, and now says which thirteen actions it is standing in for |
+| `Answer::now()` in `src/tui/` | 15 production sites — unchanged |
+| core/engine config double mirror | unchanged |
+| `Chat::submit_queued` / `Controller::drain_main` | two drains, one queue, waiting on the ruling above |

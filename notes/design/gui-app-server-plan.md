@@ -382,6 +382,37 @@ Chat/App 管线换 AppLink 帧，删全部 shim；TuiEvent 本地化；按键动
 > **engine 最后挂**。完成时 `.now()` 生产路径零、config 双镜像亡、answer.rs 阻塞半边亡。
 > D152 归 B7d，B8 顺延 D153（预留扩至 D154）。
 
+> **B7d 止步记（2026-08-19）**：**engine 侧对齐 + 房间加入归核已落，写入面未动**（D152，两提交）。
+> 落地：`SessionEngine` 从 session 的 attachment 注册表解析图片标记（图片达 engine）、memory pass 与
+> 空回复警告进入 run（turn 关闭之后）、`Run::Promote` 让 ctrl+b 有了地址（`command.promote` 从
+> `Requires::ENGINE` 改为 `NOTHING`——它依赖的是"此刻有东西在跑"而非能力，空闲即 `noChange`）；
+> D103 的"发言即入座"从 `tui::bufferview` 移入 `app/controller/run.rs`（wire 客户端向只旁观的房间
+> 发帖曾被按名拒绝）。黑盒 provider 学会：非流式请求是场外调用，不计入脚本轮次。
+> 测试 1703→1704，黑盒 27→28；四门 + discipline 全绿；`src/tui/` 零字节改动，故未重跑终端 smoke。
+>
+> **墙（结构性，非实现细节）**：裁决⑤的顺序无法成立，链条每一环都是被迫的——
+> ① `Controller::submit` 执行 Turn/Shell/Deliver 必须 `self.engine()?`，故控制台的核**必须先挂 engine**，
+> 不能最后挂；② 挂上 engine 即打开 `Controller::drain_main`（其门就是 `engine.is_none()`），
+> 与控制台 `submit_queued` 成两个 drain 抢同一队列，故控制台的 drain 必须同步消亡；
+> ③ 核的 drain 用 `serve_command_line` → `apply_action`，而 **`apply_action` 只实现 28 个 action 中的 14 个**：
+> `conversation.compact`/`rewind`、`session.reset`/`rename`/`share`、`skill.invoke`、`provider.login`、
+> `mcp.reconnect`、`team.*` 五个——全部 `Requires::ENGINE`，全部落到 `_ => unavailable()`，
+> 实现都还在 `tui::chat::run_command` 里。故排队的 `/compact`（B7c smoke 第 11 项）会在挂上 engine 的
+> 那一刻静默变成 `ActionUnavailable`。
+> **写入面不是被 engine、意图队列或乙案的门卡住的，是被 B5 留在控制台的那半张动作表卡住的。**
+> `Availability::engine_attached` 因此仍是常量 `false`（改真会让 `action/list` 承诺 `action/execute` 随即毁约），
+> 只是现在写明它代表哪十三个。
+>
+> **三条出路，请裁决**：**(a)** 动作表的 engine 半边先入核（十三个 handler，按 B4 裁决②的分法：
+> 账本归核、工作经 `Engine` 出去），独立成 B7d-2，写入面排其后——唯一不留分叉的解，且不小；
+> **(b)** 在 SessionSetup 里说明"谁 drain"（一个 bool：transport 置真、控制台不置；控制台的 drain 搬进
+> async 循环，`drain_front` 变 `.await`，`.now()` 归零仍成立）——作为陈述是诚实的，但在以消除分叉为
+> 目的的战役末尾引入一处前端行为分叉；**(c)** 把 drain 出来的行发事件让各前端渲染——最小契约加法，
+> 但不解决问题：核仍只能应用 14 个、拒绝 13 个，控制台得按 `spec_of(&action).requires.engine` 分支
+> 决定要不要自己再应用一遍，一行两个权威。
+> 建议 **(a)**。已探到的写入面成果（`Submitted` 处置、`serve_submit` 降为映射、`❯` 行改由
+> `turn/started` 的 `input_item_ids` 画）已回滚，详见 D152 末节。
+
 ### B8 · 收尾（S）
 `--print` 薄客户端；main.rs 启动统一；parity ledger 落成 CI 检查表（每个斜杠命令/提交分支/
 AppEvent 变体分类 shared|frontend-local，新增未分类即红）；schema 标 experimental；
