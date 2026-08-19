@@ -1046,6 +1046,56 @@ mod tests {
         assert_eq!(chat.store.gaps, 0);
     }
 
+    /// An idle instance's `lastActiveAt` is when it last did something, not
+    /// when it was last asked about. The roster's `Idle for 14s` is drawn from
+    /// it, and a stamp of `now` would make every instance eternally fresh.
+    #[test]
+    fn an_idle_instance_reports_when_it_was_last_active() {
+        let mut chat = crate::tui::test_util::chat_at(100, 40);
+        chat.session
+            .agents
+            .insert(
+                "scout",
+                crate::agents::AgentKind::Hire,
+                None,
+                "a scout".to_string(),
+                chat.session.clone(),
+            )
+            .now();
+        chat.settle_store();
+        let seeded = chat
+            .store
+            .view()
+            .agent("scout")
+            .map(|agent| agent.last_active_at)
+            .unwrap_or_else(|| panic!("the instance is on the roster"));
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        // Anything at all makes the actor re-project the roster; the instance
+        // itself has done nothing since it was inserted.
+        chat.session.agents.settle_now();
+        chat.session
+            .agents
+            .insert(
+                "relay",
+                crate::agents::AgentKind::Hire,
+                None,
+                "a relay".to_string(),
+                chat.session.clone(),
+            )
+            .now();
+        chat.settle_store();
+        let again = chat
+            .store
+            .view()
+            .agent("scout")
+            .map(|agent| agent.last_active_at)
+            .unwrap_or_else(|| panic!("the instance is still on the roster"));
+        assert!(
+            again <= seeded + 5,
+            "an instance that did nothing did not become fresher: {seeded} → {again}"
+        );
+    }
+
     /// The whole loop, against a real core: attach, take a cut, and watch a
     /// change the core made turn up in the local projection.
     #[tokio::test]

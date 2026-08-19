@@ -52,7 +52,10 @@ impl super::Controller {
                     elapsed_ms: fact.elapsed_ms,
                     output_tokens: fact.output_tokens,
                     tool_uses: fact.tool_uses,
-                    last_active_at: now_millis(),
+                    // When it last did something, not when it was last asked
+                    // about. Stamping `now` here made every instance eternally
+                    // fresh, and an `Idle for …` drawn from it always read zero.
+                    last_active_at: now_millis().saturating_sub(fact.idle_ms),
                 }
             })
             .collect()

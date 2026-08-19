@@ -1549,6 +1549,11 @@ pub(crate) struct AgentFacts {
     pub elapsed_ms: Option<u64>,
     pub output_tokens: u64,
     pub tool_uses: u32,
+    /// How long ago this instance last did something real. A duration rather
+    /// than an instant, because the wire wants a wall-clock moment and only the
+    /// actor can name one — `now - idle_ms` is that moment, and it is the
+    /// figure a roster's `Idle for 14s` is drawn from.
+    pub idle_ms: u64,
 }
 
 /// One message the registry accepted, as the actor reads it back.
@@ -1637,6 +1642,7 @@ impl AgentRegistry {
                         .and_then(|p| p.started_at.map(|at| at.elapsed().as_millis() as u64)),
                     output_tokens: progress.as_ref().map_or(0, |p| p.output_tokens),
                     tool_uses: progress.as_ref().map_or(0, |p| p.tool_uses) as u32,
+                    idle_ms: entry.last_active.elapsed().as_millis() as u64,
                 }
             })
             .collect();
