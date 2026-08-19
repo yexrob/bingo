@@ -830,6 +830,13 @@ mod tests {
                 true,
             ),
             (
+                19,
+                Action::ProviderLogin {
+                    provider: "codex".to_string(),
+                },
+                true,
+            ),
+            (
                 20,
                 Action::McpReconnect {
                     server: Some("docs".to_string()),

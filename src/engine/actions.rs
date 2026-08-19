@@ -133,6 +133,18 @@ pub async fn perform(session: &Arc<Session>, act: crate::app::engine::Act) {
                 }
             }
         },
+        // Always the browser flow from here: it is the one that needs no input
+        // the protocol cannot carry, and its authorization URL is published as
+        // progress so a client with no browser can still follow it.
+        Action::ProviderLogin { provider } => {
+            match plan_login(session, &provider, Flow::Loopback) {
+                Err(said) => said,
+                Ok(planned) => {
+                    let waiting = progress_sink(session, operation.clone());
+                    login_provider(session, planned, waiting).await
+                }
+            }
+        }
         Action::McpReconnect { server } => reconnect_mcp(session, server.as_deref()).await,
         crew @ (Action::TeamStart { .. }
         | Action::TeamAssign { .. }
@@ -164,6 +176,19 @@ pub async fn perform(session: &Arc<Session>, act: crate::app::engine::Act) {
             }),
         );
     }
+}
+
+/// The waiting lines of a piece of work, as the operation's own progress.
+fn progress_sink(
+    session: &Arc<Session>,
+    operation: Option<crate::app::ids::OperationId>,
+) -> Waiting {
+    let operations = session.operations.clone();
+    Arc::new(move |lines: Vec<String>| {
+        if let Some(operation) = &operation {
+            operations.progress(operation, lines.join("\n"), 0, 1);
+        }
+    })
 }
 
 /// One line of a report, as an item in a conversation's log.
@@ -727,5 +752,212 @@ pub async fn publish_share(export: Export, open: bool) -> Said {
             lines.push(SHARE_NOTE.to_string());
             Said::error(lines.join("\n"))
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// provider.login
+// ---------------------------------------------------------------------------
+
+/// Which way a login is being done.
+///
+/// **This never crosses a wire, and that is the point** (B5 ruling ③). The
+/// action a client sends names a provider and nothing else: `--device-auth` is a
+/// login mechanic, and `--manual <token>` carries a *credential*, which has no
+/// business in a request body, an event, a snapshot or an operation's progress.
+///
+/// So the manual token has one route into this process and it is not the
+/// protocol: the terminal reads it from its own input surface and passes it here
+/// as a function argument, on the thread that read it. Nothing serialises it,
+/// so there is no frame it could leak into. A remote client cannot paste a token
+/// over this protocol at all — it authenticates by device flow, whose secrets
+/// are one-time and public by design, or it writes the credential file itself.
+pub enum Flow {
+    /// The default: a local callback and a browser.
+    Loopback,
+    /// Headless: a URL and a one-time code, polled until authorised.
+    DeviceAuth,
+    /// A token the user already holds. In-process only.
+    Manual(String),
+}
+
+/// Where a login's waiting lines go while it waits.
+///
+/// The lines are the work's, because they carry the URL and the code the user
+/// has to act on: the terminal pins them, and the core publishes them as the
+/// operation's progress. A one-time device code is meant to be read aloud, so it
+/// is not a credential and this is not a leak.
+pub type Waiting = Arc<dyn Fn(Vec<String>) + Send + Sync>;
+
+/// A login that is going to be attempted.
+pub struct Login {
+    provider: String,
+    flow: Flow,
+    /// The provider takes a subscription key rather than an OAuth token.
+    api_preset: bool,
+}
+
+/// What is settled before anything is attempted: whether the provider exists,
+/// which kind of credential it takes, and whether this build can do that flow.
+///
+/// Separate from the attempt because these three answers are immediate, and a
+/// surface that has to wait for a round trip to be told "no such provider" is
+/// answering a different question from the one that was asked.
+pub fn plan_login(session: &Arc<Session>, provider: &str, flow: Flow) -> Result<Login, Said> {
+    let preset = crate::api::providers::presets::preset(provider);
+    // Effective config = user settings ⊕ built-in preset (D34 §6.5): presets make
+    // official subscriptions loginable with zero config.
+    if !session.settings.providers.contains_key(provider) && preset.is_none() {
+        return Err(Said::error(format!(
+            "provider \"{provider}\" not found (see /provider for the list)"
+        )));
+    }
+    let api_preset = preset
+        .map(|preset| preset.oauth_kind.is_none())
+        .unwrap_or(false);
+    let planned = Login {
+        provider: provider.to_string(),
+        flow,
+        api_preset,
+    };
+    // A pasted credential answers for both kinds, so it never reaches the gate.
+    if matches!(planned.flow, Flow::Manual(_)) {
+        return Ok(planned);
+    }
+    let oauth_kind = session
+        .settings
+        .providers
+        .get(provider)
+        .and_then(|config| config.oauth.as_ref().map(|oauth| oauth.kind.clone()))
+        .or_else(|| preset.and_then(|preset| preset.oauth_kind.map(str::to_string)));
+    // OAuth gate: codex only in v1; apiKey presets guide the key paste.
+    let Some(oauth_kind) = oauth_kind else {
+        return Err(Said::info(format!(
+            "provider \"{provider}\" requires an API key (subscription key):\n  1. get one at opencode.ai/auth\n  2. /provider login {provider} --manual <key>"
+        )));
+    };
+    if oauth_kind != "codex" {
+        return Err(Said::error(format!(
+            "unsupported oauth.kind \"{oauth_kind}\" (v1 supports only codex)"
+        )));
+    }
+    Ok(planned)
+}
+
+/// Authenticate with a provider.
+pub async fn login_provider(session: &Arc<Session>, login: Login, waiting: Waiting) -> Said {
+    let Login {
+        provider,
+        flow,
+        api_preset,
+    } = login;
+    let provider = provider.as_str();
+    let home = session.home.clone();
+    let config = crate::api::auth::OauthFlowConfig::codex();
+    // Share the session client's TokenProvider: saving through the same instance
+    // updates the adapter's cache and account mirror, so the login takes effect
+    // in this session without a restart.
+    let shared = session.client.token_provider(provider);
+    let token_provider = |config: crate::api::auth::OauthFlowConfig| {
+        shared.unwrap_or_else(|| {
+            Arc::new(crate::api::auth::TokenProvider::new(
+                &home, provider, config,
+            ))
+        })
+    };
+
+    if let Flow::Manual(token) = flow {
+        // A pasted key works for an apiKey preset as well as an oauth one.
+        if api_preset {
+            let store = crate::auth::AuthStore::new(&home);
+            return match store.set(provider, crate::auth::AuthEntry::Api { key: token }) {
+                Ok(()) => Said::output(format!("✓ saved {provider}'s API key (subscription key)")),
+                Err(error) => Said::error(format!("✗ save failed: {error}")),
+            };
+        }
+        let tokens = crate::api::auth::TokenSet {
+            access_token: token,
+            refresh_token: String::new(),
+            id_token: None,
+            expires_at: None,
+            account_id: None,
+        };
+        return match token_provider(config).save(&tokens).await {
+            Ok(()) => Said::output(format!(
+                "✓ saved {provider}'s login info (a --manual token does not auto-refresh)"
+            )),
+            Err(error) => Said::error(format!("✗ save failed: {error}")),
+        };
+    }
+
+    let http = reqwest::Client::new();
+    let tokens = match flow {
+        Flow::DeviceAuth => {
+            let device = crate::api::auth::DeviceFlow::new(&http, &config);
+            let (prompt, id, interval) = match device.start().await {
+                Ok(started) => started,
+                Err(error) => return Said::error(format!("✗ sign-in failed: {error}")),
+            };
+            // The code is valid for fifteen minutes and has to stay readable for
+            // all of them.
+            waiting(vec![
+                format!("sign in to {provider} (device authorization)"),
+                format!("  1. open {}", prompt.verification_url),
+                format!("  2. enter code {} (valid for 15 minutes)", prompt.user_code),
+                "⏳ waiting for authorization… (Esc will not cancel; the panel disappears when done)"
+                    .to_string(),
+            ]);
+            match device.poll(&id, &prompt.user_code, interval).await {
+                Ok(tokens) => tokens,
+                Err(error) => return Said::output(format!("✗ sign-in failed: {error}")),
+            }
+        }
+        _ => {
+            let loopback = crate::api::auth::LoopbackPkce::new(&http, &config);
+            let (url, _redirect, _verifier, handle) = match loopback.authorize_url().await {
+                Ok(started) => started,
+                Err(error) => return Said::error(format!("✗ sign-in failed: {error}")),
+            };
+            // With the URL itself: on an SSH or headless host the browser never
+            // opens and this line is the only way through.
+            waiting(vec![
+                format!(
+                    "sign in to {provider}: complete the authorization in the browser (tried to open it automatically)"
+                ),
+                format!("  {url}"),
+                format!("  browser did not open? /provider login {provider} --device-auth"),
+            ]);
+            let _ = crate::share::open_in_browser(&url);
+            match handle.await {
+                Ok(Ok(tokens)) => tokens,
+                Ok(Err(error)) => return Said::error(format!("✗ sign-in failed: {error}")),
+                Err(error) => return Said::error(format!("✗ sign-in interrupted: {error}")),
+            }
+        }
+    };
+    match token_provider(config).save(&tokens).await {
+        Ok(()) => Said::output(format!("✓ signed in to {provider}")),
+        Err(error) => Said::output(format!("✗ save failed: {error}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// The red line, asserted rather than trusted: a pasted credential is not
+    /// part of the action a login line becomes, so it cannot reach a wire frame,
+    /// an event, a snapshot or an operation's payload.
+    #[test]
+    fn a_pasted_token_is_never_part_of_the_action_a_login_line_becomes() {
+        let parsed =
+            crate::app::action::parse_in("provider login opencode-go --manual sk-secret", &[])
+                .unwrap_or_else(|error| panic!("{error}"));
+        let crate::app::action::Command::Act(action) = parsed else {
+            panic!("a login line is an action");
+        };
+        let wire = serde_json::to_string(&action).unwrap_or_else(|error| panic!("{error}"));
+        assert!(
+            !wire.contains("sk-secret"),
+            "the token stays on the line the terminal read: {wire}"
+        );
     }
 }

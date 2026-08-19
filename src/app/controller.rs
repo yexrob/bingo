@@ -966,6 +966,14 @@ impl Controller {
             share @ Action::SessionShare { .. } => {
                 self.hand_over(on, Some(crate::app::snapshot::OperationKind::Share), share)
             }
+            // No credential travels either way: the action names a provider, and
+            // the authorization URL the operation reports as progress is public
+            // by design (B5 ruling ③).
+            login @ Action::ProviderLogin { .. } => self.hand_over(
+                on,
+                Some(crate::app::snapshot::OperationKind::ProviderLogin),
+                login,
+            ),
             reconnect @ Action::McpReconnect { .. } => self.hand_over(
                 on,
                 Some(crate::app::snapshot::OperationKind::McpReconnect),

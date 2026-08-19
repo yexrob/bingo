@@ -237,7 +237,14 @@ impl super::Chat {
     /// for a provider with an `oauth` config (D33 §6). Default = loopback
     /// PKCE (opens the browser); `--device-auth` prints URL + code and polls
     /// (headless/SSH); `--manual` stores a pasted token (no refresh).
+    ///
+    /// The two flags stay here and never become fields on the action (B5 ruling
+    /// ③): they are login mechanics, and a pasted token is a credential. It
+    /// travels from this input surface into [`crate::engine::actions`] as a
+    /// function argument on this thread — nothing serialises it, so there is no
+    /// frame it could leak into.
     pub(crate) fn slash_provider_login(&mut self, arg: &str) {
+        use crate::engine::actions::{Flow, Waiting};
         let parts: Vec<&str> = arg.split_whitespace().collect();
         let Some(name) = parts.first() else {
             self.push_slash_output(
@@ -245,208 +252,37 @@ impl super::Chat {
             );
             return;
         };
-        let manual = parts
+        let flow = match parts
             .iter()
-            .position(|p| *p == "--manual")
-            .and_then(|i| parts.get(i + 1).copied());
-        let device_auth = parts.contains(&"--device-auth");
-
-        let session = self.session.clone();
-        // Effective config = user settings ⊕ built-in preset (D34 §6.5):
-        // presets make official subscriptions loginable with zero config.
-        let preset = crate::api::providers::presets::preset(name);
-        let known = session.settings.providers.contains_key(*name) || preset.is_some();
-        if !known {
-            self.push_slash_error(format!(
-                "provider \"{name}\" not found (see /provider for the list)"
-            ));
-            return;
-        }
-        let oauth_kind = session
-            .settings
-            .providers
-            .get(*name)
-            .and_then(|c| c.oauth.as_ref().map(|o| o.kind.clone()))
-            .or_else(|| preset.and_then(|p| p.oauth_kind.map(str::to_string)));
-        let name = name.to_string();
-        let home = session.home.clone();
-        let events = self.events.clone();
-        let http = reqwest::Client::new();
-        let config = crate::api::auth::OauthFlowConfig::codex();
-
-        // --manual first: works for both apiKey presets (opencode-go, stores
-        // auth.json `{type:"api"}`) and oauth presets (pasted access token).
-        if let Some(token) = manual {
-            let token = token.to_string();
-            let api_preset = preset.map(|p| p.oauth_kind.is_none()).unwrap_or(false);
-            // Share the session Client's TokenProvider: saving through the
-            // same instance updates the adapter's cache + account mirror, so
-            // the login takes effect in this session (no restart).
-            let shared_tp = session.client.token_provider(&name);
-            tokio::spawn(async move {
-                if api_preset {
-                    let store = crate::auth::AuthStore::new(&home);
-                    match store.set(&name, crate::auth::AuthEntry::Api { key: token }) {
-                        Ok(()) => {
-                            events.send(UiEvent::SlashOutput(format!(
-                                "✓ saved {name}'s API key (subscription key)"
-                            )));
-                        }
-                        Err(e) => {
-                            events.send(UiEvent::SlashError(format!("✗ save failed: {e}")));
-                        }
-                    }
-                    return;
-                }
-                let tp = shared_tp.unwrap_or_else(|| {
-                    std::sync::Arc::new(crate::api::auth::TokenProvider::new(&home, &name, config))
-                });
-                let tokens = crate::api::auth::TokenSet {
-                    access_token: token,
-                    refresh_token: String::new(),
-                    id_token: None,
-                    expires_at: None,
-                    account_id: None,
-                };
-                match tp.save(&tokens).await {
-                    Ok(()) => {
-                        events.send(UiEvent::SlashOutput(format!(
-                            "✓ saved {name}'s login info (a --manual token does not auto-refresh)"
-                        )));
-                    }
-                    Err(e) => {
-                        events.send(UiEvent::SlashError(format!("✗ save failed: {e}")));
-                    }
-                }
-            });
-            return;
-        }
-
-        // OAuth gate: codex only in v1; apiKey presets guide the key paste.
-        let Some(oauth_kind) = oauth_kind else {
-            self.push_slash_info(format!(
-                "provider \"{name}\" requires an API key (subscription key):\n  1. get one at opencode.ai/auth\n  2. /provider login {name} --manual <key>"
-            ));
-            return;
+            .position(|part| *part == "--manual")
+            .and_then(|at| parts.get(at + 1).copied())
+        {
+            Some(token) => Flow::Manual(token.to_string()),
+            None if parts.contains(&"--device-auth") => Flow::DeviceAuth,
+            None => Flow::Loopback,
         };
-        if oauth_kind != "codex" {
-            self.push_slash_error(format!(
-                "unsupported oauth.kind \"{oauth_kind}\" (v1 supports only codex)"
-            ));
-            return;
-        }
-
-        if device_auth {
-            // headless/SSH: print the URL + one-time code, poll for authorization.
-            let shared_tp = session.client.token_provider(&name);
-            tokio::spawn(async move {
-                let flow = crate::api::auth::DeviceFlow::new(&http, &config);
-                match flow.start().await {
-                    Ok((prompt, device_auth_id, interval)) => {
-                        // Pinned: the code is valid for 15 minutes — it must
-                        // stay on screen for all of them (the 2s TTL burned
-                        // it before anyone could type it).
-                        events.send(UiEvent::PinPanel {
-                            id: "login".to_string(),
-                            lines: vec![
-                                format!("sign in to {name} (device authorization)"),
-                                format!("  1. open {}", prompt.verification_url),
-                                format!("  2. enter code {} (valid for 15 minutes)", prompt.user_code),
-                                "⏳ waiting for authorization… (Esc will not cancel; the panel disappears when done)".to_string(),
-                            ],
-                        });
-                        let outcome = flow
-                            .poll(&device_auth_id, &prompt.user_code, interval)
-                            .await;
-                        events.send(UiEvent::Unpin {
-                            id: "login".to_string(),
-                        });
-                        match outcome {
-                            Ok(tokens) => {
-                                let tp = shared_tp.unwrap_or_else(|| {
-                                    std::sync::Arc::new(crate::api::auth::TokenProvider::new(
-                                        &home, &name, config,
-                                    ))
-                                });
-                                match tp.save(&tokens).await {
-                                    Ok(()) => {
-                                        events.send(UiEvent::SlashOutput(format!(
-                                            "✓ signed in to {name}"
-                                        )));
-                                    }
-                                    Err(e) => {
-                                        events.send(UiEvent::SlashOutput(format!(
-                                            "✗ save failed: {e}"
-                                        )));
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                events.send(UiEvent::SlashOutput(format!("✗ sign-in failed: {e}")));
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        events.send(UiEvent::SlashError(format!("✗ sign-in failed: {e}")));
-                    }
-                }
+        let planned = match crate::engine::actions::plan_login(&self.session, name, flow) {
+            Ok(planned) => planned,
+            Err(said) => return self.say(said),
+        };
+        let session = self.session.clone();
+        let events = self.events.clone();
+        let pin = self.events.clone();
+        // Pinned rather than printed: the URL and the one-time code have to stay
+        // on screen for as long as the user needs to act on them (the 2s TTL
+        // burned the code before anyone could type it).
+        let waiting: Waiting = std::sync::Arc::new(move |lines| {
+            pin.send(UiEvent::PinPanel {
+                id: "login".to_string(),
+                lines,
             });
-            return;
-        }
-
-        // Default: loopback PKCE (local callback + opening the browser).
-        let shared_tp = session.client.token_provider(&name);
+        });
         tokio::spawn(async move {
-            let flow = crate::api::auth::LoopbackPkce::new(&http, &config);
-            match flow.authorize_url().await {
-                Ok((url, _redirect, _verifier, handle)) => {
-                    // Pinned, with the URL itself: on SSH/no-GUI hosts the
-                    // browser never opens and this line is the only way
-                    // through (it used to say "tried to open" and show nothing).
-                    events.send(UiEvent::PinPanel {
-                        id: "login".to_string(),
-                        lines: vec![
-                            format!("sign in to {name}: complete the authorization in the browser (tried to open it automatically)"),
-                            format!("  {url}"),
-                            format!("  browser did not open? /provider login {name} --device-auth"),
-                        ],
-                    });
-                    let _ = crate::share::open_in_browser(&url);
-                    let outcome = handle.await;
-                    events.send(UiEvent::Unpin {
-                        id: "login".to_string(),
-                    });
-                    match outcome {
-                        Ok(Ok(tokens)) => {
-                            let tp = shared_tp.unwrap_or_else(|| {
-                                std::sync::Arc::new(crate::api::auth::TokenProvider::new(
-                                    &home, &name, config,
-                                ))
-                            });
-                            match tp.save(&tokens).await {
-                                Ok(()) => {
-                                    events.send(UiEvent::SlashOutput(format!(
-                                        "✓ signed in to {name}"
-                                    )));
-                                }
-                                Err(e) => {
-                                    events
-                                        .send(UiEvent::SlashOutput(format!("✗ save failed: {e}")));
-                                }
-                            }
-                        }
-                        Ok(Err(e)) => {
-                            events.send(UiEvent::SlashError(format!("✗ sign-in failed: {e}")));
-                        }
-                        Err(e) => {
-                            events.send(UiEvent::SlashError(format!("✗ sign-in interrupted: {e}")));
-                        }
-                    }
-                }
-                Err(e) => {
-                    events.send(UiEvent::SlashError(format!("✗ sign-in failed: {e}")));
-                }
-            }
+            let said = crate::engine::actions::login_provider(&session, planned, waiting).await;
+            events.send(UiEvent::Unpin {
+                id: "login".to_string(),
+            });
+            events.send(crate::tui::chat::said_event(said));
         });
     }
 
