@@ -1439,15 +1439,21 @@ fn a_turn_the_model_answered_with_nothing_twice_says_why_it_ended() {
 
     let frames = server.until("turn/completed");
     gapless(&frames);
-    let warned = of(&frames, "feedback/raised")
-        .into_iter()
-        .position(|frame| {
+    let said = |needle: &str| {
+        of(&frames, "feedback/raised").into_iter().any(|frame| {
             frame["params"]["feedback"]["message"]
                 .as_str()
-                .is_some_and(|message| message.contains("empty response and was retried"))
+                .is_some_and(|message| message.contains(needle))
         })
-        .is_some();
-    assert!(warned, "the run says why it stopped: {frames:#?}");
+    };
+    assert!(
+        said("empty response; retrying once"),
+        "the run says why it is trying again: {frames:#?}"
+    );
+    assert!(
+        said("empty response and was retried"),
+        "the run says why it stopped: {frames:#?}"
+    );
     assert_eq!(provider.rounds(), 2, "it tried exactly twice");
 
     let ended = server.finish();

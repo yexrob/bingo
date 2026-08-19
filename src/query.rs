@@ -1109,10 +1109,13 @@ async fn query_loop(
         if turn.tool_uses.is_empty() && empty_assistant && !truncated {
             if empty_retry_count == 0 {
                 empty_retry_count = 1;
-                if !session.quiet {
-                    host.events
-                        .warn("model returned an empty response; retrying once".to_string());
-                }
+                // Not gated on `quiet`, which is the framing contract for this
+                // run's *stdout* and says nothing about who may hear that the
+                // model answered with nothing. The second warning — raised once
+                // the run ends — never was gated, so gating the first one meant a
+                // wire client heard the retry's conclusion and not its cause.
+                host.events
+                    .warn("model returned an empty response; retrying once".to_string());
                 continue;
             }
             // Twice over is a decision, not a broken stream: a member draining room lines
