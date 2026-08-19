@@ -8468,3 +8468,166 @@ is already landed here belongs to the write face either way.
 | `Answer::now()` in `src/tui/` | 15 production sites — unchanged |
 | core/engine config double mirror | unchanged |
 | `Chat::submit_queued` / `Controller::drain_main` | two drains, one queue, waiting on the ruling above |
+
+## D153 — the half of the action table that never moved
+
+**What it lands.** B7d-2, the batch B7d's wall asked for and Fable's ruling ②
+chose: the thirteen actions that need a model, a transcript rewrite or a network
+round trip stop living in `tui::chat::run_command` and become the core's. With
+them, `Availability::engine_attached` stops being a constant, and a `/compact`
+queued behind a running turn drains into the compaction it asked for instead of
+a silent `ActionUnavailable`.
+
+Six commits, four gates plus the discipline gate green after each. **1704 →
+1708 unit**, 29 → 29 black-box. No test deleted; one black-box assertion
+rewritten in place and strengthened (below), five tests added.
+
+### One implementation, two renderers
+
+The move could not be "the console asks the core", because the console's core
+still has no engine — attaching one opens `Controller::drain_main` against the
+console's own `submit_queued`, which is B7d-3's whole problem. So the split is
+one level down: `src/engine/actions.rs` is the single home for the *work*, and it
+answers in the words its own surface prints.
+
+```rust
+pub struct Said { pub tier: Tier, pub text: String }
+```
+
+The terminal renders a `Said` with its slash tiers (`said_event`); the core
+records it as an `ItemBody::Notice` in the page the action was asked on, beside
+the operation that carried it. Neither owns the sentence, which is what makes
+this a move rather than a copy: the format strings exist once, and the console's
+handlers are now four to twenty lines of rendering each.
+
+Four functions that needed to answer *before* a surface says it is working are
+split plan/run — `plan_compaction`, `plan_login` — because a surface that has to
+wait for a round trip to be told "no such provider" is answering a different
+question from the one that was asked, and two console tests read the answer
+synchronously right after `submit()`.
+
+### The thirteen, and where each one's work ends up
+
+| action | how it leaves the core | what it produces |
+| --- | --- | --- |
+| `conversation.compact` | `Run::Act` + operation `compact` | `ItemBody::Compaction` (the outcome's own numbers) + a notice |
+| `conversation.rewind` | `Run::Act` + operation `rewind` | `ItemBody::Rewind` + a notice |
+| `session.reset` | `Run::Act`, no operation | a notice, plus warnings for what the rebind could not carry |
+| `session.rename` | `Run::Act`, no operation | same |
+| `session.share` | `Run::Act` + operation `share` | a notice (the export path, or the published URL) |
+| `skill.invoke` | **a turn** — `start_turn` with the `✦` marker | the run itself |
+| `provider.login` | `Run::Act` + operation `providerLogin` | progress carries the authorization URL; a notice ends it |
+| `mcp.reconnect` | `Run::Act` + operation `mcpReconnect` | a notice, plus `report_mcp` so `config/read` stops lying |
+| `team.start` | `Run::Act`, **no** operation | `spawn_tree` opens its own `teamStart`; a second row would be two for one thing |
+| `team.assign` / `team.stop` / `team.scaffold` / `team.memoryGc` | `Run::Act`, no operation | a notice |
+
+`apply_action` has no `_ =>` arm left. That is the milestone: the compiler is now
+what keeps every action in the table implemented, where B5's fall-through stood
+in for thirteen handlers that lived in a frontend.
+
+`Operation` gained the conversation it was asked on (the field B5 left `None`
+"rather than deciding it early"), and `OperationHandle` gained `record` — an
+operation says work is running and how it ended; what it *did* is an item in a
+conversation's log, and the two together are one report.
+
+### `provider.login`, and where a credential is allowed to be
+
+B5 ruling ③ said the action carries no `--device-auth` and no `--manual <token>`.
+It still does not, and the mechanics stayed reachable from the terminal:
+
+- The **action** names a provider. The core runs the browser flow and publishes
+  the authorization URL as the operation's progress, so a client with no browser
+  can still follow it. A one-time device code is meant to be read aloud; it is
+  not a credential and this is not a leak.
+- The **pasted token** has one route into this process and it is not the
+  protocol. `Flow::Manual(String)` is an engine-local enum; the terminal reads
+  the token from its own input surface and passes it as a function argument on
+  the thread that read it. Nothing serialises it, so there is no frame — request
+  body, event, snapshot, operation payload — it could leak into. A test asserts
+  that the action a `--manual` line becomes does not contain the token.
+- A **remote client cannot paste a token over this protocol at all**. It
+  authenticates by device flow or writes the credential file itself. That is a
+  boundary, stated rather than discovered.
+
+### What availability turning honest changed
+
+`action/list` used to report thirteen actions unavailable in every session,
+engine or no engine. With an engine attached and an idle console it now reports
+**all twenty-eight available**; without one, the same thirteen (plus the two that
+also need an idle console) answer unavailable with a reason. The black-box
+assertion that read "an unavailable action says why" is now the pair: the
+invariant, plus four named actions that must be *offered* by a session that has
+an engine. `action/execute` of `conversationCompact` is no longer a refusal
+test — it is an acceptance test that watches the operation open, the notice land
+and the operation close.
+
+### The gaps this found, stated
+
+- **Rewinding to a named item refuses.** A checkpoint's identity is the
+  transcript line its message was written on; an item id is minted by the session
+  with no record of which line became it. Matching by text or by ordinal would be
+  a guess, and a wrong guess here destroys work — the exact loss D135's ruling
+  exists to prevent. `RewindTarget::Latest` is served; `Item` answers
+  `BAD_ARGUMENT` with a reason. **B8's parity ledger owns it.**
+- **The terminal's rewind is still its own.** A five-answer gesture (code /
+  conversation / both / summarize / never mind) against the wire's two modes.
+  The core's `apply` is "code and conversation", which is what "go back to it"
+  means. Converging the two is a parity decision, not a refactor.
+- **A rename does not move the core's `session.locator`.** Neither did the
+  console's, so this is unmoved rather than introduced; `session/read` keeps the
+  path the session started on until it is resumed.
+- **`/mcp reconnect` with no name.** The wire's table says "absent reconnects
+  every one" and the core now does exactly that; the console still answers
+  `usage: /mcp reconnect <server name>`. Already on B7b ruling ③'s ledger.
+
+### The parity leak, closed
+
+`query.rs`'s first empty-response warning was gated on `session.quiet`, which is
+the framing contract for a run's *stdout* and says nothing about who may hear
+that the model answered with nothing. The second warning — raised when the run
+ends — never was gated, so a wire client heard the retry's conclusion and not its
+cause. The gate is gone and the black-box test asserts both lines.
+
+### Real-terminal smoke
+
+tmux, 120×40, a scripted Anthropic-protocol endpoint on loopback, a real MCP
+stdio server on the side, an isolated `HOME`, no tokens.
+
+| item | result |
+| --- | --- |
+| `/compact` on main, immediately | **pass** — "✓ compacted 19 messages → summary + the latest 12", counter moved |
+| `/compact` queued behind a running `!sleep 9` | **pass** — drained at the turn's end and ran: "✓ compacted 29 messages → …" |
+| `/rewind` (esc-esc → "Restore conversation") | **pass** — list, five answers, history truncated, message back in the composer |
+| `/team new crew` | **pass** — chart written, "output passes validation" |
+| `/team start` | **pass** — "crew up · 2/2 on standby", roster shows both |
+| `/team assign scout …` | **pass** — "✓ assigned to scout (crew)", badge `@scout •2` |
+| `/team stop` | **pass** — "crew stopped · 2 members (history kept)" |
+| `/mcp reconnect smoke` | **pass** — "✓ smoke reconnected · 2 tools" |
+| `/mcp reconnect nope` | **pass** — `no MCP server "nope".` |
+| `/mcp reconnect broken` + `/mcp` | **pass** — "✗ MCP server broken: spawn …", listing shows `✗ broken failed` beside `✓ smoke connected · 2 tools` |
+| `/provider login codex --device-auth` | **pass** — pinned panel: URL, `enter code 097A-EDJPQ (valid for 15 minutes)`, waiting line |
+| `/provider login opencode-go --manual …` | **pass** — `auth.json` gained `opencode-go` (`type`, `key`); nothing else moved |
+| `/provider login nosuch` / `opencode-go` | **pass** — "not found", and the apiKey-preset guidance, both still synchronous |
+| `/rename smoke-b7d2` | **pass** — "✓ session renamed: proj-…-smoke-b7d2", transcript renamed on disk |
+| `/share` | **pass** — HTML written beside the project, with the sensitivity note |
+| `/clear` | **pass** — context counter back to 0/200k |
+| `/compact` on an agent or room page | **not re-run** — the page-switch key was not found inside the time budget; the three D135a targeting tests (`zoom.rs`) cover it and pass unchanged |
+
+**What the smoke found, and whose it is.** After submitting a `!` line the
+composer stays in shell mode, so the *next* line inherits it: a `/compact` typed
+there queued and drained as prose (`❯ /compact`, answered by the model). Both
+halves are the console's `submit_queued`, which distinguishes command from
+non-command and nothing else — the core's `drain_main` reads `QueuedKind` and
+gets all three right. Pre-existing and unmoved by this batch; it dies with
+`submit_queued` in B7d-3.
+
+### Where the shims stand
+
+| shim | state |
+| --- | --- |
+| the thirteen handlers in `tui::chat::run_command` | **gone** — the work is `engine/actions.rs`'s, the console renders it |
+| `Availability::engine_attached` | **gone** — it is `self.engine.is_some()` |
+| `apply_action`'s `_ => unavailable()` | **gone** — the compiler keeps the table complete |
+| `Answer::now()` in `src/tui/` | 15 production sites — unchanged |
+| core/engine config double mirror | unchanged |
+| `Chat::submit_queued` / `Controller::drain_main` | two drains, one queue — B7d-3's, and now unblocked |

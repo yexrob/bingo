@@ -423,6 +423,21 @@ Chat/App 管线换 AppLink 帧，删全部 shim；TuiEvent 本地化；按键动
 > ⑤ `!session.quiet` 吞掉第一条空回应警告的 parity 泄漏 → B7d-2 修（走 emit）。
 > ⑥ B8 顺延 D155（预留扩至 D156）。
 
+> **B7d-2 落地记（2026-08-19）**：**动作表的 engine 半边已入核**（D153，六提交）。
+> 十三个 handler 从 `tui::chat::run_command` 移入 `src/engine/actions.rs`——**一份实现两个渲染器**：
+> 工作层返回 `Said{tier,text}`，控制台按 slash 档位渲染，核记为 `ItemBody::Notice` 并配一个 operation。
+> 之所以不是"控制台改问核"，是控制台的核仍无 engine（挂上即开 `drain_main`，与 `submit_queued` 撞车，
+> 那是 B7d-3 的整个问题），所以搬的是**工作层**而非调用层，格式串只剩一份。
+> `apply_action` 的 `_ => unavailable()` 消失——编译器成为动作表完备性的守卫；
+> `Availability::engine_attached` 变回 `self.engine.is_some()`；排队 `/compact` 经核 drain 正确执行（新测试）。
+> `provider.login`：动作只带 provider 名，核跑浏览器流并把授权 URL 经 operation progress 冒出；
+> `--manual <token>` 留在控制台，经**进程内函数实参**入库（不序列化即无帧可漏），有测试断言 action 不含 token；
+> 远端客户端因此**不能**经本协议粘贴 token（device flow 或自写凭据文件）——这是边界，写明而非发现。
+> 顺手修 parity 泄漏：`query.rs` 第一条空回应警告脱 `!session.quiet` 门。
+> 测试 1704→1708，黑盒 29 不变；四门 + discipline 全绿；真机 smoke 16 项过、1 项未跑（详见 D153）。
+> **已知缺口（B8 ledger）**：`RewindTarget::Item` 拒绝（checkpoint 身份是 transcript 行，item id 无对应记录，
+> 猜即是 D135 要防的错目标损失）；控制台 rewind 仍是五答手势 vs wire 两模；rename 不动核的 `session.locator`（旧限）。
+
 ### B8 · 收尾（S）
 `--print` 薄客户端；main.rs 启动统一；parity ledger 落成 CI 检查表（每个斜杠命令/提交分支/
 AppEvent 变体分类 shared|frontend-local，新增未分类即红）；schema 标 experimental；
