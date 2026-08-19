@@ -100,6 +100,15 @@ pub(crate) enum Control {
     Mcp(Vec<crate::app::snapshot::McpServerState>),
     /// The engine this session runs its work on, handed over once on the way up.
     Engine(crate::app::engine::Attached),
+    /// Stop the turn running on a conversation, from inside this process.
+    ///
+    /// The same door `turn/interrupt` goes through: the core records the
+    /// request — a runner that checks late still sees it — and the engine is
+    /// asked to stop the stream that is open right now (D154).
+    Interrupt {
+        conversation: ConvKey,
+        turn: crate::app::ids::TurnId,
+    },
     /// One action, applied from inside this process.
     ///
     /// The same door `action/execute` goes through, for a frontend that is in
@@ -576,6 +585,10 @@ impl Controller {
                 }
                 Control::Mcp(states) => self.report_mcp(states),
                 Control::Engine(engine) => self.engine = Some(engine),
+                Control::Interrupt { conversation, turn } => {
+                    let id = self.conversations.id(&mut self.mint, &conversation);
+                    let _ = self.serve_interrupt(&id, turn);
+                }
                 Control::Execute { on, action, reply } => {
                     let origin = self.conversations.id(&mut self.mint, &on);
                     let applied = self.serve_execute(&origin, None, *action);

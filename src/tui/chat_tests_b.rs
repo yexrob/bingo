@@ -1803,43 +1803,48 @@ fn ask_arrow_keys_move_focus() {
 /// Esc (while busy) sets the interrupt flag: background-task completion no longer auto-starts a turn;
 /// a new turn (start_turn) resets it.
 #[test]
-fn esc_sets_interrupted_and_start_turn_resets() {
+fn esc_sets_interrupted_and_a_new_turn_resets_it() {
     let mut chat = test_chat();
-    chat.start_test_turn();
+    let turn = chat.start_test_turn().expect("main was idle");
     assert!(
         chat.on_key(KeyCode::Esc, KeyModifiers::empty()),
         "busy Esc interrupts"
     );
     assert!(chat.conv.interrupted, "Esc sets interrupted");
+    // The request is the core's, and it is recorded whether or not a runner is
+    // listening: a late check still sees it (D154).
+    crate::tui::test_util::settled(&mut chat);
     assert!(
-        *chat.cancel_tx.borrow(),
-        "the interrupt signal was sent (send_replace applies unconditionally)"
+        chat.session.turns.view().is_interrupted(&turn),
+        "the core was asked to stop the turn"
     );
     chat.end_test_turn();
-    chat.conv.interrupted = false;
     chat.start_test_turn();
-    let _ = chat.cancel_tx.send_replace(true);
-    let cancel_rx = chat.cancel_tx.subscribe();
-    chat.cancel_tx.send_replace(false);
     assert!(
-        !*cancel_rx.borrow(),
-        "reset before a new turn starts: the receiver reads false"
+        !chat.conv.interrupted,
+        "a fresh turn clears the interrupt the last one left"
     );
-    drop(cancel_rx);
 }
 
-/// start_turn's reset order: subscribe first, then send_replace — after the previous turn's receivers are all
-/// dropped (send does not update with no receivers), the new turn still sees false.
+/// The interrupt is aimed at a turn, so it cannot reach the next one.
+///
+/// The console used to reset a shared `cancel` channel before each run, and the
+/// order of that reset was delicate enough to have a test of its own. The
+/// request is the core's now and it names its target: a turn that was never
+/// asked to stop reads as not interrupted, whatever happened to the one before.
 #[test]
-fn cancel_reset_works_after_all_receivers_dropped() {
-    let chat = test_chat();
-    chat.cancel_tx.send_replace(true);
-    drop(chat.cancel_tx.subscribe());
-    let cancel_rx = chat.cancel_tx.subscribe();
-    chat.cancel_tx.send_replace(false);
+fn an_interrupt_cannot_reach_the_turn_after_it() {
+    let mut chat = test_chat();
+    let stopped = chat.start_test_turn().expect("main was idle");
+    assert!(chat.on_key(KeyCode::Esc, KeyModifiers::empty()));
+    crate::tui::test_util::settled(&mut chat);
+    assert!(chat.session.turns.view().is_interrupted(&stopped));
+    chat.end_test_turn();
+
+    let fresh = chat.start_test_turn().expect("main was idle again");
     assert!(
-        !*cancel_rx.borrow(),
-        "after all receivers drop, send_replace still resets (send would fail)"
+        !chat.session.turns.view().is_interrupted(&fresh),
+        "the next turn starts clean"
     );
 }
 

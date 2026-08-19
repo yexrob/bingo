@@ -120,6 +120,29 @@ impl Transcript {
         self.generation
     }
 
+    /// The shell call in the foreground right now: the newest `Bash` item this
+    /// conversation still has open.
+    ///
+    /// The same rule the core applies (`turn::foreground_item`), read off the
+    /// projection instead of asked for — a key handler needs it to say what
+    /// ctrl+b would do, and the core re-checks the identifier it is handed
+    /// before backgrounding anything (D152).
+    pub fn foreground(&self) -> Option<&ItemId> {
+        self.live.iter().rev().find_map(|item| match &item.body {
+            crate::app::snapshot::ItemBody::ToolCall { name, .. }
+                if name == "Bash"
+                    && matches!(
+                        item.status,
+                        crate::app::snapshot::ItemStatus::Pending
+                            | crate::app::snapshot::ItemStatus::Streaming
+                    ) =>
+            {
+                Some(&item.id)
+            }
+            _ => None,
+        })
+    }
+
     /// The foreground command's output so far, for the item it belongs to.
     pub fn tail_of(&self, item: &ItemId) -> Option<&CommandTail> {
         self.tail

@@ -1028,7 +1028,7 @@ impl super::Chat {
             return "esc stops this agent · ↑ home".to_string();
         }
         let esc = self.esc_busy_hint();
-        if self.live.running() {
+        if self.foreground_command().is_some() {
             return format!("{esc} · ctrl+b to run in background");
         }
         esc.to_string()
@@ -1039,7 +1039,15 @@ impl super::Chat {
     fn interrupt(&mut self, now: std::time::Instant) {
         self.conv.interrupted = true;
         self.interrupt_at.get_or_insert(now);
-        self.cancel_tx.send_replace(true);
+        // The turn is the core's, so stopping it is asked of the core (D154):
+        // it records the request — a runner that checks late still sees it —
+        // and the engine hears it on the stream that is open right now. The
+        // ending still comes back as the turn's own terminal state.
+        if let Some(turn) = self.store.view().active_turn(&self.active) {
+            self.session
+                .core
+                .interrupt(self.active.clone(), turn.id.clone());
+        }
         // The dialog goes with the turn: the user asked for everything in flight
         // to stop, and a dialog is in flight.
         self.cancel_asks(false);

@@ -347,6 +347,21 @@ impl AppCore {
         }
     }
 
+    /// Stop the turn running on a conversation, from inside this process.
+    ///
+    /// A report rather than a question: the core records the request and the
+    /// engine hears it, and what comes back is the turn's own terminal state —
+    /// exactly one, whether it was interrupted or not.
+    pub fn interrupt(
+        &self,
+        conversation: crate::app::conversation::ConvKey,
+        turn: crate::app::ids::TurnId,
+    ) {
+        let _ = self
+            .control
+            .send(controller::Control::Interrupt { conversation, turn });
+    }
+
     /// Apply one action, from inside this process.
     ///
     /// A key on a keyboard and a client's `action/execute` reach the same table

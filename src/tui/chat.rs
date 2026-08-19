@@ -711,9 +711,6 @@ pub struct Chat {
     pub history: crate::tui::history::History,
     /// Whether the history file is writable (after one failure, never retry — avoid hitting the same error on every submit).
     pub(crate) history_writable: bool,
-    /// Foreground command liveness (D84): the seam the running Bash tool publishes
-    /// its output tail through, and the one ctrl+b reaches to background it.
-    pub(crate) live: std::sync::Arc<crate::live::LiveBash>,
     /// The tail of the command running right now (None: no foreground command, or
     /// it has not written anything yet). One slot, because Phase 2 runs non-safe
     /// tools serially and Bash is never concurrency-safe.
@@ -984,8 +981,6 @@ pub struct Chat {
     pub(crate) agent_mail: std::collections::HashMap<String, u64>,
     /// The esc-esc rewind selector (D91); `None` means it is closed.
     pub(crate) rewind: Option<rewind_ui::Rewind>,
-    /// Interrupt signal: Ctrl+C / Esc while busy → send(true), aborting stream reads in the turn immediately.
-    pub(crate) cancel_tx: tokio::sync::watch::Sender<bool>,
 }
 
 impl Chat {
@@ -1113,13 +1108,6 @@ impl Chat {
             &session.client.models(),
             &session.core.config().borrow().model.clone(),
         );
-        // A running command's tail reaches the screen the way every other turn-side
-        // fact does: as a UiEvent on the channel the drain loop already wakes for.
-        // Nothing else in the TUI has to learn a second way to hear from a tool.
-        let tail_events = events.clone();
-        let live = crate::live::LiveBash::new(Arc::new(move |tail| {
-            tail_events.send(UiEvent::BashTail(tail));
-        }));
         Self {
             session,
             // Detached until the host attaches it: building a `Chat` is
@@ -1144,7 +1132,6 @@ impl Chat {
             stash: None,
             history,
             history_writable: true,
-            live,
             bash_tail: None,
             help_visible: false,
             notice: None,
@@ -1246,7 +1233,6 @@ impl Chat {
             badge_print: Vec::new(),
             agent_mail: std::collections::HashMap::new(),
             rewind: None,
-            cancel_tx: tokio::sync::watch::channel(false).0,
         }
     }
 

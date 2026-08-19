@@ -1042,7 +1042,7 @@ async fn ask_user_question_keeps_its_own_shape() {
                 crate::ui::ConvKey::Main,
             ),
             steer: crate::query::no_steer(),
-            live: chat.live.clone(),
+            live: crate::live::LiveBash::detached(),
         },
     );
     let answer = tokio::spawn((ui.requests.ask_question)(
@@ -1346,19 +1346,20 @@ fn a_long_tail_line_is_clipped_to_the_width() {
 
 /// D84: ctrl+b reads the situation. A command running in the foreground is what
 /// it backgrounds; with none running it keeps opening the dialog (D80, D107).
+///
+/// Which item that is comes off the projection since D154 — the run's handle is
+/// the engine's, and the console names what the core published.
 #[test]
 fn ctrl_b_backgrounds_the_running_command_before_it_opens_the_dialog() {
     let mut chat = test_chat();
-    running_bash(&mut chat, "cargo build", false);
-    tail(&mut chat, &["Compiling bingo"], 1);
-    let (run, mut promote) = chat.live.arm();
-    assert!(chat.live.running());
+    let turn = chat.start_test_turn().expect("main was idle");
+    open_bash(&mut chat, &turn, "cargo build");
+    assert!(
+        chat.foreground_command().is_some(),
+        "the core published a shell call that is still open"
+    );
 
     assert!(chat.on_key(KeyCode::Char('b'), KeyModifiers::CONTROL));
-    assert!(
-        *promote.borrow_and_update(),
-        "the running command was told to go to the background"
-    );
     assert!(
         chat.dialog.is_none(),
         "the dialog stays closed while a command owns the key"
@@ -1367,9 +1368,12 @@ fn ctrl_b_backgrounds_the_running_command_before_it_opens_the_dialog() {
         chat.bash_tail.is_none(),
         "the tail leaves with the row it hung under"
     );
-    assert!(!chat.live.running(), "a second press means something else");
-    drop(run);
 
+    close_bash(&mut chat, &turn);
+    assert!(
+        chat.foreground_command().is_none(),
+        "a second press means something else"
+    );
     assert!(chat.on_key(KeyCode::Char('b'), KeyModifiers::CONTROL));
     assert!(
         chat.dialog.is_some(),
@@ -1380,15 +1384,46 @@ fn ctrl_b_backgrounds_the_running_command_before_it_opens_the_dialog() {
 /// The offer is only made while it is true.
 #[test]
 fn the_status_hint_offers_ctrl_b_only_while_a_command_runs() {
-    let chat = test_chat();
+    let mut chat = test_chat();
+    let turn = chat.start_test_turn().expect("main was idle");
     assert_eq!(chat.busy_hint(), "esc to interrupt");
-    let (run, _promote) = chat.live.arm();
+    open_bash(&mut chat, &turn, "cargo build");
     assert_eq!(
         chat.busy_hint(),
         "esc to interrupt · ctrl+b to run in background"
     );
-    drop(run);
+    close_bash(&mut chat, &turn);
     assert_eq!(chat.busy_hint(), "esc to interrupt");
+}
+
+/// A `!` line in flight, as the engine reports one: the call opens with the
+/// prefix `run_bash_command` mints, and the core makes it an item.
+fn open_bash(chat: &mut Chat, turn: &crate::app::ids::TurnId, command: &str) {
+    chat.session.turns.report_event(
+        turn.clone(),
+        crate::engine::events::EngineEvent::ToolReady {
+            tool_call_id: format!("{}1", crate::query::BASH_CALL_PREFIX),
+            name: "Bash".to_string(),
+            input: json!({ "command": command }),
+        },
+    );
+    chat.settle_store();
+}
+
+fn close_bash(chat: &mut Chat, turn: &crate::app::ids::TurnId) {
+    chat.session.turns.report_event(
+        turn.clone(),
+        crate::engine::events::EngineEvent::ToolDone(crate::query::ToolCallDone {
+            tool_call_id: format!("{}1", crate::query::BASH_CALL_PREFIX),
+            name: "Bash".to_string(),
+            summary: String::new(),
+            output: String::new(),
+            status: crate::query::ToolCallStatus::Done,
+            diff: None,
+            duration_ms: 1,
+        }),
+    );
+    chat.settle_store();
 }
 
 // ---------------------------------------------------------------------------

@@ -135,8 +135,13 @@ impl LiveBash {
         )
     }
 
-    /// Whether a foreground command is in flight and could still be promoted
-    /// (the hint tier asks this every frame).
+    /// Whether a foreground command is in flight and could still be promoted.
+    ///
+    /// Test-only since D154: the hint tier used to ask this every frame, and it
+    /// reads the core's projection now — the run's handle is the engine's, and
+    /// the console never holds one. What is left is this file's own assertions
+    /// about the slot's lifecycle.
+    #[cfg(test)]
     pub fn running(&self) -> bool {
         let slot = self.slot.lock().unwrap_or_else(|e| e.into_inner());
         slot.as_ref().is_some_and(|s| !s.promoted)

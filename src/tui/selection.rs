@@ -115,3 +115,19 @@ impl super::Chat {
         }
     }
 }
+
+impl super::Chat {
+    /// The shell call ctrl+b would background, if there is one.
+    ///
+    /// Read from the projection: the console stopped holding the run's
+    /// foreground handle when the run became the core's (D154), and what a key
+    /// can see is what the core published.
+    pub(crate) fn foreground_command(&self) -> Option<crate::app::ids::ItemId> {
+        let id = self
+            .store
+            .view()
+            .transcript_of(self.store.view().id_of(&crate::ui::ConvKey::Main)?)?
+            .foreground()?;
+        Some(id.clone())
+    }
+}

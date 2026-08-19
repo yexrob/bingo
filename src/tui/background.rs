@@ -521,7 +521,15 @@ impl Chat {
         // ctrl+b reads the situation (D84): a shell command running in the
         // foreground is what the key is about right now, and only when there is
         // none does it open the dialog.
-        if self.dialog.is_none() && code == KeyCode::Char('b') && ctrl && self.live.promote() {
+        if self.dialog.is_none()
+            && code == KeyCode::Char('b')
+            && ctrl
+            && let Some(item) = self.foreground_command()
+        {
+            // Which item is in the foreground is the core's answer, and letting
+            // go of the command is the engine's: the console names what it can
+            // see and the core checks it before backgrounding anything (D154).
+            self.apply_to_core(crate::app::command::Action::CommandPromote { item_id: item });
             // The tail's rows go with the row they hung under; the command
             // reappears as the background task it now is.
             self.bash_tail = None;
