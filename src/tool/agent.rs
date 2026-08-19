@@ -181,6 +181,7 @@ fn subagent_hooks(
     //
     // A shim, like `tui_hooks`: B7 removes this when the console reads
     // `AppFrame` instead of translating an engine report into a `UiEvent`.
+    // It leaves with that one and for the same reason (see its note, D150).
     let events = events.unwrap_or_else(crate::ui::EventSink::detached);
     let text_output = output.text;
     let progress_output = output.progress;

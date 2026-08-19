@@ -378,6 +378,13 @@ impl PermissionRequest {
 /// A shim: the console still consumes `UiEvent`, so this is where an engine
 /// report becomes one. B7 removes this — the TUI reads `AppFrame` from an
 /// `AppLink` and the translation goes with it.
+///
+/// **What it is waiting on** (D150): the console drives its own run loop, so
+/// its core has no engine and publishes no `item/*` events for a turn it did
+/// not run. Attaching the engine to the console's core is one line; what makes
+/// it a batch is the other end — the store projects no transcript on purpose,
+/// and every row on screen is built from the deltas below. Both halves move
+/// together or neither does.
 pub fn tui_hooks(
     events: EventSink,
     interactions: crate::app::interaction::InteractionHandle,

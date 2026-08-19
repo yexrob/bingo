@@ -7901,3 +7901,207 @@ implementation detail.
 | `tui_hooks` / `subagent_hooks` | unchanged — they leave with the engine attachment |
 | core/engine config double mirror | unchanged — converging it is a change-face write |
 | `rg "B7 removes this"` | 6 → **2**, both the engine→`UiEvent` translation (`ui.rs`, `tool/agent.rs`) |
+
+## D150 — attaching becomes a write, and the wall under the change face
+
+**What it lands.** B7b ruling ② and what it unblocks. `AppCore::attach` no longer
+needs a runtime, so every one of the console's ~640 tests attaches to a real core and
+reads a real projection. Four read sites move onto the store, one contract hole and two
+bugs found by moving them are fixed, and a console that loses its attachment now takes a
+new one.
+
+**What it does not land.** The change face. `Answer::now()` still has fifteen production
+call sites in `src/tui/`, `tui_hooks`/`subagent_hooks` still translate `EngineEvent` into
+`UiEvent`, and the config double mirror is untouched. All three are one wall, and it is
+not the one D149 predicted. It is written up at the end.
+
+Six commits, four gates green after each, plus the discipline gate. **1695 → 1700 unit**,
+27 black-box unchanged (20 app-server + 7 CLI). No test deleted, none weakened; five
+added.
+
+### The seam that changed (ruling ②)
+
+```text
+ before                                   after
+ ───────                                  ─────
+ attach ─▶ oneshot ─▶ actor               attach ─▶ actor        (a send, not a question)
+              │                                 │
+              └─▶ runtime.spawn(forwarder)      └─▶ Requests { control, attachment }
+                       tag + Detach-on-close             send() tags · Drop sends Detach
+```
+
+The forwarder task only ever did two things: tag each request with the attachment that
+wrote it, and tell the actor when the frontend was gone. Both are a struct. `Requests`
+holds the control sender and the attachment number, `send` tags, `Drop` detaches — no
+task, so no runtime, so a synchronous key handler writes to the core exactly as an
+`async` loop does. `AppLink::request` is synchronous now for the same reason: the core's
+inbox is unbounded, and there is nothing to wait for.
+
+Attaching itself became a write: the frame channel and the attachment number are minted
+on the calling side and handed over, so the loop only *learns* that a reader exists.
+Two consequences worth stating:
+
+- **The lost bound.** The per-attachment bounded request queue (`REQUEST_CAPACITY`, 64)
+  is gone, as the ruling accepted. The wire keeps its own — `INBOUND_CAPACITY`, also 64,
+  unchanged from B6 — which is the edge the spec asks it of; in-process producers are the
+  same trust domain B2b's unbounded inbox was chosen for.
+- **"A session that is over refuses" needed a fix to stay true.** It used to fall out of
+  the round trip: the reply's sender died with the inbox. With no round trip, the actor
+  closes its inbox *before* answering the close it was asked for, so a caller that saw
+  its close finish cannot then reach a loop that is gone. `a_closed_session_refuses…`
+  passes unchanged.
+
+`a_frontend_with_no_runtime_attaches_asks_and_is_answered` is a plain `#[test]`: it
+attaches, writes a query, and parks for the answer. That is the whole ruling, asserted.
+
+### The console's tests are attachments
+
+`Session` carries the `AppCore` its nine handles are already faces of. Anything holding a
+session can therefore attach, and the four `Chat` constructors do — including the six
+`test_chat()` helpers, which means **every synchronous console test now reads the same
+projection a terminal reads** instead of an empty one.
+
+`Store::connect_now` parks for the first cut, because a cut is a reply and a reply has to
+be waited for. It is `#[cfg(test)]`, and sound for the one structural reason
+`app::answer` gives. `Chat::settle_store` is the other half a running console gets from
+its loop for free: **the actor answers a question before it announces what the answer
+changed**, so a test that changes the session and then reads the projection has to let it
+finish saying so. That single fact is what every test edit in this batch is.
+
+### What moved onto the store
+
+| read | was | is |
+| --- | --- | --- |
+| the prompt on screen (`drain_asks`) | `interactions.view().head()` | `view.head_interaction()` |
+| the scope a session grant would install | `interactions.view().iter().find` | `view.interaction(id)` |
+| is anything waiting to be answered (`needs_tick`) | `interactions.view().is_empty()` | `view.has_interactions()` |
+| has the page's subject left (`away_is_gone`) | `agents.list()` / `channels.list()` | `view.agent` / `view.room` |
+| which parked pages are still reachable | `agents.list()` | `view.agent` |
+| has an open dialog anybody on it | `agents.list()` + `watch.snapshot()` | `view.agents()` + `view.commands()` |
+
+`PermissionRequest::of` stopped needing the registry's own `Pending` and takes the
+contract's `Interaction`.
+
+**Reading a projection makes acting and being told two moments, not one**, and the prompt
+is where that bites: the console answers a prompt before the core's `interaction/resolved`
+reaches it. `last_ask` is the client bookkeeping that fills the gap — the console does not
+pick up again the prompt it just settled, and it drops one the core has since closed. A
+GUI writes the same two lines against the same two frames.
+
+### Three things moving the reads found
+
+1. **`agent/removed` did not exist.** `agent/changed` only ever added or replaced, so a
+   client was never told an instance was removed and its roster kept a name the session no
+   longer had until it re-read a snapshot. The spec asks for keyed upsert *and removal*
+   events and `task/removed` is the precedent, so this is a defect, not a design change:
+   payload, notification, fixture, regenerated bundle. **Deliberately one-sided** —
+   there is no `room/removed`, because nothing in a live session deletes a room, and a
+   variant with no producer is a promise the server does not keep.
+2. **`AgentResource.last_active_at` was a lie.** It was stamped `now` on every projection,
+   so every instance was eternally fresh and an `Idle for 14s` drawn from it would always
+   read zero. The registry hands over how long ago instead, and the actor — the only side
+   that can name a wall-clock instant — turns that into one.
+3. **Nothing noticed a closed link.** The core never waits on a frontend, so one that
+   falls behind `FRAME_CAPACITY` loses its attachment; the console went on drawing its
+   last projection of a session that had moved, forever. `reconcile_store` treats a closed
+   link as the same repair one step further out.
+
+### What did not move, and why
+
+The roster itself — `tree_instances`, the two `chat_tail` readers, the background
+dialog's four, `buffer::refresh` — stays on `agents.list()`. `AgentResource` cannot
+answer what those rows say:
+
+| the row says | `AgentStatus` | `AgentResource` |
+| --- | --- | --- |
+| `Running` → the latest tool line | `recent_activity` | **absent** |
+| the dialog's task line | `prompt` | **absent** |
+| `Idle for 14s` | `last_active` | `last_active_at` (now truthful) |
+
+Adding `recentActivity` and `prompt` to the wire is a real parity question — a GUI
+rendering this roster needs both, and cannot get them — but it is a contract addition
+this batch was told to expect not to make, and it is Fable's to rule on, not an
+implementer's to slip in beside a bug fix. **Recommended for B8's parity ledger.**
+
+The queue reads (`main_queue`, `page_queue`) stay too, for a different reason: the store's
+queue projection is admittedly partial by design — a snapshot cut drops the rows and keeps
+the count, and the rows come back only from `conversation/readQueue`. Moving the console
+onto it means teaching it to re-read after every resync, which is work with its own
+regression surface and no bug behind it.
+
+### The wall under the change face
+
+D149 predicted the blocker was the test runtime. It was, and it is gone — but underneath
+it is a second one, and it is the same wall for all three remaining shims.
+
+**The fifteen `.now()` sites are not fifteen requests waiting for a receipt.** They are
+the console's *run loop*:
+
+| site | what it is |
+| --- | --- |
+| `chat.rs` `route_submission` | ask the core what this line is, then act on the answer in the same key handler |
+| `chat_tail.rs` `open_core_turn`, `digest_mail` ×2, `drain_main_queue`, `absorb_arrivals`, `reclaim_tail`, `stop_agent` | opening a turn, deciding the mail is due, draining the queue, taking the mail |
+| `bufferview.rs` ×3, `zoom.rs`, `buffer.rs`, `ask.rs` ×2 | invite/kick, permission mode, answering a prompt |
+
+Most of them have **no `AppCommand` or `AppQuery` at all** — `take_main_mail_urgent`,
+`mail.due`, `drain_main_arrivals`, `drain_front`, `open` a turn. That is not an oversight
+in the contract: on the wire the *core* does those things, because the core has an engine.
+The console does them by hand because its core does not.
+
+So the chain is one chain:
+
+```text
+console's core has no engine
+   └─▶ it publishes no item/* for a turn it did not run
+         └─▶ the console cannot render from AppEvent
+               └─▶ tui_hooks / subagent_hooks stay
+         └─▶ the console runs the loop itself
+               └─▶ the fifteen .now() sites stay
+               └─▶ /model writes runtime.model_tx and the core is never told
+                     └─▶ the config double mirror stays
+```
+
+Attaching `SessionEngine` to the console's core is one line — B7a built it and the
+transport uses it. The batch is the other end: **the store projects no transcript, on
+purpose**, and every row the console draws is built from `UiEvent` deltas. Giving the
+store an item projection and rewriting the console's transcript ingestion onto
+`item/started` · `textDelta` · `reasoningDelta` · `updated` · `completed` is the work, and
+it is B7's original second half rather than a tail of this one. Reported rather than
+swallowed, per the task's own rule.
+
+### Real-terminal smoke
+
+tmux, 120×40, a scripted Anthropic-protocol endpoint on loopback, an isolated `HOME`, a
+`.bingo/team.json` crew of two with one room. No tokens.
+
+| item | result |
+| --- | --- |
+| store attaches on the way in | **pass** — `4 conversation(s), 2 agent(s), 1 room(s)` |
+| main turn streaming | **pass** — reasoning block, text, "Baked for", context counter moved |
+| permission prompt | **pass** — modal with the command preview; this is the swapped read |
+| D81 session grant + `/permissions` | **pass** — `Bash(printf:*)` listed after "don't ask again" |
+| shell line | **pass** — `Done` + output, and the model saw `<bash-stdout>` |
+| queue while busy, drain at turn end | **pass** — "Press up to edit queued messages", then its own turn |
+| steer at a tool barrier | **pass** — absorbed as `↪ also check the lexer` between tool result and reply |
+| agent page, history | **pass** — `@scout`'s page carried its DM and its reply; badge cleared |
+| agent page, live | **pass** — a DM typed on the page landed as `❯ …` and the reply streamed there |
+| room post + wake | **pass** — "Sent to #lobby", both members woken, main woken by digest |
+| room page + `@` from it | **pass** — `── #lobby ──` with both posts; "Sent to @scout", badge `@scout •2` |
+| rooms restored on resume | **pass** — `/quit`, `--continue`, same three counts, context restored |
+| `/compact` | **pass** — "✓ compacted 26 messages → summary + the latest 12" |
+
+**One thing observed and not caused here:** a `!` line that goes through the permission
+modal leaves its tool row at `⎿ Running…` after approval, even though the command ran and
+its output reached the model. Reproduced identically on the pre-batch build (`fa0e7ce`),
+so it is pre-existing; the same command with no prompt in front of it resolves to `Done`
+plus its output.
+
+### Where the shims stand
+
+| shim | state |
+| --- | --- |
+| `Answer::now()` in `src/tui/` | 15 production sites, unchanged — the run loop, not the change face |
+| `tui_hooks` / `subagent_hooks` | unchanged — both notes now name what they wait on |
+| core/engine config double mirror | unchanged — same wall |
+| `store.rs` `#![allow(dead_code)]` | kept, and now says it is the read-face inventory |
+| `rg "B7 removes this"` | **2**, the same two |

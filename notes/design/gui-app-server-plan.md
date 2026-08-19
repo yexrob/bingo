@@ -308,6 +308,27 @@ Chat/App 管线换 AppLink 帧，删全部 shim；TuiEvent 本地化；按键动
 > 两处"wire 能说、console 从没说过"的既有限界 → B8 parity ledger 分类。
 > ④ store 的 `#![allow(dead_code)]` 随 B7b-2 读者落地摘除。
 
+> **B7b-2 落地记（2026-08-19）**：**attach 去 runtime 化已落，换帧仍未做**（D150，六提交）。
+> 裁决② 实施：`Requests` 包装（send 打 attachment 标、Drop 发 Detach）取代转发任务，`attach` 变纯写入
+> （通道与编号在调用侧铸造），`AppLink::request` 同步；失去的进程内有界请求队列由 wire 侧
+> `INBOUND_CAPACITY`（64，B6 未变）承担。「已结束的 session 拒绝 attach」改由 actor **先关收件箱再回 close**
+> 保证。`Session` 携带 `AppCore`，四个 `Chat` 构造处（含六个 `test_chat()`）全部 attach ——
+> **570 个无 runtime 测试自此读真投影**。
+> 读取面搬走六处（prompt 三处 + agent/room 存在性三处）；顺手发现并修三件：
+> ① 契约缺 `agent/removed`（`agent/changed` 只增不删，客户端永远删不掉一个实例；按 `task/removed` 形制补，
+> schema 重生成 + fixture；**不加 `room/removed`**——本会话不删房间，无生产者的变体是空承诺）；
+> ② `AgentResource.last_active_at` 恒为 `now`（`Idle for Ns` 永远读 0）；
+> ③ 链路断开无人察觉（落后即失去 attachment，控制台会永远画旧投影）→ `reconcile_store` 重新 attach。
+> 测试 1695→1700，黑盒 27 不变；四门 + discipline gate 全绿；真机 smoke 13 项全过（含团队三项与 /compact）。
+>
+> **未做与理由（新发现，非 D149 的运行时论）**：`.now()` 15 处、`tui_hooks`/`subagent_hooks`、配置双镜像
+> 是**同一堵墙**——控制台的核没有 engine，故不发 `item/*`，故控制台只能从 `UiEvent` 渲染、只能自己跑
+> run loop、只能自己写 `runtime.model_tx`。多数 `.now()` 根本没有对应的 `AppCommand`/`AppQuery`
+> （`mail.due`、`drain_main_arrivals`、`drain_front`、开 turn），因为在 wire 上那些是**核**做的事。
+> 接 engine 是一行；这一批是另一端：store 有意不投影 transcript，控制台每一行都由 `UiEvent` delta 建成。
+> 详见 D150 末两节。另：roster 读取面搬不动，因 `AgentResource` 缺 `recentActivity`/`prompt`
+> ——真实 parity 缺口，**建议 B8 ledger 裁决**，未擅自加字段。
+
 ### B8 · 收尾（S）
 `--print` 薄客户端；main.rs 启动统一；parity ledger 落成 CI 检查表（每个斜杠命令/提交分支/
 AppEvent 变体分类 shared|frontend-local，新增未分类即红）；schema 标 experimental；
