@@ -37,7 +37,9 @@ impl super::Chat {
             .as_ref()
             .map(|t| t.name())
             .unwrap_or_else(|| "none".to_string());
-        let mode = session.permission_mode_str().to_string();
+        // The mode in effect, not the one the session started in: shift+tab
+        // moves it and the core is where it moved to (D154).
+        let mode = self.permission_mode_label().to_string();
         let models = session.client.models();
         self.slash_stats_async(move |msg_count, tokens| {
             // Window/percentage measured with the model actually in use — the
