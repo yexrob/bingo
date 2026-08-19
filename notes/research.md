@@ -7516,3 +7516,195 @@ new file.
 - **The discipline gate is still red on dev**: `src/agents.rs` (4024), `src/app/controller.rs`
   (4214), `src/tui/chat.rs` (4103) exceed the 4000-line cap. All three were over before this
   batch; controller.rs grew by 32 lines here. Splitting them is nobody's batch yet.
+
+## D148 — the engine reaches the wire, and the turn becomes something a client can drive
+
+**What it lands.** The first half of B7. `bingo app-server` stops being a session that can be
+read and configured but not run: `conversation/submit` serves the three routes B3–B5 left
+`Unserved`, a real `Session` is assembled behind the transport, and a client on stdio can now
+drive a complete model turn — text, reasoning, tool calls, permission prompts, stream
+retries, the shell line, the queue and its drain.
+
+**What it does not land.** The TUI is still on its own run loop and its own `UiEvent` channel.
+The shim inventory (`Answer::now`, `tui_hooks`, `SubmitRequest.main_busy`, the four re-parsing
+handlers, the config double mirror) is untouched, and `rg "B7 removes this"` still has six
+hits. The split and the reasoning for it are at the end of this record.
+
+Five commits, four gates green after each. Baseline 1678 unit + 21 black-box → **1686 unit +
+27 black-box** (7 CLI + 20 app-server). No test deleted; one rewritten in place
+(`a_submission_starts_work_when_idle_and_queues_while_busy` asserted the refusal, and now
+asserts the turn) and one added beside it for the refusal it used to carry.
+
+### The seam
+
+```text
+        conversation/submit
+                │
+    ┌───────────┴────────────┐
+    │  AppCore (the actor)   │   item · turn · deposit · post · queue
+    └───────────┬────────────┘        all of it inside one message
+                │  Run
+                ▼
+    ┌────────────────────────┐
+    │  Engine (a trait)      │   run_query · run_bash_command
+    │  SessionEngine         │   flush_agent_inbox · follow_through
+    └───────────┬────────────┘
+                │  EngineEvent (bound to the turn)
+                ▼
+          back into the actor
+```
+
+`app/engine.rs` is thirty lines of vocabulary: `Run::{Turn, Shell, Wake, Posted, Interrupt}`
+and a one-method trait. `engine/runner.rs` is the one implementation that calls a provider.
+The seam is **one-way**: the actor never waits on anything, so all it can do is hand work
+over, and everything the work produces comes back the way every run already reported — an
+`EngineEvent` into the turn it was bound to, which the actor sequences.
+
+An engine is **attached, not built in**. `AppCore::attach_engine` is what turns a readable
+session into a runnable one; a core without one refuses a run by name (`ACTION_UNAVAILABLE`)
+rather than opening a turn nothing will run. That is not a stub — it is the state the
+transport was in through D147, and the state the TUI's core is in today.
+
+### The three routes, split where B4 ruling ② put the line
+
+| route | the core's half (inside the loop) | the engine's half |
+| --- | --- | --- |
+| `Turn` | the prose becomes an item, the turn opens naming it as input | `run_query` |
+| `Shell` | the `!` line becomes an item, the turn opens | `run_bash_command` |
+| `Deliver` → agent | the message enters the inbox and the instance's conversation | `flush_agent_inbox` |
+| `Deliver` → room | the post enters the log, a copy enters every member's inbox | the room's row, the chases an `@` owes, the members it woke |
+
+The order matters and is the contract: everything the reply names already exists by the time
+the engine hears about the work. `SubmitDisposition::TurnStarted` and `Delivered` had no
+producer anywhere in the codebase before this; now they have exactly one each.
+
+The room split made `deliver_post` honest about a seam it always had.
+`tool::channel::follow_through` is the second two thirds of a post, and both callers — the
+`SendMessage` tool and the actor — now owe a post exactly the same thing. Nothing about D137
+or the mention watchdogs moved; they changed address.
+
+**The queue's turn boundary comes with the engine.** `announce_turn` drains main when a turn
+there ends, and *only when an engine is attached*: while the console still owns its run loop
+it also owns its drain, and two drains would take the same entry twice. A drained turn's
+origin is `queue`, not `user`.
+
+### Three things the scenarios found
+
+- **A turn opened with an input item already has its prompt in the log.** The core commits
+  the prose before the turn exists — that is what lets the reply name it — and the run then
+  reports the same prose back as `EngineEvent::Inbound`. Committing it twice put the user's
+  line in the conversation twice. The registry now drops the opening inbound of a turn that
+  carries input items; an agent's turn opens with none, so its prompt still becomes an item.
+- **`quiet` is the framing contract on this path, not a preference.** `session.quiet` gates
+  the engine's own `println!`, and a bare newline on stdout is not a protocol frame. The
+  app-server's session is `quiet: true` for that reason and no other.
+- **`warn_sink` was bypassing the actor.** It called the frontend sink directly rather than
+  `emit`, so every warning raised while the tools were being assembled or while the compactor
+  ran reached the console and never became `feedback/raised`. It goes through `emit` now.
+
+### `item/commandTailUpdated` gets its producer
+
+It was in the contract with nothing to publish it. `EngineEvent::CommandTail` is the sample,
+and the registry attaches it to the shell call that is running. Which call that is needs no
+guess: `LiveBash` holds one foreground slot and phase 2 runs unsafe tools serially, so at most
+one shell item is open when a sample arrives. Engine-layer only — the schema bundle is
+unchanged, verified.
+
+### The parity check (B5 ruling ⑤): D81 session grants
+
+**The console does show them.** `/permissions` prints the live rules table
+(`session.runtime.permissions`), and `install_session_rule` pushes an `allowSession` grant onto
+exactly that table before the tool that asked for it runs. Confirmed in a real terminal: after
+answering a prompt with "yes, don't ask again this session", `/permissions` lists
+`Bash(/compact:*)`.
+
+So the wire had to follow, and does: an `allowSession` resolution now records the rule in
+`ConfigSnapshot.permissions` with `sessionScoped: true` and publishes `config/changed`. Never
+persisted — it lives as long as the session and no longer. The rule is not derived a second
+time: the gate derived and verified it, the prompt advertised it as the scope's label, and
+that same string is what the resolution carries in. `PermissionRule.session_scoped` already
+existed in the contract, so this is behaviour reaching a field, not a contract change.
+
+**One divergence found and left for B8:** the console prints these under the header
+`permission rules (.bingo/settings.json):`, which is untrue of a session grant. The wire
+distinguishes the two; the console does not. It is a string, and it is the console's.
+
+### Line debt (B6 ruling ④)
+
+`src/app/controller.rs`: **4214 → 2812**, under the 4000 cap. Two readings came out of it,
+each whole on its own:
+
+- `controller/resources.rs` (340) — what the actor *says about the collaboration domain*. Four
+  registries share one reporting problem: each changes far more often than it changes
+  meaningfully, so each is projected, compared against the last thing said, and published only
+  when the answer moved. That is one job, not four scattered ones.
+- `controller/tests.rs` (1190) — what the actor is asserted to be, split the way
+  `app_server/stdio` already splits its own.
+- `controller/run.rs` (665) — the new submission-running half, written there rather than into
+  the file that was already over.
+
+`src/tui/chat.rs` is unchanged at 4103 and `src/agents.rs` at 4055 (+31 for a `Delivery`
+constructor an in-actor caller needs). Both are still over the cap; `chat.rs` is B7b's to
+shrink, `agents.rs` is nobody's batch yet.
+
+### Real-terminal smoke
+
+Run in tmux against a scripted Anthropic-protocol endpoint on loopback (no tokens spent, real
+streaming, real terminal), with an isolated `HOME`.
+
+| item | result |
+| --- | --- |
+| main turn streaming | **pass** — reasoning block, assistant text, "Baked for", context counter moved |
+| permission prompt | **pass** — `!printf …` opened the modal with the command preview; approving ran it |
+| D81 session grant + `/permissions` | **pass** — "don't ask again this session" installed `Bash(/compact:*)`, listed by `/permissions` |
+| queue while busy, drain at turn end | **pass** — "Press up to edit queued messages" while a `!sleep 6` turn ran, drained into its own turn after |
+| `/compact` | **pass** — accepted and returned with no error; nothing to compact at that history size |
+| `/quit` and resume with `--continue` | **pass** — transcript continued, context counter restored to 2178/200k |
+| `bingo app-server` and the TUI, no crosstalk | **pass** — a full wire turn (`turnStarted` → `turn/completed`, exit 0, stderr empty) between two TUI turns in the same `HOME`; both healthy after |
+| agent page live and history | **not run** — needs the model to call the Agent tool; the scripted provider answers text |
+| rooms, `@`, rooms restored on resume | **not run** — same reason: opening a room takes an agent |
+| steer at a tool barrier | **not run** — same reason: needs a tool round to steer into |
+
+The three not run are the three that need an instance, and none of them is touched by this
+batch: the TUI's collaboration path is unchanged, and the actor's is covered by unit tests and
+by the black-box post scenario. B7b runs them for real.
+
+### Black-box scenarios added
+
+Six, all against `Provider` — an Anthropic-protocol endpoint on loopback that answers from a
+script. A model would make these measure the model; what they are about is the path.
+
+- text, reasoning and usage: two items not one spliced stream, ordered deltas, the provider's
+  own output count, and the whole turn readable back in order;
+- a tool call stopping on a permission prompt: the call is an item before the prompt is a
+  prompt, the preview carries the command, `remainingGuardMs` is recomputed, a denial with
+  feedback travels back and the model answers it, and a late answer gets `INTERACTION_CLOSED`;
+- a stream retry: `turn/retrying` names what it withdrew, and the failed attempt's text is not
+  in the conversation;
+- the shell line: main's turn, the line kept as typed, one item for it with no `turnId`, and
+  every tail sample addressed to the call that is running;
+- the queue: busy main queues with `steerEligible`, an interrupt reaches the run, the
+  interrupted turn still ends, and its ending starts a turn whose origin is `queue`;
+- the session grant reaching `config/read` and not reaching settings.
+
+Every notification stream is asserted **gapless** — one `seq` per frame, no holes.
+
+### Where B7 was split, and why
+
+The task was B7 whole: engine on the wire *and* the TUI reframed onto `AppFrame`. Two surveys
+of the TUI put the second half at a different order of magnitude from the first, and the
+task's own instruction was to report the split rather than swallow it.
+
+What the TUI reframe actually is:
+
+| seam | size | why it is not mechanical |
+| --- | --- | --- |
+| `Answer::now()` removal | ~19 production sites, 8 in `chat_tail.rs` | every one is called from a key handler or a render pass, which are `fn`, not `async fn`. Each becomes either an async call site or a two-phase request/reply — the calling functions change shape, not just their body. |
+| `watch::Receiver` frame-pull reads | ~60 sites across 20 files | the renderer *pulls* the roster, the rooms and the queue every frame. `AppFrame` pushes. There is no one-for-one replacement; the Chat side needs a locally cached projection first. |
+| `UiEvent` → `AppEvent` | 15 semantic arms, `chat.rs:1405–2152` | `WatchEvent` alone is 167 lines, and `tui_hooks`'s live output-token estimator has no home in an `AppFrame` world — the core would have to own it or the footer loses its live count. |
+| `conv.busy` test affordance | 56 test sites | `conv.busy = true` is how the TUI tests fake a running turn *without a runtime*. They need a fake link that answers busy, or they all rewrite. |
+
+The first half is what this record lands, and it is self-contained: the seam exists, the
+transport uses it, and the TUI is untouched — its core still has no engine, so nothing about
+its behaviour changed. **B7b** is the TUI reframe, and it inherits: the shim inventory, the
+six `B7 removes this` markers, `chat.rs`'s line debt, and the three smoke items above.
