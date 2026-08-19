@@ -343,6 +343,14 @@ pub async fn run_tui_session(
     // on with an empty view rather than refusing to start.
     if let Err(error) = chat.connect_store(core).await {
         chat.push_startup_note(format!("⚠ the session core did not answer: {error}"));
+    } else if std::env::var_os("BINGO_DEBUG").is_some() {
+        let view = chat.store.view();
+        eprintln!(
+            "[bingo] store attached: {} conversation(s), {} agent(s), {} room(s)",
+            view.conversations().count(),
+            view.agents().len(),
+            view.rooms().len(),
+        );
     }
     // Attention channel (D79). The environment is read here, once, and handed
     // down resolved: `notify` decides nothing about the terminal on its own, so
