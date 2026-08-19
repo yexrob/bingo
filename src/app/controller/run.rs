@@ -46,7 +46,11 @@ impl super::Controller {
     /// the turn names it as an input item instead (spec "Item"). Then the turn
     /// opens, and only then does anything leave the loop — so by the time the
     /// engine has the work, every identifier the reply mentions is already real.
-    pub(super) fn start_turn(&mut self, text: String) -> Result<AppReply, AppError> {
+    pub(super) fn start_turn(
+        &mut self,
+        text: String,
+        origin: TurnOrigin,
+    ) -> Result<AppReply, AppError> {
         let engine = self.engine()?;
         let input = self.commit_body(
             &ConvKey::Main,
@@ -55,7 +59,7 @@ impl super::Controller {
                 attachments: Vec::new(),
             },
         );
-        let turn = self.open_turn(TurnOrigin::User, vec![input])?;
+        let turn = self.open_turn(origin, vec![input])?;
         engine.run(Run::Turn {
             turn: turn.clone(),
             text,
@@ -72,7 +76,11 @@ impl super::Controller {
     /// The item is the line as it was typed, `!` and all: a client reading the
     /// conversation back has to see what was submitted, not the command stripped
     /// of the thing that made it one.
-    pub(super) fn start_shell(&mut self, command: String) -> Result<AppReply, AppError> {
+    pub(super) fn start_shell(
+        &mut self,
+        command: String,
+        origin: TurnOrigin,
+    ) -> Result<AppReply, AppError> {
         let engine = self.engine()?;
         let input = self.commit_body(
             &ConvKey::Main,
@@ -81,7 +89,7 @@ impl super::Controller {
                 attachments: Vec::new(),
             },
         );
-        let turn = self.open_turn(TurnOrigin::Shell, vec![input])?;
+        let turn = self.open_turn(origin, vec![input])?;
         engine.run(Run::Shell {
             turn: turn.clone(),
             command,
@@ -262,8 +270,10 @@ impl super::Controller {
                 return;
             };
             let started = match next.kind {
-                QueuedKind::Prose => self.start_turn(next.text).is_ok(),
-                QueuedKind::Shell => self.start_shell(next.text).is_ok(),
+                // The turn a drain opens says where it came from: it is the
+                // queue's, not a second thing the user just typed.
+                QueuedKind::Prose => self.start_turn(next.text, TurnOrigin::Queue).is_ok(),
+                QueuedKind::Shell => self.start_shell(next.text, TurnOrigin::Queue).is_ok(),
                 QueuedKind::Command => {
                     // The page it was typed on travels with it (D135a): a
                     // `/compact` queued on an instance's page summarises that

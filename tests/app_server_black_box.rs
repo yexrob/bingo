@@ -7,14 +7,19 @@
 //! the actions the core owns outright, the queue, attention, the error paths,
 //! stdout purity, and the exit codes.
 //!
-//! **What is not here, and is not pretended:** text, tool calls, permission
-//! prompts, stream retries, and steering. Those need the engine, which reaches
-//! the wire in B7 — the transport carries no model turn today, so a scenario
-//! asserting one would be asserting a stub. B7 adds them to this file.
+//! **What runs a model** does so against a scripted provider on loopback
+//! ([`Provider`]) rather than against one: text, reasoning and usage; a tool
+//! call with the permission prompt that stops it and the denial that answers
+//! it; a stream retry and the round it re-enters; the queue draining at a turn
+//! boundary and an interrupt reaching a run; the foreground shell tail. What
+//! those assert is the path, not the model.
 
 use std::io::{BufRead, BufReader, Write};
+use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
@@ -796,4 +801,666 @@ fn a_client_can_walk_the_whole_session_free_surface_in_one_connection() {
     let ended = server.finish();
     assert_eq!(ended.code, Some(0));
     assert!(ended.stderr.is_empty(), "stderr: {}", ended.stderr);
+}
+
+// ---------------------------------------------------------------------------
+// A provider that answers from a script
+// ---------------------------------------------------------------------------
+
+/// An Anthropic-protocol endpoint on loopback that answers from a script.
+///
+/// A model would make these tests measure the model. What they are about is the
+/// path — that a submission becomes a turn, that the turn's stream becomes
+/// items, that a prompt stops the run and an answer restarts it — so the
+/// provider is exactly as real as it needs to be: a socket that speaks the
+/// protocol the client speaks.
+struct Provider {
+    port: u16,
+    /// How many turns have been asked for, so a test can say the tool loop went
+    /// round twice rather than infer it from the text.
+    asked: Arc<AtomicUsize>,
+    stop: Arc<AtomicBool>,
+}
+
+impl Provider {
+    /// `script[n]` is the SSE body of the n-th request; the last entry repeats,
+    /// so a run that goes one round further than a test expected still ends.
+    fn start(script: Vec<String>) -> Self {
+        let listener =
+            TcpListener::bind("127.0.0.1:0").expect("the fake provider must take a port");
+        let port = listener.local_addr().expect("a bound port").port();
+        listener
+            .set_nonblocking(true)
+            .expect("the accept loop must not block on shutdown");
+        let asked = Arc::new(AtomicUsize::new(0));
+        let stop = Arc::new(AtomicBool::new(false));
+        let (counter, halt) = (asked.clone(), stop.clone());
+        std::thread::spawn(move || {
+            while !halt.load(Ordering::SeqCst) {
+                match listener.accept() {
+                    Ok((stream, _)) => {
+                        let script = script.clone();
+                        let counter = counter.clone();
+                        std::thread::spawn(move || serve(stream, &script, &counter));
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                    }
+                    Err(_) => return,
+                }
+            }
+        });
+        Self { port, asked, stop }
+    }
+
+    /// The settings that point a session at it, written where a project's own
+    /// settings go.
+    fn configure(&self, root: &TempDir) {
+        let dir = root.path().join(".bingo");
+        std::fs::create_dir_all(&dir).expect("project config directory");
+        std::fs::write(
+            dir.join("settings.json"),
+            serde_json::to_vec(&json!({
+                "providers": {
+                    "scripted": {
+                        "protocol": "anthropic",
+                        "apiBaseUrl": format!("http://127.0.0.1:{}", self.port),
+                        "apiKey": "sk-scripted"
+                    }
+                },
+                "provider": "scripted",
+                "model": "scripted-1"
+            }))
+            .expect("settings fixture"),
+        )
+        .expect("settings fixture");
+    }
+
+    fn rounds(&self) -> usize {
+        self.asked.load(Ordering::SeqCst)
+    }
+}
+
+/// A session that never stops to ask, for the scenarios that are about
+/// something other than the prompt.
+fn never_asks(root: &TempDir) {
+    std::fs::create_dir_all(root.path().join(".bingo")).expect("project config directory");
+    std::fs::write(
+        root.path().join(".bingo/local.json"),
+        br#"{"permissionMode":"bypassPermissions"}"#,
+    )
+    .expect("settings fixture");
+}
+
+impl Drop for Provider {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+    }
+}
+
+/// One HTTP request, one answer. `Connection: close` on purpose: a script step
+/// per connection is one less thing for a test to reason about.
+fn serve(mut stream: TcpStream, script: &[String], asked: &AtomicUsize) {
+    let mut reader = BufReader::new(stream.try_clone().expect("the socket must clone"));
+    let mut head = String::new();
+    let mut length = 0usize;
+    loop {
+        let mut line = String::new();
+        if reader.read_line(&mut line).unwrap_or(0) == 0 {
+            return;
+        }
+        if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+            length = value.trim().parse().unwrap_or(0);
+        }
+        if line == "\r\n" || line == "\n" {
+            break;
+        }
+        head.push_str(&line);
+    }
+    let mut body = vec![0u8; length];
+    let _ = std::io::Read::read_exact(&mut reader, &mut body);
+    // A token count is arithmetic the compactor asks for, not a turn.
+    if head.contains("/v1/messages/count_tokens") {
+        let payload = br#"{"input_tokens":128}"#;
+        let _ = stream.write_all(
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                payload.len()
+            )
+            .as_bytes(),
+        );
+        let _ = stream.write_all(payload);
+        return;
+    }
+    let step = asked.fetch_add(1, Ordering::SeqCst);
+    let sse = script
+        .get(step)
+        .or_else(|| script.last())
+        .cloned()
+        .unwrap_or_default();
+    let _ = stream.write_all(
+        b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n",
+    );
+    let _ = stream.write_all(sse.as_bytes());
+    let _ = stream.flush();
+}
+
+/// One SSE frame.
+fn frame_of(event: &str, data: Value) -> String {
+    format!("event: {event}\ndata: {data}\n\n")
+}
+
+fn message_open() -> String {
+    frame_of(
+        "message_start",
+        json!({"type": "message_start", "message": {"id": "msg_1", "model": "scripted-1"}}),
+    )
+}
+
+fn message_close(stop_reason: &str, output_tokens: u64) -> String {
+    frame_of(
+        "message_delta",
+        json!({
+            "type": "message_delta",
+            "delta": {"stop_reason": stop_reason},
+            "usage": {"output_tokens": output_tokens}
+        }),
+    ) + &frame_of("message_stop", json!({"type": "message_stop"}))
+}
+
+fn text_block(index: usize, text: &str) -> String {
+    frame_of(
+        "content_block_start",
+        json!({"type": "content_block_start", "index": index, "content_block": {"type": "text", "text": ""}}),
+    ) + &frame_of(
+        "content_block_delta",
+        json!({"type": "content_block_delta", "index": index, "delta": {"type": "text_delta", "text": text}}),
+    ) + &frame_of(
+        "content_block_stop",
+        json!({"type": "content_block_stop", "index": index}),
+    )
+}
+
+fn thinking_block(index: usize, thinking: &str) -> String {
+    frame_of(
+        "content_block_start",
+        json!({"type": "content_block_start", "index": index, "content_block": {"type": "thinking", "thinking": ""}}),
+    ) + &frame_of(
+        "content_block_delta",
+        json!({"type": "content_block_delta", "index": index, "delta": {"type": "thinking_delta", "thinking": thinking}}),
+    ) + &frame_of(
+        "content_block_stop",
+        json!({"type": "content_block_stop", "index": index}),
+    )
+}
+
+fn tool_block(index: usize, id: &str, name: &str, input: Value) -> String {
+    frame_of(
+        "content_block_start",
+        json!({"type": "content_block_start", "index": index, "content_block": {"type": "tool_use", "id": id, "name": name, "input": {}}}),
+    ) + &frame_of(
+        "content_block_delta",
+        json!({"type": "content_block_delta", "index": index, "delta": {"type": "input_json_delta", "partial_json": input.to_string()}}),
+    ) + &frame_of(
+        "content_block_stop",
+        json!({"type": "content_block_stop", "index": index}),
+    )
+}
+
+/// A turn that says something and stops.
+fn says(text: &str) -> String {
+    message_open() + &text_block(0, text) + &message_close("end_turn", 12)
+}
+
+/// A stream that fails in a way the engine retries.
+fn overloaded() -> String {
+    message_open()
+        + &frame_of(
+            "error",
+            json!({"type": "error", "error": {"type": "overloaded_error", "message": "try again"}}),
+        )
+}
+
+// ---------------------------------------------------------------------------
+// What a model turn looks like on the wire
+// ---------------------------------------------------------------------------
+
+impl Server {
+    /// Read frames until the named notification arrives, and return everything
+    /// read on the way, that frame last.
+    ///
+    /// A timeout is not needed and would hide the failure it caught: if the
+    /// notification never comes the process is holding the pipe open, and the
+    /// test harness's own timeout says so with the whole stream still in hand.
+    fn until(&mut self, method: &str) -> Vec<Value> {
+        let mut seen = std::mem::take(&mut self.seen);
+        if seen.iter().any(|frame| frame["method"] == json!(method)) {
+            return seen;
+        }
+        loop {
+            let Some(frame) = self.frame() else {
+                panic!("the server closed before {method}: {seen:#?}");
+            };
+            let done = frame["method"] == json!(method);
+            seen.push(frame);
+            if done {
+                return seen;
+            }
+        }
+    }
+
+    /// Start a session and answer with main's conversation id.
+    fn open_main(&mut self, id: i64) -> Value {
+        let started = self.call(id, "session/start", json!({}));
+        assert!(started.get("result").is_some(), "{started}");
+        started["result"]["snapshot"]["conversations"]["active"][0]["id"].clone()
+    }
+
+    fn submit(&mut self, id: i64, main: &Value, text: &str) -> Value {
+        self.call(
+            id,
+            "conversation/submit",
+            json!({
+                "conversationId": main,
+                "input": {"type": "composer", "mode": "normal", "text": text, "attachments": []}
+            }),
+        )
+    }
+}
+
+/// Every notification of one method, in order.
+fn of<'a>(frames: &'a [Value], method: &str) -> Vec<&'a Value> {
+    frames
+        .iter()
+        .filter(|frame| frame["method"] == json!(method))
+        .collect()
+}
+
+/// The sequence numbers of everything sequenced, which must be gapless.
+fn gapless(frames: &[Value]) {
+    let mut last: Option<u64> = None;
+    for frame in frames {
+        let Some(seq) = frame["params"]["event"]["seq"].as_u64() else {
+            continue;
+        };
+        if let Some(previous) = last {
+            assert_eq!(seq, previous + 1, "a gap before {frame}");
+        }
+        last = Some(seq);
+    }
+}
+
+/// One prose turn: what it says, what it thought, and what it cost.
+#[test]
+fn a_submission_becomes_a_turn_whose_text_reasoning_and_usage_all_reach_the_client() {
+    let provider = Provider::start(vec![
+        message_open()
+            + &thinking_block(0, "the suite is the fastest check")
+            + &text_block(1, "Running the tests.")
+            + &message_close("end_turn", 37),
+    ]);
+    let root = TempDir::new("turn");
+    provider.configure(&root);
+    let mut server = Server::start(&root);
+    server.handshake();
+    let main = server.open_main(2);
+
+    let submitted = server.submit(3, &main, "run the tests");
+    let turn = submitted["result"]["disposition"]["turnId"].clone();
+    assert_eq!(
+        submitted["result"]["disposition"]["type"],
+        json!("turnStarted"),
+        "{submitted}"
+    );
+    assert!(turn.is_string(), "{submitted}");
+
+    let frames = server.until("turn/completed");
+    gapless(&frames);
+
+    // The prose the user submitted is an item, and it carries no turn: the turn
+    // names it as an input instead (spec "Item").
+    let opened = of(&frames, "turn/started");
+    assert_eq!(opened.len(), 1, "{frames:#?}");
+    let input = opened[0]["params"]["turn"]["inputItemIds"][0].clone();
+    assert!(input.is_string(), "{}", opened[0]);
+
+    let reasoning: String = of(&frames, "item/reasoningDelta")
+        .iter()
+        .filter_map(|frame| frame["params"]["delta"].as_str())
+        .collect();
+    assert_eq!(reasoning, "the suite is the fastest check");
+    let text: String = of(&frames, "item/textDelta")
+        .iter()
+        .filter_map(|frame| frame["params"]["delta"].as_str())
+        .collect();
+    assert_eq!(text, "Running the tests.");
+    assert!(
+        of(&frames, "item/textDelta")
+            .windows(2)
+            .all(|pair| pair[0]["params"]["deltaSeq"].as_u64()
+                < pair[1]["params"]["deltaSeq"].as_u64()),
+        "deltas are ordered within their item"
+    );
+
+    // Reasoning and prose are two items, never one spliced stream.
+    let bodies: Vec<&str> = of(&frames, "item/started")
+        .iter()
+        .filter_map(|frame| frame["params"]["item"]["type"].as_str())
+        .collect();
+    assert!(bodies.contains(&"reasoning"), "{bodies:?}");
+    assert!(bodies.contains(&"assistantMessage"), "{bodies:?}");
+
+    assert_eq!(of(&frames, "turn/roundStarted").len(), 1, "one round");
+    let usage = of(&frames, "turn/usageUpdated");
+    assert!(
+        usage
+            .iter()
+            .any(|frame| frame["params"]["usage"]["outputTokens"] == json!(37)),
+        "the provider's own count travels: {usage:#?}"
+    );
+    let completed = of(&frames, "turn/completed");
+    assert_eq!(completed[0]["params"]["turn"]["id"], turn);
+    assert_eq!(completed[0]["params"]["turn"]["status"], json!("completed"));
+
+    // The whole turn is readable back, in the same order it was described.
+    let read = server.call(4, "conversation/read", json!({"conversationId": main}));
+    let items = read["result"]["snapshot"]["items"]["items"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let kinds: Vec<&str> = items
+        .iter()
+        .filter_map(|item| item["type"].as_str())
+        .collect();
+    assert_eq!(
+        kinds,
+        vec!["userMessage", "reasoning", "assistantMessage"],
+        "{items:#?}"
+    );
+
+    let ended = server.finish();
+    assert_eq!(ended.code, Some(0));
+    assert_eq!(provider.rounds(), 1, "one round, one request");
+}
+
+/// A tool call, the prompt that stops it, and the denial that answers it —
+/// including the direction the denial carries back to the model.
+#[test]
+fn a_tool_call_stops_on_a_prompt_and_a_denial_travels_back_to_the_model() {
+    let provider = Provider::start(vec![
+        message_open()
+            + &tool_block(0, "toolu_1", "Bash", json!({"command": "echo hello"}))
+            + &message_close("tool_use", 8),
+        says("I will not run it then."),
+    ]);
+    let root = TempDir::new("permission");
+    provider.configure(&root);
+    let mut server = Server::start(&root);
+    server.handshake();
+    let main = server.open_main(2);
+    server.submit(3, &main, "say hello from the shell");
+
+    // The tool is visible before the prompt is (interaction ordering, step 1).
+    let opening = server.until("interaction/opened");
+    let started = of(&opening, "item/started");
+    assert!(
+        started
+            .iter()
+            .any(|frame| frame["params"]["item"]["type"] == json!("toolCall")),
+        "the call is an item before the prompt is a prompt: {opening:#?}"
+    );
+    let prompt = of(&opening, "interaction/opened")[0]["params"]["interaction"].clone();
+    assert_eq!(prompt["prompt"]["type"], json!("permission"), "{prompt}");
+    assert_eq!(prompt["prompt"]["tool"]["name"], json!("Bash"));
+    assert_eq!(
+        prompt["prompt"]["preview"],
+        json!({"type": "command", "command": "echo hello"}),
+        "a command prompt shows the command"
+    );
+    let decisions = prompt["prompt"]["decisions"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert!(decisions.contains(&json!("allowOnce")), "{decisions:?}");
+    assert!(decisions.contains(&json!("deny")), "{decisions:?}");
+    assert!(
+        prompt["remainingGuardMs"].is_number(),
+        "D81's guard is recomputed for the client: {prompt}"
+    );
+
+    let answered = server.call(
+        4,
+        "interaction/respond",
+        json!({
+            "interactionId": prompt["id"],
+            "activation": "programmatic",
+            "decision": {"type": "deny", "feedback": "use the Write tool instead"}
+        }),
+    );
+    assert_eq!(
+        answered["result"]["status"],
+        json!("accepted"),
+        "{answered}"
+    );
+
+    let frames = server.until("turn/completed");
+    gapless(&frames);
+    assert_eq!(of(&frames, "interaction/resolved").len(), 1, "{frames:#?}");
+    let failed = of(&frames, "item/completed")
+        .into_iter()
+        .find(|frame| frame["params"]["item"]["type"] == json!("toolCall"))
+        .unwrap_or_else(|| panic!("the call reaches a terminal state: {frames:#?}"));
+    assert_eq!(failed["params"]["item"]["status"], json!("failed"));
+
+    // A late answer to a closed prompt is refused by name and changes nothing.
+    let late = server.call(
+        5,
+        "interaction/respond",
+        json!({
+            "interactionId": prompt["id"],
+            "activation": "programmatic",
+            "decision": {"type": "allowOnce"}
+        }),
+    );
+    assert_eq!(code_of(&late), "INTERACTION_CLOSED");
+
+    let ended = server.finish();
+    assert_eq!(ended.code, Some(0));
+    assert_eq!(
+        provider.rounds(),
+        2,
+        "the denial went back to the model, which answered it"
+    );
+}
+
+/// A failed attempt is not history: the retry says what it withdrew, and the
+/// round it re-enters is the same round.
+#[test]
+fn a_stream_retry_withdraws_the_attempt_it_lost_and_re_enters_the_round() {
+    let provider = Provider::start(vec![
+        message_open() + &text_block(0, "half a sen") + &overloaded(),
+        says("A whole sentence."),
+    ]);
+    let root = TempDir::new("retry");
+    provider.configure(&root);
+    let mut server = Server::start(&root);
+    server.handshake();
+    let main = server.open_main(2);
+    server.submit(3, &main, "say something");
+
+    let frames = server.until("turn/completed");
+    gapless(&frames);
+    let retrying = of(&frames, "turn/retrying");
+    assert_eq!(retrying.len(), 1, "{frames:#?}");
+    assert_eq!(retrying[0]["params"]["attempt"], json!(1));
+    assert!(
+        retrying[0]["params"]["maxAttempts"].as_u64().unwrap_or(0) > 1,
+        "{}",
+        retrying[0]
+    );
+    let removed = retrying[0]["params"]["removedItemIds"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        !removed.is_empty(),
+        "the attempt drew something, so the retry says what it took back: {}",
+        retrying[0]
+    );
+
+    // What the failed attempt said is not in the conversation.
+    let read = server.call(4, "conversation/read", json!({"conversationId": main}));
+    let text = read.to_string();
+    assert!(!text.contains("half a sen"), "{read}");
+    assert!(text.contains("A whole sentence."), "{read}");
+
+    let ended = server.finish();
+    assert_eq!(ended.code, Some(0));
+    assert_eq!(provider.rounds(), 2, "one attempt failed, one succeeded");
+}
+
+/// The console's shell line: it opens main's turn, publishes a tail while it
+/// runs, and its output is the item's, not the tail's.
+#[test]
+fn a_shell_line_runs_in_the_console_and_publishes_a_tail_while_it_does() {
+    // Nothing to answer: the shell line runs and the model is not asked.
+    let provider = Provider::start(vec![says("done")]);
+    let root = TempDir::new("shell");
+    provider.configure(&root);
+    never_asks(&root);
+    let mut server = Server::start(&root);
+    server.handshake();
+    let main = server.open_main(2);
+
+    let submitted = server.call(
+        3,
+        "conversation/submit",
+        json!({
+            "conversationId": main,
+            "input": {
+                "type": "composer",
+                "mode": "shell",
+                "text": "printf 'one\\ntwo\\n'; sleep 0.4; printf 'three\\n'",
+                "attachments": []
+            }
+        }),
+    );
+    assert_eq!(
+        submitted["result"]["disposition"]["type"],
+        json!("turnStarted"),
+        "{submitted}"
+    );
+
+    let frames = server.until("turn/completed");
+    gapless(&frames);
+    let typed: Vec<&Value> = of(&frames, "item/completed")
+        .into_iter()
+        .filter(|frame| frame["params"]["item"]["type"] == json!("userMessage"))
+        .collect();
+    assert_eq!(typed.len(), 1, "the line is one item, not two: {typed:#?}");
+    assert!(
+        typed[0]["params"]["item"]["turnId"].is_null(),
+        "an item that opens a turn carries no turnId: {}",
+        typed[0]
+    );
+    let done = of(&frames, "item/completed")
+        .into_iter()
+        .find(|frame| frame["params"]["item"]["name"] == json!("Bash"))
+        .unwrap_or_else(|| panic!("the shell call is an item: {frames:#?}"));
+    let output = done["params"]["item"]["output"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(output.contains("three"), "{output}");
+    for tail in of(&frames, "item/commandTailUpdated") {
+        assert_eq!(
+            tail["params"]["itemId"], done["params"]["item"]["id"],
+            "a sample belongs to the call that is running"
+        );
+        assert!(tail["params"]["tail"]["lines"].is_array(), "{tail}");
+    }
+
+    let read = server.call(4, "conversation/read", json!({"conversationId": main}));
+    assert!(
+        read.to_string()
+            .contains("!printf 'one\\\\ntwo\\\\n'; sleep 0.4; printf 'three\\\\n'"),
+        "the transcript keeps the line as it was submitted: {read}"
+    );
+
+    let ended = server.finish();
+    assert_eq!(ended.code, Some(0));
+}
+
+/// Busy main queues, the queue drains at the turn boundary, and an interrupt
+/// reaches the run that is open.
+#[test]
+fn input_queues_behind_a_turn_drains_at_its_end_and_an_interrupt_reaches_it() {
+    let provider = Provider::start(vec![
+        message_open()
+            + &tool_block(0, "toolu_1", "Bash", json!({"command": "sleep 5"}))
+            + &message_close("tool_use", 4),
+        says("first is done"),
+        says("second is done"),
+    ]);
+    let root = TempDir::new("queue-drain");
+    provider.configure(&root);
+    // Nothing may stop to ask: this is about the queue, not the prompt.
+    never_asks(&root);
+    let mut server = Server::start(&root);
+    server.handshake();
+    let main = server.open_main(2);
+
+    let first = server.submit(3, &main, "the first thing");
+    let turn = first["result"]["disposition"]["turnId"].clone();
+    assert_eq!(first["result"]["disposition"]["type"], json!("turnStarted"));
+
+    let second = server.submit(4, &main, "the second thing");
+    assert_eq!(
+        second["result"]["disposition"]["type"],
+        json!("queued"),
+        "busy main queues rather than starting a second turn: {second}"
+    );
+    assert_eq!(second["result"]["disposition"]["position"], json!(0));
+    assert!(
+        second["result"]["disposition"]["steerEligible"]
+            .as_bool()
+            .unwrap_or(false),
+        "plain prose may ride along at a barrier"
+    );
+
+    let queue = server.call(5, "queue/read", json!({"conversationId": main}));
+    assert_eq!(queue["result"]["count"], json!(1), "{queue}");
+
+    let interrupted = server.call(
+        6,
+        "turn/interrupt",
+        json!({"conversationId": main, "turnId": turn}),
+    );
+    assert_eq!(
+        interrupted["result"]["accepted"],
+        json!(true),
+        "{interrupted}"
+    );
+
+    // The turn that was running ends, and its ending is what starts the next.
+    let frames = server.until("turn/completed");
+    gapless(&frames);
+    let ended_turn = of(&frames, "turn/completed")[0]["params"]["turn"].clone();
+    assert_eq!(ended_turn["id"], turn);
+    assert_eq!(
+        ended_turn["status"],
+        json!("interrupted"),
+        "an interrupted turn is still a turn that ended"
+    );
+    let next = server.until("turn/started");
+    let opened = of(&next, "turn/started");
+    assert_eq!(opened.len(), 1, "{next:#?}");
+    assert_ne!(
+        opened[0]["params"]["turn"]["id"], turn,
+        "the queue drained into a new turn"
+    );
+    assert_eq!(opened[0]["params"]["turn"]["origin"], json!("queue"));
+
+    let ended = server.finish();
+    assert_eq!(ended.code, Some(0));
 }

@@ -2197,8 +2197,10 @@ impl Controller {
                 text,
                 addressed,
             } => self.serve_deliver(target, text, addressed),
-            Route::Turn { text } => self.start_turn(text),
-            Route::Shell { command } => self.start_shell(command),
+            Route::Turn { text } => self.start_turn(text, crate::app::snapshot::TurnOrigin::User),
+            Route::Shell { command } => {
+                self.start_shell(command, crate::app::snapshot::TurnOrigin::Shell)
+            }
             // A slash line is the same action a typed call makes, read by the
             // same table (D146).
             Route::Command { line, on } => {

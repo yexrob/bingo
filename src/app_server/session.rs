@@ -353,9 +353,10 @@ fn attach_engine(
         cwd: std::sync::Arc::new(std::sync::Mutex::new(cwd.to_path_buf())),
         home: boot.home.clone(),
         user_config_dir: boot.user_dir.clone(),
-        // stderr is the diagnostic stream and stdout carries frames only, so a
-        // progress print here is not the screen pollution `quiet` guards against.
-        quiet: false,
+        // stdout carries protocol frames and nothing else, and `quiet` is what
+        // the engine's own `println!` progress is gated on — so this is not a
+        // preference here, it is the framing contract.
+        quiet: true,
         compact_failures: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         watch: core.watch(),
         tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(&boot.home, &key)),

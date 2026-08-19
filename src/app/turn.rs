@@ -821,6 +821,14 @@ impl TurnRegistry {
             EngineEvent::Inbound(text) => {
                 let first = !record.saw_inbound && record.turn.round == 0;
                 record.saw_inbound = true;
+                // A turn opened with an input item already *has* the prompt in
+                // the log — the core committed it before the turn existed, which
+                // is what let the submission's reply name it. The run reports the
+                // same prose back as it starts; committing it again would put the
+                // user's line in the conversation twice.
+                if first && !record.turn.input_item_ids.is_empty() {
+                    return changes;
+                }
                 changes.push(TurnChange::Inbound {
                     conversation,
                     turn: turn.clone(),
