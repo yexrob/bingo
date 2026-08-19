@@ -1,7 +1,7 @@
 # Feedback States Specification
 
-> Version: v1.87 · Status: in effect (2026-08-17)
-> Scope: the unified design conventions for every user-visible feedback state in bingo. The GUI (TUI) and CLI (headless) sides share a single source; qa acceptance anchors are at the end.
+> Version: v1.88 · Status: in effect (2026-08-19)
+> Scope: the unified design conventions for every user-visible feedback state in bingo. The three frontends — TUI, `bingo app-server`, `--print` — share a single source; qa acceptance anchors are at the end.
 
 ## General principles
 
@@ -263,6 +263,30 @@ the `src/error.rs` drift-guard unit tests (missing either turns CI red).
 - **If the retry is also empty, the turn completes as a silent turn** (D124), not as an error: the warning stands, neither attempt is recorded, and a subagent's result reads `[subagent returned no text]`. Silence is a legal turn in the conversation model — a member draining room lines it owes nothing is instructed to end its turn that way, and any session can be woken by an inbox holding nothing it must answer. Failing there restored the inbox and had the same batch redelivered into the same silence once per chase round, under `SERVER_ERROR` copy that named the transport for a decision the model had made.
 - The transport's own failure modes are untouched: a stream that dies mid-response is still the `SERVER_ERROR` retry ladder below.
 
+### 4.5 The three frontends, and where feedback lands in each
+
+The core raises feedback once, and each frontend renders it. What follows is
+that mapping; nothing here is a fourth answer to what happened.
+
+| The core's fact | TUI | `bingo app-server` | `--print` |
+|---|---|---|---|
+| a warning from a run | the warning tier above the composer (`WARNING_TTL`) | `feedback/raised` / `feedback/cleared`, with the stable code | `[bingo] warning: …` on stderr |
+| an action's notice | the info / output / error tiers, by notice level | `item/completed` carrying the notice, plus the action's own result | not shown: `--print` runs one turn and prints its prose |
+| long work in progress | the running-status row, the pinned panel | `operation/started` · `operation/progress` · `operation/completed` | not shown |
+| a turn's failure | the full-screen error state, with the code | `turn/completed` with `status: failed` and `error.code` | `[error] code=… msg=…` on stderr, exit 1 |
+| a prompt | the approval dialog | `interaction/opened`, answered with `interaction/respond` | one line on stderr, one letter from stdin |
+
+Two consequences worth stating, because they are easy to get wrong:
+
+- **Which tier a terminal chose is not session state.** The console's four tiers
+  (output / info / error / warning) and its pinned panels are frontend-local by
+  the parity ledger's classification; what is shared is the notice and its
+  level, and the feedback and its code. A GUI is free to have three tiers or
+  seven.
+- **A code survives the trip out.** `--print` reports the code the core computed
+  from the error the run actually hit, not a code for "a print run failed" —
+  otherwise general principle 1 would hold only inside the TUI.
+
 ## 5. DOM / style / ARIA conventions
 
 > This section is the web-frontend (DOM/ARIA) stance; **bingo's current stack is ratatui TUI + headless CLI — no DOM/aria/CSS animation/prefers-reduced-motion/rAF**. The normative values (states, timing, reset) are unchanged; the TUI side implements them per the mapping below.
@@ -313,6 +337,7 @@ Web-side conventions (for a future web frontend to reuse):
 
 ## Changelog
 
+- v1.88 (2026-08-19): three frontends, one source of feedback (D155). `--print` stopped being a host of its own and became a client of the same core, so a headless warning is the same `feedback/raised` a GUI reads and a headless failure carries the same stable code the console shows — general principle 1 now holds *between* frontends and not only between environments of one. §4.5 is that mapping. Two things it makes explicit: which tier a terminal picked is frontend-local (the shared facts are the notice's level and the feedback's code), and `--print`'s exit code line reports the code the run's own error produced rather than one meaning "a print run failed".
 - v1.87 (2026-08-17): one event path, N conversations (D134). **An instance's turn streams onto the console's own channel**, addressed to its conversation, and is written into its store by the handler that writes main's — so its page has result rows, folds, status and stamps because it is the same code, not because a second renderer was taught to agree. Three visible consequences: a **send from a page is echoed at once** rather than showing up as the domain's pending record on the next rebuild; a **reconnect notice from a subagent takes the warning tier** instead of being spliced into that instance's own prose, where it read as something the agent had said; and an **instance's page reports its own context window** in the footer, the surface D89's stranded `on_context_usage` hook had been waiting for. The `stall` baseline is now per-screen: a background instance's deltas no longer reset the clock on main's status row. A room is the one conversation still filled by projection, deliberately — it is a log, not a turn loop — and its page appends the tail past what it has rather than rebuilding.
 - v1.86 (2026-08-17): silence is a turn, not a failure (D124, from a live session: four crew turns died reporting `stream protocol error: the model returned no response after the stream ended`). **Two different silences wore one error.** A member woken by room lines that name nobody is *instructed* to end its turn without speaking, and a turn with neither text nor a tool call is exactly what that instruction produces — which the query loop classified as a malformed response, retried once (invisibly: the retry warning is gated on `!quiet` and every subagent is quiet), and then failed under a message naming the transport. The failure restored the drained inbox, the chase redelivered the same batch, and the same silence failed again, once per round. **A second silence now ends the turn**: warning shown, neither attempt recorded, the inbox left drained, the subagent's result reading `[subagent returned no text]` — the sentence the downstream already had for it. Sibling members that happened to write "No reply needed." always passed, which is what made it look transient: it was a coin flip on phrasing, not a network. **`max_tokens` left the empty path entirely** (D73's leftover, standing since August 13): a turn the budget cut off mid-thought has thinking as its only block, read as empty, and was thrown away *before* the recovery that exists for it — it now records its truncated content and continues on the resume prompt, thinking-only included. The transport's own ladder is untouched: a stream that dies mid-response is still `SERVER_ERROR` with reconnects. The channel note carries the matching half — silence belongs in the room, never in the turn text.
 - v1.85 (2026-08-17): pages and the roster (D120/D121, the v6 view). **An agent's page is main's page**: entering a conversation turns the screen to it — same renderer, same folds, same gutter, write-once into the terminal's own scrollback; switching is a page turn and coming home reprints a recent tail. The room page is speech only. Esc stops the page's run then comes home (main's turn is out of its reach; ctrl+c overrides); shift+tab cycles the viewed agent's mode and the footer badge follows. **The status layer is the conversation rows** (the user's CC screenshot, verbatim shape): `● main` first, then agents and rooms, three-row window, badges as before — entered by `↓` at the end of prompt history, no chord; `Enter` opens, `k` stops, typing returns to the draft. Retired: the alt-screen zoom, the agent tree, the pills, ctrl+shift+o's preview, and D116's `⚑` flow line (user ruling: the badge in constant view plus one ring is the mention's whole surface).

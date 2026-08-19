@@ -1,9 +1,14 @@
 # GUI App-Server Protocol
 
-Status: adopted 2026-08-18 (with the amendments below), not implemented.
-Implementation plan: [`gui-app-server-plan.md`](gui-app-server-plan.md) (aggressive
-final-form sequencing, ruled by the user; it supersedes this document's phased
-"Implementation plan" section).
+Status: **implemented (experimental)**, 2026-08-19. Adopted 2026-08-18 with the
+amendments below; built over batches B0–B8 (`notes/research.md`, D140–D155).
+Experimental means the wire shapes are fixed, generated from the Rust types, and
+covered by a fixture per variant plus black-box scenarios against a real process
+— and that no released consumer exists yet, so nothing here carries a
+compatibility promise. Implementation plan and its review rulings:
+[`gui-app-server-plan.md`](gui-app-server-plan.md) (aggressive final-form
+sequencing, ruled by the user; it supersedes this document's phased
+"Implementation plan" section, which is now the record below).
 
 ## Amendments (adopted 2026-08-18)
 
@@ -66,17 +71,20 @@ machine below both frontends.
 - Slow-changing resources publish replacement snapshots. Text and reasoning use
   append-only deltas; a command live tail is a bounded replacement snapshot and
   large final output is an artifact. There is no generic JSON Patch protocol.
-- Delete `--json-events`, `JsonSession`, `CliEvent`, `json_hooks`, probe/inspect
-  modes, and their old tests. Add `bingo app-server` as the only JSON frontend.
+- `--json-events`, `JsonSession`, `CliEvent`, `json_hooks`, the probe/inspect
+  modes, and their tests are deleted. `bingo app-server` is the only JSON
+  frontend.
 
 This is a complete architecture refactor delivered incrementally, not a big-bang
 wire rewrite.
 
-## Why the current JSON protocol must be replaced
+## Why the previous JSON protocol was replaced
 
-The current development-only JSON path is the wrong layer for a full frontend.
+The development-only JSON path this replaced was the wrong layer for a full
+frontend. Kept here because it is the argument the design rests on, and because
+every row is a way for a second frontend to go wrong again.
 
-| Current shape | Consequence |
+| The shape it had | Consequence |
 | --- | --- |
 | `JsonSession` owns a second active-turn and prompt state machine | TUI and JSON behavior can diverge even when their event fields look similar. |
 | `json_hooks` forwards text, tool completion, warnings, and reduced prompts | Thinking, retry, context, round boundaries, inbound messages, steering, and live Bash are absent by construction. |
@@ -88,13 +96,13 @@ The current development-only JSON path is the wrong layer for a full frontend.
 | Unbounded adapter channels and a flush per delta | A slow GUI can consume unbounded memory or turn token granularity into transport overhead. |
 | No authoritative state read | Resume and recovery require parsing transcript paths and guessing live state. |
 
-The current protocol landed before D81, D83, D84, and the current conversation
-model. Since it has no released compatibility obligation, preserving those
-omissions would only fossilize an obsolete application boundary.
+That protocol landed before D81, D83, D84, and the conversation model bingo now
+has. Since it had no released compatibility obligation, preserving those
+omissions would only have fossilized an obsolete application boundary.
 
-Extending the event enum does not repair the deeper split: application behavior
-still lives in the TUI. The first move must therefore be extraction of the
-shared application controller.
+Extending the event enum would not have repaired the deeper split: application
+behaviour lived in the TUI. The first move was therefore extraction of the
+shared application controller, and everything else followed from it.
 
 ## Meaning of parity
 
@@ -116,8 +124,14 @@ terminal image cell geometry, and modal layout stay local. The following do not:
 - pending permissions/questions and their exact available decisions;
 - transcript/history, compaction, rewind, images, sharing, and background work.
 
-The project should maintain a parity ledger in tests. A new CLI action or state
-cannot land without being classified as shared or frontend-local.
+The project maintains that parity ledger in tests: `src/app/parity.rs`. It holds
+five inventories — slash commands, typed actions, notification methods,
+submission branches, and the terminal's own events — and a row for each,
+classified shared or frontend-local with the contract that carries it or the
+reason it stays put. The three string tables are held to set equality against
+their sources, so an entry with no home fails a test; the two Rust enums carry
+their classification inside an exhaustive `match`, so a variant with no home
+fails to compile. A new CLI action or state cannot land unclassified.
 
 ## Alternatives considered
 
@@ -141,12 +155,12 @@ The selected design uses the useful part of each at a different layer:
 ## Architecture
 
 ```text
-TUI keys/composer                         GUI
-       |                                  |
-       v                                  v
- TUI adapter                       JSON-RPC adapter
-       |                                  |
-       +----------- AppCore --------------+
+TUI keys/composer            GUI              --print
+       |                      |                  |
+       v                      v                  v
+ TUI adapter          JSON-RPC adapter      print client
+       |                      |                  |
+       +------------------ AppCore --------------+
                   /    |     \
                  /     |      \
         query/tool   session   collaboration
@@ -159,6 +173,7 @@ parsing, and prompt oneshots stay behind it.
 
 The TUI owns rendering and interaction mechanics only. The JSON adapter owns
 framing, JSON-RPC correlation, schema negotiation, and serialization only.
+`--print` owns one prompt, stdout, and a letter read off stdin.
 
 A concrete internal shape is sufficient; a public trait is not needed before a
 third implementation exists. Attachment establishes the atomic snapshot/stream
@@ -169,14 +184,21 @@ events:
 pub struct AppCore { /* private actor state */ }
 
 impl AppCore {
-    pub async fn attach(&self, request: AttachRequest) -> Result<AppLink, AppError>;
+    pub fn attach(&self, request: AttachRequest) -> Result<AppLink, AppError>;
 }
 
 pub struct AppLink {
-    pub requests: tokio::sync::mpsc::Sender<AppRequest>,
+    pub requests: Requests, // a sender and a lifetime: writing tags the
+                            // attachment, dropping detaches it
     pub frames: tokio::sync::mpsc::Receiver<AppFrame>,
 }
 ```
+
+Attaching is a write rather than a question, and synchronous: the actor runs on
+a thread of its own with an unbounded inbox, so a frontend with no async runtime
+— a synchronous key handler, a test — attaches exactly as the `async` ones do.
+What bounds an *external* client is the transport's own inbound limit, which is
+where the spec asks for it.
 
 The actor assigns event sequence numbers when it mutates state, not when a
 transport happens to serialize an event. A snapshot frame and the stream that
@@ -190,16 +212,20 @@ event.
 
 ### Internal event layers
 
-The current names blur three separate layers. They should become explicit:
+Three separate layers, and the names say which is which:
 
 - `EngineEvent`: private query/tool/provider progress entering `AppCore`.
-- `AppEvent`: semantic application state consumed by both frontends.
-- `TuiEvent`: optional TUI-only effects such as a page break, pinned panel, or
-  terminal image measurement.
+- `AppEvent`: semantic application state consumed by every frontend. Each
+  variant maps to exactly one notification method, and a test keeps the mapping
+  total in both directions.
+- the terminal's own event: TUI-only effects such as a page break, a pinned
+  panel, or a terminal image measurement.
 
-`UiHooks` may remain temporarily as the engine adapter during extraction, but it
-must not be the public GUI contract. Delete `json_hooks`; app-server consumes
-`AppEvent` directly.
+The third layer kept its existing name (`UiEvent`) rather than gaining a new
+one. It is produced nowhere outside `src/tui/`, which is the property that
+matters; `src/tui/chat_feed.rs` is where the core's `AppEvent` stream becomes
+one. `UiHooks` and `json_hooks` are gone: the engine reports through
+`EngineEvent` into the actor, and every frontend reads `AppEvent`.
 
 ## Resource model
 
@@ -544,12 +570,18 @@ Required families:
 | Item | `item/started`, `item/textDelta`, `item/reasoningDelta`, `item/commandTailUpdated`, `item/updated`, `item/completed`. Text/reasoning deltas append; tail/update/completion replace. |
 | Input queue | `queue/itemAdded`, `queue/itemRemoved`, `queue/itemAbsorbed`; each carries bounded items/IDs and the queue revision. |
 | Interaction | `interaction/opened`, `interaction/resolved`, `interaction/cancelled`. |
-| Collaboration | `agent/changed`, `room/changed`, `task/changed`, `task/removed`, `delivery/changed`, `command/changed`; room posts use the ordinary item lifecycle. |
+| Collaboration | `agent/changed`, `agent/removed`, `room/changed`, `task/changed`, `task/removed`, `delivery/changed`, `command/changed`; room posts use the ordinary item lifecycle. |
 | Operations | `operation/started`, `operation/progress`, `operation/completed`. |
 | Runtime state | `config/changed`, `catalog/changed`, `asset/available`, `feedback/raised`, `feedback/cleared`. |
 
 Specialized delta names are intentional. A generic `item/delta` would require
 clients to infer whether a payload appends, patches, or replaces.
+
+Every keyed collection that can shrink says so: `agent/removed` and
+`task/removed` exist because a client's roster would otherwise keep a name the
+session no longer has until it re-read a snapshot. There is deliberately no
+`room/removed` — a session does not delete rooms, and a variant with no producer
+is a promise the server does not keep.
 
 `item/commandTailUpdated` is D84's terminal-semantics tail snapshot: bounded
 lines plus total-line count, after carriage-return handling and escape removal.
@@ -807,7 +839,9 @@ or telemetry by default.
 ## CLI parity ledger
 
 The following table is the minimum acceptance inventory, not a future-feature
-wish list.
+wish list. `src/app/parity.rs` is its checked form: this table says what must
+have a home, that one says which home each thing has, and the tests there refuse
+to let anything land without one.
 
 | CLI behavior | Shared contract |
 | --- | --- |
@@ -840,79 +874,38 @@ wish list.
 `ImageMeta` are not wire events. Their underlying operation, feedback, asset,
 or catalog state is.
 
-## Implementation plan
+## Implementation record
 
-### Phase 0: delete the obsolete boundary and measure
+The phased plan this section used to hold was replaced before any of it was
+built: the user ruled for the aggressive route — contract first, then the core,
+then both adapters against the final shape — and
+[`gui-app-server-plan.md`](gui-app-server-plan.md) carries that sequencing, each
+batch's landing note, and the review ruling that closed it. What happened, in
+one line each:
 
-- Delete `src/json_events.rs`, the `--json-events`, `--probe`, and `--inspect`
-  flags, exact-session-only arguments, JSON-specific error plumbing, and all
-  old JSON unit and black-box tests. Keep no wire fixtures or compatibility
-  adapter.
-- Remove `json_events` startup forks so share attachment, team auto-start,
-  startup feedback, and team-memory persistence use the normal session path.
-- Add the parity ledger as a checked table covering every slash command,
-  submission branch, and `UiEvent` variant.
-- Record normalized scenario traces for text, tool, permission, retry, steer,
-  live Bash, direct delivery, room traffic, tasks, and interruption.
+| Batch | D | What landed |
+| --- | --- | --- |
+| B0 | D140 | The v1 JSON protocol and its three flags deleted; the startup forks with them. |
+| B1 | D141 | The whole wire contract, the kernel types, the schema bundle, and a fixture per variant. |
+| B2 | D142–D143 | The session actor: attachment, sequencing, the snapshot cut, the id mint; the three collaboration registries became its own state. |
+| B3 | D144 | Submission, queue and steer arbitration, exactly-one terminal turn, interactions, usage and compaction. |
+| B4 | D145 | Agents, rooms, attention, the room sidecar and its replay, delivery state, the single walker. |
+| B5 | D146 | One action table for metadata and dispatch, the catalogs, the paginated reads. |
+| B6 | D147 | The stdio transport: framing, negotiation, bounded queues, delta coalescing, the black-box suite. |
+| B7 | D148–D154 | The console became a client of the core: engine on the wire, a client-side store, the read face, the action table's engine half, the write face. |
+| B8 | D155 | The parity ledger as a checked table, `--print` as the third client, the documentation, and the remaining small accounts. |
 
-### Phase 1: extract the application core
+Two rules from that plan outlive it and stand:
 
-- Move non-visual conversation state and `Chat::handle_event` reduction into
-  `AppCore`.
-- Move submit routing, queue/steer arbitration, direct delivery, and command
-  scope into `AppCore`.
-- Introduce `EngineEvent`, `AppCommand`, `AppEvent`, and snapshot types.
-- Keep TUI-only cursor, layout, collapse, picker, page-break, and theme state in
-  `src/tui`.
-- Put the TUI on `AppCore` before adding app-server transport. This proves the
-  shared core against the product with the broadest existing behavior.
-
-Suggested ownership, allowed to evolve with the extraction:
-
-```text
-src/app/
-  mod.rs
-  controller.rs
-  command.rs
-  event.rs
-  snapshot.rs
-  catalog.rs
-src/app_server/
-  mod.rs
-  protocol.rs
-  stdio.rs
-  schema.rs
-```
-
-### Phase 2: normalize application actions
-
-- Move slash-command behavior out of `Chat` one family at a time.
-- Make raw CLI parsing and typed GUI actions converge on the same enum and
-  handler.
-- Move session/config/provider/MCP/team/task/room operations behind `AppCore`.
-- Keep app-server startup on the normal session path; do not reintroduce
-  frontend-specific capability gates.
-
-### Phase 3: add app-server protocol 1.0
-
-- Add `bingo app-server` with JSON-RPC/NDJSON stdio transport.
-- Derive the serde/schemars contract from Rust types.
-- Add `bingo app-server generate-schema --out <dir>` and commit a deterministic
-  Draft 7 schema bundle. Its manifest maps every method/notification to
-  direction, params, result, declared application errors, and stable `$id`
-  references; shape-only enum schemas are not a complete RPC contract.
-- Generate TypeScript from that schema in the GUI build rather than maintaining
-  handwritten duplicate interfaces.
-- Start experimental until the parity ledger and black-box scenarios are green.
-
-### Phase 4: declare GUI parity
-
-- Run the same controller scenarios through the TUI adapter and JSON adapter.
-- Complete the capability ledger with no unexplained omissions.
-- Update `src/skills/bundled/guide.md`, README capability documentation, and
-  `notes/design/feedback-states.md` in the implementation batches that change
-  user-visible behavior.
-- Only then advertise app-server protocol 1.0 as stable.
+- **Documentation moves with behaviour.** A batch that changes user-visible
+  behaviour updates `src/skills/bundled/guide.md`, the README capability
+  documentation, and `notes/design/feedback-states.md` in the same batch.
+- **1.0 is advertised as stable only when there is a consumer.** The ledger is
+  green and the black-box scenarios pass, which is what "experimental" required;
+  what it does not yet have is an independent client, and until one exists the
+  protocol carries no compatibility promise. A GUI build should generate its
+  TypeScript from the committed schema bundle rather than maintaining
+  handwritten interfaces.
 
 ## Verification strategy
 
@@ -932,6 +925,14 @@ Test the shared controller once, at its public interface:
 
 These tests replace duplicated frontend state-machine tests rather than layering
 another copy on top.
+
+### The parity ledger
+
+`src/app/parity.rs`, described under "Meaning of parity": five inventories, one
+row each, every row classified shared or frontend-local with its reason. It is a
+checklist rather than a behaviour test, and it is the one that fails when
+somebody adds a command, an action, a notification, a submission branch or a
+terminal event and forgets to say which side it lives on.
 
 ### Protocol contract tests
 
@@ -957,7 +958,9 @@ traces for:
 - live shell output + backgrounding;
 - images/assets;
 - agent/room/peer messages + tasks + obligations;
-- startup warnings, provider authentication, MCP, sharing, and session close.
+- startup warnings, provider authentication, MCP, sharing, and session close;
+- `--print` against the same scripted provider, since it is a client of this
+  core too: one prompt, the prose on stdout, everything else on stderr.
 
 All normal project gates still apply to every implementation batch:
 `cargo fmt --all -- --check`, `cargo check --locked --all-targets`,

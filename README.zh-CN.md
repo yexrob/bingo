@@ -37,6 +37,9 @@ Rust 实现的本地 agent CLI（agent harness）。在终端里驱动大模型�
   memdir 自动记忆 + CLAUDE.md/AGENTS.md 项目记忆。
 - **Hooks 扩展点**：工具前后、会话起止、压缩、Stop、任务生命周期等事件的
   shell hook（stdin 喂 JSON、stdout 回传决策）。
+- **一个内核，三个前端**：终端、`bingo app-server`（JSON-RPC over stdio，
+  实验特性）与 `--print` 都是同一个会话 actor 的投影——GUI 驱动的是这个产品
+  本身，而不是把它重写一遍。
 
 ## 构建与安装
 
@@ -103,6 +106,7 @@ bingo --inline              # inline 模式：历史保留在终端 scrollback
 bingo -p "修复这个 bug"       # headless：prompt 参数，结果打到 stdout
 bingo -p < prompt.txt       # headless：从 stdin 读 prompt
 bingo --continue            # 恢复最近一次会话
+bingo app-server            # 面向 GUI 的 JSON-RPC over stdio（实验特性）
 ```
 
 没有任何凭据也能启动：欢迎卡会给出引导（`/provider login codex` 使用 ChatGPT 订阅，或在 settings 写 `apiKey`），配好凭据前请求会快速失败并提示下一步。
@@ -119,6 +123,8 @@ bingo --continue            # 恢复最近一次会话
 | `--permission-mode <模式>` | 权限模式：`default`/`acceptEdits`/`plan`/`dontAsk`/`bypassPermissions`（默认取 settings） |
 | `--continue` | 恢复最近的会话继续对话 |
 | `bingo share [会话] [--public] [--open] [-o 路径]` | 默认仅在本地导出自包含 HTML；`--public` 才显式发布任何人可访问的链接（上传前显示敏感内容警告） |
+| `bingo app-server` | 在 stdio 上提供 app-server 协议（见 [App-server](#app-server实验特性)） |
+| `bingo app-server generate-schema --out <目录>` | 生成该协议的 JSON Schema bundle |
 | `prompt` | 非交互提示词（缺省从 stdin 读取；交互模式忽略） |
 
 ## 使用界面
@@ -687,7 +693,9 @@ bingo 的 Tool trait：
 ## 会话、压缩与记忆
 
 - **Transcript**：`~/.local/share/bingo/transcripts/<项目>-<ts>.jsonl`，
-  每行一条 Message；坏行跳过不阻塞恢复。`--continue` 续最近会话，
+  每行一条 Message；坏行跳过不阻塞恢复。会话一开始就把文件打开，因此
+  还没说话就能被列出、恢复与重命名。`--continue` 续的是最近**用过**的会话
+  （启动即退出会留下一个空文件，交给 `/gc` 回收），
   `/resume [名]` 列出/切换，`/rename` 重命名。启动清理与 `/gc` 最多保留最近
   100 个非活跃会话，并删除超过 30 天的会话；最近 24 小时有活动的会话不受数量
   上限清理；对应 share 快照随 transcript 删除。
@@ -702,31 +710,89 @@ bingo 的 Tool trait：
 - **记忆**：memdir 自动记忆（`~/.config/bingo/memdir/<项目名>-<路径哈希>.md`，
   完整路径哈希避免同名项目串味）+ 项目 CLAUDE.md 与 AGENTS.md 作为 system 记忆。
 
+## App-server（实验特性）
+
+`bingo app-server` 用 JSON-RPC 2.0 把 bingo 的应用状态开在 stdio 上，
+每行一个 JSON 对象（NDJSON）。它的存在理由只有一个：让 GUI 驱动终端所驱动的
+同一个会话——同样的提交、回合、审批、agent、房间与动作，而不是重新实现一遍。
+
+- **stdout 只有协议帧**，诊断一律走 stderr。
+- **会话归服务端**。`session/start` / `session/resume` 开一个；
+  `session/read` 与 `conversation/read` 给出权威快照，快照之后的一切以有序
+  通知到达，序号无洞。
+- **只有一条提交路径**。`conversation/submit` 决定输入是起一个回合、排队、
+  在工具屏障处 steer，还是投递给别人——客户端不选。不常用的操作走
+  `action/execute`，用的是 `/help` 打印的同一张表。
+- **审批是服务端发起的交互**。权限请求与 `AskUserQuestion` 的寿命长于宣告它
+  的那次调用，用 `interaction/respond` 回答，因此客户端重连后仍可作答。
+
+契约由 Rust 类型生成，不手写：
+
+```bash
+bingo app-server generate-schema --out schema/app-server
+```
+
+已提交的 bundle 在 [`schema/app-server`](schema/app-server)：一份 manifest 把
+每个方法与通知映射到方向、params、result 与声明的错误，外加各自的 Draft-7
+schema。客户端应从它生成 TypeScript，而不是手抄第二份类型。
+
+**状态：实验特性。** manifest 里协议记作 1.0，wire 形状有逐变体的往返 fixture
+与黑盒场景覆盖，但还没有已发布的消费者，因此不承诺兼容性。设计与其修订见
+[`notes/design/gui-app-server.md`](notes/design/gui-app-server.md)。
+
+1.0 不做：两个客户端同时控制一个会话、持久事件日志、网络传输、透出 provider
+原生流帧、终端布局状态。详见设计文档的 non-goals。
+
 ## 架构
 
 ```text
-CLI (clap)
-  → settings 三层合并 (user/project/local)
-  → Messages API 客户端 (reqwest + SSE 流式)
-  → query loop: 工具调用 → 权限门 → 并发执行 → 结果回填
-  → TUI (ratatui inline/fullscreen + crossterm) | headless --print
-       ├─ Tool Registry (trait + schemars schema)
-       ├─ MCP 适配层 (rmcp: stdio / streamable HTTP)
-       ├─ 子代理 (hub-and-spoke, 异步 + 通知)
-       ├─ Hooks (shell, JSON 契约)
-       ├─ Task 存储 / 频道 / 技能 / 记忆 / transcript
-       └─ 预算监控与压缩
+TUI (ratatui)        bingo app-server        --print
+      \                    |                  /
+       +--------------- AppCore ---------------+
+       | 独占一根线程的单会话 actor：
+       | conversations · turns · items · 输入队列
+       | interactions · attention · agents · rooms · tasks
+       | 动作表 · catalogs · 服务端铸造的 id
+       +-------------------+-------------------+
+                           |
+                    engine：query loop、工具、agent run
+                    EngineEvent → actor（唯一定序点）
+```
+
+一切变更都发生在 actor 内部，由它盖上无洞的序号并发布；前端是这条流的投影，
+自己不持有规则。终端只保留终端才有的东西——行、折叠、滚动、按键、图片的
+单元格几何——而一张受检的账（`src/app/parity.rs`）逐条声明每个 slash 命令、
+动作、通知、提交分支与终端事件属于哪一边。
+
+actor 之下：
+
+```text
+settings 三层合并 (user/project/local)
+Messages API 客户端 (reqwest + SSE 流式)
+query loop: 工具调用 → 权限门 → 并发执行 → 结果回填
+  ├─ Tool Registry (trait + schemars schema)
+  ├─ MCP 适配层 (rmcp: stdio / streamable HTTP)
+  ├─ 子代理 (hub-and-spoke, 异步 + 通知)
+  ├─ Hooks (shell, JSON 契约)
+  ├─ Task 存储 / 频道 / 技能 / 记忆 / transcript
+  └─ 预算监控与压缩
 ```
 
 核心循环语义：**模型只产出 tool_use 意图；权限、并行、副作用、压缩、记忆与
-UI 由本地 harness 负责**。设计决策见 [`notes/research.md`](notes/research.md)
-（D1–D36）。
+UI 由本地 harness 负责**。设计决策见 [`notes/research.md`](notes/research.md)。
 
 ## 项目结构
 
 ```text
 src/
   main.rs          CLI 入口（clap）、会话启动链
+  app/             应用内核：会话 actor 及其所有物
+                   （command / event / snapshot / projection / queue /
+                   interaction / attention / 动作表 / parity 账）
+  app_server/      `bingo app-server`：wire 类型、stdio 传输、schema bundle
+  engine/          内核把工作交出去的那一侧：run loop、动作 handler、
+                   EngineEvent（工作重新进入 actor 的唯一入口）
+  print.rs         `--print`：内核的第三个客户端
   api/             Messages API 客户端（client / SSE / types）
   query.rs         主循环（queryLoop）、slash 可变运行时
   tools.rs         工具装配（按 depth/实验开关分发）
@@ -751,12 +817,16 @@ src/
   memory.rs        memdir 记忆提取与加载
   watch.rs         后台任务注册与通知
   tui/             ratatui 界面（chat / view / input / markdown / highlight / gfx …）
-  ui.rs            headless hooks 与共享渲染
+                   其中 `store.rs` 是它对内核的客户端投影
+  ui.rs            与渲染器无关的事件与对话框契约
   system.rs        system prompt 拼装（记忆 + 项目记忆 + 技能清单）
 tests/
   fixtures/        集成测试夹具
+schema/
+  app-server/      已提交的 app-server 协议 JSON Schema bundle
 notes/
-  research.md      技术决策记录（D1–D36）
+  research.md      技术决策记录
+  design/          协议与界面设计
 ```
 
 ## 开发约定

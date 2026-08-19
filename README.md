@@ -48,6 +48,9 @@ produces intent; side effects are gated by the harness.
 - **Hooks extension points**: shell hooks for pre/post-tool, session
   start/end, compaction, Stop, and task lifecycle events (JSON on stdin,
   decisions returned on stdout).
+- **One application core, three frontends**: the terminal, `bingo app-server`
+  (JSON-RPC over stdio, experimental) and `--print` are projections of the same
+  session actor, so a GUI drives the product rather than re-implementing it.
 
 ## Building & installing
 
@@ -118,6 +121,7 @@ bingo --inline              # inline mode: keep history in terminal scrollback
 bingo -p "fix this bug"      # headless: prompt argument, reply to stdout
 bingo -p < prompt.txt       # headless: read the prompt from stdin
 bingo --continue            # resume the most recent session
+bingo app-server            # JSON-RPC over stdio, for a GUI (experimental)
 ```
 
 bingo starts even with no credentials: the welcome card carries onboarding (`/provider login codex` for a ChatGPT subscription, or write `apiKey` in settings); requests fail fast with next-step guidance until credentials exist.
@@ -134,6 +138,8 @@ bingo starts even with no credentials: the welcome card carries onboarding (`/pr
 | `--permission-mode <mode>` | permission mode: `default`/`acceptEdits`/`plan`/`dontAsk`/`bypassPermissions` (default from settings) |
 | `--continue` | resume the most recent session |
 | `bingo share [session] [--public] [--open] [-o path]` | export self-contained HTML locally by default; `--public` explicitly publishes a link anyone can access (with a sensitive-content warning before upload) |
+| `bingo app-server` | serve the app-server protocol on stdio (see [App-server](#app-server-experimental)) |
+| `bingo app-server generate-schema --out <dir>` | write the JSON Schema bundle for that protocol |
 | `prompt` | non-interactive prompt (read from stdin if omitted; ignored in interactive mode) |
 
 ## Interface
@@ -803,8 +809,10 @@ Example (PreToolUse denies Bash):
 
 - **Transcript**: `~/.local/share/bingo/transcripts/<project>-<ts>.jsonl`, one
   Message per line; corrupt lines are skipped without blocking recovery.
-  `--continue` resumes the latest session, `/resume [name]` lists/switches,
-  `/rename` renames. Startup cleanup and `/gc` retain the newest 100
+  A session's file is opened when the session starts, so it can be listed,
+  resumed and renamed before a word has been said in it. `--continue` resumes
+  the latest session that was *used* (a launch-and-quit leaves an empty file,
+  and `/gc` reaps it), `/resume [name]` lists/switches, `/rename` renames. Startup cleanup and `/gc` retain the newest 100
   inactive sessions and remove sessions older than 30 days; sessions touched in
   the last 24 hours are never count-pruned; matching share snapshots
   follow transcript deletion. Prompt-history files use the same TTL and a
@@ -823,32 +831,101 @@ Example (PreToolUse denies Bash):
   collisions between same-named projects) + project CLAUDE.md and AGENTS.md as
   system memory.
 
+## App-server (experimental)
+
+`bingo app-server` serves bingo's application state over JSON-RPC 2.0, one JSON
+object per line (NDJSON) on stdin/stdout. It exists so a GUI can drive the same
+session the terminal drives — the same submissions, turns, prompts, agents,
+rooms and actions — rather than re-implementing them.
+
+- **stdout is protocol frames and nothing else.** Diagnostics go to stderr.
+- **Sessions are server-owned.** `session/start` and `session/resume` open one;
+  `session/read` and `conversation/read` hand out authoritative snapshots, and
+  everything after a snapshot arrives as ordered notifications with a gapless
+  sequence number.
+- **One submission path.** `conversation/submit` decides whether input starts a
+  turn, queues behind one, steers into one, or is delivered — a client never
+  chooses. Uncommon operations go through `action/execute` against the same
+  table `/help` prints.
+- **Prompts are server-initiated interactions.** A permission request or an
+  `AskUserQuestion` outlives the call that announced it and is answered with
+  `interaction/respond`, so it survives a client reconnecting.
+
+The contract is generated from the Rust types rather than written by hand:
+
+```bash
+bingo app-server generate-schema --out schema/app-server
+```
+
+The committed bundle is in [`schema/app-server`](schema/app-server): a manifest
+mapping every method and notification to its direction, params, result and
+declared errors, plus Draft-7 schemas for each. Generate TypeScript from it
+rather than keeping a second copy of the types by hand.
+
+**Status: experimental.** The protocol is at 1.0 in the manifest and the wire
+shapes are covered by round-trip fixtures and black-box scenarios, but it has no
+released consumer yet, so it carries no compatibility promise. The design and its
+amendments are in
+[`notes/design/gui-app-server.md`](notes/design/gui-app-server.md).
+
+Not in 1.0: two clients controlling one session at once, a durable event
+journal, network transports, provider-native stream frames, and terminal layout
+state. See the spec's non-goals.
+
 ## Architecture
 
 ```text
-CLI (clap)
-  → settings, three layers merged (user/project/local)
-  → Messages API client (reqwest + SSE streaming)
-  → query loop: tool calls → permission gate → concurrent execution → results fed back
-  → TUI (ratatui inline/fullscreen + crossterm) | headless --print
-       ├─ Tool Registry (trait + schemars schema)
-       ├─ MCP adapter layer (rmcp: stdio / streamable HTTP)
-       ├─ sub-agents (hub-and-spoke, async + notifications)
-       ├─ Hooks (shell, JSON contract)
-       ├─ Task store / channels / skills / memory / transcript
-       └─ budget monitoring & compaction
+TUI (ratatui)        bingo app-server        --print
+      \                    |                  /
+       +--------------- AppCore ---------------+
+       | one session actor, on a thread of its own:
+       | conversations · turns · items · input queue
+       | interactions · attention · agents · rooms · tasks
+       | the action table · the catalogs · server-owned ids
+       +-------------------+-------------------+
+                           |
+                    engine: query loop, tools, agent runs
+                    EngineEvent → the actor (the one ordering point)
+```
+
+Every mutation happens inside the actor, which stamps it with a gapless sequence
+number and publishes it; a frontend is a projection of that stream and holds no
+rules of its own. The terminal keeps what only a terminal has — rows, folds,
+scroll, key bindings, image cell geometry — and a checked ledger
+(`src/app/parity.rs`) says, for every slash command, action, notification,
+submission branch and terminal event, which of the two sides it lives on.
+
+Underneath the actor:
+
+```text
+settings, three layers merged (user/project/local)
+Messages API client (reqwest + SSE streaming)
+query loop: tool calls → permission gate → concurrent execution → results fed back
+  ├─ Tool Registry (trait + schemars schema)
+  ├─ MCP adapter layer (rmcp: stdio / streamable HTTP)
+  ├─ sub-agents (hub-and-spoke, async + notifications)
+  ├─ Hooks (shell, JSON contract)
+  ├─ Task store / channels / skills / memory / transcript
+  └─ budget monitoring & compaction
 ```
 
 Core loop semantics: **the model only produces tool_use intent; permissions,
 parallelism, side effects, compaction, memory, and the UI are the local
 harness's job**. Design decisions live in
-[`notes/research.md`](notes/research.md) (D1–D36).
+[`notes/research.md`](notes/research.md).
 
 ## Project layout
 
 ```text
 src/
   main.rs          CLI entry (clap), session bootstrap
+  app/             the application core: the session actor and what it owns
+                   (command / event / snapshot / projection / queue /
+                   interaction / attention / action table / parity ledger)
+  app_server/      `bingo app-server`: wire types, stdio transport, schema bundle
+  engine/          what the core hands work to: run loop, action handlers,
+                   EngineEvent (the one way work re-enters the actor)
+  print.rs         `--print`: the third client of the core
   api/             Messages API client (client / SSE / types)
   query.rs         main loop (queryLoop), slash-mutable runtime
   tools.rs         tool assembly (by depth / experimental flags)
@@ -873,12 +950,16 @@ src/
   memory.rs        memdir memory extraction and loading
   watch.rs         background task registry & notifications
   tui/             ratatui UI (chat / view / input / markdown / highlight / gfx …)
-  ui.rs            headless hooks and shared rendering
+                   `store.rs` is its client-side projection of the core
+  ui.rs            the renderer-agnostic event and dialog contract
   system.rs        system prompt assembly (memory + project memory + skills listing)
 tests/
   fixtures/        integration-test fixtures
+schema/
+  app-server/      the committed JSON Schema bundle for the app-server protocol
 notes/
-  research.md      technical decision record (D1–D36)
+  research.md      technical decision record
+  design/          protocol and interface designs
 ```
 
 ## Development conventions

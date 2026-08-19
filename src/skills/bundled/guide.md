@@ -112,6 +112,36 @@ Example (.bingo/settings.json):
 }
 ```
 
+## Frontends
+
+Three, and they are three projections of one session, not three programs:
+
+- **the terminal** (`bingo`) — everything below;
+- **`bingo -p "…"`** — one prompt, one turn, the model's prose on stdout and
+  everything else on stderr; the prompt comes from the argument or from stdin.
+  Prompts (permissions, AskUserQuestion) are asked on stderr and answered on
+  stdin; a failure exits non-zero with `[error] code=… msg=…`;
+- **`bingo app-server`** — JSON-RPC 2.0, one JSON object per line (NDJSON) on
+  stdin/stdout, for a GUI. **Experimental**: the wire shapes are fixed and
+  covered by fixtures and black-box scenarios, but there is no released
+  consumer and no compatibility promise yet. stdout carries protocol frames
+  only; diagnostics go to stderr. `bingo app-server generate-schema --out <dir>`
+  writes the Draft-7 schema bundle (a manifest mapping every method and
+  notification to direction, params, result and declared errors, plus a schema
+  for each); the committed copy is in `schema/app-server`, and a client should
+  generate its types from it rather than hand-write them.
+
+They share one core, so the answer to "can a GUI do X" is "yes, if the terminal
+can" for everything that is session state: which conversation input goes to,
+whether it starts a turn or queues or steers or is delivered, turns and retries
+and usage, tools and diffs and live command output, permissions and questions
+and the exact decisions each offers, agents and rooms and read cursors and
+mention obligations, compaction, rewind, images, sharing and background work.
+What stays with the terminal is what only a terminal has: rows, folds, scroll,
+key bindings, theme rendering, and image cell geometry. `src/app/parity.rs` is
+the checked ledger of that split, one row per slash command, action,
+notification, submission branch and terminal event.
+
 ## Slash command quick reference
 
 `/help` for the full list. Common ones: `/model [name]` (no args: two-level picker — level 1 providers → level 2 model list, which comes from the settings `models` declaration when there is one, otherwise the endpoint; `r` re-asks a fetched list; with a name: switch directly, validated against the known list when available),
@@ -435,7 +465,7 @@ Example (.bingo/settings.json):
 - **MCP**: stdio and streamable HTTP (`type: "http"`, with custom headers) server tools are integrated (see above).
 - **Memory**: memdir auto-memory (`~/.config/bingo/memdir/`, filenames
   `<project-name>-<path-hash>.md`, same-name directories don't cross-pollute) + project CLAUDE.md (Anthropic convention).
-- **Sessions**: transcripts persisted (JSONL), `--continue`/`/resume` restore, `/compact` compacts. Startup cleanup and `/gc` enforce a 30-day TTL plus a latest-100 inactive-session cap plus a 24-hour activity grace; share snapshots are removed with their transcript, while prompt-history files use the same TTL and a 100-file cap. `/cd <dir>` switches the session-owned working directory without changing the process cwd; subsequent Bash/Read/Edit/Write/Glob/Grep calls, project skills/agent definitions, Team/Agent crew lookup, Experience project keys, memory extraction, settings command paths, image paths, and `/team` resolve from the new directory. Startup-loaded settings/MCP configuration and the already-built system prompt are not reloaded.
+- **Sessions**: transcripts persisted (JSONL), `--continue`/`/resume` restore, `/compact` compacts. A session's transcript file is opened when the session starts, in every frontend, so it can be listed, resumed and renamed before anything has been said in it; `--continue` therefore restores the most recent session that was actually *used*, and an empty one left by a launch-and-quit is reaped by `/gc`. Startup cleanup and `/gc` enforce a 30-day TTL plus a latest-100 inactive-session cap plus a 24-hour activity grace; share snapshots are removed with their transcript, while prompt-history files use the same TTL and a 100-file cap. `/cd <dir>` switches the session-owned working directory without changing the process cwd; subsequent Bash/Read/Edit/Write/Glob/Grep calls, project skills/agent definitions, Team/Agent crew lookup, Experience project keys, memory extraction, settings command paths, image paths, and `/team` resolve from the new directory. Startup-loaded settings/MCP configuration and the already-built system prompt are not reloaded.
   **Sharing**: `bingo share [session]` generates a self-contained HTML file in the current directory by default (`--output`
   specifies the path), never touching the network. Only an explicit `--public` uploads to the official share service and prints
   a public `https://bingo.ruobin.dev/share/u/<id>` link; **anyone can access it publicly**, so
