@@ -793,6 +793,12 @@ pub struct Chat {
     /// The prompt on screen: the core's identity for it, and the render model
     /// built from it. The answer belongs to the actor (B3); this is the view.
     pub pending_ask: Option<(crate::app::ids::InteractionId, PermissionRequest)>,
+    /// The last prompt this console adopted from the projection.
+    ///
+    /// A client acts on a prompt before it is told the prompt closed, so for a
+    /// tick the projection still holds one the console has already settled.
+    /// This is what keeps it from picking the same one up again.
+    pub(crate) last_ask: Option<crate::app::ids::InteractionId>,
     /// Dialog focus row (0..=options.len(); == options.len() = free-text input).
     pub(crate) ask_focus: usize,
     /// Buffer for free-form input: AskUserQuestion's Other, or a refusal's feedback.
@@ -1170,6 +1176,7 @@ impl Chat {
             last_prompt: String::new(),
             cwd,
             pending_ask: None,
+            last_ask: None,
             ask_focus: 0,
             ask_other: String::new(),
             ask_expanded: false,
@@ -1299,6 +1306,18 @@ impl Chat {
     pub fn connect_store_now(&mut self) -> Result<(), crate::app::AppError> {
         let core = self.session.core.clone();
         self.store.connect_now(&core, "tui")
+    }
+
+    /// Let the core finish saying what a change did, then fold it in.
+    ///
+    /// The two halves a running console gets from its loop for free. The actor
+    /// answers a question before it announces what the answer changed, so a test
+    /// that changes the session and then reads the projection has to wait for
+    /// both — and a real console does, one tick later.
+    #[cfg(test)]
+    pub(crate) fn settle_store(&mut self) {
+        self.session.core.settle_now();
+        self.pump_store();
     }
 
     /// Fold in everything the core has said since the last look.
@@ -2632,6 +2651,9 @@ impl Chat {
                 item: None,
                 prompt,
             });
+        // The console learns about a prompt the way every client does: from the
+        // frame the core published. Let it finish saying so, then look.
+        self.settle_store();
         self.drain_asks();
         verdict
     }

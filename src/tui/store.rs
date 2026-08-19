@@ -437,6 +437,20 @@ impl View {
         self.interactions.iter().find(|open| &open.id == id)
     }
 
+    /// Every prompt open anywhere in the session, oldest first.
+    ///
+    /// One surface, one question at a time — and the surface is the console's
+    /// single modal, which a subagent's run shares with main's (D134). So this
+    /// is deliberately not per-conversation.
+    pub fn open_interactions(&self) -> impl Iterator<Item = &Interaction> {
+        self.interactions.iter()
+    }
+
+    /// Whether anything is waiting to be answered.
+    pub fn has_interactions(&self) -> bool {
+        !self.interactions.is_empty()
+    }
+
     /// The queue rows this side has seen for a page. Empty is not "no queue" —
     /// the count on the summary is authoritative, and the rows are read.
     pub fn queue(&self, key: &ConvKey) -> Option<&Queue> {

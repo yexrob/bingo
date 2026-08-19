@@ -694,6 +694,8 @@ async fn gate_asks(
     });
     let run = tokio::spawn(pending);
     for _ in 0..500 {
+        // What a console does every tick: fold what the core said, then look.
+        chat.pump_store();
         if chat.drain_asks() {
             return run;
         }
@@ -1038,6 +1040,7 @@ async fn ask_user_question_keeps_its_own_shape() {
         vec![("A".to_string(), None), ("B".to_string(), None)],
     ));
     for _ in 0..500 {
+        chat.pump_store();
         if chat.drain_asks() {
             break;
         }

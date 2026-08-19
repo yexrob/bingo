@@ -319,9 +319,9 @@ pub enum UiEvent {
 /// enforces the confirmation guard. This is its render model, and the conversion
 /// below is the only thing that knows both shapes.
 impl PermissionRequest {
-    pub fn of(pending: &crate::app::interaction::Pending) -> Self {
+    pub fn of(interaction: &crate::app::snapshot::Interaction) -> Self {
         use crate::app::snapshot::{InteractionPreview, InteractionPrompt};
-        match &pending.interaction.prompt {
+        match &interaction.prompt {
             InteractionPrompt::Permission {
                 title,
                 reason,
@@ -600,7 +600,7 @@ mod tests {
             ],
         ));
         let pending = opened(&interactions).await;
-        let request = PermissionRequest::of(&pending);
+        let request = PermissionRequest::of(&pending.interaction);
         assert_eq!(request.title, "Tech stack");
         assert_eq!(request.question, "Which library?");
         assert_eq!(request.options, vec!["A", "B"]);

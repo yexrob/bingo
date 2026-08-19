@@ -108,15 +108,9 @@ pub fn chat_at(width: usize, height: usize) -> Chat {
 }
 
 /// Let the actor apply everything already asked of it, then fold what it said
-/// into the console's store.
-///
-/// The two halves a running console gets from its loop for free: the actor
-/// answers a question before it announces what the answer changed, so a caller
-/// that only waited for its own answer has not yet been told. A test that
-/// changes the session and then reads the projection needs both.
+/// into the console's store — see [`Chat::settle_store`].
 pub fn settled(chat: &mut Chat) {
-    chat.session.agents.settle_now();
-    chat.pump_store();
+    chat.settle_store();
 }
 
 /// TestBackend plus the raw-byte sink and command counters the driver needs asserting on.

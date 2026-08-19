@@ -27,23 +27,41 @@ impl super::Chat {
     /// Picks up the prompt the core has open (one at a time: a second question
     /// waits until this one is settled).
     ///
-    /// The prompt is the actor's; this is the console noticing it. B7 replaces
-    /// the poll with the `interaction/opened` frame the core already publishes.
+    /// The prompt is the actor's; this reads the projection the core's
+    /// `interaction/opened` frame folded into the store, which is where every
+    /// client learns about a prompt.
     pub fn drain_asks(&mut self) -> bool {
+        // A prompt this console adopted and then settled comes off the screen
+        // when the core says it is closed — and is not adopted again in the
+        // meantime. Acting is a write and being told is a frame, so between the
+        // two the projection still holds a prompt that is already answered;
+        // `last_ask` is how the client remembers which one that is.
+        if let Some((id, _)) = &self.pending_ask
+            && self.last_ask.as_ref() == Some(id)
+            && self.store.view().interaction(id).is_none()
+        {
+            self.pending_ask = None;
+            self.reset_ask_state();
+            self.dirty = true;
+        }
         if self.pending_ask.is_some() {
             return false;
         }
-        let view = self.session.interactions.view();
-        let Some(pending) = view.head() else {
+        let settled = self.last_ask.clone();
+        let Some(open) = self
+            .store
+            .view()
+            .open_interactions()
+            .find(|open| Some(&open.id) != settled.as_ref())
+        else {
             return false;
         };
+        let pending = (open.id.clone(), crate::ui::PermissionRequest::of(open));
         self.ask_focus = 0;
         self.ask_other.clear();
         self.ask_expanded = false;
-        self.pending_ask = Some((
-            pending.interaction.id.clone(),
-            crate::ui::PermissionRequest::of(pending),
-        ));
+        self.last_ask = Some(pending.0.clone());
+        self.pending_ask = Some(pending);
         // The turn is blocked until this is answered, and the user may well
         // be looking somewhere else by now (D79).
         self.notify.attention(Attention::WaitingPermission);
@@ -149,9 +167,7 @@ impl super::Chat {
     /// The scope identifier the core minted for this prompt's session rule.
     fn open_scope(&self) -> Option<crate::app::ids::ScopeId> {
         let (id, _) = self.pending_ask.as_ref()?;
-        let view = self.session.interactions.view();
-        let pending = view.iter().find(|p| &p.interaction.id == id)?;
-        match &pending.interaction.prompt {
+        match &self.store.view().interaction(id)?.prompt {
             crate::app::snapshot::InteractionPrompt::Permission { session_scope, .. } => {
                 session_scope.as_ref().map(|scope| scope.id.clone())
             }

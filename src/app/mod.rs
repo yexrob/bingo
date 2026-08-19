@@ -400,6 +400,17 @@ impl AppCore {
         let _ = self.control.send(controller::Control::Mcp(states));
     }
 
+    /// Wait until everything already asked of the actor has been applied and
+    /// announced.
+    ///
+    /// The actor answers a question before it publishes what the answer changed,
+    /// so a caller that only waited for its own answer has not yet been told.
+    /// This is the barrier for a test that wants both.
+    #[cfg(test)]
+    pub fn settle_now(&self) {
+        controller::settle_now(&self.control);
+    }
+
     /// Whether the session actor's loop is still running.
     pub fn is_running(&self) -> bool {
         self.alive.upgrade().is_some()

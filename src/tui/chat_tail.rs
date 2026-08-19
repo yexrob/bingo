@@ -2064,7 +2064,7 @@ impl super::Chat {
             || self.slash_error_at.is_some()
             || self.notice_until.is_some()
             || !self.events_rx.is_empty()
-            || !self.session.interactions.view().is_empty()
+            || self.store.view().has_interactions()
             // Mail landing in a fully idle session is the one thing that has to
             // wake the clock rather than ride an event: nothing else is
             // happening, and the digest window has to be able to expire (D98).
