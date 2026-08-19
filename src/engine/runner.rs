@@ -11,7 +11,7 @@
 //! core hears about the work through the same door whichever frontend asked for
 //! it.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use tokio::sync::watch;
 
@@ -28,6 +28,10 @@ pub struct SessionEngine {
     /// rather than one per run: `turn/interrupt` names a turn, and the run that
     /// owns it is the only one listening when it fires.
     cancel: watch::Sender<bool>,
+    /// The foreground handle of the run in flight. There is at most one — phase
+    /// 2 runs unsafe tools serially — so this is the one thing `Run::Promote`
+    /// could possibly be about.
+    live: Arc<Mutex<Option<Arc<crate::live::LiveBash>>>>,
 }
 
 impl SessionEngine {
@@ -42,6 +46,7 @@ impl SessionEngine {
             session,
             runtime: tokio::runtime::Handle::try_current().ok()?,
             cancel: watch::channel(false).0,
+            live: Arc::new(Mutex::new(None)),
         }))
     }
 
@@ -77,15 +82,24 @@ impl SessionEngine {
         let session = self.session.clone();
         let cancel = self.cancel.subscribe();
         self.cancel.send_replace(false);
+        // The host is assembled here rather than inside the task so the
+        // foreground handle it carries is reachable the moment the run exists:
+        // ctrl+b arrives as `Run::Promote` and has nowhere else to look.
+        let host = host_for(&session, turn.clone());
+        self.hold(Some(host.requests.live.clone()));
+        let held = self.live.clone();
         self.runtime.spawn(async move {
-            let host = host_for(&session, turn.clone());
             let guard = session
                 .turns
                 .guard(turn, crate::app::snapshot::TurnStatus::Failed);
             let history = Self::history(&session, &mut host.events.warn_sink());
             let outcome = match work {
                 Work::Prompt(text) => {
-                    crate::query::run_query(&session, history, &text, &[], &host, Some(cancel))
+                    // The markers are the text's, and the registry they name is
+                    // the session's — so a picture the user pasted reaches the
+                    // model whichever frontend submitted the line.
+                    let images = session.attachments.resolve(&text);
+                    crate::query::run_query(&session, history, &text, &images, &host, Some(cancel))
                         .await
                 }
                 Work::Shell(command) => {
@@ -93,7 +107,8 @@ impl SessionEngine {
                         .await
                 }
             };
-            match outcome {
+            *held.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+            match &outcome {
                 Ok(outcome) if outcome.aborted => {
                     guard.finish(crate::app::snapshot::TurnStatus::Interrupted, None)
                 }
@@ -101,12 +116,50 @@ impl SessionEngine {
                 Err(error) => guard.finish(
                     crate::app::snapshot::TurnStatus::Failed,
                     Some(crate::app::snapshot::TurnError {
-                        code: crate::error::map_error(&error).to_string(),
+                        code: crate::error::map_error(error).to_string(),
                         message: crate::error::sanitize_msg(&error.to_string()),
                     }),
                 ),
             }
+            // After the turn is closed, never before: a non-streaming model call
+            // must not hold up the ending a client is waiting on.
+            if let Ok(outcome) = &outcome {
+                Self::wrap_up(&session, &host.events, outcome).await;
+            }
         });
+    }
+
+    /// What a run leaves behind once its turn is closed: the one thing that went
+    /// wrong without ending it, and the memory pass.
+    ///
+    /// Both used to be the console's, which meant a session driven over the wire
+    /// silently learned nothing from its own turns. They are the engine's now,
+    /// so every frontend gets the same session.
+    async fn wrap_up(
+        session: &Arc<Session>,
+        events: &EngineEvents,
+        outcome: &crate::query::QueryOutcome,
+    ) {
+        if !outcome.aborted
+            && outcome.end_reason == crate::query::QueryEndReason::EmptyResponseRetried
+        {
+            events.warn("model returned an empty response and was retried");
+        }
+        let cwd = session.cwd();
+        crate::memory::extract_memory(session, &outcome.messages, &session.home, &cwd).await;
+    }
+
+    /// Remember the run's foreground handle, or forget it.
+    fn hold(&self, live: Option<Arc<crate::live::LiveBash>>) {
+        *self.live.lock().unwrap_or_else(|held| held.into_inner()) = live;
+    }
+
+    /// The run in flight, as `Run::Promote` reaches it.
+    fn foreground(&self) -> Option<Arc<crate::live::LiveBash>> {
+        self.live
+            .lock()
+            .unwrap_or_else(|held| held.into_inner())
+            .clone()
     }
 }
 
@@ -189,6 +242,14 @@ impl Engine for SessionEngine {
             // or not. This only asks.
             Run::Interrupt { .. } => {
                 self.cancel.send_replace(true);
+            }
+            // Which item is in the foreground was settled before this was sent;
+            // what is left is letting go of the command, and only the run that
+            // armed it can.
+            Run::Promote { .. } => {
+                if let Some(live) = self.foreground() {
+                    live.promote();
+                }
             }
         }
     }

@@ -19,7 +19,7 @@
 
 use std::sync::Arc;
 
-use crate::app::ids::TurnId;
+use crate::app::ids::{ItemId, TurnId};
 
 /// One piece of work the core accepted and cannot do itself.
 #[derive(Debug, Clone, PartialEq)]
@@ -28,6 +28,13 @@ pub enum Run {
     /// is already in the log; the engine claims the turn, reports into it, and
     /// closes it exactly once.
     Turn { turn: TurnId, text: String },
+    /// Send the foreground shell command to the background.
+    ///
+    /// The handle on a running command belongs to the run that started it, which
+    /// is why this is work rather than state: the core knows *which* item is in
+    /// the foreground and says so, and the engine is the only thing that can let
+    /// go of it.
+    Promote { item: ItemId },
     /// The console's shell line. It runs in main's context wherever it was
     /// submitted from, and the model may answer it afterwards.
     Shell { turn: TurnId, command: String },

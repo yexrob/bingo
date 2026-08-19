@@ -875,6 +875,17 @@ impl Controller {
             }
             Action::RoomJoin { room } => self.room_membership(&room, user, true),
             Action::RoomLeave { room } => self.room_membership(&room, user, false),
+            // Which item is in the foreground is the core's answer, so an
+            // identifier that names anything else changes nothing rather than
+            // backgrounding whatever happens to be running.
+            Action::CommandPromote { item_id } => {
+                let engine = self.engine()?;
+                if self.turns.foreground(&ConvKey::Main) != Some(item_id.clone()) {
+                    return Ok(ActionResultStatus::NoChange);
+                }
+                engine.run(crate::app::engine::Run::Promote { item: item_id });
+                Ok(ActionResultStatus::Applied)
+            }
             // Everything else needs the engine, and its spec said so before it
             // got here.
             _ => Err(unavailable()),
@@ -1398,9 +1409,7 @@ impl Controller {
     fn availability(&self) -> crate::app::action::Availability {
         crate::app::action::Availability {
             console_busy: self.turns.is_busy(&ConvKey::Main),
-            // The engine half — a model, a transcript rewrite, a network round
-            // trip — is still the console's until B7 attaches it here.
-            engine_attached: false,
+            engine_attached: self.engine.is_some(),
         }
     }
 

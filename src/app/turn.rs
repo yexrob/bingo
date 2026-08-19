@@ -473,6 +473,16 @@ impl TurnRegistry {
         Interrupted::Asked
     }
 
+    /// The shell call a conversation currently has in the foreground, if any.
+    ///
+    /// The same answer [`foreground_item`] gives the tail, asked from outside a
+    /// report: a client that wants to background the running command names the
+    /// item, and this is what says whether it named the one that is running.
+    pub(crate) fn foreground(&self, conversation: &ConvKey) -> Option<ItemId> {
+        let turn = self.active.get(conversation)?;
+        foreground_item(self.turns.get(turn)?)
+    }
+
     pub(crate) fn active_turns(&self) -> Vec<Turn> {
         self.active
             .values()

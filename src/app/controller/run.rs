@@ -33,7 +33,7 @@ use crate::app_server::protocol::error::ProtocolErrorKind;
 
 impl super::Controller {
     /// The engine, or the refusal a session without one owes.
-    fn engine(&self) -> Result<crate::app::engine::Attached, AppError> {
+    pub(super) fn engine(&self) -> Result<crate::app::engine::Attached, AppError> {
         self.engine
             .clone()
             .ok_or(AppError::Refused(ProtocolErrorKind::ActionUnavailable))

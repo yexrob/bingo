@@ -485,11 +485,21 @@ fn the_actions_the_core_owns_are_applied_and_the_rest_say_why_not() {
         .filter(|action| action["available"] == json!(false))
         .collect();
     assert!(
-        !unavailable.is_empty()
-            && unavailable
-                .iter()
-                .all(|action| action["unavailableReason"].is_string()),
+        unavailable
+            .iter()
+            .all(|action| action["unavailableReason"].is_string()),
         "an unavailable action says why: {unavailable:?}"
+    );
+    // The session was given an engine, so the actions that need one are offered
+    // rather than refused. `action/list` used to answer from a constant here,
+    // which meant a client was told the whole engine family was out of reach in
+    // a session that could run every one of them.
+    assert!(
+        actions
+            .iter()
+            .any(|action| action["id"] == json!("conversation.compact")
+                && action["available"] == json!(true)),
+        "an attached engine is what the availability answers from: {actions:?}"
     );
 
     // Representatives of the fourteen the core owns: a setting, a selection, a
@@ -922,6 +932,21 @@ fn serve(mut stream: TcpStream, script: &[String], asked: &AtomicUsize) {
     // A token count is arithmetic the compactor asks for, not a turn.
     if head.contains("/v1/messages/count_tokens") {
         let payload = br#"{"input_tokens":128}"#;
+        let _ = stream.write_all(
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                payload.len()
+            )
+            .as_bytes(),
+        );
+        let _ = stream.write_all(payload);
+        return;
+    }
+    // Neither is the memory pass, which is one non-streaming completion made
+    // after a turn has already ended. It answers with nothing worth remembering,
+    // so the script a test wrote for its turns stays the script for its turns.
+    if !String::from_utf8_lossy(&body).contains("\"stream\":true") {
+        let payload = br#"{"id":"msg_aside","type":"message","role":"assistant","model":"scripted-1","content":[],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}"#;
         let _ = stream.write_all(
             format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
@@ -1387,6 +1412,81 @@ fn a_shell_line_runs_in_the_console_and_publishes_a_tail_while_it_does() {
         "the transcript keeps the line as it was submitted: {read}"
     );
 
+    let ended = server.finish();
+    assert_eq!(ended.code, Some(0));
+}
+
+/// Sending the foreground command to the background, as every frontend reaches
+/// it: the core says which item is running and the engine is the only thing that
+/// can let go of the command.
+#[test]
+fn the_foreground_command_is_backgrounded_by_the_item_the_core_named() {
+    let provider = Provider::start(vec![says("done")]);
+    let root = TempDir::new("promote");
+    provider.configure(&root);
+    never_asks(&root);
+    let mut server = Server::start(&root);
+    server.handshake();
+    let main = server.open_main(2);
+
+    let promote = |item: &str| {
+        json!({
+            "originConversationId": main,
+            "action": {"type": "commandPromote", "itemId": item}
+        })
+    };
+    let idle = server.call(3, "action/execute", promote("item_404"));
+    assert_eq!(
+        idle["result"]["disposition"]["result"]["status"],
+        json!("noChange"),
+        "nothing is running, so nothing is backgrounded: {idle}"
+    );
+
+    let submitted = server.call(
+        4,
+        "conversation/submit",
+        json!({
+            "conversationId": main,
+            "input": {
+                "type": "composer",
+                "mode": "shell",
+                "text": "printf 'one\\n'; sleep 5; printf 'two\\n'",
+                "attachments": []
+            }
+        }),
+    );
+    assert_eq!(
+        submitted["result"]["disposition"]["type"],
+        json!("turnStarted"),
+        "{submitted}"
+    );
+
+    let frames = server.until("item/commandTailUpdated");
+    let running = of(&frames, "item/commandTailUpdated")
+        .last()
+        .map(|tail| tail["params"]["itemId"].clone())
+        .unwrap_or_else(|| panic!("a running command publishes its tail: {frames:#?}"));
+    let stale = server.call(5, "action/execute", promote("item_404"));
+    assert_eq!(
+        stale["result"]["disposition"]["result"]["status"],
+        json!("noChange"),
+        "an identifier that names something else changes nothing: {stale}"
+    );
+    let backgrounded = server.call(
+        6,
+        "action/execute",
+        promote(running.as_str().unwrap_or_default()),
+    );
+    assert_eq!(
+        backgrounded["result"]["disposition"]["result"]["status"],
+        json!("applied"),
+        "{backgrounded}"
+    );
+
+    // The command keeps running out of the way, so the turn does not wait five
+    // seconds for it: the run reaches its end and says so.
+    let frames = server.until("turn/completed");
+    gapless(&frames);
     let ended = server.finish();
     assert_eq!(ended.code, Some(0));
 }
