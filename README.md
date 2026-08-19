@@ -18,10 +18,11 @@ produces intent; side effects are gated by the harness.
 - **Tool set**: Bash, Read/Glob/Grep, Edit/Write, WebFetch/WebSearch, the Task
   family, AskUserQuestion, Skill, Agent (sub-agents), and MCP tools — all
   behind the same `Tool` trait.
-- **Sub-agents (hub-and-spoke)**: the main agent spawns named sub-agents that
-  run asynchronously; completion notifications are injected into context
-  automatically. `SendMessage` continues a sub-agent, `AgentControl` manages
-  its lifecycle.
+- **Sub-agents**: the main agent spawns named sub-agents that run
+  asynchronously; completion notifications are injected into context
+  automatically. `SendMessage` is the one speech tool — anyone with a name may
+  write to anyone who has one (D137), so colleagues message each other directly;
+  `AgentControl` (main session only) manages lifecycle.
 - **Agent teams (project-scoped)**: a `.bingo/team.json` fixes a roster of
   roles to a project; the team is pulled up automatically at startup (members
   idle at zero token cost) and managed via `/team`; cross-session memory is
@@ -209,8 +210,8 @@ to subscription endpoints, `logout` signs out),
 opens the level picker; the choice persists), `/theme`,
 `/images` (the pictures this session has shown, newest first; Enter opens one in
 the system viewer),
-`/permissions [allow|deny|ask] [rule]`,
-`/mcp` (status) · `/mcp enable|disable [name|all]` · `/mcp reconnect <name>`,
+`/permissions [allow|deny|ask <rule>]` · `/permissions remove <allow|deny|ask> <rule>`,
+`/mcp` (status) · `/mcp enable|disable [name|all]` · `/mcp reconnect [name]` (all enabled servers when the name is omitted),
 `/skills` (listing; `/skill-name` executes directly),
 `/context` (usage),
 `/status`, `/config` (effective config with per-key source layer/env, current
@@ -219,7 +220,9 @@ session), `/rename`, `/gc` (clean expired session data), `/share [--public] [--o
 `/share` writes a self-contained HTML file locally by default. `--public` is
 an explicit opt-in to upload it to a link anyone can access; bingo shows the
 sensitive-content warning before upload. `--open` opens the local file or the
-published URL. The equivalent CLI is `bingo share [session] [--public]
+published URL. The session key defaults to the newest session that was actually
+*used* — an empty launch-and-quit transcript is skipped, the same filter as
+`--continue`. The equivalent CLI is `bingo share [session] [--public]
 [--open] [-o path]`.
 `/team` (project teams): `list` (roster + runtime), `start` (pull up / reuse),
 `status`, `assign <member> <task>`, `stop`, `validate`, `new` (scaffold
@@ -258,7 +261,11 @@ also keeps the placeholder inside tmux).
 
 ## Configuration (settings.json)
 
-Three layers are shallow-merged; later layers override earlier ones.
+Three layers; a later layer overrides per key, with four exceptions: the
+`permissions` lists and `disabledMcpServers` **accumulate** across layers (a
+local layer cannot drop a project `deny`), `providers` merges per provider
+name, and the `experimental` switches latch on once any layer sets them
+(`mcpServers` is replaced wholesale).
 UI selections (/model /provider /theme /think) persist to the layer where they
 take effect: a layer that already defines the key is updated in place,
 otherwise the user layer — no `.bingo/` is conjured in arbitrary directories
@@ -274,11 +281,17 @@ otherwise the user layer — no `.bingo/` is conjured in arbitrary directories
 | `apiBaseUrl` | string | API endpoint (settings take precedence over `ANTHROPIC_BASE_URL`; default is the official one) |
 | `providers` | object | named providers: `{name: {protocol?, apiKey?, envKey?, apiBaseUrl?, supportsImages?, oauth?, models?}}`, switch with `/provider <name>`; `protocol` is `"anthropic"` (default) or `"openai"` (Responses API, bearer auth; `apiBaseUrl` defaults to `https://api.openai.com`); `envKey` names an environment variable holding the key (credential order: `apiKey` > `envKey` > stored key / OAuth); `oauth: {kind: "codex"}` enables OAuth login (`/provider login`, apiKey wins) |
 | `model` | string | default model (written by `/model`); precedence: `--model` > settings > built-in `claude-sonnet-5` |
+| `provider` | string | current provider (persisted by `/provider` and the `/model` menu; default `"default"` = top-level `apiKey`/`apiBaseUrl`); an invalid name falls back to default with a warning |
+| `sendImages` | bool | whether the default endpoint sends message-box image attachments (default true; named providers use their own `supportsImages`) |
 | `models` | array | the default provider's model list; per-provider under `providers.<name>.models`. Entries are ids (`"gpt-5.6-sol"`) or objects (`{id, display?, contextWindow?, maxTokens?, thinking?, vision?}`). Declared = authoritative: `/model` shows exactly this list with no request, and the metadata overrides the built-in table. `maxTokens` is the model's output ceiling — it is sent as the request's `max_tokens` and reserved out of the input window, clamped to half the window so a small `contextWindow` still leaves room to work. `vision` says whether the model accepts image input; the model is told its own capabilities in the system prompt (a text-only model refuses image-first work instead of failing silently — distinct from the endpoint-wide `sendImages`/`supportsImages` send gates). Undeclared providers pull `/v1/models` and the result is cached for 24h (`r` in the menu re-asks) |
 | `thinkingLevel` | string | `off` omits thinking params (DeepSeek-compatible, default); `low`/`medium`/`high`/`xhigh`/`max` send adaptive thinking + `output_config.effort` at that level |
 | `permissionMode` | string | `default` / `acceptEdits` / `plan` / `dontAsk` / `bypassPermissions` |
 | `theme` | string | `auto` (follow terminal background) / `dark` / `light` |
+| `motion` | string | `auto` (default) / `off` — one gate over every animated surface; the two colours that carry information keep changing. Env `BINGO_NO_MOTION` (any value) is equivalent |
+| `notifications` | string | attention channel: `auto` (default, reads the terminal) / `bell` / `iterm2` / `kitty` / `ghostty` / `off`. Fires on a waiting permission prompt, a long turn finishing, a failed turn, and an agent needing you |
 | `cacheControl` | bool | enable prompt caching (default off: unreliable on non-official endpoints) |
+| `bashOutputMaxChars` | integer | max combined stdout/stderr characters the Bash tool returns (default and ceiling 48,000) |
+| `share` | object | `{baseUrl}` — overrides the share service base (default `https://bingo.ruobin.dev`) |
 | `respondToBashCommands` | bool | whether `!` commands are handed back to the model after running (default true) |
 | `shell` | string | shell program for the Bash tool and hooks. Default per platform: macOS `/bin/zsh`, other Unix `/bin/bash`, Windows `powershell.exe`. PowerShell-family shells run with `-Command`; any other configured shell (e.g. Git Bash's `bash.exe`) runs with `-c` |
 | `mcpServers` | object | see MCP below |
@@ -345,7 +358,7 @@ schema from a single source of truth):
 | `Edit` / `Write` | file editing (produces a unified diff preview for the UI) |
 | `WebFetch` / `WebSearch` | web fetching and search (shared HTTP connection pool; pre-approved domains auto-allowed) |
 | `Agent` | spawns a named sub-agent (async by default, completion notification injected into context; `background:false` waits synchronously) |
-| `SendMessage` | the one speech tool: `to` is an agent (`name` / `@name`) or a room (`#name`); the main agent reaches any instance, a sub-agent reaches `main` and its rooms |
+| `SendMessage` | the one speech tool: `to` is an agent (`name` / `@name`) or a room (`#name`); anyone with a registry name may write to anyone who has one (D137) — a peer message arrives under `[message from @name]`; rooms require membership |
 | `AgentControl` | sub-agent lifecycle management (main session only) |
 | `Team` | the project crew (main session only): `status`/`validate` read freely, `start`/`stop`/`save` are confirmed by the user in every permission mode |
 | `TaskCreate`/`TaskUpdate`/`TaskGet`/`TaskList` | task tracking (disk-backed, same source as the TUI task area, lifecycle hooks) |
@@ -358,14 +371,18 @@ schema from a single source of truth):
 ## Sub-agents
 
 - The main agent (depth 0) has `Agent`/`AgentControl`; sub-agents (depth ≥ 1)
-  keep `Agent` (they can spawn further) and cannot manage siblings —
-  hub-and-spoke topology. `SendMessage` is assembled everywhere and keeps that
-  topology by *addressing*: the main agent may write to any instance and any
-  room it is in, a sub-agent only to `main` and the rooms it is a member of.
+  keep `Agent` (they can spawn further) and cannot manage siblings — lifecycle
+  control stays with the hub. Speech does not (D137): `SendMessage` lets anyone
+  with a registry name write to anyone who has one, so two members work
+  something out directly instead of routing through the manager — a peer
+  message arrives under a `[message from @name]` marker and is answered with
+  `SendMessage(to: "@name")`, never in turn text (a colleague does not read
+  your prose). What is still checked: a session with no name in the registry
+  can only write to `main`, and a room requires membership.
 - **Named definitions**: `~/.config/bingo/agents/*.md` and `.bingo/agents/*.md`
   (walked upward from cwd; project-level wins on name clash); frontmatter
-  `name/description/model/provider`, body = sub-agent system prompt; referenced
-  via the Agent tool's `agent` parameter.
+  `name/description/model/provider/thinking/inherit_system`, body = sub-agent
+  system prompt; referenced via the Agent tool's `agent` parameter.
 - Instances have names (`name` parameter, defaults to the definition name/
   `agent`, auto `-2`/`-3` on collisions); the turn that spawns one shows
   `◉ @name: task` with the last three things the instance did under it (or one
@@ -401,8 +418,8 @@ schema from a single source of truth):
 
 A team fixes a roster of roles to a project. It is a declarative layer on top
 of existing primitives: members reference named definitions (AgentDef), the
-room reuses the channel machinery, and control stays on the hub-and-spoke
-surface.
+room reuses the channel machinery, and lifecycle control stays with the main
+session.
 
 - **Definition**: `.bingo/team.json` (camelCase, committed to the repo):
   `name` + `channel {mode, messageLimit}` +
@@ -478,11 +495,15 @@ surface.
 
 With `settings.experimental.agentChannels: true`:
 
-- The main agent gets `Channel`: create channels, add/remove members
-  (members are direct sub-agents; the main agent joins as `main`); members
+- Main and direct sub-agents get `Channel`: create channels, add/remove
+  members (creating one seats the creator and nobody else; members are direct
+  sub-agents plus `main` and `user`, each seated only when named); members
   speak with `SendMessage(to: "#room")`, and messages enter every member's
   context (same order). The main agent's own copy is digested on a debounce —
-  a burst of posts buys one turn, not one turn per post.
+  a burst of posts buys one turn, not one turn per post. An `@` on a member's
+  name is a recorded debt (D131): it stays open until they post in that room,
+  the conversation rows show who is holding one, and after five minutes
+  unanswered a watchdog asks again in the room with the message quoted back.
 - In a `serial` channel, stale posts are bounced back with the new messages
   attached (agents read and adjust — sequential coordination emerges); `free`
   channels allow interleaving.
@@ -557,13 +578,16 @@ the counterpart, and a room you leave stays readable.
 
 **The conversation rows** are what say who is working — and, since D115's
 badges, what has been said while you were not looking. They line up under the
-composer, constant once anybody exists: `● main` first — filled while main
-works — then every instance (`● @scout: reading src/lib.rs… · 12 tool uses ·
-8.3k tokens` while it runs, `Idle for 14s`, `[stopped]`), then the rooms you
-are in (`#dev-team: 3 members`), names in their own colours, at most three
+composer, constant once anybody exists: `● @main` first — filled while main
+works — then every instance (`● @scout: reading src/lib.rs…` while it runs —
+the tool-use and token stats belong to the dispatch row and the `Ctrl+B`
+detail — `Idle for 14s`, `[stopped]`, or `owes #build #7` while it holds an
+unanswered mention), then the rooms you
+are in (`#dev-team: 3 members`, or `waiting on @dev · 3m` while a mention is
+open there), names in their own colours, at most three
 rows with the cursor scrolling the window (`↓ 2 more` on the edge). Every row
 wears its conversation's **badge**: unread is a bare dot (`•`), words at *you*
-— a room post naming `@user` — are the count in the accent (`•3`) and ring
+— a room post naming `@user` or `@all` — are the count in the accent (`•3`) and ring
 once per mention until you read the room; an agent **waiting on your
 permission** turns its row to `waiting on you (permission)` in the accent.
 There is no key to learn: `↓` at the end of your prompt history drops onto
@@ -585,10 +609,15 @@ is streaming right now. Switching banks the page you leave into scrollback
 and starts the next at the top; coming home reprints a recent tail of main's.
 The composer stays live and addresses the agent in its own colour: what you
 type reaches its inbox under your name and appears as the queued message it
-is, and a `/` or `!` line is a message rather than a command. A **room's page
+is. **The console's own grammar keeps working there** (D135): `/` is a
+command and `!` is shell mode — only prose follows the page. A command acts
+on the console's session wherever it is typed, with one exception: `/compact`
+on an agent's page compacts *that agent's* context (refused while its turn
+runs). A **room's page
 is speech only** — what members sent to the room, each post under its
 sender's name; typing posts to the room and joins you first. `Esc` stops a
-running subject first and comes home on the next press (main's own turn is
+running subject first, then leaves shell mode, then clears a non-empty
+draft, then comes home (main's own turn is
 out of its reach; `Ctrl+C` keeps the override); `Shift+Tab` cycles *that
 agent's* permission mode and the footer badge follows it. A page closes
 itself when its subject leaves the registry; a *finished* agent's page stays,
@@ -707,7 +736,7 @@ on connect and adapted to bingo's Tool trait:
   (e.g. the `mcp__server` prefix or the full tool name).
 - Diagnostics: `/mcp` shows status; stdio server output goes to
   `~/.local/share/bingo/logs/mcp-<name>.log`; after fixing, run
-  `/mcp reconnect <name>`.
+  `/mcp reconnect [name]` (all enabled servers when the name is omitted).
 - Disable/enable: `/mcp disable|enable [name|all]` (persisted to settings.json).
 
 ## Permission system
@@ -822,10 +851,11 @@ Example (PreToolUse denies Bash):
   models assume 200k/64k), effective input window = window − output budget;
   auto-compaction threshold = 90% of the effective window (≈785k for current
   Claude models), with a 20k headroom warning (`/context`). Compaction
-  summarizes old messages and keeps the most recent 8; the split point advances
+  summarizes old messages and keeps the most recent 12; the split point advances
   safely past tool_result boundaries to avoid orphaned tool_result 400s.
   Fuse after 3 consecutive failures (`/compact` forces manually). Non-Anthropic
-  endpoints (no count_tokens) fall back to local estimation (chars/4).
+  endpoints (no count_tokens) fall back to local estimation (ASCII ≈ 4
+  characters per token, CJK ≈ 1 token per character).
 - **Memory**: memdir auto-memory
   (`~/.config/bingo/memdir/<project>-<path-hash>.md`, full-path hash avoids
   collisions between same-named projects) + project CLAUDE.md and AGENTS.md as
@@ -858,9 +888,9 @@ bingo app-server generate-schema --out schema/app-server
 ```
 
 The committed bundle is in [`schema/app-server`](schema/app-server): a manifest
-mapping every method and notification to its direction, params, result and
-declared errors, plus Draft-7 schemas for each. Generate TypeScript from it
-rather than keeping a second copy of the types by hand.
+mapping every method to its direction, params, result and declared errors —
+notifications to direction and params — plus Draft-7 schemas for each. Generate
+TypeScript from it rather than keeping a second copy of the types by hand.
 
 **Status: experimental.** The protocol is at 1.0 in the manifest and the wire
 shapes are covered by round-trip fixtures and black-box scenarios, but it has no
@@ -903,7 +933,7 @@ Messages API client (reqwest + SSE streaming)
 query loop: tool calls → permission gate → concurrent execution → results fed back
   ├─ Tool Registry (trait + schemars schema)
   ├─ MCP adapter layer (rmcp: stdio / streamable HTTP)
-  ├─ sub-agents (hub-and-spoke, async + notifications)
+  ├─ sub-agents (async + notifications; peer messaging since D137)
   ├─ Hooks (shell, JSON contract)
   ├─ Task store / channels / skills / memory / transcript
   └─ budget monitoring & compaction
@@ -952,7 +982,9 @@ src/
   tui/             ratatui UI (chat / view / input / markdown / highlight / gfx …)
                    `store.rs` is its client-side projection of the core
   ui.rs            the renderer-agnostic event and dialog contract
-  system.rs        system prompt assembly (memory + project memory + skills listing)
+  system.rs        system prompt assembly (base + memory + the main-session
+                   extras every frontend shares: crew note / room etiquette /
+                   experience index)
 tests/
   fixtures/        integration-test fixtures
 schema/

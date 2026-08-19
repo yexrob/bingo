@@ -479,8 +479,9 @@ Aliases: `/?` = help · `/quit` = exit · `/reset` and `/new` = clear · `/team`
   rule: a direct instruction outranks it on the point that instruction makes, and every other norm still holds. `/team new` scaffolds
   a starter agreement (never overwriting one that exists); `/team norms` prints what is on disk.
 - **Skills**: built-in `guide` (this guide) + `~/.config/bingo/skills/` and `.bingo/skills/` at the
-  session directory and every ancestor directory up from it (nearest layer wins; same-name disk
-  skills override built-ins); the model invokes them via SkillTool, users run them via `/skill-name`.
+  session directory and every ancestor directory up from it (priority: user layer → nearest project
+  layer → farther ancestors; same-name disk skills override built-ins); the model invokes them via
+  SkillTool, users run them via `/skill-name`.
 - **Images**: markdown images in model replies (`![alt](path)`, supports `~/`, relative paths/data/http(s))
   render via kitty Unicode placeholders (U=1) on terminals that support them (Ghostty/kitty), in both
   modes and everywhere at once: the live viewport, fullscreen, and `--inline` scrollback all paint the

@@ -9177,5 +9177,16 @@ The corrections, heaviest first:
   lost its `remove`, `/think` its `s`, `/model`'s "validated" is advisory; the
   quick reference now lists `/config` `/share` `/tasks` and the aliases.
 
+The same corrections reached `README.md` and `README.zh-CN.md` one commit
+later: hub-and-spoke in four places, `reconnect <name>`, v6's "a `/` line on a
+page is a message" (reversed by D135), Channel-is-main's-tool, the roster-row
+stats, KEEP_RECENT written as 8 (it is 12), `chars/4` estimation without the
+CJK half, the six settings keys the tables lacked (`provider`, `sendImages`,
+`motion`, `notifications`, `bashOutputMaxChars`, `share` — and `vision` in the
+zh models row), and the D131/D158 additions. One correction ran the other way:
+the guide's new skills line had written "nearest layer wins", but the READMEs'
+user → project → bundled order is what `scan_dirs` implements — the guide now
+says so too.
+
 Verification: fmt, clippy `-D warnings`, discipline gate, full suite —
 **1722 → 1723 unit**, 23 app-server + 7 CLI black-box, all green.

@@ -13,8 +13,9 @@ Rust 实现的本地 agent CLI（agent harness）。在终端里驱动大模型�
 - **统一权限门**：五种权限模式 × 规则表（allow/deny/ask）→ 放行 / 拒绝 / 询问。
 - **工具集**：Bash、Read/Glob/Grep、Edit/Write、WebFetch/WebSearch、Task 族、
   AskUserQuestion、Skill、Agent（子代理）与 MCP 工具，全部经同一 Tool trait。
-- **子代理（hub-and-spoke）**：主 agent 派生命名子代理，异步执行、完成通知自动
-  注入上下文；SendMessage 续话、AgentControl 管理生命周期。
+- **子代理**：主 agent 派生命名子代理，异步执行、完成通知自动注入上下文；
+  SendMessage 是唯一的发言工具——有名字的任何人都能写给有名字的任何人（D137），
+  同侪之间直接对话；AgentControl（仅主会话）管理生命周期。
 - **Agent 团队（项目级）**：`.bingo/team.json` 把一组角色固定到项目，启动自动
   拉起（成员零 token 待命），`/team` 命令族管理；钉了团队的项目里，团队就是默认
   用工对象——活先派给队内成员，另派的子代理只是不进队的临时工；
@@ -156,7 +157,7 @@ bingo app-server            # 面向 GUI 的 JSON-RPC over stdio（实验特性�
 | `Esc` | 先关最上层弹窗/菜单/面板 / busy 时中断 / 双击清空输入，输入为空时双击打开 Rewind |
 | `Ctrl+C` | busy 中断 / 有文本清空 / 空输入连按两次退出 |
 | `Ctrl+T` | 显隐任务区 |
-| `Ctrl+O` | 打开 transcript 视图：整段会话连同全部工具输出，独占一屏（`ctrl+e` 折叠 · `/` 搜索 · `q` 关闭） |
+| `Ctrl+O` | 打开 transcript 视图：整段会话连同全部工具输出，独占一屏（`ctrl+e` 折叠 · `/` 搜索 · `o` 打开视野内的图片 · `q` 关闭） |
 | `Ctrl+G` | 用 `$VISUAL`/`$EDITOR` 编辑当前草稿（也可用 readline 组合键 `Ctrl+X Ctrl+E`）；编辑器非零退出则保留原草稿 |
 | `Ctrl+P` / `Ctrl+N` | 提示历史——与 `↑`/`↓` 完全同键，包含把排队消息取回 |
 | `Alt+B` / `Alt+F` | 按词移动，在 `/` `-` `_` `.` 处停下，便于逐段走过路径 |
@@ -179,8 +180,8 @@ bingo app-server            # 面向 GUI 的 JSON-RPC over stdio（实验特性�
 一对持久化）、`/provider [名称]`（列出/切换多 provider；`/provider login
 <名> [--device-auth|--manual <token>]` 登录订阅端点、`logout` 退出）、
 `/think [off|low|medium|high|xhigh|max]`（无参进入等级选择器，选择持久化）、
-`/theme`、`/permissions [allow|deny|ask] [规则]`、
-`/mcp`（状态）· `/mcp enable|disable [name|all]` · `/mcp reconnect <name>`、
+`/theme`、`/permissions [allow|deny|ask <规则>]` · `/permissions remove <allow|deny|ask> <规则>`、
+`/mcp`（状态）· `/mcp enable|disable [name|all]` · `/mcp reconnect [name]`（省略名字 = 重连全部已启用服务器）、
 `/skills`（清单，`/技能名` 直接执行）、
 `/join #房间`、`/leave #房间`（加入房间以便发言，或退出）、
 `/context`（用量）、`/status`、
@@ -189,7 +190,9 @@ bingo app-server            # 面向 GUI 的 JSON-RPC over stdio（实验特性�
 `/gc`（清理过期会话数据）、`/share [--public] [--open]`、`/clear`、`/exit`。
 `/share` 默认只在本地生成自包含 HTML；只有显式加 `--public` 才会上传为
 任何人可访问的公开链接，且上传前会先显示敏感内容警告。`--open` 打开本地文件
-或已发布链接。等价 CLI 为 `bingo share [会话] [--public] [--open] [-o 路径]`。
+或已发布链接。会话键缺省取最近**实际用过**的会话——启动即退出留下的空 transcript
+会被跳过，与 `--continue` 同一套过滤。等价 CLI 为
+`bingo share [会话] [--public] [--open] [-o 路径]`。
 `/team`（项目团队）：`list`（图纸+运行区同屏）、`start`（拉起/幂等复用）、
 `status`、`assign <成员> <任务>`（派活）、`stop`、`validate`、`new`
 （脚手架生成 team.json + team-norms.md）、`norms`（团队规范）、`memory list|gc`。
@@ -219,7 +222,10 @@ tmux 下仍显示 `#[image]` 占位（tmux 内的活动视口同样保持占位�
 
 ## 配置（settings.json）
 
-三层配置浅层合并，后者覆盖前者。UI 内的选择（/model /provider /theme /think）
+三层配置逐键合并、后层覆盖前层，有四个例外：`permissions` 三张表与
+`disabledMcpServers` 跨层**累加**（local 层删不掉 project 层的 deny）、
+`providers` 按 provider 名逐个合并、`experimental` 开关任一层开了就开
+（`mcpServers` 整体替换）。UI 内的选择（/model /provider /theme /think）
 写回「生效层」：某层已定义该键则更新该层，否则写 user 层——不会在任意目录凭空创建
 `.bingo/`；`/permissions` 与 `/mcp disable` 属项目级状态，仍写项目层。
 
@@ -233,11 +239,17 @@ tmux 下仍显示 `#[image]` 占位（tmux 内的活动视口同样保持占位�
 | `apiBaseUrl` | string | API 端点（settings 优先于 `ANTHROPIC_BASE_URL`；缺省官方） |
 | `providers` | object | 命名 provider：`{名: {protocol?, apiKey?, envKey?, apiBaseUrl?, supportsImages?, oauth?, models?}}`，`/provider <名>` 切换；`protocol` 为 `"anthropic"`（缺省）或 `"openai"`（Responses API，Bearer 认证；`apiBaseUrl` 缺省 `https://api.openai.com`）；`envKey` 写环境变量名取 key（凭据顺序 `apiKey` > `envKey` > 存储的 key / OAuth）；`oauth: {kind: "codex"}` 启用 OAuth 登录（`/provider login`，apiKey 优先） |
 | `model` | string | 默认模型（`/model` 选择写入）；优先级 `--model` > settings > 内置 `claude-sonnet-5` |
-| `models` | array | 默认 provider 的模型清单；各 provider 写在 `providers.<名>.models`。条目是模型 id（`"gpt-5.6-sol"`）或对象（`{id, display?, contextWindow?, maxTokens?, thinking?}`）。声明即权威：`/model` 只列这些且零请求，元数据覆盖内置表。`maxTokens` 是模型的输出上限——既作请求的 `max_tokens` 发出，也从输入窗口里预留出来，并 clamp 到窗口的一半，小 `contextWindow` 也留得下工作余量。未声明的 provider 动态拉 `/v1/models`，结果落盘缓存 24 小时（菜单里 `r` 重拉） |
+| `provider` | string | 当前 provider（`/provider` 与 `/model` 菜单持久化；缺省 `"default"` = 顶层 `apiKey`/`apiBaseUrl`）；名字失效时回落 default 并告警 |
+| `sendImages` | bool | 默认端点是否发送消息框里的图片附件（默认 true；命名 provider 用各自的 `supportsImages`） |
+| `models` | array | 默认 provider 的模型清单；各 provider 写在 `providers.<名>.models`。条目是模型 id（`"gpt-5.6-sol"`）或对象（`{id, display?, contextWindow?, maxTokens?, thinking?, vision?}`）。声明即权威：`/model` 只列这些且零请求，元数据覆盖内置表。`maxTokens` 是模型的输出上限——既作请求的 `max_tokens` 发出，也从输入窗口里预留出来，并 clamp 到窗口的一半，小 `contextWindow` 也留得下工作余量。`vision` 声明模型是否接受图片输入——系统提示会告诉模型自己的能力，无 vision 的模型发出的请求会丢弃图片块（与端点级的 `sendImages`/`supportsImages` 发送闸是两回事）。未声明的 provider 动态拉 `/v1/models`，结果落盘缓存 24 小时（菜单里 `r` 重拉） |
 | `thinkingLevel` | string | `off` 不发 thinking 参数（兼容 DeepSeek，缺省）；`low`/`medium`/`high`/`xhigh`/`max` 发自适应 thinking + 对应档位的 `output_config.effort` |
 | `permissionMode` | string | `default` / `acceptEdits` / `plan` / `dontAsk` / `bypassPermissions` |
 | `theme` | string | `auto`（跟随终端背景）/ `dark` / `light` |
+| `motion` | string | `auto`（缺省）/ `off`——一个开关管住全部动画表面；携带信息的两处颜色照常变化。环境变量 `BINGO_NO_MOTION`（任意值）等价 |
+| `notifications` | string | 提醒通道：`auto`（缺省，按终端探测）/ `bell` / `iterm2` / `kitty` / `ghostty` / `off`。四个触发点：权限询问等待中、长回合结束、回合失败、agent 需要你 |
 | `cacheControl` | bool | 发送 prompt caching（默认关：非官方端点不稳定） |
+| `bashOutputMaxChars` | integer | Bash 工具返回的 stdout/stderr 合并字符上限（默认与上限均为 48,000） |
+| `share` | object | `{baseUrl}`——覆盖分享服务地址（缺省 `https://bingo.ruobin.dev`） |
 | `respondToBashCommands` | bool | `!` 命令执行后是否交模型回应（默认 true） |
 | `shell` | string | Bash 工具与 hooks 使用的 shell。默认按平台：macOS `/bin/zsh`、其他 Unix `/bin/bash`、Windows `powershell.exe`。PowerShell 系用 `-Command` 执行；配置其他 shell（如 Git Bash 的 `bash.exe`）用 `-c` 执行 |
 | `mcpServers` | object | 见下「MCP」 |
@@ -272,7 +284,7 @@ tmux 下仍显示 `#[image]` 占位（tmux 内的活动视口同样保持占位�
 ### 模型目录（model-catalog.json）
 
 `~/.config/bingo/model-catalog.json`（首次启动生成，与 settings.json 同目录）存放按模型 id **前缀**
-归类的家族默认值——`contextWindow`、`maxTokens`（输出上限）、`thinking`——最长前缀逐字段胜出。
+归类的家族默认值——`contextWindow`、`maxTokens`（输出上限）、`thinking`、`vision`——最长前缀逐字段胜出。
 两段各有其主：
 
 - `builtin` 归 bingo：编译进二进制的调研默认值的镜像，升级时重写，修正过的数字随版本到达；
@@ -295,7 +307,7 @@ tmux 下仍显示 `#[image]` 占位（tmux 内的活动视口同样保持占位�
 | `Edit` / `Write` | 文件编辑（产生 unified diff 供 UI 预览） |
 | `WebFetch` / `WebSearch` | 网页抓取与搜索（共享 HTTP 连接池；预批准域名自动放行） |
 | `Agent` | 派生命名子代理（异步执行，完成通知注入上下文；`background:false` 可同步等待） |
-| `SendMessage` | 唯一的发言工具：`to` 是 agent（`name` / `@name`）或房间（`#name`）；主 agent 可达任意实例与自己所在的房间，子代理可达 `main` 与自己所在的房间 |
+| `SendMessage` | 唯一的发言工具：`to` 是 agent（`name` / `@name`）或房间（`#name`）；名册上有名字的任何人都可写给有名字的任何人（D137）——同侪消息带 `[message from @name]` 标记到达；房间需要成员身份 |
 | `AgentControl` | 子代理生命周期管理（仅主会话装配） |
 | `Team` | 项目编队（仅主会话装配）：`status`/`validate` 只读免询问，`start`/`stop`/`save` 在任何权限模式下都要用户当面确认 |
 | `TaskCreate`/`TaskUpdate`/`TaskGet`/`TaskList` | 任务追踪（磁盘存储，TUI 任务区同源，含生命周期 hook） |
@@ -308,13 +320,16 @@ tmux 下仍显示 `#[image]` 占位（tmux 内的活动视口同样保持占位�
 ## 子代理
 
 - 主 agent（depth 0）装配 `Agent`/`AgentControl`；子代理（depth ≥ 1）只保留
-  `Agent`（可再派生），无法管理兄弟——hub-and-spoke 拓扑。`SendMessage` 各层都装配，
-  拓扑靠**寻址**而非藏工具来守：主 agent 可写任意实例与自己所在的任意房间，子代理
-  只能写 `main` 与自己所属的房间，越界一律拒绝。
+  `Agent`（可再派生），无法管理兄弟——生命周期控制仍在枢纽。发言不再是（D137）：
+  `SendMessage` 让名册上有名字的任何人写给有名字的任何人，两名成员直接把事情谈清，
+  不必绕经管理者——同侪消息带 `[message from @name]` 标记到达，用
+  `SendMessage(to: "@name")` 回答而不是写在回合文本里（同事读不到你的散文，
+  那是交回给 main 的结果）。仍然把守的是发送者：名册上没有名字的会话只能写
+  `main`，房间需要成员身份。
 - **具名定义**：`~/.config/bingo/agents/*.md` 与 `.bingo/agents/*.md`
   （从 cwd 向上逐层查找，同名项目层优先）；frontmatter
-  `name/description/model/provider`，正文 = 子代理 system prompt；
-  Agent 工具的 `agent` 参数引用定义。
+  `name/description/model/provider/thinking/inherit_system`，正文 = 子代理
+  system prompt；Agent 工具的 `agent` 参数引用定义。
 - 派生实例有名字（`name` 参数，缺省取定义名/`agent`，重名自动 `-2`/`-3`），
   派生它的那一轮显示为 `◉ @名字: 任务`，运行期间行下挂着它最近做的三件事（窗口太矮
   时收成一行 `In progress… · 4 tool uses · 8.3k tokens`），结束后定格为
@@ -340,7 +355,7 @@ tmux 下仍显示 `#[image]` 占位（tmux 内的活动视口同样保持占位�
 ## Agent 团队（项目级）
 
 团队把一组角色固定到一个项目：声明式编排层，成员引用具名定义（AgentDef）、
-房间复用频道机制、控制面仍是 hub-and-spoke。
+房间复用频道机制、生命周期控制仍在主会话。
 
 - **定义**：`.bingo/team.json`（camelCase，进版本库）——`name` + `channel{mode,
   messageLimit}` + `members[{name, agent, avatar?, model?, provider?, thinking?}]`；`name` 即消息上显示的名字（取人名而非角色代号），`avatar` 钉住内置头像之一；成员引用 AgentDef，人格单一事实来源
@@ -415,9 +430,12 @@ tmux 下仍显示 `#[image]` 占位（tmux 内的活动视口同样保持占位�
 
 `settings.experimental.agentChannels: true` 开启后：
 
-- 主 agent 获得 `Channel` 工具：建频道、进出成员（成员限直接子代理，主 agent 名
-  `main` 自动入席）；成员用 `SendMessage(to: "#房间")` 发言，消息进全体成员上下文
+- 主 agent 与直接子代理都获得 `Channel` 工具：建频道、进出成员（建房只把发起者
+  坐进去；成员是直接子代理加上 `main` 与 `user`，都要被点名才在场）；成员用
+  `SendMessage(to: "#房间")` 发言，消息进全体成员上下文
   （同序）。主 agent 自己那一份按去抖消化：一阵密集发言只买一轮，而不是一条一轮。
+  点到成员名字的 `@` 是一笔记录在案的债（D131）：直到它在那个房间发言才销账，
+  会话行看得见谁欠着；五分钟无人应答，看门狗会把原话引回房间再问一次。
 - `serial` 频道落后发言被弹回并附新增消息（agent 阅读后自行改口，报数式顺序
   由此涌现）；`free` 频道允许交叉。
 - 超限自动冻结频道并通知主 agent（`channelMessageLimit`/`agentMessageLimit` 预算闸）。
@@ -477,12 +495,14 @@ tmux 下仍显示 `#[image]` 占位（tmux 内的活动视口同样保持占位�
 你不在其中的标 `you're not in`。
 
 **会话行**是回答「谁在干活」的那一层——D115 之后,也回答「你没看的时候谁说了话」。
-它们常驻在输入框下方,一旦有人存在就一直在:`● main` 打头——main 工作时圆点是实心
-的——然后是每个实例一行(运行时 `● @scout: reading src/lib.rs… · 12 tool uses ·
-8.3k tokens`,等待时 `Idle for 14s`,停止后 `[stopped]`),再后是你在的每个房间
-(`#dev-team: 3 members`),名字各用自己的身份色,最多同时显示三行,光标移动时窗口
+它们常驻在输入框下方,一旦有人存在就一直在:`● @main` 打头——main 工作时圆点是实心
+的——然后是每个实例一行(运行时 `● @scout: reading src/lib.rs…`——tool 数与 token
+统计属于派发行和 `Ctrl+B` 详情,不在这里——等待时 `Idle for 14s`,停止后
+`[stopped]`,欠着房间里一个 `@` 未答时是 `owes #build #7`),再后是你在的每个房间
+(`#dev-team: 3 members`,有 `@` 悬而未答时是 `waiting on @dev · 3m`),名字各用自己
+的身份色,最多同时显示三行,光标移动时窗口
 跟着滚(边缘行右侧标 `↓ 2 more`)。每一行都戴着它那个会话的**徽章**:有未读是一个
-点(`•`),点名到你——房间发言里 `@user`——是强调色的计数(`•3`),并且每次点亮响
+点(`•`),点名到你——房间发言里 `@user` 或 `@all`——是强调色的计数(`•3`),并且每次点亮响
 一次铃,读过房间才会再响;等你授权的 agent 行会变成强调色的
 `waiting on you (permission)`。没有需要学的快捷键:提示历史翻到底时再按一次 `↓`
 就落到行上(与 Claude Code 同款的三级下落),`↓/↑` 在行间移动,`Enter` 打开那一行
@@ -498,11 +518,14 @@ tmux 下仍显示 `#[image]` 占位（tmux 内的活动视口同样保持占位�
 叠方式与 `@main` 相同)、它的回答,以及此刻正在流式产出的那一轮。切换即翻页:离开
 的那一页整体存进 scrollback,新页从屏幕顶端开始;回到 main 时重打最近一段尾巴。
 **输入框保持可用,并且指向这个 agent**,边框与 `❯` 都染上它的身份色:你打的字以你
-自己的名义进它的收件箱,以「排队中的消息」的样子出现在页上;`/` 开头的一行是消息而
-不是命令,`!` 也是。**房间页只有发言**——成员 `SendMessage` 到房间的内容,每条压着
+自己的名义进它的收件箱,以「排队中的消息」的样子出现在页上。**控制台自己的语法在页
+上照常生效**(D135):`/` 是命令,`!` 是 shell 模式——只有散文跟着页走。命令作用于
+控制台的会话,唯一例外是 `/compact`:在 agent 页上压缩的是**这个 agent 的**上下文
+(它的回合运行中会被拒绝)。**房间页只有发言**——成员 `SendMessage` 到房间的内容,每条压着
 发送者的名字;进出记录留在日志里、不上页;打字就是发到房间,不是成员时先把你加进
-去。**`Esc` 有两重含义,按这个顺序**:先停掉*正在运行*的这一页的主人(历史保留,页
-不关),再按一次才回家——页开着时 main 自己的回合够不到 `Esc`(`Ctrl+C` 仍然是万能
+去。**`Esc` 有四重含义,按这个顺序**:先停掉*正在运行*的这一页的主人(历史保留,页
+不关),再退出已进入的 shell 模式,再清掉未发的草稿,最后才回家——页开着时 main
+自己的回合够不到 `Esc`(`Ctrl+C` 仍然是万能
 打断)。`Shift+Tab` 轮换的是**这个 agent 的**权限模式,底部徽章跟着它走。页的主人
 离开名册时页自己关闭;而一个*已完成*的 agent 的页会留着,因为读它正是目的。
 
@@ -605,7 +628,8 @@ bingo 的 Tool trait：
 - 工具名：`mcp__<server>__<tool>`；权限规则用全名（如 `mcp__server` 前缀或
   完整工具名）。
 - 诊断：`/mcp` 查看状态；stdio 服务器自身输出在
-  `~/.local/share/bingo/logs/mcp-<name>.log`；修好后 `/mcp reconnect <name>`。
+  `~/.local/share/bingo/logs/mcp-<name>.log`；修好后 `/mcp reconnect [name]`
+  （省略名字 = 重连全部已启用服务器）。
 - 禁用/启用：`/mcp disable|enable [name|all]`（持久化到 settings.json）。
 
 ## 权限系统
@@ -704,9 +728,10 @@ bingo 的 Tool trait：
 - **上下文预算**：窗口与输出预算按模型取值（settings 声明、`model-catalog.json`
   或内置家族表；未知模型按 200k/64k 保守假设），有效输入窗口 = 窗口 − 输出预算；
   自动压缩阈值 = 有效窗口的 90%（当前 Claude 系约 785k），提前 20k 提醒（`/context`）。
-  压缩 = 摘要旧消息 + 保留最近 8 条；压缩切点安全推进到 tool_result 边界之外，
+  压缩 = 摘要旧消息 + 保留最近 12 条；压缩切点安全推进到 tool_result 边界之外，
   避免孤儿 tool_result 导致 400。连续压缩失败 3 次熔断（`/compact` 手动触发）。
-  非 Anthropic 端点（无 count_tokens）自动改用本地估算（字符数/4）。
+  非 Anthropic 端点（无 count_tokens）自动改用本地估算（ASCII 约 4 字符/token、
+  CJK 约 1 token/字）。
 - **记忆**：memdir 自动记忆（`~/.config/bingo/memdir/<项目名>-<路径哈希>.md`，
   完整路径哈希避免同名项目串味）+ 项目 CLAUDE.md 与 AGENTS.md 作为 system 记忆。
 
@@ -733,8 +758,8 @@ bingo app-server generate-schema --out schema/app-server
 ```
 
 已提交的 bundle 在 [`schema/app-server`](schema/app-server)：一份 manifest 把
-每个方法与通知映射到方向、params、result 与声明的错误，外加各自的 Draft-7
-schema。客户端应从它生成 TypeScript，而不是手抄第二份类型。
+每个方法映射到方向、params、result 与声明的错误——通知映射到方向与 params——
+外加各自的 Draft-7 schema。客户端应从它生成 TypeScript，而不是手抄第二份类型。
 
 **状态：实验特性。** manifest 里协议记作 1.0，wire 形状有逐变体的往返 fixture
 与黑盒场景覆盖，但还没有已发布的消费者，因此不承诺兼容性。设计与其修订见
@@ -772,7 +797,7 @@ Messages API 客户端 (reqwest + SSE 流式)
 query loop: 工具调用 → 权限门 → 并发执行 → 结果回填
   ├─ Tool Registry (trait + schemars schema)
   ├─ MCP 适配层 (rmcp: stdio / streamable HTTP)
-  ├─ 子代理 (hub-and-spoke, 异步 + 通知)
+  ├─ 子代理 (异步 + 通知；D137 起同侪直接互信)
   ├─ Hooks (shell, JSON 契约)
   ├─ Task 存储 / 频道 / 技能 / 记忆 / transcript
   └─ 预算监控与压缩
@@ -819,7 +844,8 @@ src/
   tui/             ratatui 界面（chat / view / input / markdown / highlight / gfx …）
                    其中 `store.rs` 是它对内核的客户端投影
   ui.rs            与渲染器无关的事件与对话框契约
-  system.rs        system prompt 拼装（记忆 + 项目记忆 + 技能清单）
+  system.rs        system prompt 拼装（基座 + 记忆 + 三前端共享的主会话
+                   附加块：crew note / 房间礼仪 / 经验索引）
 tests/
   fixtures/        集成测试夹具
 schema/
