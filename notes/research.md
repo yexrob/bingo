@@ -7708,3 +7708,196 @@ The first half is what this record lands, and it is self-contained: the seam exi
 transport uses it, and the TUI is untouched — its core still has no engine, so nothing about
 its behaviour changed. **B7b** is the TUI reframe, and it inherits: the shim inventory, the
 six `B7 removes this` markers, `chat.rs`'s line debt, and the three smoke items above.
+
+## D149 — the console becomes a client, and the wall the rest of it hits
+
+**What it lands.** The console is an attachment. It takes a snapshot cut from `AppCore`
+before its first frame and folds the ordered `AppEvent` stream into a local store, exactly
+as a wire client does — including the recovery: a hole in the `seq` is not patched, it is
+re-read. Three accounting items go with it: `SubmitRequest.main_busy`, three of the four
+re-parsing handlers, and the line debt on both files that were over the cap.
+
+**What it does not land.** The frame swap itself. `Answer::now()` still has fifteen
+production call sites, `tui_hooks` and `subagent_hooks` still translate `EngineEvent` into
+`UiEvent`, and the console still drives its own run loop. The reason is a fact this batch
+found and the surveys had not: it is not the shape of the code, it is the shape of the
+tests. It is written up at the end.
+
+Five commits, four gates green after each. **1686 → 1695 unit**, 27 black-box unchanged
+(20 app-server + 7 CLI). One test rewritten in place, none deleted; one added for a bug the
+work uncovered.
+
+### The store
+
+`src/tui/store.rs` — a client-side reducer, 977 lines with its tests.
+
+```text
+   AppCore ──attach──▶ AppLink { requests, frames }
+                              │
+                   ┌──────────┴───────────┐
+                   │  Store               │   cursor · replies · stale
+                   │   pump()   (sync)    │◀── every tick, before the idle gate
+                   │   reconcile() (async)│◀── once per loop turn, if stale
+                   └──────────┬───────────┘
+                              │  view()  (sync, infallible)
+                   render pass · key handler
+```
+
+- **`View` is what the core said, under the identity the core gave it.** Session summary,
+  capabilities, config; conversations by `ConversationId` with the console's `ConvKey`
+  alongside; live turns; open interactions; operations; the five bounded collections;
+  per-conversation queues. Nothing in it decides anything — a named resource is replaced, a
+  keyed one removed, an ordered one inserted where the event says. The one derived thing is
+  `is_busy`, which is "does a turn exist on this conversation", and that is a lookup.
+- **Two halves, because the render path cannot wait.** `pump()` is a non-blocking drain
+  called from the tick arm; `reconcile()` is the `async` re-read called from the loop body.
+  A hole is *noticed* by the first and *repaired* by the second. Both loops (inline and
+  fullscreen) do it.
+- **Draining happens before the idle gate, not after it.** The core never waits on a
+  frontend: an attachment that stops reading loses its attachment (`FRAME_CAPACITY`). A
+  console with nothing to draw still has to listen, so the drain sits above
+  `needs_tick()` and a fold is itself a reason to tick.
+- **Gap detection reads the span, not the point.** `coalescedFrom` (D147) means a merged
+  frame stands for `coalescedFrom..=seq`, so continuity is judged from where the run began.
+  Events at or below the cursor are dropped rather than folded twice — that is what makes a
+  re-read safe while frames from before the new cut are still in the channel.
+- **A detached store holds an empty view, never a wrong one.** `Store::default()` is what a
+  `Chat` is built with, because building is synchronous and attaching is not; the host calls
+  `connect_store` on the way into the loop.
+
+`ConvKey` ↔ `ConversationId` is the one mapping a client has to keep, and it is kept from
+the title: the wire names an agent conversation by an opaque `AgentId` a client cannot turn
+back into a name once the instance is gone, while `title` is `@name`/`#room` and stable. A
+test holds the two ends of that round trip together.
+
+### `main_busy` leaves
+
+`SubmitRequest.main_busy: Option<bool>` let a caller state what the turn registry already
+knows. Two owners, one fact, and no rule for when they disagree — which they did, in every
+test that set a bool. The field is gone; `submit` reads `self.turns.is_busy(&ConvKey::Main)`,
+which is the registry sitting in the same struct.
+
+**Fifty-four test sites** faked a running turn with `chat.conv.busy = true`. They open one
+now: `start_test_turn` asks the registry the console asks, and sets the console's own flag
+beside it (that half is still the console's until it reads the store for it). `end_test_turn`
+closes it and asks once more, because closing is a report and asking is how this side learns
+the report was read. **No assertion changed.** Fifteen of the fifty-four were failing the
+moment the field left, which is the measure of how much the bool was carrying.
+
+### The handlers stop reading the line twice
+
+`/share`, `/mcp` and `/team` each took the raw argument text and split it again, after the
+registry had already split it to decide which handler runs. Three of the four `B7 removes
+this` markers on that seam are gone:
+
+| handler | now takes |
+| --- | --- |
+| `slash_share` | `public: bool, open: bool` (the console exports to its own path, so `output` is the wire's) |
+| `slash_mcp` | `McpRequest::{List, SetEnabled{target, enabled}, Reconnect{server}}` |
+| `/team` | `team_cmd::read(TeamRead)` and `team_cmd::act(&Action)` |
+
+**They did disagree, and here is what about.** `/team list` printed a usage menu instead of
+the chart. The registry read the line into `TeamRead::Chart`; the console then handed
+`team_cmd` an empty string; `team_cmd` read *that* as "no subcommand" and answered with its
+own usage block. So the one command whose whole job is to show the chart showed a menu.
+`team_list_shows_the_chart_rather_than_a_menu` is the new test, and `team_cmd`'s usage block
+is deleted — the registry owns that string now.
+
+**The fourth marker stays, reworded.** `provider.login` keeps its own line by ruling (B5 ③),
+not by debt: `--device-auth` and `--manual <token>` are login mechanics the action does not
+carry and must not, because a pasted token is a credential. The comment said "B7 removes
+this"; it now says why nothing will.
+
+**Two known gaps, recorded rather than invented.** `TeamStart { members }` and
+`TeamStop { member }` can name who; this front end has only ever started and stopped the
+whole formation, and still does. `McpReconnect { server: None }` is documented on the wire
+as "every configured server" and is a usage error in the console. Neither is new, both are
+now visible in one place.
+
+### Line debt
+
+| file | before | after |
+| --- | --- | --- |
+| `src/tui/chat.rs` | 4103 | **3783** |
+| `src/agents.rs` | 4048 | **2488** |
+
+`chat_setup.rs` (428) is one reading lifted whole: `/status`, `/config`, `/context`,
+`/permissions`, `/mcp` and `/provider` answer and move the same handful of facts — which
+endpoint, which model, which rules, which servers — and on the wire that is one
+`ConfigSnapshot`. `agents_tests.rs` (1566) is the split `app/controller` already made.
+Nothing in the crate is over the cap now. Note that `chat.rs` *grew* before it shrank: the
+store, the two test-turn helpers and the typed `/mcp` shape are all additions, and the
+deletion that was supposed to pay for them is the shim removal, which is B7b-2's.
+
+### Real-terminal smoke: the three B7a could not run
+
+tmux, a scripted Anthropic-protocol endpoint on loopback, an isolated `HOME`, no tokens.
+All three run with the store attached and pumping, which is also the evidence that the
+attachment survives a real session.
+
+| item | result |
+| --- | --- |
+| agent page, history | **pass** — the Agent tool spawned `@scout`, `f` foregrounded its page, and the page carried its prompt and its report |
+| agent page, live | **pass** — a DM typed on the page landed as `❯ …`, the instance's turn ran, and its reply streamed onto the page |
+| steer at a tool barrier | **pass** — typed during a 7s `Bash`, shown as a queue row with "Press up to edit queued messages", absorbed at the barrier as `↪ also check the lexer` between the tool result and the reply. The provider log proves the absorption reached the *same* request: `[Message from user, sent while you were working]` beside the `tool_result`. |
+| rooms: a team from a fixture | **pass** — `.bingo/team.json` + two `agents/*.md`, no model involved: `@scout` and `@relay` idle within five seconds |
+| rooms: post and wake | **pass** — `#lobby morning all…` → "Sent to #lobby", both members woken (two provider requests on the sub lane), main woken by digest with `<messages>[#lobby msg #1] user: …` |
+| rooms: `@name` from a room page | **pass** — "Sent to @scout" and the roster badge moved to `@scout •2` |
+| rooms restored on resume | **pass** — `/quit`, `--continue`: the sidecar (`{stem}.rooms.jsonl`, room + post + three member cursors) replayed the room, its four-member roster and its one post, and the unread count stayed cleared |
+
+Re-run for regression, since the console's data path changed: main turn streaming
+(**pass**), permission prompt and approval (**pass**), queue while busy and drain
+(**pass**), `/compact` (**pass** — accepted, nothing to compact at that size, same as D148).
+`BINGO_DEBUG` now prints what the first cut carried; a resumed session with a team reported
+`4 conversation(s), 2 agent(s), 1 room(s)`, which is the session exactly.
+
+### Why the frame swap is a second batch, and what actually blocks it
+
+The surveys in D148 sized the reframe by counting seams: 19 `Answer::now()` sites, ~60
+frame-pull reads, 15 `UiEvent` arms, 56 `conv.busy` sites. Those counts are right and they
+are not the obstacle. The obstacle is underneath them:
+
+**570 of the console's ~640 tests are `#[test]`, not `#[tokio::test]`.**
+
+`AppCore::attach` spawns the attachment's request forwarder on `Handle::current()`. A test
+with no runtime cannot attach, so its store is detached and its view is empty. That is
+harmless while the store has no readers — and becomes the whole problem the moment a read
+site moves onto it, because every such test would then read an empty projection instead of
+the registry it reads today. The read-face swap is therefore not separable from a test
+migration; and the migration is not a `sed`, because several of those tests were written
+*because* there is no runtime (`submit_queued` returns early without one, `Chat::new` skips
+spawning the watch forwarder, and `.now()`'s parker works precisely because the actor is on
+its own OS thread).
+
+So the honest split is not "store + reads / writes + accounting". It is:
+
+- **B7b (this record)** — the store, live, with recovery; the accounting that does not need
+  a runtime in tests (`main_busy`, the handlers, the line debt); the smoke.
+- **B7b-2** — one decision first: *how does a console test get a core?* Three candidates,
+  and the batch should pick one before touching a read site:
+  1. give every TUI test a runtime (`#[tokio::test]` everywhere) and let each attach;
+  2. make `attach` runtime-free (the forwarder exists to tag requests and send `Detach` on
+     drop; a `Requests` wrapper holding the control sender plus a `Drop` would do both, at
+     the cost of the bounded request queue the spec asks for on the wire — which the wire
+     transport could keep on its own side);
+  3. feed the store directly in tests (`Store` already folds an `AppEvent` without a link;
+     what is missing is a seeded cut), and let the console's tests assert against a
+     projection they state rather than a core they run.
+  Then: the read face, the change face (`AppRequest` with awaited receipts), the engine
+  attached to the console's own core so `tui_hooks`/`subagent_hooks` can go, and
+  `Answer::now()` to zero.
+
+`(2)` is the one that removes the divergence rather than papering over it, and it is small.
+It is also a change to the core's public seam, which is why it is a decision and not an
+implementation detail.
+
+### Where the shims stand
+
+| shim | state |
+| --- | --- |
+| `SubmitRequest.main_busy` | **gone** |
+| four re-parsing handlers | **three converged**, one kept by ruling |
+| `Answer::now()` | 15 production sites, unchanged — all on the change face |
+| `tui_hooks` / `subagent_hooks` | unchanged — they leave with the engine attachment |
+| core/engine config double mirror | unchanged — converging it is a change-face write |
+| `rg "B7 removes this"` | 6 → **2**, both the engine→`UiEvent` translation (`ui.rs`, `tool/agent.rs`) |

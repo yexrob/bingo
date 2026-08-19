@@ -263,6 +263,30 @@ Chat/App 管线换 AppLink 帧，删全部 shim；TuiEvent 本地化；按键动
 > 56 处测试用 `conv.busy` 伪造运行中回合）、`chat.rs` 线债、三项需要 instance 的真机 smoke
 > （agent 页直播、房间收发与 @、tool barrier steer）。理由与尺寸见 D148 末节。
 
+> **B7b 落地记（2026-08-19）**：**store 已上线，换帧未做**（D149，五提交）。
+> `src/tui/store.rs` 是客户端 reducer：attach → 快照切割 → 折叠 `AppEvent` 流；
+> `pump()` 同步（每 tick，在 idle 门之前——核不等前端，不读就掉链路），
+> `reconcile()` 异步（seq 空洞 → 重读快照替换本地态，`coalescedFrom` 按 span 判连续）。
+> 真机确认已 attach（`BINGO_DEBUG` 报首次切割：4 会话/2 agent/1 房间）。
+> 清账：`SubmitRequest.main_busy` **已删**（54 处 conv.busy 测试改为在核内起真 turn，断言未削弱）；
+> 四个二次读参 handler **三个已收敛**（`provider.login` 按 B5 裁决③保留并改写注释），
+> 顺手修出真 bug：`/team list` 因两个读者而印 usage 菜单而非组织图；
+> 行数：`chat.rs` 4103→3783（拆 `chat_setup.rs`）、`agents.rs` 4048→2488（拆 `agents_tests.rs`），
+> 全仓无文件超 4000。`rg "B7 removes this"` 6→2。测试 1686→1695，黑盒 27 不变。
+> 三项真机 smoke **全部通过**（agent 页直播与历史、房间收发/@/resume 恢复、tool barrier steer），
+> 另回归四项（主 turn/权限弹窗/队列/compact）。
+>
+> **拆批理由（新发现，非 D148 的尺寸论）**：读取面换帧被**测试运行时**卡住，不是被代码形状卡住。
+> 控制台 ~640 个测试里 570 个是 `#[test]` 无 tokio 运行时，而 `AppCore::attach` 要
+> `Handle::current()` 起转发任务 → 无运行时即无法 attach → store 为空视图。
+> 只要有一个读取点搬上 store，这 570 个测试就读到空投影。故 **B7b-2 第一件事是裁决
+> 「控制台测试如何拿到核」**：①全体改 `#[tokio::test]`；②让 `attach` 不需运行时
+> （转发任务只为打 attachment 标签 + drop 时 Detach，可用带 `Drop` 的 `Requests` 包装替代，
+> 代价是进程内失去有界请求队列，wire 侧自留即可）；③测试直接给 store 灌种子快照+事件。
+> ②是唯一消除分叉而非绕开它的解，且改动很小——但它动核的公开接缝，所以是裁决不是实现细节。
+> 裁决后再做：读取面 → 变更面（`AppRequest` + 等回执）→ 给控制台的核 attach engine
+> （`tui_hooks`/`subagent_hooks` 随之删）→ `Answer::now()` 清零（余 15 处生产调用，全在变更面）。
+
 > **B7a review 裁决（2026-08-19，Fable）**：① 拆批核准——止步报告优于硬吞，B7a 自含且 TUI
 > 行为位相同。② 对开放问题的裁决：**B7b 照常进行，不需要重新规划**。frame-pull/push 的
 > "错配"有标准解：TUI 本地 **store**（客户端 reducer——快照 + AppEvent 物化成本地投影，
