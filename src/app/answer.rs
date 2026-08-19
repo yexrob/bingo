@@ -3,17 +3,21 @@
 //!
 //! A registry call that returns a value cannot be a one-way report: the caller
 //! needs what came back. Its callers, though, are not one kind of thing. An
-//! engine task awaits; a key handler and a render pass cannot, because the whole
-//! terminal front end above them is synchronous and will stay that way until B7
-//! turns it into an attachment. [`Answer`] serves both without giving the same
-//! question two spellings: `.await` for the first, [`Answer::now`] for the
-//! second.
+//! engine task awaits; the actor's own loop and a `spawn_blocking` worker
+//! cannot. [`Answer`] serves both without giving the same question two
+//! spellings: `.await` for the first, [`Answer::now`] for the second.
 //!
 //! Blocking is safe here for one structural reason, and only that one: the actor
 //! runs on a thread of its own and never waits on anything — not a frontend, not
 //! an engine task, not the disk. A thread that blocks on it is therefore waiting
 //! on a bounded amount of arithmetic, exactly as it used to block on the
-//! registry mutex this replaced. **B7 removes the blocking half.**
+//! registry mutex this replaced.
+//!
+//! **The render thread is no longer one of them** (D154). The terminal front end
+//! used to take every answer this way, on the thread that draws; it records an
+//! intent instead and the loop performs it (`tui::intent`). What is left of
+//! `now` is the actor reading its own tables inside its own message, the blocking
+//! workers an engine spawns, and tests — none of which has a frame to miss.
 
 use std::future::Future;
 use std::pin::Pin;

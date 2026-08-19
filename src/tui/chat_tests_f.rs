@@ -53,6 +53,13 @@ fn seed_agent(chat: &mut Chat, name: &str) {
     chat.settle_store();
 }
 
+/// Poll the mail debounce the way a frame does, and wait for the answer: the
+/// wake is an intent since D154, and a test is its own loop.
+fn digested(chat: &mut Chat) {
+    chat.digest_mail();
+    chat.settle_intents_now();
+}
+
 fn lifecycle(label: &str, status: WatchState, detail: Option<&str>) -> UiEvent {
     UiEvent::WatchEvent {
         label: label.to_string(),
@@ -406,7 +413,8 @@ fn a_burst_of_room_mail_wakes_once_after_the_quiet_window() {
     chat.session
         .channels
         .deliver_to_main("scout", "one", None, false);
-    assert!(!chat.digest_mail(), "the window has only just opened");
+    digested(&mut chat);
+    assert!(!chat.digest_woke, "the window has only just opened");
     assert!(
         chat.session.mail.is_waiting().now(),
         "and the clock is armed, which is what keeps the tick alive"
@@ -421,19 +429,23 @@ fn a_burst_of_room_mail_wakes_once_after_the_quiet_window() {
     chat.session
         .channels
         .deliver_to_main("zoe", "two", None, false);
+    digested(&mut chat);
     assert!(
-        !chat.digest_mail(),
+        !chat.digest_woke,
         "the window restarted with the new message"
     );
 
     chat.session.mail.rewind(nearly());
-    assert!(!chat.digest_mail(), "still inside the restarted window");
+    digested(&mut chat);
+    assert!(!chat.digest_woke, "still inside the restarted window");
     chat.session
         .mail
         .rewind(std::time::Duration::from_millis(1));
-    assert!(chat.digest_mail(), "the room went quiet; digest the batch");
+    digested(&mut chat);
+    assert!(chat.digest_woke, "the room went quiet; digest the batch");
+    digested(&mut chat);
     assert!(
-        !chat.digest_mail(),
+        !chat.digest_woke,
         "and exactly once — a second ask for the same batch is the flood again"
     );
 }
@@ -464,7 +476,8 @@ fn an_unnamed_room_line_mails_at_once_and_starts_the_clock() {
         "mailed at once, named or not"
     );
     assert!(chat.needs_tick(), "waiting mail holds the frame loop open");
-    assert!(!chat.digest_mail(), "the quiet window has not elapsed");
+    digested(&mut chat);
+    assert!(!chat.digest_woke, "the quiet window has not elapsed");
 
     // A second line inside the window restarts it: the question and its answer
     // are one wake, not two.
@@ -474,10 +487,13 @@ fn an_unnamed_room_line_mails_at_once_and_starts_the_clock() {
         .channels
         .post("scout", "crew", "@main look")
         .now();
-    assert!(!chat.digest_mail(), "still inside the restarted window");
+    digested(&mut chat);
+    assert!(!chat.digest_woke, "still inside the restarted window");
     chat.session.mail.rewind(crate::app::mail::QUIET);
-    assert!(chat.digest_mail(), "then digests once, both lines together");
-    assert!(!chat.digest_mail(), "and exactly once");
+    digested(&mut chat);
+    assert!(chat.digest_woke, "then digests once, both lines together");
+    digested(&mut chat);
+    assert!(!chat.digest_woke, "and exactly once");
 }
 
 /// A room that never stops talking would restart the window forever. The
@@ -489,7 +505,8 @@ fn a_chatty_room_cannot_starve_the_wake_past_the_deadline() {
     chat.session
         .channels
         .deliver_to_main("scout", "0", None, false);
-    assert!(!chat.digest_mail());
+    digested(&mut chat);
+    assert!(!chat.digest_woke);
     let mut fired = false;
     let mut elapsed = std::time::Duration::ZERO;
     let rounds = crate::app::mail::DEADLINE.as_millis() / step.as_millis() + 1;
@@ -499,7 +516,8 @@ fn a_chatty_room_cannot_starve_the_wake_past_the_deadline() {
         chat.session
             .channels
             .deliver_to_main("scout", &format!("{i}"), None, false);
-        if chat.digest_mail() {
+        digested(&mut chat);
+        if chat.digest_woke {
             fired = true;
             break;
         }
@@ -522,7 +540,8 @@ fn urgent_direct_mail_rings_and_skips_the_window() {
     chat.session
         .channels
         .deliver_to_main("scout", "I need the deploy key", None, true);
-    assert!(chat.digest_mail(), "urgent does not wait out the window");
+    digested(&mut chat);
+    assert!(chat.digest_woke, "urgent does not wait out the window");
     assert!(
         emitted(&mut chat).contains('\x07'),
         "and it reaches a user who is in another window"
@@ -544,7 +563,8 @@ fn the_ring_survives_a_turn_that_drained_the_mail_first() {
         "a running turn absorbed it at its next round"
     );
 
-    assert!(!chat.digest_mail(), "there is nothing left to digest");
+    digested(&mut chat);
+    assert!(!chat.digest_woke, "there is nothing left to digest");
     assert!(
         emitted(&mut chat).contains('\x07'),
         "but the bell it asked for is still owed"

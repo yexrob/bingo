@@ -403,6 +403,15 @@ pub async fn run_inline(
             dirty = true;
         }
 
+        // What the frame asked the core for, performed and folded in before the
+        // frame that shows it (D154). Here rather than in the key handler for
+        // the same reason the repair below is here: a key handler runs on the
+        // thread that draws, and asking the actor is `async`.
+        if chat.settle_intents().await {
+            chat.dirty = true;
+            dirty = true;
+        }
+
         // A hole in the event stream, repaired the way the protocol says: read
         // a fresh cut and replace local state with it, rather than patching a
         // projection that is no longer the core's ("Snapshots and recovery").
@@ -672,6 +681,15 @@ pub async fn run_fullscreen(
         if std::mem::take(&mut chat.open_transcript) {
             crate::tui::transcript::run_transcript_modal(&mut chat, &mut events, true).await?;
             chat.force_redraw = true;
+            chat.dirty = true;
+            dirty = true;
+        }
+
+        // What the frame asked the core for, performed and folded in before the
+        // frame that shows it (D154). Here rather than in the key handler for
+        // the same reason the repair below is here: a key handler runs on the
+        // thread that draws, and asking the actor is `async`.
+        if chat.settle_intents().await {
             chat.dirty = true;
             dirty = true;
         }

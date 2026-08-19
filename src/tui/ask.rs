@@ -21,7 +21,7 @@ const ASK_DIFF_ROWS: usize = 12;
 /// Bounded command height, collapsed (heredocs and `&&` chains run long).
 const ASK_COMMAND_ROWS: usize = 6;
 
-use crate::app::snapshot::{ActivationKind, InteractionCancelReason, InteractionDecision};
+use crate::app::snapshot::{ActivationKind, InteractionDecision};
 
 impl super::Chat {
     /// Picks up the prompt the core has open (one at a time: a second question
@@ -83,29 +83,21 @@ impl super::Chat {
     /// belong to the turn that just ended are the ones whose run is already gone.
     /// An explicit interrupt takes everything, because that is what the user
     /// asked for.
-    pub(crate) fn cancel_asks(&mut self, dead_only: bool) -> bool {
-        let reason = if dead_only {
-            InteractionCancelReason::TurnEnded
-        } else {
-            InteractionCancelReason::Interrupted
-        };
-        let cancelled = self
-            .session
-            .interactions
-            .cancel_all(reason, dead_only)
-            .now();
-        if cancelled {
-            // What is on screen may have been one of them; the next drain picks
-            // up whatever is still open.
-            self.pending_ask = None;
-            self.reset_ask_state();
-            self.main_conv().drop_empty_stream_message();
-            self.push_user_line(ASK_CANCELLED_TEXT.to_string());
-            // The title still announced a question nobody could answer.
-            self.notify_idle();
-            self.dirty = true;
-        }
-        cancelled
+    pub(crate) fn cancel_asks(&mut self, dead_only: bool) {
+        self.intend(crate::tui::intent::Intent::CancelAsks { dead_only });
+    }
+
+    /// What the console does about prompts the core closed.
+    pub(crate) fn asks_cancelled(&mut self) {
+        // What is on screen may have been one of them; the next drain picks
+        // up whatever is still open.
+        self.pending_ask = None;
+        self.reset_ask_state();
+        self.main_conv().drop_empty_stream_message();
+        self.push_user_line(ASK_CANCELLED_TEXT.to_string());
+        // The title still announced a question nobody could answer.
+        self.notify_idle();
+        self.dirty = true;
     }
 
     fn reset_ask_state(&mut self) {
@@ -119,29 +111,39 @@ impl super::Chat {
         self.pending_ask.as_ref().map(|(_, request)| request)
     }
 
-    /// Answer the prompt on screen. `Some(false)` means the core refused the
-    /// answer — a keyboard approval inside D81's guard, which is swallowed
-    /// exactly as it was before the guard moved into the core.
+    /// Answer the prompt on screen, with the receipt the answer earns.
+    ///
+    /// The receipt travels with the answer rather than being written beside it,
+    /// because only an answer the core *took* has earned one: D81's guard
+    /// refuses one that came too fast, and the dialog stays exactly where it was
+    /// (D154 moved the waiting off the key handler; the refusal is unchanged).
     fn answer(
         &mut self,
         activation: ActivationKind,
         at: std::time::Instant,
         decision: InteractionDecision,
+        receipt: Option<String>,
     ) -> bool {
         let Some((id, _)) = &self.pending_ask else {
             return false;
         };
-        let accepted = self
-            .session
-            .interactions
-            .respond_at(id.clone(), activation, at, decision)
-            .now()
-            .is_ok();
-        if accepted {
-            self.pending_ask = None;
-            self.reset_ask_state();
+        self.intend(crate::tui::intent::Intent::AnswerAsk {
+            id: id.clone(),
+            activation,
+            at,
+            decision,
+            receipt,
+        });
+        true
+    }
+
+    /// What the console does about an answer the core took.
+    pub(crate) fn ask_answered(&mut self, receipt: Option<String>) {
+        self.pending_ask = None;
+        self.reset_ask_state();
+        if let Some(line) = receipt {
+            self.push_ask_message(line);
         }
-        accepted
     }
 
     /// The decision option `index` stands for on the prompt in hand.
@@ -288,15 +290,13 @@ impl super::Chat {
                 let Some(request) = self.ask_request() else {
                     return true;
                 };
-                let permission = request.kind == AskKind::Permission;
-                let free_text = request.free_text;
-                if self.answer(ActivationKind::Keyboard, now, InteractionDecision::Cancel) {
-                    if permission {
-                        self.push_ask_message(ASK_RECEIPT_NO.to_string());
-                    } else if free_text {
-                        self.push_ask_message(ASK_DECLINED_TEXT.to_string());
-                    }
-                }
+                let receipt = Self::refusal_receipt(request);
+                self.answer(
+                    ActivationKind::Keyboard,
+                    now,
+                    InteractionDecision::Cancel,
+                    receipt,
+                );
                 true
             }
             _ => false,
@@ -366,16 +366,15 @@ impl super::Chat {
             return;
         };
         let permission = request.kind == AskKind::Permission;
-        let free_text = request.free_text;
         let question = request.question.clone();
         if text.trim().is_empty() {
-            if self.answer(ActivationKind::Keyboard, now, InteractionDecision::Cancel) {
-                if permission {
-                    self.push_ask_message(ASK_RECEIPT_NO.to_string());
-                } else if free_text {
-                    self.push_ask_message(ASK_DECLINED_TEXT.to_string());
-                }
-            }
+            let receipt = Self::refusal_receipt(request);
+            self.answer(
+                ActivationKind::Keyboard,
+                now,
+                InteractionDecision::Cancel,
+                receipt,
+            );
             return;
         }
         let decision = if permission {
@@ -390,12 +389,22 @@ impl super::Chat {
                 text: Some(text.clone()),
             }
         };
-        if self.answer(ActivationKind::Keyboard, now, decision) {
-            if permission {
-                self.push_ask_message(format!("{}{}", ASK_RECEIPT_NO_PREFIX, text.trim()));
-            } else {
-                self.push_ask_message(Self::ask_answer_text(&question, &text));
-            }
+        let receipt = Some(if permission {
+            format!("{}{}", ASK_RECEIPT_NO_PREFIX, text.trim())
+        } else {
+            Self::ask_answer_text(&question, &text)
+        });
+        self.answer(ActivationKind::Keyboard, now, decision, receipt);
+    }
+
+    /// The line a plain refusal leaves, if it leaves one.
+    fn refusal_receipt(request: &crate::ui::PermissionRequest) -> Option<String> {
+        if request.kind == AskKind::Permission {
+            Some(ASK_RECEIPT_NO.to_string())
+        } else if request.free_text {
+            Some(ASK_DECLINED_TEXT.to_string())
+        } else {
+            None
         }
     }
 
@@ -424,32 +433,32 @@ impl super::Chat {
             return true;
         }
         if index >= request.options.len() {
-            return self.answer(activation, at, InteractionDecision::Cancel);
+            let receipt = Self::refusal_receipt(request);
+            return self.answer(activation, at, InteractionDecision::Cancel, receipt);
         }
         let permission = request.kind == AskKind::Permission;
         let free_text = request.free_text;
         let question = request.question.clone();
         let label = request.options[index].clone();
         let session = request.session_option() == Some(index);
-        let Some(decision) = self.decision_at(index) else {
-            return false;
-        };
-        if !self.answer(activation, at, decision) {
-            return false;
-        }
-        if permission {
-            self.push_ask_message(
+        let receipt = if permission {
+            Some(
                 if session {
                     ASK_RECEIPT_SESSION
                 } else {
                     ASK_RECEIPT_YES
                 }
                 .to_string(),
-            );
+            )
         } else if free_text {
-            self.push_ask_message(Self::ask_answer_text(&question, &label));
-        }
-        true
+            Some(Self::ask_answer_text(&question, &label))
+        } else {
+            None
+        };
+        let Some(decision) = self.decision_at(index) else {
+            return false;
+        };
+        self.answer(activation, at, decision, receipt)
     }
 
     /// Permission/ask block (PermissionDialog / AskUserQuestion):

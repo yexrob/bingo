@@ -709,6 +709,14 @@ struct Follow {
 /// bingo chat component state: message stream + activity notices + input + permission requests.
 pub struct Chat {
     pub session: Arc<Session>,
+    /// What a keystroke asked the core for, waiting for the loop to perform it
+    /// (D154). A key handler cannot wait; it records and returns.
+    pub(crate) intents: std::collections::VecDeque<crate::tui::intent::Intent>,
+    /// Somebody is already draining the queue. Performing an intent folds the
+    /// core's stream, and folding it can leave another intent behind.
+    pub(crate) draining: bool,
+    /// Whether the last mail digest opened a turn.
+    pub(crate) digest_woke: bool,
     /// What the core has said, materialized (B7b).
     ///
     /// The console is an attachment like any other: it takes one snapshot cut
@@ -1172,6 +1180,9 @@ impl Chat {
             // Detached until the host attaches it: building a `Chat` is
             // synchronous and attaching is not, so the console connects on the
             // way into its loop (`Chat::connect_store`).
+            intents: std::collections::VecDeque::new(),
+            draining: false,
+            digest_woke: false,
             store: crate::tui::store::Store::default(),
             events,
             events_rx,
@@ -1452,8 +1463,7 @@ impl Chat {
             self.cancel_asks(true);
         }
         if follow.wake {
-            let interrupted = self.main_conv().interrupted;
-            let _ = self.session.mail.notified(interrupted).now();
+            self.intend(crate::tui::intent::Intent::Wake);
         }
         if let Some((label, reason)) = follow.alert {
             self.push_agent_alert(&label, reason.as_deref());
@@ -2541,12 +2551,22 @@ impl Chat {
         // handed text and assets (spec "One submission path").
         let text = self.expand_pastes(&raw);
         let text = self.expand_image_paths(&text);
-        let performed = self.route_submission(&text);
-        self.drew(performed, raw, text);
-        // The rows the submission produced are the core's, and they are folded
-        // in before the frame that shows them (D154).
-        self.pump_store();
-        self.drain_frames();
+        // The line is recorded rather than sent from here: a key handler cannot
+        // wait on the actor, and the answer is folded in before the frame that
+        // would show it (D154).
+        let mode = if self.bash_mode {
+            crate::app::command::ComposerMode::Shell
+        } else {
+            crate::app::command::ComposerMode::Normal
+        };
+        let carries_attachments = !self.resolve_images(&text).is_empty();
+        self.intend(crate::tui::intent::Intent::Submit {
+            raw,
+            text,
+            mode,
+            on: self.active.clone(),
+            carries_attachments,
+        });
     }
 
     /// What the console does about what the core did.
@@ -2556,7 +2576,12 @@ impl Chat {
     /// What is left is the console's own half: its input history, its feedback
     /// tiers, and the dropdown. The rows the submission produced are drawn from
     /// the core's own stream like every other row on the page.
-    fn drew(&mut self, performed: crate::app::submit::Performed, raw: String, text: String) {
+    pub(crate) fn drew(
+        &mut self,
+        performed: crate::app::submit::Performed,
+        raw: String,
+        text: String,
+    ) {
         use crate::app::submit::Performed;
         match performed {
             Performed::Nothing => self.set_input(raw),
@@ -2651,28 +2676,15 @@ impl Chat {
     /// composer's forms, so a skill whose marker opens with `/` is prose and not
     /// a command.
     pub(crate) fn resubmit(&mut self, text: String) {
-        let performed = self
-            .session
-            .submit
-            .submit(crate::app::submit::SubmitRequest {
-                conversation: crate::ui::ConvKey::Main,
-                input: crate::app::command::Submission::SendProse {
-                    text: text.clone(),
-                    attachments: Vec::new(),
-                },
-                carries_attachments: !self.resolve_images(&text).is_empty(),
-            })
-            .now();
-        if matches!(performed, crate::app::submit::Performed::Turn { .. }) {
-            self.last_prompt = text;
-        }
-        self.dirty = true;
+        self.intend(crate::tui::intent::Intent::Resubmit(text));
     }
 
-    /// Hand this line to the core and hear what it did with it.
+    /// Hand this line to the core and hear what it did with it, for a test whose
+    /// subject is the disposition rather than the rows it produced.
     ///
     /// Whether main is busy is not stated here: the turn registry is the core's,
     /// and a caller that could state it could also state it wrongly.
+    #[cfg(test)]
     pub(crate) fn route_submission(&mut self, text: &str) -> crate::app::submit::Performed {
         let mode = if self.bash_mode {
             crate::app::command::ComposerMode::Shell
@@ -3102,12 +3114,8 @@ impl Chat {
     /// Apply one action to the core, which is where the session's configuration
     /// lives (D154). The console renders the outcome itself; what this is for is
     /// making sure there is one thing to render it *from*.
-    pub(crate) fn apply_to_core(&self, action: crate::app::command::Action) {
-        let _ = self
-            .session
-            .core
-            .execute(crate::ui::ConvKey::Main, action)
-            .now();
+    pub(crate) fn apply_to_core(&mut self, action: crate::app::command::Action) {
+        self.intend(crate::tui::intent::Intent::Execute(Box::new(action)));
     }
 
     /// The permission mode in effect, read from the projection rather than kept.

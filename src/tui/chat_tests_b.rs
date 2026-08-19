@@ -407,9 +407,11 @@ async fn turn_end_triggers_auto_turn_when_wake_notification_pending() {
     // side put on its own channel.
     chat.end_test_turn();
     chat.settle_store();
-    assert_eq!(
-        chat.conv.messages.len(),
-        1,
+    assert!(
+        chat.conv.messages[0]
+            .activities
+            .iter()
+            .any(|activity| matches!(&activity.kind, ActivityKind::Watch(_))),
         "the turn keeps the message the watch row hangs on: {:?}",
         chat.conv.messages
     );

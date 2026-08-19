@@ -53,6 +53,7 @@ pub mod highlight;
 pub mod history;
 pub mod images;
 pub mod input;
+pub(crate) mod intent;
 pub mod keys;
 pub mod line;
 pub mod markdown;

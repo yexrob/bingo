@@ -442,18 +442,8 @@ impl super::Chat {
     /// channel.
     ///
     /// Returns whether a digest turn was opened this frame.
-    pub(crate) fn digest_mail(&mut self) -> bool {
-        // Taken rather than read, and before anything else: the drain and the
-        // bell are separate readers, and a turn already running can absorb the
-        // message before this ever sees the mail that asked for the ring.
-        if self.session.channels.take_main_mail_urgent().now() {
-            self.notify
-                .attention(crate::tui::notify::Attention::AgentNotice);
-        }
-        // `interrupted` is the console's own state; everything else in the
-        // decision, and the turn itself, is the core's.
-        let interrupted = self.main_conv().interrupted;
-        self.session.mail.digest(interrupted).now()
+    pub(crate) fn digest_mail(&mut self) {
+        self.intend_once(crate::tui::intent::Intent::Digest);
     }
 
     /// Open main's turn in the core, for a test that wants one running without a
@@ -1275,11 +1265,7 @@ impl super::Chat {
             // first wins, and a pull-back that lost is a no-op: the text is in the
             // request by then, so bringing it back into the composer would send it
             // twice.
-            match self.session.queue.reclaim_tail(self.active.clone()).now() {
-                crate::app::queue::Reclaim::Pulled(entry) => self.set_input(entry.text),
-                crate::app::queue::Reclaim::Absorbed(_) | crate::app::queue::Reclaim::Empty => {}
-            }
-            self.dirty = true;
+            self.intend(crate::tui::intent::Intent::ReclaimTail(self.active.clone()));
             return true;
         }
         let width = self.input_width();
@@ -1456,17 +1442,9 @@ impl super::Chat {
             self.permission_mode(),
             self.session.permission_mode,
         );
-        let _ = self
-            .session
-            .core
-            .execute(
-                crate::ui::ConvKey::Main,
-                crate::app::command::Action::PermissionModeSet {
-                    mode: crate::tui::chat::app_permission_mode(next),
-                },
-            )
-            .now();
-        self.dirty = true;
+        self.apply_to_core(crate::app::command::Action::PermissionModeSet {
+            mode: crate::tui::chat::app_permission_mode(next),
+        });
     }
 
     /// Alt+T: thinking toggle (off ↔ the last non-off level, default medium).
@@ -1618,7 +1596,7 @@ impl super::Chat {
         // comparisons against a length the domain already keeps, and the thing it
         // decides — whether the room has stopped talking — is a question about
         // *this* frame.
-        let _ = self.digest_mail();
+        self.digest_mail();
         // The bottom notice expires with the window it advertises.
         if let Some(until) = self.notice_until
             && std::time::Instant::now() >= until
@@ -1722,10 +1700,7 @@ impl super::Chat {
     /// that agent's zoom is visited. The wake and its debounce are untouched:
     /// this reads a mirror of the inbox, never the inbox itself.
     fn absorb_arrivals(&mut self) {
-        for arrival in self.session.channels.drain_main_arrivals().now() {
-            *self.agent_mail.entry(arrival.from).or_insert(0) += 1;
-            self.dirty = true;
-        }
+        self.intend_once(crate::tui::intent::Intent::Arrivals);
     }
 
     /// Frame number within the update-banner breathing window (animation running → Some; no banner / motion off /
@@ -2173,7 +2148,16 @@ impl super::Chat {
     /// tree's `k`, the dialog's `x`, the zoom's — so there is one path, one
     /// warning and one watch transition.
     pub(crate) fn stop_agent(&mut self, name: &str) {
-        match self.session.agents.stop(name).now() {
+        self.intend(crate::tui::intent::Intent::StopAgent(name.to_string()));
+    }
+
+    /// What the console does about a stop the core performed.
+    pub(crate) fn stopped_agent(
+        &mut self,
+        name: &str,
+        stopped: Result<(Option<crate::watch::WatchId>, usize), String>,
+    ) {
+        match stopped {
             Ok((watch_id, dropped)) => {
                 if let Some(id) = watch_id {
                     self.session.watch.set_state(

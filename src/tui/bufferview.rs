@@ -24,7 +24,6 @@
 //! zoom (v6): a conversation you are standing in is an away page now, drawn
 //! by the transcript's own pipeline ([`crate::tui::conv`]).
 
-use crate::channels::USER_NAME;
 use crate::tui::chat::{Chat, Row, one_line};
 use crate::tui::line::Line;
 
@@ -121,13 +120,10 @@ impl Chat {
             );
             return;
         };
-        match self.session.channels.invite(&room, USER_NAME).now() {
-            Ok(()) => {
-                self.refresh_conversations();
-                self.push_slash_info(format!("joined #{room}"));
-            }
-            Err(why) => self.push_slash_info(why),
-        }
+        self.intend(crate::tui::intent::Intent::Room {
+            name: room,
+            join: true,
+        });
     }
 
     /// `/leave [#room]` — stop being a member; the room stays readable.
@@ -136,13 +132,10 @@ impl Chat {
             self.push_slash_info("usage: /leave #room".to_string());
             return;
         };
-        match self.session.channels.kick(&room, USER_NAME).now() {
-            Ok(()) => {
-                self.refresh_conversations();
-                self.push_slash_info(format!("left #{room}"));
-            }
-            Err(why) => self.push_slash_info(why),
-        }
+        self.intend(crate::tui::intent::Intent::Room {
+            name: room,
+            join: false,
+        });
     }
 }
 
@@ -153,6 +146,7 @@ mod tests {
     use crate::api::types::{ContentBlock, Message as ApiMessage, Role as ApiRole};
     use crate::app::submit::DirectTarget;
     use crate::channels::ChannelMode;
+    use crate::channels::USER_NAME;
     use crate::tui::chat::{Role, UiMessage};
     use crate::tui::test_util::chat_at;
 
