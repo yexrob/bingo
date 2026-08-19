@@ -340,6 +340,36 @@ Chat/App 管线换 AppLink 帧，删全部 shim；TuiEvent 本地化；按键动
 > 红线不变：现有行断言测试是护栏。④ 真机发现的既有显示瑕疵（`!` 行经权限弹窗后工具行
 > 留在 `⎿ Running…`）：若随渲染取数源切换自然消除则顺手收，否则入 B8 清单。D151 归 B7c。
 
+> **B7c 落地记（2026-08-19）**：**读取面收官，写入面留 B7d**（D151，五提交）。
+> `tui_hooks`/`subagent_hooks` 删除，`AgentRegistry` 的事件 sink 一并删；`src/tui/chat_feed.rs`
+> 把 store 折进来的 `AppEvent` 译成控制台的渲染增量——**换的是取数源，不是渲染器**，
+> 700 行 `Chat::route` 一字未动，全部行断言原样通过。关键发现纠正 D150 的判断：
+> 控制台的 turn 从 B3 起就 `EngineHost::bound` 到核的 turn，agent turn 从 B4 起也是——
+> **item 流一直在，只是没有读者**；"核没 engine 所以不发 item" 只对*核自己开的* turn 成立。
+> store 获得 `Transcript`（log + live，`conversation/read` 打底、`item/completed` 追加、
+> `turn/retrying` 按名撤回、generation 变化触发重读）与 `take_folded()`（状态 + 变更，
+> 一个订阅者需要的那一对）。契约加法：`AgentResource.prompt`/`recentActivity`（裁决②，
+> 两者进变更摘要），roster 三处读取面换 store；`buffer::refresh` 留在注册表并写明理由
+> （DM 徽章走 `pair_lane` 走史，store 不投影那个）。三处形状被迫改正：吸收的 prompt 由
+> 无主 `notice` 改为带 `from` 的 `peerMessage`（控制台第二个 walker 随之删除，B4 的"单走查器"落实）、
+> `ItemBody::Interruption` 有了生产者、turn 级错误码变 `String`。
+> 真机 smoke 18 项全过，并**修出一个只有真机能发现的缺陷**：`↪` steer 行原由控制台自己的
+> steering 闭包发出，与核流竞态，真终端画出 `the tool ans`·`↪ …`·`wered; done.`；
+> 改由 `queue/itemAbsorbed` 驱动后落回工具结果与回复之间。`!` 经权限弹窗后留 `⎿ Running…`
+> 的瑕疵**在本批父提交 3924f9c 上逐键复现**，确认非回归，留 B8。
+> 四门 + discipline 全绿；测试 1700→1703，黑盒 27 不变；`rg "B7 removes this"` **0**。
+>
+> **未做与理由（新墙，非 D150 的渲染论）**：`.now()` 15 处、配置双镜像、engine 挂接是**写入面**，
+> 卡在三件事上：① `serve_submit` 会把斜杠命令交给核执行，而 `/status`/`/model`/`/help` 是控制台的
+> *渲染*——控制台需要一个"核执行 Turn/Shell/Deliver、把 Command 交回"的 submit，
+> 即 `Controller::submit` 从"只裁决"变成"裁决并执行"；② 15 处里有 10 处不是 run loop 而是
+> **按键写入要回执**（invite/kick/stop/set_permission_mode/respond/reclaim_tail），消除它们要给
+> 控制台一条 intent 队列（按键记意图、async 循环执行并在下一帧前折入），~130 处 `chat.submit()`
+> 假定即时生效，是设计不是清账；③ digest 唤醒没有门（空 prose 被 `compose` 读成 `Empty`，
+> 乙案的 debounce 尚未进 controller），images/memory/`LiveBash` 同理。
+> 故建议 **B7d = 写入面**：`Controller::submit` 执行化 → 控制台 intent 队列 → 唤醒的门 →
+> 末尾挂 engine；`.now()` 在那里归零，配置双镜像随之。
+
 ### B8 · 收尾（S）
 `--print` 薄客户端；main.rs 启动统一；parity ledger 落成 CI 检查表（每个斜杠命令/提交分支/
 AppEvent 变体分类 shared|frontend-local，新增未分类即红）；schema 标 experimental；

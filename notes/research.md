@@ -8105,3 +8105,225 @@ plus its output.
 | core/engine config double mirror | unchanged — same wall |
 | `store.rs` `#![allow(dead_code)]` | kept, and now says it is the read-face inventory |
 | `rg "B7 removes this"` | **2**, the same two |
+
+## D151 — one door to the screen, and the wall the engine attachment still hits
+
+**What it lands.** The console's rows are built from what the core published.
+`tui_hooks` and `subagent_hooks` — the two adapters that turned an engine report
+into a `UiEvent` on its way past the actor — are gone, and `src/tui/chat_feed.rs`
+reads the change out of the store instead. `AgentResource` gains the two fields a
+roster row is made of, and the roster reads them. The store projects transcripts.
+
+**What it does not land.** The engine attached to the console's core. The
+console still calls `run_query` itself; `Answer::now()` still has fifteen
+production sites and the config double mirror is untouched. The reason is not
+the one D150 predicted either, and it is written up at the end.
+
+Five commits, four gates green after each, plus the discipline gate. **1700 →
+1703 unit**, 27 black-box unchanged. No test deleted; two rewritten in place
+against the path that replaced their subject, five added.
+
+### The report used to reach the screen twice
+
+```text
+ before                                            after
+ ───────                                           ─────
+ EngineEvent ─┬─▶ turns ─▶ actor ─▶ AppEvent       EngineEvent ─▶ turns ─▶ actor
+              │                     (nobody read)                          │
+              └─▶ tui_hooks ─▶ UiEvent ─▶ rows                          AppEvent
+                  subagent_hooks                                           │
+                                                                       Store.fold
+                                                                           │
+                                                                    chat_feed ─▶ rows
+```
+
+The second path was the shim, and it was a *whole second stream*: the actor was
+already sequencing every report, because a console turn has been bound to a core
+turn since B3 (`EngineHost::bound`) and an instance's turn since B4. D150 read
+the console's core as having nothing to publish because it has no engine; that is
+true of a turn the core *starts*, and the console's turns were never that — they
+were turns the core opened and the console ran. So the item stream was there all
+along, with no reader.
+
+`Store::take_folded` is what a reader needs beside a projection: the state *and*
+the change, which is the pair every subscriber to a JavaScript store gets.
+`chat_feed::read_frame` turns one published event into the console's own render
+vocabulary, and `Chat::route` — 700 lines of thinking-block aggregation, insert
+points, collapse groups and token meters — is untouched. That is deliberate:
+**the batch swaps the source, not the renderer**, so every row-level assertion in
+the suite is the guardrail it was written to be.
+
+| what the row is drawn from | before | now |
+| --- | --- | --- |
+| the turn opening and ending | `TurnBrackets` / the spawn | `turn/started` · `turn/completed` |
+| prose, reasoning | the sink's `TextDelta` / `ThinkingDelta` | `item/textDelta` · `item/reasoningDelta` |
+| a tool call | the sink's three events | `item/started` · `item/updated` · `item/completed` |
+| a round, a retry | the sink | `turn/roundCompleted` · `turn/retrying` |
+| context and output tokens | `tui_hooks`'s own accumulator | `turn/usageUpdated` + a per-page estimate in the feed |
+| the shell tail | the console's `LiveBash` callback | `item/commandTailUpdated` |
+| the interrupt marker | `finish_turn` | an `interruption` item the console commits before it closes the turn |
+| a run's warning | the sink, prefixed by the producer | `feedback/raised`, named by the conversation it is about |
+| the `↪` steer row | the console's steering closure | `queue/itemAbsorbed` |
+| a message that arrived | `AgentRegistry`'s event sink | the `peerMessage` item the core committed |
+| a turn-level error | the spawn's `Err` arm | the terminal state's `TurnError` |
+
+`UiEvent` survives the move and is now what it always was underneath: the
+console's own render vocabulary, produced nowhere outside `src/tui/`. What it is
+*not* any more is a layer anything else has to know about — `src/ui.rs` keeps the
+dialog types, the enum and one host builder, and `AgentRegistry` no longer holds
+an event sink at all.
+
+### Three shapes the move had to change
+
+1. **An absorbed prompt is a `peerMessage`, not a `notice`.** The core read one
+   inbound block with the one walker and then threw away what the walker knew,
+   filing every line as an authorless `notice` with a code. The console could not
+   draw a row from that — a room relay has a sender, and a client rendering the
+   line without it puts words in nobody's mouth. The walker's attribution now
+   survives into the log, which is also what let the console's *second* walker
+   (`conv::inbound_messages`) be deleted: one reader, as B4 intended.
+2. **`ItemBody::Interruption` has a producer.** The console echoed the exact
+   marker the transcript recorded straight onto its own channel; ordered against
+   the core's stream that would have raced the turn's ending. It is committed as
+   an item before the turn closes, so the screen and the model read the same
+   sentence in the same order — and a wire client sees it for the first time.
+3. **A turn-level error carries the code the contract gave it**, so
+   `UiEvent::Error.code` is a `String` rather than a `&'static str`. There is no
+   reverse table from a code string back to a literal, and inventing one to keep
+   a type would have been the tail wagging the dog.
+
+`TurnBrackets` opens an instance's core turn unconditionally now. It used to be
+conditional on the console having handed the registry a sink, which meant a
+session with no frontend ran instances the core knew nothing about.
+
+### `AgentResource` gets what a roster row says
+
+Ruling ② of the B7b-2 review, landed as the contract addition it was approved as:
+`prompt` and `recentActivity`, plus both in the change summary — a row whose
+`Running · Read src/lib.rs` never moved would report the first tool of a run for
+the rest of it, and that is a transition rate, not a token rate.
+
+With them there, `tree_instances`, the ctrl+b dialog, the dispatch sampler and
+the task panel's owner check all read `AgentResource`. `AgentStatus` loses the
+five fields nobody asks it for any more and the published roster loses its copy
+of the progress handle. **`buffer::refresh` stays**, and the code says why: its
+DM badge is measured by walking the instance's own message history through
+`pair_lane`, which is not what the store projects — moving the loop without the
+measure would be two sources for one row.
+
+### The store projects transcripts
+
+`View` gains a `Transcript` per conversation: the committed log, read through
+`conversation/read` beside the cut and appended to by `item/completed`, and the
+live set an item streams into until its terminal snapshot arrives. Nothing is
+ever in both. A retry withdraws exactly the identifiers `turn/retrying` names; a
+rewrite moves `historyGeneration` and takes the re-read the store already had,
+which is the path a `/compact` exercises.
+
+### Real-terminal smoke
+
+tmux, 120×40, a scripted Anthropic-protocol endpoint on loopback, an isolated
+`HOME`, a `.bingo/team.json` crew of two with one room. No tokens.
+
+| item | result |
+| --- | --- |
+| store attaches on the way in | **pass** — `4 conversation(s), 2 agent(s), 1 room(s)` |
+| main turn streaming | **pass** — reasoning block, text, "Baked for", context counter moved |
+| permission prompt | **pass** — modal with the command preview |
+| D81 session grant + `/permissions` | **pass** — `Bash(printf:*)` listed after "don't ask again" |
+| shell line | **pass** — `⎿ Done` + `third-run`, expanded, ungrouped (the standalone call) |
+| a shell line that fails | **pass** — `⎿ Failed` + the shell's own message |
+| queue while busy | **pass** — `> also check the lexer` · "Press up to edit queued messages" |
+| steer at a tool barrier | **pass** — and *fixed*: see below |
+| tool loop over two rounds | **pass** — `running it now.` · `Ran 1 bash command` · `the tool answered; done.` |
+| agent page, history | **pass** — `── @agent ──` with the task it was dispatched with above its reply |
+| agent page, live | **pass** — a DM typed on the page landed as `❯ …` and the reply streamed there |
+| dispatch row | **pass** — `◉ @agent: survey` · `⎿ Done (…)` · `● @agent completed · survey` |
+| room post + wake | **pass** — "Sent to #lobby", both members woken, main woken by digest |
+| room page + `@` from it | **pass** — `── #lobby ──` with the post; "Sent to @scout", badge `@scout •2` |
+| `/compact` on a room page | **pass** — "#lobby is a log, not a context" (D135a, the page it was typed on) |
+| `/compact` on main | **pass** — "✓ compacted 20 messages → summary + the latest 12", counter 217k → 1852 |
+| rooms restored on resume | **pass** — `/quit`, `--continue`, same three counts, the room's post back |
+| roster copy | **pass** — `Idle for 12s` truthful, `@scout •2` badge, `2 agents · 1 active shell` |
+
+**What the smoke found.** The `↪` steer row was drawn from the console's own
+steering closure while the reply's deltas came off the core's stream, so the two
+raced and a real terminal drew `the tool ans` · `↪ also check the lexer` ·
+`wered; done.` It is drawn from `queue/itemAbsorbed` now — the core commits the
+item the entry became and then names it — and the row lands between the tool
+result and the reply written with it. No unit test could have caught this: both
+producers are correct, and only one clock puts them in the wrong order.
+
+**What the smoke confirmed unchanged.** The `!` line that goes through the
+permission modal still leaves its tool row at `⎿ Running…` after approval. It was
+reproduced on this batch's parent (`3924f9c`) in a second tmux session, keystroke
+for keystroke, with the same result — pre-existing, unmoved by the source swap,
+and still B8's.
+
+### Two visible deltas, stated rather than hidden
+
+- **The live output estimate no longer counts a tool call's argument JSON.** The
+  old accumulator saw `ToolInputDelta`; the item stream has no delta for a
+  half-built argument, on purpose (spec: arguments are not an item's content).
+  The footer's figure is therefore slightly low while a call's input streams, and
+  exact from the round's authoritative count onward.
+- **A watch row's position inside a streaming message may differ by a few
+  characters.** It always could — the watch board and the run are two producers —
+  but the deltas now take one more hop than the board does. Nothing about which
+  message a row hangs on changed (D94/D114's rules are untouched).
+
+### The wall the engine attachment hits, and what it actually is
+
+Attaching `SessionEngine` to the console's core is still one line, and it is
+still not one line of work — but the reason has moved again. It is no longer the
+rendering: the console reads the core's stream now, so a turn the *core* started
+would draw itself. It is the **submission path**, and specifically its shape.
+
+`SubmitHandle::submit` answers what a line *is*; `serve_submit` (the wire's)
+answers it and then *does* it. The console cannot use the second one as it
+stands, for three reasons that are each real:
+
+1. **A slash command is not the core's to run for the console.** `serve_submit`
+   sends `Route::Command` to `serve_command_line`, which applies the action and
+   answers `NoChange` for a viewing command. The console's `/status`, `/model`,
+   `/help` and `/compact` are renderings, and they are the console's. So the
+   console needs a submit that performs `Turn`/`Shell`/`Deliver` and *hands back*
+   `Command` — which means `Controller::submit` performing what it currently only
+   decides, and `serve_submit` becoming a mapping over the result.
+2. **A key handler is `fn`, and a receipt is `async`.** Ten of the fifteen
+   remaining `Answer::now()` sites are not the run loop at all — `invite`,
+   `kick`, `stop`, `set_permission_mode`, `respond`, `reclaim_tail` — they are
+   writes made from a keypress that need the answer to draw the next line.
+   Removing them is not deleting a shim, it is giving the console an *intent
+   queue*: the key handler records what it asked for, the `async` loop performs
+   it and folds the answer before the next frame. That is a design with its own
+   test surface (~130 `chat.submit()` call sites assume the effect is immediate),
+   not an accounting item.
+3. **The digest wake has no door.** `submit_auto` opens a turn with no prose and
+   `TurnOrigin::Auto`; `compose` reads an empty line as `Composed::Empty`, so
+   there is no submission that means it. 乙案 (B4) said the debounce moves into
+   `app/controller`; it has not, and the console still holds the half that runs
+   the turn. The same is true of images (`Run::Turn` carries no attachments), of
+   the memory pass, and of the console's `LiveBash`, whose other half is ctrl+b.
+
+So the honest split is: **B7c (this record)** is the read face, complete — one
+door to the screen, the roster on the contract, the transcript in the store —
+and **B7d** is the write face: `Controller::submit` performing what it decides,
+the console's intent queue, the digest wake's door, and the engine attached at
+the end of it. `Answer::now()` reaches zero there and not before, and the config
+double mirror goes with it, because `/model` writing `runtime.model_tx` is a
+write like any other.
+
+### Where the shims stand
+
+| shim | state |
+| --- | --- |
+| `tui_hooks` / `subagent_hooks` | **gone** |
+| `AgentRegistry`'s event sink (`set_events` / `sink_for`) | **gone** |
+| `conv::inbound_messages` (the console's second walker) | **gone** |
+| `Chat::supervise_turn` | **gone** — a lost turn is a terminal state with no reason |
+| `AgentResource` missing `recentActivity` / `prompt` | **gone** (B7b-2 ruling ②) |
+| `Answer::now()` in `src/tui/` | 15 production sites — the write face, B7d |
+| core/engine config double mirror | unchanged — same face |
+| `store.rs` `#![allow(dead_code)]` | kept: the read face still has readers to come |
+| `rg "B7 removes this"` | **0** |
