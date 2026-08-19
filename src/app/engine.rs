@@ -19,7 +19,9 @@
 
 use std::sync::Arc;
 
-use crate::app::ids::{ItemId, TurnId};
+use crate::app::command::Action;
+use crate::app::conversation::ConvKey;
+use crate::app::ids::{ItemId, OperationId, TurnId};
 
 /// One piece of work the core accepted and cannot do itself.
 #[derive(Debug, Clone, PartialEq)]
@@ -48,6 +50,27 @@ pub enum Run {
     /// — a runner that checks late still sees it — and this is what reaches the
     /// stream that is open right now.
     Interrupt { turn: TurnId },
+    /// One action whose work needs a model, a transcript rewrite or a network
+    /// round trip.
+    ///
+    /// The core has already decided it may run and named the operation it runs
+    /// under; what is left is the part that leaves the process, and its report
+    /// comes back the way an operation's always does.
+    Act(Box<Act>),
+}
+
+/// An action the core accepted and handed over.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Act {
+    /// The work's identity: progress and the one terminal state are reported
+    /// against it. `None` when the work opens its own further down, which is
+    /// what bringing a team up does.
+    pub operation: Option<OperationId>,
+    /// The page it was asked on. A `/compact` queued on an instance's page
+    /// summarises that instance's history, not whatever is on screen when it
+    /// runs (D135a), and the report lands there too.
+    pub on: ConvKey,
+    pub action: Action,
 }
 
 /// What a room post left for the engine to finish.

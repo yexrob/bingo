@@ -397,168 +397,46 @@ impl super::Chat {
     /// the *viewed* agent's permission mode, and this is the one command where
     /// the precedent is worth its cost.
     pub(super) fn slash_compact(&mut self, on: &crate::ui::ConvKey) {
-        match on.clone() {
-            crate::ui::ConvKey::Agent(name) => self.compact_agent(name),
-            // A room is a log, not a turn loop: there is no context behind it
-            // to summarise, and quietly compacting the console's instead would
-            // be the exact wrong-target loss this ruling exists to prevent.
-            crate::ui::ConvKey::Room(room) => self.push_slash_info(format!(
-                "#{room} is a log, not a context: nothing to compact"
-            )),
-            crate::ui::ConvKey::Main => self.compact_console(),
-        }
-    }
-
-    /// Compact the context of the instance whose page is up.
-    ///
-    /// Its history lives in the registry rather than in a transcript file, so
-    /// the rewrite is read-summarise-write and the write is refused while a
-    /// turn is running ([`crate::agents::AgentHandle::replace_history`]).
-    fn compact_agent(&mut self, name: String) {
-        let Some((history, _, state)) = self.session.agents.view_of(&name) else {
-            self.push_slash_error(format!(
-                "[error] code={} msg=no instance named {name}",
-                crate::error::SLASH_ERROR_BAD_ARGUMENT
-            ));
-            return;
+        use crate::engine::actions;
+        let plan = match actions::plan_compaction(&self.session, on) {
+            Ok(plan) => plan,
+            Err(said) => return self.say(said),
         };
-        if state == crate::agents::AgentState::Running {
-            self.push_slash_error(format!(
-                "[error] code={} msg=@{name} is mid-turn and owns the history a compaction would rewrite (esc to stop it, then retry)",
-                crate::error::SLASH_ERROR_BAD_ARGUMENT
-            ));
-            return;
-        }
-        // Same floor the loop's own gate applies, reported as what it is.
-        if history.len() <= crate::compact::KEEP_RECENT {
-            self.push_slash_output(format!(
-                "@{name}'s context is too short; no compaction needed."
-            ));
-            return;
-        }
-        let Some(session) = self.session.agents.session_of(&name) else {
-            // Deleted between the two reads. Every other exit here speaks, and a
-            // keystroke that silently did nothing is what the queue-info line
-            // was added for.
-            self.push_slash_error(format!("no instance named {name}"));
-            return;
-        };
-        let registry = self.session.agents.clone();
-        // The tiers are the console's and answer on whatever page is up; the
-        // window figure is the *instance's* and belongs to the instance's own
-        // footer, so it travels on a sink bound to that conversation.
-        let console = self.events.clone();
-        let page = self
-            .events
-            .bound_to(crate::ui::ConvKey::Agent(name.clone()));
         // Keyed by instance: the console's own compaction uses the bare id, and
         // one pin for both meant whichever finished first unpinned the other's
         // progress line — the silence the pin exists to prevent (D135a).
-        let pin = format!("compact:@{name}");
-        self.pin_panel(&pin, vec![format!("⏳ compacting @{name}'s context…")]);
+        let pin = match &plan.instance {
+            Some(name) => format!("compact:@{name}"),
+            None => "compact".to_string(),
+        };
+        self.pin_panel(&pin, vec![plan.waiting.clone()]);
+        let session = self.session.clone();
+        // The tiers are the console's and answer on whatever page is up; the
+        // window figure is the compacted context's and belongs to that page's
+        // own footer, so it travels on a sink bound to it.
+        let console = self.events.clone();
+        let page = self.events.bound_to(on.clone());
         tokio::spawn(async move {
-            let unpin = || {
-                console.send(UiEvent::Unpin { id: pin.clone() });
-            };
-            let mut messages = history;
-            let old_len = messages.len();
-            let compacted =
-                crate::compact::maybe_compact(&session, &mut messages, u64::MAX, &mut |_| {}).await;
-            if !compacted {
-                unpin();
-                console.send(UiEvent::SlashError(
-                    "compaction failed (model call error).".to_string(),
-                ));
-                return;
+            let done = actions::compact(session, plan).await;
+            if let Some(usage) = done.usage {
+                page.send(UiEvent::ContextUsage(usage));
             }
-            let kept = messages.len().saturating_sub(1);
-            let tokens = crate::compact::estimate_tokens(&session.system, &messages, &[]);
-            if !registry.replace_history(&name, messages).await {
-                unpin();
-                console.send(UiEvent::SlashError(format!(
-                    "@{name} started a turn while it was being compacted; its context is unchanged."
-                )));
-                return;
-            }
-            page.send(UiEvent::ContextUsage(
-                crate::context_usage::ContextUsage::for_model(
-                    tokens,
-                    &session.client.models(),
-                    &session.runtime.model.borrow().clone(),
-                ),
-            ));
-            unpin();
-            console.send(UiEvent::SlashInfo(format!(
-                "✓ compacted @{name}: {old_len} messages → summary + the latest {kept}."
-            )));
+            console.send(UiEvent::Unpin { id: pin });
+            console.send(match done.said.tier {
+                actions::Tier::Error => UiEvent::SlashError(done.said.text),
+                actions::Tier::Info => UiEvent::SlashInfo(done.said.text),
+                actions::Tier::Output => UiEvent::SlashOutput(done.said.text),
+            });
         });
     }
 
-    fn compact_console(&mut self) {
-        let session = self.session.clone();
-        let events = self.events.clone();
-        // Long operation (a full model call): pinned until the flow resolves —
-        // a 2s hint left the rest of the wait silent.
-        self.pin_panel("compact", vec!["⏳ compacting the context…".to_string()]);
-        tokio::spawn(async move {
-            let unpin = || {
-                events.send(UiEvent::Unpin {
-                    id: "compact".to_string(),
-                });
-            };
-            let transcript = session.runtime.transcript.borrow().clone();
-            let mut messages = match &transcript {
-                Some(t) => t.load_messages().unwrap_or_default(),
-                None => Vec::new(),
-            };
-            // Same floor maybe_compact applies, so "too short" is reported as
-            // that and not as a model-call failure.
-            if messages.len() <= crate::compact::KEEP_RECENT {
-                unpin();
-                events.send(UiEvent::SlashOutput(
-                    "the conversation is too short; no compaction needed.".to_string(),
-                ));
-                return;
-            }
-            let old_len = messages.len();
-            // The slash command reports its own outcome below, so the shared
-            // notification channel stays quiet here.
-            let compacted =
-                crate::compact::maybe_compact(&session, &mut messages, u64::MAX, &mut |_| {}).await;
-            if !compacted {
-                unpin();
-                events.send(UiEvent::SlashError(
-                    "compaction failed (model call error).".to_string(),
-                ));
-                return;
-            }
-            let summary = messages
-                .first()
-                .map(|m| {
-                    m.content
-                        .iter()
-                        .filter_map(|b| match b {
-                            crate::api::types::ContentBlock::Text { text } => Some(text.clone()),
-                            _ => None,
-                        })
-                        .collect::<Vec<_>>()
-                        .join("\n")
-                })
-                .unwrap_or_default();
-            // Persistence happened inside compact() as an appended marker; the
-            // canonical lines are untouched (D74).
-            events.send(UiEvent::ContextUsage(
-                crate::context_usage::ContextUsage::for_model(
-                    crate::compact::estimate_tokens(&session.system, &messages, &[]),
-                    &session.client.models(),
-                    &session.runtime.model.borrow().clone(),
-                ),
-            ));
-            unpin();
-            let kept = messages.len().saturating_sub(1);
-            events.send(UiEvent::SlashInfo(format!(
-                "✓ compacted {old_len} messages → summary + the latest {kept}.\nSummary: {summary}"
-            )));
-        });
+    /// One line of an action's own report, in the tier it asked for.
+    pub(super) fn say(&mut self, said: crate::engine::actions::Said) {
+        use crate::engine::actions::Tier;
+        match said.tier {
+            Tier::Error => self.push_slash_error(said.text),
+            Tier::Info => self.push_slash_info(said.text),
+            Tier::Output => self.push_slash_output(said.text),
+        }
     }
 }

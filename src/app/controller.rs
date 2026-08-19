@@ -90,6 +90,11 @@ pub(crate) enum Control {
     Mail(crate::app::mail::MailMsg),
     /// Work that is not a turn, starting, reporting, or ending.
     Operation(crate::app::operation::OperationMsg),
+    /// What one piece of that work produced, for the page it was asked on.
+    Record {
+        conversation: ConvKey,
+        body: Box<crate::app::snapshot::ItemBody>,
+    },
     /// What the MCP manager stands at. Connection state is the manager's, and it
     /// lives outside the actor, so it is reported in rather than read out.
     Mcp(Vec<crate::app::snapshot::McpServerState>),
@@ -543,6 +548,9 @@ impl Controller {
                     let changes = self.operations.handle(message, &mut self.mint);
                     self.announce_operations(changes);
                 }
+                Control::Record { conversation, body } => {
+                    self.commit_body(&conversation, *body);
+                }
                 Control::Mcp(states) => self.report_mcp(states),
                 Control::Engine(engine) => self.engine = Some(engine),
                 Control::Submit { request, reply } => {
@@ -719,7 +727,10 @@ impl Controller {
         {
             return Err(AppError::Refused(ProtocolErrorKind::StaleRevision));
         }
-        let status = self.apply_action(action)?;
+        let Some(on) = self.conversations.key(origin).cloned() else {
+            return Err(AppError::Refused(ProtocolErrorKind::ConversationNotFound));
+        };
+        let status = self.apply_action(&on, action)?;
         let revision = spec
             .precondition
             .map(|scope| crate::app::snapshot::ResourceRevision {
@@ -750,14 +761,67 @@ impl Controller {
         }
     }
 
-    /// Perform one action the core owns outright.
+    /// Accept one piece of work that is not a turn, and name it.
     ///
-    /// Every arm here changes state this loop holds. The ones that need a model,
-    /// a transcript rewrite or a network round trip never reach it: their spec
-    /// says they need an engine, and `action/list` says so too rather than
-    /// letting a client find out by failing (B7 attaches the engine).
+    /// Called from inside the loop, so the registry is reached directly rather
+    /// than through its handle: a message to itself would be answered after the
+    /// engine already had the work.
+    fn open_operation(
+        &mut self,
+        kind: crate::app::snapshot::OperationKind,
+        on: &ConvKey,
+    ) -> crate::app::ids::OperationId {
+        let conversation = self.conversations.id(&mut self.mint, on);
+        let (reply, answer) = oneshot::channel();
+        let changes = self.operations.handle(
+            crate::app::operation::OperationMsg::Start {
+                kind,
+                conversation: Some(conversation),
+                reply,
+            },
+            &mut self.mint,
+        );
+        self.announce_operations(changes);
+        crate::app::answer::Answer::new(answer, crate::app::ids::OperationId::new(String::new()))
+            .now()
+    }
+
+    /// Hand one action's work to the engine, under an operation of its own.
+    ///
+    /// The split is the same one a turn gets (B4 ruling ②): the core decides the
+    /// action may run, opens the work and owns its lifecycle; the model call, the
+    /// transcript rewrite and the network round trip leave through `Engine`.
+    /// `kind` is `None` for work that opens its own operation further down —
+    /// bringing a team up is one operation whether the core or a tool asked for
+    /// it, and a second wrapper around it would be two rows for one thing.
+    fn hand_over(
+        &mut self,
+        on: &ConvKey,
+        kind: Option<crate::app::snapshot::OperationKind>,
+        action: crate::app::command::Action,
+    ) -> Result<crate::app::command::ActionResultStatus, AppError> {
+        let engine = self.engine()?;
+        let operation = kind.map(|kind| self.open_operation(kind, on));
+        engine.run(crate::app::engine::Run::Act(Box::new(
+            crate::app::engine::Act {
+                operation,
+                on: on.clone(),
+                action,
+            },
+        )));
+        Ok(crate::app::command::ActionResultStatus::Applied)
+    }
+
+    /// Perform one action.
+    ///
+    /// Most arms change state this loop holds and are done by the time they
+    /// return. The rest need a model, a transcript rewrite or a network round
+    /// trip: those open an operation and hand the work to the engine, which is
+    /// why a core without one refuses them by name rather than accepting work it
+    /// cannot do.
     fn apply_action(
         &mut self,
+        on: &ConvKey,
         action: crate::app::command::Action,
     ) -> Result<crate::app::command::ActionResultStatus, AppError> {
         use crate::app::command::{Action, ActionResultStatus};
@@ -888,6 +952,11 @@ impl Controller {
                 engine.run(crate::app::engine::Run::Promote { item: item_id });
                 Ok(ActionResultStatus::Applied)
             }
+            compact @ Action::ConversationCompact { .. } => self.hand_over(
+                on,
+                Some(crate::app::snapshot::OperationKind::Compact),
+                compact,
+            ),
             // Everything else needs the engine, and its spec said so before it
             // got here.
             _ => Err(unavailable()),
@@ -1411,14 +1480,12 @@ impl Controller {
     fn availability(&self) -> crate::app::action::Availability {
         crate::app::action::Availability {
             console_busy: self.turns.is_busy(&ConvKey::Main),
-            // Not `self.engine.is_some()`, and the difference is the honest one:
-            // an attached engine is not the same thing as an action table that
-            // can *use* it. Thirteen actions — compact, rewind, share, the team
-            // family, a skill invocation — are still implemented in the console
-            // and answer `unavailable` here, so saying they were available would
-            // be a promise `action/execute` then breaks. B7d's record says what
-            // has to move for this to become the attachment.
-            engine_attached: false,
+            // The attachment itself, at last. It stood at a constant `false` for
+            // as long as the thirteen actions that need a model were implemented
+            // in the console rather than here: `action/list` may not advertise
+            // what `action/execute` then refuses. They are the core's now, so the
+            // answer is the plain one again.
+            engine_attached: self.engine.is_some(),
         }
     }
 

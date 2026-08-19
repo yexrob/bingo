@@ -6,5 +6,6 @@
 //! answer itself. [`runner`] is the other direction — the session actor asking
 //! for a run rather than a run reporting into it.
 
+pub mod actions;
 pub mod events;
 pub mod runner;

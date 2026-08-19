@@ -284,6 +284,19 @@ fn conversation_of(session: &Session) -> crate::ui::ConvKey {
     }
 }
 
+/// Compact now, whatever the context stands at.
+///
+/// `maybe_compact` is the automatic gate; this is the one a user asked for, and
+/// it hands back what the rewrite actually did rather than whether it happened —
+/// the numbers are what a compaction item is made of (spec "Item").
+pub async fn compact_now(
+    session: &Session,
+    messages: &mut Vec<Message>,
+    notify: CompactNotify<'_>,
+) -> Option<CompactOutcome> {
+    compact(session, messages, notify).await
+}
+
 async fn compact(
     session: &Session,
     messages: &mut Vec<Message>,

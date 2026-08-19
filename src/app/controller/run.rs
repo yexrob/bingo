@@ -704,6 +704,49 @@ mod tests {
         assert!(core.turns().view().is_busy(&ConvKey::Main));
     }
 
+    /// A slash line that needs the engine survives the queue.
+    ///
+    /// This is the silent failure B7d found: the drain applies a queued command
+    /// through the same action table a typed one goes through, and every action
+    /// that needs a model used to fall through to `ActionUnavailable` there —
+    /// so a `/compact` typed behind a running turn did nothing at all, and said
+    /// nothing about it either.
+    #[tokio::test]
+    async fn a_queued_compaction_is_performed_when_the_queue_drains() {
+        let (core, engine) = running();
+        let mut link = attached(&core).await;
+        let first = match submit(&mut link, 9, "first").await {
+            Ok(AppReply::Submitted(SubmitDisposition::TurnStarted { turn_id })) => turn_id,
+            other => panic!("expected a turn, got {other:?}"),
+        };
+        assert!(
+            matches!(
+                submit(&mut link, 10, "/compact").await,
+                Ok(AppReply::Submitted(SubmitDisposition::Queued { .. }))
+            ),
+            "a compaction waits: it rewrites what the running turn is reading"
+        );
+        let _ = drain(&mut link).await;
+        core.turns().close(first, TurnStatus::Completed, None);
+        let events = drain(&mut link).await;
+        match engine.taken().as_slice() {
+            [Run::Turn { .. }, Run::Act(act)] => {
+                assert_eq!(
+                    act.action,
+                    crate::app::command::Action::ConversationCompact { instructions: None }
+                );
+                assert_eq!(act.on, ConvKey::Main, "on the page it was typed on (D135a)");
+                assert!(act.operation.is_some(), "under an operation of its own");
+            }
+            other => panic!("expected the queued compaction to be handed over, got {other:?}"),
+        }
+        let opened = events.iter().any(|event| {
+            matches!(&event.payload, AppEventPayload::OperationStarted(started)
+                if started.operation.kind == crate::app::snapshot::OperationKind::Compact)
+        });
+        assert!(opened, "and the client is told it is running: {events:#?}");
+    }
+
     /// A core with no engine keeps the console's arrangement: it queues, and the
     /// drain is not its to run.
     #[tokio::test]

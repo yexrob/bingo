@@ -17,12 +17,14 @@ use crate::app::answer::Answer;
 use crate::app::controller::Control;
 use crate::app::ids::{IdMint, OperationId, now_millis};
 use crate::app::snapshot::{
-    Operation, OperationKind, OperationProgress, OperationStatus, TurnError,
+    ItemBody, Operation, OperationKind, OperationProgress, OperationStatus, TurnError,
 };
 
 pub(crate) enum OperationMsg {
     Start {
         kind: OperationKind,
+        /// The page it was asked on, when it was asked on one.
+        conversation: Option<crate::app::ids::ConversationId>,
         reply: oneshot::Sender<OperationId>,
     },
     Progress {
@@ -70,11 +72,17 @@ impl OperationHandle {
     }
 
     /// Accept a piece of work and name it.
-    pub fn start(&self, kind: OperationKind) -> Answer<OperationId> {
+    pub fn start(
+        &self,
+        kind: OperationKind,
+        conversation: Option<crate::app::ids::ConversationId>,
+    ) -> Answer<OperationId> {
         let (reply, answer) = oneshot::channel();
-        let _ = self
-            .control
-            .send(Control::Operation(OperationMsg::Start { kind, reply }));
+        let _ = self.control.send(Control::Operation(OperationMsg::Start {
+            kind,
+            conversation,
+            reply,
+        }));
         Answer::new(answer, OperationId::new(""))
     }
 
@@ -99,6 +107,19 @@ impl OperationHandle {
             error,
         }));
     }
+
+    /// Write what the work produced into the page it was asked on.
+    ///
+    /// An operation says that something is happening and when it stopped; what
+    /// it *did* is an item in a conversation's log, because that is where a
+    /// client reads the history of a session rather than the state of its
+    /// background work. The two together are one report.
+    pub fn record(&self, conversation: crate::app::conversation::ConvKey, body: ItemBody) {
+        let _ = self.control.send(Control::Record {
+            conversation,
+            body: Box::new(body),
+        });
+    }
 }
 
 impl OperationRegistry {
@@ -108,16 +129,20 @@ impl OperationRegistry {
         mint: &mut IdMint,
     ) -> Vec<OperationChange> {
         match message {
-            OperationMsg::Start { kind, reply } => {
+            OperationMsg::Start {
+                kind,
+                conversation,
+                reply,
+            } => {
                 let id: OperationId = mint.mint();
                 let operation = Operation {
                     id: id.clone(),
                     kind,
                     status: OperationStatus::Running,
-                    // An operation that belongs to a page is B5's: the actions
-                    // that carry an origin conversation land there, and inventing
-                    // the field's meaning here would be deciding it early.
-                    conversation_id: None,
+                    // The page it was asked on, which is where its report lands:
+                    // an action carries its origin conversation (D135a), and work
+                    // nobody asked for on a page carries none.
+                    conversation_id: conversation,
                     progress: None,
                     started_at: now_millis(),
                     completed_at: None,
@@ -199,6 +224,7 @@ mod tests {
         registry.handle(
             OperationMsg::Start {
                 kind: OperationKind::TeamStart,
+                conversation: None,
                 reply,
             },
             mint,

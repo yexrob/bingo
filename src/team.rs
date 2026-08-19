@@ -1125,7 +1125,7 @@ pub fn spawn_tree(
     validate_tree(tree, session, home)?;
     let operation = session
         .operations
-        .start(crate::app::snapshot::OperationKind::TeamStart)
+        .start(crate::app::snapshot::OperationKind::TeamStart, None)
         .now();
     let mut summary = SpawnSummary::default();
     // The name a member ends up running under, when the registry had to claim a

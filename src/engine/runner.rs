@@ -245,6 +245,18 @@ impl Engine for SessionEngine {
                     live.promote();
                 }
             }
+            Run::Act(act) => self.act(*act),
         }
+    }
+}
+
+impl SessionEngine {
+    /// One action's work, from the operation the core opened to the item it
+    /// leaves in the page it was asked on.
+    fn act(&self, act: crate::app::engine::Act) {
+        let session = self.session.clone();
+        self.runtime.spawn(async move {
+            crate::engine::actions::perform(&session, act).await;
+        });
     }
 }

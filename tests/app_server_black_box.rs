@@ -485,12 +485,28 @@ fn the_actions_the_core_owns_are_applied_and_the_rest_say_why_not() {
         .filter(|action| action["available"] == json!(false))
         .collect();
     assert!(
-        !unavailable.is_empty()
-            && unavailable
-                .iter()
-                .all(|action| action["unavailableReason"].is_string()),
+        unavailable
+            .iter()
+            .all(|action| action["unavailableReason"].is_string()),
         "an unavailable action says why: {unavailable:?}"
     );
+    // A session with an engine offers the actions that need one. The constant
+    // that stood here said `false` for as long as those thirteen lived in the
+    // console; `action/list` may not advertise what `action/execute` refuses,
+    // and it may not hide what it would accept either.
+    for id in [
+        "conversation.compact",
+        "session.share",
+        "team.start",
+        "provider.login",
+    ] {
+        assert!(
+            actions
+                .iter()
+                .any(|action| action["id"] == json!(id) && action["available"] == json!(true)),
+            "{id} needs the engine this session has: {actions:?}"
+        );
+    }
     // Backgrounding the foreground command is always reachable: what it depends
     // on is a moment rather than a capability, so a session with nothing running
     // answers `noChange` instead of being told the key does not exist.
@@ -578,8 +594,10 @@ fn the_actions_the_core_owns_are_applied_and_the_rest_say_why_not() {
     );
     assert_eq!(code_of(&nowhere), "BAD_ARGUMENT");
 
-    // One that needs a model, refused before it starts.
-    let refused = server.call(
+    // One that needs a model: accepted, and its progress is an operation rather
+    // than a reply the client waits on. This conversation is too short to
+    // summarise, which is the compactor's own answer and not a refusal.
+    let compact = server.call(
         24,
         "action/execute",
         json!({
@@ -587,7 +605,27 @@ fn the_actions_the_core_owns_are_applied_and_the_rest_say_why_not() {
             "action": {"type": "conversationCompact"}
         }),
     );
-    assert_eq!(code_of(&refused), "ACTION_UNAVAILABLE");
+    assert_eq!(
+        compact["result"]["disposition"]["result"]["status"],
+        json!("applied"),
+        "{compact}"
+    );
+    let frames = server.until("operation/completed");
+    let started = of(&frames, "operation/started");
+    assert!(
+        started.iter().any(
+            |frame| frame["params"]["operation"]["kind"] == json!("compact")
+                && frame["params"]["operation"]["conversationId"] == main
+        ),
+        "the work is announced against the page it was asked on: {started:?}"
+    );
+    let said = of(&frames, "item/completed").into_iter().any(|frame| {
+        frame["params"]["item"]["type"] == json!("notice")
+            && frame["params"]["item"]["text"]
+                .as_str()
+                .is_some_and(|text| text.contains("too short"))
+    });
+    assert!(said, "and what it did is an item: {frames:#?}");
 
     // A stale precondition loses rather than overwrites.
     let stale = server.call(
