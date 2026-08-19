@@ -246,6 +246,23 @@ Chat/App 管线换 AppLink 帧，删全部 shim；TuiEvent 本地化；按键动
 **验收**：四门绿 + TUI 域测试全绿 + **真机 smoke 清单**（main turn、agent 页直播、房间收发、
 权限弹窗、queue/steer、/compact、resume 后房间恢复）——smoke 结果如实记录，未跑项列明。
 
+> **B7 拆分（2026-08-19）**：实施中判定本批需拆两段，按任务书守则停下报告而非硬吞。
+>
+> **B7a · engine 上 wire（D148，已合 dev，五提交）**：`app/engine.rs` 一个单方法 trait +
+> `engine/runner.rs` 一个实现；`conversation/submit` 的 `Turn`/`Shell`/`Deliver` 三路全部服务
+> （核内做 item/turn/deposit/post，engine 做 model/shell/wake，B4 裁决②的线落成代码）；
+> app-server 装配真 `Session` 并 attach；turn 结束时核内 drain 队列（仅在有 engine 时）；
+> `EngineEvent::CommandTail` 给 `item/commandTailUpdated` 补上生产者；`warn_sink` 改走 `emit`。
+> 黑盒补六场景（脚本 provider on loopback）。B5 裁决⑤核验完成：**TUI /permissions 确实展示
+> D81 session 授权**（真机确认），故 `config/read` 已跟上（`sessionScoped: true`，不持久化）；
+> 遗留 B8：控制台那行 "(.bingo/settings.json)" 表头对 session 授权是假话。
+> `controller.rs` 4214 → 2812（拆 `resources.rs`/`tests.rs`/`run.rs`），线债已清。
+>
+> **B7b · TUI 换帧（待做）**：shim 清零（`Answer::now` 19 处生产调用点在同步按键/渲染路径、
+> ~60 处 `watch::Receiver` 每帧拉取需先建本地投影、`UiEvent`→`AppEvent` 15 个语义臂、
+> 56 处测试用 `conv.busy` 伪造运行中回合）、`chat.rs` 线债、三项需要 instance 的真机 smoke
+> （agent 页直播、房间收发与 @、tool barrier steer）。理由与尺寸见 D148 末节。
+
 ### B8 · 收尾（S）
 `--print` 薄客户端；main.rs 启动统一；parity ledger 落成 CI 检查表（每个斜杠命令/提交分支/
 AppEvent 变体分类 shared|frontend-local，新增未分类即红）；schema 标 experimental；
