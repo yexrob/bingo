@@ -263,6 +263,16 @@ Chat/App 管线换 AppLink 帧，删全部 shim；TuiEvent 本地化；按键动
 > 56 处测试用 `conv.busy` 伪造运行中回合）、`chat.rs` 线债、三项需要 instance 的真机 smoke
 > （agent 页直播、房间收发与 @、tool barrier steer）。理由与尺寸见 D148 末节。
 
+> **B7a review 裁决（2026-08-19，Fable）**：① 拆批核准——止步报告优于硬吞，B7a 自含且 TUI
+> 行为位相同。② 对开放问题的裁决：**B7b 照常进行，不需要重新规划**。frame-pull/push 的
+> "错配"有标准解：TUI 本地 **store**（客户端 reducer——快照 + AppEvent 物化成本地投影，
+> 渲染/按键同步读它，检测到 seq 空洞即重读快照 resync）。这不是逻辑复制——store 不含业务
+> 规则，只是物化视图，GUI 客户端将来在 JS 里建的是同一个东西；这正是本协议的客户端形态。
+> ③ 三个实现发现（输入 item 双落修复、`quiet` 是成帧契约、warn_sink 绕 actor 修复）核准；
+> parity 核验结论核准（session 授权两侧都见，`(.bingo/settings.json)` 标头谎言转 B8）。
+> ④ D 编号：B7b 取 **D149**；追加预留 **D150–D152**（B8 与溢出）。⑤ agents.rs 仍超 4000 线，
+> B7b/B8 收敛或报告距离。
+
 ### B8 · 收尾（S）
 `--print` 薄客户端；main.rs 启动统一；parity ledger 落成 CI 检查表（每个斜杠命令/提交分支/
 AppEvent 变体分类 shared|frontend-local，新增未分类即红）；schema 标 experimental；
