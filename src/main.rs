@@ -257,37 +257,10 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         settings.cache_control.unwrap_or(false),
         &project_dir,
     );
-    // The crew pinned to this project, and the rule that decides between giving a member
-    // work and hiring someone new (D53). A system block rather than a tool description:
-    // compaction rewrites the message history and leaves `Session::system` alone, so the
-    // routing rule is still there on turn fifty, when the roster matters most. The whole
-    // tree is named (D54) — a department main cannot see is one it will re-hire.
-    if let Ok(Some(tree)) = crate::team::load_team_tree(&project_dir) {
-        system.push(crate::api::contract::SystemBlock {
-            text: crate::team::crew_note(&tree, &home),
-            cache: settings.cache_control.unwrap_or(false),
-        });
-    }
-    // Main's half of the room etiquette (D119): its room lines arrive inside
-    // the <messages> envelope with nothing else explaining them, and the base
-    // prompt's instinct — talk to the user — is exactly the narration flood
-    // the note forbids. Same gate and same system-block reasoning as the
-    // member-side CHANNEL_NOTE.
-    if settings.experimental.agent_channels {
-        system.push(crate::api::contract::SystemBlock {
-            text: crate::tool::agent_notes::MAIN_CHANNEL_NOTE.to_string(),
-            cache: settings.cache_control.unwrap_or(false),
-        });
-    }
-    // Inject this project's active experience index at session start (≤10 lines;
-    // full entries via ExperienceQuery and applied-use feedback via ExperienceOutcome).
-    let experience_index = crate::tool::experience::session_index(&home, &project_dir);
-    if !experience_index.is_empty() {
-        system.push(crate::api::contract::SystemBlock {
-            text: format!("Project experience (reusable patterns from past sessions):\n{experience_index}\n(Query full details with ExperienceQuery; after applying one, record verified helpful/harmful evidence with ExperienceOutcome; propose new ones with ExperiencePropose)"),
-            cache: settings.cache_control.unwrap_or(false),
-        });
-    }
+    // The crew note, room etiquette and experience index — shared with the
+    // app-server frontend (D156), because a prompt block only the console
+    // pushes is a fourth answer the parity ledger would never see.
+    crate::system::push_main_extras(&mut system, &home, &project_dir, &settings);
 
     // Startup notes for the TUI: everything printed to stderr before the
     // alternate screen opens is wiped by it — the fullscreen (default) host

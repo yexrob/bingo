@@ -326,6 +326,10 @@ fn attach_engine(
         settings.cache_control.unwrap_or(false),
         cwd,
     );
+    // The crew note, room etiquette and experience index (D156): the console
+    // always pushed these and this frontend never did, so a GUI session ran
+    // without the crew routing rule or the project's experience.
+    crate::system::push_main_extras(&mut system, &boot.home, cwd, settings);
     system.push(crate::system::model_capability_block(
         &model,
         &runtime.provider.borrow().clone(),

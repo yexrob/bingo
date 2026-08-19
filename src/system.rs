@@ -198,6 +198,54 @@ pub fn build_system(
     blocks
 }
 
+/// The main session's project blocks beyond [`build_system`]: the crew pinned
+/// to this project (D53), main's half of the room etiquette (D119), and the
+/// active experience index. One assembly for every frontend (D156) — the
+/// console grew these one campaign at a time and the app-server's session
+/// never heard, so a GUI turn ran without the crew routing rule, the room
+/// etiquette, or the project's experience. Pushed between [`build_system`] and
+/// the model-capability block, the order `main.rs` always used.
+pub fn push_main_extras(
+    system: &mut Vec<SystemBlock>,
+    home: &Path,
+    cwd: &Path,
+    settings: &crate::settings::Settings,
+) {
+    let cache = settings.cache_control.unwrap_or(false);
+    // The crew, and the rule that decides between giving a member work and
+    // hiring someone new (D53). A system block rather than a tool description:
+    // compaction rewrites the message history and leaves the system prompt
+    // alone, so the routing rule is still there on turn fifty, when the roster
+    // matters most. The whole tree is named (D54) — a department main cannot
+    // see is one it will re-hire.
+    if let Ok(Some(tree)) = crate::team::load_team_tree(cwd) {
+        system.push(SystemBlock {
+            text: crate::team::crew_note(&tree, home),
+            cache,
+        });
+    }
+    // Main's half of the room etiquette (D119): its room lines arrive inside
+    // the <messages> envelope with nothing else explaining them, and the base
+    // prompt's instinct — talk to the user — is exactly the narration flood
+    // the note forbids. Same gate and same system-block reasoning as the
+    // member-side CHANNEL_NOTE.
+    if settings.experimental.agent_channels {
+        system.push(SystemBlock {
+            text: crate::tool::agent_notes::MAIN_CHANNEL_NOTE.to_string(),
+            cache,
+        });
+    }
+    // This project's active experience index (≤10 lines; full entries via
+    // ExperienceQuery and applied-use feedback via ExperienceOutcome).
+    let experience_index = crate::tool::experience::session_index(home, cwd);
+    if !experience_index.is_empty() {
+        system.push(SystemBlock {
+            text: format!("Project experience (reusable patterns from past sessions):\n{experience_index}\n(Query full details with ExperienceQuery; after applying one, record verified helpful/harmful evidence with ExperienceOutcome; propose new ones with ExperiencePropose)"),
+            cache,
+        });
+    }
+}
+
 /// The `# Model capabilities` heading — the stable marker callers use to
 /// find and replace the block when the active model changes (subagent with
 /// its own model, /model switch rebuilds are appended, never stacked).
@@ -273,6 +321,32 @@ mod tests {
             "must keep the escape hatch — otherwise the duty degrades into arguing with \
              a user who already decided"
         );
+    }
+
+    /// D156: the main-extras assembly is one function both frontends call.
+    /// The gates it holds — a crew file, the channels flag, a non-empty
+    /// experience index — must each stay closed on an empty project, and the
+    /// channels flag alone must open exactly the etiquette block.
+    #[test]
+    fn main_extras_gate_on_flag_and_project_state() {
+        let tmp = std::env::temp_dir().join(format!("bingo-extras-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let mut settings = crate::settings::Settings::default();
+        let mut system = Vec::new();
+        push_main_extras(&mut system, &tmp, &tmp, &settings);
+        assert!(
+            system.is_empty(),
+            "an empty project with channels off adds nothing"
+        );
+        settings.experimental.agent_channels = true;
+        push_main_extras(&mut system, &tmp, &tmp, &settings);
+        assert_eq!(system.len(), 1, "the flag opens only the etiquette block");
+        assert_eq!(
+            system[0].text,
+            crate::tool::agent_notes::MAIN_CHANNEL_NOTE,
+            "the block is the member-facing note's main-side half, verbatim"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]
