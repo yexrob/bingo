@@ -9099,3 +9099,83 @@ established: both tests wait on the actor, both failures were under a machine
 compiling black-box binaries in parallel, and neither reproduces otherwise.
 D144's record noted the same shape. Worth a deterministic barrier in those two
 tests when somebody is next in them; **not** proven to predate B8.
+
+## D156–D159 — the guide audit: the documents catch up, and three findings were code
+
+**Where it comes from.** One campaign after D155 closed, a six-way audit read the
+bundled `guide` skill (486 lines) against the source, section by section. The
+verdict: the guide was plainly written *from* the code — constants, key tables,
+thresholds and layer orders almost all check out — but its content stops at v7,
+and three rulings that landed after it (D124, D131, D137) never reached it. Two
+paragraphs contradicted each other inside the same file, each pair with exactly
+one side still true. And three findings were not documentation drift at all: the
+code disagreed with itself, and the fix belongs in the code, not the text.
+
+### D156 — one prompt for every frontend
+
+`main.rs` grew three main-session system blocks one campaign at a time — the
+crew note (D53), `MAIN_CHANNEL_NOTE` (D119), the experience index — and the
+app-server's `assemble` never heard: a GUI session ran without the crew routing
+rule, the room etiquette, or the project's experience. The three pushes now live
+in `system::push_main_extras`, called by both frontends between `build_system`
+and the capability block. The parity ledger could never have caught this — it
+inventories commands, actions and notifications, not prompt assembly — which is
+exactly why the assembly has to be one function.
+
+### D157 — the console reconnects them all
+
+`Action::McpReconnect { server: None }` has always meant "every enabled server",
+and the parity row admitted the asymmetry in as many words: *a wire client can
+ask for that, no console line does*. The TUI's `None` arm answered with a usage
+error one line above the engine call that would have done the work. It now calls
+it; the usage strings read `reconnect [name]`, and the parity row records that
+both frontends reach it.
+
+### D158 — an empty session is not the one to share
+
+D155 opens a transcript at session start, and `--continue` learned to skip the
+empty launch-and-quit file that leaves behind. `bingo share` with no key did
+not: it took newest-by-mtime and could publish a session with nothing in it.
+The no-key default now uses the same used-filter; an **explicit** key still
+names whatever it names, empty or not — the user's choice is not filtered.
+
+### D159 — the guide catches up
+
+The corrections, heaviest first:
+
+- **D137**: the messaging paragraph taught hub-and-spoke — "a subagent reaches
+  `main` … and anything else is refused" — that `address.rs` refuses to enforce.
+  It now teaches peer messages, the `[message from @name]` marker, and the one
+  check that remains (the sender must have a registry name).
+- **D124**: "if the retry is also empty, the turn shows the normal full-flow
+  retry/back error" — the second silence has been a quiet, legal turn end since
+  D124, and `max_tokens` truncation left the empty-check entirely.
+- **D131**: the `@` was described as prompt etiquette only; the recorded debt,
+  the five-minute watchdog, and the roster's `owes #room #7` / `waiting on @dev`
+  surfaces were absent.
+- Retired surfaces: `Ctrl+Shift+O` (never existed — no Ctrl+Shift binding in
+  the tree), the `@name❯` arrival line (retired with D114), Channel as main's
+  tool with main auto-seated (both halves wrong since D95's own paragraph, which
+  was right). Two code comments carried the same stale claims
+  (`tool/agent.rs`, `channels.rs`) and were corrected with it.
+- Self-contradictions resolved on the side the code takes: startup without
+  credentials onboards (quick start said it errors; diagnostics 1 was right),
+  and `● main` is written `@main`.
+- Settings: the `model` key was documented nowhere; `share` had prose but no
+  table row; `cacheControl`'s default (**false**) was unstated and the phrasing
+  implied on; "shallow-merged, later overrides" is false for four keys
+  (`permissions` and `disabledMcpServers` accumulate, `providers` merges per
+  name, `experimental` latches on); `notifications` fires four times now
+  (`An agent needs you`); `BINGO_NO_MOTION` works at any value, not `=1`.
+- Accounting: the instant-command list was 10 of 14 (`/config` `/permissions`
+  `/mcp` `/exit` missing); the Esc layer list named 8 of 17 and had error/info
+  reversed; the compaction numbers were right but the formula wasn't (785k/554k
+  are 90% *of* window−budget, not window−budget); "`$()` never auto-allowed"
+  overstated (segments each need cover; only unclosed quotes are categorical);
+  the ack chase is per-instance only (subagent→main arms nothing, rooms ignore
+  `ack_timeout`); the roster row carries no tool/token stats; `/permissions`
+  lost its `remove`, `/think` its `s`, `/model`'s "validated" is advisory; the
+  quick reference now lists `/config` `/share` `/tasks` and the aliases.
+
+Verification: fmt, clippy `-D warnings`, discipline gate, full suite —
+**1722 → 1723 unit**, 23 app-server + 7 CLI black-box, all green.

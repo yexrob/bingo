@@ -1746,7 +1746,9 @@ impl ChannelHandle {
     }
 
     /// Take the direct messages that landed for `main` since the last look, for
-    /// the surface that draws them (D106's `@scout❯ <summary>` line).
+    /// the surface that signals them — the sender's mail dot in the status
+    /// layer (the `@scout❯ <summary>` flow line retired with D114; the
+    /// `summary` field rides along unread until a preview surface wants it).
     ///
     /// **Direct messages only.** A room relay lands in the same inbox and wakes
     /// main on the same debounce, and it is deliberately not mirrored here: a

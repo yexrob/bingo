@@ -1588,11 +1588,12 @@ An idle receiver starts a turn immediately; a running one takes it at its next t
     }
     /// The schema, minus what this caller's message would not be previewed by.
     ///
-    /// `summary` is drawn only for a message *from* an agent — the `@name❯`
-    /// line (D106) and the tree preview (D104) — so main's own sends have no
-    /// surface for it and it is left off the schema main assembles rather than
-    /// advertised and ignored. [`SendMessageInput`] still accepts it at every
-    /// depth: `deny_unknown_fields` would turn a harmless word into an error.
+    /// `summary` once fed the `@name❯` line (D106) and the D104 tree preview;
+    /// both retired (D114/v6), so today no surface draws it for anyone — the
+    /// arrival path takes it and drops it. It stays off the schema main
+    /// assembles (advertising a field nothing reads buys tokens for nothing)
+    /// and stays *accepted* at every depth: `deny_unknown_fields` would turn
+    /// a harmless word into an error, and a preview surface may want it back.
     fn input_schema(&self) -> serde_json::Value {
         let mut schema = super::schema_for::<SendMessageInput>();
         if self.session.depth == 0
