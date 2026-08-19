@@ -1331,7 +1331,17 @@ impl Chat {
 
     /// Repair the store if the stream showed a hole: read a fresh cut and
     /// replace local state with it, exactly as a wire client would.
+    ///
+    /// A *closed* link is the same repair one step further out. The core never
+    /// waits on a frontend, so a console that fell behind loses its attachment
+    /// rather than slowing the session down — and one that then went on reading
+    /// its last projection would be showing a session that had moved. It
+    /// attaches again and re-reads.
     pub async fn reconcile_store(&mut self) -> bool {
+        if self.store.is_closed() {
+            let core = self.session.core.clone();
+            return self.store.connect(&core, "tui").await.is_ok();
+        }
         matches!(self.store.reconcile().await, Ok(true))
     }
 

@@ -62,7 +62,7 @@ use crate::app_server::protocol::error::ProtocolErrorKind;
 /// block on a frontend, so a frontend that stops reading loses its attachment
 /// and has to attach and read again. The transport's own backpressure and its
 /// `CLIENT_TOO_SLOW` notice are B6's (spec "Errors, load, and security").
-const FRAME_CAPACITY: usize = 1024;
+pub(crate) const FRAME_CAPACITY: usize = 1024;
 
 /// What a frontend says about itself when it attaches. It buys one ordered frame
 /// channel and the right to write on the core's, nothing else: an attachment is

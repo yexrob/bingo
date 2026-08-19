@@ -21,8 +21,9 @@
 //! The reducer and the recovery are complete and live: the console attaches on
 //! its way into the event loop and folds every frame. The read face is being
 //! moved across seam by seam — a reader here without a caller yet is one the
-//! console still asks the registries for, and the campaign record (D149) lists
-//! which and why.
+//! console still asks the registries for, and the campaign record (D150) lists
+//! which and why. The `dead_code` allow below is exactly that inventory: it
+//! goes when the last read moves across, and not before.
 #![allow(dead_code)]
 
 use std::collections::BTreeMap;
@@ -1093,6 +1094,39 @@ mod tests {
         assert!(
             again <= seeded + 5,
             "an instance that did nothing did not become fresher: {seeded} → {again}"
+        );
+    }
+
+    /// The core never waits on a frontend: one that stops reading loses its
+    /// attachment. A console that then went on drawing its last projection
+    /// would be showing a session that had moved, so it attaches again.
+    #[tokio::test]
+    async fn a_console_that_lost_its_attachment_takes_a_new_one() {
+        let mut chat = crate::tui::test_util::chat_at(100, 40);
+        let publisher = chat.session.core.publisher();
+        for revision in 0..(crate::app::FRAME_CAPACITY as u64 + 8) {
+            publisher
+                .publish(
+                    AppEventPayload::CatalogChanged(crate::app::event::CatalogChanged {
+                        catalog: crate::app::snapshot::CatalogKind::Models,
+                        revision,
+                    }),
+                    None,
+                )
+                .unwrap_or_else(|error| panic!("{error}"));
+        }
+        chat.session.core.settle_now();
+        chat.pump_store();
+        assert!(
+            chat.store.is_closed(),
+            "a frontend that fell this far behind is not carried"
+        );
+
+        assert!(chat.reconcile_store().await, "and it attaches again");
+        assert!(!chat.store.is_closed());
+        assert!(
+            chat.store.view().session.is_some(),
+            "with a fresh cut, not the stale projection"
         );
     }
 
