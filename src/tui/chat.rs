@@ -669,6 +669,20 @@ struct Follow {
 }
 
 /// bingo chat component state: message stream + activity notices + input + permission requests.
+/// What `/mcp` was asked for, as the action registry read it.
+///
+/// Three actions and one read reach one handler; this is the shape they arrive
+/// in, so the handler never sees the line they came from.
+enum McpRequest {
+    /// Every configured server and where it stands.
+    List,
+    /// `all` names every configured server; anything else names one.
+    SetEnabled { target: String, enabled: bool },
+    /// Absent is a usage error here rather than "every server": reconnecting is
+    /// a per-server operation in this front end, and the console says so.
+    Reconnect { server: Option<String> },
+}
+
 pub struct Chat {
     pub session: Arc<Session>,
     /// What the core has said, materialized (B7b).
@@ -3080,21 +3094,27 @@ impl Chat {
             Command::Read(Read::Config(Some(ConfigSection::Permissions))) => {
                 self.slash_permissions()
             }
-            Command::Read(Read::Config(Some(ConfigSection::Mcp))) => self.slash_mcp(""),
+            Command::Read(Read::Config(Some(ConfigSection::Mcp))) => {
+                self.slash_mcp(McpRequest::List)
+            }
             Command::Read(Read::Config(Some(_))) => self.slash_config(),
             Command::Read(Read::Catalog(CatalogKind::Models)) => self.open_model_menu(),
             Command::Read(Read::Catalog(CatalogKind::Providers)) => self.slash_provider(""),
             Command::Read(Read::Catalog(CatalogKind::Skills)) => self.slash_skills(),
-            Command::Read(Read::Catalog(CatalogKind::McpServers)) => self.slash_mcp(""),
+            Command::Read(Read::Catalog(CatalogKind::McpServers)) => {
+                self.slash_mcp(McpRequest::List)
+            }
             Command::Read(Read::Catalog(CatalogKind::Images)) => self.slash_images(),
             Command::Read(Read::Resource(ResourceKind::Tasks)) => self.slash_tasks(),
             Command::Read(Read::Resource(_)) => self.slash_status(),
             Command::Read(Read::Sessions) => self.slash_resume(""),
-            Command::Read(Read::Team(TeamRead::Chart)) => self.slash_team(""),
-            Command::Read(Read::Team(TeamRead::Status)) => self.slash_team("status"),
-            Command::Read(Read::Team(TeamRead::Validate)) => self.slash_team("validate"),
-            Command::Read(Read::Team(TeamRead::Norms)) => self.slash_team("norms"),
-            Command::Read(Read::Team(TeamRead::Memory)) => self.slash_team("memory"),
+            Command::Read(Read::Team(TeamRead::Chart)) => self.slash_team_read(TeamRead::Chart),
+            Command::Read(Read::Team(TeamRead::Status)) => self.slash_team_read(TeamRead::Status),
+            Command::Read(Read::Team(TeamRead::Validate)) => {
+                self.slash_team_read(TeamRead::Validate)
+            }
+            Command::Read(Read::Team(TeamRead::Norms)) => self.slash_team_read(TeamRead::Norms),
+            Command::Read(Read::Team(TeamRead::Memory)) => self.slash_team_read(TeamRead::Memory),
             // A picker is that action's own argument choices; which surface
             // shows them is the frontend's business.
             Command::Read(Read::Options(action)) => match action.as_str() {
@@ -3115,9 +3135,9 @@ impl Chat {
                 Action::SessionReset => self.slash_clear(),
                 Action::SessionRename { name } => self.slash_rename(&name),
                 Action::SessionGarbageCollect => self.slash_gc(),
-                // B7 removes this: the flag text is re-read by the handler,
-                // which the registry has already parsed into the action.
-                Action::SessionShare { .. } => self.slash_share(arg),
+                // The console exports to its own default path, so `output` is
+                // the wire's business and not this surface's.
+                Action::SessionShare { public, open, .. } => self.slash_share(public, open),
                 Action::SessionChangeDirectory { path } => self.slash_cd(&path.to_string_lossy()),
                 Action::ConversationCompact { .. } => self.slash_compact(on),
                 // esc-esc owns the checkpoint selector; a typed line never
@@ -3125,8 +3145,11 @@ impl Chat {
                 Action::ConversationRewind { .. } => self.slash_status(),
                 Action::ModelSelect { model } => self.set_model(model),
                 Action::ProviderSelect { provider } => self.slash_provider(&provider),
-                // B7 removes this: `--device-auth` and `--manual <token>` are
-                // login mechanics the action does not carry.
+                // The one handler that keeps its own line, on purpose (B5 ruling
+                // ③): `--device-auth` and `--manual <token>` are login mechanics
+                // the action does not carry and must not — a pasted token is a
+                // credential, and credentials have no business in a request. If
+                // a GUI ever needs them it needs a design decision, not a field.
                 Action::ProviderLogin { .. } | Action::ProviderLogout { .. } => {
                     self.slash_provider(arg)
                 }
@@ -3138,10 +3161,15 @@ impl Chat {
                 Action::PermissionRuleRemove { decision, rule } => {
                     self.permission_rule(decision, &rule, false)
                 }
-                // B7 removes this: the handler re-reads what the registry parsed.
-                Action::McpEnable { .. }
-                | Action::McpDisable { .. }
-                | Action::McpReconnect { .. } => self.slash_mcp(arg),
+                Action::McpEnable { server } => self.slash_mcp(McpRequest::SetEnabled {
+                    target: server,
+                    enabled: true,
+                }),
+                Action::McpDisable { server } => self.slash_mcp(McpRequest::SetEnabled {
+                    target: server,
+                    enabled: false,
+                }),
+                Action::McpReconnect { server } => self.slash_mcp(McpRequest::Reconnect { server }),
                 Action::SkillInvoke { skill, input } => {
                     // Progressive disclosure: only the `✦ <skill name> [args]`
                     // marker is submitted; the model reads the body on demand
@@ -3152,12 +3180,11 @@ impl Chat {
                     };
                     self.start_turn(marker, true);
                 }
-                // B7 removes this: `team_cmd` still reads its own sub-grammar.
-                Action::TeamStart { .. }
+                team @ (Action::TeamStart { .. }
                 | Action::TeamAssign { .. }
                 | Action::TeamStop { .. }
                 | Action::TeamScaffold { .. }
-                | Action::TeamMemoryGarbageCollect => self.slash_team(arg),
+                | Action::TeamMemoryGarbageCollect) => self.slash_team_act(&team),
                 Action::RoomJoin { room } => self.slash_join(&room),
                 Action::RoomLeave { room } => self.slash_leave(&room),
                 Action::CommandPromote { .. } => {}
@@ -3882,15 +3909,18 @@ impl Chat {
         }
     }
 
-    fn slash_mcp(&mut self, arg: &str) {
+    ///
+    /// What was asked for arrives already read ([`McpRequest`]): the registry
+    /// decides which handler runs, and it used to decide that by parsing a line
+    /// this function then parsed again.
+    fn slash_mcp(&mut self, request: McpRequest) {
         use crate::mcp::McpStatus;
         let session = self.session.clone();
         let cwd = std::path::PathBuf::from(&self.cwd);
         let user_config_dir = self.session.user_config_dir.clone();
         let events = self.events.clone();
-        let parts: Vec<&str> = arg.split_whitespace().collect();
-        match parts.first().copied() {
-            None => {
+        match request {
+            McpRequest::List => {
                 self.pin_panel("mcp", vec!["⏳ checking MCP servers…".to_string()]);
                 tokio::spawn(async move {
                     let unpin = || {
@@ -3930,9 +3960,7 @@ impl Chat {
                     events.send(UiEvent::SlashInfo(lines.join("\n")));
                 });
             }
-            Some(action @ ("enable" | "disable")) => {
-                let target = parts.get(1).copied().unwrap_or("all").to_string();
-                let enabled = action == "enable";
+            McpRequest::SetEnabled { target, enabled } => {
                 self.push_slash_output(format!(
                     "⏳ {}{target}…",
                     if enabled { "enabling " } else { "disabling " }
@@ -3980,12 +4008,10 @@ impl Chat {
                     )));
                 });
             }
-            Some("reconnect") => {
-                let Some(name) = parts.get(1).copied() else {
-                    self.push_slash_error("usage: /mcp reconnect <server name>".to_string());
-                    return;
-                };
-                let name = name.to_string();
+            McpRequest::Reconnect { server: None } => {
+                self.push_slash_error("usage: /mcp reconnect <server name>".to_string());
+            }
+            McpRequest::Reconnect { server: Some(name) } => {
                 self.pin_panel("mcp", vec![format!("⏳ reconnecting {name}…")]);
                 tokio::spawn(async move {
                     let unpin = || {
@@ -4024,9 +4050,6 @@ impl Chat {
                     }
                 });
             }
-            _ => self.push_slash_error(
-                "usage: /mcp [enable|disable [name|all]] · /mcp reconnect <name>".to_string(),
-            ),
         }
     }
 
@@ -4130,8 +4153,6 @@ pub mod rewind_ui;
 
 /// The `/resume` selector model, rendered by chrome.rs.
 pub use chat_session::ResumeMenu;
-#[cfg(test)]
-pub(crate) use chat_session::parse_share_arg;
 
 /// The overlay frame the ctrl+b manager draws, reused by the rewind selector
 /// (D91) so the two overlays are the same object in the same place.

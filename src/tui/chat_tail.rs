@@ -173,8 +173,20 @@ impl super::Chat {
     /// directory, D104 took the directory's door away and printed here as
     /// well, and D107 retired the column with the directory. A store nobody
     /// reads is not a store, so the tier is now the whole answer.
-    pub(crate) fn slash_team(&mut self, arg: &str) {
-        let lines = crate::team_cmd::run(&self.session, &std::path::PathBuf::from(&self.cwd), arg);
+    pub(crate) fn slash_team_read(&mut self, what: crate::app::action::TeamRead) {
+        let lines =
+            crate::team_cmd::read(&self.session, &std::path::PathBuf::from(&self.cwd), what);
+        self.push_team_lines(lines);
+    }
+
+    /// The other half: what `/team` was asked to *do*, already read.
+    pub(crate) fn slash_team_act(&mut self, action: &crate::app::command::Action) {
+        let lines =
+            crate::team_cmd::act(&self.session, &std::path::PathBuf::from(&self.cwd), action);
+        self.push_team_lines(lines);
+    }
+
+    fn push_team_lines(&mut self, lines: Vec<String>) {
         for line in lines {
             self.push_slash_info(line);
         }

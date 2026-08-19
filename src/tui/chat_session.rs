@@ -54,11 +54,6 @@ impl ResumeMenu {
     }
 }
 
-/// `/share` flag parser (`--public` / `--open`).
-pub(crate) fn parse_share_arg(arg: &str, flag: &str) -> bool {
-    arg.split_whitespace().any(|t| t == flag)
-}
-
 impl super::Chat {
     pub(super) fn slash_rename(&mut self, arg: &str) {
         let Some(t) = self.session.runtime.transcript.borrow().clone() else {
@@ -261,9 +256,11 @@ impl super::Chat {
 
     /// `/share` exports locally by default. Publishing a public link requires the
     /// explicit `--public` opt-in; the warning is presented before bytes leave the machine.
-    pub(super) fn slash_share(&mut self, arg: &str) {
-        let public = parse_share_arg(arg, "--public");
-        let open = parse_share_arg(arg, "--open");
+    ///
+    /// What the flags say is the registry's reading, handed in. The handler used
+    /// to re-split the same line the registry had already parsed — one grammar
+    /// with two readers, which is how a flag comes to mean two things.
+    pub(super) fn slash_share(&mut self, public: bool, open: bool) {
         let Some(transcript) = self.session.runtime.transcript.borrow().clone() else {
             self.push_slash_output("no session to export yet (the new session has not been persisted; send a message first).".to_string());
             return;

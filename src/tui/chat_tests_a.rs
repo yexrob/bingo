@@ -1947,15 +1947,29 @@ fn slash_share_without_transcript_hints() {
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
-/// /share flag parsing (pure logic; no browser or network side effects).
+/// `/share`'s flags, read where they are now read: the registry. The console
+/// used to split the same line a second time, so this asserted the second
+/// reader; it asserts the only one.
 #[test]
-fn parse_share_arg_flags() {
-    assert!(parse_share_arg("--open", "--open"));
-    assert!(parse_share_arg("--public --open", "--open"));
-    assert!(parse_share_arg("  --public  ", "--public"));
-    assert!(!parse_share_arg("", "--public"));
-    assert!(!parse_share_arg("--open", "--public"));
-    assert!(!parse_share_arg("--output x", "--public"));
+fn share_flags_are_read_by_the_registry() {
+    use crate::app::action::Command;
+    use crate::app::command::Action;
+    let share = |line: &str| match crate::app::action::parse(line) {
+        Ok(Command::Act(Action::SessionShare {
+            public,
+            open,
+            output,
+        })) => (public, open, output),
+        other => panic!("{line}: {other:?}"),
+    };
+    assert_eq!(share("share --open"), (false, true, None));
+    assert_eq!(share("share --public --open"), (true, true, None));
+    assert_eq!(share("share   --public  "), (true, false, None));
+    assert_eq!(share("share"), (false, false, None));
+    assert_eq!(
+        share("share x"),
+        (false, false, Some(std::path::PathBuf::from("x")))
+    );
 }
 
 /// /share --public: the mock server receives a POST only when public

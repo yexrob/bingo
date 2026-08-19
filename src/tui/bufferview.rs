@@ -329,7 +329,11 @@ mod tests {
         chat.refresh_conversations();
         chat.run_slash("team");
 
-        let answer = crate::team_cmd::run(&chat.session, &std::path::PathBuf::from(&chat.cwd), "");
+        let answer = crate::team_cmd::read(
+            &chat.session,
+            &std::path::PathBuf::from(&chat.cwd),
+            crate::app::action::TeamRead::Chart,
+        );
         assert!(!chat.slash_info_lines.is_empty(), "the command answers");
         assert_eq!(
             chat.slash_info_lines, answer,
@@ -342,6 +346,34 @@ mod tests {
                 .iter()
                 .any(|message| message.text.contains("/team")),
             "on the info tier, never as a message in the transcript"
+        );
+    }
+
+    /// `/team list` shows the chart.
+    ///
+    /// It did not. The registry read the line into `TeamRead::Chart` and the
+    /// console then handed `team_cmd` an empty string, which that file read a
+    /// second time as "no subcommand" and answered with a usage block — so the
+    /// one command whose whole job is to show the chart printed a menu instead.
+    /// One grammar, two readers, and this is what they disagreed about (D149).
+    #[test]
+    fn team_list_shows_the_chart_rather_than_a_menu() {
+        let mut chat = test_chat();
+        chat.run_slash("team list");
+        let answer = chat.slash_info_lines.join("\n");
+        assert!(
+            !answer.starts_with("usage: /team"),
+            "the chart, not the menu: {answer}"
+        );
+        assert_eq!(
+            answer,
+            crate::team_cmd::read(
+                &chat.session,
+                &std::path::PathBuf::from(&chat.cwd),
+                crate::app::action::TeamRead::Chart,
+            )
+            .join("\n"),
+            "and exactly what the read produces"
         );
     }
 

@@ -12,44 +12,45 @@ use crate::agents::AgentState;
 use crate::query::Session;
 use crate::team::{TeamNode, TeamTree};
 
-/// Main entry: `/team <subcommand>`, returns the lines to display. Unknown subcommands get usage.
-pub fn run(session: &Arc<Session>, cwd: &Path, arg: &str) -> Vec<String> {
-    let mut parts = arg.split_whitespace();
-    let sub = parts.next().unwrap_or("");
-    match sub {
-        "" => usage(),
-        "list" | "ls" => list(session, cwd),
-        "start" | "up" => start(session, cwd),
-        "status" | "st" => status(session, cwd),
-        "assign" | "say" => assign(session, cwd, parts.collect::<Vec<_>>().join(" ")),
-        "stop" | "down" => stop(session, cwd),
-        "validate" | "check" => validate(session, cwd),
-        "new" => new_team(session, cwd, parts.next().unwrap_or("")),
-        "norms" => norms(cwd),
-        "memory" => memory(session, cwd, parts.next().unwrap_or("")),
-        other => {
-            let mut out = vec![format!("unknown subcommand: /team {other}"), String::new()];
-            out.extend(usage());
-            out
-        }
+/// One of `/team`'s reads, as the action registry named it.
+///
+/// The registry decides which of these a line is; this file no longer splits
+/// that line a second time to decide the same thing.
+pub fn read(session: &Arc<Session>, cwd: &Path, what: crate::app::action::TeamRead) -> Vec<String> {
+    use crate::app::action::TeamRead;
+    match what {
+        TeamRead::Chart => list(session, cwd),
+        TeamRead::Status => status(session, cwd),
+        TeamRead::Validate => validate(session, cwd),
+        TeamRead::Norms => norms(cwd),
+        TeamRead::Memory => memory(session, cwd, "list"),
     }
 }
 
-fn usage() -> Vec<String> {
-    vec![
-        "usage: /team <list|start|status|assign|stop|validate|new|norms|memory>".to_string(),
-        "  list       definition zone (blueprint) + runtime zone (worksite) side by side"
-            .to_string(),
-        "  start      bring up the team (members on standby · idempotent reuse)".to_string(),
-        "  status     member states (●standby ◐busy ✗failed ○offline)".to_string(),
-        "  assign     assign a task to a member (/team assign <member> <task>)".to_string(),
-        "  stop       stop the team (members stop receiving instructions)".to_string(),
-        "  validate   validate team.json (same source as start)".to_string(),
-        "  new        scaffold: generate .bingo/team.json (the output must pass validate)"
-            .to_string(),
-        "  norms      the crew's working agreement (.bingo/team-norms.md)".to_string(),
-        "  memory     memory management (list to view / gc to clean)".to_string(),
-    ]
+/// One of `/team`'s actions, likewise.
+///
+/// **A known gap, and not a new one** (D149): `TeamStart { members }` and
+/// `TeamStop { member }` can name who, and this front end has only ever started
+/// and stopped the whole formation. It still does exactly that; naming members
+/// is behaviour nobody has written yet, on either side. Recorded rather than
+/// invented here.
+pub fn act(
+    session: &Arc<Session>,
+    cwd: &Path,
+    action: &crate::app::command::Action,
+) -> Vec<String> {
+    use crate::app::command::Action;
+    match action {
+        Action::TeamStart { .. } => start(session, cwd),
+        Action::TeamStop { .. } => stop(session, cwd),
+        Action::TeamAssign { member, task } => assign(session, cwd, format!("{member} {task}")),
+        Action::TeamScaffold { name } => new_team(session, cwd, name),
+        Action::TeamMemoryGarbageCollect => memory(session, cwd, "gc"),
+        // The registry routes only the five above here; anything else is a
+        // dispatch bug, and saying so beats printing a usage block that answers
+        // a question nobody asked.
+        other => vec![format!("/team cannot perform {}", other.id())],
+    }
 }
 
 /// Load the whole org chart. Parse errors (invalid JSON, a broken reference, a name
