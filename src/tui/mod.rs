@@ -64,6 +64,7 @@ pub mod picker;
 pub(crate) mod roster;
 pub mod slash;
 pub mod statics;
+pub mod store;
 pub(crate) mod term;
 #[cfg(test)]
 pub(crate) mod test_util;
@@ -280,6 +281,7 @@ fn install_panic_hook() {
 /// only paints the live tail.
 pub async fn run_tui_session(
     session: Arc<Session>,
+    core: &crate::app::AppCore,
     expand_rx: tokio::sync::watch::Receiver<bool>,
     fullscreen: bool,
     startup_notes: Vec<String>,
@@ -334,6 +336,14 @@ pub async fn run_tui_session(
         detected_background,
     );
     chat.image_cap = image_cap;
+    // The console becomes an attachment (B7b). It takes its snapshot cut here,
+    // before the first frame is drawn, so nothing is rendered out of a
+    // projection that has not been told what the session is. A core that will
+    // not attach is a core that is already gone; the console says so and goes
+    // on with an empty view rather than refusing to start.
+    if let Err(error) = chat.connect_store(core).await {
+        chat.push_startup_note(format!("⚠ the session core did not answer: {error}"));
+    }
     // Attention channel (D79). The environment is read here, once, and handed
     // down resolved: `notify` decides nothing about the terminal on its own, so
     // its tests do not depend on the shell that launched them.
