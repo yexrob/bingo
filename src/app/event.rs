@@ -16,8 +16,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::app::ids::{
-    ConversationId, FeedbackId, InteractionId, ItemId, OperationId, QueueId, SessionId, TaskId,
-    TurnId, UnixMillis,
+    AgentId, ConversationId, FeedbackId, InteractionId, ItemId, OperationId, QueueId, SessionId,
+    TaskId, TurnId, UnixMillis,
 };
 use crate::app::snapshot::{
     AgentResource, AssetRecord, BackgroundCommandResource, CatalogKind, CommandTail,
@@ -273,6 +273,16 @@ pub struct RoomChanged {
     pub room: RoomResource,
 }
 
+/// An instance left the roster: stopped is not gone, but removed is. Without
+/// this a client's roster would keep a name the session no longer has until it
+/// re-read a snapshot — the removal half the spec asks of every keyed
+/// collection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentRemoved {
+    pub agent_id: AgentId,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct TaskChanged {
@@ -377,6 +387,7 @@ pub enum AppEventPayload {
     InteractionResolved(InteractionResolved),
     InteractionCancelled(InteractionCancelled),
     AgentChanged(AgentChanged),
+    AgentRemoved(AgentRemoved),
     RoomChanged(RoomChanged),
     TaskChanged(TaskChanged),
     TaskRemoved(TaskRemoved),
@@ -422,6 +433,7 @@ impl AppEventPayload {
             Self::InteractionResolved(_) => "interaction/resolved",
             Self::InteractionCancelled(_) => "interaction/cancelled",
             Self::AgentChanged(_) => "agent/changed",
+            Self::AgentRemoved(_) => "agent/removed",
             Self::RoomChanged(_) => "room/changed",
             Self::TaskChanged(_) => "task/changed",
             Self::TaskRemoved(_) => "task/removed",

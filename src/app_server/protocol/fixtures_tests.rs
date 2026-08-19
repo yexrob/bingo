@@ -1737,6 +1737,15 @@ fn every_notification() -> Vec<(ServerNotification, Value)> {
             json!({"event": event_meta_json(), "agent": agent_resource_json()}),
         ),
         (
+            ServerNotification::AgentRemoved(NotificationParams::new(
+                meta(),
+                AgentRemoved {
+                    agent_id: AgentId::new("agent_1"),
+                },
+            )),
+            json!({"event": event_meta_json(), "agentId": "agent_1"}),
+        ),
+        (
             ServerNotification::RoomChanged(NotificationParams::new(
                 meta(),
                 RoomChanged {

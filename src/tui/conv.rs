@@ -516,14 +516,10 @@ impl Chat {
     /// deleted) — the auto-close rule the zoom carried (CC
     /// `useTeammateViewAutoExit`).
     fn away_is_gone(&self) -> bool {
+        let view = self.store.view();
         match &self.active {
-            ConvKey::Agent(name) => !self.session.agents.list().iter().any(|s| &s.name == name),
-            ConvKey::Room(name) => !self
-                .session
-                .channels
-                .list()
-                .iter()
-                .any(|status| &status.name == name),
+            ConvKey::Agent(name) => view.agent(name).is_none(),
+            ConvKey::Room(name) => view.room(name).is_none(),
             ConvKey::Main => false,
         }
     }

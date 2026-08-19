@@ -2045,8 +2045,8 @@ impl super::Chat {
             // runtime — so an open dialog with anybody on it keeps the clock
             // awake, exactly as the tree does (D107).
             || (self.dialog.is_some()
-                && (!self.session.agents.list().is_empty()
-                    || !self.session.watch.snapshot().is_empty()))
+                && (!self.store.view().agents().is_empty()
+                    || !self.store.view().commands().is_empty()))
             // The roster counts seconds — a running row's activity and an
             // idle row's `Idle for 14s` both move without an event arriving —
             // so it keeps the clock awake while anybody exists to be shown
@@ -2383,10 +2383,9 @@ impl super::Chat {
         // A store outlives its page but not its instance: once the registry has
         // forgotten an agent there is no page left to open, and keeping its
         // transcript would grow the console for the length of the session.
+        let view = self.store.view();
         self.parked.retain(|key, _| match key {
-            crate::ui::ConvKey::Agent(name) => {
-                session.agents.list().iter().any(|s| &s.name == name)
-            }
+            crate::ui::ConvKey::Agent(name) => view.agent(name).is_some(),
             crate::ui::ConvKey::Main | crate::ui::ConvKey::Room(_) => true,
         });
     }

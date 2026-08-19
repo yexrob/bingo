@@ -170,7 +170,7 @@ mod tests {
 
     /// An instance the registry has just been told about — which is a
     /// *running* one: `insert` is the spawn path and a spawned agent is working.
-    fn seed(chat: &Chat, name: &str) {
+    fn seed(chat: &mut Chat, name: &str) {
         chat.session
             .agents
             .insert(
@@ -181,13 +181,15 @@ mod tests {
                 chat.session.clone(),
             )
             .now();
+        chat.settle_store();
     }
 
     /// The same instance, parked: `finish` with an empty inbox is the one
     /// legal door to `Idle`.
-    fn seed_idle(chat: &Chat, name: &str) {
+    fn seed_idle(chat: &mut Chat, name: &str) {
         seed(chat, name);
         let _ = chat.session.agents.finish(name, Vec::new(), 0).now();
+        chat.settle_store();
     }
 
     fn assistant(text: &str) -> ApiMessage {
@@ -199,9 +201,10 @@ mod tests {
         }
     }
 
-    fn seed_with_history(chat: &Chat, name: &str, history: Vec<ApiMessage>) {
+    fn seed_with_history(chat: &mut Chat, name: &str, history: Vec<ApiMessage>) {
         seed(chat, name);
         let _ = chat.session.agents.finish(name, history, 0).now();
+        chat.settle_store();
     }
 
     fn seed_room(chat: &Chat, name: &str, members: &[&str]) {
@@ -232,7 +235,7 @@ mod tests {
     fn a_page_is_the_transcripts_own_pipeline() {
         let mut chat = test_chat();
         seed_with_history(
-            &chat,
+            &mut chat,
             "scout",
             vec![
                 ApiMessage::user_text("fix the parser"),
@@ -268,7 +271,7 @@ mod tests {
     #[test]
     fn a_room_page_is_speech_only() {
         let mut chat = test_chat();
-        seed(&chat, "zoe");
+        seed(&mut chat, "zoe");
         seed_room(&chat, "crew", &["user", "zoe"]);
         chat.session
             .channels
@@ -297,7 +300,7 @@ mod tests {
     #[tokio::test]
     async fn typing_on_a_page_reaches_the_agent_as_the_user() {
         let mut chat = test_chat();
-        seed(&chat, "scout");
+        seed(&mut chat, "scout");
         chat.switch_to(Some(ZoomTarget::Agent("scout".into())));
         chat.set_input("look at the lexer".to_string());
         chat.submit();
@@ -315,7 +318,7 @@ mod tests {
     #[tokio::test]
     async fn a_slash_line_on_a_page_is_the_consoles_command() {
         let mut chat = test_chat();
-        seed(&chat, "scout");
+        seed(&mut chat, "scout");
         chat.switch_to(Some(ZoomTarget::Agent("scout".into())));
         chat.set_input("/help".to_string());
         chat.submit();
@@ -338,7 +341,7 @@ mod tests {
     #[tokio::test]
     async fn compact_on_a_page_targets_that_agents_context() {
         let mut chat = test_chat();
-        seed_idle(&chat, "scout"); // finished: an empty stored history
+        seed_idle(&mut chat, "scout"); // finished: an empty stored history
         chat.switch_to(Some(ZoomTarget::Agent("scout".into())));
         chat.set_input("/compact".to_string());
         chat.submit();
@@ -358,7 +361,7 @@ mod tests {
     #[tokio::test]
     async fn compact_refuses_while_the_agent_is_mid_turn() {
         let mut chat = test_chat();
-        seed(&chat, "scout"); // spawned = Running
+        seed(&mut chat, "scout"); // spawned = Running
         chat.switch_to(Some(ZoomTarget::Agent("scout".into())));
         chat.set_input("/compact".to_string());
         chat.submit();
@@ -392,7 +395,7 @@ mod tests {
     #[tokio::test]
     async fn compact_at_home_is_still_the_consoles() {
         let mut chat = test_chat();
-        seed_idle(&chat, "scout");
+        seed_idle(&mut chat, "scout");
         chat.set_input("/compact".to_string());
         chat.submit();
         assert!(
@@ -409,7 +412,7 @@ mod tests {
     #[tokio::test]
     async fn bash_mode_on_a_page_runs_the_consoles_shell() {
         let mut chat = test_chat();
-        seed(&chat, "scout");
+        seed(&mut chat, "scout");
         chat.switch_to(Some(ZoomTarget::Agent("scout".into())));
         chat.on_key(KeyCode::Char('!'), KeyModifiers::NONE);
         assert!(chat.bash_mode, "`!` on an empty composer arms shell mode");
@@ -427,7 +430,7 @@ mod tests {
     #[test]
     fn shell_mode_outlives_a_page_turn() {
         let mut chat = test_chat();
-        seed_idle(&chat, "scout"); // no run to stop, so Esc reaches the mode
+        seed_idle(&mut chat, "scout"); // no run to stop, so Esc reaches the mode
         chat.on_key(KeyCode::Char('!'), KeyModifiers::NONE);
         chat.switch_to(Some(ZoomTarget::Agent("scout".into())));
         assert!(chat.bash_mode, "the mode came with the reader");
@@ -443,8 +446,8 @@ mod tests {
     #[tokio::test]
     async fn a_direct_send_from_a_page_reaches_a_third_party() {
         let mut chat = test_chat();
-        seed(&chat, "scout");
-        seed(&chat, "dev");
+        seed(&mut chat, "scout");
+        seed(&mut chat, "dev");
         chat.switch_to(Some(ZoomTarget::Agent("scout".into())));
         chat.set_input("@dev take the parser".to_string());
         chat.submit();
@@ -463,7 +466,7 @@ mod tests {
     #[test]
     fn a_command_on_a_page_waits_behind_mains_turn_and_says_so() {
         let mut chat = test_chat();
-        seed(&chat, "scout");
+        seed(&mut chat, "scout");
         chat.start_test_turn(); // main's turn, before the page turn parks it
         chat.switch_to(Some(ZoomTarget::Agent("scout".into())));
         chat.set_input("/clear".to_string());
@@ -485,7 +488,7 @@ mod tests {
     #[tokio::test]
     async fn a_message_to_a_stopped_agent_resumes_it() {
         let mut chat = test_chat();
-        seed_idle(&chat, "scout");
+        seed_idle(&mut chat, "scout");
         let _ = chat.session.agents.stop("scout").await;
         chat.switch_to(Some(ZoomTarget::Agent("scout".into())));
         chat.set_input("wake up".to_string());
@@ -505,7 +508,7 @@ mod tests {
     #[tokio::test]
     async fn a_room_page_joins_before_it_speaks() {
         let mut chat = test_chat();
-        seed(&chat, "zoe");
+        seed(&mut chat, "zoe");
         seed_room(&chat, "crew", &["zoe"]);
         chat.switch_to(Some(ZoomTarget::Room("crew".into())));
         chat.set_input("hello room".to_string());
@@ -527,7 +530,7 @@ mod tests {
     #[test]
     fn esc_stops_the_run_first_and_comes_home_second() {
         let mut chat = test_chat();
-        seed(&chat, "scout"); // Running
+        seed(&mut chat, "scout"); // Running
         chat.start_test_turn(); // main's own turn, out of Esc's reach while away
         chat.switch_to(Some(ZoomTarget::Agent("scout".into())));
 
@@ -553,7 +556,7 @@ mod tests {
     #[test]
     fn shift_tab_cycles_the_viewed_agents_mode_and_not_mains() {
         let mut chat = test_chat();
-        seed(&chat, "scout");
+        seed(&mut chat, "scout");
         let before_main = chat.permission_mode;
         chat.switch_to(Some(ZoomTarget::Agent("scout".into())));
         chat.on_key(KeyCode::BackTab, KeyModifiers::SHIFT);
@@ -571,7 +574,7 @@ mod tests {
     #[test]
     fn entering_reads_the_conversation_and_leaving_gives_it_back() {
         let mut chat = test_chat();
-        seed(&chat, "scout");
+        seed(&mut chat, "scout");
         chat.agent_mail.insert("scout".to_string(), 2);
         chat.switch_to(Some(ZoomTarget::Agent("scout".into())));
         assert_eq!(
@@ -592,11 +595,12 @@ mod tests {
     #[test]
     fn the_page_closes_when_its_subject_is_gone_and_stays_when_done() {
         let mut chat = test_chat();
-        seed_idle(&chat, "scout");
+        seed_idle(&mut chat, "scout");
         chat.switch_to(Some(ZoomTarget::Agent("scout".into())));
         chat.sync_away();
         assert!(!chat.active.is_main(), "a finished agent's page stays open");
         let _ = chat.session.agents.remove("scout").now();
+        chat.settle_store();
         chat.sync_away();
         assert!(chat.active.is_main(), "a deleted agent's page cannot stay");
     }
@@ -606,7 +610,7 @@ mod tests {
     #[test]
     fn a_switch_owes_a_page_turn_and_home_reprints_the_tail() {
         let mut chat = test_chat();
-        seed(&chat, "scout");
+        seed(&mut chat, "scout");
         for i in 0..40 {
             chat.conv.messages.push(crate::tui::chat::UiMessage {
                 role: crate::tui::chat::Role::User,
@@ -643,7 +647,7 @@ mod tests {
     #[test]
     fn enter_on_a_roster_row_switches_and_main_comes_home() {
         let mut chat = test_chat();
-        seed(&chat, "scout");
+        seed(&mut chat, "scout");
         chat.refresh_conversations();
         assert!(chat.roster_enter_selection(), "↓ fell into the rows");
         chat.roster_key(KeyCode::Down, KeyModifiers::NONE);
@@ -671,8 +675,8 @@ mod tests {
     #[test]
     fn a_peers_message_lands_on_the_receivers_page() {
         let mut chat = test_chat();
-        seed(&chat, "dev");
-        seed(&chat, "qa");
+        seed(&mut chat, "dev");
+        seed(&mut chat, "qa");
         chat.session
             .agents
             .deliver("qa", "dev", "does the parser handle EOF?", Vec::new(), None)
@@ -698,7 +702,7 @@ mod tests {
     fn a_peers_message_in_the_record_is_filed_to_the_peer() {
         let mut chat = test_chat();
         seed_with_history(
-            &chat,
+            &mut chat,
             "qa",
             vec![
                 ApiMessage {

@@ -3732,6 +3732,22 @@
       ],
       "type": "object"
     },
+    "NotificationParams_for_AgentRemoved": {
+      "description": "One notification's params: the event header, then the body's own fields.",
+      "properties": {
+        "agentId": {
+          "$ref": "#/definitions/AgentId"
+        },
+        "event": {
+          "$ref": "#/definitions/EventMeta"
+        }
+      },
+      "required": [
+        "agentId",
+        "event"
+      ],
+      "type": "object"
+    },
     "NotificationParams_for_AssetAvailable": {
       "description": "One notification's params: the event header, then the body's own fields.",
       "properties": {

@@ -13,13 +13,13 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::app::event::{
-    AgentChanged, AppEvent, AppEventPayload, AssetAvailable, CatalogChanged, CommandChanged,
-    ConfigChanged, ConversationChanged, ConversationRemoved, DeliveryChanged, EventMeta,
-    FeedbackCleared, FeedbackRaised, InteractionCancelled, InteractionOpened, InteractionResolved,
-    ItemChanged, ItemCommandTailUpdated, ItemDelta, OperationChanged, OperationProgressed,
-    QueueItemAbsorbed, QueueItemAdded, QueueItemRemoved, RoomChanged, SessionClosed,
-    SessionDeleted, SessionUpdated, TaskChanged, TaskRemoved, TurnChanged, TurnRetrying,
-    TurnRoundCompleted, TurnRoundStarted, TurnUsageUpdated,
+    AgentChanged, AgentRemoved, AppEvent, AppEventPayload, AssetAvailable, CatalogChanged,
+    CommandChanged, ConfigChanged, ConversationChanged, ConversationRemoved, DeliveryChanged,
+    EventMeta, FeedbackCleared, FeedbackRaised, InteractionCancelled, InteractionOpened,
+    InteractionResolved, ItemChanged, ItemCommandTailUpdated, ItemDelta, OperationChanged,
+    OperationProgressed, QueueItemAbsorbed, QueueItemAdded, QueueItemRemoved, RoomChanged,
+    SessionClosed, SessionDeleted, SessionUpdated, TaskChanged, TaskRemoved, TurnChanged,
+    TurnRetrying, TurnRoundCompleted, TurnRoundStarted, TurnUsageUpdated,
 };
 
 /// One notification's params: the event header, then the body's own fields.
@@ -93,6 +93,7 @@ server_notifications! {
     InteractionResolved(InteractionResolved) => "interaction/resolved",
     InteractionCancelled(InteractionCancelled) => "interaction/cancelled",
     AgentChanged(AgentChanged) => "agent/changed",
+    AgentRemoved(AgentRemoved) => "agent/removed",
     RoomChanged(RoomChanged) => "room/changed",
     TaskChanged(TaskChanged) => "task/changed",
     TaskRemoved(TaskRemoved) => "task/removed",
@@ -188,6 +189,9 @@ impl From<AppEvent> for ServerNotification {
             }
             AppEventPayload::AgentChanged(body) => {
                 Self::AgentChanged(NotificationParams::new(meta, body))
+            }
+            AppEventPayload::AgentRemoved(body) => {
+                Self::AgentRemoved(NotificationParams::new(meta, body))
             }
             AppEventPayload::RoomChanged(body) => {
                 Self::RoomChanged(NotificationParams::new(meta, body))

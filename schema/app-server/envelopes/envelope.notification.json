@@ -457,6 +457,24 @@
       "properties": {
         "method": {
           "enum": [
+            "agent/removed"
+          ],
+          "type": "string"
+        },
+        "params": {
+          "$ref": "../definitions.json#/definitions/NotificationParams_for_AgentRemoved"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
             "room/changed"
           ],
           "type": "string"

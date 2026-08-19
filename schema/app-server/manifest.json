@@ -661,6 +661,14 @@
       }
     },
     {
+      "method": "agent/removed",
+      "direction": "serverToClient",
+      "params": {
+        "id": "urn:bingo:app-server:v1:agent.removed.params",
+        "file": "notifications/agent.removed.params.json"
+      }
+    },
+    {
       "method": "room/changed",
       "direction": "serverToClient",
       "params": {

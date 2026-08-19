@@ -291,6 +291,12 @@ impl View {
                     agent.id.clone()
                 });
             }
+            AppEventPayload::AgentRemoved(removed) => {
+                self.agents
+                    .active
+                    .retain(|agent| agent.id != removed.agent_id);
+                self.agents.count = self.agents.active.len() as u32;
+            }
             AppEventPayload::RoomChanged(changed) => {
                 replace_by(&mut self.rooms, changed.room.clone(), |room| {
                     room.id.clone()
@@ -1003,6 +1009,39 @@ mod tests {
                 .map(|agent| agent.name.clone()),
             Some("scout".to_string()),
             "and what the core said afterwards was folded in"
+        );
+        assert_eq!(chat.store.gaps, 0);
+    }
+
+    /// Removal is something a client is *told*, not something it can only find
+    /// out by re-reading. Stopped is not gone — the registry keeps a stopped
+    /// instance and a message resumes it — but removed is, and without an event
+    /// for it a roster would keep a name the session no longer has.
+    #[test]
+    fn an_instance_that_leaves_the_roster_leaves_the_projection() {
+        let mut chat = crate::tui::test_util::chat_at(100, 40);
+        chat.session
+            .agents
+            .insert(
+                "scout",
+                crate::agents::AgentKind::Hire,
+                None,
+                "a scout".to_string(),
+                chat.session.clone(),
+            )
+            .now();
+        chat.settle_store();
+        assert!(chat.store.view().agent("scout").is_some());
+
+        chat.session
+            .agents
+            .remove("scout")
+            .now()
+            .unwrap_or_else(|error| panic!("{error}"));
+        chat.settle_store();
+        assert!(
+            chat.store.view().agent("scout").is_none(),
+            "the projection was told, not left to guess"
         );
         assert_eq!(chat.store.gaps, 0);
     }

@@ -12,7 +12,9 @@
 //! saw `agent_3` twice saw the same instance twice.
 
 use crate::app::conversation::ConvKey;
-use crate::app::event::{AgentChanged, AppEventPayload, DeliveryChanged, RoomChanged};
+use crate::app::event::{
+    AgentChanged, AgentRemoved, AppEventPayload, DeliveryChanged, RoomChanged,
+};
 use crate::app::ids::{CommandId, DeliveryId, now_millis};
 use crate::app::snapshot::{
     AgentKind, AgentResource, AgentState, BackgroundCommandResource, BackgroundCommandState,
@@ -175,12 +177,31 @@ impl super::Controller {
             .collect()
     }
 
-    /// Publish one event per instance whose state moved, and one per instance
-    /// that is new. An instance that went away is not announced yet: `agent/gone`
-    /// is not in the contract, and inventing a shape for it here would be
-    /// deciding it from the implementation.
+    /// Publish one event per instance whose state moved, one per instance that
+    /// is new, and one per instance that is gone.
+    ///
+    /// Stopped is not gone: the registry keeps a stopped instance and a direct
+    /// message resumes it. Removal is `remove`, and a client that is never told
+    /// about it keeps a name the session no longer has — which is the removal
+    /// half the spec asks of every keyed collection.
     pub(super) fn announce_agents(&mut self) {
         let resources = self.agent_resources();
+        let present: std::collections::HashSet<String> =
+            resources.iter().map(|agent| agent.name.clone()).collect();
+        let mut gone = Vec::new();
+        self.told.agents.retain(|name, (id, _)| {
+            if present.contains(name) {
+                return true;
+            }
+            gone.push(id.clone());
+            false
+        });
+        for agent_id in gone {
+            self.publish(
+                Box::new(AppEventPayload::AgentRemoved(AgentRemoved { agent_id })),
+                None,
+            );
+        }
         let mut changed = Vec::new();
         for agent in resources {
             let summary = AgentSummary {
@@ -207,6 +228,10 @@ impl super::Controller {
     }
 
     /// Publish one event per room whose roster, head or attention moved.
+    ///
+    /// There is no removal half here, and that is not an omission: nothing in
+    /// this session deletes a room. A variant with no producer is a promise the
+    /// server does not keep, so the contract does not carry one.
     pub(super) fn announce_rooms(&mut self) {
         let resources = self.room_resources();
         let mut changed = Vec::new();

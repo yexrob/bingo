@@ -37,7 +37,7 @@ fn assistant(text: &str) -> Message {
 }
 
 /// Register a hire on the chat's own session, the way a `Task` spawn would.
-fn seed_agent(chat: &Chat, name: &str) {
+fn seed_agent(chat: &mut Chat, name: &str) {
     chat.session
         .agents
         .insert(
@@ -48,6 +48,9 @@ fn seed_agent(chat: &Chat, name: &str) {
             chat.session.clone(),
         )
         .now();
+    // The console learns the roster from the projection now, so a seeded
+    // instance is not there until the core has said so and this side has heard.
+    chat.settle_store();
 }
 
 fn lifecycle(label: &str, status: WatchState, detail: Option<&str>) -> UiEvent {
@@ -144,7 +147,7 @@ fn a_spawn_and_a_completion_add_no_rows_to_an_idle_console() {
 fn the_lifecycle_signal_reaches_the_dialog_and_not_the_console() {
     let mut chat = test_chat();
     chat.conv.messages.push(msg(Role::Assistant, ""));
-    seed_agent(&chat, "scout");
+    seed_agent(&mut chat, "scout");
     chat.refresh_conversations();
 
     chat.apply_event(lifecycle(
@@ -180,7 +183,7 @@ fn the_lifecycle_signal_reaches_the_dialog_and_not_the_console() {
 fn a_completion_bumps_the_dm_instead_of_main() {
     let mut chat = test_chat();
     chat.conv.messages.push(msg(Role::Assistant, ""));
-    seed_agent(&chat, "scout");
+    seed_agent(&mut chat, "scout");
     chat.refresh_conversations();
 
     let dm = BufferId::Dm("scout".to_string());
@@ -902,7 +905,7 @@ fn a_failed_open_lands_on_the_info_tier() {
 #[test]
 fn the_console_counts_what_main_says_while_you_are_elsewhere() {
     let mut chat = test_chat();
-    seed_agent(&chat, "scout");
+    seed_agent(&mut chat, "scout");
     chat.refresh_conversations();
     // The console's count is only readable from somewhere else: `observe`
     // zeroes it outright while @main is the conversation being read. D103 drove
@@ -1426,8 +1429,8 @@ fn a_completion_notification_leaves_one_dim_line() {
 #[test]
 fn a_streak_of_notices_reads_as_one_batch() {
     let mut chat = test_chat();
-    seed_agent(&chat, "scout");
-    seed_agent(&chat, "writer");
+    seed_agent(&mut chat, "scout");
+    seed_agent(&mut chat, "writer");
     chat.conv
         .messages
         .push(msg(Role::Assistant, "dispatching them now."));
@@ -1472,7 +1475,7 @@ fn a_streak_of_notices_reads_as_one_batch() {
 #[test]
 fn a_message_from_an_agent_writes_no_line_and_counts_as_mail() {
     let mut chat = test_chat();
-    seed_agent(&chat, "scout");
+    seed_agent(&mut chat, "scout");
     let body = "the parser was fine; the lexer drops a token when the input ends mid-string";
     let before = main_rows(&mut chat);
     chat.session
@@ -1512,7 +1515,7 @@ fn a_message_from_an_agent_writes_no_line_and_counts_as_mail() {
 #[test]
 fn a_room_post_naming_the_user_rings_once_and_writes_nothing() {
     let mut chat = chat_with_bell();
-    seed_agent(&chat, "scout");
+    seed_agent(&mut chat, "scout");
     chat.session
         .channels
         .create(
@@ -1596,7 +1599,7 @@ fn a_room_post_naming_the_user_rings_once_and_writes_nothing() {
 #[test]
 fn a_delivery_triggered_run_completes_without_a_notice() {
     let mut chat = test_chat();
-    seed_agent(&chat, "scout");
+    seed_agent(&mut chat, "scout");
     chat.conv
         .messages
         .push(msg(Role::Assistant, "the room is busy"));
@@ -1627,8 +1630,8 @@ fn a_delivery_triggered_run_completes_without_a_notice() {
 #[test]
 fn a_streaming_turn_staples_only_its_own_dispatches() {
     let mut chat = test_chat();
-    seed_agent(&chat, "scout");
-    seed_agent(&chat, "writer");
+    seed_agent(&mut chat, "scout");
+    seed_agent(&mut chat, "writer");
     chat.conv.messages.push(msg(Role::Assistant, ""));
     chat.conv.stream_msg = Some(0);
 
@@ -1671,7 +1674,7 @@ fn running_idle_and_stopped_write_no_line() {
     chat.conv
         .messages
         .push(msg(Role::Assistant, "scout is on it"));
-    seed_agent(&chat, "scout");
+    seed_agent(&mut chat, "scout");
     let before = main_rows(&mut chat);
 
     chat.apply_event(lifecycle(
@@ -1705,7 +1708,7 @@ fn a_continuation_run_is_the_same_agent_as_the_first() {
         .messages
         .push(msg(Role::Assistant, "hiring scout"));
     chat.conv.stream_msg = Some(chat.conv.messages.len() - 1);
-    seed_agent(&chat, "scout");
+    seed_agent(&mut chat, "scout");
     chat.apply_event(lifecycle(
         "scout #3 · look again",
         WatchState::Running,
@@ -1798,7 +1801,7 @@ fn mains_own_flow_grows_no_speaker_rows() {
 // ---------------------------------------------------------------------------
 
 /// One agent, one finished run, seeded as the record the registry keeps.
-fn seed_run(chat: &Chat, name: &str, assistant: Vec<ContentBlock>, results: Vec<ContentBlock>) {
+fn seed_run(chat: &mut Chat, name: &str, assistant: Vec<ContentBlock>, results: Vec<ContentBlock>) {
     use crate::api::types::Role as ApiRole;
     seed_agent(chat, name);
     let mut history = vec![
@@ -1820,6 +1823,7 @@ fn seed_run(chat: &Chat, name: &str, assistant: Vec<ContentBlock>, results: Vec<
         });
     }
     let _ = chat.session.agents.finish(name, history, 0).now();
+    chat.settle_store();
 }
 
 fn call(id: &str, url: &str) -> ContentBlock {
@@ -1852,7 +1856,7 @@ fn agent_page(chat: &mut Chat, name: &str) -> Vec<String> {
 fn an_agent_page_says_whether_a_call_worked() {
     let mut chat = test_chat();
     seed_run(
-        &chat,
+        &mut chat,
         "scout",
         vec![call("t1", "https://x.dev/a"), call("t2", "https://x.dev/b")],
         vec![
@@ -1886,7 +1890,7 @@ fn an_agent_page_says_whether_a_call_worked() {
 fn a_call_with_no_answer_in_the_record_reads_as_interrupted() {
     let mut chat = test_chat();
     seed_run(
-        &chat,
+        &mut chat,
         "scout",
         vec![call("t1", "https://x.dev/a")],
         Vec::new(),
@@ -1904,7 +1908,7 @@ fn a_call_with_no_answer_in_the_record_reads_as_interrupted() {
 fn an_agent_pages_reasoning_folds_like_mains() {
     let mut chat = test_chat();
     seed_run(
-        &chat,
+        &mut chat,
         "scout",
         vec![
             ContentBlock::Thinking {
@@ -1937,7 +1941,7 @@ fn an_agent_pages_reasoning_folds_like_mains() {
 fn a_run_that_opens_with_reasoning_keeps_its_clock() {
     let mut chat = test_chat();
     seed_run(
-        &chat,
+        &mut chat,
         "scout",
         vec![
             ContentBlock::Thinking {
@@ -1970,7 +1974,7 @@ fn a_run_that_opens_with_reasoning_keeps_its_clock() {
 fn prose_between_tool_streaks_closes_the_fold() {
     let mut chat = test_chat();
     seed_run(
-        &chat,
+        &mut chat,
         "scout",
         vec![
             ContentBlock::ToolUse {
@@ -2013,7 +2017,7 @@ fn prose_between_tool_streaks_closes_the_fold() {
 fn a_running_turn_is_drawn_like_a_finished_one() {
     use serde_json::json;
     let mut chat = test_chat();
-    seed_agent(&chat, "scout");
+    seed_agent(&mut chat, "scout");
     let scout = crate::ui::ConvKey::Agent("scout".to_string());
     let call = |id: &str, url: &str| UiEvent::ToolReady {
         tool_call_id: id.to_string(),
@@ -2071,7 +2075,7 @@ fn a_running_turn_is_drawn_like_a_finished_one() {
 #[test]
 fn a_page_opened_late_still_has_the_turn_that_already_happened() {
     let mut chat = test_chat();
-    seed_agent(&chat, "scout");
+    seed_agent(&mut chat, "scout");
     let scout = crate::ui::ConvKey::Agent("scout".to_string());
     for event in [
         UiEvent::TurnStart,
@@ -2093,7 +2097,7 @@ fn a_page_opened_late_still_has_the_turn_that_already_happened() {
 #[test]
 fn two_conversations_stream_at_once_without_crossing() {
     let mut chat = test_chat();
-    seed_agent(&chat, "scout");
+    seed_agent(&mut chat, "scout");
     let scout = crate::ui::ConvKey::Agent("scout".to_string());
     chat.apply_event(UiEvent::TurnStart);
     chat.apply_event_to(scout.clone(), UiEvent::TurnStart);
@@ -2132,7 +2136,7 @@ fn two_conversations_stream_at_once_without_crossing() {
 #[test]
 fn an_inbound_prompt_lands_as_the_sender_who_wrote_it() {
     let mut chat = test_chat();
-    seed_agent(&chat, "scout");
+    seed_agent(&mut chat, "scout");
     let scout = crate::ui::ConvKey::Agent("scout".to_string());
     chat.apply_event_to(scout.clone(), UiEvent::TurnStart);
     chat.apply_event_to(scout.clone(), UiEvent::Inbound("map the parser".into()));
@@ -2187,7 +2191,7 @@ fn an_inbound_prompt_lands_as_the_sender_who_wrote_it() {
 #[test]
 fn a_pages_running_turn_stays_out_of_scrollback() {
     let mut chat = test_chat();
-    seed_agent(&chat, "scout");
+    seed_agent(&mut chat, "scout");
     let scout = crate::ui::ConvKey::Agent("scout".to_string());
     chat.apply_event_to(scout.clone(), UiEvent::TurnStart);
     chat.apply_event_to(scout.clone(), UiEvent::TextDelta("halfway through".into()));
@@ -2239,7 +2243,7 @@ fn a_pages_running_turn_stays_out_of_scrollback() {
 #[tokio::test]
 async fn a_line_sent_to_an_agent_shows_on_its_page_once() {
     let mut chat = test_chat();
-    seed_agent(&chat, "scout");
+    seed_agent(&mut chat, "scout");
     chat.switch_to(Some(crate::tui::zoom::ZoomTarget::Agent("scout".into())));
     chat.set_input("look at the lexer".to_string());
     chat.submit();
@@ -2313,6 +2317,9 @@ fn a_room_page_appends_what_was_posted_while_it_was_open() {
         .post("dev", "crew", "first")
         .now()
         .expect("posted");
+    // The page asks the projection whether its room still exists, so the room
+    // has to have reached it before the page is opened.
+    chat.settle_store();
     chat.switch_to(Some(crate::tui::zoom::ZoomTarget::Room("crew".to_string())));
     assert_eq!(chat.conv.messages.len(), 1);
 
@@ -2336,7 +2343,7 @@ fn a_room_page_appends_what_was_posted_while_it_was_open() {
 #[test]
 fn switching_turns_the_page_and_coming_home_reprints_the_tail() {
     let mut chat = test_chat();
-    seed_agent(&chat, "scout");
+    seed_agent(&mut chat, "scout");
     chat.conv.messages.push(msg(Role::User, "what broke?"));
     chat.conv
         .messages
@@ -2435,7 +2442,7 @@ fn a_concurrent_answer_lands_on_the_call_that_made_it() {
 #[test]
 fn a_working_agents_page_says_it_is_working() {
     let mut chat = test_chat();
-    seed_agent(&chat, "scout");
+    seed_agent(&mut chat, "scout");
     // The row reads the page's own store since D134, so the turn has to have
     // started there — which is what `TurnStart` addressed to the instance is.
     chat.apply_event_to(
@@ -2479,7 +2486,7 @@ fn a_working_agents_page_says_it_is_working() {
 #[test]
 fn the_question_lands_above_the_answer_it_caused() {
     let mut chat = test_chat();
-    seed_agent(&chat, "scout");
+    seed_agent(&mut chat, "scout");
     let scout = crate::ui::ConvKey::Agent("scout".into());
     chat.switch_to(Some(crate::tui::zoom::ZoomTarget::Agent("scout".into())));
     chat.apply_event_to(scout.clone(), UiEvent::TurnStart);
@@ -2509,7 +2516,7 @@ fn the_question_lands_above_the_answer_it_caused() {
 #[test]
 fn mail_delivered_mid_turn_splits_the_run_around_it() {
     let mut chat = test_chat();
-    seed_agent(&chat, "scout");
+    seed_agent(&mut chat, "scout");
     let scout = crate::ui::ConvKey::Agent("scout".into());
     chat.switch_to(Some(crate::tui::zoom::ZoomTarget::Agent("scout".into())));
     chat.apply_event_to(scout.clone(), UiEvent::TurnStart);
@@ -2545,7 +2552,7 @@ fn mail_delivered_mid_turn_splits_the_run_around_it() {
 #[test]
 fn a_call_the_abort_caught_stops_reading_as_running() {
     let mut chat = test_chat();
-    seed_agent(&chat, "scout");
+    seed_agent(&mut chat, "scout");
     let scout = crate::ui::ConvKey::Agent("scout".into());
     chat.switch_to(Some(crate::tui::zoom::ZoomTarget::Agent("scout".into())));
     chat.apply_event_to(scout.clone(), UiEvent::TurnStart);
@@ -2584,7 +2591,7 @@ fn a_call_the_abort_caught_stops_reading_as_running() {
 #[test]
 fn an_instances_bash_leaves_the_consoles_tail_alone() {
     let mut chat = test_chat();
-    seed_agent(&chat, "scout");
+    seed_agent(&mut chat, "scout");
     let scout = crate::ui::ConvKey::Agent("scout".into());
     chat.bash_tail = Some(crate::live::LiveTail {
         lines: vec!["building…".to_string()],
@@ -2627,7 +2634,7 @@ fn an_instances_bash_leaves_the_consoles_tail_alone() {
 #[test]
 fn a_page_opened_over_undrained_events_does_not_double_the_turn() {
     let mut chat = test_chat();
-    seed_agent(&chat, "scout");
+    seed_agent(&mut chat, "scout");
     // The run committed its history first.
     chat.session
         .agents
@@ -2678,7 +2685,7 @@ fn a_page_opened_over_undrained_events_does_not_double_the_turn() {
 #[test]
 fn a_queued_command_acts_on_the_page_it_was_typed_on() {
     let mut chat = test_chat();
-    seed_agent(&chat, "scout");
+    seed_agent(&mut chat, "scout");
     chat.start_test_turn();
     chat.set_input("/compact");
     chat.submit();
@@ -2707,7 +2714,7 @@ fn a_queued_command_acts_on_the_page_it_was_typed_on() {
 fn a_store_opened_by_mail_still_owes_its_record() {
     use crate::api::types::Role as ApiRole;
     let mut chat = test_chat();
-    seed_agent(&chat, "scout");
+    seed_agent(&mut chat, "scout");
     let _ = chat
         .session
         .agents
