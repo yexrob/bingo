@@ -9,7 +9,7 @@ use super::*;
 use serde_json::json;
 
 /// Register an instance on the chat's own session, the way a spawn would.
-fn seed_agent(chat: &Chat, name: &str) {
+fn seed_agent(chat: &mut Chat, name: &str) {
     chat.session
         .agents
         .insert(
@@ -20,6 +20,9 @@ fn seed_agent(chat: &Chat, name: &str) {
             chat.session.clone(),
         )
         .now();
+    // The console learns the roster from the projection now, so a seeded
+    // instance is not there until the core has said so and this side has heard.
+    chat.settle_store();
 }
 
 /// Three grouped reads, each with output of its own.
@@ -1626,7 +1629,7 @@ fn esc_peels_the_agent_tree_in_the_slot_above_the_task_panel() {
     );
 
     let mut chat = test_chat();
-    seed_agent(&chat, "scout");
+    seed_agent(&mut chat, "scout");
     chat.start_test_turn();
     chat.help_visible = true;
     assert!(chat.roster_enter_selection(), "a cursor on the roster");
@@ -1657,7 +1660,7 @@ fn esc_peels_the_agent_tree_in_the_slot_above_the_task_panel() {
     // The roster's rows are constant furniture (v6): the one state Esc can
     // take is the cursor on them, and the rows stay.
     let mut chat = test_chat();
-    seed_agent(&chat, "scout");
+    seed_agent(&mut chat, "scout");
     assert!(chat.roster_enter_selection());
     assert!(chat.roster_selection().is_some());
     assert!(chat.on_key(KeyCode::Esc, KeyModifiers::NONE));
@@ -1677,7 +1680,7 @@ fn esc_peels_the_agent_tree_in_the_slot_above_the_task_panel() {
 #[test]
 fn ctrl_t_toggles_the_task_panel_alone() {
     let mut chat = test_chat();
-    seed_agent(&chat, "scout");
+    seed_agent(&mut chat, "scout");
     let ctrl_t = |chat: &mut Chat| chat.on_key(KeyCode::Char('t'), KeyModifiers::CONTROL);
 
     assert!(ctrl_t(&mut chat));

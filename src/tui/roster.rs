@@ -64,7 +64,7 @@ fn join_detail(owed: Option<String>, state: String) -> String {
 
 impl Chat {
     fn roster_entries(&self) -> Vec<Entry> {
-        let now = std::time::Instant::now();
+        let now = crate::app::ids::now_millis();
         let asking = self.asking_instance();
         let mut out = Vec::new();
         let palette = crate::tui::avatar::Palette::new(&self.theme);
@@ -88,8 +88,8 @@ impl Chat {
             stoppable: false,
         });
         for status in self.tree_instances() {
-            let stopped = status.state == crate::agents::AgentState::Stopped;
-            let running = status.state == crate::agents::AgentState::Running;
+            let stopped = status.state == crate::app::snapshot::AgentState::Stopped;
+            let running = status.state == crate::app::snapshot::AgentState::Running;
             let waiting = asking.as_deref() == Some(status.name.as_str());
             let owed = self.owed_by(&status.name);
             out.push(Entry {
@@ -349,7 +349,7 @@ mod tests {
         chat_at(100, 40)
     }
 
-    fn seed(chat: &Chat, name: &str) {
+    fn seed(chat: &mut Chat, name: &str) {
         chat.session
             .agents
             .insert(
@@ -360,6 +360,7 @@ mod tests {
                 chat.session.clone(),
             )
             .now();
+        chat.settle_store();
     }
 
     fn texts(chat: &Chat) -> Vec<String> {
@@ -376,7 +377,7 @@ mod tests {
     fn the_rows_lead_with_main_and_wear_the_status_copy() {
         let mut chat = test_chat();
         assert!(texts(&chat).is_empty(), "no conversations, no furniture");
-        seed(&chat, "scout");
+        seed(&mut chat, "scout");
         chat.session
             .channels
             .create(
@@ -411,7 +412,7 @@ mod tests {
     fn the_window_is_three_rows_and_follows_the_cursor() {
         let mut chat = test_chat();
         for name in ["a", "b", "c", "d"] {
-            seed(&chat, name);
+            seed(&mut chat, name);
         }
         chat.refresh_conversations();
         assert_eq!(chat.roster_len(), 5);
@@ -441,7 +442,7 @@ mod tests {
     fn down_falls_in_up_comes_back_and_typing_leaves() {
         use crossterm::event::{KeyCode, KeyModifiers};
         let mut chat = test_chat();
-        seed(&chat, "scout");
+        seed(&mut chat, "scout");
         chat.refresh_conversations();
         assert!(chat.roster_selection().is_none());
         chat.on_key(KeyCode::Down, KeyModifiers::NONE);
@@ -475,7 +476,7 @@ mod tests {
     fn k_stops_only_the_running_row_under_the_cursor() {
         use crossterm::event::{KeyCode, KeyModifiers};
         let mut chat = test_chat();
-        seed(&chat, "scout");
+        seed(&mut chat, "scout");
         chat.refresh_conversations();
         assert!(chat.roster_enter_selection());
         // On main's row, `k` is nothing.
@@ -512,7 +513,7 @@ mod tests {
     #[test]
     fn a_row_says_what_a_member_owes_and_whether_it_has_looked() {
         let mut chat = test_chat();
-        seed(&chat, "dev");
+        seed(&mut chat, "dev");
         chat.session
             .channels
             .create(
@@ -564,7 +565,7 @@ mod tests {
     #[test]
     fn a_rooms_row_says_who_it_is_waiting_on() {
         let mut chat = test_chat();
-        seed(&chat, "dev");
+        seed(&mut chat, "dev");
         chat.session
             .channels
             .create(

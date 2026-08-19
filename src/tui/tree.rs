@@ -14,7 +14,8 @@
 
 use ratatui::style::Color;
 
-use crate::agents::{AgentState, AgentStatus};
+use crate::app::ids::UnixMillis;
+use crate::app::snapshot::{AgentResource, AgentState};
 use crate::tui::avatar::{Gutter, Palette};
 use crate::tui::buffer::BufferId;
 use crate::tui::chat::{Chat, one_line};
@@ -111,7 +112,7 @@ pub fn stats_body(tool_uses: usize, tokens: u64) -> String {
 /// analogue and are not invented here — `[awaiting approval]` belongs to the
 /// plan-approval protocol v4 explicitly does not copy, and the all-idle
 /// past-tense verb (`Brewed for 2m 5s`) belongs to the teammate idle loop.
-pub(crate) fn status_label(status: &AgentStatus, now: std::time::Instant) -> String {
+pub(crate) fn status_label(status: &AgentResource, now: UnixMillis) -> String {
     match status.state {
         // CC's `[stopping]` slot. bingo's stop is synchronous, so the state
         // this row can be in is *stopped*, not stopping — and a stopped
@@ -123,7 +124,9 @@ pub(crate) fn status_label(status: &AgentStatus, now: std::time::Instant) -> Str
         AgentState::Stopped => "[stopped]".to_string(),
         AgentState::Idle => format!(
             "Idle for {}",
-            duration_label(now.saturating_duration_since(status.last_active))
+            duration_label(std::time::Duration::from_millis(
+                now.saturating_sub(status.last_active_at)
+            ))
         ),
         AgentState::Running => {
             let activity = status
@@ -141,15 +144,16 @@ pub(crate) fn status_label(status: &AgentStatus, now: std::time::Instant) -> Str
 }
 
 impl Chat {
-    /// Everyone the tree lists, in the order it lists them. The registry sorts
-    /// by name, which is CC's order too (`getRunningTeammatesSorted`).
+    /// Everyone the tree lists, in the order it lists them — read from the
+    /// projection the core published, which sorts by name, CC's order too
+    /// (`getRunningTeammatesSorted`).
     ///
     /// Stopped instances are included, where CC drops a killed task. bingo's
     /// registry keeps a stopped instance and the composer can still reach it,
     /// so a roster that hid it would disagree with the `@name` typeahead one
     /// row below.
-    pub(crate) fn tree_instances(&self) -> Vec<AgentStatus> {
-        self.session.agents.list()
+    pub(crate) fn tree_instances(&self) -> Vec<AgentResource> {
+        self.store.view().agents().to_vec()
     }
 
     /// The rooms the tree lists under the instances (D115): the ones the user

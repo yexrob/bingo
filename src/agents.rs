@@ -216,7 +216,6 @@ pub struct AgentStatus {
     pub name: String,
     pub def: Option<String>,
     pub description: String,
-    pub prompt: String,
     pub state: AgentState,
     /// Crew member or temporary hire (D53).
     pub kind: AgentKind,
@@ -238,16 +237,11 @@ pub struct AgentStatus {
     /// or another repository, so "which member is where" is not the session's
     /// answer to give.
     pub cwd: PathBuf,
-    /// Elapsed time of the current run; absent while idle or stopped.
-    pub elapsed: Option<Duration>,
-    /// Cumulative output tokens reported by the current model run.
-    pub output_tokens: u64,
-    /// Tool calls observed in the current run.
-    pub tool_uses: usize,
-    /// Most recent tool activity in this run, oldest first.
-    pub recent_activity: Vec<String>,
     /// When this instance last did something real (inbox receipt, turn start/end, activity).
     pub last_active: Instant,
+    // What a run has produced so far, and the task it was given, are not here:
+    // they are on the roster the core publishes (`AgentResource.recentActivity`
+    // / `.prompt`, B7c), which is where the console and a GUI both read them.
 }
 
 /// Message identifier, unique per registry. Handed back to the sender so it can check later
@@ -519,7 +513,6 @@ pub struct ToolAnswer {
 struct AgentRow {
     def: Option<String>,
     description: String,
-    prompt: String,
     state: AgentState,
     kind: AgentKind,
     last_active: Instant,
@@ -532,7 +525,6 @@ struct AgentRow {
     in_flight: Vec<(MsgId, String, String)>,
     acks: Vec<Ack>,
     session: Arc<Session>,
-    progress: Option<Arc<Mutex<AgentProgress>>>,
 }
 
 /// The replacement snapshot the registry publishes after every change.
@@ -1281,7 +1273,6 @@ impl AgentRegistry {
                     Arc::new(AgentRow {
                         def: entry.def.clone(),
                         description: entry.description.clone(),
-                        prompt: entry.prompt.clone(),
                         state: entry.state,
                         kind: entry.kind,
                         last_active: entry.last_active,
@@ -1291,7 +1282,6 @@ impl AgentRegistry {
                         in_flight: entry.in_flight.clone(),
                         acks: entry.acks.clone(),
                         session: entry.session.clone(),
-                        progress: entry.progress.clone(),
                     })
                 }),
             );
@@ -2258,37 +2248,19 @@ impl AgentHandle {
             .borrow()
             .instances
             .iter()
-            .map(|(name, row)| {
-                // Sampled here rather than stored: a run's token count and its
-                // elapsed time move without the registry hearing about it, and a
-                // row that froze them would stop the clock on a live turn.
-                let progress = row.progress.as_ref().map(|progress| {
-                    progress
-                        .lock()
-                        .unwrap_or_else(|err| err.into_inner())
-                        .clone()
-                });
-                AgentStatus {
-                    name: name.clone(),
-                    def: row.def.clone(),
-                    description: row.description.clone(),
-                    prompt: row.prompt.clone(),
-                    state: row.state,
-                    kind: row.kind,
-                    pending: row.inbox.len(),
-                    unacked: row.acks.iter().filter(|a| a.state.is_outstanding()).count(),
-                    model: row.session.runtime.model.borrow().clone(),
-                    provider: row.session.runtime.provider.borrow().clone(),
-                    thinking: row.session.runtime.thinking.borrow().clone(),
-                    cwd: row.session.cwd(),
-                    elapsed: progress
-                        .as_ref()
-                        .and_then(|p| p.started_at.map(|started| started.elapsed())),
-                    output_tokens: progress.as_ref().map_or(0, |p| p.output_tokens),
-                    tool_uses: progress.as_ref().map_or(0, |p| p.tool_uses),
-                    recent_activity: progress.map_or_else(Vec::new, |p| p.recent_activity),
-                    last_active: row.last_active,
-                }
+            .map(|(name, row)| AgentStatus {
+                name: name.clone(),
+                def: row.def.clone(),
+                description: row.description.clone(),
+                state: row.state,
+                kind: row.kind,
+                pending: row.inbox.len(),
+                unacked: row.acks.iter().filter(|a| a.state.is_outstanding()).count(),
+                model: row.session.runtime.model.borrow().clone(),
+                provider: row.session.runtime.provider.borrow().clone(),
+                thinking: row.session.runtime.thinking.borrow().clone(),
+                cwd: row.session.cwd(),
+                last_active: row.last_active,
             })
             .collect()
     }

@@ -1933,7 +1933,7 @@ impl super::Chat {
         if !running {
             return;
         }
-        let roster = self.session.agents.list();
+        let roster = self.tree_instances();
         for msg in &mut self.conv.messages {
             for act in &mut msg.activities {
                 let ActivityKind::Watch(w) = &mut act.kind else {
@@ -1958,7 +1958,7 @@ impl super::Chat {
                 }
                 let seen = w.run_stats.unwrap_or_default();
                 w.run_stats = Some(crate::tui::activities::RunStats {
-                    tool_uses: seen.tool_uses.max(status.tool_uses),
+                    tool_uses: seen.tool_uses.max(status.tool_uses as usize),
                     tokens: seen.tokens.max(status.output_tokens),
                 });
             }
@@ -2144,7 +2144,7 @@ impl super::Chat {
         // string, and only a name the registry answers to earns a colour and a
         // row of its own (CC gates the same way on `ownerActive`,
         // `TaskListV2.tsx:268`).
-        let roster = self.session.agents.list();
+        let roster = self.tree_instances();
         // What a blocker being "open" means: the task it names is not done.
         // Nothing else — this is a readout, not a scheduler.
         let unresolved: Vec<&str> = t
@@ -2178,7 +2178,7 @@ impl super::Chat {
             line.push_styled(item.text.clone(), style);
             if let Some(owner) = item.owner.as_deref()
                 && let Some(status) = roster.iter().find(|status| status.name == owner)
-                && status.state != crate::agents::AgentState::Stopped
+                && status.state != crate::app::snapshot::AgentState::Stopped
             {
                 line.push_styled(" (".to_string(), SegStyle::fg(theme.text_secondary));
                 line.push_styled(

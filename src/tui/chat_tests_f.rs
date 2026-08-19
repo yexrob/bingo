@@ -1136,6 +1136,9 @@ fn dispatching(chat: &mut Chat, name: &str, description: &str, activity: &[&str]
             },
         )
         .now();
+    // What the row says the instance is doing is what the core published about
+    // it, so the core has to have finished saying it.
+    chat.settle_store();
     chat.apply_event(lifecycle(
         &format!("{name} · {description}"),
         WatchState::Running,

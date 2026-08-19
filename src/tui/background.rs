@@ -32,7 +32,7 @@ use std::collections::HashMap;
 
 use crossterm::event::{KeyCode, KeyModifiers};
 
-use crate::agents::{AgentState, AgentStatus};
+use crate::app::snapshot::{AgentResource, AgentState};
 use crate::channels::{ChannelStatus, USER_NAME};
 use crate::tui::buffer::BufferId;
 use crate::tui::chat::{Chat, Row, one_line};
@@ -229,11 +229,11 @@ impl Chat {
 
     /// The roster, in the dialog's order: running first, then whichever
     /// conversation moved most recently, then by name so the order is total.
-    fn dialog_agents(&self, badges: &HashMap<BufferId, Badge>) -> Vec<AgentStatus> {
-        let mut agents = self.session.agents.list();
+    fn dialog_agents(&self, badges: &HashMap<BufferId, Badge>) -> Vec<AgentResource> {
+        let mut agents = self.tree_instances();
         agents.sort_by(|a, b| {
-            let running = |s: &AgentStatus| s.state == AgentState::Running;
-            let moved = |s: &AgentStatus| {
+            let running = |s: &AgentResource| s.state == AgentState::Running;
+            let moved = |s: &AgentResource| {
                 badges
                     .get(&BufferId::Dm(s.name.clone()))
                     .map(|badge| badge.last_activity)
@@ -281,7 +281,7 @@ impl Chat {
             .filter(|present| **present)
             .count();
         let headings = kinds > 1;
-        let now = std::time::Instant::now();
+        let now = crate::app::ids::now_millis();
         let mut rows: Vec<DialogRow> = Vec::new();
 
         if !agents.is_empty() {
@@ -394,9 +394,7 @@ impl Chat {
     /// *working*, and a room is a place rather than a task.
     fn dialog_subtitle(&self) -> String {
         let agents = self
-            .session
-            .agents
-            .list()
+            .tree_instances()
             .iter()
             .filter(|status| status.state == AgentState::Running)
             .count();
@@ -446,9 +444,7 @@ impl Chat {
         let Some(DialogTarget::Agent(name)) = target else {
             return false;
         };
-        self.session
-            .agents
-            .list()
+        self.tree_instances()
             .iter()
             .any(|status| &status.name == name && status.state == AgentState::Running)
     }
@@ -692,9 +688,9 @@ impl Chat {
     fn agent_detail_rows(&self, name: &str, width: usize) -> Vec<Row> {
         let theme = &self.theme;
         let budget = width.saturating_sub(4);
-        let statuses = self.session.agents.list();
+        let statuses = self.tree_instances();
         let status = statuses.iter().find(|status| status.name == name);
-        let now = std::time::Instant::now();
+        let now = crate::app::ids::now_millis();
         let mut title = Line::styled(
             format!("@{name}"),
             SegStyle::fg(self.identity_color(name)).bold(),
@@ -733,11 +729,11 @@ impl Chat {
         // tools to count, and `0s · 0 tool uses · 0 tokens` would be three
         // measurements of nothing.
         let mut cost: Vec<String> = Vec::new();
-        if let Some(elapsed) = status.elapsed {
-            cost.push(duration_label(elapsed));
+        if let Some(elapsed) = status.elapsed_ms {
+            cost.push(duration_label(std::time::Duration::from_millis(elapsed)));
         }
         if status.tool_uses > 0 || status.output_tokens > 0 {
-            cost.push(stats_body(status.tool_uses, status.output_tokens));
+            cost.push(stats_body(status.tool_uses as usize, status.output_tokens));
         }
         if !cost.is_empty() {
             subtitle.push_styled(cost.join(" · "), SegStyle::fg(theme.text_secondary));
@@ -809,7 +805,7 @@ impl Chat {
     /// The detail's bottom row — CC's
     /// (`InProcessTeammateDetailDialog.tsx:198`), conditional on what the row
     /// can actually do.
-    fn dialog_hint_detail(&self, status: Option<&AgentStatus>) -> String {
+    fn dialog_hint_detail(&self, status: Option<&AgentResource>) -> String {
         let mut parts = vec![
             "← to go back".to_string(),
             "Esc/Enter/Space to close".to_string(),
@@ -1090,7 +1086,7 @@ mod tests {
         chat_at(100, 40)
     }
 
-    fn seed_agent(chat: &Chat, name: &str) {
+    fn seed_agent(chat: &mut Chat, name: &str) {
         chat.session
             .agents
             .insert(
@@ -1101,6 +1097,9 @@ mod tests {
                 chat.session.clone(),
             )
             .now();
+        // The roster is what the core published, so the core has to have
+        // finished saying it.
+        chat.settle_store();
     }
 
     fn seed_room(chat: &Chat, name: &str, members: &[&str]) {
@@ -1166,7 +1165,7 @@ mod tests {
     #[test]
     fn the_dialog_shows_agents_shells_and_rooms() {
         let mut chat = test_chat();
-        seed_agent(&chat, "scout");
+        seed_agent(&mut chat, "scout");
         seed_shell(&chat, "cargo build");
         seed_room(&chat, "build", &["main", USER_NAME, "scout"]);
         seed_room(&chat, "parser", &["scout", "zoe"]);
@@ -1228,7 +1227,7 @@ mod tests {
         assert!(empty.contains("Background tasks"), "{empty}");
         assert!(empty.contains("No tasks currently running"), "{empty}");
 
-        seed_agent(&chat, "scout");
+        seed_agent(&mut chat, "scout");
         chat.refresh_conversations();
         let rows = texts(&chat);
         assert!(
@@ -1248,8 +1247,8 @@ mod tests {
     #[test]
     fn the_subtitle_counts_what_is_running() {
         let mut chat = test_chat();
-        seed_agent(&chat, "scout");
-        seed_agent(&chat, "zoe");
+        seed_agent(&mut chat, "scout");
+        seed_agent(&mut chat, "zoe");
         seed_shell(&chat, "cargo build");
         seed_room(&chat, "build", &[USER_NAME]);
         chat.refresh_conversations();
@@ -1259,6 +1258,8 @@ mod tests {
 
         chat.session.agents.stop("zoe").now().expect("stopped");
         chat.session.agents.stop("scout").now().expect("stopped");
+        chat.settle_store();
+        chat.settle_store();
         let text = view(&chat);
         assert!(
             text.contains("1 active shell") && !text.contains("agents"),
@@ -1273,10 +1274,11 @@ mod tests {
     #[test]
     fn rows_lead_with_what_is_running_and_then_with_what_just_moved() {
         let mut chat = test_chat();
-        seed_agent(&chat, "alpha");
-        seed_agent(&chat, "zulu");
+        seed_agent(&mut chat, "alpha");
+        seed_agent(&mut chat, "zulu");
         chat.refresh_conversations();
         chat.session.agents.stop("alpha").now().expect("stopped");
+        chat.settle_store();
         chat.open_background_dialog();
         let names: Vec<String> = chat
             .dialog_rows()
@@ -1295,6 +1297,7 @@ mod tests {
 
         // With neither running, the one whose conversation moved last leads.
         chat.session.agents.stop("zulu").now().expect("stopped");
+        chat.settle_store();
         chat.buffers
             .observe(BufferId::Dm("alpha".into()), 4, false, 9);
         let names: Vec<String> = chat
@@ -1313,7 +1316,7 @@ mod tests {
     #[test]
     fn the_cursor_walks_every_section_and_wraps() {
         let mut chat = test_chat();
-        seed_agent(&chat, "scout");
+        seed_agent(&mut chat, "scout");
         seed_shell(&chat, "cargo build");
         seed_room(&chat, "build", &[USER_NAME]);
         chat.refresh_conversations();
@@ -1350,10 +1353,11 @@ mod tests {
     #[test]
     fn the_cursor_follows_its_row_when_the_order_changes() {
         let mut chat = test_chat();
-        seed_agent(&chat, "alpha");
-        seed_agent(&chat, "zulu");
+        seed_agent(&mut chat, "alpha");
+        seed_agent(&mut chat, "zulu");
         chat.refresh_conversations();
         chat.session.agents.stop("zulu").now().expect("stopped");
+        chat.settle_store();
         chat.open_background_dialog();
         assert_eq!(
             chat.dialog_selection(),
@@ -1368,6 +1372,7 @@ mod tests {
 
         // alpha stops: zulu is no longer second, and the cursor is still on it.
         chat.session.agents.stop("alpha").now().expect("stopped");
+        chat.settle_store();
         chat.buffers
             .observe(BufferId::Dm("zulu".into()), 2, false, 7);
         assert_eq!(
@@ -1390,7 +1395,7 @@ mod tests {
     #[test]
     fn f_foregrounds_an_agent_and_a_room() {
         let mut chat = test_chat();
-        seed_agent(&chat, "scout");
+        seed_agent(&mut chat, "scout");
         seed_room(&chat, "build", &[USER_NAME]);
         chat.refresh_conversations();
 
@@ -1433,7 +1438,7 @@ mod tests {
     #[test]
     fn x_stops_the_agent_under_the_cursor_and_nothing_else() {
         let mut chat = test_chat();
-        seed_agent(&chat, "scout");
+        seed_agent(&mut chat, "scout");
         seed_room(&chat, "build", &[USER_NAME]);
         let shell = seed_shell(&chat, "cargo build");
         chat.refresh_conversations();
@@ -1447,7 +1452,7 @@ mod tests {
                 .iter()
                 .find(|status| status.name == "scout")
                 .map(|status| status.state),
-            Some(AgentState::Stopped),
+            Some(crate::agents::AgentState::Stopped),
         );
         assert_eq!(
             chat.warnings.len(),
@@ -1457,7 +1462,9 @@ mod tests {
         );
         assert!(chat.dialog.is_some(), "the dialog stays open");
 
-        // A stopped instance has nothing left to stop.
+        // A stopped instance has nothing left to stop — once the roster the
+        // dialog reads has been told it stopped.
+        chat.settle_store();
         chat.warnings.clear();
         assert!(chat.background_dialog_key(KeyCode::Char('x'), KeyModifiers::NONE));
         assert!(chat.warnings.is_empty(), "{:?}", chat.warnings);
@@ -1492,7 +1499,7 @@ mod tests {
     #[test]
     fn rows_carry_the_unread_the_store_counted() {
         let mut chat = test_chat();
-        seed_agent(&chat, "scout");
+        seed_agent(&mut chat, "scout");
         seed_room(&chat, "build", &[USER_NAME, "scout"]);
         chat.refresh_conversations();
         chat.buffers
@@ -1532,7 +1539,7 @@ mod tests {
     #[test]
     fn foregrounding_a_row_clears_its_unread() {
         let mut chat = test_chat();
-        seed_agent(&chat, "scout");
+        seed_agent(&mut chat, "scout");
         chat.refresh_conversations();
         chat.buffers
             .observe(BufferId::Dm("scout".into()), 3, true, 4);
@@ -1564,7 +1571,7 @@ mod tests {
     #[test]
     fn the_key_row_is_ccs_and_says_only_what_is_true() {
         let mut chat = test_chat();
-        seed_agent(&chat, "scout");
+        seed_agent(&mut chat, "scout");
         chat.refresh_conversations();
         chat.open_background_dialog();
         let hint = chat.dialog_hint();
@@ -1574,6 +1581,8 @@ mod tests {
         );
 
         chat.session.agents.stop("scout").now().expect("stopped");
+
+        chat.settle_store();
         let hint = chat.dialog_hint();
         assert_eq!(
             hint, "↑/↓ to select · Enter to view · f to foreground · ←/Esc to close",
@@ -1587,7 +1596,7 @@ mod tests {
     #[test]
     fn enter_opens_the_detail_and_the_ways_out_are_ccs() {
         let mut chat = test_chat();
-        seed_agent(&chat, "scout");
+        seed_agent(&mut chat, "scout");
         chat.refresh_conversations();
         chat.open_background_dialog();
 
@@ -1614,7 +1623,7 @@ mod tests {
     #[test]
     fn the_agent_detail_says_what_it_is_doing_and_what_it_was_asked() {
         let mut chat = test_chat();
-        seed_agent(&chat, "scout");
+        seed_agent(&mut chat, "scout");
         chat.session
             .agents
             .set_prompt("scout", "Find the rendering seam".into())
@@ -1631,7 +1640,7 @@ mod tests {
                 },
             )
             .now();
-        chat.session.agents.settle_now();
+        chat.settle_store();
         chat.refresh_conversations();
         chat.open_background_dialog();
         chat.background_dialog_key(KeyCode::Enter, KeyModifiers::NONE);
@@ -1723,7 +1732,7 @@ mod tests {
     fn the_dialog_fits_its_box_and_bounds_its_sections() {
         let mut chat = test_chat();
         for i in 0..SECTION_ROWS_MAX + 3 {
-            seed_agent(&chat, &format!("agent{i:02}"));
+            seed_agent(&mut chat, &format!("agent{i:02}"));
         }
         seed_room(
             &chat,
@@ -1754,7 +1763,7 @@ mod tests {
     #[test]
     fn a_pending_question_keeps_the_dialog_shut() {
         let mut chat = test_chat();
-        seed_agent(&chat, "scout");
+        seed_agent(&mut chat, "scout");
         chat.open_background_dialog();
         assert!(chat.dialog.is_some());
         chat.dialog = None;

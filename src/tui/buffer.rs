@@ -308,6 +308,12 @@ impl Buffers {
             _ => true,
         });
         let mut live: Vec<String> = Vec::new();
+        // The one roster read that stays on the registry (B7c). It is not the
+        // names it needs — the projection has those — it is `pair_measure`
+        // below, which walks the instance's own message history with
+        // `pair_lane`. That history is not what the store projects, so moving
+        // the loop without moving the measure would be reading two sources for
+        // one row.
         for status in session.agents.list() {
             let id = BufferId::Dm(status.name.clone());
             let read = self.get(&id).map(|b| b.read).unwrap_or(0) as usize;

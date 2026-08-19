@@ -817,7 +817,7 @@ mod tests {
     /// once a conversation exists, nothing at all before one does.
     #[test]
     fn the_roster_takes_the_last_rows() {
-        let chat = chat_at(100, 40);
+        let mut chat = chat_at(100, 40);
         let base = rows_of(chrome(&chat, 100, false)).len();
         chat.session
             .agents
@@ -829,6 +829,7 @@ mod tests {
                 chat.session.clone(),
             )
             .now();
+        chat.settle_store();
 
         let rows = rows_of(chrome(&chat, 100, false));
         let text: Vec<String> = rows.iter().map(row_text).collect();

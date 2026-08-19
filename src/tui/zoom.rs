@@ -14,7 +14,6 @@
 //! ([`Chat::submit`]): the console's `/`, `!` and `@name` work on every page,
 //! and where the *prose* goes is the only thing that reads which page it is.
 
-use crate::agents::AgentState;
 use crate::tui::buffer::BufferId;
 use crate::tui::chat::Chat;
 
@@ -124,7 +123,7 @@ impl Chat {
         };
         self.tree_instances()
             .iter()
-            .any(|s| s.name == name && s.state == AgentState::Running)
+            .any(|s| s.name == name && s.state == crate::app::snapshot::AgentState::Running)
     }
 
     /// Point the screen at a conversation: the accounting follows the reader,
@@ -498,7 +497,7 @@ mod tests {
                 .agents
                 .list()
                 .iter()
-                .any(|s| s.name == "scout" && s.state == AgentState::Running),
+                .any(|s| s.name == "scout" && s.state == crate::agents::AgentState::Running),
             "delivery revived and the flush claimed it"
         );
     }
@@ -540,12 +539,15 @@ mod tests {
                 .agents
                 .list()
                 .iter()
-                .any(|s| s.name == "scout" && s.state == AgentState::Stopped),
+                .any(|s| s.name == "scout" && s.state == crate::agents::AgentState::Stopped),
             "the first press stops the subject's run"
         );
         assert!(!chat.active.is_main(), "and stays on the page");
         assert!(chat.main_conv().busy, "main's turn was never touched");
 
+        // The ladder reads the roster the core published, so the stop it just
+        // asked for has to have been said before the next press reads it.
+        chat.settle_store();
         chat.on_key(KeyCode::Esc, KeyModifiers::NONE);
         assert!(chat.active.is_main(), "the second press comes home");
         assert!(chat.conv.busy, "still not touched");
