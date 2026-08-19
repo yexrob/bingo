@@ -780,6 +780,7 @@ mod tests {
             name: name.to_string(),
             def: None,
             description: String::new(),
+            prompt: String::new(),
             kind: AgentKind::Hire,
             state,
             model: "test-model".to_string(),
@@ -792,6 +793,7 @@ mod tests {
             elapsed_ms: None,
             output_tokens: 0,
             tool_uses: 0,
+            recent_activity: Vec::new(),
             last_active_at: 0,
         }
     }

@@ -384,11 +384,18 @@ struct Told {
 /// What decides whether an instance's change is worth an event. Progress
 /// counters are deliberately out: a token count moving is not a state
 /// transition, and B4's usage events are where a live figure belongs.
+///
+/// The task and the latest tool line are in, because they are what the row
+/// *says*: a roster whose `Running · Read src/lib.rs` never moved would be
+/// reporting the first tool of the run for the rest of it. They move once per
+/// tool call and once per run, which is a transition rate, not a token rate.
 #[derive(PartialEq, Eq)]
 struct AgentSummary {
     state: AgentState,
     pending: u32,
     unacked: u32,
+    prompt: String,
+    recent_activity: Vec<String>,
 }
 
 #[derive(PartialEq, Eq)]

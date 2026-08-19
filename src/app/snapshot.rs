@@ -913,6 +913,11 @@ pub struct AgentResource {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub def: Option<String>,
     pub description: String,
+    /// The task this instance is working on, or last worked on. A roster's task
+    /// line is drawn from it, and a client that had only the description would
+    /// be showing what the instance *is* where it means to show what it is
+    /// *doing*.
+    pub prompt: String,
     pub kind: AgentKind,
     pub state: AgentState,
     pub model: String,
@@ -929,6 +934,10 @@ pub struct AgentResource {
     pub elapsed_ms: Option<u64>,
     pub output_tokens: u64,
     pub tool_uses: u32,
+    /// The tool lines this run has produced, oldest first and bounded. What a
+    /// `Running` row says it is doing right now is the last of them; without it
+    /// a client can only report that something is running.
+    pub recent_activity: Vec<String>,
     pub last_active_at: UnixMillis,
 }
 

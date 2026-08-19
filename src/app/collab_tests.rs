@@ -810,3 +810,51 @@ async fn a_mention_the_user_owes_is_an_obligation_until_they_speak() {
         "and the user's own words are read by definition"
     );
 }
+
+/// A roster row says what an instance is *doing*, and both halves of that
+/// sentence are the contract's now: the task it was given, and the tool line its
+/// run last produced. Without them a client can draw a name and a spinner, which
+/// is what the console's own roster refused to be drawn from.
+#[tokio::test]
+async fn an_instance_reports_the_task_it_took_and_the_work_it_is_doing() {
+    let core = AppCore::start(SessionSetup::default());
+    let agents = core.agents();
+    let mut link = attached(&core).await;
+    agents
+        .insert(
+            "scout",
+            crate::agents::AgentKind::Hire,
+            None,
+            "surveys the crate".to_string(),
+            test_session(&core),
+        )
+        .await;
+    agents
+        .set_prompt("scout", "find every call site".to_string())
+        .await;
+    let progress = Arc::new(std::sync::Mutex::new(
+        crate::agents::AgentProgress::default(),
+    ));
+    if let Ok(mut held) = progress.lock() {
+        held.start_run();
+        held.record_tool("Read src/lib.rs".to_string());
+    }
+    agents.set_progress("scout", Some(progress)).await;
+    agents.settle_now();
+
+    let projected = drain(&mut link)
+        .await
+        .into_iter()
+        .filter_map(|event| match event.payload {
+            AppEventPayload::AgentChanged(changed) => Some(changed.agent),
+            _ => None,
+        })
+        .next_back()
+        .unwrap_or_else(|| panic!("the roster was published"));
+    assert_eq!(projected.prompt, "find every call site");
+    assert_eq!(
+        projected.description, "surveys the crate",
+        "the task and what the instance is are two different lines"
+    );
+    assert_eq!(projected.recent_activity, vec!["Read src/lib.rs"]);
+}

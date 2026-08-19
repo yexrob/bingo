@@ -324,6 +324,7 @@ fn agent_resource() -> AgentResource {
         name: "scout".to_string(),
         def: Some("explorer".to_string()),
         description: "Surveys the crate".to_string(),
+        prompt: "find every call site".to_string(),
         kind: AgentKind::Crew,
         state: AgentState::Running,
         model: "sonnet".to_string(),
@@ -336,6 +337,7 @@ fn agent_resource() -> AgentResource {
         elapsed_ms: Some(4200),
         output_tokens: 512,
         tool_uses: 3,
+        recent_activity: vec!["Read src/lib.rs".to_string()],
         last_active_at: TS,
     }
 }
@@ -346,6 +348,7 @@ fn agent_resource_json() -> Value {
         "name": "scout",
         "def": "explorer",
         "description": "Surveys the crate",
+        "prompt": "find every call site",
         "kind": "crew",
         "state": "running",
         "model": "sonnet",
@@ -358,6 +361,7 @@ fn agent_resource_json() -> Value {
         "elapsedMs": 4200,
         "outputTokens": 512,
         "toolUses": 3,
+        "recentActivity": ["Read src/lib.rs"],
         "lastActiveAt": TS
     })
 }

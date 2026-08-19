@@ -37,6 +37,7 @@ impl super::Controller {
                     name: fact.name,
                     def: fact.def,
                     description: fact.description,
+                    prompt: fact.prompt,
                     kind: match fact.kind {
                         crate::agents::AgentKind::Crew => AgentKind::Crew,
                         crate::agents::AgentKind::Hire => AgentKind::Hire,
@@ -52,6 +53,7 @@ impl super::Controller {
                     elapsed_ms: fact.elapsed_ms,
                     output_tokens: fact.output_tokens,
                     tool_uses: fact.tool_uses,
+                    recent_activity: fact.recent_activity,
                     // When it last did something, not when it was last asked
                     // about. Stamping `now` here made every instance eternally
                     // fresh, and an `Idle for …` drawn from it always read zero.
@@ -211,6 +213,8 @@ impl super::Controller {
                 state: agent.state,
                 pending: agent.pending,
                 unacked: agent.unacked,
+                prompt: agent.prompt.clone(),
+                recent_activity: agent.recent_activity.clone(),
             };
             let known = self.told.agents.get(&agent.name);
             if known.is_some_and(|(_, told)| told == &summary) {

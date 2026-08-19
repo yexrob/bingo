@@ -1538,6 +1538,9 @@ pub(crate) struct AgentFacts {
     pub name: String,
     pub def: Option<String>,
     pub description: String,
+    /// The task it was given. Whoever draws a roster draws this line, not the
+    /// description.
+    pub prompt: String,
     pub kind: AgentKind,
     pub state: AgentState,
     pub model: String,
@@ -1549,6 +1552,8 @@ pub(crate) struct AgentFacts {
     pub elapsed_ms: Option<u64>,
     pub output_tokens: u64,
     pub tool_uses: u32,
+    /// The tool lines this run has produced, oldest first.
+    pub recent_activity: Vec<String>,
     /// How long ago this instance last did something real. A duration rather
     /// than an instant, because the wire wants a wall-clock moment and only the
     /// actor can name one — `now - idle_ms` is that moment, and it is the
@@ -1625,6 +1630,7 @@ impl AgentRegistry {
                     name: name.clone(),
                     def: entry.def.clone(),
                     description: entry.description.clone(),
+                    prompt: entry.prompt.clone(),
                     kind: entry.kind,
                     state: entry.state,
                     model: entry.session.runtime.model.borrow().clone(),
@@ -1642,6 +1648,10 @@ impl AgentRegistry {
                         .and_then(|p| p.started_at.map(|at| at.elapsed().as_millis() as u64)),
                     output_tokens: progress.as_ref().map_or(0, |p| p.output_tokens),
                     tool_uses: progress.as_ref().map_or(0, |p| p.tool_uses) as u32,
+                    recent_activity: progress
+                        .as_ref()
+                        .map(|p| p.recent_activity.clone())
+                        .unwrap_or_default(),
                     idle_ms: entry.last_active.elapsed().as_millis() as u64,
                 }
             })
