@@ -8,7 +8,7 @@
 use super::*;
 use crate::app::event::CatalogChanged;
 use crate::app::snapshot::{CatalogKind, ThinkingLevel};
-use crate::app::{AppCore, AppPublisher, RequestId};
+use crate::app::{AppCore, AppLink, AppPublisher, FRAME_CAPACITY, RequestId};
 
 fn catalog(revision: u64) -> AppEventPayload {
     AppEventPayload::CatalogChanged(CatalogChanged {
@@ -37,19 +37,45 @@ fn publish(publisher: &AppPublisher, revision: u64) {
 async fn attached(core: &AppCore, label: &str) -> (AppLink, SessionSnapshot) {
     let mut link = core
         .attach(AttachRequest::new(label))
-        .await
         .unwrap_or_else(|error| panic!("{error}"));
     link.request(AppRequest::Query {
         id: RequestId(1),
         query: AppQuery::ReadSession,
     })
-    .await
     .unwrap_or_else(|error| panic!("{error}"));
     match link.recv().await {
         Some(AppFrame::Reply {
             result: Ok(AppReply::Session(snapshot)),
             ..
         }) => (link, *snapshot),
+        other => panic!("expected a session snapshot, got {other:?}"),
+    }
+}
+
+/// Attaching needs no runtime, which is the whole of B7b ruling ②.
+///
+/// The console's synchronous tests — and its key handlers — have no runtime to
+/// spawn a forwarder on. Attaching is a write and a request is a write, so both
+/// happen here in a plain `#[test]`, and the actor answers on its own thread.
+#[test]
+fn a_frontend_with_no_runtime_attaches_asks_and_is_answered() {
+    let core = AppCore::start(SessionSetup::default());
+    let mut link = core
+        .attach(AttachRequest::new("no-runtime"))
+        .unwrap_or_else(|error| panic!("{error}"));
+    link.request(AppRequest::Query {
+        id: RequestId(1),
+        query: AppQuery::ReadSession,
+    })
+    .unwrap_or_else(|error| panic!("{error}"));
+    match crate::app::answer::block_on(link.recv()) {
+        Some(AppFrame::Reply {
+            id,
+            result: Ok(AppReply::Session(snapshot)),
+        }) => {
+            assert_eq!(id, RequestId(1), "the reply names the request it answers");
+            assert_eq!(snapshot.event_cursor, 0, "nothing has happened yet");
+        }
         other => panic!("expected a session snapshot, got {other:?}"),
     }
 }
@@ -100,7 +126,6 @@ async fn a_snapshot_cut_suppresses_what_it_already_contains() {
     let publisher = core.publisher();
     let mut link = core
         .attach(AttachRequest::new("test"))
-        .await
         .unwrap_or_else(|error| panic!("{error}"));
     for revision in 0..3 {
         publish(&publisher, revision);
@@ -110,7 +135,6 @@ async fn a_snapshot_cut_suppresses_what_it_already_contains() {
         id: RequestId(7),
         query: AppQuery::ReadSession,
     })
-    .await
     .unwrap_or_else(|error| panic!("{error}"));
     let cursor = match link.recv().await {
         Some(AppFrame::Reply {
@@ -229,7 +253,6 @@ async fn the_two_methods_that_choose_a_session_belong_to_the_transport() {
             id: RequestId(id),
             command,
         })
-        .await
         .unwrap_or_else(|error| panic!("{error}"));
         assert_eq!(
             next_reply(&mut link, RequestId(id)).await,
@@ -266,7 +289,6 @@ async fn marking_read_names_the_view_it_was_looking_at() {
             expected_revision: revision.saturating_add(7),
         },
     })
-    .await
     .unwrap_or_else(|error| panic!("{error}"));
     match next_reply(&mut link, RequestId(2)).await {
         Err(AppError::Refused(kind)) => assert_eq!(
@@ -286,7 +308,6 @@ async fn marking_read_names_the_view_it_was_looking_at() {
             expected_revision: revision,
         },
     })
-    .await
     .unwrap_or_else(|error| panic!("{error}"));
     // The reply is the reader's own view, so a client that just cleared a
     // badge does not have to wait for a notification to know it is clear.
@@ -326,7 +347,6 @@ async fn read(link: &mut AppLink, id: u64, query: AppQuery) -> Result<AppReply, 
         id: RequestId(id),
         query,
     })
-    .await
     .unwrap_or_else(|error| panic!("{error}"));
     next_reply(link, RequestId(id)).await
 }
@@ -569,7 +589,6 @@ async fn an_asset_is_registered_and_read_back_through_the_core() {
             expected_sha256: None,
         },
     })
-    .await
     .unwrap_or_else(|error| panic!("{error}"));
     let record = match next_reply(&mut link, RequestId(2)).await {
         Ok(AppReply::Asset(record)) => *record,
@@ -660,7 +679,6 @@ async fn execute(
             action,
         },
     })
-    .await
     .unwrap_or_else(|error| panic!("{error}"));
     next_reply(link, RequestId(id)).await
 }
@@ -907,7 +925,6 @@ async fn a_stale_precondition_loses_rather_than_overwrites() {
             },
         },
     })
-    .await
     .unwrap_or_else(|error| panic!("{error}"));
     match next_reply(&mut link, RequestId(2)).await {
         Err(AppError::Refused(kind)) => assert_eq!(
@@ -948,7 +965,6 @@ async fn interrupting_asks_the_turn_that_was_named() {
             turn_id: turn.clone(),
         },
     })
-    .await
     .unwrap_or_else(|error| panic!("{error}"));
     match next_reply(&mut link, RequestId(2)).await {
         Ok(AppReply::Interrupted { accepted, .. }) => assert!(accepted),
@@ -972,7 +988,6 @@ async fn interrupting_asks_the_turn_that_was_named() {
             turn_id: turn,
         },
     })
-    .await
     .unwrap_or_else(|error| panic!("{error}"));
     match next_reply(&mut link, RequestId(3)).await {
         Ok(AppReply::Interrupted { accepted, .. }) => assert!(
@@ -988,7 +1003,6 @@ async fn interrupting_asks_the_turn_that_was_named() {
             turn_id: crate::app::ids::TurnId::new("turn_nope"),
         },
     })
-    .await
     .unwrap_or_else(|error| panic!("{error}"));
     match next_reply(&mut link, RequestId(4)).await {
         Err(AppError::Refused(kind)) => assert_eq!(
@@ -1019,7 +1033,6 @@ async fn a_session_that_is_not_this_one_can_be_deleted() {
             },
         },
     })
-    .await
     .unwrap_or_else(|error| panic!("{error}"));
     match next_reply(&mut link, RequestId(2)).await {
         Ok(AppReply::Deleted { deleted, .. }) => assert!(deleted),
@@ -1032,7 +1045,6 @@ async fn a_session_that_is_not_this_one_can_be_deleted() {
             locator: SessionLocator::Latest,
         },
     })
-    .await
     .unwrap_or_else(|error| panic!("{error}"));
     match next_reply(&mut link, RequestId(3)).await {
         Err(AppError::Refused(kind)) => assert_eq!(
@@ -1071,7 +1083,6 @@ async fn a_slash_line_is_the_action_a_typed_call_would_have_made() {
             input: submit("/theme light"),
         },
     })
-    .await
     .unwrap_or_else(|error| panic!("{error}"));
     assert_eq!(
         applied(next_reply(&mut link, RequestId(2)).await),
@@ -1090,7 +1101,6 @@ async fn a_slash_line_is_the_action_a_typed_call_would_have_made() {
             input: submit("/status"),
         },
     })
-    .await
     .unwrap_or_else(|error| panic!("{error}"));
     assert_eq!(
         applied(next_reply(&mut link, RequestId(4)).await),
@@ -1104,7 +1114,6 @@ async fn a_slash_line_is_the_action_a_typed_call_would_have_made() {
             input: submit("/nonesuch"),
         },
     })
-    .await
     .unwrap_or_else(|error| panic!("{error}"));
     match next_reply(&mut link, RequestId(5)).await {
         Err(AppError::Refused(kind)) => assert_eq!(

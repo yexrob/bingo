@@ -54,13 +54,11 @@ pub(crate) fn test_session(core: &AppCore) -> Arc<Session> {
 async fn attached(core: &AppCore) -> AppLink {
     let mut link = core
         .attach(AttachRequest::new("collab"))
-        .await
         .unwrap_or_else(|error| panic!("{error}"));
     link.request(AppRequest::Query {
         id: RequestId(1),
         query: AppQuery::ReadSession,
     })
-    .await
     .unwrap_or_else(|error| panic!("{error}"));
     match link.recv().await {
         Some(AppFrame::Reply { .. }) => link,
@@ -115,7 +113,6 @@ async fn read_conversation(
             limit: None,
         },
     })
-    .await
     .unwrap_or_else(|error| panic!("{error}"));
     loop {
         match link.recv().await {
@@ -141,7 +138,6 @@ async fn command(link: &mut AppLink, id: u64, command: AppCommand) -> Result<App
         id: RequestId(id),
         command,
     })
-    .await
     .unwrap_or_else(|error| panic!("{error}"));
     loop {
         match link.recv().await {

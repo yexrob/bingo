@@ -64,12 +64,9 @@ use crate::app_server::protocol::error::ProtocolErrorKind;
 /// `CLIENT_TOO_SLOW` notice are B6's (spec "Errors, load, and security").
 const FRAME_CAPACITY: usize = 1024;
 
-/// How many unserved requests one attachment may have in flight.
-const REQUEST_CAPACITY: usize = 64;
-
 /// What a frontend says about itself when it attaches. It buys one ordered frame
-/// channel and one request channel, nothing else: an attachment is a view, never
-/// a second owner of state.
+/// channel and the right to write on the core's, nothing else: an attachment is
+/// a view, never a second owner of state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AttachRequest {
     /// What this attachment is, for diagnostics: `tui`, `app-server`, `print`.
@@ -90,8 +87,48 @@ impl AttachRequest {
 /// replies, snapshots, and events on one channel rather than several, because
 /// two channels cannot state which came first.
 pub struct AppLink {
-    pub requests: mpsc::Sender<AppRequest>,
+    pub requests: Requests,
     pub frames: mpsc::Receiver<AppFrame>,
+}
+
+/// The writing half of an attachment.
+///
+/// It is a sender and a lifetime, nothing more: every request it writes is
+/// tagged with the attachment that wrote it, and dropping it is what tells the
+/// core the frontend is gone. There is no task behind it, which is the point —
+/// a frontend attaches from wherever it lives, with or without a runtime, and a
+/// synchronous key handler can write to the core the same way an `async` loop
+/// does (B7b ruling ②).
+///
+/// The core's inbox is unbounded, so writing never blocks and never waits; what
+/// bounds an *external* client is the transport's own inbound limit, which is
+/// where the spec asks for it (`app_server::stdio`).
+pub struct Requests {
+    control: mpsc::UnboundedSender<controller::Control>,
+    attachment: controller::AttachmentId,
+}
+
+impl Requests {
+    /// Write one request. Ordered with every other request from this
+    /// attachment, and with the attachment itself.
+    pub fn send(&self, request: AppRequest) -> Result<(), AppError> {
+        self.control
+            .send(controller::Control::Request {
+                attachment: self.attachment,
+                request,
+            })
+            .map_err(|_| AppError::Stopped)
+    }
+}
+
+impl Drop for Requests {
+    /// A frontend that is gone stops being carried. This is the whole reason the
+    /// forwarder task existed.
+    fn drop(&mut self) {
+        let _ = self.control.send(controller::Control::Detach {
+            attachment: self.attachment,
+        });
+    }
 }
 
 /// A caller-chosen correlation number, echoed on the reply frame. The wire's
@@ -276,6 +313,9 @@ pub struct AppCore {
     /// Whether the actor's loop is still running. Weak on purpose: holding it
     /// must not be what keeps a session alive.
     alive: controller::Alive,
+    /// The next attachment's number, minted here rather than in the loop so that
+    /// attaching is a write and not a question.
+    attachments: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl AppCore {
@@ -294,6 +334,7 @@ impl AppCore {
             mail: registries.mail,
             operations: registries.operations,
             alive,
+            attachments: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
     }
 
@@ -392,16 +433,32 @@ impl AppCore {
     /// Attach a frontend. The attachment sees no event until it takes a
     /// snapshot cut: everything before the cut is in the snapshot, so replaying
     /// it would be telling the same fact twice (spec "Architecture").
-    pub async fn attach(&self, request: AttachRequest) -> Result<AppLink, AppError> {
-        let (reply, answer) = oneshot::channel();
+    ///
+    /// Attaching is a write, not a question: the channels and the attachment's
+    /// number are made here and handed over, so a frontend with no runtime — a
+    /// synchronous test, a key handler — attaches exactly as the `async` ones do
+    /// (B7b ruling ②). A session that is over refuses, because its inbox is
+    /// closed before the close it was asked for is answered.
+    pub fn attach(&self, request: AttachRequest) -> Result<AppLink, AppError> {
+        let (frames, incoming) = mpsc::channel(FRAME_CAPACITY);
+        let attachment = controller::AttachmentId(
+            self.attachments
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+        );
         self.control
             .send(controller::Control::Attach {
                 request,
-                runtime: tokio::runtime::Handle::current(),
-                reply,
+                attachment,
+                frames,
             })
             .map_err(|_| AppError::Stopped)?;
-        answer.await.map_err(|_| AppError::Stopped)?
+        Ok(AppLink {
+            requests: Requests {
+                control: self.control.clone(),
+                attachment,
+            },
+            frames: incoming,
+        })
     }
 
     /// The ingress engine work publishes through. A shim while the engine still
@@ -447,10 +504,10 @@ impl AppLink {
         self.frames.recv().await
     }
 
-    pub async fn request(&self, request: AppRequest) -> Result<(), AppError> {
-        self.requests
-            .send(request)
-            .await
-            .map_err(|_| AppError::Stopped)
+    /// Write one request. Synchronous: the core's inbox is unbounded, so there
+    /// is nothing here to wait for. What the request produced arrives on
+    /// `frames`, in the order the core decided it.
+    pub fn request(&self, request: AppRequest) -> Result<(), AppError> {
+        self.requests.send(request)
     }
 }

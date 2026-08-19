@@ -786,13 +786,11 @@ async fn concurrent_registry_work_makes_one_gapless_history() {
     let session = test_session();
     let mut link = core
         .attach(AttachRequest::new("test"))
-        .await
         .unwrap_or_else(|error| panic!("{error}"));
     link.request(AppRequest::Query {
         id: RequestId(1),
         query: AppQuery::ReadSession,
     })
-    .await
     .unwrap_or_else(|error| panic!("{error}"));
     let cursor = match link.recv().await {
         Some(AppFrame::Reply {

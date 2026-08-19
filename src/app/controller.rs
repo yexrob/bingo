@@ -43,10 +43,7 @@ use crate::app::snapshot::{
     SessionCloseReason, SessionSnapshot, SessionState, SessionSummary,
 };
 use crate::app::turn::TurnChange;
-use crate::app::{
-    AppError, AppFrame, AppLink, AppReply, AppRequest, AttachRequest, FRAME_CAPACITY,
-    REQUEST_CAPACITY, SessionSetup,
-};
+use crate::app::{AppError, AppFrame, AppReply, AppRequest, AttachRequest, SessionSetup};
 
 /// What reaches the actor. Attachments, their requests, the engine's
 /// publications and every registry change are one queue on purpose: the order
@@ -61,10 +58,10 @@ use crate::app::{
 pub(crate) enum Control {
     Attach {
         request: AttachRequest,
-        /// The runtime the attachment's request forwarder runs on. The actor has
-        /// no runtime of its own, and the frontend that attaches always does.
-        runtime: tokio::runtime::Handle,
-        reply: oneshot::Sender<Result<AppLink, AppError>>,
+        /// Minted by the attaching side, so attaching needs no answer back.
+        attachment: AttachmentId,
+        /// The frame channel the frontend already holds the reading half of.
+        frames: mpsc::Sender<AppFrame>,
     },
     Request {
         attachment: AttachmentId,
@@ -286,7 +283,7 @@ pub(crate) fn settle_now(control: &mpsc::UnboundedSender<Control>) {
 
 /// One attached frontend, as the actor knows it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct AttachmentId(u64);
+pub(crate) struct AttachmentId(pub(crate) u64);
 
 struct Attachment {
     id: AttachmentId,
@@ -317,7 +314,6 @@ struct Controller {
     /// this epoch.
     seq: u64,
     attachments: Vec<Attachment>,
-    next_attachment: u64,
     control: mpsc::WeakUnboundedSender<Control>,
     /// Background work — commands, agent runs, room operations — as a state
     /// machine. Actor-private since B2b: what used to be an `Arc<Mutex<…>>` every
@@ -453,7 +449,6 @@ impl Controller {
             mcp: Vec::new(),
             seq: 0,
             attachments: Vec::new(),
-            next_attachment: 0,
             control,
             watch: state.watch,
             channels: state.channels,
@@ -480,11 +475,9 @@ impl Controller {
             match message {
                 Control::Attach {
                     request,
-                    runtime,
-                    reply,
-                } => {
-                    let _ = reply.send(self.attach(request, runtime));
-                }
+                    attachment,
+                    frames,
+                } => self.attach(request, attachment, frames),
                 Control::Request {
                     attachment,
                     request,
@@ -556,6 +549,12 @@ impl Controller {
                 }
                 Control::Close { reason, reply } => {
                     self.close(reason);
+                    // Shut the inbox before answering, not after: a caller that
+                    // saw its close finish must not then be able to attach to a
+                    // loop that is gone. Closing rejects new sends; what is
+                    // already queued dies with the loop, which is what a closed
+                    // session means.
+                    inbox.close();
                     let _ = reply.send(());
                     // Nothing more can happen in a session that is over, and the
                     // loop ending is what releases the last of what it held.
@@ -568,45 +567,17 @@ impl Controller {
         }
     }
 
-    fn attach(
-        &mut self,
-        request: AttachRequest,
-        runtime: tokio::runtime::Handle,
-    ) -> Result<AppLink, AppError> {
-        let Some(control) = self.control.upgrade() else {
-            return Err(AppError::Stopped);
-        };
-        let (frames, incoming) = mpsc::channel(FRAME_CAPACITY);
-        let (requests, mut outgoing) = mpsc::channel(REQUEST_CAPACITY);
-        let id = AttachmentId(self.next_attachment);
-        self.next_attachment = self.next_attachment.saturating_add(1);
+    /// Take a frontend on. Nothing is created here: the attaching side made the
+    /// channel and the number, so this is the loop learning that a reader
+    /// exists — and until that reader takes a cut, it is a reader of nothing
+    /// (spec "Architecture").
+    fn attach(&mut self, request: AttachRequest, id: AttachmentId, frames: mpsc::Sender<AppFrame>) {
         self.attachments.push(Attachment {
             id,
             label: request.label,
             frames,
             cursor: None,
         });
-        // One forwarder per attachment: it tags each request with the
-        // attachment that sent it, keeps that attachment's requests in the order
-        // they were written, and tells the actor when the frontend is gone.
-        runtime.spawn(async move {
-            while let Some(request) = outgoing.recv().await {
-                if control
-                    .send(Control::Request {
-                        attachment: id,
-                        request,
-                    })
-                    .is_err()
-                {
-                    return;
-                }
-            }
-            let _ = control.send(Control::Detach { attachment: id });
-        });
-        Ok(AppLink {
-            requests,
-            frames: incoming,
-        })
     }
 
     /// Answer one request, then publish what it caused.

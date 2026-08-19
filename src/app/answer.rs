@@ -77,7 +77,7 @@ impl<T: Unpin> Future for Answer<T> {
 /// The runtime's own `block_on` refuses to run inside itself, and this is called
 /// from inside it — a key handler on a worker thread. It is sound because of
 /// what it waits on, not because of where it is called: see the module note.
-fn block_on<F: Future>(future: F) -> F::Output {
+pub(crate) fn block_on<F: Future>(future: F) -> F::Output {
     struct Unpark(std::thread::Thread);
 
     impl Wake for Unpark {

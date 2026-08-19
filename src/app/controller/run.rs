@@ -343,13 +343,11 @@ mod tests {
     async fn attached(core: &AppCore) -> AppLink {
         let mut link = core
             .attach(AttachRequest::new("run"))
-            .await
             .unwrap_or_else(|error| panic!("{error}"));
         link.request(AppRequest::Query {
             id: RequestId(1),
             query: crate::app::command::AppQuery::ReadSession,
         })
-        .await
         .unwrap_or_else(|error| panic!("{error}"));
         match link.recv().await {
             Some(AppFrame::Reply { .. }) => link,
@@ -369,7 +367,6 @@ mod tests {
                 },
             },
         })
-        .await
         .unwrap_or_else(|error| panic!("{error}"));
         loop {
             match link.recv().await {
@@ -461,7 +458,6 @@ mod tests {
                 },
             },
         })
-        .await
         .unwrap_or_else(|error| panic!("{error}"));
         let turn = loop {
             match link.recv().await {

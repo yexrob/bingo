@@ -553,13 +553,11 @@ mod actor_tests {
     async fn attached(core: &AppCore) -> AppLink {
         let mut link = core
             .attach(AttachRequest::new("test"))
-            .await
             .unwrap_or_else(|error| panic!("{error}"));
         link.request(AppRequest::Query {
             id: RequestId(1),
             query: AppQuery::ReadSession,
         })
-        .await
         .unwrap_or_else(|error| panic!("{error}"));
         match link.recv().await {
             Some(AppFrame::Reply { .. }) => link,
@@ -579,7 +577,6 @@ mod actor_tests {
                 },
             },
         })
-        .await
         .unwrap_or_else(|error| panic!("{error}"));
         loop {
             match link.recv().await {
@@ -680,7 +677,6 @@ mod actor_tests {
                 },
             },
         })
-        .await
         .unwrap_or_else(|error| panic!("{error}"));
         match link.recv().await {
             Some(AppFrame::Reply { result, .. }) => assert_eq!(
@@ -723,7 +719,6 @@ mod actor_tests {
                 },
             },
         })
-        .await
         .unwrap_or_else(|error| panic!("{error}"));
 
         let queue_id = loop {

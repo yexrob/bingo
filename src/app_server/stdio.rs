@@ -46,9 +46,13 @@ use crate::app_server::protocol::requests::{
 use crate::app_server::session::{self, Bootstrap, Refusal, Started, Wanted};
 
 /// How many frames may wait for a client that is not reading. Bounded, as the
-/// spec requires of both directions; the core's own channel is bounded behind it.
+/// spec requires of both directions; the core's frame channel is bounded behind
+/// it.
 const OUTBOUND_CAPACITY: usize = 1024;
-/// How many lines may wait to be served.
+/// How many lines may wait to be served. This is *the* inbound bound: the core
+/// takes requests on an unbounded queue (B7b ruling ②), because half its
+/// producers are in-process and cannot wait. A client on a socket is not one of
+/// those, so the limit the spec asks for lives here, at the edge that has one.
 const INBOUND_CAPACITY: usize = 64;
 /// How many frames one write may carry. Batching is what keeps a token-sized
 /// delta from costing a syscall of its own.
@@ -859,19 +863,11 @@ impl Connection {
         let call_id = crate::app::RequestId(self.next_call);
         self.next_call = self.next_call.saturating_add(1);
         let sent = match request {
-            Core::Command(command) => {
-                live.link
-                    .request(AppRequest::Command {
-                        id: call_id,
-                        command,
-                    })
-                    .await
-            }
-            Core::Query(query) => {
-                live.link
-                    .request(AppRequest::Query { id: call_id, query })
-                    .await
-            }
+            Core::Command(command) => live.link.request(AppRequest::Command {
+                id: call_id,
+                command,
+            }),
+            Core::Query(query) => live.link.request(AppRequest::Query { id: call_id, query }),
         };
         if let Err(error) = sent {
             let error = self.as_rpc_error(&error);
@@ -980,7 +976,7 @@ impl Connection {
             ),
             ..Default::default()
         });
-        match core.attach(AttachRequest::new("app-server")).await {
+        match core.attach(AttachRequest::new("app-server")) {
             Ok(link) => {
                 self.session = Some(Live {
                     core,
@@ -1272,13 +1268,12 @@ fn as_core_request(call: ClientRequest) -> Option<Core> {
 /// everything before it is in the snapshot, so replaying it would state the same
 /// fact twice (spec "Architecture"; B2a ruling ①).
 async fn attach(core: AppCore) -> Result<(Live, SessionSnapshot), AppError> {
-    let mut link = core.attach(AttachRequest::new("app-server")).await?;
+    let mut link = core.attach(AttachRequest::new("app-server"))?;
     let id = crate::app::RequestId(0);
     link.request(AppRequest::Query {
         id,
         query: AppQuery::ReadSession,
-    })
-    .await?;
+    })?;
     loop {
         match link.recv().await {
             Some(AppFrame::Reply { result, .. }) => {

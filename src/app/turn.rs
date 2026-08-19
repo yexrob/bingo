@@ -1358,13 +1358,11 @@ mod actor_tests {
     async fn attached(core: &AppCore) -> (crate::app::AppLink, SessionSnapshot) {
         let mut link = core
             .attach(AttachRequest::new("test"))
-            .await
             .unwrap_or_else(|error| panic!("{error}"));
         link.request(AppRequest::Query {
             id: RequestId(1),
             query: AppQuery::ReadSession,
         })
-        .await
         .unwrap_or_else(|error| panic!("{error}"));
         match link.recv().await {
             Some(AppFrame::Reply {
@@ -1694,7 +1692,7 @@ mod actor_tests {
 
         // Nothing can be started in a session that is over.
         assert_eq!(
-            core.attach(AttachRequest::new("late")).await.err(),
+            core.attach(AttachRequest::new("late")).err(),
             Some(crate::app::AppError::Stopped)
         );
         drop(link);

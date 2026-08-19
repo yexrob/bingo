@@ -494,7 +494,7 @@ impl Store {
 
     /// Attach an existing store, replacing whatever it holds with a fresh cut.
     pub async fn connect(&mut self, core: &AppCore, label: &str) -> Result<(), AppError> {
-        self.link = Some(core.attach(AttachRequest::new(label)).await?);
+        self.link = Some(core.attach(AttachRequest::new(label))?);
         self.cursor = None;
         self.closed = false;
         self.stale = false;
@@ -617,8 +617,7 @@ impl Store {
             .as_ref()
             .ok_or(AppError::Stopped)?
             .requests
-            .try_send(request)
-            .map_err(|_| AppError::Stopped)?;
+            .send(request)?;
         Ok(id)
     }
 
