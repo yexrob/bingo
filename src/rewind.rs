@@ -448,6 +448,10 @@ pub struct Checkpoint {
 /// Longest label the selector shows before eliding.
 const LABEL_CHARS: usize = 60;
 
+/// How far back a rewind list goes. A cap rather than the whole history: past
+/// fifty turns the list is a scroll, not a choice.
+pub const REWIND_MAX: usize = 50;
+
 /// The rewind points a projected history offers, newest first.
 ///
 /// Only turn-opening messages qualify, and only ones still present verbatim: a

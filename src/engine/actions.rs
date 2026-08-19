@@ -145,6 +145,25 @@ pub async fn perform(session: &Arc<Session>, act: crate::app::engine::Act) {
                 }
             }
         }
+        Action::ConversationRewind { target, mode } => {
+            let done = rewind_conversation(session, &target, mode);
+            if done.removed > 0 {
+                session.operations.record(
+                    on.clone(),
+                    crate::app::snapshot::ItemBody::Rewind {
+                        mode,
+                        removed_items: done.removed,
+                        target_item_id: match &target {
+                            crate::app::command::RewindTarget::Item { item_id } => {
+                                Some(item_id.clone())
+                            }
+                            crate::app::command::RewindTarget::Latest => None,
+                        },
+                    },
+                );
+            }
+            done.said
+        }
         Action::McpReconnect { server } => reconnect_mcp(session, server.as_deref()).await,
         crew @ (Action::TeamStart { .. }
         | Action::TeamAssign { .. }
@@ -938,6 +957,114 @@ pub async fn login_provider(session: &Arc<Session>, login: Login, waiting: Waiti
     match token_provider(config).save(&tokens).await {
         Ok(()) => Said::output(format!("✓ signed in to {provider}")),
         Err(error) => Said::output(format!("✗ save failed: {error}")),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// conversation.rewind
+// ---------------------------------------------------------------------------
+
+/// How many restored files a report names before it counts the rest.
+const RESTORE_LIST_MAX: usize = 8;
+
+/// What a rewind did, or would do.
+pub struct Rewound {
+    pub said: Said,
+    /// Projected history entries the cut removes. Zero for a preview, which
+    /// removes nothing.
+    pub removed: u32,
+}
+
+/// Go back to an earlier checkpoint, or say what going back would cost.
+///
+/// `apply` restores the files *and* the conversation, because that is what "go
+/// back to it" means: a conversation restored over files that failed to come
+/// back would describe a state the disk is not in, which is why the files move
+/// first and a failure there stops everything.
+pub fn rewind_conversation(
+    session: &Arc<Session>,
+    target: &crate::app::command::RewindTarget,
+    mode: crate::app::snapshot::RewindMode,
+) -> Rewound {
+    use crate::app::command::RewindTarget;
+    use crate::app::snapshot::RewindMode;
+    let nothing = |said: Said| Rewound { said, removed: 0 };
+    let Some(transcript) = session.runtime.transcript.borrow().clone() else {
+        return nothing(Said::info(
+            "this session has no transcript; nothing to rewind",
+        ));
+    };
+    let dir = crate::rewind::session_dir(&session.home, &transcript.name());
+    let entries = transcript.load_projection().unwrap_or_default();
+    let points = crate::rewind::checkpoints_of(&entries, &dir, crate::rewind::REWIND_MAX);
+    let point = match target {
+        RewindTarget::Latest => points.first(),
+        // A checkpoint's identity is the transcript line its message was written
+        // on, and an item id is minted by this session with no record of which
+        // line became it. Guessing the correspondence is exactly the wrong-target
+        // loss D135 exists to prevent, so this refuses instead. B8's parity
+        // ledger owns the gap.
+        RewindTarget::Item { .. } => {
+            return nothing(Said::error(
+                "rewinding to a named item is not supported yet; rewind to the latest checkpoint",
+            ));
+        }
+    };
+    let Some(point) = point else {
+        return nothing(Said::info("no turns to rewind to yet"));
+    };
+    let removed = entries.len().saturating_sub(point.index) as u32;
+    if mode == RewindMode::Preview {
+        return nothing(Said::info(format!(
+            "⏪ would restore to {}: {} message{} and {} file{} would go back",
+            point.label,
+            removed,
+            if removed == 1 { "" } else { "s" },
+            point.coverage.files,
+            if point.coverage.files == 1 { "" } else { "s" }
+        )));
+    }
+    let mut lines = Vec::new();
+    match crate::rewind::restore(&dir, point.line) {
+        Ok(restored) => {
+            lines.push(format!(
+                "⏪ restored {} file{}",
+                restored.len(),
+                if restored.len() == 1 { "" } else { "s" }
+            ));
+            lines.extend(restored.iter().take(RESTORE_LIST_MAX).map(|file| {
+                format!(
+                    "   {} {}",
+                    if file.removed { "removed" } else { "reverted" },
+                    file.path.display()
+                )
+            }));
+            if restored.len() > RESTORE_LIST_MAX {
+                lines.push(format!("   … {} more", restored.len() - RESTORE_LIST_MAX));
+            }
+        }
+        Err(error) => {
+            return nothing(Said::error(format!(
+                "[error] rewind could not restore files: {error}"
+            )));
+        }
+    }
+    if let Err(error) = transcript.truncate_at_line(point.line) {
+        return nothing(Said::error(format!(
+            "[error] rewind could not rewrite the session: {error}"
+        )));
+    }
+    session.queue.clear(crate::app::conversation::ConvKey::Main);
+    // The turns those snapshots belong to are gone from the conversation, so the
+    // pre-images they hold address nothing any more.
+    crate::rewind::drop_from(&dir, point.line);
+    lines.push(format!(
+        "⏪ code and conversation restored to {}",
+        point.label
+    ));
+    Rewound {
+        said: Said::output(lines.join("\n")),
+        removed,
     }
 }
 

@@ -966,6 +966,11 @@ impl Controller {
             share @ Action::SessionShare { .. } => {
                 self.hand_over(on, Some(crate::app::snapshot::OperationKind::Share), share)
             }
+            rewind @ Action::ConversationRewind { .. } => self.hand_over(
+                on,
+                Some(crate::app::snapshot::OperationKind::Rewind),
+                rewind,
+            ),
             // No credential travels either way: the action names a provider, and
             // the authorization URL the operation reports as progress is public
             // by design (B5 ruling ③).
@@ -998,10 +1003,11 @@ impl Controller {
                 )?;
                 Ok(ActionResultStatus::Applied)
             }
-            // Everything else needs the engine, and its spec said so before it
-            // got here.
-            _ => Err(unavailable()),
         }
+        // No catch-all arm, and that is the milestone: every action in the table
+        // has a home here now, so the compiler is what keeps it that way. B5's
+        // `_ => unavailable()` stood in for thirteen handlers that lived in the
+        // console, and a queued slash line drained into it in silence (D152).
     }
 
     /// Join or leave a room, as the user.

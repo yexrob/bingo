@@ -495,6 +495,32 @@ async fn the_actions_are_listed_with_what_can_run_now() {
         }
         other => panic!("expected actions, got {other:?}"),
     }
+    // And with one attached the whole table is offered, which is only honest
+    // because the whole table is implemented: `engine_attached` stood at a
+    // constant `false` for as long as thirteen of these lived in the console.
+    core.attach_engine(std::sync::Arc::new(crate::app::engine::Recorder::default()));
+    match read(
+        &mut link,
+        3,
+        AppQuery::ListActions {
+            origin_conversation_id: None,
+        },
+    )
+    .await
+    {
+        Ok(AppReply::Actions { actions, .. }) => {
+            let refused: Vec<&str> = actions
+                .iter()
+                .filter(|info| !info.available)
+                .map(|info| info.id.as_str())
+                .collect();
+            assert!(
+                refused.is_empty(),
+                "an idle session with an engine can do all of it: {refused:?}"
+            );
+        }
+        other => panic!("expected actions, got {other:?}"),
+    }
     let _ = std::fs::remove_dir_all(&home);
 }
 

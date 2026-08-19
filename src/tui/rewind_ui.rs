@@ -18,7 +18,7 @@ use crate::tui::line::{Line, SegStyle};
 
 /// Turns offered. Deep history is what `/resume` and the transcript are for;
 /// a rewind list is a list of recent regrets.
-pub const REWIND_MAX: usize = 50;
+pub use crate::rewind::REWIND_MAX;
 
 /// The five answers, in Claude Code's wording.
 pub const ACTIONS: [&str; 5] = [

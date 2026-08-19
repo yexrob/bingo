@@ -812,6 +812,14 @@ mod tests {
         let (core, engine) = running();
         let mut link = attached(&core).await;
         for (id, action, operation) in [
+            (
+                15,
+                Action::ConversationRewind {
+                    target: crate::app::command::RewindTarget::Latest,
+                    mode: crate::app::snapshot::RewindMode::Preview,
+                },
+                true,
+            ),
             (16, Action::SessionReset, false),
             (
                 17,
