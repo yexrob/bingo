@@ -108,6 +108,16 @@ impl SessionEngine {
                 }
             };
             *held.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+            // Before the close, not after: a report into a turn that has already
+            // reached its terminal state is dropped, and this one is about the
+            // turn rather than about what came after it.
+            if let Ok(outcome) = &outcome
+                && !outcome.aborted
+                && outcome.end_reason == crate::query::QueryEndReason::EmptyResponseRetried
+            {
+                host.events
+                    .warn("model returned an empty response and was retried");
+            }
             match &outcome {
                 Ok(outcome) if outcome.aborted => {
                     guard.finish(crate::app::snapshot::TurnStatus::Interrupted, None)
@@ -121,32 +131,16 @@ impl SessionEngine {
                     }),
                 ),
             }
-            // After the turn is closed, never before: a non-streaming model call
-            // must not hold up the ending a client is waiting on.
+            // After the turn is closed, never before: the memory pass is a
+            // non-streaming model call and must not hold up an ending a client is
+            // waiting on. It used to be the console's alone, which meant a
+            // session driven over the wire learned nothing from its own turns.
             if let Ok(outcome) = &outcome {
-                Self::wrap_up(&session, &host.events, outcome).await;
+                let cwd = session.cwd();
+                crate::memory::extract_memory(&session, &outcome.messages, &session.home, &cwd)
+                    .await;
             }
         });
-    }
-
-    /// What a run leaves behind once its turn is closed: the one thing that went
-    /// wrong without ending it, and the memory pass.
-    ///
-    /// Both used to be the console's, which meant a session driven over the wire
-    /// silently learned nothing from its own turns. They are the engine's now,
-    /// so every frontend gets the same session.
-    async fn wrap_up(
-        session: &Arc<Session>,
-        events: &EngineEvents,
-        outcome: &crate::query::QueryOutcome,
-    ) {
-        if !outcome.aborted
-            && outcome.end_reason == crate::query::QueryEndReason::EmptyResponseRetried
-        {
-            events.warn("model returned an empty response and was retried");
-        }
-        let cwd = session.cwd();
-        crate::memory::extract_memory(session, &outcome.messages, &session.home, &cwd).await;
     }
 
     /// Remember the run's foreground handle, or forget it.

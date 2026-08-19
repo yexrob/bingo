@@ -1416,6 +1416,44 @@ fn a_shell_line_runs_in_the_console_and_publishes_a_tail_while_it_does() {
     assert_eq!(ended.code, Some(0));
 }
 
+/// A turn that ended because the model kept answering with nothing says so,
+/// while the turn is still open enough to carry the words.
+///
+/// The console has always shown this line. It reaches every client now, and the
+/// order is the whole test: a report into a turn that has already reached its
+/// terminal state is dropped, so the warning has to precede the close.
+#[test]
+fn a_turn_the_model_answered_with_nothing_twice_says_why_it_ended() {
+    let empty = message_open() + &message_close("end_turn", 0);
+    let provider = Provider::start(vec![empty.clone(), empty]);
+    let root = TempDir::new("empty");
+    provider.configure(&root);
+    never_asks(&root);
+    let mut server = Server::start(&root);
+    server.handshake();
+    let main = server.open_main(2);
+    assert_eq!(
+        server.submit(3, &main, "say nothing")["result"]["disposition"]["type"],
+        json!("turnStarted")
+    );
+
+    let frames = server.until("turn/completed");
+    gapless(&frames);
+    let warned = of(&frames, "feedback/raised")
+        .into_iter()
+        .position(|frame| {
+            frame["params"]["feedback"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("empty response and was retried"))
+        })
+        .is_some();
+    assert!(warned, "the run says why it stopped: {frames:#?}");
+    assert_eq!(provider.rounds(), 2, "it tried exactly twice");
+
+    let ended = server.finish();
+    assert_eq!(ended.code, Some(0));
+}
+
 /// Sending the foreground command to the background, as every frontend reaches
 /// it: the core says which item is running and the engine is the only thing that
 /// can let go of the command.
