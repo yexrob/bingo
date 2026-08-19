@@ -8,16 +8,29 @@
 //! spellings: `.await` for the first, [`Answer::now`] for the second.
 //!
 //! Blocking is safe here for one structural reason, and only that one: the actor
-//! runs on a thread of its own and never waits on anything — not a frontend, not
-//! an engine task, not the disk. A thread that blocks on it is therefore waiting
-//! on a bounded amount of arithmetic, exactly as it used to block on the
-//! registry mutex this replaced.
+//! runs on a thread of its own and never waits on a frontend or an engine task.
+//! A thread that blocks on it is waiting on a bounded amount of work, exactly as
+//! it used to block on the registry mutex this replaced. (Bounded is not
+//! instant: a few action handlers write settings from inside the loop, so the
+//! wait can include a small synchronous file write. That is a latency the whole
+//! session shares, not a wait on anything that could wait back.)
+//!
+//! The one shape that would deadlock is a call *on the actor's thread* that has
+//! to wait: the actor cannot answer itself. The calls the loop makes are all to
+//! registries it owns, inline, which fill the reply before returning — so they
+//! never park. [`block_on`] asserts that rather than trusting it, because the
+//! failure mode is a hang with no timeout and no message.
 //!
 //! **The render thread is no longer one of them** (D154). The terminal front end
 //! used to take every answer this way, on the thread that draws; it records an
 //! intent instead and the loop performs it (`tui::intent`). What is left of
 //! `now` is the actor reading its own tables inside its own message, the blocking
-//! workers an engine spawns, and tests — none of which has a frame to miss.
+//! workers an engine spawns, and — the one exception, and it is a real one —
+//! `/team start`, `/team assign` and `/team stop`, which the console still
+//! dispatches synchronously into `team_cmd`. Those park a runtime worker for the
+//! length of a crew coming up. Nothing deadlocks (the actor is its own thread
+//! and stays answering), but it is a stall, and the honest place to say so is
+//! here rather than in a D record nobody greps.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -108,10 +121,25 @@ pub(crate) fn block_on<F: Future>(future: F) -> F::Output {
     loop {
         match future.as_mut().poll(&mut cx) {
             Poll::Ready(value) => return value,
-            Poll::Pending => std::thread::park(),
+            Poll::Pending => {
+                // The actor cannot answer itself. Everything the loop asks of
+                // its own registries is filled inline, so it never reaches here
+                // — and if a refactor ever routes one of those through a handle
+                // instead, this says which invariant broke rather than hanging
+                // the session forever with nothing on the screen.
+                assert!(
+                    std::thread::current().name() != Some(ACTOR_THREAD),
+                    "the session actor blocked on an answer only it can give"
+                );
+                std::thread::park()
+            }
         }
     }
 }
+
+/// The name the session actor's thread runs under, which is how the guard above
+/// recognises it. Set in `controller::spawn`.
+pub(crate) const ACTOR_THREAD: &str = "bingo-session";
 
 #[cfg(test)]
 mod tests {
@@ -130,6 +158,40 @@ mod tests {
             let _ = reply.send(7);
         });
         assert_eq!(Answer::new(answer, 0).now(), 7);
+    }
+
+    /// The guard fires on the thread it is about, and on no other. A worker
+    /// parking here is the ordinary case and must stay ordinary.
+    #[test]
+    fn the_actor_may_not_wait_for_an_answer_only_it_can_give() {
+        let held = std::thread::Builder::new()
+            .name(ACTOR_THREAD.to_string())
+            .spawn(|| {
+                let (reply, answer) = oneshot::channel::<u8>();
+                // Held, so nothing can answer and nothing can drop the sender:
+                // without the guard this thread parks for ever.
+                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    Answer::new(answer, 0).now()
+                }));
+                drop(reply);
+                outcome.is_err()
+            })
+            .unwrap_or_else(|error| panic!("{error}"));
+        assert!(
+            held.join().unwrap_or(false),
+            "the actor's own thread is refused rather than hung"
+        );
+
+        let (reply, answer) = oneshot::channel();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            let _ = reply.send(9);
+        });
+        assert_eq!(
+            Answer::new(answer, 0).now(),
+            9,
+            "every other thread waits as it always did"
+        );
     }
 
     /// A session that ended answers rather than panicking in whatever was

@@ -211,7 +211,9 @@ pub(super) fn spawn(setup: SessionSetup) -> (mpsc::UnboundedSender<Control>, Reg
     );
     let config = controller.live_config.subscribe();
     std::thread::Builder::new()
-        .name("bingo-session".to_string())
+        // Named, and the name is load-bearing: `answer::block_on` recognises
+        // this thread by it and refuses to park on it.
+        .name(crate::app::answer::ACTOR_THREAD.to_string())
         .spawn(move || {
             let _running = running;
             controller.run(inbox);
