@@ -114,6 +114,27 @@ impl super::Chat {
             None => self.session.permission_mode,
         }
     }
+
+    /// The rules a "don't ask again this session" answer installed (D81).
+    ///
+    /// The runtime's table is one flat list of strings: the rules settings
+    /// declares and the grants the gate installed are indistinguishable in it.
+    /// The core keeps them apart, so this is where `/permissions` learns which
+    /// of the rules it is about to print were never written anywhere.
+    pub(crate) fn session_grants(&self) -> std::collections::BTreeSet<String> {
+        let of = |config: &crate::app::snapshot::ConfigSnapshot| {
+            config
+                .permissions
+                .iter()
+                .filter(|rule| rule.session_scoped)
+                .map(|rule| rule.rule.clone())
+                .collect()
+        };
+        match &self.store.view().config {
+            Some(config) => of(config),
+            None => of(&self.session.core.config().borrow()),
+        }
+    }
 }
 
 impl super::Chat {

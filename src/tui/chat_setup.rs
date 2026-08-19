@@ -183,25 +183,7 @@ impl super::Chat {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone();
-        let mut lines = vec!["permission rules (.bingo/settings.json):".to_string()];
-        for (name, list) in [
-            ("allow", &rules.allow),
-            ("deny", &rules.deny),
-            ("ask", &rules.ask),
-        ] {
-            if list.is_empty() {
-                lines.push(format!("  {name}: (none)"));
-            } else {
-                lines.push(format!("  {name}:"));
-                for rule in list {
-                    lines.push(format!("    {rule}"));
-                }
-            }
-        }
-        lines.push(
-            "usage: /permissions [allow|deny|ask] <rule, e.g. Skill(review:*)] · remove <allow|deny|ask> <rule>"
-                .into(),
-        );
+        let lines = permission_lines(&rules, &self.session_grants());
         self.push_slash_info(lines.join("\n"));
     }
 
@@ -398,5 +380,93 @@ impl super::Chat {
             return;
         }
         self.switch_provider(arg, true);
+    }
+}
+
+/// `/permissions`, as a block of lines.
+///
+/// Two kinds of rule share one runtime table: the ones settings declares, and
+/// the grants a "don't ask again this session" answer installed (D81). The
+/// table is a flat list of strings and cannot tell them apart, so this block
+/// used to print a session grant under a heading naming a file it had never
+/// been written to. `granted` is the core's answer to which is which, and the
+/// two lists are printed apart — a grant that vanishes when the process does
+/// should not read as one somebody committed.
+pub(super) fn permission_lines(
+    rules: &crate::settings::PermissionRules,
+    granted: &std::collections::BTreeSet<String>,
+) -> Vec<String> {
+    let mut lines = vec!["permission rules (.bingo/settings.json):".to_string()];
+    let mut for_this_session = Vec::new();
+    for (name, list) in [
+        ("allow", &rules.allow),
+        ("deny", &rules.deny),
+        ("ask", &rules.ask),
+    ] {
+        let declared: Vec<&String> = list
+            .iter()
+            .filter(|rule| !granted.contains(*rule))
+            .collect();
+        if declared.is_empty() {
+            lines.push(format!("  {name}: (none)"));
+        } else {
+            lines.push(format!("  {name}:"));
+            for rule in declared {
+                lines.push(format!("    {rule}"));
+            }
+        }
+        for_this_session.extend(
+            list.iter()
+                .filter(|rule| granted.contains(*rule))
+                .map(|rule| format!("    {rule}")),
+        );
+    }
+    if !for_this_session.is_empty() {
+        lines.push("allowed for this session only (written to no file):".to_string());
+        lines.extend(for_this_session);
+    }
+    lines.push(
+        "usage: /permissions [allow|deny|ask] <rule, e.g. Skill(review:*)] · remove <allow|deny|ask> <rule>"
+            .into(),
+    );
+    lines
+}
+
+#[cfg(test)]
+mod tests {
+    use super::permission_lines;
+
+    /// The heading names a file, so what is printed under it has to be in one.
+    #[test]
+    fn a_session_grant_is_not_printed_as_a_settings_rule() {
+        let rules = crate::settings::PermissionRules {
+            allow: vec!["Skill(review:*)".to_string(), "Bash(ls:*)".to_string()],
+            deny: Vec::new(),
+            ask: Vec::new(),
+        };
+        let granted = std::collections::BTreeSet::from(["Bash(ls:*)".to_string()]);
+        let printed = permission_lines(&rules, &granted).join("\n");
+        let settings = printed
+            .split("allowed for this session only")
+            .next()
+            .unwrap_or_default();
+        assert!(
+            settings.contains("Skill(review:*)"),
+            "a declared rule belongs under the settings heading: {printed}"
+        );
+        assert!(
+            !settings.contains("Bash(ls:*)"),
+            "a session grant was never written to settings: {printed}"
+        );
+        assert!(
+            printed.contains("allowed for this session only (written to no file):\n    Bash(ls:*)"),
+            "{printed}"
+        );
+
+        let none = permission_lines(&rules, &std::collections::BTreeSet::new()).join("\n");
+        assert!(
+            !none.contains("this session only"),
+            "no grants, no second heading: {none}"
+        );
     }
 }
