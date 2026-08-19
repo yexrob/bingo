@@ -256,16 +256,21 @@ use crate::app::controller::Control;
 
 /// What the actor is asked about the waiting mail.
 pub(crate) enum MailMsg {
-    /// Is a digest turn due right now?
-    Due {
-        /// The console's own interrupted flag, which is a frontend's state until
-        /// B7 gives the run state to the core. A turn must not be started on top
+    /// Wake main if a digest turn is due. The core decides *and opens it*
+    /// (D154): the debounce and the turn are one answer, and a frontend that
+    /// performed the second half could wake on a window of its own.
+    Digest {
+        /// The console's own interrupted flag. A turn must not be started on top
         /// of an interrupt the user has not finished.
         interrupted: bool,
         reply: oneshot::Sender<bool>,
     },
-    /// A digest turn was asked for.
-    Woke,
+    /// A finished background run left a notification in main's context. That is
+    /// the event, so it is read now rather than on the quiet window.
+    Notified {
+        interrupted: bool,
+        reply: oneshot::Sender<bool>,
+    },
     /// Is a batch waiting at all?
     Waiting { reply: oneshot::Sender<bool> },
     /// Move the batch's clocks back (tests only).
@@ -290,19 +295,24 @@ impl MailHandle {
         Self { control }
     }
 
-    /// Whether a digest turn is due: the window, the urgency, main's own turn and
-    /// main's queue, all decided in one place.
-    pub fn due(&self, interrupted: bool) -> Answer<bool> {
+    /// Wake main if a digest turn is due: the window, the urgency, main's own
+    /// turn, main's queue and the turn itself, all in one place. `true` means a
+    /// turn was opened.
+    pub fn digest(&self, interrupted: bool) -> Answer<bool> {
         let (reply, answer) = oneshot::channel();
         let _ = self
             .control
-            .send(Control::Mail(MailMsg::Due { interrupted, reply }));
+            .send(Control::Mail(MailMsg::Digest { interrupted, reply }));
         Answer::new(answer, false)
     }
 
-    /// A digest turn was started. Nothing more is due until the batch drains.
-    pub fn woke(&self) {
-        let _ = self.control.send(Control::Mail(MailMsg::Woke));
+    /// Wake main because a finished background run left it a notification.
+    pub fn notified(&self, interrupted: bool) -> Answer<bool> {
+        let (reply, answer) = oneshot::channel();
+        let _ = self
+            .control
+            .send(Control::Mail(MailMsg::Notified { interrupted, reply }));
+        Answer::new(answer, false)
     }
 
     /// Whether a batch of mail is waiting to be read.

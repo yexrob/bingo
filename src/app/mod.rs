@@ -310,6 +310,10 @@ pub struct AppCore {
     interactions: crate::app::interaction::InteractionHandle,
     mail: crate::app::mail::MailHandle,
     operations: crate::app::operation::OperationHandle,
+    /// The effective configuration, live. Read rather than asked for: the engine
+    /// needs the permission mode and the model on the thread that starts a run,
+    /// and a copy of its own would be a second authority (D154).
+    config: tokio::sync::watch::Receiver<crate::app::snapshot::ConfigSnapshot>,
     /// Whether the actor's loop is still running. Weak on purpose: holding it
     /// must not be what keeps a session alive.
     alive: controller::Alive,
@@ -333,9 +337,38 @@ impl AppCore {
             interactions: registries.interactions,
             mail: registries.mail,
             operations: registries.operations,
+            config: registries.config,
             alive,
             attachments: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
+    }
+
+    /// Apply one action, from inside this process.
+    ///
+    /// A key on a keyboard and a client's `action/execute` reach the same table
+    /// and the same handlers; the frontend renders what came back (D154).
+    pub fn execute(
+        &self,
+        on: crate::app::conversation::ConvKey,
+        action: crate::app::command::Action,
+    ) -> crate::app::answer::Answer<Result<AppReply, AppError>> {
+        let (reply, answer) = tokio::sync::oneshot::channel();
+        let _ = self.control.send(controller::Control::Execute {
+            on,
+            action: Box::new(action),
+            reply,
+        });
+        crate::app::answer::Answer::new(
+            answer,
+            Err(AppError::Refused(
+                crate::app_server::protocol::error::ProtocolErrorKind::ActionUnavailable,
+            )),
+        )
+    }
+
+    /// The effective configuration as it stands, without asking the loop.
+    pub fn config(&self) -> tokio::sync::watch::Receiver<crate::app::snapshot::ConfigSnapshot> {
+        self.config.clone()
     }
 
     /// Background work: commands, agent runs, room operations.

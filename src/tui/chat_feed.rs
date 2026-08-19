@@ -66,6 +66,14 @@ impl super::Chat {
                 let Some(to) = self.key_of(&changed.conversation_id) else {
                     return out;
                 };
+                // The `❯` row is the turn's own input, named by the turn: a line
+                // typed a moment ago and one the queue drained have one producer,
+                // and a turn with nothing in its mouth (the digest wake) draws no
+                // row at all (D154).
+                for text in self.input_prose(&changed.conversation_id, &changed.turn.input_item_ids)
+                {
+                    send(&to, UiEvent::Submitted(text));
+                }
                 self.stream_units.insert(to.clone(), 0);
                 send(&to, UiEvent::TurnStart);
             }
@@ -319,6 +327,18 @@ impl super::Chat {
             ItemBody::Interruption { marker } => {
                 send(to, UiEvent::Interrupted(marker.clone()));
             }
+            // What an action the *core* ran had to say. A slash line the console
+            // dispatches itself renders its own `Said`; this is the other
+            // producer — a line drained off the queue, or one another client
+            // asked for — and it lands on the same tiers (D154).
+            ItemBody::Notice { level, text, .. } => send(
+                to,
+                match level {
+                    crate::app::snapshot::NoticeLevel::Error => UiEvent::SlashError(text.clone()),
+                    crate::app::snapshot::NoticeLevel::Warning => UiEvent::Warning(text.clone()),
+                    crate::app::snapshot::NoticeLevel::Info => UiEvent::SlashInfo(text.clone()),
+                },
+            ),
             // A message that arrived from somebody else. The private lane's
             // target is the sender's own page, and the console draws the arrival
             // on the page it landed on.
@@ -336,6 +356,29 @@ impl super::Chat {
     /// The console's key for a conversation the core named.
     fn key_of(&self, id: &crate::app::ids::ConversationId) -> Option<crate::ui::ConvKey> {
         self.store.view().key_of(id).cloned()
+    }
+
+    /// The prose of a turn's input items, in the order the turn names them.
+    ///
+    /// The items are ordered before `turn/started` and carry no `turnId` of
+    /// their own, so by the time the turn is announced the store already holds
+    /// them.
+    fn input_prose(
+        &self,
+        conversation: &crate::app::ids::ConversationId,
+        items: &[crate::app::ids::ItemId],
+    ) -> Vec<String> {
+        let Some(transcript) = self.store.view().transcript_of(conversation) else {
+            return Vec::new();
+        };
+        items
+            .iter()
+            .filter_map(|id| transcript.items().find(|item| &item.id == id))
+            .filter_map(|item| match &item.body {
+                ItemBody::UserMessage { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
     }
 
     /// The running output estimate for this page's round, in tokens.

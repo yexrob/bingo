@@ -2263,7 +2263,21 @@ async fn a_line_sent_to_an_agent_shows_on_its_page_once() {
         )
         .await
         .unwrap_or_else(|e| panic!("{e}"));
-    chat.drain_all();
+    // The waking half of a delivery is the engine's since D154, so it happens on
+    // the runtime rather than inside the send: the page is read once the core
+    // has finished saying what landed on it.
+    for _ in 0..200 {
+        chat.drain_all();
+        if chat
+            .conv
+            .messages
+            .iter()
+            .any(|m| m.text == "map the parser")
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+    }
     assert!(
         chat.conv
             .messages

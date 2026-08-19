@@ -34,6 +34,9 @@ impl super::Chat {
                     self.provider_models
                         .insert(prev_provider, prev_model.clone());
                 }
+                self.apply_to_core(crate::app::command::Action::ProviderSelect {
+                    provider: name.clone(),
+                });
                 let _ = session.runtime.provider_tx.send(name.clone());
                 let resolved = self
                     .provider_models
@@ -42,6 +45,9 @@ impl super::Chat {
                     .or_else(|| session.client.provider_default_model(&name));
                 let model_note = match &resolved {
                     Some(model) if *model != prev_model => {
+                        self.apply_to_core(crate::app::command::Action::ModelSelect {
+                            model: model.clone(),
+                        });
                         let _ = session.runtime.model_tx.send(model.clone());
                         format!(" · model {model}")
                     }
@@ -372,6 +378,19 @@ impl super::Chat {
             ));
             return;
         };
+        // The core is where the level lives (D154): a run reads it from there,
+        // and `config/read` answers with the same one. The runtime watch below
+        // is the console's local projection of the same decision.
+        self.apply_to_core(crate::app::command::Action::ThinkingSelect {
+            level: match level.as_deref() {
+                Some("low") => crate::app::snapshot::ThinkingLevel::Low,
+                Some("medium") => crate::app::snapshot::ThinkingLevel::Medium,
+                Some("high") => crate::app::snapshot::ThinkingLevel::High,
+                Some("xhigh") => crate::app::snapshot::ThinkingLevel::Xhigh,
+                Some("max") => crate::app::snapshot::ThinkingLevel::Max,
+                _ => crate::app::snapshot::ThinkingLevel::Off,
+            },
+        });
         let _ = self.session.runtime.thinking_tx.send(level.clone());
         let saved = level.as_deref().unwrap_or("off");
         // The wire gate (query.rs) skips thinking for models that reject it —

@@ -14,17 +14,17 @@
 //! - **The completion notice** ([`agent_notice_line`], D106). One dim `●` line
 //!   where the task notification of a finished run reaches main's context,
 //!   before main says anything about it.
-//! - **The direct send** ([`Chat::parse_direct_send`]). A composer line shaped
-//!   `@scout fix the lexer` or `#build tests are green` bypasses the model and
-//!   goes straight to that inbox or that room, under the user's own name, with
-//!   a transient receipt and nothing in main's history.
+//! - **The direct send**. A composer line shaped `@scout fix the lexer` or
+//!   `#build tests are green` bypasses the model and goes straight to that inbox
+//!   or that room, under the user's own name, with a transient receipt and
+//!   nothing in main's history. Performing it is the core's since D154; what is
+//!   left here is the room commands the same grammar reaches.
 //!
 //! The post-row renderer that used to live here retired with the alt-screen
 //! zoom (v6): a conversation you are standing in is an away page now, drawn
 //! by the transcript's own pipeline ([`crate::tui::conv`]).
 
 use crate::channels::USER_NAME;
-use crate::tui::buffer::{Delivery, SubmitTarget};
 use crate::tui::chat::{Chat, Row, one_line};
 use crate::tui::line::Line;
 
@@ -79,11 +79,6 @@ pub(crate) fn agent_notice_line(label: &str) -> String {
     }
 }
 
-/// Who a composer line addresses when it opens with a sigil (D103). The grammar
-/// and its resolution are the core's since B3; this is the name the console
-/// reads them under.
-pub use crate::app::submit::DirectTarget;
-
 impl Chat {
     /// The rows a line about somebody else's life takes in the flow (D106) —
     /// `None` for anything the ordinary user-message renderer should draw.
@@ -105,65 +100,6 @@ impl Chat {
         Some(vec![Row::new(line)])
     }
 
-    /// Perform a direct send. The delivery and nothing else.
-    ///
-    /// A room the user is not in **joins first**. Speaking is participation and
-    /// participation is announced — the domain writes the membership line into
-    /// the room's own log, so every member sees the same arrival the joiner
-    /// does. That is the v3 ruling, and it is what keeps reading a room free.
-    /// One join path, so a zoom and a `#room` line announce identically.
-    pub(crate) fn deliver_direct(&mut self, target: &DirectTarget, text: String) -> Delivery {
-        let submit = match target {
-            DirectTarget::Agent(name) => SubmitTarget::Dm {
-                agent: name.clone(),
-                text,
-            },
-            DirectTarget::Room(name) => {
-                if !self.session.channels.is_member(name, USER_NAME)
-                    && let Err(why) = self.session.channels.invite(name, USER_NAME).now()
-                {
-                    return Delivery::Rejected(why);
-                }
-                SubmitTarget::Channel {
-                    channel: name.clone(),
-                    text,
-                }
-            }
-        };
-        let outcome = crate::tui::buffer::deliver(&self.session, submit);
-        if outcome == Delivery::Sent {
-            self.refresh_conversations();
-            // The user's line enters the receiver's transcript the moment it is
-            // sent, and so does everybody else's — but not from here. D134 put
-            // the echo on this path and covered only the user, which left main's
-            // own mail invisible on the page of the instance it was sent to.
-            // The delivery emits `UiEvent::Mail` for every sender instead
-            // (D135), and a room needs none of it: its page is projected from
-            // the log the post just entered.
-        }
-        outcome
-    }
-
-    /// A direct send from the transcript, with its receipt.
-    ///
-    /// The receipt is **transient** and lives on the info tier: nothing was said
-    /// to the model, so nothing belongs in main's history, and a flow line
-    /// would put an envelope in the user's mouth for the rest of the session.
-    /// CC does the same thing with a 3s notification (`Sent to @scout`).
-    ///
-    /// It is the *transcript's* receipt and not the delivery's, which is why it
-    /// sits out here: the zoomed view sends down the same path and needs none,
-    /// because the message it just sent is drawn on the screen it was sent from
-    /// (D105).
-    pub(crate) fn direct_send(&mut self, target: DirectTarget, text: String) {
-        let receipt = format!("Sent to {}", target.label());
-        match self.deliver_direct(&target, text) {
-            Delivery::Sent => self.push_slash_info(receipt),
-            // A refusal says what did not happen, on the same tier and never as
-            // a receipt — a receipt claims something was delivered.
-            Delivery::Rejected(why) => self.push_slash_info(why),
-        }
-    }
     /// Which room a `/join` or `/leave` is about. Named outright since D103:
     /// there is no room to be standing in any more, so the argument that used
     /// to be optional is the only thing that can say which one.
@@ -215,6 +151,7 @@ mod tests {
     use super::*;
     use crate::agents::AgentKind;
     use crate::api::types::{ContentBlock, Message as ApiMessage, Role as ApiRole};
+    use crate::app::submit::DirectTarget;
     use crate::channels::ChannelMode;
     use crate::tui::chat::{Role, UiMessage};
     use crate::tui::test_util::chat_at;
@@ -523,13 +460,20 @@ mod tests {
 
         // The grammar is the core's, and these are the names it resolves
         // against: one live instance and one live room.
+        // Performing is the point: since D154 the core delivers what it read,
+        // so a line the grammar does not address opens a turn instead — closed
+        // again here so the next line is judged on an idle console.
         let addressed = |chat: &mut Chat, line: &str| match chat.route_submission(line) {
-            crate::app::submit::Route::Deliver {
+            crate::app::submit::Performed::Delivered {
                 target,
                 text,
                 addressed: true,
+                ..
             } => Some((target, text)),
-            _ => None,
+            _ => {
+                chat.end_test_turn();
+                None
+            }
         };
 
         assert_eq!(addressed(&mut chat, "@scout"), None);

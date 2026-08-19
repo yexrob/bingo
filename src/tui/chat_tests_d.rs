@@ -38,7 +38,7 @@ fn chat_with_settings(tag: &str, json: &str) -> Chat {
     let mut chat = test_chat_home(home.clone());
     let settings: crate::settings::Settings =
         serde_json::from_str(json).unwrap_or_else(|e| panic!("settings: {e}"));
-    let session = Arc::get_mut(&mut chat.session).unwrap_or_else(|| panic!("sole owner"));
+    let session = crate::tui::test_util::session_mut(&mut chat);
     session.client = crate::api::client::Client::from_settings_at(&settings, &home)
         .unwrap_or_else(|e| panic!("client: {e}"));
     session.settings = settings;

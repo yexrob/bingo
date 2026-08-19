@@ -7,7 +7,6 @@ use crossterm::event::{KeyCode, KeyModifiers};
 
 use crate::query::Session;
 use crate::tui::composer::KillDir;
-use crate::ui::UiEvent;
 
 /// Everything Esc can dismiss, in the order it dismisses them (D80). The key
 /// handler walks [`EscLayer::ORDER`] top-down, acts on the first layer that is
@@ -320,36 +319,6 @@ impl super::Chat {
         self.clear_slash_suggestions();
     }
 
-    /// Submits the next queued item after a turn (one at a time: a plain message starts
-    /// the next turn; queued slash commands drain synchronously until one does).
-    ///
-    /// What comes out is the core's answer, not this side's: the queue and its
-    /// order are the actor's, and `.now()` is the console's synchronous seam
-    /// (B7 removes it).
-    pub(crate) fn submit_queued(&mut self) {
-        if self.main_conv().busy {
-            return;
-        }
-        if tokio::runtime::Handle::try_current().is_err() {
-            return;
-        }
-        // Drain queued slash commands synchronously; stop at the first plain message
-        // (it starts a turn, which re-triggers submit_queued on TurnEnd).
-        loop {
-            let Some(item) = self.drain_main_queue() else {
-                return;
-            };
-            if !item.is_command() {
-                self.start_turn(item.text, true);
-                return;
-            }
-            self.run_slash_on(item.text.strip_prefix('/').unwrap_or(&item.text), &item.on);
-            if self.main_conv().busy {
-                return; // a skill command started a turn; the rest waits for TurnEnd
-            }
-        }
-    }
-
     /// The tool barrier, taken by hand: the same atomic absorb the running turn's
     /// steering source performs, for a test that has no provider behind it.
     #[cfg(test)]
@@ -372,13 +341,6 @@ impl super::Chat {
     /// page reads an empty queue rather than main's.
     pub(crate) fn page_queue(&self) -> crate::app::queue::ConversationQueue {
         self.session.queue.of(&self.active)
-    }
-
-    fn drain_main_queue(&self) -> Option<crate::app::queue::QueuedInput> {
-        self.session
-            .queue
-            .drain_front(crate::ui::ConvKey::Main)
-            .now()
     }
 
     /// The running turn took these queued messages into its own context at a tool
@@ -472,13 +434,14 @@ impl super::Chat {
     /// The main agent's inbox, digested on a quiet window rather than per message
     /// (D98).
     ///
-    /// **The window is not decided here** (乙案, B4). Coalescing, the deadline,
-    /// urgency and the idle gates are `app::mail`'s one answer, so a GUI wakes
-    /// main exactly as this does rather than reimplementing a debounce that
-    /// could drift from it. What is left here is the console's own half: ringing
-    /// its attention channel, and running the turn.
+    /// **Neither the window nor the turn is decided here** (乙案, B4; D154).
+    /// Coalescing, the deadline, urgency, the idle gates *and* opening the turn
+    /// are `app::mail`'s and the core's one answer, so a GUI wakes main exactly
+    /// as this does rather than reimplementing a debounce that could drift from
+    /// it. What is left here is the console's own half: ringing its attention
+    /// channel.
     ///
-    /// Returns whether it asked for a digest turn this frame.
+    /// Returns whether a digest turn was opened this frame.
     pub(crate) fn digest_mail(&mut self) -> bool {
         // Taken rather than read, and before anything else: the drain and the
         // bell are separate readers, and a turn already running can absorb the
@@ -487,163 +450,15 @@ impl super::Chat {
             self.notify
                 .attention(crate::tui::notify::Attention::AgentNotice);
         }
-        // `interrupted` is the console's own state until B7 gives the run state
-        // to the core; everything else in the decision is already the core's.
+        // `interrupted` is the console's own state; everything else in the
+        // decision, and the turn itself, is the core's.
         let interrupted = self.main_conv().interrupted;
-        if !self.session.mail.due(interrupted).now() {
-            return false;
-        }
-        self.submit_auto();
-        self.session.mail.woke();
-        true
+        self.session.mail.digest(interrupted).now()
     }
 
-    /// System-triggered turn: a watchable signal/terminal notification wakes the main agent.
-    /// No user input (the notification is injected in run_query's first round); user state is irrelevant.
-    ///
-    /// The turn it opens is an ordinary one and ends like one — in prose, which
-    /// renders as main speaking (D103 removed the silence contract D102 gave it:
-    /// CC's leader narrates, and the noise control is the wake debounce above
-    /// and the dispatch row's own state, not a marker that renders as nothing).
-    pub(crate) fn submit_auto(&mut self) {
-        if self.main_conv().busy {
-            return;
-        }
-        if tokio::runtime::Handle::try_current().is_err() {
-            return;
-        }
-        self.start_turn(String::new(), false);
-    }
-
-    /// Multi-turn continuity: loads transcript history as this turn's context (each turn runs its own run_query).
-    fn load_history(
-        session: &Session,
-        on_warning: &mut (dyn FnMut(String) + Send),
-    ) -> Vec<crate::api::types::Message> {
-        let Some(t) = session.runtime.transcript.borrow().clone() else {
-            return Vec::new();
-        };
-        match t.load_messages() {
-            Ok(msgs) => msgs,
-            Err(crate::transcript::TranscriptError::Io(e))
-                if e.kind() == std::io::ErrorKind::NotFound =>
-            {
-                Vec::new()
-            }
-            Err(e) => {
-                on_warning(format!("transcript load failed: {e}"));
-                Vec::new()
-            }
-        }
-    }
-
-    /// Post-turn handling.
-    ///
-    /// The turn's *end* is not here any more: the core closes it and publishes
-    /// the terminal state, and the console draws the completion row from that.
-    /// What is left are the two things the core does not know about — a
-    /// transient warning about how the turn ended, and the memory pass, which is
-    /// a non-streaming model call and must not hold the wrap-up up.
-    async fn finish_turn(
-        events: &crate::ui::EventSink,
-        session: &Arc<Session>,
-        outcome: &crate::query::QueryOutcome,
-    ) {
-        if !outcome.aborted
-            && outcome.end_reason == crate::query::QueryEndReason::EmptyResponseRetried
-        {
-            events.send(UiEvent::Warning(
-                "model returned an empty response and was retried".to_string(),
-            ));
-        }
-        let cwd = session.cwd();
-        crate::memory::extract_memory(session, &outcome.messages, &session.home, &cwd).await;
-    }
-
-    pub(crate) fn start_turn(&mut self, text: String, show_user: bool) {
-        // Main's turn, wherever the screen is: a background run finishing wakes
-        // one while the reader is standing on somebody else's page, and its rows
-        // belong in the transcript that asked for them.
-        if show_user {
-            let at = crate::channels::now_unix();
-            let text = text.clone();
-            self.main_conv().messages.push(UiMessage {
-                speaker: None,
-                role: Role::User,
-                text,
-                at,
-                activities: Vec::new(),
-                insert_points: Vec::new(),
-                groups: Vec::new(),
-                group_of: Vec::new(),
-            });
-        }
-        let main = self.main_conv();
-        main.busy = true;
-        main.interrupted = false;
-        let live = self.live.clone();
-        let session = self.session_for_turn();
-        let events = self.events.clone();
-        let interactions = self.session.interactions.clone();
-        let images = self.resolve_images(&text);
-        // Subscribe first, then reset: tokio watch's send does not update the value with no receivers —
-        // after the previous spawn ends, all receivers are dropped; sending false first would silently
-        // fail (the value stays true) and the new turn would be misread as interrupted during connection.
-        let cancel_rx = self.cancel_tx.subscribe();
-        self.cancel_tx.send_replace(false);
-        // The core's turn opens before the task that runs it, so the task cannot
-        // be aborted between the two and leave a run nobody accounted for. `.now()`
-        // is the synchronous seam this side of the console still has; B7 removes it.
-        let turn = self.open_core_turn(crate::app::snapshot::TurnOrigin::User);
-        let turns = self.session.turns.clone();
-        let steer = self.steering(turn.clone());
-        tokio::spawn(async move {
-            let mut host = crate::ui::tui_host(interactions, steer, live);
-            let guard = turn.clone().map(|turn| {
-                host = host.clone().bound(turns.clone(), turn.clone());
-                turns.guard(turn, crate::app::snapshot::TurnStatus::Failed)
-            });
-            let history = Self::load_history(&session, &mut host.events.warn_sink());
-            let result = run_query(&session, history, &text, &images, &host, Some(cancel_rx)).await;
-            Self::close_core_turn(&turns, turn, guard, &result);
-            if let Ok(outcome) = &result {
-                Self::finish_turn(&events, &session, outcome).await;
-            }
-        });
-    }
-
-    /// This turn's tool barrier: what the composer queued while it worked (D83).
-    ///
-    /// The take is atomic because it happens inside the actor — whatever comes back
-    /// is out of the queue and on its way to the model, so a pull-back racing it
-    /// has already lost. What the screen does about it is the core's to say:
-    /// `queue/itemAbsorbed` names the item the entry became, and the `↪` row is
-    /// drawn from that, in the one order everything else on the page is drawn in.
-    ///
-    /// A turn the core did not open steers nothing: there is no turn to absorb into.
-    fn steering(
-        &self,
-        turn: Option<crate::app::ids::TurnId>,
-    ) -> std::sync::Arc<crate::query::SteerFn> {
-        let queue = self.session.queue.clone();
-        std::sync::Arc::new(move || {
-            let queue = queue.clone();
-            let turn = turn.clone();
-            Box::pin(async move {
-                let Some(turn) = turn else {
-                    return Vec::new();
-                };
-                queue.absorb(crate::ui::ConvKey::Main, turn).await
-            })
-        })
-    }
-
-    /// Open main's turn in the core, or `None` when the core says one is already
-    /// running there.
-    ///
-    /// The console's own `busy` flag is still what gates a second submission
-    /// (B7 makes the core's answer the only gate); when the two disagree the run
-    /// goes ahead unbound rather than reporting into a turn it does not own.
+    /// Open main's turn in the core, for a test that wants one running without a
+    /// submission behind it.
+    #[cfg(test)]
     pub(crate) fn open_core_turn(
         &self,
         origin: crate::app::snapshot::TurnOrigin,
@@ -652,49 +467,6 @@ impl super::Chat {
             .turns
             .open(crate::ui::ConvKey::Main, origin, Vec::new())
             .now()
-    }
-
-    /// Close main's turn with the state the run actually reached. A run that is
-    /// aborted instead of returning never gets here, and the guard's own `Drop`
-    /// closes the turn for it.
-    ///
-    /// The interrupt marker is committed before the close, in the order it
-    /// happened: the exact sentence the transcript recorded becomes an item, so
-    /// the screen and the model read the same one and the console does not have
-    /// to be told twice.
-    fn close_core_turn(
-        turns: &crate::app::turn::TurnHandle,
-        turn: Option<crate::app::ids::TurnId>,
-        guard: Option<crate::app::turn::TurnGuard>,
-        result: &Result<crate::query::QueryOutcome, crate::query::QueryError>,
-    ) {
-        if let Ok(outcome) = result
-            && let Some(marker) = outcome.interrupt_marker
-        {
-            turns
-                .commit_item(
-                    crate::ui::ConvKey::Main,
-                    turn,
-                    crate::app::snapshot::ItemBody::Interruption {
-                        marker: marker.to_string(),
-                    },
-                )
-                .forget();
-        }
-        let Some(guard) = guard else { return };
-        match result {
-            Ok(outcome) if outcome.aborted => {
-                guard.finish(crate::app::snapshot::TurnStatus::Interrupted, None)
-            }
-            Ok(_) => guard.finish(crate::app::snapshot::TurnStatus::Completed, None),
-            Err(error) => guard.finish(
-                crate::app::snapshot::TurnStatus::Failed,
-                Some(crate::app::snapshot::TurnError {
-                    code: crate::error::map_error(error).to_string(),
-                    message: crate::error::sanitize_msg(&error.to_string()),
-                }),
-            ),
-        }
     }
 
     /// Turn-level error message with auth guidance for the current provider:
@@ -722,53 +494,6 @@ impl super::Chat {
     /// provider guidance the raw body never carries.
     pub(crate) fn auth_hint(&self, code: &str, msg: String) -> String {
         Self::auth_error_hint(&self.session, code, msg)
-    }
-
-    /// bash-mode turn (processBashCommand): `!` commands execute directly,
-    /// output shown as a tool activity; with respondToBashCommands on, the model replies afterwards.
-    pub(crate) fn start_bash_turn(&mut self, command: String) {
-        let at = crate::channels::now_unix();
-        self.main_conv().messages.push(UiMessage {
-            speaker: None,
-            role: Role::User,
-            text: format!("!{command}"),
-            at,
-            activities: Vec::new(),
-            insert_points: Vec::new(),
-            groups: Vec::new(),
-            group_of: Vec::new(),
-        });
-        let main = self.main_conv();
-        main.busy = true;
-        // Same as start_turn: a fresh turn clears interrupt suppression —
-        // without this, one interrupt followed by only `!` commands kept
-        // background wake-ups suppressed for the rest of the session.
-        main.interrupted = false;
-        let live = self.live.clone();
-        let session = self.session_for_turn();
-        let events = self.events.clone();
-        let interactions = self.session.interactions.clone();
-        // Same as start_turn: subscribe first, then reset (send does not update with no receivers).
-        let cancel_rx = self.cancel_tx.subscribe();
-        self.cancel_tx.send_replace(false);
-        let turn = self.open_core_turn(crate::app::snapshot::TurnOrigin::Shell);
-        let turns = self.session.turns.clone();
-        let steer = self.steering(turn.clone());
-        tokio::spawn(async move {
-            let mut host = crate::ui::tui_host(interactions, steer, live);
-            let guard = turn.clone().map(|turn| {
-                host = host.clone().bound(turns.clone(), turn.clone());
-                turns.guard(turn, crate::app::snapshot::TurnStatus::Failed)
-            });
-            let history = Self::load_history(&session, &mut host.events.warn_sink());
-            let result =
-                crate::query::run_bash_command(&session, &command, history, &host, Some(cancel_rx))
-                    .await;
-            Self::close_core_turn(&turns, turn, guard, &result);
-            if let Ok(outcome) = &result {
-                Self::finish_turn(&events, &session, outcome).await;
-            }
-        });
     }
 
     /// The answer lands mid-turn and the model keeps going. Without a message of its own, that
@@ -803,7 +528,7 @@ impl super::Chat {
             KeyCode::Enter => {
                 self.dismiss_error();
                 if !self.last_prompt.is_empty() {
-                    self.start_turn(self.last_prompt.clone(), true);
+                    self.resubmit(self.last_prompt.clone());
                 }
                 true
             }
@@ -828,6 +553,18 @@ impl super::Chat {
         modifiers: KeyModifiers,
         now: std::time::Instant,
     ) -> bool {
+        let consumed = self.key_at(code, modifiers, now);
+        // The receipt folds before the frame that shows it (D154). A keystroke
+        // asks the core — submit, execute, wake — and what came back is drawn on
+        // the *next* frame, which is this one: folding here rather than on the
+        // next tick is the difference between "the console draws what the core
+        // published" and a visible lag on every `Enter`.
+        self.pump_store();
+        self.drain_frames();
+        consumed
+    }
+
+    fn key_at(&mut self, code: KeyCode, modifiers: KeyModifiers, now: std::time::Instant) -> bool {
         let pasting = self.track_burst(now);
         self.pasting = pasting;
         // The two "immediately after" rules are counted in keys, not seconds
@@ -1709,11 +1446,26 @@ impl super::Chat {
     /// Shift+Tab: default → acceptEdits → plan → default.
     /// bypassPermissions / dontAsk stay in the cycle only when the session started in that mode
     /// (dangerous modes must not be reachable by one mispress).
+    ///
+    /// The new mode is applied to the core, which is where the mode a run
+    /// obeys is read from (D154). It used to be set on the console alone, so
+    /// `config/read` and the badge could say two different things about one
+    /// session.
     fn cycle_permission_mode(&mut self) {
-        self.permission_mode = crate::tui::chat::next_permission_mode(
-            self.permission_mode,
+        let next = crate::tui::chat::next_permission_mode(
+            self.permission_mode(),
             self.session.permission_mode,
         );
+        let _ = self
+            .session
+            .core
+            .execute(
+                crate::ui::ConvKey::Main,
+                crate::app::command::Action::PermissionModeSet {
+                    mode: crate::tui::chat::app_permission_mode(next),
+                },
+            )
+            .now();
         self.dirty = true;
     }
 
@@ -2202,7 +1954,7 @@ impl super::Chat {
 
     /// Permission-mode label (footer badge).
     pub fn permission_mode_label(&self) -> &'static str {
-        match self.permission_mode {
+        match self.permission_mode() {
             PermissionMode::Default => "default",
             PermissionMode::AcceptEdits => "acceptEdits",
             PermissionMode::BypassPermissions => "bypassPermissions",

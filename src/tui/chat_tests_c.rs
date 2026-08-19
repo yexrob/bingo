@@ -1030,10 +1030,20 @@ async fn ctrl_e_toggles_the_bounded_preview() {
 #[tokio::test]
 async fn ask_user_question_keeps_its_own_shape() {
     let mut chat = test_chat();
-    let ui = crate::ui::tui_host(
-        chat.session.interactions.clone(),
-        crate::query::no_steer(),
-        chat.live.clone(),
+    let ui = crate::engine::events::EngineHost::new(
+        crate::engine::events::EngineEvents::detached(),
+        crate::engine::events::EngineRequests {
+            ask: crate::app::interaction::permission_ask(
+                chat.session.interactions.clone(),
+                crate::ui::ConvKey::Main,
+            ),
+            ask_question: crate::app::interaction::question_ask(
+                chat.session.interactions.clone(),
+                crate::ui::ConvKey::Main,
+            ),
+            steer: crate::query::no_steer(),
+            live: chat.live.clone(),
+        },
     );
     let answer = tokio::spawn((ui.requests.ask_question)(
         "Tech stack".to_string(),
@@ -1207,9 +1217,10 @@ async fn the_channel_is_re_armed_for_the_turn_that_actually_runs() {
     chat.submit();
     chat.set_input("two");
     chat.submit();
-    // TurnEnd: "one" starts the next turn, and only what is still queued is on offer.
+    // TurnEnd: "one" starts the next turn — the core drains on the ending it
+    // owns — and only what is still queued is on offer.
     chat.end_test_turn();
-    chat.submit_queued();
+    crate::tui::test_util::settled(&mut chat);
     assert!(chat.conv.busy, "the first queued message opened a turn");
     assert_eq!(
         chat.take_steering()
@@ -1727,4 +1738,82 @@ fn the_dialog_swallows_its_own_keys_and_passes_the_chords_through() {
     assert!(chat.on_key(KeyCode::Char('b'), KeyModifiers::CONTROL));
     assert!(chat.dialog.is_none());
     assert_eq!(chat.input, "dr", "and it did not edit the draft either");
+}
+
+/// After a turn ends, queued slash commands drain **in the core**, in order,
+/// until a plain message starts the next turn — one drain, so a queued line
+/// cannot be taken twice or read as prose (D154).
+#[tokio::test]
+async fn queued_slashes_drain_in_the_core() {
+    let tmp = std::env::temp_dir().join(format!("bingo-slash-{}-drain", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    let mut chat = test_chat_home(tmp.join("home"));
+    chat.cwd = tmp.display().to_string();
+    chat.start_test_turn();
+    for text in ["/think low", "/nope", "the message"] {
+        chat.enqueue(text.to_string(), crate::ui::ConvKey::Main);
+    }
+    // The turn ending is what lets the queue move: the console asks for no
+    // drain of its own.
+    chat.end_test_turn();
+    crate::tui::test_util::settled(&mut chat);
+    assert_eq!(
+        chat.session.core.config().borrow().thinking,
+        crate::app::snapshot::ThinkingLevel::Low,
+        "queued slash commands run as commands, against the core's own table"
+    );
+    let out = all_slash_text(&chat);
+    assert!(
+        out.contains("unknown command: /nope") && out.contains("code=UNKNOWN_COMMAND"),
+        "unknown commands get guidance instead of the model: {out}"
+    );
+    assert!(chat.conv.busy, "the last plain message starts a new turn");
+    assert!(
+        chat.conv
+            .messages
+            .iter()
+            .any(|m| m.role == Role::User && m.text == "the message"),
+        "plain messages reach the model as a turn of their own: {:?}",
+        chat.conv
+            .messages
+            .iter()
+            .map(|m| (m.role, &m.text))
+            .collect::<Vec<_>>()
+    );
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// The bug the one drain kills: after a `!` line the composer stays in shell
+/// mode, so the `/compact` typed next queued as a **shell** entry (the grammar's
+/// own answer — shell mode outranks the slash) and the console's own drain sent
+/// it to the model as prose. The one drain reads `QueuedKind` and runs it
+/// (D153's smoke found it; D154 killed it with `submit_queued`).
+#[tokio::test]
+async fn a_line_queued_in_shell_mode_drains_as_a_shell_run() {
+    let mut chat = chat_with_history("shell-drain");
+    chat.start_test_turn();
+    chat.bash_mode = true;
+    chat.set_input("echo drained");
+    chat.submit();
+    let queued = chat.main_queue().entries;
+    assert_eq!(queued.len(), 1);
+    assert!(
+        !queued[0].is_command(),
+        "shell mode makes the line the console's shell, not a slash command"
+    );
+    chat.end_test_turn();
+    crate::tui::test_util::settled(&mut chat);
+    assert!(
+        chat.conv
+            .messages
+            .iter()
+            .any(|m| m.role == Role::User && m.text == "!echo drained"),
+        "the drained line ran as a shell command, `!` and all, rather than \
+         being sent to the model as prose: {:?}",
+        chat.conv
+            .messages
+            .iter()
+            .map(|m| (m.role, &m.text))
+            .collect::<Vec<_>>()
+    );
 }

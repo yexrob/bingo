@@ -100,10 +100,20 @@ pub(crate) enum Control {
     Mcp(Vec<crate::app::snapshot::McpServerState>),
     /// The engine this session runs its work on, handed over once on the way up.
     Engine(crate::app::engine::Attached),
+    /// One action, applied from inside this process.
+    ///
+    /// The same door `action/execute` goes through, for a frontend that is in
+    /// the same process as the core: what a key does and what a client asks for
+    /// are one table and one authority (D154).
+    Execute {
+        on: ConvKey,
+        action: Box<crate::app::command::Action>,
+        reply: oneshot::Sender<Result<AppReply, AppError>>,
+    },
     /// One submission, read and routed.
     Submit {
         request: Box<crate::app::submit::SubmitRequest>,
-        reply: oneshot::Sender<crate::app::submit::Route>,
+        reply: oneshot::Sender<crate::app::submit::Performed>,
     },
     /// Answered once everything queued ahead of it has been applied.
     Settle {
@@ -145,6 +155,7 @@ pub(crate) struct Registries {
     pub interactions: crate::app::interaction::InteractionHandle,
     pub mail: crate::app::mail::MailHandle,
     pub operations: crate::app::operation::OperationHandle,
+    pub config: tokio::sync::watch::Receiver<ConfigSnapshot>,
 }
 
 /// Start the actor and return the handle everything reaches it by.
@@ -182,6 +193,7 @@ pub(super) fn spawn(setup: SessionSetup) -> (mpsc::UnboundedSender<Control>, Reg
             interactions,
         },
     );
+    let config = controller.live_config.subscribe();
     std::thread::Builder::new()
         .name("bingo-session".to_string())
         .spawn(move || {
@@ -201,6 +213,7 @@ pub(super) fn spawn(setup: SessionSetup) -> (mpsc::UnboundedSender<Control>, Reg
             interactions: interaction_handle,
             mail: crate::app::mail::MailHandle::new(control_for_submit.clone()),
             operations: crate::app::operation::OperationHandle::new(control_for_submit),
+            config,
         },
         alive,
     )
@@ -306,6 +319,14 @@ struct Controller {
     session: SessionSummary,
     capabilities: ServerCapabilities,
     config: ConfigSnapshot,
+    /// The configuration as anything outside the loop reads it, without asking.
+    ///
+    /// The engine needs the permission mode, the model and the provider on the
+    /// thread that starts a run, and a copy of its own would be a second
+    /// authority (D154). A `watch` costs one send per change and can never
+    /// disagree, because there is nothing to disagree with: the core writes and
+    /// everybody else reads.
+    live_config: tokio::sync::watch::Sender<ConfigSnapshot>,
     /// Settings, the two directories and the endpoint table, as the catalogs and
     /// the effective configuration are read from them (B5).
     catalog: crate::app::catalog::CatalogSource,
@@ -451,11 +472,13 @@ impl Controller {
             layers: layers_of(&setup.catalog),
             mcp_servers: setup.catalog.mcp_servers(None),
         };
+        let live_config = tokio::sync::watch::channel(config.clone()).0;
         Self {
             mint,
             session,
             capabilities: setup.capabilities,
             config,
+            live_config,
             assets,
             catalog: setup.catalog,
             mcp: Vec::new(),
@@ -553,9 +576,14 @@ impl Controller {
                 }
                 Control::Mcp(states) => self.report_mcp(states),
                 Control::Engine(engine) => self.engine = Some(engine),
+                Control::Execute { on, action, reply } => {
+                    let origin = self.conversations.id(&mut self.mint, &on);
+                    let applied = self.serve_execute(&origin, None, *action);
+                    let _ = reply.send(applied);
+                }
                 Control::Submit { request, reply } => {
-                    let route = self.submit(*request);
-                    let _ = reply.send(route);
+                    let performed = self.submit(*request);
+                    let _ = reply.send(performed);
                 }
                 Control::Settle { reply } => {
                     self.announce_conversations();
@@ -1174,6 +1202,10 @@ impl Controller {
     fn config_changed(&mut self) {
         self.config.revision = self.config.revision.saturating_add(1);
         let config = self.config_snapshot();
+        // The live mirror, before the event: the engine reads the session's
+        // configuration here rather than keeping a copy of its own, so a
+        // `/model` or a shift+tab has exactly one authority (D154).
+        let _ = self.live_config.send(config.clone());
         self.publish(
             Box::new(AppEventPayload::ConfigChanged(
                 crate::app::event::ConfigChanged { config },
@@ -2080,52 +2112,61 @@ impl Controller {
 
     /// `conversation/submit`, as a client asks for it.
     ///
-    /// The routing is the same one the terminal front end reaches; what differs
-    /// is who performs the result. A queue entry and a delivery the core does
-    /// itself. A turn, a shell run and a slash command are still run by the
-    /// console (B7) and dispatched by the action registry (B5), so the core says
-    /// so by name rather than answering out of state it does not hold.
+    /// A mapping, and nothing else. [`Controller::submit`] does the work and says
+    /// what it did; this states the same answer in the protocol's vocabulary, so
+    /// a GUI and the console cannot be told two different things about one line
+    /// (D154). The one arm that still performs here is the slash command, whose
+    /// *view* is the frontend's: a wire client has no surface to render it on, so
+    /// the core applies it through the same table a typed call goes through
+    /// (D146).
     fn serve_submit(
         &mut self,
         conversation_id: ConversationId,
         input: crate::app::command::Submission,
     ) -> Result<AppReply, AppError> {
-        use crate::app::command::SubmitDisposition;
-        use crate::app::submit::Route;
         let Some(conversation) = self.conversations.key(&conversation_id).cloned() else {
             return Err(AppError::Refused(
                 crate::app_server::protocol::error::ProtocolErrorKind::ConversationNotFound,
             ));
         };
-        let route = self.submit(crate::app::submit::SubmitRequest {
+        let performed = self.submit(crate::app::submit::SubmitRequest {
             conversation,
             input,
             carries_attachments: false,
         });
-        match route {
-            Route::Queued(placement) => Ok(AppReply::Submitted(SubmitDisposition::Queued {
+        self.disposition(performed)
+    }
+
+    /// What the core did, in the protocol's words.
+    fn disposition(
+        &mut self,
+        performed: crate::app::submit::Performed,
+    ) -> Result<AppReply, AppError> {
+        use crate::app::command::SubmitDisposition;
+        use crate::app::submit::Performed;
+        use crate::app_server::protocol::error::ProtocolErrorKind;
+        match performed {
+            Performed::Nothing => Err(AppError::Refused(ProtocolErrorKind::BadArgument)),
+            Performed::Turn { turn } | Performed::Shell { turn, .. } => {
+                Ok(AppReply::Submitted(SubmitDisposition::TurnStarted {
+                    turn_id: turn,
+                }))
+            }
+            Performed::Queued(placement) => Ok(AppReply::Submitted(SubmitDisposition::Queued {
                 queue_id: placement.id,
                 position: placement.position,
                 steer_eligible: placement.steer_eligible,
             })),
-            Route::Nothing => Err(AppError::Refused(
-                crate::app_server::protocol::error::ProtocolErrorKind::BadArgument,
-            )),
-            // The core owns the ledger half of a delivery and of a run; the
-            // model, the shell and the loop a deposit wakes are the engine's
-            // (B4 ruling ②, B5 ruling ①). `app/controller/run.rs` is the seam.
-            Route::Deliver {
-                target,
-                text,
-                addressed,
-            } => self.serve_deliver(target, text, addressed),
-            Route::Turn { text } => self.start_turn(text, crate::app::snapshot::TurnOrigin::User),
-            Route::Shell { command } => {
-                self.start_shell(command, crate::app::snapshot::TurnOrigin::Shell)
+            Performed::Delivered { item, .. } => {
+                Ok(AppReply::Submitted(SubmitDisposition::Delivered {
+                    message_id: item,
+                }))
             }
+            Performed::Undelivered { kind, .. } => Err(AppError::Refused(kind)),
+            Performed::Unavailable => Err(AppError::Refused(ProtocolErrorKind::ActionUnavailable)),
             // A slash line is the same action a typed call makes, read by the
             // same table (D146).
-            Route::Command { line, on } => {
+            Performed::Command { line, on } => {
                 let origin = self.conversations.id(&mut self.mint, &on);
                 self.serve_command_line(&line, &origin)
             }
@@ -2178,13 +2219,16 @@ impl Controller {
 
     /// The one submission path (spec "One submission path").
     ///
-    /// Reading the line and routing it both happen here, so the terminal front
-    /// end and a GUI cannot disagree about what a leading slash, shell mode or an
-    /// `@name` means. What the core can perform itself it performs — a queue
-    /// entry is on the queue by the time this returns; a turn, a shell run and a
-    /// slash command name work the caller still runs (B5 and B7 take those).
-    fn submit(&mut self, request: crate::app::submit::SubmitRequest) -> crate::app::submit::Route {
-        use crate::app::submit::{Decision, Route, compose, route};
+    /// Reading the line, routing it and *performing* it all happen here, so the
+    /// terminal front end and a GUI cannot disagree about what a leading slash,
+    /// shell mode or an `@name` means, nor about what happened next. Everything
+    /// the answer names exists by the time it is given: the item, the turn, the
+    /// queue entry, the message in its inbox.
+    fn submit(
+        &mut self,
+        request: crate::app::submit::SubmitRequest,
+    ) -> crate::app::submit::Performed {
+        use crate::app::submit::{Decision, Performed, compose, route};
         let origin = crate::app::submit::Origin {
             page: request.conversation.clone(),
             // Whose turn it is is the registry's fact, and the registry is
@@ -2193,25 +2237,21 @@ impl Controller {
         };
         let composed = compose(&request.input, &self.addressable());
         match route(composed, &origin) {
-            Decision::Nothing => Route::Nothing,
-            Decision::Turn { text } => Route::Turn { text },
-            Decision::Shell { command } => Route::Shell { command },
-            Decision::Command { line, on } => Route::Command { line, on },
+            Decision::Nothing => Performed::Nothing,
+            Decision::Turn { text } => self.perform_turn(text),
+            Decision::Shell { command } => self.perform_shell(command),
+            Decision::Command { line, on } => Performed::Command { line, on },
             Decision::Deliver {
                 target,
                 text,
                 addressed,
-            } => Route::Deliver {
-                target,
-                text,
-                addressed,
-            },
+            } => self.perform_delivery(target, text, addressed),
             Decision::Queue(entry) => {
                 let mut entry = *entry;
                 entry.carries_attachments = request.carries_attachments;
                 let (placement, changes) = self.queue.enqueue(entry, &mut self.mint);
                 self.announce_queue(changes);
-                Route::Queued(placement)
+                Performed::Queued(placement)
             }
         }
     }
@@ -2556,27 +2596,49 @@ impl Controller {
         }
     }
 
-    /// Answer what the frontends ask about the waiting mail.
+    /// Wake main, or say why not — and open the turn when it is due.
+    ///
+    /// The window was already the core's (乙案); the *turn* is now too, which is
+    /// what stops a frontend from waking on a debounce of its own. The turn it
+    /// opens has no input of its own: what it reads is the inbox, and
+    /// `TurnOrigin::Auto` is what says so.
     fn serve_mail(&mut self, message: crate::app::mail::MailMsg) {
         use crate::app::mail::MailMsg;
         match message {
-            MailMsg::Due { interrupted, reply } => {
-                // Idle-only, as the per-post wake was: a running turn absorbs the
-                // mail at its own next round, and a queued user message goes
-                // first. Main's turn and main's queue, whatever page the screen
-                // is on.
-                let free = !interrupted
-                    && !self.turns.is_busy(&ConvKey::Main)
-                    && self.queue.count(&ConvKey::Main) == 0;
-                let _ = reply.send(free && self.mail.due(std::time::Instant::now()));
+            MailMsg::Digest { interrupted, reply } => {
+                let due =
+                    self.free_to_wake(interrupted) && self.mail.due(std::time::Instant::now());
+                if due {
+                    self.wake_main();
+                    self.mail.woke();
+                }
+                let _ = reply.send(due);
             }
-            MailMsg::Woke => self.mail.woke(),
+            MailMsg::Notified { interrupted, reply } => {
+                let wake = self.free_to_wake(interrupted);
+                if wake {
+                    self.wake_main();
+                }
+                let _ = reply.send(wake);
+            }
             MailMsg::Waiting { reply } => {
                 let _ = reply.send(self.mail.is_waiting());
             }
             #[cfg(test)]
             MailMsg::Rewind { by } => self.mail.rewind(by),
         }
+    }
+
+    /// Idle-only, as the per-post wake was: a running turn absorbs the mail at
+    /// its own next round, and a queued user message goes first. Main's turn and
+    /// main's queue, whatever page the screen is on.
+    fn free_to_wake(&self, interrupted: bool) -> bool {
+        !interrupted && !self.turns.is_busy(&ConvKey::Main) && self.queue.count(&ConvKey::Main) == 0
+    }
+
+    /// The digest turn itself: an ordinary turn with no prose of its own.
+    fn wake_main(&mut self) {
+        let _ = self.perform_turn_from(String::new(), crate::app::snapshot::TurnOrigin::Auto);
     }
 
     /// Read where main's inbox stands and say so.

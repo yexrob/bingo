@@ -1,15 +1,12 @@
 //! Renderer-agnostic contract between the agent core and any front end.
 //!
 //! Nothing here may depend on a terminal library: [`UiEvent`] and the dialog
-//! transport types are what a TUI, a GUI or a test harness all consume, and
-//! [`tui_hooks`] is the adapter that turns an engine run's reports into channel
-//! traffic. Front-end implementations live outside this module.
-
-use std::sync::Arc;
+//! transport types are what a TUI, a GUI or a test harness all consume. Front-end
+//! implementations live outside this module, and since D154 so does every host a
+//! run reports through — the console submits, and the core's engine runs it.
 
 use tokio::sync::mpsc;
 
-use crate::engine::events::{EngineEvents, EngineHost, EngineRequests};
 use crate::query::ToolCallDone;
 use crate::watch::WatchState;
 
@@ -154,6 +151,11 @@ impl EventSink {
 /// Event channel from the agent task to components.
 #[derive(Debug, Clone)]
 pub enum UiEvent {
+    /// One input item of the turn that is about to start: the prose the core
+    /// recorded, drawn as the user's own row. It arrives before
+    /// [`TurnStart`](UiEvent::TurnStart) because the item is ordered before the
+    /// turn, and a turn with no input of its own (the digest wake) sends none.
+    Submitted(String),
     TurnStart,
     /// Discard all live output and tool rows produced by the current model-response attempt before
     /// a transparent stream reconnect. Persisted history is unchanged because the attempt has not
@@ -349,29 +351,6 @@ impl PermissionRequest {
     }
 }
 
-/// What one console run needs answered, and nothing else.
-///
-/// There is no sink here any more. A run reports into the turn the core opened
-/// for it, the actor sequences the report, and the console reads its rows out of
-/// the projection that follows (`tui::chat_feed`) — so an engine report reaches
-/// the screen through exactly one door, the same door a GUI reads. What is left
-/// is the four questions a run cannot answer itself.
-pub fn tui_host(
-    interactions: crate::app::interaction::InteractionHandle,
-    steer: Arc<crate::query::SteerFn>,
-    live: Arc<crate::live::LiveBash>,
-) -> EngineHost {
-    EngineHost::new(
-        EngineEvents::new(|_| {}),
-        EngineRequests {
-            ask: crate::app::interaction::permission_ask(interactions.clone(), ConvKey::Main),
-            ask_question: crate::app::interaction::question_ask(interactions, ConvKey::Main),
-            steer,
-            live,
-        },
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -384,10 +363,17 @@ mod tests {
 
         let core = crate::app::AppCore::start(Default::default());
         let interactions = core.interactions();
-        let ui = tui_host(
-            interactions.clone(),
-            crate::query::no_steer(),
-            crate::live::LiveBash::detached(),
+        let ui = crate::engine::events::EngineHost::new(
+            crate::engine::events::EngineEvents::detached(),
+            crate::engine::events::EngineRequests {
+                ask: crate::app::interaction::permission_ask(interactions.clone(), ConvKey::Main),
+                ask_question: crate::app::interaction::question_ask(
+                    interactions.clone(),
+                    ConvKey::Main,
+                ),
+                steer: crate::query::no_steer(),
+                live: crate::live::LiveBash::detached(),
+            },
         );
 
         /// The prompt the core has open, once it does.

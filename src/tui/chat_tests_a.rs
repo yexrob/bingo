@@ -71,6 +71,7 @@ pub(super) fn test_chat_home(home: std::path::PathBuf) -> Chat {
         instance: None,
         attachments: crate::api::image::Attachments::new(),
     });
+    crate::tui::test_util::attach_test_engine(&session);
     let mut chat = Chat::new(
         session,
         crate::ui::EventSink::new(crate::ui::ConvKey::Main, events_tx),
@@ -926,6 +927,9 @@ fn running_status_verb_priority() {
     assert_eq!(chat.running_status(), None, "no status row when idle");
 
     chat.start_test_turn();
+    // The turn's own thinking placeholder is a running activity; emptying the
+    // flow is what "nothing is active" means here.
+    chat.conv.messages.clear();
     chat.conv.turn_started = Some(std::time::Instant::now());
     let verb = chat.running_status().expect("busy status").verb;
     assert_eq!(verb, "Working", "fallback when nothing is active");
@@ -1108,6 +1112,7 @@ async fn bash_submit_runs_command_and_ends_turn() {
         instance: None,
         attachments: crate::api::image::Attachments::new(),
     });
+    crate::tui::test_util::attach_test_engine(&session);
     let (events_tx, events_rx) = mpsc::unbounded_channel();
     let mut chat = Chat::new(
         session,
@@ -1544,7 +1549,7 @@ async fn model_menu_level_one_uses_picker_core() {
             oauth: None,
         },
     );
-    Arc::get_mut(&mut chat.session).unwrap().client =
+    crate::tui::test_util::session_mut(&mut chat).client =
         crate::api::client::Client::from_settings(&s2).unwrap();
 
     chat.input = "/model".to_string();
@@ -2014,8 +2019,7 @@ async fn slash_share_public_opt_in_warns_before_upload() {
     let _ = t.append(&crate::api::types::Message::user_text("hi"));
     let mut chat = test_chat_home(home.clone());
     // settings.share.baseUrl → a local mock server (runtime session config; no disk/XDG dependency).
-    Arc::get_mut(&mut chat.session)
-        .unwrap_or_else(|| panic!("single reference"))
+    crate::tui::test_util::session_mut(&mut chat)
         .settings
         .share
         .base_url = Some(format!("http://{addr}"));
@@ -2331,7 +2335,7 @@ fn slash_provider_list_masks_short_keys() {
         api_key: Some("main".into()),
         ..Default::default()
     };
-    Arc::get_mut(&mut chat.session).unwrap().client =
+    crate::tui::test_util::session_mut(&mut chat).client =
         crate::api::client::Client::from_settings(&settings).unwrap();
     chat.input = "/provider".to_string();
     chat.submit();
@@ -2433,7 +2437,7 @@ fn slash_provider_switch_warns_on_oauth_not_logged_in() {
             }),
         },
     );
-    Arc::get_mut(&mut chat.session).unwrap().client =
+    crate::tui::test_util::session_mut(&mut chat).client =
         crate::api::client::Client::from_settings_at_with(
             &settings,
             |_| Err(std::env::VarError::NotPresent),
@@ -2546,7 +2550,7 @@ fn slash_provider_lists_and_switches() {
             oauth: None,
         },
     )]);
-    Arc::get_mut(&mut chat.session).unwrap().client =
+    crate::tui::test_util::session_mut(&mut chat).client =
         crate::api::client::Client::new("sk-main".into(), "https://main.example".into());
     // set_provider needs a providers table — constructing via from_settings is more direct.
     drop(providers);
@@ -2566,7 +2570,7 @@ fn slash_provider_lists_and_switches() {
             oauth: None,
         },
     );
-    Arc::get_mut(&mut chat.session).unwrap().client =
+    crate::tui::test_util::session_mut(&mut chat).client =
         crate::api::client::Client::from_settings(&settings).unwrap();
 
     // Reopen the selector: the list has deepseek; Esc does not change the current.
@@ -2613,7 +2617,7 @@ fn slash_provider_lists_and_switches() {
     // s = this session only (a fresh chat, nothing persisted before): runtime switch without writing settings.
     let mut chat = test_chat_home(s_tmp.join("home"));
     chat.cwd = s_tmp.display().to_string();
-    Arc::get_mut(&mut chat.session).unwrap().client =
+    crate::tui::test_util::session_mut(&mut chat).client =
         crate::api::client::Client::from_settings(&settings).unwrap();
     chat.input = "/provider".to_string();
     chat.submit();
@@ -2748,7 +2752,7 @@ async fn slash_mcp_enable_disable_persists_and_lists() {
     let _ = std::fs::remove_dir_all(&tmp);
     let mut chat = test_chat_home(tmp.join("home"));
     chat.cwd = tmp.display().to_string();
-    Arc::get_mut(&mut chat.session).unwrap().runtime.mcp =
+    crate::tui::test_util::session_mut(&mut chat).runtime.mcp =
         Arc::new(tokio::sync::Mutex::new(crate::mcp::McpManager::new(
             std::collections::HashMap::from([(
                 "files".to_string(),
@@ -2801,7 +2805,7 @@ async fn slash_mcp_reconnect_unknown_server() {
     let _ = std::fs::remove_dir_all(&tmp);
     let mut chat = test_chat_home(tmp.join("home"));
     chat.cwd = tmp.display().to_string();
-    Arc::get_mut(&mut chat.session).unwrap().runtime.mcp =
+    crate::tui::test_util::session_mut(&mut chat).runtime.mcp =
         Arc::new(tokio::sync::Mutex::new(crate::mcp::McpManager::new(
             std::collections::HashMap::from([(
                 "files".to_string(),
@@ -3173,7 +3177,7 @@ async fn model_menu_esc_back_keeps_provider_list() {
             },
         );
     }
-    Arc::get_mut(&mut chat.session).unwrap().client =
+    crate::tui::test_util::session_mut(&mut chat).client =
         crate::api::client::Client::from_settings(&settings).unwrap();
 
     chat.input = "/model".to_string();
@@ -3232,7 +3236,7 @@ async fn provider_switch_persists_provider_and_model_menu_persists_both() {
             oauth: None,
         },
     );
-    Arc::get_mut(&mut chat.session).unwrap().client =
+    crate::tui::test_util::session_mut(&mut chat).client =
         crate::api::client::Client::from_settings(&settings).unwrap();
 
     // /provider deepseek: switch + persist.

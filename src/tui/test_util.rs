@@ -28,7 +28,7 @@ use crate::tui::theme::Theme;
 /// A minimal offline session (no real endpoint is ever contacted in tests).
 pub fn test_session() -> Arc<Session> {
     let core = crate::app::AppCore::start(Default::default());
-    Arc::new(Session {
+    let session = Arc::new(Session {
         client: crate::api::client::Client::new(
             "test-key".to_string(),
             "https://example.com".to_string(),
@@ -57,7 +57,52 @@ pub fn test_session() -> Arc<Session> {
         operations: core.operations(),
         instance: None,
         attachments: crate::api::image::Attachments::new(),
-    })
+    });
+    attach_test_engine(&session);
+    session
+}
+
+/// Edit the session a test holds, exclusively.
+///
+/// The session is shared with the engine that runs its turns since D154, so
+/// nothing holds it alone any more. Rebuilding it hands the caller the only
+/// reference to what it is about to edit; every field it does not touch is a
+/// shared handle and still points at the same state.
+pub fn session_mut(chat: &mut Chat) -> &mut Session {
+    let fresh = (*chat.session).clone();
+    chat.session = Arc::new(fresh);
+    Arc::get_mut(&mut chat.session).unwrap_or_else(|| panic!("just rebuilt"))
+}
+
+/// Give a test session the thing that runs a turn.
+///
+/// A console whose core cannot run one is not the console: since D154 the
+/// submission path opens the turn *inside* the core, so a test that submits
+/// needs an engine attached exactly as a terminal does. With a runtime in scope
+/// it is the real one — a run against the offline endpoint fails the way it
+/// always did; without one there is nothing to spawn on, and the recorder keeps
+/// the core's half honest for the synchronous tests.
+pub fn attach_test_engine(session: &Arc<Session>) {
+    // A real assembly builds the core and the runtime from the same settings
+    // (`main.rs`, `app_server::session`); a test builds the `Session` by hand, so
+    // the core is told what it was built with. Since D154 the mode a run obeys
+    // is the core's, and a session whose two halves disagreed would be a test
+    // fixture no terminal could produce.
+    let _ = session
+        .core
+        .execute(
+            crate::ui::ConvKey::Main,
+            crate::app::command::Action::PermissionModeSet {
+                mode: crate::tui::chat::app_permission_mode(session.permission_mode),
+            },
+        )
+        .now();
+    match crate::engine::runner::SessionEngine::new(session.clone()) {
+        Some(engine) => session.core.attach_engine(engine),
+        None => session
+            .core
+            .attach_engine(Arc::new(crate::app::engine::Recorder::default())),
+    }
 }
 
 /// One document row with its avatar gutter taken off — the message column
@@ -110,6 +155,23 @@ pub fn chat_at(width: usize, height: usize) -> Chat {
 /// into the console's store — see [`Chat::settle_store`].
 pub fn settled(chat: &mut Chat) {
     chat.settle_store();
+}
+
+/// Put the session's permission mode where a test wants it, through the door a
+/// key press goes through: the core holds it, and the console reads it back
+/// (D154).
+pub fn set_permission_mode(chat: &mut Chat, mode: crate::permission::PermissionMode) {
+    let _ = chat
+        .session
+        .core
+        .execute(
+            crate::ui::ConvKey::Main,
+            crate::app::command::Action::PermissionModeSet {
+                mode: crate::tui::chat::app_permission_mode(mode),
+            },
+        )
+        .now();
+    settled(chat);
 }
 
 /// TestBackend plus the raw-byte sink and command counters the driver needs asserting on.

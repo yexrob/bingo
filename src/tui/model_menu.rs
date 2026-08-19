@@ -510,9 +510,12 @@ mod tests {
     fn chat_at_home(home: &std::path::Path, json: &str) -> crate::tui::chat::Chat {
         let mut chat = crate::tui::test_util::chat_at(80, 24);
         let settings: crate::settings::Settings = serde_json::from_str(json).unwrap();
-        let session = std::sync::Arc::get_mut(&mut chat.session).unwrap();
+        // Rebuilt rather than mutated in place: the session is shared with the
+        // engine that runs its turns, so nothing holds it alone any more.
+        let mut session = (*chat.session).clone();
         session.client = crate::api::client::Client::from_settings_at(&settings, home).unwrap();
         session.home = home.to_path_buf();
+        chat.session = std::sync::Arc::new(session);
         chat
     }
 

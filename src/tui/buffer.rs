@@ -125,26 +125,6 @@ impl Buffer {
     }
 }
 
-/// Where a direct send belongs. Data only — [`deliver`] performs it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SubmitTarget {
-    /// `AgentHandle::deliver` under the user's name. The `[DM from user]`
-    /// marker is *not* applied here and must not be: it is added downstream in
-    /// `absorb_inbox`, derived from `from`, and adding it at both ends would
-    /// double it (D64).
-    Dm { agent: String, text: String },
-    /// `tool::channel::deliver_post` under the user's name.
-    Channel { channel: String, text: String },
-}
-
-/// What came of a direct send.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Delivery {
-    Sent,
-    /// A notice to put above the composer (English; the wording is final).
-    Rejected(String),
-}
-
 /// What a DM's badge is measured in (D99): one entry per Said post of the pair
 /// lane, `true` where the agent is the one who spoke.
 ///
@@ -373,42 +353,6 @@ impl Buffers {
         if let Some(buf) = self.list.iter_mut().find(|b| b.id == *id) {
             buf.read = buf.seq;
             buf.mention = false;
-        }
-    }
-}
-
-/// Perform a direct send against the domain — the same two calls every other
-/// path makes, in the same order, so a message the user types into the
-/// transcript is indistinguishable at the domain from one a tool delivered.
-pub fn deliver(session: &Arc<Session>, target: SubmitTarget) -> Delivery {
-    match target {
-        SubmitTarget::Dm { agent, text } => {
-            match session
-                .agents
-                .deliver(&agent, USER_NAME, &text, Vec::new(), None)
-                .now()
-            {
-                Ok(_) => {
-                    crate::tool::agent::flush_agent_inbox(session, &session.watch);
-                    Delivery::Sent
-                }
-                Err(e) => Delivery::Rejected(e),
-            }
-        }
-        SubmitTarget::Channel { channel, text } => {
-            match crate::tool::channel::deliver_post(
-                session,
-                &session.watch,
-                USER_NAME,
-                &channel,
-                &text,
-            ) {
-                Ok(crate::tool::channel::PostDelivery::Sent { .. }) => Delivery::Sent,
-                Ok(crate::tool::channel::PostDelivery::Stale { .. }) => Delivery::Rejected(
-                    "the channel got new messages; read them and resend".to_string(),
-                ),
-                Err(e) => Delivery::Rejected(e),
-            }
         }
     }
 }
@@ -909,17 +853,32 @@ mod tests {
 
     /// The two halves of a direct send, at the domain. Rewritten for D103: the
     /// router that used to decide between them was the composer-in-a-buffer's,
-    /// and the composer is main's again — the target is now decided by the
-    /// sigil the user typed, and this is what the sigil resolves to.
+    /// and the composer is main's again — the target is decided by the sigil the
+    /// user typed. Since D154 the send itself is the core's, so this asks the
+    /// core the way the composer does.
+    async fn send(session: &Arc<Session>, line: &str) -> crate::app::submit::Performed {
+        session
+            .submit
+            .submit(crate::app::submit::SubmitRequest {
+                conversation: crate::ui::ConvKey::Main,
+                input: crate::app::command::Submission::Composer {
+                    mode: crate::app::command::ComposerMode::Normal,
+                    text: line.to_string(),
+                    attachments: Vec::new(),
+                },
+                carries_attachments: false,
+            })
+            .await
+    }
+
     #[tokio::test]
     async fn a_dm_reaches_the_agent_under_the_user_marker() {
         let session = test_session();
         seed_agent(&session, "scout", Vec::new());
-        let target = SubmitTarget::Dm {
-            agent: "scout".to_string(),
-            text: "have a look".to_string(),
-        };
-        assert_eq!(deliver(&session, target), Delivery::Sent);
+        assert!(matches!(
+            send(&session, "@scout have a look").await,
+            crate::app::submit::Performed::Delivered { .. }
+        ));
 
         // An inbox item from `user`, which is what earns the D64 marker when
         // the instance picks it up. The send path must not add the marker
@@ -932,14 +891,18 @@ mod tests {
         );
     }
 
+    /// An unresolved name is a question about a directory, not a failed
+    /// delivery (the grammar's own rule), so the line the core cannot deliver
+    /// is the one whose addressee it knows and whose inbox refuses it.
     #[tokio::test]
     async fn a_dm_to_nobody_is_reported_not_swallowed() {
         let session = test_session();
-        let target = SubmitTarget::Dm {
-            agent: "ghost".to_string(),
-            text: "hello?".to_string(),
-        };
-        assert!(matches!(deliver(&session, target), Delivery::Rejected(_)));
+        seed_agent(&session, "ghost", Vec::new());
+        session.agents.remove("ghost").await.ok();
+        assert!(!matches!(
+            send(&session, "@ghost hello?").await,
+            crate::app::submit::Performed::Delivered { .. }
+        ));
     }
 
     #[tokio::test]
@@ -954,11 +917,10 @@ mod tests {
             )
             .await
             .expect("channel created");
-        let target = SubmitTarget::Channel {
-            channel: "build".to_string(),
-            text: "ship it".to_string(),
-        };
-        assert_eq!(deliver(&session, target), Delivery::Sent);
+        assert!(matches!(
+            send(&session, "#build ship it").await,
+            crate::app::submit::Performed::Delivered { .. }
+        ));
 
         let log = session.channels.log_of("build");
         assert_eq!(log.len(), 1);

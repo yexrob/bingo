@@ -42,9 +42,11 @@ impl SessionEngine {
     /// session with no engine is a session that can be read and configured but
     /// not run, which is a state the core already has an answer for.
     pub fn new(session: Arc<Session>) -> Option<Arc<Self>> {
+        let runtime = tokio::runtime::Handle::try_current().ok()?;
+        runtime.spawn(mirror_config(session.clone()));
         Some(Arc::new(Self {
             session,
-            runtime: tokio::runtime::Handle::try_current().ok()?,
+            runtime,
             cancel: watch::channel(false).0,
             live: Arc::new(Mutex::new(None)),
         }))
@@ -79,7 +81,7 @@ impl SessionEngine {
     /// abort: a task that is cancelled executes none of its own code, and the
     /// guard's `Drop` closes the turn for it (spec invariant #5).
     fn spawn(&self, turn: TurnId, work: Work) {
-        let session = self.session.clone();
+        let session = self.session_now();
         let cancel = self.cancel.subscribe();
         self.cancel.send_replace(false);
         // The host is assembled here rather than inside the task so the
@@ -88,6 +90,7 @@ impl SessionEngine {
         let host = host_for(&session, turn.clone());
         self.hold(Some(host.requests.live.clone()));
         let held = self.live.clone();
+        let turn_id = turn.clone();
         self.runtime.spawn(async move {
             let guard = session
                 .turns
@@ -118,6 +121,23 @@ impl SessionEngine {
                 host.events
                     .warn("model returned an empty response and was retried");
             }
+            // The interrupt marker is committed before the close, in the order
+            // it happened: the exact sentence the transcript recorded becomes an
+            // item, so the screen and the model read the same one.
+            if let Ok(outcome) = &outcome
+                && let Some(marker) = outcome.interrupt_marker
+            {
+                session
+                    .turns
+                    .commit_item(
+                        crate::app::conversation::ConvKey::Main,
+                        Some(turn_id.clone()),
+                        crate::app::snapshot::ItemBody::Interruption {
+                            marker: marker.to_string(),
+                        },
+                    )
+                    .forget();
+            }
             match &outcome {
                 Ok(outcome) if outcome.aborted => {
                     guard.finish(crate::app::snapshot::TurnStatus::Interrupted, None)
@@ -141,6 +161,37 @@ impl SessionEngine {
                     .await;
             }
         });
+    }
+
+    /// The session this run reads its permission mode from.
+    ///
+    /// A `Session` is immutable inside its `Arc`, and the permission mode moves
+    /// while a session is alive — shift+tab, `/permission-mode`, a client's
+    /// `action/execute`. The core is the one authority for what it stands at
+    /// (D154), so a run that needs a different one takes a copy carrying it;
+    /// every other field is a shared handle and still points at the same state.
+    fn session_now(&self) -> Arc<crate::query::Session> {
+        let wanted = match self.session.core.config().borrow().permission_mode {
+            crate::app::snapshot::PermissionMode::Default => {
+                crate::permission::PermissionMode::Default
+            }
+            crate::app::snapshot::PermissionMode::AcceptEdits => {
+                crate::permission::PermissionMode::AcceptEdits
+            }
+            crate::app::snapshot::PermissionMode::BypassPermissions => {
+                crate::permission::PermissionMode::BypassPermissions
+            }
+            crate::app::snapshot::PermissionMode::DontAsk => {
+                crate::permission::PermissionMode::DontAsk
+            }
+            crate::app::snapshot::PermissionMode::Plan => crate::permission::PermissionMode::Plan,
+        };
+        if wanted == self.session.permission_mode {
+            return self.session.clone();
+        }
+        let mut session = (*self.session).clone();
+        session.permission_mode = wanted;
+        Arc::new(session)
     }
 
     /// Remember the run's foreground handle, or forget it.
@@ -203,6 +254,38 @@ fn steering(session: &Arc<Session>, turn: TurnId) -> Arc<crate::query::SteerFn> 
                 .await
         })
     })
+}
+
+/// Keep what a run reads in step with what the core holds.
+///
+/// The model, the provider and the thinking level are the core's — an
+/// `action/execute`, a slash line, or a `/model` drained off the queue all change
+/// them there (D154). What a run *reads* is the session's runtime, so one task
+/// carries the core's answer across rather than every caller remembering to
+/// write both. It ends when the session does, because the sender does.
+async fn mirror_config(session: Arc<Session>) {
+    let mut config = session.core.config();
+    // What moved, not what differs: a session assembles its runtime and its core
+    // from the same settings, and anything else that revises the configuration —
+    // an MCP report, a permission rule — must not carry a stale selection across
+    // with it.
+    let mut held = config.borrow().clone();
+    while config.changed().await.is_ok() {
+        let now = config.borrow_and_update().clone();
+        if now.model != held.model {
+            let _ = session.runtime.model_tx.send(now.model.clone());
+        }
+        if now.thinking != held.thinking {
+            let _ = session.runtime.thinking_tx.send(match now.thinking {
+                crate::app::snapshot::ThinkingLevel::Off => None,
+                level => Some(level.as_str().to_string()),
+            });
+        }
+        if now.provider != held.provider && session.client.set_provider(&now.provider).is_ok() {
+            let _ = session.runtime.provider_tx.send(now.provider.clone());
+        }
+        held = now;
+    }
 }
 
 /// What a run is running.

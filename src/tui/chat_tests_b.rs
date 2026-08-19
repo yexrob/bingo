@@ -2338,44 +2338,45 @@ fn esc_closes_layers_then_clears_input() {
 #[test]
 fn shift_tab_cycles_permission_mode() {
     let mut chat = chat_with_history("mode");
-    assert_eq!(chat.permission_mode, PermissionMode::Default);
+    assert_eq!(chat.permission_mode(), PermissionMode::Default);
     press(&mut chat, KeyCode::BackTab);
-    assert_eq!(chat.permission_mode, PermissionMode::AcceptEdits);
+    assert_eq!(chat.permission_mode(), PermissionMode::AcceptEdits);
     assert_eq!(
         chat.permission_mode_label(),
         "acceptEdits",
         "the footer badge shares a source"
     );
     press(&mut chat, KeyCode::BackTab);
-    assert_eq!(chat.permission_mode, PermissionMode::Plan);
+    assert_eq!(chat.permission_mode(), PermissionMode::Plan);
     press(&mut chat, KeyCode::BackTab);
     assert_eq!(
-        chat.permission_mode,
+        chat.permission_mode(),
         PermissionMode::Default,
         "cycles back to default"
     );
-    // The turn's Session carries the current mode (Session is immutable in Arc → derive a copy).
+    // The core carries the mode a run will obey — the console keeps no copy of
+    // its own, so the badge and `config/read` cannot disagree (D154).
     press(&mut chat, KeyCode::BackTab);
     assert_eq!(
-        chat.session_for_turn().permission_mode,
-        PermissionMode::AcceptEdits
+        chat.session.core.config().borrow().permission_mode,
+        crate::app::snapshot::PermissionMode::AcceptEdits
     );
     assert_eq!(
         chat.session.permission_mode,
         PermissionMode::Default,
-        "the original Session is unchanged"
+        "the mode the session started in is unchanged"
     );
 
     // A session started in bypass only toggles between bypass ↔ default (never introduces a new dangerous mode).
     let mut chat = chat_with_history("mode-bypass");
-    chat.permission_mode = PermissionMode::BypassPermissions;
     let mut session = (*chat.session).clone();
     session.permission_mode = PermissionMode::BypassPermissions;
     chat.session = Arc::new(session);
+    crate::tui::test_util::set_permission_mode(&mut chat, PermissionMode::BypassPermissions);
     press(&mut chat, KeyCode::BackTab);
-    assert_eq!(chat.permission_mode, PermissionMode::Default);
+    assert_eq!(chat.permission_mode(), PermissionMode::Default);
     press(&mut chat, KeyCode::BackTab);
-    assert_eq!(chat.permission_mode, PermissionMode::BypassPermissions);
+    assert_eq!(chat.permission_mode(), PermissionMode::BypassPermissions);
 }
 
 /// Enter while busy is no longer a no-op: messages queue and show below the input; ↑ pulls back the last one.
@@ -2474,41 +2475,6 @@ fn busy_dispatch_runs_instant_and_queues_the_rest() {
     let queued = chat.main_queue().entries;
     assert_eq!(queued.len(), 2);
     assert!(!queued[1].is_command());
-    let _ = std::fs::remove_dir_all(&tmp);
-}
-
-/// After TurnEnd, queued slash commands drain through `run_slash` (not `start_turn`),
-/// in order, until a plain message starts the next turn.
-#[tokio::test]
-async fn queued_slashes_drain_through_run_slash() {
-    let tmp = std::env::temp_dir().join(format!("bingo-slash-{}-drain", std::process::id()));
-    let _ = std::fs::remove_dir_all(&tmp);
-    let mut chat = test_chat_home(tmp.join("home"));
-    chat.cwd = tmp.display().to_string();
-    for text in ["/think low", "/nope", "the message"] {
-        chat.enqueue(text.to_string(), crate::ui::ConvKey::Main);
-    }
-    chat.submit_queued();
-    // Both slash commands ran (think applied + unknown guidance), then the message started a turn.
-    assert_eq!(
-        chat.session.runtime.thinking.borrow().as_deref(),
-        Some("low"),
-        "queued slash commands run as commands"
-    );
-    let out = all_slash_text(&chat);
-    assert!(
-        out.contains("unknown command: /nope") && out.contains("code=UNKNOWN_COMMAND"),
-        "unknown commands get guidance instead of the model: {out}"
-    );
-    assert!(chat.conv.busy, "the last plain message starts a new turn");
-    assert_eq!(chat.conv.messages.last().map(|m| m.role), Some(Role::User));
-    assert!(
-        chat.conv
-            .messages
-            .last()
-            .is_some_and(|m| m.text == "the message"),
-        "plain messages reach the model via start_turn"
-    );
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
@@ -3618,7 +3584,7 @@ fn switch_provider_resolves_model_atomically() {
             oauth: None,
         },
     );
-    Arc::get_mut(&mut chat.session).unwrap().client =
+    crate::tui::test_util::session_mut(&mut chat).client =
         crate::api::client::Client::from_settings_with(&settings, |_| {
             Err(std::env::VarError::NotPresent)
         })

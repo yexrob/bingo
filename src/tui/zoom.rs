@@ -559,10 +559,10 @@ mod tests {
     fn shift_tab_cycles_the_viewed_agents_mode_and_not_mains() {
         let mut chat = test_chat();
         seed(&mut chat, "scout");
-        let before_main = chat.permission_mode;
+        let before_main = chat.permission_mode();
         chat.switch_to(Some(ZoomTarget::Agent("scout".into())));
         chat.on_key(KeyCode::BackTab, KeyModifiers::SHIFT);
-        assert_eq!(chat.permission_mode, before_main, "main's mode untouched");
+        assert_eq!(chat.permission_mode(), before_main, "main's mode untouched");
         assert_ne!(
             chat.session.agents.permission_mode_of("scout"),
             Some(PermissionMode::Default),

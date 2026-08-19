@@ -462,6 +462,14 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         attachments: crate::api::image::Attachments::new(),
     });
 
+    // The thing that runs a turn (D154). The console stopped driving its own
+    // model calls here: it submits, the core opens the turn, and this runs it —
+    // the same engine `bingo app-server` attaches, so the two frontends are one
+    // product rather than two that agree by hand.
+    if let Some(engine) = crate::engine::runner::SessionEngine::new(session.clone()) {
+        core.attach_engine(engine);
+    }
+
     // Share persistence: incrementally records subagent/channel snapshots per session (the data source for `bingo share`).
     // Same key as the task list = transcript file stem; create/read failures only warn (an enhancement, not a contract).
     if let Some(stem) = transcript

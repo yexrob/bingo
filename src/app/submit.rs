@@ -138,32 +138,55 @@ fn direct(text: &str, known: &Addressable) -> Option<(DirectTarget, String)> {
     Some((target, body.to_string()))
 }
 
-/// What the core decided to do with a submission.
+/// What the core **did** with a submission.
 ///
-/// The caller never chooses between these. Some of them the core performs on the
-/// spot — a queue entry, a delivery; the rest name work whose runner is still the
-/// terminal front end's until B7 moves it.
+/// The caller never chooses between these, and by the time one exists everything
+/// it names is real: the item the prose became, the turn the engine is running,
+/// the message that entered an inbox, the entry on the queue. The wire's
+/// [`crate::app::command::SubmitDisposition`] is a mapping over this rather than
+/// a second answer (D154).
+///
+/// One arm is not performed, on purpose. A slash command's *view* — `/status`,
+/// `/help`, the model picker — is the frontend's, so the line comes back with
+/// the page it was typed on and each surface renders its own.
 #[derive(Debug, Clone, PartialEq)]
-pub enum Route {
+pub enum Performed {
     /// Nothing was submitted.
     Nothing,
-    /// Prose that opens a turn on the console.
-    Turn { text: String },
-    /// A standalone shell run, always in the console's context.
-    Shell { command: String },
-    /// A slash command, with the page it was submitted on. B3 recognises and
-    /// forwards it; B5 moves the handlers behind `action/execute`.
+    /// The prose is an item, main's turn is open, and the engine has the work.
+    Turn { turn: crate::app::ids::TurnId },
+    /// The `!` line is an item and its run is open, always in the console's
+    /// context.
+    Shell {
+        turn: crate::app::ids::TurnId,
+        command: String,
+    },
+    /// A slash command, with the page it was submitted on.
     Command { line: String, on: ConvKey },
     /// Accepted behind the console's busy turn.
     Queued(crate::app::queue::Placement),
-    /// Handed to a conversation that runs no turn for it. `addressed` marks the
+    /// It reached a conversation that runs no turn for it. `addressed` marks the
     /// `@name`/`#room` grammar, which leaves a receipt; the page's own prose is
     /// drawn on the screen it was typed on and needs none (D105).
-    Deliver {
+    Delivered {
         target: DirectTarget,
-        text: String,
         addressed: bool,
+        /// The body, as the addressee received it: the sigil and the whitespace
+        /// after it are the envelope and are not part of the message.
+        text: String,
+        item: crate::app::ids::ItemId,
     },
+    /// The domain would not take the delivery, in the domain's own words. The
+    /// sentence travels because it is the only thing that says *why* — the wire's
+    /// error kind is a category, and a reader needs the reason.
+    Undelivered {
+        target: DirectTarget,
+        addressed: bool,
+        kind: crate::app_server::protocol::error::ProtocolErrorKind,
+        why: String,
+    },
+    /// The core would not run it: this session has no engine.
+    Unavailable,
 }
 
 /// Everything the core knows when it routes: which page the line was submitted
@@ -306,15 +329,16 @@ impl SubmitHandle {
         Self { control }
     }
 
-    /// The one submission path. What comes back is what the core decided; the
-    /// parts it could perform itself — a queue entry — are already done.
-    pub fn submit(&self, request: SubmitRequest) -> crate::app::answer::Answer<Route> {
+    /// The one submission path. What comes back is what the core *did*: by the
+    /// time it answers, the turn is running, the message is in its inbox, or the
+    /// entry is on the queue.
+    pub fn submit(&self, request: SubmitRequest) -> crate::app::answer::Answer<Performed> {
         let (reply, answer) = tokio::sync::oneshot::channel();
         let _ = self.control.send(crate::app::controller::Control::Submit {
             request: Box::new(request),
             reply,
         });
-        crate::app::answer::Answer::new(answer, Route::Nothing)
+        crate::app::answer::Answer::new(answer, Performed::Nothing)
     }
 }
 

@@ -20,16 +20,34 @@
 use tokio::sync::oneshot;
 
 use crate::app::answer::Answer;
-use crate::app::command::SubmitDisposition;
 use crate::app::conversation::ConvKey;
 use crate::app::engine::{Posted, Run};
 use crate::app::ids::{ItemId, TurnId};
 use crate::app::queue::{QueuedInput, QueuedKind};
 use crate::app::snapshot::{ItemBody, TurnOrigin};
-use crate::app::submit::DirectTarget;
+use crate::app::submit::{DirectTarget, Performed};
 use crate::app::turn::TurnMsg;
 use crate::app::{AppError, AppReply};
 use crate::app_server::protocol::error::ProtocolErrorKind;
+
+/// Why a delivery did not happen: the protocol's category, and the sentence the
+/// domain gave for it.
+///
+/// Both travel because they answer different questions. A wire client branches
+/// on the kind; a reader needs the reason, and "conversationNotFound" is not one.
+struct Refusal {
+    kind: ProtocolErrorKind,
+    why: String,
+}
+
+impl Refusal {
+    fn not_found(why: String) -> Self {
+        Self {
+            kind: ProtocolErrorKind::ConversationNotFound,
+            why,
+        }
+    }
+}
 
 impl super::Controller {
     /// The engine, or the refusal a session without one owes.
@@ -45,28 +63,47 @@ impl super::Controller {
     /// exists, because a user message that opens a turn carries no `turnId` and
     /// the turn names it as an input item instead (spec "Item"). Then the turn
     /// opens, and only then does anything leave the loop — so by the time the
-    /// engine has the work, every identifier the reply mentions is already real.
+    /// engine has the work, every identifier the answer mentions is already real.
+    pub(super) fn perform_turn_from(&mut self, text: String, origin: TurnOrigin) -> Performed {
+        let Ok(engine) = self.engine() else {
+            return Performed::Unavailable;
+        };
+        // A turn with nothing in its mouth is the digest wake: what it reads is
+        // the inbox, so it has no input item and the page shows no `❯` row for
+        // it. Every other turn's prose is an item before the turn exists.
+        let input: Vec<ItemId> = if text.is_empty() {
+            Vec::new()
+        } else {
+            vec![self.commit_body(
+                &ConvKey::Main,
+                ItemBody::UserMessage {
+                    text: text.clone(),
+                    attachments: Vec::new(),
+                },
+            )]
+        };
+        let Ok(turn) = self.open_turn(origin, input) else {
+            return Performed::Unavailable;
+        };
+        engine.run(Run::Turn {
+            turn: turn.clone(),
+            text,
+        });
+        Performed::Turn { turn }
+    }
+
+    /// The user's own prose, as the composer submitted it.
+    pub(super) fn perform_turn(&mut self, text: String) -> Performed {
+        self.perform_turn_from(text, TurnOrigin::User)
+    }
+
     pub(super) fn start_turn(
         &mut self,
         text: String,
         origin: TurnOrigin,
     ) -> Result<AppReply, AppError> {
-        let engine = self.engine()?;
-        let input = self.commit_body(
-            &ConvKey::Main,
-            ItemBody::UserMessage {
-                text: text.clone(),
-                attachments: Vec::new(),
-            },
-        );
-        let turn = self.open_turn(origin, vec![input])?;
-        engine.run(Run::Turn {
-            turn: turn.clone(),
-            text,
-        });
-        Ok(AppReply::Submitted(SubmitDisposition::TurnStarted {
-            turn_id: turn,
-        }))
+        let performed = self.perform_turn_from(text, origin);
+        self.disposition(performed)
     }
 
     /// A shell line. It always runs in the console's context, whichever page it
@@ -76,12 +113,10 @@ impl super::Controller {
     /// The item is the line as it was typed, `!` and all: a client reading the
     /// conversation back has to see what was submitted, not the command stripped
     /// of the thing that made it one.
-    pub(super) fn start_shell(
-        &mut self,
-        command: String,
-        origin: TurnOrigin,
-    ) -> Result<AppReply, AppError> {
-        let engine = self.engine()?;
+    pub(super) fn perform_shell_from(&mut self, command: String, origin: TurnOrigin) -> Performed {
+        let Ok(engine) = self.engine() else {
+            return Performed::Unavailable;
+        };
         let input = self.commit_body(
             &ConvKey::Main,
             ItemBody::UserMessage {
@@ -89,14 +124,27 @@ impl super::Controller {
                 attachments: Vec::new(),
             },
         );
-        let turn = self.open_turn(origin, vec![input])?;
+        let Ok(turn) = self.open_turn(origin, vec![input]) else {
+            return Performed::Unavailable;
+        };
         engine.run(Run::Shell {
             turn: turn.clone(),
-            command,
+            command: command.clone(),
         });
-        Ok(AppReply::Submitted(SubmitDisposition::TurnStarted {
-            turn_id: turn,
-        }))
+        Performed::Shell { turn, command }
+    }
+
+    pub(super) fn perform_shell(&mut self, command: String) -> Performed {
+        self.perform_shell_from(command, TurnOrigin::Shell)
+    }
+
+    pub(super) fn start_shell(
+        &mut self,
+        command: String,
+        origin: TurnOrigin,
+    ) -> Result<AppReply, AppError> {
+        let performed = self.perform_shell_from(command, origin);
+        self.disposition(performed)
     }
 
     /// Open main's turn.
@@ -133,16 +181,28 @@ impl super::Controller {
     /// this loop's tables — and that is what makes the item the reply names a
     /// fact rather than a promise. What travels to the engine afterwards is only
     /// the waking.
-    pub(super) fn serve_deliver(
+    pub(super) fn perform_delivery(
         &mut self,
         target: DirectTarget,
         text: String,
         addressed: bool,
-    ) -> Result<AppReply, AppError> {
-        let engine = self.engine()?;
-        let (item, run) = match &target {
-            DirectTarget::Agent(name) => (self.deposit(name, &text)?, Run::Wake),
-            DirectTarget::Room(name) => self.post(name, &text)?,
+    ) -> Performed {
+        let undelivered = |kind: ProtocolErrorKind, why: String| Performed::Undelivered {
+            target: target.clone(),
+            addressed,
+            kind,
+            why,
+        };
+        let Ok(engine) = self.engine() else {
+            return Performed::Unavailable;
+        };
+        let outcome = match &target {
+            DirectTarget::Agent(name) => self.deposit(name, &text).map(|item| (item, Run::Wake)),
+            DirectTarget::Room(name) => self.post(name, &text),
+        };
+        let (item, run) = match outcome {
+            Ok(outcome) => outcome,
+            Err(Refusal { kind, why }) => return undelivered(kind, why),
         };
         // An addressed send leaves a receipt on the page it was typed on; a
         // page's own prose is already drawn where it was typed and needs none
@@ -153,19 +213,32 @@ impl super::Controller {
                 ItemBody::PeerMessage {
                     from: crate::channels::USER_NAME.to_string(),
                     to: Some(target.label()),
-                    text,
+                    text: text.clone(),
                     delivery_id: None,
                 },
             );
         }
         engine.run(run);
-        Ok(AppReply::Submitted(SubmitDisposition::Delivered {
-            message_id: item,
-        }))
+        Performed::Delivered {
+            target,
+            addressed,
+            text,
+            item,
+        }
+    }
+
+    pub(super) fn serve_deliver(
+        &mut self,
+        target: DirectTarget,
+        text: String,
+        addressed: bool,
+    ) -> Result<AppReply, AppError> {
+        let performed = self.perform_delivery(target, text, addressed);
+        self.disposition(performed)
     }
 
     /// The private lane: one message into one instance's inbox.
-    fn deposit(&mut self, name: &str, text: &str) -> Result<ItemId, AppError> {
+    fn deposit(&mut self, name: &str, text: &str) -> Result<ItemId, Refusal> {
         // The user's own send is not chased. A watchdog exists to tell a
         // *colleague* that its message went unanswered; the user is looking at
         // the page it landed on (D44 read the same way).
@@ -176,9 +249,9 @@ impl super::Controller {
         let committed = self.absorb_deliveries_into();
         self.announce_agents();
         self.announce_deliveries();
-        delivered.map_err(|_| AppError::Refused(ProtocolErrorKind::ConversationNotFound))?;
+        delivered.map_err(Refusal::not_found)?;
         last_in(committed, &ConvKey::Agent(name.to_string()))
-            .ok_or(AppError::Refused(ProtocolErrorKind::ConversationNotFound))
+            .ok_or_else(|| Refusal::not_found(format!("no instance named {name} to deliver to")))
     }
 
     /// The room lane: one post into one room's log, and one copy into every
@@ -189,7 +262,7 @@ impl super::Controller {
     /// gets a watchdog, and a mentioned member that is stopped is reported to the
     /// sender rather than waited on. Both of those are the engine's, so what the
     /// deposits found travels with the wake.
-    fn post(&mut self, name: &str, text: &str) -> Result<(ItemId, Run), AppError> {
+    fn post(&mut self, name: &str, text: &str) -> Result<(ItemId, Run), Refusal> {
         use crate::agents::InboxItem;
         use crate::channels::{ChannelMsg, PostOutcome};
         // Speaking in a room is joining it (D103). The domain writes the
@@ -216,7 +289,7 @@ impl super::Controller {
             self.announce_rooms();
             Answer::new(joined, Err(String::new()))
                 .now()
-                .map_err(|_| AppError::Refused(ProtocolErrorKind::ConversationNotFound))?;
+                .map_err(Refusal::not_found)?;
         }
         let (reply, answer) = oneshot::channel();
         self.channels.handle(ChannelMsg::Post {
@@ -227,7 +300,7 @@ impl super::Controller {
         });
         let posted = Answer::new(answer, Err(String::new()))
             .now()
-            .map_err(|_| AppError::Refused(ProtocolErrorKind::ConversationNotFound))?;
+            .map_err(Refusal::not_found)?;
         let PostOutcome::Sent {
             seq, deliveries, ..
         } = posted
@@ -236,7 +309,10 @@ impl super::Controller {
             // reading the room has the missed posts already — they are items —
             // so what it needs is to be told its post did not go, not to be told
             // them again.
-            return Err(AppError::Refused(ProtocolErrorKind::StaleRevision));
+            return Err(Refusal {
+                kind: ProtocolErrorKind::StaleRevision,
+                why: "the channel got new messages; read them and resend".to_string(),
+            });
         };
         let (mut chase, mut undelivered) = (Vec::new(), Vec::new());
         for delivery in deliveries {
@@ -265,7 +341,7 @@ impl super::Controller {
         self.announce_agents();
         let room = ConvKey::Room(name.to_string());
         let item = last_in(committed, &room)
-            .ok_or(AppError::Refused(ProtocolErrorKind::ConversationNotFound))?;
+            .ok_or_else(|| Refusal::not_found(format!("no room named #{name} to post in")))?;
         Ok((
             item,
             Run::Posted(Box::new(Posted {
@@ -307,7 +383,21 @@ impl super::Controller {
                     // drains.
                     let origin = self.conversations.id(&mut self.mint, &next.on);
                     let line = next.text.strip_prefix('/').unwrap_or(&next.text);
-                    let _ = self.serve_command_line(line, &origin);
+                    // A refusal is news. The line was accepted minutes ago and
+                    // the user has moved on, so an error swallowed here is a
+                    // queue entry that vanished; it lands in the page it was
+                    // typed on, like everything else the drain does (D154).
+                    if let Err(error) = self.serve_command_line(line, &origin) {
+                        let text = refusal_line(&next.text, &error);
+                        self.commit_body(
+                            &next.on,
+                            ItemBody::Notice {
+                                code: crate::error::SLASH_ERROR_UNKNOWN_COMMAND.to_string(),
+                                level: crate::app::snapshot::NoticeLevel::Error,
+                                text,
+                            },
+                        );
+                    }
                     false
                 }
             };
@@ -328,6 +418,28 @@ impl super::Controller {
         );
         self.announce_queue(changes);
         Answer::new(answer, None).now()
+    }
+}
+
+/// What a drained line that the table would not take says for itself.
+///
+/// The wording is the console's own for an unknown command, because that is what
+/// a reader has always been told, and the guidance is what makes it actionable.
+fn refusal_line(line: &str, error: &AppError) -> String {
+    let unknown = matches!(
+        error,
+        AppError::Refused(ProtocolErrorKind::ActionUnavailable)
+    );
+    if unknown {
+        format!(
+            "[error] code={} msg=unknown command: {line}. Type /help to see the available commands.",
+            crate::error::SLASH_ERROR_UNKNOWN_COMMAND
+        )
+    } else {
+        format!(
+            "[error] code={} msg={line} could not run: {error}",
+            crate::error::SLASH_ERROR_BAD_ARGUMENT
+        )
     }
 }
 

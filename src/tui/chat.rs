@@ -18,7 +18,7 @@ use tokio::sync::mpsc;
 
 use crate::budget::MAX_RESULT_CHARS;
 use crate::permission::PermissionMode;
-use crate::query::{Session, run_query};
+use crate::query::Session;
 use crate::tui::activities::{
     Activity, ActivityKind, Diff, Portrait, Thinking, ThinkingState, TodoItem, TodoStatus,
     ToolCall, ToolStatus, WatchCall, activities_path_get_mut, diff_lines, layout_activity,
@@ -497,6 +497,31 @@ fn auth_hint_for(oauth: bool, provider: &str, code: &str, msg: String) -> String
 /// viewed agent's — and CC does exactly that, calling its own
 /// `getNextPermissionMode` on the teammate's context and leaving the leader's
 /// alone (`PromptInput.tsx:1410-1447`).
+/// The permission mode as the core spells it. The two vocabularies are the same
+/// five names; the crossing lives here so nothing else has to know both.
+pub fn app_permission_mode(mode: PermissionMode) -> crate::app::snapshot::PermissionMode {
+    use crate::app::snapshot::PermissionMode as App;
+    match mode {
+        PermissionMode::Default => App::Default,
+        PermissionMode::AcceptEdits => App::AcceptEdits,
+        PermissionMode::BypassPermissions => App::BypassPermissions,
+        PermissionMode::DontAsk => App::DontAsk,
+        PermissionMode::Plan => App::Plan,
+    }
+}
+
+/// And back, for a console reading the mode the core holds.
+pub fn console_permission_mode(mode: crate::app::snapshot::PermissionMode) -> PermissionMode {
+    use crate::app::snapshot::PermissionMode as App;
+    match mode {
+        App::Default => PermissionMode::Default,
+        App::AcceptEdits => PermissionMode::AcceptEdits,
+        App::BypassPermissions => PermissionMode::BypassPermissions,
+        App::DontAsk => PermissionMode::DontAsk,
+        App::Plan => PermissionMode::Plan,
+    }
+}
+
 pub fn next_permission_mode(mode: PermissionMode, startup: PermissionMode) -> PermissionMode {
     let next = match mode {
         PermissionMode::Default => PermissionMode::AcceptEdits,
@@ -667,10 +692,9 @@ pub struct HistorySearch {
 /// is detached for the length of a handler.
 #[derive(Default)]
 struct Follow {
-    /// A finished background run left a notification in main's context: wake a
-    /// turn to read it.
+    /// A finished background run left a notification in main's context: ask the
+    /// core to wake a turn to read it.
     wake: bool,
-    drain_queue: bool,
     /// A run that failed, named, with its reason (D98).
     alert: Option<(String, Option<String>)>,
     /// A run that finished and reported itself to main (D106).
@@ -769,9 +793,6 @@ pub struct Chat {
     bash_history: Vec<String>,
     /// ctrl+r reverse search state (None = not active).
     pub search: Option<HistorySearch>,
-    /// Current permission mode (cycled with shift+tab). `Session` is immutable inside an `Arc`,
-    /// so this holds the one actually in effect: each turn derives a `Session` copy from it.
-    pub permission_mode: PermissionMode,
     /// ctrl+l requests a full-screen repaint (cleared after the render layer consumes it).
     pub force_redraw: bool,
     /// ctrl+o requests the transcript view: the host opens the alternate-screen
@@ -1121,7 +1142,6 @@ impl Chat {
                     Some((m.name.clone(), avatar::index_of_id(m.avatar.as_deref()?)?))
                 })
                 .collect();
-        let permission_mode = session.permission_mode;
         // Update-banner (welcome card) data source + motion off: computed before the session moves into Self.
         // Store the bare version (rendering adds the `v` prefix in `banner_segments`).
         let update_banner = crate::update::latest_cached(&session.home).map(|v| v.to_string());
@@ -1182,7 +1202,6 @@ impl Chat {
             pastes: Vec::new(),
             bash_history: Vec::new(),
             search: None,
-            permission_mode,
             force_redraw: false,
             open_transcript: false,
             open_editor: false,
@@ -1286,8 +1305,17 @@ impl Chat {
     /// else's deltas are not evidence against it.
     pub fn drain_events(&mut self) -> bool {
         let mut seen = false;
+        let mut any = false;
         while let Ok(addressed) = self.events_rx.try_recv() {
             seen |= self.route(addressed);
+            any = true;
+        }
+        // A local event can ask the core for something — a finished run waking
+        // main is the one that matters — and what came back is folded in the
+        // same pass rather than a tick later (D154).
+        if any {
+            self.pump_store();
+            seen |= self.drain_frames();
         }
         seen
     }
@@ -1424,10 +1452,8 @@ impl Chat {
             self.cancel_asks(true);
         }
         if follow.wake {
-            self.submit_auto();
-        }
-        if follow.drain_queue {
-            self.submit_queued();
+            let interrupted = self.main_conv().interrupted;
+            let _ = self.session.mail.notified(interrupted).now();
         }
         if let Some((label, reason)) = follow.alert {
             self.push_agent_alert(&label, reason.as_deref());
@@ -1512,6 +1538,22 @@ impl Chat {
     ) -> Follow {
         let mut follow = Follow::default();
         match event {
+            // The user's own line, as the core recorded it. Main's row, wherever
+            // the screen is: a background run finishing wakes a turn while the
+            // reader is standing on somebody else's page, and its rows belong in
+            // the transcript that asked for them.
+            UiEvent::Submitted(text) => {
+                conv.messages.push(UiMessage {
+                    speaker: None,
+                    role: Role::User,
+                    text,
+                    at: crate::channels::now_unix(),
+                    activities: Vec::new(),
+                    insert_points: Vec::new(),
+                    groups: Vec::new(),
+                    group_of: Vec::new(),
+                });
+            }
             UiEvent::TurnStart => {
                 // Watching the turn happen *is* reading the record.
                 conv.history_read = true;
@@ -1526,6 +1568,10 @@ impl Chat {
                     // this one (an interrupt drops the tool future without a ToolDone).
                     self.bash_tail = None;
                     self.interrupt_at = None;
+                    // A fresh turn clears interrupt suppression — without this,
+                    // one interrupt followed by only `!` commands kept
+                    // background wake-ups suppressed for the rest of the session.
+                    conv.interrupted = false;
                 }
                 let now = std::time::Instant::now();
                 conv.turn_started = Some(now);
@@ -2171,11 +2217,11 @@ impl Chat {
                 }
                 conv.stream_msg = None;
                 conv.stream_attempt_checkpoint = None;
-                // The queue is the *composer's*, and the composer talks to main.
-                // An instance's turn ending is not a reason to submit what the
-                // user typed at main (D135 is where one submit serves every
-                // conversation).
-                follow.drain_queue = to.is_main();
+                // Draining the queue is not here any more, and not the console's
+                // at all: main's turn ending is what lets the next entry start,
+                // and the turn registry is where that ending is known
+                // (`Controller::drain_main`, D154). Two drains would take the
+                // same entry twice.
             }
             UiEvent::Error {
                 code,
@@ -2495,34 +2541,67 @@ impl Chat {
         // handed text and assets (spec "One submission path").
         let text = self.expand_pastes(&raw);
         let text = self.expand_image_paths(&text);
-        let route = self.route_submission(&text);
-        match route {
-            crate::app::submit::Route::Nothing => self.set_input(raw),
+        let performed = self.route_submission(&text);
+        self.drew(performed, raw, text);
+        // The rows the submission produced are the core's, and they are folded
+        // in before the frame that shows them (D154).
+        self.pump_store();
+        self.drain_frames();
+    }
+
+    /// What the console does about what the core did.
+    ///
+    /// Nothing here performs the submission — by the time this runs the turn is
+    /// open, the message is in its inbox or the entry is on the queue (D154).
+    /// What is left is the console's own half: its input history, its feedback
+    /// tiers, and the dropdown. The rows the submission produced are drawn from
+    /// the core's own stream like every other row on the page.
+    fn drew(&mut self, performed: crate::app::submit::Performed, raw: String, text: String) {
+        use crate::app::submit::Performed;
+        match performed {
+            Performed::Nothing => self.set_input(raw),
             // The whole line goes into history, envelope included: ↑ brings back
             // what was typed, not what was delivered.
-            crate::app::submit::Route::Deliver {
+            Performed::Delivered {
                 target,
-                text,
                 addressed: true,
+                ..
             } => {
                 self.record_history(&raw);
-                self.direct_send(target, text);
+                self.refresh_conversations();
+                // The receipt is transient and lives on the info tier: nothing
+                // was said to the model, so nothing belongs in main's history.
+                self.push_slash_info(format!("Sent to {}", target.label()));
                 self.update_slash_suggestions();
             }
-            // The page's own prose. A refusal is news and takes the warning tier;
-            // there is no receipt, because what a receipt would announce is drawn
-            // on this very screen the moment the frame redraws (D105).
-            crate::app::submit::Route::Deliver { target, text, .. } => {
+            // A refusal says what did not happen, on the same tier and never as
+            // a receipt — a receipt claims something was delivered.
+            Performed::Undelivered {
+                addressed: true,
+                why,
+                ..
+            } => {
+                self.record_history(&raw);
+                self.push_slash_info(why);
+                self.update_slash_suggestions();
+            }
+            // The page's own prose. There is no receipt, because what a receipt
+            // would announce is drawn on this very screen the moment the frame
+            // redraws (D105).
+            Performed::Delivered { .. } => {
                 self.record_history(&text);
-                if let crate::tui::buffer::Delivery::Rejected(why) =
-                    self.deliver_direct(&target, text)
-                {
-                    self.push_warning(why);
-                }
+                self.refresh_conversations();
                 self.update_slash_suggestions();
                 self.dirty = true;
             }
-            crate::app::submit::Route::Queued(_) => {
+            // A refusal is news and takes the warning tier.
+            Performed::Undelivered { why, .. } => {
+                self.record_history(&text);
+                self.push_warning(why);
+                self.update_slash_suggestions();
+                self.dirty = true;
+            }
+            Performed::Queued(_) => {
                 // The queue rows are main's page. Somewhere else, a line that
                 // silently joined a queue nobody can see is a keystroke that did
                 // nothing, so it says so on the tier the page does show.
@@ -2532,12 +2611,12 @@ impl Chat {
                 self.update_slash_suggestions();
                 self.dirty = true;
             }
-            crate::app::submit::Route::Shell { command } => {
+            Performed::Shell { command, .. } => {
                 self.record_history(&text);
-                self.bash_history.push(command.clone());
-                self.start_bash_turn(command);
+                self.bash_history.push(command);
+                self.dirty = true;
             }
-            crate::app::submit::Route::Command { line, .. } => {
+            Performed::Command { line, .. } => {
                 // A command the core let through while a turn runs is a
                 // side-channel dispatch: it must not reset `busy`, it leaves no
                 // history entry, and the dropdown has nothing to do with it.
@@ -2547,28 +2626,54 @@ impl Chat {
                     return;
                 }
                 self.record_history(&text);
-                if self.run_completed_slash(&line) {
-                    return;
-                }
-                // An unrecognized command falls through as prose, exactly as it
-                // did when this was one function.
-                self.last_prompt = text.clone();
-                self.start_turn(text, true);
+                self.run_completed_slash(&line);
             }
-            crate::app::submit::Route::Turn { text } => {
+            Performed::Turn { .. } => {
                 self.record_history(&text);
-                self.last_prompt = text.clone();
-                self.start_turn(text, true);
+                self.last_prompt = text;
+                self.dirty = true;
+            }
+            // Only a session assembled without an engine answers this, and the
+            // console's is never one. Saying so is better than a keystroke that
+            // did nothing.
+            Performed::Unavailable => {
+                self.set_input(raw);
+                self.push_warning("this session cannot run a turn".to_string());
             }
         }
     }
 
-    /// Ask the core what this line is and where it goes.
+    /// Prose the console submits on the user's behalf: the retry an error screen
+    /// offers, and the marker a skill invocation becomes.
     ///
-    /// Whether main is busy is no longer stated here: the turn registry is the
-    /// core's, and a caller that could state it could also state it wrongly.
-    /// `.now()` is the console's remaining synchronous seam on this path.
-    pub(crate) fn route_submission(&mut self, text: &str) -> crate::app::submit::Route {
+    /// It goes through the same door a typed line goes through, as
+    /// [`crate::app::command::Submission::SendProse`] — which parses none of the
+    /// composer's forms, so a skill whose marker opens with `/` is prose and not
+    /// a command.
+    pub(crate) fn resubmit(&mut self, text: String) {
+        let performed = self
+            .session
+            .submit
+            .submit(crate::app::submit::SubmitRequest {
+                conversation: crate::ui::ConvKey::Main,
+                input: crate::app::command::Submission::SendProse {
+                    text: text.clone(),
+                    attachments: Vec::new(),
+                },
+                carries_attachments: !self.resolve_images(&text).is_empty(),
+            })
+            .now();
+        if matches!(performed, crate::app::submit::Performed::Turn { .. }) {
+            self.last_prompt = text;
+        }
+        self.dirty = true;
+    }
+
+    /// Hand this line to the core and hear what it did with it.
+    ///
+    /// Whether main is busy is not stated here: the turn registry is the core's,
+    /// and a caller that could state it could also state it wrongly.
+    pub(crate) fn route_submission(&mut self, text: &str) -> crate::app::submit::Performed {
         let mode = if self.bash_mode {
             crate::app::command::ComposerMode::Shell
         } else {
@@ -2599,6 +2704,10 @@ impl Chat {
     #[cfg(test)]
     pub(crate) fn start_test_turn(&mut self) -> Option<crate::app::ids::TurnId> {
         let turn = self.open_core_turn(crate::app::snapshot::TurnOrigin::User);
+        // Folded in before anything else looks: a real console reads the turn's
+        // own start off the stream, and a test that skipped it would find the
+        // event later, in the middle of whatever it was actually asserting.
+        self.settle_store();
         self.main_conv().busy = true;
         turn
     }
@@ -2990,16 +3099,28 @@ impl Chat {
             .map(|entry| entry.id)
     }
 
-    /// The `Session` in effect for this turn: `Session` is immutable inside `Arc`, and shift+tab must
-    /// switch permission modes — so each turn derives a copy carrying the current mode (the other fields are shared
-    /// handles: Runtime's watch channel, task store, and watch registry still point at the same state).
-    pub(crate) fn session_for_turn(&self) -> Arc<Session> {
-        if self.permission_mode == self.session.permission_mode {
-            return self.session.clone();
+    /// Apply one action to the core, which is where the session's configuration
+    /// lives (D154). The console renders the outcome itself; what this is for is
+    /// making sure there is one thing to render it *from*.
+    pub(crate) fn apply_to_core(&self, action: crate::app::command::Action) {
+        let _ = self
+            .session
+            .core
+            .execute(crate::ui::ConvKey::Main, action)
+            .now();
+    }
+
+    /// The permission mode in effect, read from the projection rather than kept.
+    ///
+    /// Shift+tab used to set a copy here while `/permission-mode` set the core's,
+    /// which is two answers to one question. There is one now: the core's, as
+    /// `config/read` publishes it. Before the first cut lands, the mode the
+    /// session started in is the honest answer.
+    pub fn permission_mode(&self) -> PermissionMode {
+        match &self.store.view().config {
+            Some(config) => console_permission_mode(config.permission_mode),
+            None => self.session.permission_mode,
         }
-        let mut session = (*self.session).clone();
-        session.permission_mode = self.permission_mode;
-        Arc::new(session)
     }
 
     /// Queues slash output lines (transient hints: rendered after messages and above the input, gone after TTL).
@@ -3237,7 +3358,7 @@ impl Chat {
                 }),
                 Action::McpReconnect { server } => self.slash_mcp(McpRequest::Reconnect { server }),
                 Action::SkillInvoke { skill, input } => {
-                    self.start_turn(crate::skills::invocation(&skill, input.as_deref()), true);
+                    self.resubmit(crate::skills::invocation(&skill, input.as_deref()));
                 }
                 team @ (Action::TeamStart { .. }
                 | Action::TeamAssign { .. }
@@ -3407,6 +3528,9 @@ impl Chat {
                 .get(&provider)
                 .is_some_and(|known| !known.is_empty() && !known.contains(&model)),
         };
+        self.apply_to_core(crate::app::command::Action::ModelSelect {
+            model: model.clone(),
+        });
         let _ = self.session.runtime.model_tx.send(model.clone());
         self.refresh_context_usage_from_transcript();
         self.provider_models.insert(provider.clone(), model.clone());

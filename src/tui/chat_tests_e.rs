@@ -597,6 +597,9 @@ fn both_diff_surfaces_render_the_same_gutter() {
     // Surface 2: the completed-edit rows in the flow.
     let mut chat = test_chat();
     chat.start_test_turn();
+    // The turn's own placeholder message is not this test's subject: the rows it
+    // asserts belong to the assistant message it builds itself.
+    chat.conv.messages.clear();
     chat.conv.messages.push(msg(Role::Assistant, ""));
     chat.conv.stream_msg = Some(0);
     chat.events.send(UiEvent::ToolStart {

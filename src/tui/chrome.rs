@@ -175,7 +175,7 @@ fn footer_row(chat: &Chat, width: usize) -> Row {
             None => Vec::new(),
         }
     } else {
-        mode_badge(chat.permission_mode, theme)
+        mode_badge(chat.permission_mode(), theme)
     };
     if chat.bash_mode {
         left.push(("! for shell mode".to_string(), theme.bash_border));
@@ -1351,7 +1351,7 @@ mod tests {
 
         chat.end_test_turn();
         chat.bash_mode = true;
-        chat.permission_mode = PermissionMode::Plan;
+        crate::tui::test_util::set_permission_mode(&mut chat, PermissionMode::Plan);
         let text = row_text(&footer_row(&chat, 80));
         assert!(text.contains("⏸ plan mode on ·"), "{text}");
         assert!(text.contains("! for shell mode"), "{text}");
@@ -1520,6 +1520,10 @@ mod tests {
     fn the_bottom_states_compose_around_the_composer() {
         let mut chat = chat_at(100, 40);
         chat.start_test_turn();
+        // A turn that has only just opened draws its thinking placeholder; what
+        // this test is about is the row *around* the composer, so the flow is
+        // emptied and the busy row falls back to its own verb.
+        chat.conv.messages.clear();
         chat.set_input("/theme");
         chat.run_slash("theme");
 

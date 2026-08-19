@@ -1548,6 +1548,7 @@ mod tests {
     #[tokio::test]
     async fn the_console_reads_what_the_core_publishes() {
         let core = AppCore::start(Default::default());
+        core.attach_engine(std::sync::Arc::new(crate::app::engine::Recorder::default()));
         let mut store = Store::open(&core, "tui-test")
             .await
             .unwrap_or_else(|error| panic!("{error}"));
