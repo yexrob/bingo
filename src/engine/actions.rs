@@ -607,6 +607,11 @@ pub struct Rebound {
 pub fn reset_session(session: &Arc<Session>) -> Rebound {
     let transcript = crate::transcript::create(&session.home, &session.cwd()).ok();
     let _ = session.runtime.transcript_tx.send(transcript.clone());
+    // Which file this session is is the core's to publish, and moving the file
+    // is this side's work — so it is reported in, the way MCP state is.
+    if let Some(transcript) = transcript.as_ref() {
+        session.core.report_moved(transcript.path().to_path_buf());
+    }
     bind_tasks(session, transcript.as_ref());
     let warnings = bind_share(session, transcript.as_ref());
     Rebound {
@@ -647,6 +652,7 @@ pub fn rename_session(session: &Arc<Session>, name: &str) -> Rebound {
         ));
     }
     let _ = session.runtime.transcript_tx.send(Some(renamed.clone()));
+    session.core.report_moved(renamed.path().to_path_buf());
     warnings.extend(bind_share(session, Some(&renamed)));
     Rebound {
         said: Said::output(format!("✓ session renamed: {name}")),

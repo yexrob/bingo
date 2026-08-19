@@ -1805,6 +1805,23 @@ fn slash_rename_renames_transcript() {
         "rename task",
         "the renamed task list is restored by its new session key"
     );
+    // And the core hears about it: `session/read` used to keep naming the file
+    // the session started on for as long as it ran (D155).
+    chat.settle_store();
+    let session = chat
+        .store
+        .view()
+        .session
+        .clone()
+        .expect("the console has read a cut of its own session");
+    assert_eq!(
+        session.locator,
+        crate::app::snapshot::SessionLocator::Path {
+            path: t.path().to_path_buf()
+        },
+        "the session is on the file it was moved to"
+    );
+    assert_eq!(session.title, t.name());
     let _ = std::fs::remove_dir_all(&tmp);
 }
 

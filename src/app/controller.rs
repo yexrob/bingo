@@ -98,6 +98,13 @@ pub(crate) enum Control {
     /// What the MCP manager stands at. Connection state is the manager's, and it
     /// lives outside the actor, so it is reported in rather than read out.
     Mcp(Vec<crate::app::snapshot::McpServerState>),
+    /// The session is on a different file now. Renaming and clearing both move
+    /// the transcript, and the work of moving it belongs to the engine — so, as
+    /// with MCP, the fact comes back in rather than being read out.
+    Moved {
+        locator: crate::app::snapshot::SessionLocator,
+        title: String,
+    },
     /// The engine this session runs its work on, handed over once on the way up.
     Engine(crate::app::engine::Attached),
     /// Stop the turn running on a conversation, from inside this process.
@@ -592,6 +599,7 @@ impl Controller {
                     self.commit_body(&conversation, *body);
                 }
                 Control::Mcp(states) => self.report_mcp(states),
+                Control::Moved { locator, title } => self.moved(locator, title),
                 Control::Engine(engine) => self.engine = Some(engine),
                 Control::Interrupt { conversation, turn } => {
                     let id = self.conversations.id(&mut self.mint, &conversation);
@@ -1548,6 +1556,21 @@ impl Controller {
             );
         }
         Ok(AppReply::Asset(Box::new(record)))
+    }
+
+    /// The session's transcript moved, and this is where it moved to.
+    ///
+    /// `session/read` used to keep the path the session started on for as long
+    /// as it ran: a rename moved the file and the two sidecars that answer to
+    /// its name, and left the core naming a file that was no longer there. So
+    /// did `/clear`, which makes a whole new transcript.
+    fn moved(&mut self, locator: crate::app::snapshot::SessionLocator, title: String) {
+        if self.session.locator == locator && self.session.title == title {
+            return;
+        }
+        self.session.locator = locator;
+        self.session.title = title;
+        self.session_changed();
     }
 
     /// Take what the MCP manager reports, and say so once it has changed.

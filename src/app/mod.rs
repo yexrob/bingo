@@ -454,6 +454,23 @@ impl AppCore {
         let _ = self.control.send(controller::Control::Mcp(states));
     }
 
+    /// Tell the core the session is on a different file now.
+    ///
+    /// Renaming moves the transcript and its two sidecars; clearing makes a new
+    /// one. Both are the engine's work, and until this existed neither reached
+    /// the core — so `session/read` kept naming the file the session started on
+    /// for as long as it ran.
+    pub fn report_moved(&self, path: PathBuf) {
+        let title = path
+            .file_stem()
+            .map(|stem| stem.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let _ = self.control.send(controller::Control::Moved {
+            locator: SessionLocator::Path { path },
+            title,
+        });
+    }
+
     /// Wait until everything already asked of the actor has been applied and
     /// announced.
     ///

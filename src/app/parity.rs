@@ -168,7 +168,7 @@ const ACTION_ROWS: &[Row] = &[
     row(
         "session.rename",
         Shared,
-        "`/rename`. The transcript moves; the core's session locator does not follow it (known limit, D155).",
+        "`/rename`. The transcript and its sidecars move, and the core's locator follows them (D155).",
     ),
     row("session.gc", Shared, "`/gc`."),
     row("session.share", Shared, "`/share`."),
