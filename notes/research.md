@@ -9190,3 +9190,36 @@ says so too.
 
 Verification: fmt, clippy `-D warnings`, discipline gate, full suite —
 **1722 → 1723 unit**, 23 app-server + 7 CLI black-box, all green.
+
+## D160 — the guide's trigger says what the guide contains
+
+**Where it comes from.** Asked "can subagents DM each other?" in a session, the
+model went to the source instead of the guide — and admitted its memdir carried
+the pre-D137 rule. In this repo the source is the strongest evidence and the
+answer came out right; in any other project there is no source, and that stale
+memory would have answered wrong, confidently.
+
+The disease is the trigger surface, not the model. A skill is invoked off its
+listing line — `- guide: <description> - <when_to_use>`, truncated at 250
+chars (`MAX_LISTING_DESC_CHARS`) — and the guide's description said "settings
+config, slash commands, modes, MCP, troubleshooting": ~230 chars of it, so the
+`when_to_use` was cut and nothing in what survived says *capabilities*. The
+guide has carried a section literally titled "reference when asked 'what can
+bingo do'" since D53-era, betrayed by its own frontmatter.
+
+Two edits, both word-layer:
+
+- The frontmatter now leads with "the manual for bingo itself — invoke before
+  answering any question about bingo", names the nouns (capabilities,
+  messaging & DMs, teams, rooms, settings, commands, providers, MCP), and
+  fits in 246 chars so the whole line survives the cap.
+- The body's intro replaced "when unsure, read the source to confirm" — advice
+  that only works inside this repo — with the versioning argument: the guide
+  ships inside the running binary, so it outranks any memory of an older
+  bingo, and reading the source is for when bingo is the project on disk.
+
+Not done, noted as an option: one line in `BASE_PROMPT` routing bingo-self
+questions to the guide skill. The listing fix should suffice — the Skill
+tool's own preamble already orders a matching skill invoked before answering —
+and a base-prompt line costs every session tokens; hold it until the listing
+alone proves insufficient.

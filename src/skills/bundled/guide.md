@@ -1,19 +1,22 @@
 ---
 name: guide
 description: >-
-  bingo usage guide and diagnostic manual: settings config, slash commands,
-  modes, MCP, troubleshooting.
-  Use when the user asks how to use/configure bingo, or reports a problem
-  ("why", "how to configure", "how to diagnose", "not working").
+  The manual for bingo itself — invoke before answering any question about
+  bingo: capabilities (can agents/subagents do X?), messaging & DMs, teams,
+  rooms, settings, commands, providers, MCP, troubleshooting. Ships with the
+  binary; outranks memory.
 when_to_use: >-
-  User asks how to configure or use bingo · reports a bug or unexpected
-  behavior · asks about settings.json / slash commands / MCP / permissions.
+  Any question about bingo's own features or behavior — can X be done, how to
+  configure, why it misbehaves — including subagents, DMs, teams, rooms,
+  images, permissions, sessions.
 ---
 
 # bingo Usage and Diagnostic Guide
 
 When answering user questions, use this guide to locate config options, commands, and troubleshooting paths; give concrete file paths,
-commands, and verification steps in conclusions. Never speculate about features (capabilities follow actual behavior; when unsure, read the source to confirm).
+commands, and verification steps in conclusions. Never speculate about features: this guide ships inside the running binary and matches
+its version, so it outranks anything remembered from an older bingo — a memory that contradicts it is stale. Where the guide is silent,
+say so; read bingo's source to confirm only when it is actually the project you are working in.
 
 ## Quick start
 
