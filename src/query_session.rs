@@ -87,6 +87,13 @@ pub struct Session {
     pub quiet: bool,
     /// Consecutive auto-compact failure count (circuit breaker: skip after MAX_COMPACT_FAILURES).
     pub compact_failures: Arc<std::sync::atomic::AtomicU64>,
+    /// The session actor itself, which every handle below is a face of.
+    ///
+    /// A front end needs it to *attach* — to buy the ordered frame channel a
+    /// client reads its projection from — and attaching is a write, so this is
+    /// reachable from anywhere a session is, with or without a runtime
+    /// (B7b ruling ②).
+    pub core: crate::app::AppCore,
     /// Background work — commands, agent runs, room operations — as the session
     /// actor holds it (B2b). A handle, not a table: the state is the actor's,
     /// and every change here is a message on its one queue.

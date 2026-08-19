@@ -494,11 +494,32 @@ impl Store {
 
     /// Attach an existing store, replacing whatever it holds with a fresh cut.
     pub async fn connect(&mut self, core: &AppCore, label: &str) -> Result<(), AppError> {
+        self.open_link(core, label)?;
+        self.resync().await
+    }
+
+    /// The same, for a caller with no runtime to await the cut on.
+    ///
+    /// Attaching needs none (B7b ruling ②); reading the first cut does, because
+    /// the answer comes back on the frame channel. This parks the calling thread
+    /// until it arrives, which is sound for the one structural reason
+    /// [`crate::app::answer`] gives: the actor runs on a thread of its own and
+    /// never waits back. It is the console's *test* seam — the console itself
+    /// attaches on the way into its `async` loop — and it exists so that a
+    /// `#[test]` reads the same projection a real terminal does instead of a
+    /// second kind of console.
+    #[cfg(test)]
+    pub fn connect_now(&mut self, core: &AppCore, label: &str) -> Result<(), AppError> {
+        self.open_link(core, label)?;
+        crate::app::answer::block_on(self.resync())
+    }
+
+    fn open_link(&mut self, core: &AppCore, label: &str) -> Result<(), AppError> {
         self.link = Some(core.attach(AttachRequest::new(label))?);
         self.cursor = None;
         self.closed = false;
         self.stale = false;
-        self.resync().await
+        Ok(())
     }
 
     /// What the core last said.
@@ -935,6 +956,41 @@ mod tests {
         )));
         assert_eq!(store.cursor, Some(10));
         assert!(store.view().agent("stale").is_none());
+    }
+
+    /// The same loop, from a test with no runtime at all.
+    ///
+    /// This is what B7b ruling ② bought: the console's synchronous tests are
+    /// attachments like any other, so a `#[test]` reads the projection a real
+    /// terminal reads instead of an empty one. Without it, every read moved onto
+    /// the store would answer "nothing" in 570 tests.
+    #[test]
+    fn a_console_test_with_no_runtime_reads_a_live_projection() {
+        let mut chat = crate::tui::test_util::chat_at(100, 40);
+        assert!(
+            chat.store.view().session.is_some(),
+            "the cut was taken without a runtime to await it on"
+        );
+        chat.session
+            .agents
+            .insert(
+                "scout",
+                crate::agents::AgentKind::Hire,
+                None,
+                "a scout".to_string(),
+                chat.session.clone(),
+            )
+            .now();
+        crate::tui::test_util::settled(&mut chat);
+        assert_eq!(
+            chat.store
+                .view()
+                .agent("scout")
+                .map(|agent| agent.name.clone()),
+            Some("scout".to_string()),
+            "and what the core said afterwards was folded in"
+        );
+        assert_eq!(chat.store.gaps, 0);
     }
 
     /// The whole loop, against a real core: attach, take a cut, and watch a

@@ -43,6 +43,7 @@ pub fn test_session() -> Arc<Session> {
         user_config_dir: std::env::temp_dir().join(".config"),
         quiet: true,
         compact_failures: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        core: core.clone(),
         watch: core.watch(),
         tasks: Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), "test")),
         expand_tasks: tokio::sync::watch::channel(false).0,
@@ -98,7 +99,24 @@ pub fn chat_at(width: usize, height: usize) -> Chat {
     );
     chat.width = width;
     chat.height = height;
+    // The console is an attachment, in a test exactly as in a terminal: it takes
+    // its cut before anything reads it, so a test asserts against the projection
+    // the real console renders rather than a second, emptier kind of console.
+    chat.connect_store_now()
+        .unwrap_or_else(|error| panic!("the test core would not attach: {error}"));
     chat
+}
+
+/// Let the actor apply everything already asked of it, then fold what it said
+/// into the console's store.
+///
+/// The two halves a running console gets from its loop for free: the actor
+/// answers a question before it announces what the answer changed, so a caller
+/// that only waited for its own answer has not yet been told. A test that
+/// changes the session and then reads the projection needs both.
+pub fn settled(chat: &mut Chat) {
+    chat.session.agents.settle_now();
+    chat.pump_store();
 }
 
 /// TestBackend plus the raw-byte sink and command counters the driver needs asserting on.

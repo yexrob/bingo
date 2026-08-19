@@ -281,7 +281,6 @@ fn install_panic_hook() {
 /// only paints the live tail.
 pub async fn run_tui_session(
     session: Arc<Session>,
-    core: &crate::app::AppCore,
     expand_rx: tokio::sync::watch::Receiver<bool>,
     fullscreen: bool,
     startup_notes: Vec<String>,
@@ -341,7 +340,7 @@ pub async fn run_tui_session(
     // projection that has not been told what the session is. A core that will
     // not attach is a core that is already gone; the console says so and goes
     // on with an empty view rather than refusing to start.
-    if let Err(error) = chat.connect_store(core).await {
+    if let Err(error) = chat.connect_store().await {
         chat.push_startup_note(format!("⚠ the session core did not answer: {error}"));
     } else if std::env::var_os("BINGO_DEBUG").is_some() {
         let view = chat.store.view();

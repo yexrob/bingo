@@ -358,6 +358,7 @@ fn attach_engine(
         // preference here, it is the framing contract.
         quiet: true,
         compact_failures: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        core: core.clone(),
         watch: core.watch(),
         tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(&boot.home, &key)),
         expand_tasks: tokio::sync::watch::channel(false).0,

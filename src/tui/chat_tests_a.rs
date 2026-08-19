@@ -56,6 +56,7 @@ pub(super) fn test_chat_home(home: std::path::PathBuf) -> Chat {
         user_config_dir: home.join(".config"),
         quiet: true,
         compact_failures: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        core: core.clone(),
         watch: core.watch(),
         tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(&home, "test")),
         expand_tasks: tokio::sync::watch::channel(false).0,
@@ -74,14 +75,17 @@ pub(super) fn test_chat_home(home: std::path::PathBuf) -> Chat {
         crate::ui::ConvKey::Main,
         events_tx.clone(),
     ));
-    Chat::new(
+    let mut chat = Chat::new(
         session,
         crate::ui::EventSink::new(crate::ui::ConvKey::Main, events_tx),
         events_rx,
         Theme::dark(),
         crate::tui::theme::ThemeSetting::Auto,
         None,
-    )
+    );
+    chat.connect_store_now()
+        .unwrap_or_else(|error| panic!("the test core would not attach: {error}"));
+    chat
 }
 
 #[test]
@@ -1093,6 +1097,7 @@ async fn bash_submit_runs_command_and_ends_turn() {
         user_config_dir: std::env::temp_dir().join(".config"),
         quiet: true,
         compact_failures: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        core: core.clone(),
         watch: core.watch(),
         tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(&std::env::temp_dir(), "test")),
         expand_tasks: tokio::sync::watch::channel(false).0,

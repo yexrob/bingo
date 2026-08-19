@@ -509,6 +509,8 @@ mod tests {
         );
         chat.width = 100;
         chat.height = 40;
+        chat.connect_store_now()
+            .unwrap_or_else(|error| panic!("the test core would not attach: {error}"));
         chat
     }
 

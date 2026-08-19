@@ -1282,17 +1282,23 @@ impl Chat {
     }
 
     /// Drains all channels. Returns whether there is any new state.
-    /// Attach the console's store to the core and take its first cut.
+    /// Attach the console's store to its session's core and take the first cut.
     ///
-    /// Separate from `new` because attaching is `async` and constructing is not.
-    /// A console that never calls this reads an empty view — which is what an
-    /// attachment that has heard nothing reads, and is why a test without a
-    /// runtime is not a second kind of console.
-    pub async fn connect_store(
-        &mut self,
-        core: &crate::app::AppCore,
-    ) -> Result<(), crate::app::AppError> {
-        self.store.connect(core, "tui").await
+    /// Separate from `new` because reading a cut is `async` and constructing is
+    /// not. A console that never calls this reads an empty view — which is what
+    /// an attachment that has heard nothing reads.
+    pub async fn connect_store(&mut self) -> Result<(), crate::app::AppError> {
+        let core = self.session.core.clone();
+        self.store.connect(&core, "tui").await
+    }
+
+    /// The same, without a runtime: what every synchronous console test uses so
+    /// that it reads the projection a real terminal reads (see
+    /// [`crate::tui::store::Store::connect_now`]).
+    #[cfg(test)]
+    pub fn connect_store_now(&mut self) -> Result<(), crate::app::AppError> {
+        let core = self.session.core.clone();
+        self.store.connect_now(&core, "tui")
     }
 
     /// Fold in everything the core has said since the last look.

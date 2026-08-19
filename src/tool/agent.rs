@@ -1241,6 +1241,7 @@ pub(crate) fn build_sub_session(
         user_config_dir: parent.user_config_dir.clone(),
         quiet: parent.quiet,
         compact_failures: parent.compact_failures.clone(),
+        core: parent.core.clone(),
         watch: parent.watch.clone(),
         tasks: parent.tasks.clone(),
         expand_tasks: parent.expand_tasks.clone(),

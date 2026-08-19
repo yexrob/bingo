@@ -446,6 +446,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         user_config_dir: user_dir.clone(),
         quiet: !cli.print,
         compact_failures: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        core: core.clone(),
         watch: core.watch(),
         tasks: std::sync::Arc::new(crate::tasks::TaskStore::new(&home, &task_list_key)),
         expand_tasks: expand_tx,
@@ -558,8 +559,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             extract_memory(&session, &outcome.messages, &home, &cwd).await;
         } else {
             drop(initial_messages); // in interactive mode, --continue history is reused by later turns
-            tui::run_tui_session(session.clone(), &core, expand_rx, fullscreen, startup_notes)
-                .await?;
+            tui::run_tui_session(session.clone(), expand_rx, fullscreen, startup_notes).await?;
         }
         Ok::<(), Box<dyn std::error::Error>>(())
     }
