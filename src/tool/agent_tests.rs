@@ -1316,18 +1316,26 @@ async fn an_acknowledged_message_reports_nothing() {
         .await
         .unwrap_or_else(|e| panic!("{e}"));
     // The receiver picks it up at the boundary, then that run ends with something to say.
+    //
+    // Taken rather than awaited, and that is the whole of it: the clock is
+    // paused, the actor answers from a thread of its own, and an `.await` here
+    // parks the runtime with nothing else to poll — at which point tokio's
+    // auto-advance jumps to the next timer, which is this message's own 60s
+    // watchdog. The chase would then fire *before* the reply it is chasing, and
+    // the run below would find a follow-up in the inbox. Blocking keeps the
+    // acknowledgement and the clock in the order the test is about.
     assert!(
         session
             .agents
             .finish("worker", Vec::new(), 1)
-            .await
+            .now()
             .is_some()
     );
     assert!(
         session
             .agents
             .finish("worker", Vec::new(), 2)
-            .await
+            .now()
             .is_none()
     );
     tokio::time::sleep(std::time::Duration::from_secs(120)).await;

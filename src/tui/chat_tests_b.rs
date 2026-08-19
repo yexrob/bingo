@@ -400,16 +400,16 @@ async fn turn_end_triggers_auto_turn_when_wake_notification_pending() {
     );
     watch.settle().await;
     assert!(watch.has_wake_notifications(None), "notification queued");
-    chat.drain_all();
-    assert!(chat.conv.busy, "still busy, no auto turn mid-turn");
-    // The turn ends the way one ends: the core closes it and says so, and the
-    // console's wake decision hangs off that report rather than off a word this
-    // side put on its own channel.
-    chat.end_test_turn();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    // The registry broadcasts; a task of its own forwards that broadcast onto
+    // the console's channel. `watch.settle` is a barrier on the registry and not
+    // on that task, so the row is waited for — on `drain_all`, which is the only
+    // drain that reads that channel at all, and while the turn it hangs on is
+    // still the open one. Reading it off `settle_store` was the bug: that half
+    // folds the core's stream, which this event never travelled.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     let mut has_watch = false;
     while std::time::Instant::now() < deadline {
-        chat.settle_store();
+        chat.drain_all();
         has_watch = chat.conv.messages[0]
             .activities
             .iter()
@@ -425,10 +425,16 @@ async fn turn_end_triggers_auto_turn_when_wake_notification_pending() {
         "the turn keeps the message the watch row hangs on: {:?}",
         chat.conv.messages
     );
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    assert!(chat.conv.busy, "still busy, no auto turn mid-turn");
+    // The turn ends the way one ends: the core closes it and says so, and the
+    // console's wake decision hangs off that report rather than off a word this
+    // side put on its own channel.
+    chat.end_test_turn();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     let mut woke = false;
     while std::time::Instant::now() < deadline {
         chat.settle_store();
+        chat.drain_all();
         if chat.conv.busy {
             woke = true;
             break;

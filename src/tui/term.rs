@@ -914,22 +914,44 @@ mod tests {
         assert!(out.is_empty(), "and the blind pop writes nothing");
 
         // Supported: pushed once, popped once, whatever the call count.
+        //
+        // The bytes are asserted everywhere but Windows, where crossterm
+        // declares both commands `is_ansi_code_supported() == false` and routes
+        // them to a winapi path that only returns `Unsupported`. Nothing reaches
+        // the writer there, by the library's decision rather than this latch's —
+        // and the latch itself is what the rest of the test is about.
         KEYBOARD_ENHANCEMENT.store(true, Ordering::SeqCst);
-        push_keyboard_enhancement(&mut out);
-        let after_push = out.len();
-        assert!(after_push > 0, "the push reaches the terminal");
-        push_keyboard_enhancement(&mut out);
-        assert_eq!(
-            out.len(),
-            after_push,
-            "a second push is not a second stack entry"
-        );
+        #[cfg(not(windows))]
+        {
+            push_keyboard_enhancement(&mut out);
+            let after_push = out.len();
+            assert!(after_push > 0, "the push reaches the terminal");
+            push_keyboard_enhancement(&mut out);
+            assert_eq!(
+                out.len(),
+                after_push,
+                "a second push is not a second stack entry"
+            );
 
+            pop_keyboard_enhancement(&mut out);
+            let after_pop = out.len();
+            assert!(after_pop > after_push, "the pop reaches the terminal");
+            pop_keyboard_enhancement(&mut out);
+            assert_eq!(out.len(), after_pop, "and only the first pop does");
+        }
+        // The latch itself is the platform-independent half: two pushes leave it
+        // set once, and the second pop finds nothing to undo.
+        push_keyboard_enhancement(&mut out);
+        push_keyboard_enhancement(&mut out);
+        assert!(
+            ENHANCEMENT_PUSHED.load(Ordering::SeqCst),
+            "the push latched"
+        );
         pop_keyboard_enhancement(&mut out);
-        let after_pop = out.len();
-        assert!(after_pop > after_push, "the pop reaches the terminal");
-        pop_keyboard_enhancement(&mut out);
-        assert_eq!(out.len(), after_pop, "and only the first pop does");
+        assert!(
+            !ENHANCEMENT_PUSHED.load(Ordering::SeqCst),
+            "and the pop cleared it"
+        );
 
         KEYBOARD_ENHANCEMENT.store(probed, Ordering::SeqCst);
         ENHANCEMENT_PUSHED.store(pushed, Ordering::SeqCst);

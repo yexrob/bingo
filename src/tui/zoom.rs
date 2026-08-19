@@ -491,14 +491,25 @@ mod tests {
         chat.switch_to(Some(ZoomTarget::Agent("scout".into())));
         chat.set_input("wake up".to_string());
         chat.submit();
-        assert!(
-            chat.session
+        // The delivery is the actor's and has landed by the time `submit`
+        // returns; claiming what it revived is the engine's, on a blocking task
+        // of its own (`Run::Wake`). So the state it reaches is waited for rather
+        // than read on the next line.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut resumed = false;
+        while std::time::Instant::now() < deadline {
+            resumed = chat
+                .session
                 .agents
                 .list()
                 .iter()
-                .any(|s| s.name == "scout" && s.state == crate::agents::AgentState::Running),
-            "delivery revived and the flush claimed it"
-        );
+                .any(|s| s.name == "scout" && s.state == crate::agents::AgentState::Running);
+            if resumed {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(resumed, "delivery revived and the flush claimed it");
     }
 
     /// Posting into a room the user is not in joins them first — the same

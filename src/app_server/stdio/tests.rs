@@ -417,25 +417,40 @@ async fn a_request_id_already_in_flight_is_refused() {
     let root = Root::new("duplicate");
     let mut client = Client::open(root.boot());
     let _ = client.handshake().await;
-    // Two frames with one id, written before either can be answered.
-    let call = json!({"jsonrpc": "2.0", "id": 9, "method": "catalog/read", "params": {"catalog": "skills"}});
-    client.write(&call.to_string()).await;
-    client.write(&call.to_string()).await;
-    let first = client.reply(json!(9)).await;
-    let second = client.reply(json!(9)).await;
-    let refused = [&first, &second]
-        .into_iter()
-        .filter(|frame| frame.get("error").is_some())
-        .count();
-    assert_eq!(
-        refused, 1,
-        "exactly one of the two is refused: {first} / {second}"
-    );
-    // The id is free again once it has been answered.
-    let again = client
-        .call(json!(9), "catalog/read", json!({"catalog": "skills"}))
-        .await;
-    assert!(again.get("result").is_some(), "{again}");
+    // Two frames with one id, in a single write so both are on the wire before
+    // the server reads either.
+    //
+    // Whether the second is *read* while the first is still in flight is the
+    // server's own ordering, not the client's: its loop prefers the core's reply
+    // over the next client line, so a core that answers quickly enough frees the
+    // id before the duplicate is looked at and both calls succeed. That is
+    // correct, and it is not what this test is about — so the pairing is retried
+    // with a fresh id until the window the guard lives in actually opens.
+    let mut refused = 0;
+    for attempt in 0..16 {
+        let id = json!(100 + attempt);
+        let call = json!({"jsonrpc": "2.0", "id": id, "method": "catalog/read", "params": {"catalog": "skills"}});
+        client.write(&format!("{call}\n{call}")).await;
+        let first = client.reply(id.clone()).await;
+        let second = client.reply(id.clone()).await;
+        refused = [&first, &second]
+            .into_iter()
+            .filter(|frame| frame.get("error").is_some())
+            .count();
+        assert!(
+            refused < 2,
+            "a duplicate refuses the second, never both: {first} / {second}"
+        );
+        if refused == 1 {
+            // The id is free again once it has been answered.
+            let again = client
+                .call(id, "catalog/read", json!({"catalog": "skills"}))
+                .await;
+            assert!(again.get("result").is_some(), "{again}");
+            break;
+        }
+    }
+    assert_eq!(refused, 1, "no round ever put two frames in flight at once");
     let _ = client.finish().await;
 }
 
