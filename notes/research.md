@@ -9244,3 +9244,14 @@ The READMEs keep their D-references on purpose: they are repository
 documentation and link `notes/research.md` as the decision record, so a
 D-number there is a traceable anchor rather than a leak. The boundary is the
 binary: what ships inside it speaks no ledger.
+
+## D162 — the skill listing is the answer, not just the menu
+
+Asked "what skills do you have", the model scanned the skill directories — and
+a directory scan is the *worse* answer: it cannot see the bundled guide (which
+lives in the binary, not in any directory) and knows nothing of same-name
+override and dedup rules. The listing in the Skill tool's description was
+already injected every request; nothing said it was quotable. One sentence
+added to the tool description (same word-layer knife as D160): the list is
+authoritative and complete, answer inventory questions from it (`/skills` is
+the user-facing command), never enumerate skill directories.
