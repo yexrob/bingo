@@ -438,6 +438,15 @@ Chat/App 管线换 AppLink 帧，删全部 shim；TuiEvent 本地化；按键动
 > **已知缺口（B8 ledger）**：`RewindTarget::Item` 拒绝（checkpoint 身份是 transcript 行，item id 无对应记录，
 > 猜即是 D135 要防的错目标损失）；控制台 rewind 仍是五答手势 vs wire 两模；rename 不动核的 `session.locator`（旧限）。
 
+> **B7d-2 review 裁决（2026-08-19，Fable）**：① 13 动作入核全部核准；`engine/actions.rs`
+> 单一 home 返回 `Said{tier,text}`、格式串只存在一次、编译器守表完整——正确形状。
+> ② `provider.login` 凭据通道核准：`Flow::Manual` engine 本地枚举、读它的线程函数传参、
+> 无序列化路径 + 断言测试；"远程客户端不能经本协议粘贴 token"作为边界如实声明。
+> ③ `RewindTarget::Item` 拒绝核准（item id 无 transcript 行身份，猜测即 D135 要防的错靶）；
+> rewind 的终端五答手势 vs wire 两模式收敛 → B8 parity 决定。④ smoke 发现的 shell 模式
+> drain bug（`submit_queued` 把 /compact 按散文喂模型）随 B7d-3 的 drain 统一消亡——
+> 又一个"核对了、控制台错了"的例证。⑤ rename 不动 locator：既有未引入，记录。
+
 ### B8 · 收尾（S）
 `--print` 薄客户端；main.rs 启动统一；parity ledger 落成 CI 检查表（每个斜杠命令/提交分支/
 AppEvent 变体分类 shared|frontend-local，新增未分类即红）；schema 标 experimental；
