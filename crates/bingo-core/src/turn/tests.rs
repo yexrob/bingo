@@ -3,107 +3,11 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use futures::StreamExt;
-use serde_json::{Value, json};
+use serde_json::json;
 
 use super::*;
 use crate::gate::DefaultPolicy;
-
-/// One provider response: events in order; `None` means hang forever after them.
-enum Script {
-    Events(Vec<Result<ModelEvent, ProviderError>>),
-    Hang(Vec<ModelEvent>),
-    Fail(ProviderError),
-}
-
-struct ScriptedProvider {
-    responses: Mutex<VecDeque<Script>>,
-    requests: Mutex<Vec<ModelRequest>>,
-}
-
-impl ScriptedProvider {
-    fn new(responses: Vec<Script>) -> Arc<Self> {
-        Arc::new(Self {
-            responses: Mutex::new(responses.into()),
-            requests: Mutex::new(vec![]),
-        })
-    }
-    fn requests(&self) -> Vec<ModelRequest> {
-        self.requests.lock().unwrap().clone()
-    }
-}
-
-#[async_trait]
-impl Provider for ScriptedProvider {
-    fn id(&self) -> &str {
-        "scripted"
-    }
-    fn capabilities(&self, _: &str) -> ModelCapabilities {
-        ModelCapabilities {
-            context_window: 100_000,
-            max_output: 4_000,
-            images: false,
-            reasoning: false,
-            count_tokens: false,
-            caching: false,
-        }
-    }
-    async fn stream(
-        &self,
-        request: ModelRequest,
-        _cancel: CancellationToken,
-    ) -> Result<ModelStream, ProviderError> {
-        self.requests.lock().unwrap().push(request);
-        let next = self.responses.lock().unwrap().pop_front();
-        match next {
-            None => Err(ProviderError::Request {
-                message: "script exhausted".into(),
-            }),
-            Some(Script::Fail(e)) => Err(e),
-            Some(Script::Events(evs)) => Ok(Box::pin(futures::stream::iter(evs))),
-            Some(Script::Hang(evs)) => Ok(Box::pin(
-                futures::stream::iter(evs.into_iter().map(Ok)).chain(futures::stream::pending()),
-            )),
-        }
-    }
-}
-
-fn text(t: &str) -> Vec<Result<ModelEvent, ProviderError>> {
-    vec![
-        Ok(ModelEvent::TextStart { id: "b".into() }),
-        Ok(ModelEvent::TextDelta {
-            id: "b".into(),
-            delta: t.into(),
-        }),
-        Ok(ModelEvent::TextEnd { id: "b".into() }),
-        Ok(ModelEvent::Finish {
-            usage: Usage {
-                input_tokens: 10,
-                output_tokens: 3,
-                ..Default::default()
-            },
-            finish_reason: FinishReason::unified(UnifiedFinish::Stop),
-        }),
-    ]
-}
-
-fn tool_call(name: &str, input: Value) -> Vec<Result<ModelEvent, ProviderError>> {
-    vec![
-        Ok(ModelEvent::ToolCall {
-            id: "c1".into(),
-            name: name.into(),
-            input: input.to_string(),
-        }),
-        Ok(ModelEvent::Finish {
-            usage: Usage {
-                input_tokens: 10,
-                output_tokens: 3,
-                ..Default::default()
-            },
-            finish_reason: FinishReason::unified(UnifiedFinish::ToolCalls),
-        }),
-    ]
-}
+use crate::test_support::*;
 
 struct RecordingHost {
     events: Mutex<Vec<Event>>,
@@ -144,24 +48,6 @@ impl RecordingHost {
     }
 }
 
-fn kind(item: &Item) -> String {
-    let body = match &item.body {
-        ItemBody::User { .. } => "user",
-        ItemBody::Assistant { .. } => "assistant",
-        ItemBody::Reasoning { .. } => "reasoning",
-        ItemBody::ToolCall { .. } => "tool",
-        ItemBody::Action { .. } => "action",
-        ItemBody::Compaction { .. } => "compaction",
-        ItemBody::Rewind { .. } => "rewind",
-        ItemBody::Interruption { .. } => "interruption",
-        ItemBody::Notice { .. } => "notice",
-        ItemBody::QuestionAnswer { .. } => "qa",
-        ItemBody::PermissionReceipt { .. } => "receipt",
-        ItemBody::Asset { .. } => "asset",
-    };
-    format!("{body}/{:?}", item.status).to_lowercase()
-}
-
 #[async_trait]
 impl TurnHost for RecordingHost {
     fn emit(&self, event: Event) {
@@ -182,53 +68,6 @@ impl TurnHost for RecordingHost {
     }
     async fn absorb(&self) -> Vec<(IntentId, Input)> {
         std::mem::take(&mut *self.queue.lock().unwrap())
-    }
-}
-
-struct EchoTool {
-    read_only: bool,
-}
-
-#[async_trait]
-impl Tool for EchoTool {
-    fn spec(&self) -> ToolSpec {
-        ToolSpec {
-            name: "Echo".into(),
-            description: "echo".into(),
-            input_schema: json!({"type": "object"}),
-        }
-    }
-    fn traits(&self, _: &Value) -> ToolTraits {
-        if self.read_only {
-            ToolTraits::read_only()
-        } else {
-            ToolTraits::edit()
-        }
-    }
-    async fn call(&self, input: Value, _cx: &ToolContext) -> Result<ToolOutput, ToolError> {
-        Ok(ToolOutput::text(format!("echo:{}", input["v"])))
-    }
-}
-
-struct NoHost;
-#[async_trait]
-impl Prompter for NoHost {
-    async fn ask(&self, _: InteractionKind, _: Vec<AnswerSpec>) -> Result<Answer, KernelError> {
-        Ok(Answer::Cancel)
-    }
-}
-#[async_trait]
-impl ToolHost for NoHost {
-    fn progress(&self, _: &ItemId, _: String) {}
-    async fn record(&self, _: ItemBody) -> Result<ItemId, KernelError> {
-        Ok(ItemId::mint())
-    }
-    async fn spawn_session(&self, _: SessionSpec) -> Result<SessionId, KernelError> {
-        Err(KernelError::new(ErrorCode::Internal, "no"))
-    }
-    fn submit(&self, _: &SessionId, _: IntentId, _: Input) {}
-    fn service_any(&self, _: &str) -> Option<Arc<dyn std::any::Any + Send + Sync>> {
-        None
     }
 }
 

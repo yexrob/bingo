@@ -121,6 +121,11 @@ impl SessionState {
     }
 
     pub fn apply(&mut self, frame: &Frame) -> Applied {
+        // A lag marker is transport, not history: it must not move `seq`, so
+        // the client's next `events_since(seq)` replays what it missed.
+        if matches!(frame.event, Event::Lagged { .. }) {
+            return Applied::Lagged;
+        }
         if frame.seq <= self.seq && self.seq != Seq::ZERO {
             return Applied::Stale;
         }
@@ -387,6 +392,36 @@ mod tests {
             Applied::Stale
         );
         assert_eq!(st.seq, Seq(5));
+    }
+
+    #[test]
+    fn a_lag_marker_leaves_seq_where_the_last_applied_frame_put_it() {
+        let mut st = SessionState::new(summary());
+        st.apply(&frame(
+            3,
+            Event::ConfigChanged {
+                config: ConfigView::default(),
+            },
+        ));
+        assert_eq!(
+            st.apply(&frame(
+                9,
+                Event::Lagged {
+                    from: Seq(4),
+                    to: Seq(9)
+                }
+            )),
+            Applied::Lagged
+        );
+        assert_eq!(
+            st.seq,
+            Seq(3),
+            "resync must start from the last applied frame"
+        );
+        assert_ne!(
+            st.apply(&frame(4, Event::CatalogChanged { kind: "x".into() })),
+            Applied::Stale
+        );
     }
 
     #[test]

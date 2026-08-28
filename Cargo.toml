@@ -37,7 +37,6 @@ tempfile = "3.27"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
-missing_debug_implementations = "warn"
 
 [workspace.lints.clippy]
 unwrap_used = "deny"

@@ -1,8 +1,18 @@
-//! The kernel: session actor, journal, turn state machine, permission gate,
-//! executor, plugin host. It depends on `bingo-sdk` and nothing feature-shaped.
+//! The kernel: session actor and journal, turn state machine, permission
+//! gate, tool executor, plugin host. It knows no feature nouns; everything
+//! it runs is a plugin registered through `bingo_sdk`.
 
 pub mod accumulator;
 pub mod context;
 pub mod executor;
 pub mod gate;
+pub mod journal;
+pub mod session;
 pub mod turn;
+
+#[cfg(test)]
+pub(crate) mod test_support;
+
+pub use journal::MemoryStore;
+pub use session::{Mailbox, spawn};
+pub use turn::{TurnBudget, TurnConfig};
