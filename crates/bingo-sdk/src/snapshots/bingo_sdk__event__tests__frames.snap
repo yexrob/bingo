@@ -1,0 +1,410 @@
+---
+source: crates/bingo-sdk/src/event.rs
+expression: frames
+---
+[
+  {
+    "seq": 1,
+    "ts": "2023-11-14T22:13:20Z",
+    "session": "ses_1",
+    "event": {
+      "type": "sessionUpdated",
+      "summary": {
+        "id": "ses_1",
+        "title": "hello",
+        "cwd": "/tmp/p",
+        "model": "fake-1",
+        "provider": "fake",
+        "createdAt": "2023-11-14T22:13:20Z",
+        "updatedAt": "2023-11-14T22:13:20Z",
+        "usage": {
+          "inputTokens": 0,
+          "outputTokens": 0,
+          "cacheReadTokens": 0,
+          "cacheWriteTokens": 0,
+          "reasoningTokens": 0
+        },
+        "busy": false
+      }
+    }
+  },
+  {
+    "seq": 2,
+    "ts": "2023-11-14T22:13:20Z",
+    "session": "ses_1",
+    "event": {
+      "type": "turnStarted",
+      "turn": "trn_1",
+      "inputs": [
+        "itm_1"
+      ],
+      "origin": "submit"
+    }
+  },
+  {
+    "seq": 3,
+    "ts": "2023-11-14T22:13:20Z",
+    "session": "ses_1",
+    "event": {
+      "type": "itemCompleted",
+      "item": {
+        "id": "itm_1",
+        "turn": "trn_1",
+        "round": 0,
+        "status": "completed",
+        "startedAt": "2023-11-14T22:13:20Z",
+        "completedAt": "2023-11-14T22:13:20Z",
+        "body": {
+          "kind": "user",
+          "parts": [
+            {
+              "type": "text",
+              "text": "run tests"
+            }
+          ],
+          "origin": {
+            "surface": "tui"
+          }
+        }
+      }
+    }
+  },
+  {
+    "seq": 4,
+    "ts": "2023-11-14T22:13:20Z",
+    "session": "ses_1",
+    "event": {
+      "type": "intentAck",
+      "intent": "req_1",
+      "outcome": {
+        "kind": "turnStarted",
+        "turn": "trn_1"
+      }
+    }
+  },
+  {
+    "seq": 5,
+    "ts": "2023-11-14T22:13:20Z",
+    "session": "ses_1",
+    "event": {
+      "type": "itemStarted",
+      "item": {
+        "id": "itm_2",
+        "turn": "trn_1",
+        "round": 0,
+        "status": "running",
+        "startedAt": "2023-11-14T22:13:20Z",
+        "body": {
+          "kind": "assistant",
+          "text": ""
+        }
+      }
+    }
+  },
+  {
+    "seq": 6,
+    "ts": "2023-11-14T22:13:20Z",
+    "session": "ses_1",
+    "event": {
+      "type": "itemDelta",
+      "item": "itm_2",
+      "n": 0,
+      "kind": "text",
+      "data": "Sure"
+    }
+  },
+  {
+    "seq": 7,
+    "ts": "2023-11-14T22:13:20Z",
+    "session": "ses_1",
+    "event": {
+      "type": "itemCompleted",
+      "item": {
+        "id": "itm_2",
+        "turn": "trn_1",
+        "round": 0,
+        "status": "completed",
+        "startedAt": "2023-11-14T22:13:20Z",
+        "completedAt": "2023-11-14T22:13:20Z",
+        "body": {
+          "kind": "assistant",
+          "text": "Sure"
+        }
+      }
+    }
+  },
+  {
+    "seq": 8,
+    "ts": "2023-11-14T22:13:20Z",
+    "session": "ses_1",
+    "event": {
+      "type": "itemStarted",
+      "item": {
+        "id": "itm_3",
+        "turn": "trn_1",
+        "round": 0,
+        "status": "pending",
+        "startedAt": "2023-11-14T22:13:20Z",
+        "body": {
+          "kind": "toolCall",
+          "call_id": "call_1",
+          "name": "Edit",
+          "input": {
+            "file_path": "src/lib.rs"
+          }
+        }
+      }
+    }
+  },
+  {
+    "seq": 9,
+    "ts": "2023-11-14T22:13:20Z",
+    "session": "ses_1",
+    "event": {
+      "type": "interactionOpened",
+      "interaction": {
+        "id": "int_1",
+        "session": "ses_1",
+        "turn": "trn_1",
+        "item": "itm_3",
+        "openedAt": "2023-11-14T22:13:20Z",
+        "kind": {
+          "kind": "permission",
+          "tool": "Edit",
+          "summary": "Edit src/lib.rs",
+          "preview": {
+            "kind": "diff",
+            "unified": "--- a\n+++ b\n"
+          },
+          "session_scope": "Edit(src/)"
+        },
+        "answers": [
+          "allowOnce",
+          "allowSession",
+          "deny"
+        ]
+      }
+    }
+  },
+  {
+    "seq": 10,
+    "ts": "2023-11-14T22:13:20Z",
+    "session": "ses_1",
+    "event": {
+      "type": "interactionResolved",
+      "id": "int_1",
+      "answer": {
+        "kind": "allowOnce"
+      },
+      "by": {
+        "kind": "client",
+        "name": "gui-2",
+        "surface": "gui"
+      }
+    }
+  },
+  {
+    "seq": 11,
+    "ts": "2023-11-14T22:13:20Z",
+    "session": "ses_1",
+    "event": {
+      "type": "interactionCancelled",
+      "id": "int_2",
+      "reason": "turnEnded"
+    }
+  },
+  {
+    "seq": 12,
+    "ts": "2023-11-14T22:13:20Z",
+    "session": "ses_1",
+    "event": {
+      "type": "itemUpdated",
+      "item": {
+        "id": "itm_3",
+        "turn": "trn_1",
+        "round": 0,
+        "status": "running",
+        "startedAt": "2023-11-14T22:13:20Z",
+        "body": {
+          "kind": "toolCall",
+          "call_id": "call_1",
+          "name": "Edit",
+          "input": {},
+          "progress": "writing…"
+        }
+      }
+    }
+  },
+  {
+    "seq": 13,
+    "ts": "2023-11-14T22:13:20Z",
+    "session": "ses_1",
+    "event": {
+      "type": "turnUsage",
+      "turn": "trn_1",
+      "usage": {
+        "inputTokens": 10,
+        "outputTokens": 4,
+        "cacheReadTokens": 0,
+        "cacheWriteTokens": 0,
+        "reasoningTokens": 0
+      },
+      "context": {
+        "used": 14,
+        "window": 200000,
+        "trigger": 180000
+      }
+    }
+  },
+  {
+    "seq": 14,
+    "ts": "2023-11-14T22:13:20Z",
+    "session": "ses_1",
+    "event": {
+      "type": "turnRetrying",
+      "turn": "trn_1",
+      "attempt": 1,
+      "max": 10,
+      "delay_ms": 500,
+      "dropped": [
+        "itm_4"
+      ],
+      "reason": "server error 503"
+    }
+  },
+  {
+    "seq": 15,
+    "ts": "2023-11-14T22:13:20Z",
+    "session": "ses_1",
+    "event": {
+      "type": "queueChanged",
+      "revision": 1,
+      "entries": [
+        {
+          "intent": "req_2",
+          "position": 0,
+          "preview": "also fix the docs",
+          "steerable": true,
+          "origin": {
+            "surface": "tui"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "seq": 16,
+    "ts": "2023-11-14T22:13:20Z",
+    "session": "ses_1",
+    "event": {
+      "type": "compacted",
+      "generation": 1,
+      "boundary": "itm_2",
+      "summary": "itm_9",
+      "kept": [
+        "itm_1"
+      ]
+    }
+  },
+  {
+    "seq": 17,
+    "ts": "2023-11-14T22:13:20Z",
+    "session": "ses_1",
+    "event": {
+      "type": "rewound",
+      "generation": 2,
+      "to_turn": "trn_1",
+      "dropped": [
+        "itm_3"
+      ],
+      "files_restored": [
+        "src/lib.rs"
+      ]
+    }
+  },
+  {
+    "seq": 18,
+    "ts": "2023-11-14T22:13:20Z",
+    "session": "ses_1",
+    "event": {
+      "type": "configChanged",
+      "config": {
+        "kernel": null,
+        "plugins": {}
+      }
+    }
+  },
+  {
+    "seq": 19,
+    "ts": "2023-11-14T22:13:20Z",
+    "session": "ses_1",
+    "event": {
+      "type": "catalogChanged",
+      "kind": "models"
+    }
+  },
+  {
+    "seq": 20,
+    "ts": "2023-11-14T22:13:20Z",
+    "session": "ses_1",
+    "event": {
+      "type": "notice",
+      "level": "warn",
+      "code": "COUNT_TOKENS_UNAVAILABLE",
+      "text": "estimating"
+    }
+  },
+  {
+    "seq": 21,
+    "ts": "2023-11-14T22:13:20Z",
+    "session": "ses_1",
+    "event": {
+      "type": "extension",
+      "plugin": "bingo.tasks",
+      "kind": "task.changed",
+      "payload": {
+        "id": 1
+      }
+    }
+  },
+  {
+    "seq": 22,
+    "ts": "2023-11-14T22:13:20Z",
+    "session": "ses_1",
+    "event": {
+      "type": "lagged",
+      "from": 3,
+      "to": 9
+    }
+  },
+  {
+    "seq": 23,
+    "ts": "2023-11-14T22:13:20Z",
+    "session": "ses_1",
+    "event": {
+      "type": "turnCompleted",
+      "turn": "trn_1",
+      "status": {
+        "kind": "completed"
+      },
+      "usage": {
+        "inputTokens": 0,
+        "outputTokens": 0,
+        "cacheReadTokens": 0,
+        "cacheWriteTokens": 0,
+        "reasoningTokens": 0
+      }
+    }
+  },
+  {
+    "seq": 24,
+    "ts": "2023-11-14T22:13:20Z",
+    "session": "ses_1",
+    "event": {
+      "type": "sessionClosed",
+      "reason": {
+        "kind": "client"
+      }
+    }
+  }
+]
