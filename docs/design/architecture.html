@@ -1,0 +1,500 @@
+<title>bingo 重写架构</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&family=Noto+Sans+SC:wght@400;500;700&display=swap">
+<style>
+  :root{
+    --bg:#F6F7F9; --surface:#FFFFFF; --ink:#1B2430; --ink-2:#5B6675; --line:#D6DBE3;
+    --accent:#C2410C; --accent-soft:#FDE8D8; --accent-ink:#9A3412; --plugin:#EDF0F4; --danger:#B42318;
+    --sans:"IBM Plex Sans","Noto Sans SC","PingFang SC","Hiragino Sans GB","Microsoft YaHei",system-ui,sans-serif;
+    --mono:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+  }
+  @media (prefers-color-scheme: dark){
+    :root:not([data-theme="light"]){
+      --bg:#0F1419; --surface:#151B23; --ink:#E4E9F0; --ink-2:#98A3B3; --line:#2B3542;
+      --accent:#F0883E; --accent-soft:#3A2314; --accent-ink:#FDBA74; --plugin:#1E2732; --danger:#F97066;
+    }
+  }
+  :root[data-theme="dark"]{
+    --bg:#0F1419; --surface:#151B23; --ink:#E4E9F0; --ink-2:#98A3B3; --line:#2B3542;
+    --accent:#F0883E; --accent-soft:#3A2314; --accent-ink:#FDBA74; --plugin:#1E2732; --danger:#F97066;
+  }
+  html{background:var(--bg)}
+  body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);font-size:15.5px;line-height:1.65;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:1080px;margin:0 auto;padding:48px 24px 96px}
+  header{display:flex;flex-direction:column;gap:12px;margin-bottom:40px;padding-bottom:28px;border-bottom:1px solid var(--line)}
+  .eyebrow{font-family:var(--mono);font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:var(--ink-2)}
+  h1{font-size:34px;line-height:1.15;font-weight:600;margin:0;letter-spacing:-.01em;text-wrap:balance}
+  .lede{max-width:72ch;color:var(--ink-2);margin:0;font-size:16.5px}
+  section{margin:44px 0}
+  h2{font-size:22px;font-weight:600;margin:0 0 6px;letter-spacing:-.005em;text-wrap:balance}
+  h2 .no{font-family:var(--mono);font-size:12px;color:var(--accent);margin-right:10px;letter-spacing:.04em}
+  p{max-width:72ch;margin:8px 0}
+  .prose{max-width:72ch}
+  code,kbd{font-family:var(--mono);font-size:.88em;background:var(--plugin);padding:1px 5px;border-radius:3px}
+  figure{margin:20px 0 0;border:1px solid var(--line);background:var(--surface);border-radius:6px;padding:18px 18px 12px;overflow-x:auto}
+  figure svg{display:block;width:100%;height:auto;min-width:720px;color:var(--ink);font-family:var(--sans)}
+  figcaption{margin-top:10px;font-size:13px;color:var(--ink-2);max-width:none}
+  table{border-collapse:collapse;width:100%;font-size:14px;margin-top:14px}
+  th,td{text-align:left;vertical-align:top;padding:9px 10px;border-bottom:1px solid var(--line)}
+  th{font-size:12px;letter-spacing:.05em;text-transform:uppercase;color:var(--ink-2);font-weight:500}
+  td.k{font-family:var(--mono);font-size:13px;white-space:nowrap}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:22px}
+  @media (max-width:760px){.grid2{grid-template-columns:1fr}}
+  ul.tight{margin:8px 0 0;padding-left:20px;max-width:72ch}
+  ul.tight li{margin:4px 0}
+  .inv{display:grid;grid-template-columns:auto 1fr;gap:6px 14px;margin-top:12px;max-width:80ch;font-size:14.5px}
+  .inv b{font-family:var(--mono);font-weight:500;color:var(--accent);font-size:12.5px;padding-top:3px}
+  .note{border-left:2px solid var(--accent);padding:2px 0 2px 14px;color:var(--ink-2);font-size:14px;max-width:72ch}
+  /* SVG vocabulary */
+  .b{fill:var(--surface);stroke:currentColor;stroke-width:1.2}
+  .bk{fill:var(--accent-soft);stroke:var(--accent);stroke-width:1.4}
+  .bp{fill:var(--plugin);stroke:currentColor;stroke-width:1}
+  .bx{fill:none;stroke:currentColor;stroke-width:1;stroke-dasharray:4 3}
+  .bs{fill:var(--surface);stroke:var(--accent);stroke-width:2}
+  .t{font-size:13px;font-weight:600;fill:currentColor}
+  .s{font-size:11px;fill:var(--ink-2)}
+  .l{font-size:11px;fill:currentColor}
+  .m{font-family:var(--mono)}
+  .tk{fill:var(--accent-ink)}
+  .a{stroke:currentColor;fill:none;stroke-width:1.3}
+  .ak{stroke:var(--accent);fill:none;stroke-width:1.5}
+  .ad{stroke:var(--danger);fill:none;stroke-width:1.3;stroke-dasharray:5 4}
+  .dash{stroke-dasharray:5 4}
+  .life{stroke:var(--line);stroke-dasharray:2 4;stroke-width:1}
+  .dot{fill:currentColor}
+  .mk{fill:currentColor}.mkk{fill:var(--accent)}.mkd{fill:var(--danger)}
+  .td{fill:var(--danger);font-size:11px}
+  footer{margin-top:56px;padding-top:20px;border-top:1px solid var(--line);color:var(--ink-2);font-size:13.5px}
+  a{color:var(--accent-ink)}
+  a:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+</style>
+
+<div class="wrap">
+<header>
+  <div class="eyebrow">bingo · 重写设计稿 · 2026-08-28</div>
+  <h1>bingo 重写架构</h1>
+  <p class="lede">一个最小内核 —— 会话 actor、有序事件日志（事件中心）、turn 状态机、权限门、插件宿主 —— 其余一切是经稳定 trait 注册的插件；每个界面（TUI、print、GUI、ACP、IM）都只是事件的订阅者和唯一提交入口的调用者。</p>
+</header>
+
+<section>
+  <h2><span class="no">01</span>内核与插件的边界</h2>
+  <p>内核是「把所有功能拆掉之后，仍然能用脚本化 provider 跑完一轮、并发出一条无缝事件流」的那部分。判断标准只有一条：<em>一个插件不能定义插件被咨询的顺序</em>，能定义顺序的东西才进内核。</p>
+  <table>
+    <thead><tr><th style="width:34%">在内核（bingo-core / bingo-sdk）</th><th>为什么不能是插件</th></tr></thead>
+    <tbody>
+      <tr><td><b>领域词汇</b>：ids、Message/ContentPart、Item、Event、Interaction、SessionState</td><td>两个插件要能对话，名词必须不属于任何一方。放在 sdk，core 只是消费者之一。</td></tr>
+      <tr><td><b>会话 actor</b>：id 铸造、seq、turn/交互/队列注册表、快照</td><td>顺序是全局性质。谁分配 seq、谁裁决两个竞争写谁赢，谁就是内核。</td></tr>
+      <tr><td><b>turn 状态机 + 工具执行器</b></td><td>它是「插件被调用的顺序」本身，且不含任何功能名词——收件箱、任务提醒、团队规范都是它调用的 contributor。</td></tr>
+      <tr><td><b>权限门</b>（不是策略）</td><td>「用户说不」在此唯一执行。策略（模式、规则表、敏感目录）是插件；没有策略时门拒绝一切非只读。</td></tr>
+      <tr><td><b>插件宿主</b>：manifest、拓扑序、service、配置分层、HostApi</td><td>插件注册进去的那个东西，也拥有唯一提交入口与唯一订阅入口。</td></tr>
+    </tbody>
+  </table>
+  <p class="note" style="margin-top:14px">其余全是插件，包括 Bash/Read/Edit、每个 provider、每个界面、转录存储、压缩策略、记忆、skills、MCP、子代理、团队、房间、任务、经验库。</p>
+</section>
+
+<section>
+  <h2><span class="no">02</span>分层总览</h2>
+  <p>自上而下：客户端 → 唯一入口/出口 → 内核 → 插件贡献 → 外部世界。橙色是内核；灰色是插件；虚线框是进程外的东西。</p>
+  <figure>
+    <svg viewBox="0 0 1000 660" role="img" aria-label="分层总览：五种客户端经 HostApi 的唯一入口与出口连接内核；内核经 trait 调用八类插件贡献；插件再连接 LLM API、文件系统、MCP 服务器等外部世界">
+      <defs>
+        <marker id="m1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="mk"/></marker>
+        <marker id="m1k" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="mkk"/></marker>
+      </defs>
+      <!-- clients -->
+      <text x="30" y="14" class="s">客户端 · 每个都是 Surface 插件，只依赖 bingo-sdk</text>
+      <g>
+        <rect x="30" y="24" width="172" height="60" rx="4" class="bp"/><text x="116" y="48" class="t" text-anchor="middle">TUI</text><text x="116" y="68" class="s" text-anchor="middle">ratatui · 进程内直接调 trait</text>
+        <rect x="222" y="24" width="172" height="60" rx="4" class="bp"/><text x="308" y="48" class="t" text-anchor="middle">--print</text><text x="308" y="68" class="s" text-anchor="middle">stream-json = RPC 的预设</text>
+        <rect x="414" y="24" width="172" height="60" rx="4" class="bp"/><text x="500" y="48" class="t" text-anchor="middle">JSON-RPC</text><text x="500" y="68" class="s" text-anchor="middle">stdio · WebSocket → GUI</text>
+        <rect x="606" y="24" width="172" height="60" rx="4" class="bp"/><text x="692" y="48" class="t" text-anchor="middle">ACP</text><text x="692" y="68" class="s" text-anchor="middle">IDE · OpenClaw · Hermes</text>
+        <rect x="798" y="24" width="172" height="60" rx="4" class="bp"/><text x="884" y="48" class="t" text-anchor="middle">IM 频道</text><text x="884" y="68" class="s" text-anchor="middle">Feishu · Telegram</text>
+      </g>
+      <!-- write/read arrows -->
+      <g>
+        <line x1="106" y1="84" x2="106" y2="128" class="ak" marker-end="url(#m1k)"/><line x1="126" y1="130" x2="126" y2="86" class="a" marker-end="url(#m1)"/>
+        <line x1="298" y1="84" x2="298" y2="128" class="ak" marker-end="url(#m1k)"/><line x1="318" y1="130" x2="318" y2="86" class="a" marker-end="url(#m1)"/>
+        <line x1="490" y1="84" x2="490" y2="128" class="ak" marker-end="url(#m1k)"/><line x1="510" y1="130" x2="510" y2="86" class="a" marker-end="url(#m1)"/>
+        <line x1="682" y1="84" x2="682" y2="128" class="ak" marker-end="url(#m1k)"/><line x1="702" y1="130" x2="702" y2="86" class="a" marker-end="url(#m1)"/>
+        <line x1="874" y1="84" x2="874" y2="128" class="ak" marker-end="url(#m1k)"/><line x1="894" y1="130" x2="894" y2="86" class="a" marker-end="url(#m1)"/>
+      </g>
+      <!-- HostApi band -->
+      <rect x="30" y="130" width="940" height="44" rx="4" class="b"/>
+      <text x="500" y="157" class="l" text-anchor="middle"><tspan class="m" font-weight="600">HostApi</tspan>  ·  唯一入口 <tspan class="m">submit(intent) · interrupt · answer</tspan>（同步，不返回回执）  ·  唯一出口 <tspan class="m">subscribe → 快照 + Frame 流</tspan>（seq 无缝）</text>
+      <!-- kernel -->
+      <line x1="500" y1="174" x2="500" y2="198" class="a" marker-end="url(#m1)"/>
+      <rect x="30" y="200" width="940" height="196" rx="6" class="bk"/>
+      <text x="46" y="222" class="t tk">bingo-core · 内核</text>
+      <text x="954" y="222" class="s" text-anchor="end">事件中心 = 每会话一条 Journal(seq) + 每订阅者一条有界广播通道</text>
+      <g>
+        <rect x="46" y="238" width="290" height="60" rx="4" class="b"/><text x="191" y="262" class="t" text-anchor="middle">Session Actor</text><text x="191" y="282" class="s" text-anchor="middle">id 铸造 · seq · turn/交互/队列注册表 · 快照</text>
+        <rect x="351" y="238" width="290" height="60" rx="4" class="b"/><text x="496" y="262" class="t" text-anchor="middle">Journal + Broadcast</text><text x="496" y="282" class="s" text-anchor="middle">持久帧先落盘 · 有界通道 · 溢出发 Lagged 回读</text>
+        <rect x="656" y="238" width="290" height="60" rx="4" class="b"/><text x="801" y="262" class="t" text-anchor="middle">Turn 状态机</text><text x="801" y="282" class="s" text-anchor="middle">Assembling → Streaming → Gating → Executing → Barrier</text>
+        <rect x="46" y="318" width="290" height="60" rx="4" class="b"/><text x="191" y="342" class="t" text-anchor="middle">权限门</text><text x="191" y="362" class="s" text-anchor="middle">hook → policy → ask → verdict · 失败关闭</text>
+        <rect x="351" y="318" width="290" height="60" rx="4" class="b"/><text x="496" y="342" class="t" text-anchor="middle">工具执行器</text><text x="496" y="362" class="s" text-anchor="middle">安全批并行 ≤10 · 其余串行 · 类型化中断</text>
+        <rect x="656" y="318" width="290" height="60" rx="4" class="b"/><text x="801" y="342" class="t" text-anchor="middle">插件宿主 + 尺子</text><text x="801" y="362" class="s" text-anchor="middle">manifest 拓扑序 · service · ContextUsage 与熔断</text>
+      </g>
+      <!-- kernel <-> plugins -->
+      <line x1="480" y1="396" x2="480" y2="436" class="ak" marker-end="url(#m1k)"/><text x="470" y="420" class="s" text-anchor="end">调用 trait</text>
+      <line x1="520" y1="438" x2="520" y2="398" class="a" marker-end="url(#m1)"/><text x="530" y="420" class="s">register(Contribution)</text>
+      <!-- plugins -->
+      <text x="30" y="428" class="s">插件贡献 · Plugin::register 注册为 Arc&lt;dyn Trait&gt; · 每个是独立 crate</text>
+      <g>
+        <rect x="30" y="440" width="223" height="56" rx="4" class="bp"/><text x="141" y="462" class="t" text-anchor="middle">Provider</text><text x="141" y="482" class="s" text-anchor="middle">anthropic · openai/codex · fake</text>
+        <rect x="269" y="440" width="223" height="56" rx="4" class="bp"/><text x="380" y="462" class="t" text-anchor="middle">Tool</text><text x="380" y="482" class="s" text-anchor="middle">fs · bash · web · Agent · MCP 工具</text>
+        <rect x="508" y="440" width="223" height="56" rx="4" class="bp"/><text x="619" y="462" class="t" text-anchor="middle">PermissionPolicy</text><text x="619" y="482" class="s" text-anchor="middle">5 模式 · allow/deny/ask 规则</text>
+        <rect x="747" y="440" width="223" height="56" rx="4" class="bp"/><text x="858" y="462" class="t" text-anchor="middle">Hook</text><text x="858" y="482" class="s" text-anchor="middle">shell hooks · agents(@name 重定向)</text>
+        <rect x="30" y="508" width="223" height="56" rx="4" class="bp"/><text x="141" y="530" class="t" text-anchor="middle">ContextContributor</text><text x="141" y="550" class="s" text-anchor="middle">记忆 · 任务提醒 · 团队规范 · 通知</text>
+        <rect x="269" y="508" width="223" height="56" rx="4" class="bp"/><text x="380" y="530" class="t" text-anchor="middle">Command</text><text x="380" y="550" class="s" text-anchor="middle">/model /compact /team …</text>
+        <rect x="508" y="508" width="223" height="56" rx="4" class="bp"/><text x="619" y="530" class="t" text-anchor="middle">SessionStore</text><text x="619" y="550" class="s" text-anchor="middle">jsonl journal · lock · blobs</text>
+        <rect x="747" y="508" width="223" height="56" rx="4" class="bp"/><text x="858" y="530" class="t" text-anchor="middle">Compactor</text><text x="858" y="550" class="s" text-anchor="middle">阈值策略 · 溢出阶梯</text>
+      </g>
+      <!-- external -->
+      <g>
+        <line x1="141" y1="564" x2="141" y2="602" class="a" marker-end="url(#m1)"/>
+        <line x1="380" y1="564" x2="380" y2="602" class="a" marker-end="url(#m1)"/>
+        <line x1="619" y1="564" x2="619" y2="602" class="a" marker-end="url(#m1)"/>
+        <line x1="858" y1="564" x2="858" y2="602" class="a" marker-end="url(#m1)"/>
+        <rect x="30" y="604" width="223" height="44" rx="4" class="bx"/><text x="141" y="631" class="l" text-anchor="middle">LLM API · HTTPS/SSE</text>
+        <rect x="269" y="604" width="223" height="44" rx="4" class="bx"/><text x="380" y="631" class="l" text-anchor="middle">文件系统 · 进程 · shell</text>
+        <rect x="508" y="604" width="223" height="44" rx="4" class="bx"/><text x="619" y="631" class="l" text-anchor="middle">MCP 服务器 · stdio/HTTP</text>
+        <rect x="747" y="604" width="223" height="44" rx="4" class="bx"/><text x="858" y="631" class="l" text-anchor="middle">OAuth issuer · IM 平台</text>
+      </g>
+    </svg>
+    <figcaption>橙色向下的箭头是写（submit / answer），黑色向上的是读（帧流）。内核除 <code>Surface::run</code> 外从不调用界面；界面也无法触达 core 的任何类型——它们在 Cargo 依赖上只看得见 sdk。</figcaption>
+  </figure>
+</section>
+
+<section>
+  <h2><span class="no">03</span>事件中心</h2>
+  <p>不是一条全局无类型总线（那会重新引入「谁先谁后」问题），而是<strong>每个会话一条有序日志 + 每个订阅者一条有界通道</strong>。所有生产者（turn loop、工具、插件）都经 actor 发布；所有消费者都经 <code>subscribe</code> 读取。</p>
+  <figure>
+    <svg viewBox="0 0 1000 400" role="img" aria-label="事件中心：三个客户端把写操作提交进会话 actor，actor 铸造 seq、先落盘再广播，三个订阅者视图由同一个 reducer 从快照与帧折叠而来">
+      <defs>
+        <marker id="m2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="mk"/></marker>
+        <marker id="m2k" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="mkk"/></marker>
+      </defs>
+      <text x="30" y="30" class="s">写：客户端 → actor（同步 · 不阻塞 · 不返回回执）</text>
+      <rect x="30" y="70" width="130" height="48" rx="4" class="bp"/><text x="95" y="90" class="t" text-anchor="middle">TUI</text><text x="95" y="108" class="s" text-anchor="middle">按键处理是纯函数</text>
+      <rect x="30" y="176" width="130" height="48" rx="4" class="bp"/><text x="95" y="196" class="t" text-anchor="middle">GUI</text><text x="95" y="214" class="s" text-anchor="middle">经 WebSocket</text>
+      <rect x="30" y="282" width="130" height="48" rx="4" class="bp"/><text x="95" y="302" class="t" text-anchor="middle">IM 频道</text><text x="95" y="320" class="s" text-anchor="middle">Feishu / Telegram</text>
+
+      <line x1="160" y1="94" x2="338" y2="94" class="ak" marker-end="url(#m2k)"/><text x="249" y="86" class="s m" text-anchor="middle">submit(i1, Text)</text>
+      <line x1="160" y1="200" x2="338" y2="200" class="ak" marker-end="url(#m2k)"/><text x="249" y="192" class="s m" text-anchor="middle">answer(i2, p3, Allow)</text>
+      <line x1="160" y1="306" x2="338" y2="306" class="ak" marker-end="url(#m2k)"/><text x="249" y="298" class="s m" text-anchor="middle">submit(i3, Text{origin})</text>
+
+      <rect x="340" y="40" width="320" height="320" rx="6" class="bk"/>
+      <text x="360" y="62" class="t tk">Session Actor · 每会话一个</text>
+      <rect x="360" y="80" width="280" height="46" rx="4" class="b"/><text x="500" y="99" class="t" text-anchor="middle">seq 铸造</text><text x="500" y="117" class="s" text-anchor="middle">一把锁 · 裁决竞争写 · 幂等键 = IntentId</text>
+      <rect x="360" y="140" width="280" height="46" rx="4" class="b"/><text x="500" y="159" class="t" text-anchor="middle">Journal</text><text x="500" y="177" class="s" text-anchor="middle">持久帧先 append 到 journal.jsonl，再发布</text>
+      <rect x="360" y="200" width="280" height="46" rx="4" class="b"/><text x="500" y="219" class="t" text-anchor="middle">Broadcast</text><text x="500" y="237" class="s" text-anchor="middle">每订阅者有界通道 · 满则发 Lagged，从不阻塞</text>
+      <rect x="360" y="260" width="280" height="46" rx="4" class="b"/><text x="500" y="279" class="t" text-anchor="middle">SessionState</text><text x="500" y="297" class="s" text-anchor="middle">内核自己的快照，用同一个 reducer 维护</text>
+      <text x="500" y="340" class="s m" text-anchor="middle">Frame{seq, ts, session, event}</text>
+
+      <text x="970" y="30" class="s" text-anchor="end">读：actor → 每个订阅者（帧流 + 自己的回执）</text>
+      <line x1="660" y1="94" x2="838" y2="94" class="a" marker-end="url(#m2)"/><text x="749" y="86" class="s m" text-anchor="middle">Frame{seq} · seq &gt; 快照</text>
+      <line x1="660" y1="200" x2="838" y2="200" class="a" marker-end="url(#m2)"/><text x="749" y="192" class="s m" text-anchor="middle">IntentAck · Resolved{by}</text>
+      <line x1="660" y1="306" x2="838" y2="306" class="a" marker-end="url(#m2)"/><text x="749" y="298" class="s m" text-anchor="middle">同一批帧</text>
+      <line x1="838" y1="130" x2="662" y2="130" class="a dash" marker-end="url(#m2)"/><text x="749" y="146" class="s m" text-anchor="middle">Lagged → events_since</text>
+
+      <rect x="840" y="70" width="130" height="48" rx="4" class="bp"/><text x="905" y="90" class="t" text-anchor="middle">TUI 视图</text><text x="905" y="108" class="s" text-anchor="middle">同一 reducer</text>
+      <rect x="840" y="176" width="130" height="48" rx="4" class="bp"/><text x="905" y="196" class="t" text-anchor="middle">GUI 视图</text><text x="905" y="214" class="s" text-anchor="middle">TS 孪生 reducer</text>
+      <rect x="840" y="282" width="130" height="48" rx="4" class="bp"/><text x="905" y="302" class="t" text-anchor="middle">IM 投递</text><text x="905" y="320" class="s" text-anchor="middle">Deliverer · 编辑/分块</text>
+      <text x="500" y="386" class="s" text-anchor="middle">任何客户端的视图 = SessionState::apply(快照, 快照之后的帧)；有人在 GUI 点了「允许」，TUI 与 IM 看到的是同一条 InteractionResolved{by: gui}</text>
+    </svg>
+    <figcaption>九条不变量里最要紧的三条：内核永不阻塞在客户端上；写操作不返回回执（结果是 <code>IntentAck</code> 事件，所以同步按键处理器无法等待回执——旧项目 D151 那堵墙无法表达）；视图永远可从快照 + seq 之后的帧推出。</figcaption>
+  </figure>
+  <div class="inv">
+    <b>I1</b><span>内核永不阻塞在客户端上——每订阅者有界通道，溢出发 <code>Lagged{from,to}</code>，客户端回读日志。</span>
+    <b>I3</b><span>写操作不返回回执——<code>submit/interrupt/answer</code> 带客户端铸造的 <code>IntentId</code>，返回 <code>()</code>。</span>
+    <b>I4</b><span>每个动作恰有一个处理者，且在内核——界面在 Cargo 依赖上触达不到 core。</span>
+    <b>I6</b><span>日志即真相，模型上下文是派生——压缩与回退是事件，永不改写历史。</span>
+    <b>I7</b><span>交互是资源不是调用——由事件打开、在快照可见、任一附着者按 id 只答一次、带 <code>by</code> 解决。</span>
+  </div>
+</section>
+
+<section>
+  <h2><span class="no">04</span>一轮对话的时序</h2>
+  <p>TUI 提交「跑测试」；模型决定编辑文件；权限提示同时到达 TUI 与 GUI；GUI 先点了允许；TUI 迟到的回答被拒绝；工具执行完成；轮结束。所有人看到的都是同一条帧序列。</p>
+  <figure>
+    <svg viewBox="0 0 1100 620" role="img" aria-label="一轮对话的时序图：TUI、GUI、Actor、Turn loop、Provider、Tool 六条泳道，展示提交、流式增量、权限交互扇出与先答者胜、工具执行、轮结束">
+      <defs>
+        <marker id="m3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="mk"/></marker>
+        <marker id="m3k" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="mkk"/></marker>
+      </defs>
+      <g>
+        <rect x="20" y="16" width="140" height="32" rx="4" class="bp"/><text x="90" y="37" class="t" text-anchor="middle">TUI</text>
+        <rect x="180" y="16" width="140" height="32" rx="4" class="bp"/><text x="250" y="37" class="t" text-anchor="middle">GUI</text>
+        <rect x="360" y="16" width="140" height="32" rx="4" class="bk"/><text x="430" y="37" class="t tk" text-anchor="middle">Actor · Journal</text>
+        <rect x="540" y="16" width="140" height="32" rx="4" class="bk"/><text x="610" y="37" class="t tk" text-anchor="middle">Turn loop</text>
+        <rect x="720" y="16" width="140" height="32" rx="4" class="bp"/><text x="790" y="37" class="t" text-anchor="middle">Provider</text>
+        <rect x="900" y="16" width="140" height="32" rx="4" class="bp"/><text x="970" y="37" class="t" text-anchor="middle">Tool · Edit</text>
+        <line x1="90" y1="48" x2="90" y2="600" class="life"/><line x1="250" y1="48" x2="250" y2="600" class="life"/><line x1="430" y1="48" x2="430" y2="600" class="life"/><line x1="610" y1="48" x2="610" y2="600" class="life"/><line x1="790" y1="48" x2="790" y2="600" class="life"/><line x1="970" y1="48" x2="970" y2="600" class="life"/>
+      </g>
+      <g>
+        <line x1="90" y1="84" x2="428" y2="84" class="ak" marker-end="url(#m3k)"/><text x="260" y="78" class="s m" text-anchor="middle">submit(i1, "跑测试")</text>
+        <line x1="430" y1="112" x2="92" y2="112" class="a" marker-end="url(#m3)"/><circle cx="250" cy="112" r="3" class="dot"/><text x="260" y="106" class="s m" text-anchor="middle">ItemCompleted(user) · IntentAck{i1: TurnStarted} · TurnStarted</text>
+        <line x1="430" y1="140" x2="608" y2="140" class="a" marker-end="url(#m3)"/><text x="520" y="134" class="s m" text-anchor="middle">Run turn t1</text>
+        <line x1="610" y1="168" x2="788" y2="168" class="a" marker-end="url(#m3)"/><text x="700" y="162" class="s m" text-anchor="middle">stream(ModelRequest)</text>
+        <line x1="790" y1="196" x2="612" y2="196" class="a" marker-end="url(#m3)"/><text x="700" y="190" class="s m" text-anchor="middle">ModelEvent · 文本增量</text>
+        <line x1="610" y1="224" x2="92" y2="224" class="a" marker-end="url(#m3)"/><circle cx="430" cy="224" r="3" class="dot"/><circle cx="250" cy="224" r="3" class="dot"/><text x="350" y="218" class="s m" text-anchor="middle">ItemStarted / ItemDelta(text) — 瞬态，不落盘</text>
+        <line x1="790" y1="252" x2="612" y2="252" class="a" marker-end="url(#m3)"/><text x="700" y="246" class="s m" text-anchor="middle">ModelEvent · tool_use Edit</text>
+        <line x1="610" y1="280" x2="92" y2="280" class="a" marker-end="url(#m3)"/><circle cx="430" cy="280" r="3" class="dot"/><circle cx="250" cy="280" r="3" class="dot"/><text x="350" y="274" class="s m" text-anchor="middle">ItemStarted(ToolCall Edit)</text>
+        <line x1="610" y1="308" x2="432" y2="308" class="a" marker-end="url(#m3)"/><text x="520" y="302" class="s" text-anchor="middle">门：before_tool → policy → Ask</text>
+        <line x1="430" y1="336" x2="92" y2="336" class="ak" marker-end="url(#m3k)"/><circle cx="250" cy="336" r="3" class="dot"/><text x="260" y="330" class="s m" text-anchor="middle">InteractionOpened(Permission, preview: Diff, guard_until)</text>
+        <line x1="250" y1="364" x2="428" y2="364" class="ak" marker-end="url(#m3k)"/><text x="340" y="358" class="s m" text-anchor="middle">answer(i2, p3, AllowOnce, Pointer)</text>
+        <line x1="90" y1="392" x2="428" y2="392" class="a dash" marker-end="url(#m3)"/><text x="260" y="386" class="s m" text-anchor="middle">answer(i3, p3) → IntentAck{i3: Rejected INTERACTION_CLOSED}</text>
+        <line x1="430" y1="420" x2="92" y2="420" class="a" marker-end="url(#m3)"/><circle cx="250" cy="420" r="3" class="dot"/><text x="260" y="414" class="s m" text-anchor="middle">InteractionResolved{p3, by: gui} · ItemCompleted(PermissionReceipt)</text>
+        <line x1="610" y1="448" x2="968" y2="448" class="a" marker-end="url(#m3)"/><text x="790" y="442" class="s m" text-anchor="middle">call(input, ctx)</text>
+        <line x1="970" y1="476" x2="612" y2="476" class="a" marker-end="url(#m3)"/><text x="790" y="470" class="s m" text-anchor="middle">ToolOutput{parts, display: Diff}</text>
+        <line x1="610" y1="504" x2="92" y2="504" class="a" marker-end="url(#m3)"/><circle cx="430" cy="504" r="3" class="dot"/><circle cx="250" cy="504" r="3" class="dot"/><text x="350" y="498" class="s m" text-anchor="middle">ItemCompleted(ToolCall, output) — 权威，覆盖此前所有 delta</text>
+        <text x="610" y="540" class="s" text-anchor="middle">Barrier：after_tool · queue.absorb · Contributors{Barrier} → Assembling → 再一轮 …</text>
+        <line x1="430" y1="572" x2="92" y2="572" class="a" marker-end="url(#m3)"/><circle cx="250" cy="572" r="3" class="dot"/><text x="260" y="566" class="s m" text-anchor="middle">TurnCompleted{t1, Completed, usage}</text>
+      </g>
+    </svg>
+    <figcaption>圆点表示同一帧同时投递到该泳道。权限交互先扇出到所有附着者，第一个有效答案赢；迟到者收到稳定错误码而不是静默失败。工具的 <code>ItemCompleted</code> 是权威事实，之前的 delta 只是现场画面。</figcaption>
+  </figure>
+</section>
+
+<section>
+  <h2><span class="no">05</span>Turn 状态机</h2>
+  <p>内核里唯一的「流程」。它只知道 provider、tool、policy、hook、contributor 这些 trait，不知道收件箱、雇员、任务提醒——那些在旧项目里都长在 575 行的 <code>query_loop</code> 内部，现在是插件注册的 contributor。</p>
+  <figure>
+    <svg viewBox="0 0 1120 560" role="img" aria-label="Turn 状态机：Idle、Opening、Assembling、Streaming、Deciding、Gating、Executing、Barrier 依次向下，Barrier 回到 Assembling；右侧 Compacting 由阈值或溢出进入并回到 Streaming；Closing 由无工具或中断进入并回到 Idle 或 Opening；每个状态旁标注插件介入点">
+      <defs>
+        <marker id="m4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="mk"/></marker>
+        <marker id="m4k" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="mkk"/></marker>
+      </defs>
+      <!-- main column -->
+      <g>
+        <rect x="225" y="20" width="150" height="40" rx="20" class="b"/><text x="300" y="45" class="t" text-anchor="middle">Idle</text>
+        <rect x="225" y="84" width="150" height="40" rx="4" class="bk"/><text x="300" y="109" class="t tk" text-anchor="middle">Opening</text>
+        <rect x="225" y="148" width="150" height="40" rx="4" class="bk"/><text x="300" y="173" class="t tk" text-anchor="middle">Assembling</text>
+        <rect x="225" y="212" width="150" height="40" rx="4" class="bk"/><text x="300" y="237" class="t tk" text-anchor="middle">Streaming</text>
+        <rect x="225" y="276" width="150" height="40" rx="4" class="bk"/><text x="300" y="301" class="t tk" text-anchor="middle">Deciding</text>
+        <rect x="225" y="340" width="150" height="40" rx="4" class="bk"/><text x="300" y="365" class="t tk" text-anchor="middle">Gating</text>
+        <rect x="225" y="404" width="150" height="40" rx="4" class="bk"/><text x="300" y="429" class="t tk" text-anchor="middle">Executing</text>
+        <rect x="225" y="468" width="150" height="40" rx="4" class="bk"/><text x="300" y="493" class="t tk" text-anchor="middle">Barrier</text>
+        <line x1="300" y1="60" x2="300" y2="82" class="a" marker-end="url(#m4)"/><text x="310" y="76" class="s m">submit</text>
+        <line x1="300" y1="124" x2="300" y2="146" class="a" marker-end="url(#m4)"/>
+        <line x1="300" y1="188" x2="300" y2="210" class="a" marker-end="url(#m4)"/><text x="310" y="204" class="s m">ModelRequest</text>
+        <line x1="300" y1="252" x2="300" y2="274" class="a" marker-end="url(#m4)"/><text x="310" y="268" class="s m">Stop</text>
+        <line x1="300" y1="316" x2="300" y2="338" class="a" marker-end="url(#m4)"/><text x="310" y="332" class="s m">有 tool_use</text>
+        <line x1="300" y1="380" x2="300" y2="402" class="a" marker-end="url(#m4)"/>
+        <line x1="300" y1="444" x2="300" y2="466" class="a" marker-end="url(#m4)"/>
+        <!-- loop back -->
+        <polyline points="225,488 150,488 150,168 223,168" class="ak" marker-end="url(#m4k)"/><text x="60" y="334" class="s">继续下一轮</text>
+      </g>
+      <!-- compacting -->
+      <g>
+        <rect x="565" y="180" width="150" height="40" rx="4" class="b"/><text x="640" y="205" class="t" text-anchor="middle">Compacting</text>
+        <line x1="375" y1="164" x2="563" y2="190" class="a" marker-end="url(#m4)"/><text x="460" y="166" class="s m" text-anchor="middle">≥ 阈值</text>
+        <line x1="375" y1="228" x2="563" y2="206" class="a" marker-end="url(#m4)"/><text x="470" y="230" class="s m" text-anchor="middle">溢出 · 仅一次</text>
+        <polyline points="640,220 640,246 377,246" class="a" marker-end="url(#m4)"/><text x="520" y="260" class="s m" text-anchor="middle">再流式一次</text>
+        <text x="640" y="170" class="s m" text-anchor="middle">on_compact · Item::Compaction · 熔断计数</text>
+      </g>
+      <!-- closing -->
+      <g>
+        <rect x="565" y="404" width="150" height="40" rx="4" class="b"/><text x="640" y="429" class="t" text-anchor="middle">Closing</text>
+        <line x1="375" y1="296" x2="563" y2="416" class="a" marker-end="url(#m4)"/><text x="450" y="348" class="s m" text-anchor="middle">无工具 · 空回复</text>
+        <line x1="375" y1="488" x2="563" y2="432" class="a" marker-end="url(#m4)"/><text x="450" y="474" class="s m" text-anchor="middle">中断 · 阻断</text>
+        <polyline points="715,424 740,424 740,40 377,40" class="a" marker-end="url(#m4)"/><text x="748" y="228" class="s m">队列空 → Idle</text><text x="748" y="244" class="s m">非空 → Opening</text>
+        <text x="640" y="462" class="s m" text-anchor="middle">恰好一次 TurnCompleted · on_turn(End)</text>
+      </g>
+      <!-- hook points -->
+      <g>
+        <text x="850" y="14" class="s">插件介入点</text>
+        <text x="850" y="108" class="s m">Hook::on_submit · on_turn(Start)</text>
+        <text x="850" y="166" class="s m">Contributors{System,RoundStart}</text><text x="850" y="180" class="s m">ContextUsage 量尺</text>
+        <text x="850" y="230" class="s m">重试阶梯 · TurnRetrying</text>
+        <text x="850" y="294" class="s m">空回复重试 1 · 续写 3</text><text x="850" y="308" class="s m">Hook::on_stop</text>
+        <text x="850" y="358" class="s m">before_tool → policy.decide</text><text x="850" y="372" class="s m">Ask ⇒ Interaction → on_verdict</text>
+        <text x="850" y="422" class="s m">并行安全批 ≤10</text><text x="850" y="436" class="s m">Interrupt::Block / Cancel</text>
+        <text x="850" y="486" class="s m">after_tool · queue.absorb</text><text x="850" y="500" class="s m">Contributors{Barrier}</text>
+      </g>
+    </svg>
+    <figcaption>橙色是内核状态；<code>Compacting</code> 与 <code>Closing</code> 是旁路。留在内核的常量只有循环机制本身：中断标记、续写提示、空回复重试 1 次、max-tokens 恢复 3 次、结果裁剪 50K、并发 10、TurnBudget。</figcaption>
+  </figure>
+</section>
+
+<section>
+  <h2><span class="no">06</span>会话 = 一条日志</h2>
+  <p>一个会话就是一份持久上下文、一条日志、一个 actor——没有「主会话里装着多个对话」。子代理是带 parent 链接的子会话；房间是一个没有模型的会话。日志之上跑两个纯 reducer：一个给客户端，一个给模型。</p>
+  <figure>
+    <svg viewBox="0 0 1000 400" role="img" aria-label="会话即日志：journal.jsonl 的一列持久帧，经 SessionState::apply 折叠成客户端视图，经 ContextView::fold 折叠成发给 provider 的消息；底部展示父会话到子会话的链接与房间作为无模型会话">
+      <defs>
+        <marker id="m5" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="mk"/></marker>
+        <marker id="m5k" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="mkk"/></marker>
+      </defs>
+      <rect x="40" y="30" width="300" height="250" rx="6" class="bk"/>
+      <text x="56" y="52" class="s m tk">sessions/&lt;ulid&gt;/journal.jsonl · 真相</text>
+      <g class="m">
+        <rect x="56" y="64" width="268" height="20" rx="2" class="b"/><text x="64" y="78" class="l">TurnStarted{t1}</text>
+        <rect x="56" y="88" width="268" height="20" rx="2" class="b"/><text x="64" y="102" class="l">ItemCompleted(User「跑测试」)</text>
+        <rect x="56" y="112" width="268" height="20" rx="2" class="b"/><text x="64" y="126" class="l">ItemStarted(ToolCall Edit)</text>
+        <rect x="56" y="136" width="268" height="20" rx="2" class="b"/><text x="64" y="150" class="l">InteractionResolved{by: gui}</text>
+        <rect x="56" y="160" width="268" height="20" rx="2" class="b"/><text x="64" y="174" class="l">ItemCompleted(ToolCall, output)</text>
+        <rect x="56" y="184" width="268" height="20" rx="2" class="b"/><text x="64" y="198" class="l">ItemCompleted(Assistant)</text>
+        <rect x="56" y="208" width="268" height="20" rx="2" class="b"/><text x="64" y="222" class="l">TurnCompleted{t1}</text>
+        <rect x="56" y="232" width="268" height="20" rx="2" class="b"/><text x="64" y="246" class="l">Compacted{boundary, kept, summary}</text>
+        <text x="64" y="270" class="s">… seq 无缝 · 只追加 · ItemDelta 不落盘</text>
+      </g>
+      <line x1="340" y1="120" x2="458" y2="94" class="ak" marker-end="url(#m5k)"/>
+      <line x1="340" y1="180" x2="458" y2="214" class="ak" marker-end="url(#m5k)"/>
+      <rect x="460" y="70" width="200" height="48" rx="4" class="b"/><text x="560" y="90" class="t m" text-anchor="middle">SessionState::apply</text><text x="560" y="108" class="s" text-anchor="middle">客户端 reducer · 内核也用它</text>
+      <rect x="460" y="190" width="200" height="48" rx="4" class="b"/><text x="560" y="210" class="t m" text-anchor="middle">ContextView::fold</text><text x="560" y="228" class="s" text-anchor="middle">模型上下文 reducer · 纯函数</text>
+      <line x1="660" y1="94" x2="738" y2="94" class="a" marker-end="url(#m5)"/>
+      <line x1="660" y1="214" x2="738" y2="214" class="a" marker-end="url(#m5)"/>
+      <rect x="740" y="70" width="220" height="48" rx="4" class="bp"/><text x="850" y="90" class="t" text-anchor="middle">快照 + tail</text><text x="850" y="108" class="s" text-anchor="middle">TUI · GUI · IM 看到同一份</text>
+      <rect x="740" y="190" width="220" height="48" rx="4" class="bp"/><text x="850" y="210" class="t m" text-anchor="middle">Vec&lt;Message&gt;</text><text x="850" y="228" class="s" text-anchor="middle">→ Provider 请求 · 每版本 golden 测试</text>
+      <text x="460" y="150" class="s">Compacted：跳过 boundary 之前的帧，保留 kept，插入 summary</text>
+      <text x="460" y="166" class="s">Rewound：排除 dropped（仍在日志里，history_generation +1）</text>
+
+      <line x1="40" y1="296" x2="960" y2="296" class="life"/>
+      <rect x="40" y="316" width="230" height="60" rx="4" class="b"/><text x="155" y="338" class="t" text-anchor="middle">父会话</text><text x="155" y="358" class="s m" text-anchor="middle">ToolCall(Agent){child_session}</text>
+      <line x1="270" y1="346" x2="298" y2="346" class="a" marker-end="url(#m5)"/><text x="284" y="338" class="s" text-anchor="middle">parent</text>
+      <rect x="300" y="316" width="220" height="60" rx="4" class="b"/><text x="410" y="338" class="t" text-anchor="middle">子会话 · 自己的 journal</text><text x="410" y="358" class="s" text-anchor="middle">事件回流到根订阅者（children=true）</text>
+      <rect x="600" y="316" width="180" height="60" rx="4" class="bs"/><text x="690" y="338" class="t" text-anchor="middle">房间 = 无模型会话</text><text x="690" y="358" class="s" text-anchor="middle">只有日志与队列 · 同一 reducer 渲染</text>
+      <g>
+        <rect x="830" y="314" width="130" height="16" rx="2" class="bp"/><text x="895" y="326" class="s" text-anchor="middle">成员 A · submit(Peer)</text>
+        <rect x="830" y="338" width="130" height="16" rx="2" class="bp"/><text x="895" y="350" class="s" text-anchor="middle">成员 B</text>
+        <rect x="830" y="362" width="130" height="16" rx="2" class="bp"/><text x="895" y="374" class="s" text-anchor="middle">成员 C</text>
+        <line x1="830" y1="322" x2="782" y2="336" class="a" marker-end="url(#m5)"/><line x1="830" y1="346" x2="782" y2="346" class="a" marker-end="url(#m5)"/><line x1="830" y1="370" x2="782" y2="356" class="a" marker-end="url(#m5)"/>
+      </g>
+    </svg>
+    <figcaption>旧项目里「一条消息」有五种形状、「转录」有五种格式；这里只剩一条日志和两个 reducer。协作层需要的内核原语只有三个：子会话、向任意会话提交（队列就是收件箱）、<code>Extension</code> 事件。</figcaption>
+  </figure>
+</section>
+
+<section>
+  <h2><span class="no">07</span>Crate 与依赖方向</h2>
+  <p>把设计里已经存在的接缝变成 Cargo 边界。旧项目是一个 148K 行的单 crate，工具层反向依赖 TUI，任何改动全量重链；这里的每条禁止边都由 CI 用 <code>cargo metadata</code> 断言。</p>
+  <figure>
+    <svg viewBox="0 0 1000 480" role="img" aria-label="Crate 依赖图：bingo 二进制依赖 core 与所有插件；核心与插件都只依赖 sdk；插件与界面到 core 的边、core 到插件的边、插件到插件的边被标为禁止">
+      <defs>
+        <marker id="m6" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="mk"/></marker>
+        <marker id="m6d" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="mkd"/></marker>
+      </defs>
+      <rect x="400" y="20" width="200" height="44" rx="4" class="b"/><text x="500" y="38" class="t m" text-anchor="middle">bingo</text><text x="500" y="56" class="s" text-anchor="middle">二进制 · 组装 Vec&lt;Box&lt;dyn Plugin&gt;&gt; · 选 Surface</text>
+      <line x1="470" y1="64" x2="150" y2="118" class="a" marker-end="url(#m6)"/>
+      <line x1="530" y1="64" x2="640" y2="98" class="a" marker-end="url(#m6)"/>
+
+      <rect x="30" y="120" width="220" height="200" rx="6" class="bk"/>
+      <text x="140" y="144" class="t m tk" text-anchor="middle">bingo-core</text>
+      <text x="140" y="166" class="s" text-anchor="middle">session actor · journal + broadcast</text>
+      <text x="140" y="184" class="s" text-anchor="middle">turn 状态机 · 权限门 · 执行器</text>
+      <text x="140" y="202" class="s" text-anchor="middle">插件宿主 · 配置分层</text>
+      <text x="140" y="220" class="s" text-anchor="middle">ContextUsage 尺子 · ContextView::fold</text>
+      <text x="140" y="250" class="s m" text-anchor="middle">deps: sdk · tokio · tokio-util</text>
+      <text x="140" y="268" class="s m" text-anchor="middle">无 reqwest · 无 ratatui · 无 rmcp</text>
+      <text x="140" y="300" class="s" text-anchor="middle">测试只用 sdk::testing 假件</text>
+
+      <rect x="290" y="100" width="680" height="220" rx="6" class="b"/>
+      <text x="306" y="122" class="t">界面与插件 · 各自独立 crate · 只依赖 sdk</text>
+      <g class="m">
+        <rect x="306" y="134" width="155" height="40" rx="4" class="bp"/><text x="383" y="158" class="l" text-anchor="middle">surface-tui</text>
+        <rect x="473" y="134" width="155" height="40" rx="4" class="bp"/><text x="550" y="158" class="l" text-anchor="middle">surface-print</text>
+        <rect x="640" y="134" width="155" height="40" rx="4" class="bp"/><text x="717" y="158" class="l" text-anchor="middle">surface-rpc</text>
+        <rect x="807" y="134" width="155" height="40" rx="4" class="bp"/><text x="884" y="158" class="l" text-anchor="middle">acp · channels</text>
+        <rect x="306" y="194" width="155" height="40" rx="4" class="bp"/><text x="383" y="218" class="l" text-anchor="middle">provider-anthropic</text>
+        <rect x="473" y="194" width="155" height="40" rx="4" class="bp"/><text x="550" y="218" class="l" text-anchor="middle">provider-openai</text>
+        <rect x="640" y="194" width="155" height="40" rx="4" class="bp"/><text x="717" y="218" class="l" text-anchor="middle">tool-fs · tool-bash</text>
+        <rect x="807" y="194" width="155" height="40" rx="4" class="bp"/><text x="884" y="218" class="l" text-anchor="middle">tool-web · mcp</text>
+        <rect x="306" y="254" width="155" height="40" rx="4" class="bp"/><text x="383" y="278" class="l" text-anchor="middle">permissions · hooks</text>
+        <rect x="473" y="254" width="155" height="40" rx="4" class="bp"/><text x="550" y="278" class="l" text-anchor="middle">store-jsonl · context</text>
+        <rect x="640" y="254" width="155" height="40" rx="4" class="bp"/><text x="717" y="278" class="l" text-anchor="middle">skills · agents</text>
+        <rect x="807" y="254" width="155" height="40" rx="4" class="bp"/><text x="884" y="278" class="l" text-anchor="middle">teams · rooms · tasks</text>
+      </g>
+      <!-- forbidden edges -->
+      <line x1="290" y1="196" x2="252" y2="196" class="ad" marker-end="url(#m6d)"/><text x="271" y="188" class="td" text-anchor="middle">✕</text>
+      <line x1="250" y1="236" x2="288" y2="236" class="ad" marker-end="url(#m6d)"/><text x="269" y="252" class="td" text-anchor="middle">✕</text>
+      <text x="140" y="342" class="td" text-anchor="middle">禁止：界面/插件 → core，core → 插件</text>
+
+      <line x1="140" y1="320" x2="140" y2="378" class="a" marker-end="url(#m6)"/>
+      <line x1="630" y1="320" x2="630" y2="378" class="a" marker-end="url(#m6)"/>
+      <rect x="30" y="380" width="940" height="50" rx="6" class="b"/>
+      <text x="500" y="400" class="t m" text-anchor="middle">bingo-sdk · 稳定 API</text>
+      <text x="500" y="420" class="s" text-anchor="middle">ids · Message/ContentPart · Event/Item · SessionState 与 reducer · Provider/Tool/Policy/Hook/Contributor/Command/Surface/Store/Compactor · HostApi · Service 注册表 · testing 假件</text>
+      <text x="500" y="462" class="s" text-anchor="middle">实线 = Cargo 依赖 · 红色虚线 ✕ = 禁止（CI 用 cargo metadata 断言） · 插件之间只经 sdk 的 Service trait 互通（提供方注册，消费方 host.service::&lt;T&gt;() 取）</text>
+    </svg>
+    <figcaption>集成测试在进程内对着 <code>bingo-core</code> 跑，不再需要起子进程；改一个工具 crate 不会重链 TUI；sdk 是外部插件作者要下载的东西，所以它不能拖着 ratatui。</figcaption>
+  </figure>
+</section>
+
+<section>
+  <h2><span class="no">08</span>稳定 trait 一览</h2>
+  <p>全部 object-safe，以 <code>Arc&lt;dyn T&gt;</code> 持有；失败关闭的默认值；扩展靠 <code>#[non_exhaustive]</code>、默认方法和 <code>meta</code>。</p>
+  <table>
+    <thead><tr><th>trait</th><th>谁实现</th><th>谁调用</th><th>关键方法</th></tr></thead>
+    <tbody>
+      <tr><td class="k">Plugin</td><td>每个插件 crate</td><td>宿主，一次</td><td><code>manifest() · register(&amp;mut Registrar) · start(host) · stop(deadline)</code></td></tr>
+      <tr><td class="k">Provider</td><td>anthropic · openai/codex · fake</td><td>turn loop · compactor</td><td><code>stream(ModelRequest, cancel) → ModelStream · capabilities · count_tokens · login</code></td></tr>
+      <tr><td class="k">Tool</td><td>fs · bash · web · Agent · MCP 适配</td><td>执行器</td><td><code>spec · traits(input) · subjects(input) · confirm · preview · call(input, ctx)</code></td></tr>
+      <tr><td class="k">PermissionPolicy</td><td>bingo-permissions（同一时刻一个）</td><td>权限门</td><td><code>decide(PolicyInput) → Allow | Deny | Ask{scope} · on_verdict</code></td></tr>
+      <tr><td class="k">Hook</td><td>shell hooks · agents · 任何想拦截的插件</td><td>状态机各点位</td><td><code>on_submit · before_tool · after_tool · on_stop · on_turn · on_compact · on_event</code></td></tr>
+      <tr><td class="k">ContextContributor</td><td>记忆 · 任务 · 团队 · 通知 · 能力块</td><td>Assembling / Barrier</td><td><code>placement() → System | RoundStart | Barrier · contribute(query) → pieces</code></td></tr>
+      <tr><td class="k">Command</td><td>各功能插件的斜杠命令</td><td>提交解析器 · 补全 · /help</td><td><code>spec · complete · run(args, cx) → Applied | View | Prompt | Action</code></td></tr>
+      <tr><td class="k">Surface</td><td>tui · print · rpc · acp · channels</td><td>bin，一次 <code>run</code></td><td><code>kind() → Exclusive | Concurrent · run(host, opts)</code></td></tr>
+      <tr><td class="k">SessionStore</td><td>store-jsonl</td><td>actor（先落盘后发布）</td><td><code>create · append(frame) · replay(since) · list · delete</code></td></tr>
+      <tr><td class="k">Compactor</td><td>bingo-context</td><td>状态机 Compacting</td><td><code>threshold(model) · compact(cx, Threshold | Overflow | Manual)</code></td></tr>
+    </tbody>
+  </table>
+  <p class="note" style="margin-top:14px">故意不做 SDK trait 的：Memory（= System contributor + <code>on_turn(End)</code> hook）、SkillSource（skills 插件导出的 service）、SubagentRuntime（= <code>spawn_session</code> + <code>submit</code> + 队列）。</p>
+</section>
+
+<section>
+  <h2><span class="no">09</span>路线图</h2>
+  <p>每个里程碑都能从终端用、都以验证收尾、plan 文件先于代码。RPC 在 TUI 之前——「GUI-ready」只有在 TUI 之前就存在一个非 TUI 客户端时才是真的；子代理与协作是 first-class，紧跟 hooks/MCP。</p>
+  <figure>
+    <svg viewBox="0 0 1000 330" role="img" aria-label="路线图：M0 到 M14 共十五个里程碑，按内核、界面、扩展、协作、深化与生态分组">
+      <g>
+        <rect x="30" y="34" width="172" height="64" rx="4" class="bk"/><text x="116" y="58" class="t tk" text-anchor="middle">M0 行走骨架</text><text x="116" y="78" class="s" text-anchor="middle">fake provider · loop · --print</text>
+        <rect x="222" y="34" width="172" height="64" rx="4" class="bk"/><text x="308" y="58" class="t tk" text-anchor="middle">M1 真 provider + 权限门</text><text x="308" y="78" class="s" text-anchor="middle">Anthropic · fs/bash · 5 模式</text>
+        <rect x="414" y="34" width="172" height="64" rx="4" class="bk"/><text x="500" y="58" class="t tk" text-anchor="middle">M2 第二 provider · 目录</text><text x="500" y="78" class="s" text-anchor="middle">OpenAI Responses · web 工具</text>
+        <rect x="606" y="34" width="172" height="64" rx="4" class="bk"/><text x="692" y="58" class="t tk" text-anchor="middle">M3 会话落盘 · resume</text><text x="692" y="78" class="s" text-anchor="middle">journal · lock · 类型化中断</text>
+        <rect x="798" y="34" width="172" height="64" rx="4" class="bk"/><text x="884" y="58" class="t tk" text-anchor="middle">M4 压缩 · 记忆</text><text x="884" y="78" class="s" text-anchor="middle">溢出阶梯 · microcompact · 记忆</text>
+
+        <rect x="30" y="124" width="172" height="64" rx="4" class="bp"/><text x="116" y="148" class="t" text-anchor="middle">M5 RPC 界面</text><text x="116" y="168" class="s" text-anchor="middle">JSON-RPC stdio + WS · schema</text>
+        <rect x="222" y="124" width="172" height="64" rx="4" class="bp"/><text x="308" y="148" class="t" text-anchor="middle">M6 TUI MVP</text><text x="308" y="168" class="s" text-anchor="middle">composer · 审批弹窗 · 斜杠</text>
+        <rect x="414" y="124" width="172" height="64" rx="4" class="b"/><text x="500" y="148" class="t" text-anchor="middle">M7 hooks · skills · MCP</text><text x="500" y="168" class="s" text-anchor="middle">三个低风险插件</text>
+        <rect x="606" y="124" width="172" height="64" rx="4" class="bs"/><text x="692" y="148" class="t" text-anchor="middle">M8 子代理 ★</text><text x="692" y="168" class="s" text-anchor="middle">Agent · 命名定义 · SendMessage</text>
+        <rect x="798" y="124" width="172" height="64" rx="4" class="bs"/><text x="884" y="148" class="t" text-anchor="middle">M9 协作 ★</text><text x="884" y="168" class="s" text-anchor="middle">团队 · 房间 · 任务</text>
+
+        <rect x="30" y="214" width="172" height="64" rx="4" class="b"/><text x="116" y="238" class="t" text-anchor="middle">M10 OAuth · Codex</text><text x="116" y="258" class="s" text-anchor="middle">PKCE · device flow</text>
+        <rect x="222" y="214" width="172" height="64" rx="4" class="b"/><text x="308" y="238" class="t" text-anchor="middle">M11 TUI 深度</text><text x="308" y="258" class="s" text-anchor="middle">inline · 图片 · 分页器 · rewind</text>
+        <rect x="414" y="214" width="172" height="64" rx="4" class="b"/><text x="500" y="238" class="t" text-anchor="middle">M12 ACP</text><text x="500" y="258" class="s" text-anchor="middle">IDE · OpenClaw · Hermes 宿主</text>
+        <rect x="606" y="214" width="172" height="64" rx="4" class="b"/><text x="692" y="238" class="t" text-anchor="middle">M13 IM 频道</text><text x="692" y="258" class="s" text-anchor="middle">Feishu 优先 · Deliverer</text>
+        <rect x="798" y="214" width="172" height="64" rx="4" class="b"/><text x="884" y="238" class="t" text-anchor="middle">M14 经验库 · 插件桥</text><text x="884" y="258" class="s" text-anchor="middle">跨进程插件（任意语言）</text>
+      </g>
+      <text x="30" y="308" class="s">橙底 = 内核与基础 · 灰底 = 界面 · 橙框 ★ = 协作 first-class · 永不：share</text>
+    </svg>
+    <figcaption>M0–M4 全部只用 <code>--print</code> / <code>--json</code> 验证；M5 起有第二个客户端；M6 起日常可用。</figcaption>
+  </figure>
+</section>
+
+<section>
+  <h2><span class="no">10</span>生态接入</h2>
+  <div class="grid2">
+    <div>
+      <p><strong>被别人驱动</strong></p>
+      <ul class="tight">
+        <li><code>bingo serve --stdio</code>：OpenClaw <code>registerCliBackend</code>、Hermes、CI 脚本；<code>--print --output-format stream-json</code> 就是它的预设。</li>
+        <li><code>bingo-acp</code>：一份有损投影，同时接入 Zed/IDE、Hermes、OpenClaw <code>acpx</code>——三个宿主换一个适配器。</li>
+        <li>WebSocket + 发布的 schema：OpenClaw 若想写原生 <code>AgentHarness</code>，其 <code>req/res/event</code> 与 JSON-RPC 只是信封改名。</li>
+      </ul>
+    </div>
+    <div>
+      <p><strong>自己托管 IM</strong></p>
+      <ul class="tight">
+        <li><code>bingo-channels</code>：会话键 <code>feishu/oc_abc/om_thread</code>，首段 = 铸造插件 id，内核强制唯一。</li>
+        <li><code>Deliverer</code> 纯 reducer：帧 → 编辑 / 分块 / typing / 审批按钮；与 TUI 用同一套帧 fixture 测。</li>
+        <li>群聊里每条用户 item 记 <code>origin.principal</code>；GUI/TUI/ACP 看到同样的「谁说的」。</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<footer>
+  待决（各在对应里程碑的 ADR 里定）：<code>async_trait</code> 与 AFIT；房间作为「无模型会话」的内核扩展（M9 前）；子会话在存储里按父目录还是平铺（M3 前）；ACP v1 的 <code>session/prompt</code> 保持打开与队列优先的映射。开源库选型另有一份调研报告。
+</footer>
+</div>
