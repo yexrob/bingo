@@ -17,3 +17,9 @@ futures.workspace = true
 async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+# `tokio::time::pause`, so a scripted delay costs a test no wall time.
+tokio = { workspace = true, features = ["test-util"] }
