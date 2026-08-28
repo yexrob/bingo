@@ -29,6 +29,9 @@ clap = { version = "4.6", features = ["derive"] }
 ulid = { version = "3.0", features = ["serde"] }
 jiff = { version = "0.2", features = ["serde"] }
 tracing = "0.1"
+# Image files reach the model as base64 parts. `simd-unsafe` is off: this
+# workspace forbids unsafe, and a Read tool is not a throughput problem.
+base64 = { version = "0.23", default-features = false, features = ["std"] }
 insta = { version = "1.48", features = ["json"] }
 tempfile = "3.27"
 
