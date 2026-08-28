@@ -18,6 +18,7 @@ confidence-threshold = 0.8
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
+allow-wildcard-paths = true
 deny = [
   { crate = "serde_yml", reason = "RUSTSEC-2025-0068: unsound and archived; use serde-saphyr" },
   { crate = "serde_yaml", reason = "deprecated by its author; use serde-saphyr" },
