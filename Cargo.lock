@@ -140,6 +140,7 @@ dependencies = [
  "async-trait",
  "bingo-sdk",
  "futures",
+ "jiff",
  "serde_json",
  "tokio",
 ]
