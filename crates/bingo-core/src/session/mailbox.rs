@@ -1,0 +1,264 @@
+//! The actor's address and the two views on it: the client port
+//! (`SessionPort`) and the turn loop's host (`TurnHost`). Writes are
+//! synchronous and never block; reads are oneshot round trips.
+
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use bingo_sdk::*;
+use tokio::sync::{mpsc, oneshot};
+
+use crate::turn::{TurnHost, TurnOutcome};
+
+pub(crate) enum Msg {
+    Submit {
+        intent: IntentId,
+        input: Input,
+    },
+    Interrupt {
+        intent: IntentId,
+        scope: InterruptScope,
+    },
+    Answer {
+        intent: IntentId,
+        interaction: InteractionId,
+        answer: Answer,
+        activation: Activation,
+        who: ClientIdentity,
+    },
+    Attach {
+        reply: oneshot::Sender<(SessionState, FrameStream)>,
+    },
+    EventsSince {
+        since: Seq,
+        reply: oneshot::Sender<FrameStream>,
+    },
+    History {
+        page: HistoryPage,
+        reply: oneshot::Sender<HistoryChunk>,
+    },
+    Summary {
+        reply: oneshot::Sender<SessionSummary>,
+    },
+    Emit {
+        turn: TurnId,
+        event: Box<Event>,
+    },
+    Ask {
+        item: Option<ItemId>,
+        kind: InteractionKind,
+        answers: Vec<AnswerSpec>,
+        reply: oneshot::Sender<Result<Answer, KernelError>>,
+    },
+    Absorb {
+        turn: TurnId,
+        reply: oneshot::Sender<Vec<(IntentId, Input)>>,
+    },
+    TurnFinished {
+        turn: TurnId,
+        outcome: Result<TurnOutcome, String>,
+    },
+    Record {
+        body: ItemBody,
+        reply: oneshot::Sender<ItemId>,
+    },
+    Progress {
+        item: ItemId,
+        tail: String,
+    },
+    Close {
+        reason: CloseReason,
+    },
+}
+
+/// The actor's address. Cheap to clone; every write is synchronous and
+/// never blocks, every read is a oneshot round trip.
+#[derive(Clone)]
+pub struct Mailbox {
+    id: SessionId,
+    tx: mpsc::UnboundedSender<Msg>,
+}
+
+impl Mailbox {
+    pub(super) fn new(id: SessionId, tx: mpsc::UnboundedSender<Msg>) -> Self {
+        Self { id, tx }
+    }
+}
+
+impl std::fmt::Debug for Mailbox {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Mailbox({})", self.id)
+    }
+}
+
+fn gone() -> KernelError {
+    KernelError::new(ErrorCode::SessionClosed, "the session actor is gone")
+}
+
+impl Mailbox {
+    pub fn id(&self) -> &SessionId {
+        &self.id
+    }
+
+    pub(super) fn send(&self, msg: Msg) {
+        // A closed actor drops writes; the reply channel, where there is one,
+        // reports it. Fire-and-forget writes have `IntentAck` for that.
+        let _ = self.tx.send(msg);
+    }
+
+    pub(super) async fn call<T>(
+        &self,
+        make: impl FnOnce(oneshot::Sender<T>) -> Msg,
+    ) -> Result<T, KernelError> {
+        let (tx, rx) = oneshot::channel();
+        self.send(make(tx));
+        rx.await.map_err(|_| gone())
+    }
+
+    pub fn submit(&self, intent: IntentId, input: Input) {
+        self.send(Msg::Submit { intent, input });
+    }
+
+    pub fn interrupt(&self, intent: IntentId, scope: InterruptScope) {
+        self.send(Msg::Interrupt { intent, scope });
+    }
+
+    pub fn answer(
+        &self,
+        intent: IntentId,
+        interaction: InteractionId,
+        answer: Answer,
+        activation: Activation,
+        who: ClientIdentity,
+    ) {
+        self.send(Msg::Answer {
+            intent,
+            interaction,
+            answer,
+            activation,
+            who,
+        });
+    }
+
+    /// A snapshot and every frame after it.
+    pub async fn attach(&self) -> Result<(SessionState, FrameStream), KernelError> {
+        self.call(|reply| Msg::Attach { reply }).await
+    }
+
+    pub async fn events_since(&self, since: Seq) -> Result<FrameStream, KernelError> {
+        self.call(|reply| Msg::EventsSince { since, reply }).await
+    }
+
+    pub async fn history(&self, page: HistoryPage) -> Result<HistoryChunk, KernelError> {
+        self.call(|reply| Msg::History { page, reply }).await
+    }
+
+    pub async fn summary(&self) -> Result<SessionSummary, KernelError> {
+        self.call(|reply| Msg::Summary { reply }).await
+    }
+
+    /// Write one completed item outside the turn loop (a background result).
+    pub async fn record(&self, body: ItemBody) -> Result<ItemId, KernelError> {
+        self.call(|reply| Msg::Record { body, reply }).await
+    }
+
+    pub fn progress(&self, item: ItemId, tail: String) {
+        self.send(Msg::Progress { item, tail });
+    }
+
+    /// Open an interaction on the running turn and wait for its answer.
+    pub async fn ask(
+        &self,
+        item: Option<ItemId>,
+        kind: InteractionKind,
+        answers: Vec<AnswerSpec>,
+    ) -> Result<Answer, KernelError> {
+        self.call(|reply| Msg::Ask {
+            item,
+            kind,
+            answers,
+            reply,
+        })
+        .await?
+    }
+
+    pub fn close(&self, reason: CloseReason) {
+        self.send(Msg::Close { reason });
+    }
+
+    /// The client-facing port, stamped with who is holding it.
+    pub fn port(&self, who: ClientIdentity) -> SessionHandle {
+        SessionHandle(Arc::new(Port {
+            mailbox: self.clone(),
+            who,
+        }))
+    }
+}
+
+struct Port {
+    mailbox: Mailbox,
+    who: ClientIdentity,
+}
+
+#[async_trait]
+impl SessionPort for Port {
+    fn submit(&self, intent: IntentId, input: Input) {
+        self.mailbox.submit(intent, input);
+    }
+
+    fn interrupt(&self, intent: IntentId, scope: InterruptScope) {
+        self.mailbox.interrupt(intent, scope);
+    }
+
+    fn answer(
+        &self,
+        intent: IntentId,
+        interaction: InteractionId,
+        answer: Answer,
+        activation: Activation,
+    ) {
+        self.mailbox
+            .answer(intent, interaction, answer, activation, self.who.clone());
+    }
+
+    async fn history(&self, page: HistoryPage) -> Result<HistoryChunk, KernelError> {
+        self.mailbox.history(page).await
+    }
+
+    async fn events_since(&self, since: Seq) -> Result<FrameStream, KernelError> {
+        self.mailbox.events_since(since).await
+    }
+}
+
+/// The turn loop's view of the actor: publish, ask, absorb — all by mail.
+pub(super) struct TurnMail {
+    pub(super) mailbox: Mailbox,
+    pub(super) turn: TurnId,
+}
+
+#[async_trait]
+impl TurnHost for TurnMail {
+    fn emit(&self, event: Event) {
+        self.mailbox.send(Msg::Emit {
+            turn: self.turn.clone(),
+            event: Box::new(event),
+        });
+    }
+
+    async fn ask(
+        &self,
+        item: Option<ItemId>,
+        kind: InteractionKind,
+        answers: Vec<AnswerSpec>,
+    ) -> Result<Answer, KernelError> {
+        self.mailbox.ask(item, kind, answers).await
+    }
+
+    async fn absorb(&self) -> Vec<(IntentId, Input)> {
+        let turn = self.turn.clone();
+        self.mailbox
+            .call(|reply| Msg::Absorb { turn, reply })
+            .await
+            .unwrap_or_default()
+    }
+}
