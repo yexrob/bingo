@@ -1,0 +1,28 @@
+# Architecture
+
+One sentence: a minimal kernel — session actor, ordered event journal (the event hub), turn state machine, permission gate, plugin host — with everything else as plugin crates behind stable traits; every surface is a client of one submission entry and one subscription.
+
+```
+bingo (bin)                     composes Vec<Box<dyn Plugin>>, picks a Surface
+├── bingo-core                  kernel: session actor · journal + broadcast · turn state machine
+│                               · permission gate · tool executor · plugin host · ContextUsage ruler
+│                               · ContextView::fold (journal → provider messages)
+├── plugins (each its own crate, depends on bingo-sdk only)
+│   providers   bingo-provider-fake · -anthropic · -openai · bingo-auth-oauth
+│   tools       bingo-tool-fs · bingo-tool-bash · bingo-tool-web · bingo-mcp · bingo-agents
+│   policy      bingo-permissions · bingo-hooks-shell
+│   session     bingo-store-jsonl (journal + index) · bingo-context (compactor + memory)
+│   features    bingo-skills · bingo-teams · bingo-rooms · bingo-tasks · bingo-experience
+│   surfaces    bingo-surface-print · bingo-surface-rpc · bingo-surface-tui · bingo-acp · bingo-channels
+└── bingo-sdk                   stable API: ids · Message/ContentPart · Frame/Event/Item · SessionState + apply
+                                · traits (Plugin, Provider, Tool, PermissionPolicy, Hook, ContextContributor,
+                                  Command, Surface, SessionStore, Compactor) · HostApi · Service registry · testing fakes
+```
+
+Dependency direction is strictly downward; the forbidden edges are listed in ADR-0001 and asserted by `scripts/check_discipline.sh`.
+
+Data flow for one turn: a client calls `SessionHandle::submit(intent, input)` (synchronous, returns nothing) → the session actor appends a user `Item`, mints `seq`, and hands `Run::Turn` to the turn state machine → the loop asks contributors for context, streams the provider, folds `ModelEvent`s into `Item`s, gates each tool call through hooks and the policy (an `Interaction` when a person must answer), executes tools, absorbs queued steering at the barrier, and closes with exactly one `TurnCompleted` → every frame is journaled first and then broadcast to each subscriber's bounded channel → every client folds frames with `SessionState::apply`.
+
+Sessions are the only conversational noun. A sub-agent is a session with a `parent` link; a room is a session without a model. Both render through the same reducer and the same draw code.
+
+Where to read next: `docs/adr/` for the decisions, `docs/plans/` for what is being built now, `docs/design/` for the full proposals and the research behind the library choices.
