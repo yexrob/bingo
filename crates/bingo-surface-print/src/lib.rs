@@ -130,9 +130,9 @@ pub(crate) async fn drive(
                     decide(interaction, console, err).map_err(stdio_error)?;
                 handle.answer(IntentId::mint(), interaction.id.clone(), answer, activation);
             }
-            // The reducer has already moved past the gap, so the missed frames
-            // are stale by definition; pick the live stream up after them.
-            Event::Lagged { to, .. } => events = handle.events_since(*to).await?,
+            // The lagged stream ends at its marker; the reducer left `seq` at
+            // the last frame it applied, so replay from there fills the gap.
+            Event::Lagged { .. } => events = handle.events_since(snapshot.seq).await?,
             Event::TurnCompleted { status, .. } => return Ok(exit_for(status)),
             Event::SessionClosed { reason } => {
                 return closed(&close_message(reason), err);
@@ -475,8 +475,15 @@ pub(crate) mod tests {
             })
         }
 
+        /// The journal replay: durable frames only, like the kernel's.
         async fn events_since(&self, since: Seq) -> Result<FrameStream, KernelError> {
-            Ok(self.stream(since))
+            let frames: Vec<_> = self
+                .frames
+                .iter()
+                .filter(|f| f.seq > since && f.event.is_durable())
+                .cloned()
+                .collect();
+            Ok(Box::pin(futures::stream::iter(frames)))
         }
     }
 
@@ -855,11 +862,13 @@ pub(crate) mod tests {
         assert_eq!(run.session.answers()[0].1, Answer::Cancel);
     }
 
+    /// The live stream ends at the marker; the surface re-reads the journal
+    /// from the last frame it applied and finds the completion there.
     #[tokio::test]
     async fn a_lag_marker_re_reads_the_journal_and_the_turn_still_ends() {
         let run = headless(vec![
             frame(
-                1,
+                3,
                 Event::Lagged {
                     from: Seq(2),
                     to: Seq(3),

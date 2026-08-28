@@ -126,7 +126,23 @@ impl Renderer {
                 self.end_line(out)?;
                 self.failure(event, err)?;
             }
-            _ => {}
+            // Deliberately silent: state a headless run has no use for.
+            Event::ItemDelta { .. }
+            | Event::ItemUpdated { .. }
+            | Event::SessionUpdated { .. }
+            | Event::TurnStarted { .. }
+            | Event::TurnUsage { .. }
+            | Event::QueueChanged { .. }
+            | Event::InteractionOpened { .. }
+            | Event::InteractionResolved { .. }
+            | Event::InteractionCancelled { .. }
+            | Event::IntentAck { .. }
+            | Event::Compacted { .. }
+            | Event::Rewound { .. }
+            | Event::ConfigChanged { .. }
+            | Event::CatalogChanged { .. }
+            | Event::Extension { .. }
+            | Event::Lagged { .. } => {}
         }
         Ok(())
     }
@@ -160,7 +176,19 @@ impl Renderer {
                 let ms = duration_ms.unwrap_or(0);
                 self.diagnostic(&format!("[tool] {name} {verdict} ({ms}ms)"), err)?;
             }
-            _ => {}
+            ItemBody::Notice { code, text, .. } => {
+                self.diagnostic(&format!("[notice] {code} {text}"), err)?;
+            }
+            ItemBody::Interruption { marker } => self.diagnostic(marker, err)?,
+            // Not part of a headless transcript.
+            ItemBody::User { .. }
+            | ItemBody::Reasoning { .. }
+            | ItemBody::Action { .. }
+            | ItemBody::Compaction { .. }
+            | ItemBody::Rewind { .. }
+            | ItemBody::QuestionAnswer { .. }
+            | ItemBody::PermissionReceipt { .. }
+            | ItemBody::Asset { .. } => {}
         }
         Ok(())
     }
