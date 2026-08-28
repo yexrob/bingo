@@ -52,8 +52,9 @@ while IFS= read -r f; do
 done < <(find crates -name '*.rs' -not -path '*/target/*')
 
 # 4. Feature nouns must not appear in the kernel or sdk (identifiers only, case-insensitive).
-if grep -rEiw 'room|team|hire|experience' crates/bingo-sdk/src crates/bingo-core/src --include='*.rs' -l 2>/dev/null | grep -q .; then
-  say "feature noun found in kernel/sdk:"; grep -rEinw 'room|team|hire|experience' crates/bingo-sdk/src crates/bingo-core/src --include='*.rs' | head; fail=1
+nouns=$(grep -rEinw 'room|team|hire|experience' crates/bingo-sdk/src crates/bingo-core/src --include='*.rs' 2>/dev/null | grep -vE '^[^:]+:[0-9]+:\s*//' || true)
+if [ -n "$nouns" ]; then
+  say "feature noun found in kernel/sdk code:"; say "$nouns" | head; fail=1
 fi
 
 # 5. Struct field count ≤ 16 and inherent impl spread ≤ 2 files per type (best effort, grep-based).
