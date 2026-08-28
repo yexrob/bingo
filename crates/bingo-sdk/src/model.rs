@@ -221,7 +221,6 @@ pub struct ModelCapabilities {
 /// Provider stream events. Never published; the accumulator folds them into items.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "camelCase")]
-#[non_exhaustive]
 pub enum ModelEvent {
     StreamStart {
         #[serde(default)]
@@ -288,7 +287,6 @@ pub type ModelStream = Pin<Box<dyn Stream<Item = Result<ModelEvent, ProviderErro
 
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "camelCase")]
-#[non_exhaustive]
 pub enum ProviderError {
     #[error("authentication required: {message}")]
     Auth { message: String },

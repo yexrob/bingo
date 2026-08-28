@@ -81,7 +81,6 @@ pub trait Plugin: Send + Sync + 'static {
 
 /// What a plugin hands the host. One enum so the in-process path and a future
 /// out-of-process bridge share one representation.
-#[non_exhaustive]
 pub enum Contribution {
     Tool(Arc<dyn Tool>),
     Provider(Arc<dyn Provider>),

@@ -13,7 +13,6 @@ use crate::model::ModelCapabilities;
 use crate::provider::Provider;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[non_exhaustive]
 pub enum CompactReason {
     Threshold,
     Overflow { message: String },

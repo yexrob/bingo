@@ -23,7 +23,6 @@ pub struct PolicyInput<'a> {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "camelCase")]
-#[non_exhaustive]
 pub enum Decision {
     Allow {
         reason: Reason,
@@ -41,7 +40,6 @@ pub enum Decision {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "camelCase")]
-#[non_exhaustive]
 pub enum Reason {
     Rule { rule: String },
     Mode { mode: String },

@@ -20,7 +20,6 @@ use crate::model::ToolSpec;
 /// What the gate and the executor may assume about a call. Every default is
 /// the unsafe reading: not concurrency-safe, not read-only, finish on interrupt.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[non_exhaustive]
 pub struct ToolTraits {
     pub concurrency_safe: bool,
     pub read_only: bool,
@@ -96,7 +95,6 @@ pub enum ResultLimit {
 /// What a permission rule may match against.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "camelCase")]
-#[non_exhaustive]
 pub enum Subject {
     Path { path: PathBuf },
     Command { command: String },

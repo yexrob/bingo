@@ -63,7 +63,6 @@ impl std::fmt::Debug for CommandContext {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "camelCase")]
-#[non_exhaustive]
 pub enum CommandOutcome {
     Applied {
         #[serde(default, skip_serializing_if = "Option::is_none")]

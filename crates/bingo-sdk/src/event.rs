@@ -41,7 +41,6 @@ pub struct Frame {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "camelCase")]
-#[non_exhaustive]
 pub enum Event {
     SessionUpdated {
         summary: SessionSummary,
@@ -308,7 +307,6 @@ impl ItemStatus {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "camelCase")]
-#[non_exhaustive]
 pub enum ItemBody {
     User {
         parts: Vec<ContentPart>,
@@ -460,7 +458,6 @@ pub struct Interaction {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "camelCase")]
-#[non_exhaustive]
 pub enum InteractionKind {
     Permission {
         tool: String,

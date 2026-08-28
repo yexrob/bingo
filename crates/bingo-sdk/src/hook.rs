@@ -30,7 +30,6 @@ pub struct HookMatcher {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[non_exhaustive]
 pub enum HookOutcome {
     Continue,
     Deny {
