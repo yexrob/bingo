@@ -2,6 +2,9 @@
 //! frames) and nothing else; every diagnostic is on stderr; a failure is
 //! one `[error] code=… msg=…` line and a non-zero exit.
 
+// An integration test is not `cfg(test)`; the test-only lint relief is spelled out.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use std::io::Write;
 use std::process::{Command, Output, Stdio};
 
