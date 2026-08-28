@@ -21,3 +21,6 @@ serde_json.workspace = true
 serde.workspace = true
 jiff.workspace = true
 async-trait.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
