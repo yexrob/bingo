@@ -10,11 +10,11 @@ license = "MIT"
 repository = "https://github.com/yexrob/bingo"
 
 [workspace.dependencies]
-bingo-sdk = { path = "crates/bingo-sdk" }
-bingo-core = { path = "crates/bingo-core" }
-bingo-provider-fake = { path = "crates/bingo-provider-fake" }
-bingo-tool-fs = { path = "crates/bingo-tool-fs" }
-bingo-surface-print = { path = "crates/bingo-surface-print" }
+bingo-sdk = { path = "crates/bingo-sdk", version = "0.1.0" }
+bingo-core = { path = "crates/bingo-core", version = "0.1.0" }
+bingo-provider-fake = { path = "crates/bingo-provider-fake", version = "0.1.0" }
+bingo-tool-fs = { path = "crates/bingo-tool-fs", version = "0.1.0" }
+bingo-surface-print = { path = "crates/bingo-surface-print", version = "0.1.0" }
 
 tokio = { version = "1.53", default-features = false, features = ["rt-multi-thread", "macros", "sync", "time", "io-util", "io-std", "fs", "process", "signal"] }
 tokio-util = { version = "0.7.19", features = ["codec", "rt"] }
