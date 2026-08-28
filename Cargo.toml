@@ -1,0 +1,50 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96"
+license = "MIT"
+repository = "https://github.com/yexrob/bingo"
+
+[workspace.dependencies]
+bingo-sdk = { path = "crates/bingo-sdk" }
+bingo-core = { path = "crates/bingo-core" }
+bingo-provider-fake = { path = "crates/bingo-provider-fake" }
+bingo-tool-fs = { path = "crates/bingo-tool-fs" }
+bingo-surface-print = { path = "crates/bingo-surface-print" }
+
+tokio = { version = "1.53", default-features = false, features = ["rt-multi-thread", "macros", "sync", "time", "io-util", "io-std", "fs", "process", "signal"] }
+tokio-util = { version = "0.7.19", features = ["codec", "rt"] }
+futures = "0.3.34"
+async-trait = "0.1.92"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = { version = "1.0", features = ["preserve_order"] }
+schemars = "1.2"
+thiserror = "2.0"
+anyhow = "1.0"
+clap = { version = "4.6", features = ["derive"] }
+ulid = { version = "3.0", features = ["serde"] }
+jiff = { version = "0.2", features = ["serde"] }
+tracing = "0.1"
+insta = { version = "1.48", features = ["json"] }
+tempfile = "3.27"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+dbg_macro = "deny"
+todo = "deny"
+
+[profile.dev]
+debug = "line-tables-only"
+split-debuginfo = "unpacked"
+
+[profile.dev.package."*"]
+debug = false

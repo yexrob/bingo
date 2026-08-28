@@ -1,0 +1,18 @@
+[package]
+name = "bingo-surface-print"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Headless --print surface plugin for bingo"
+
+[lints]
+workspace = true
+
+[dependencies]
+bingo-sdk.workspace = true
+tokio.workspace = true
+futures.workspace = true
+async-trait.workspace = true
+serde_json.workspace = true

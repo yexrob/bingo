@@ -1,0 +1,21 @@
+[package]
+name = "bingo"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "bingo: a local coding-agent harness"
+
+[lints]
+workspace = true
+
+[dependencies]
+bingo-sdk.workspace = true
+bingo-core.workspace = true
+bingo-provider-fake.workspace = true
+bingo-tool-fs.workspace = true
+bingo-surface-print.workspace = true
+clap.workspace = true
+tokio.workspace = true
+anyhow.workspace = true
