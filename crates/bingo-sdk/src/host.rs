@@ -1,0 +1,295 @@
+//! The client contract. In-process surfaces call these traits directly; the
+//! JSON-RPC surface exposes them one-to-one. Writes are synchronous and
+//! return nothing; outcomes arrive as `IntentAck` frames.
+
+use std::any::Any;
+use std::path::PathBuf;
+use std::pin::Pin;
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use futures::Stream;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+use crate::error::KernelError;
+use crate::event::*;
+use crate::ids::{IntentId, InteractionId, ItemId, Seq, SessionId, TurnId};
+use crate::state::SessionState;
+
+pub type FrameStream = Pin<Box<dyn Stream<Item = Frame> + Send>>;
+pub type GatewayStream = Pin<Box<dyn Stream<Item = GatewayEvent> + Send>>;
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ClientIdentity {
+    pub name: String,
+    pub surface: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionSpec {
+    pub cwd: PathBuf,
+    /// Routing key, `owner/path`, unique across the store; the first segment is the minting plugin.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<ParentLink>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_extra: Option<String>,
+    /// Restrict the tool set by name; `None` means every registered tool.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tools: Option<Vec<String>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum SessionSelector {
+    Create { spec: SessionSpec },
+    ById { id: SessionId },
+    ByKey { key: String },
+    Latest { cwd: PathBuf },
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionFilter {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<SessionId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
+}
+
+/// A typed action a client asks for (GUI buttons, hosts); the kernel dispatches it to a command.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct Action {
+    pub name: String,
+    #[serde(default)]
+    pub args: Value,
+}
+
+/// The one submission entry. The kernel parses `/`, `!` and `@` in text and
+/// decides turn, queue, steer or deliver; a client never chooses.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum Input {
+    Text {
+        text: String,
+        #[serde(default)]
+        attachments: Vec<String>,
+        origin: Origin,
+    },
+    Action {
+        action: Action,
+    },
+}
+
+impl Input {
+    pub fn text(text: impl Into<String>, origin: Origin) -> Self {
+        Input::Text {
+            text: text.into(),
+            attachments: Vec::new(),
+            origin,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum InterruptScope {
+    Turn {
+        turn: TurnId,
+    },
+    /// Whatever is running now.
+    Head,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoryPage {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before: Option<ItemId>,
+    #[serde(default)]
+    pub limit: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoryChunk {
+    pub items: Vec<Item>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next: Option<ItemId>,
+    pub generation: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum CatalogKind {
+    Models,
+    Providers,
+    Tools,
+    Commands,
+    Skills,
+    Plugins,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct CatalogEntry {
+    pub id: String,
+    pub label: String,
+    #[serde(default)]
+    pub meta: Value,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct Catalog {
+    pub kind: CatalogKind,
+    pub entries: Vec<CatalogEntry>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum GatewayEvent {
+    SessionCreated { summary: Box<SessionSummary> },
+    SessionRemoved { session: SessionId },
+    CatalogChanged { kind: CatalogKind },
+}
+
+/// Ask a person something through the interaction registry.
+#[async_trait]
+pub trait Prompter: Send + Sync {
+    async fn ask(
+        &self,
+        kind: InteractionKind,
+        answers: Vec<AnswerSpec>,
+    ) -> Result<Answer, KernelError>;
+}
+
+/// The actor's mailbox as a client sees it.
+#[async_trait]
+pub trait SessionPort: Send + Sync {
+    fn submit(&self, intent: IntentId, input: Input);
+    fn interrupt(&self, intent: IntentId, scope: InterruptScope);
+    fn answer(
+        &self,
+        intent: IntentId,
+        interaction: InteractionId,
+        answer: Answer,
+        activation: Activation,
+    );
+    async fn history(&self, page: HistoryPage) -> Result<HistoryChunk, KernelError>;
+    /// Frames with `seq > since`, then live.
+    async fn events_since(&self, since: Seq) -> Result<FrameStream, KernelError>;
+}
+
+#[derive(Clone)]
+pub struct SessionHandle(pub Arc<dyn SessionPort>);
+
+impl std::fmt::Debug for SessionHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SessionHandle")
+    }
+}
+
+impl SessionHandle {
+    pub fn submit(&self, intent: IntentId, input: Input) {
+        self.0.submit(intent, input)
+    }
+
+    pub fn interrupt(&self, intent: IntentId, scope: InterruptScope) {
+        self.0.interrupt(intent, scope)
+    }
+
+    pub fn answer(
+        &self,
+        intent: IntentId,
+        interaction: InteractionId,
+        answer: Answer,
+        activation: Activation,
+    ) {
+        self.0.answer(intent, interaction, answer, activation)
+    }
+
+    pub async fn history(&self, page: HistoryPage) -> Result<HistoryChunk, KernelError> {
+        self.0.history(page).await
+    }
+
+    pub async fn events_since(&self, since: Seq) -> Result<FrameStream, KernelError> {
+        self.0.events_since(since).await
+    }
+}
+
+/// What `open` returns: a snapshot cut and every frame after it.
+pub struct Attachment {
+    pub session: SessionId,
+    pub snapshot: SessionState,
+    pub events: FrameStream,
+    pub handle: SessionHandle,
+}
+
+impl std::fmt::Debug for Attachment {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Attachment")
+            .field("session", &self.session)
+            .field("seq", &self.snapshot.seq)
+            .finish_non_exhaustive()
+    }
+}
+
+#[async_trait]
+pub trait HostApi: Send + Sync {
+    async fn sessions(&self, filter: SessionFilter) -> Result<Vec<SessionSummary>, KernelError>;
+
+    async fn open(
+        &self,
+        selector: SessionSelector,
+        who: ClientIdentity,
+    ) -> Result<Attachment, KernelError>;
+
+    /// Detach this client; the session keeps running.
+    async fn close(&self, session: &SessionId, reason: CloseReason) -> Result<(), KernelError>;
+
+    async fn delete(&self, session: &SessionId) -> Result<(), KernelError>;
+
+    fn catalog(&self, kind: CatalogKind) -> Catalog;
+
+    fn gateway_events(&self) -> GatewayStream;
+
+    fn service_any(&self, key: &str) -> Option<Arc<dyn Any + Send + Sync>>;
+}
+
+#[derive(Clone)]
+pub struct HostHandle(pub Arc<dyn HostApi>);
+
+impl std::fmt::Debug for HostHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("HostHandle")
+    }
+}
+
+impl HostHandle {
+    pub fn service<T: Any + Send + Sync>(&self, key: &str) -> Option<Arc<T>> {
+        self.0.service_any(key).and_then(|v| v.downcast::<T>().ok())
+    }
+}
+
+impl std::ops::Deref for HostHandle {
+    type Target = dyn HostApi;
+
+    fn deref(&self) -> &Self::Target {
+        self.0.as_ref()
+    }
+}
