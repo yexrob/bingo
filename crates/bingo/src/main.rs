@@ -20,12 +20,15 @@ use bingo_surface_print::{PrintPlugin, error_report, notice_report};
 use bingo_tool_bash::BashPlugin;
 use bingo_tool_fs::FsPlugin;
 use bingo_tool_web::WebPlugin;
-use clap::{Parser, ValueEnum};
+use clap::{Parser, Subcommand, ValueEnum};
 use serde_json::{Map, Value, json};
 
 #[derive(Parser, Debug)]
 #[command(name = "bingo", version, about = "A local coding-agent harness")]
 struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
+
     /// The prompt. Read from stdin when absent.
     prompt: Option<String>,
 
@@ -82,6 +85,16 @@ struct Cli {
     max_turns: Option<u32>,
 }
 
+#[derive(Subcommand, Debug)]
+enum Command {
+    /// Serve sessions over JSON-RPC to one client (ADR-0007).
+    Serve {
+        /// One client on stdin and stdout, one JSON-RPC message per line.
+        #[arg(long)]
+        stdio: bool,
+    },
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 enum OutputFormat {
     Text,
@@ -111,7 +124,8 @@ async fn main() -> ExitCode {
 }
 
 async fn run(cli: Cli) -> Result<i32, KernelError> {
-    if !cli.print {
+    let serve = cli.command.as_ref().map(|Command::Serve { stdio }| *stdio);
+    if serve.is_none() && !cli.print {
         return Err(KernelError::new(
             ErrorCode::InvalidInput,
             "the interactive interface is not built yet; run with --print",
@@ -126,12 +140,38 @@ async fn run(cli: Cli) -> Result<i32, KernelError> {
         let human = std::io::IsTerminal::is_terminal(&std::io::stderr());
         eprintln!("{}", notice_report(&code, &text, human));
     }
+    let (id, options) = match serve {
+        Some(stdio) => ("rpc", serve_options(stdio, cwd)?),
+        None => ("print", surface_options(cli, cwd)),
+    };
     let surface = host
-        .surface("print")
-        .ok_or_else(|| KernelError::new(ErrorCode::Internal, "no print surface"))?;
-    let exit = surface.run(host.handle(), surface_options(cli, cwd)).await;
+        .surface(id)
+        .ok_or_else(|| KernelError::new(ErrorCode::Internal, format!("no {id} surface")))?;
+    let exit = surface.run(host.handle(), options).await;
     host.shutdown().await;
     exit.map(|e| e.code)
+}
+
+/// The server has no prompt and no session of its own; the selector is a
+/// placeholder the surface ignores (ADR-0007).
+fn serve_options(stdio: bool, cwd: PathBuf) -> Result<SurfaceOptions, KernelError> {
+    if !stdio {
+        return Err(KernelError::new(
+            ErrorCode::InvalidInput,
+            "serve needs a transport: --stdio is the one there is",
+        ));
+    }
+    Ok(SurfaceOptions {
+        selector: SessionSelector::Create {
+            spec: SessionSpec {
+                cwd: cwd.clone(),
+                ..SessionSpec::default()
+            },
+        },
+        cwd,
+        prompt: None,
+        args: json!({ "transport": "stdio" }),
+    })
 }
 
 fn working_dir(flag: Option<&std::path::Path>) -> Result<PathBuf, KernelError> {
