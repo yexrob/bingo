@@ -17,7 +17,7 @@ A GUI, an IDE, an IM gateway and a remote TUI all need to drive the kernel from 
 
 ## Consequences
 
-- No sdk change: the wire is the sdk. A surface crate may not declare an enum whose name ends in `Event` (`scripts/check_discipline.sh`).
+- The wire is the sdk, and building it found two things the sdk had wrong: variant fields of its tagged enums reached the wire in snake_case while struct fields were camelCase (fixed with `rename_all_fields`; the journal keeps version 1 — no journal had left a developer's machine), and `HostApi::catalog` was synchronous, which a remote implementation cannot honour (now `async` and fallible). Touched: `bingo-core`, `bingo-surface-print`, `bingo-surface-rpc`. A surface crate may not declare an enum whose name ends in `Event` (`scripts/check_discipline.sh`).
 - A host can reconstruct any client view from the snapshot and the frames; `session/history` exists only for paging a long transcript.
 - One stdio server serves one client; two processes on one session are refused by the store's lock (ADR-0005). Concurrent clients of one server come with the WebSocket transport.
 - `bingo serve` is the first surface with no prompt and no session of its own; `SurfaceOptions.selector` is ignored by it.

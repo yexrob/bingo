@@ -565,7 +565,7 @@ async fn the_remote_catalog_answers_on_a_multi_threaded_runtime() {
         let kernel = kernel.clone();
         move || {
             tokio::runtime::Handle::current()
-                .block_on(async { kernel.catalog_async(CatalogKind::Tools).await })
+                .block_on(async { kernel.catalog(CatalogKind::Tools).await })
         }
     })
     .await

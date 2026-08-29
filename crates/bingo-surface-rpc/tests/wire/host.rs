@@ -236,15 +236,15 @@ impl HostApi for TestHost {
         Ok(())
     }
 
-    fn catalog(&self, kind: CatalogKind) -> Catalog {
-        Catalog {
+    async fn catalog(&self, kind: CatalogKind) -> Result<Catalog, KernelError> {
+        Ok(Catalog {
             kind,
             entries: vec![CatalogEntry {
                 id: "fake".into(),
                 label: "the fake provider".into(),
                 meta: Value::Null,
             }],
-        }
+        })
     }
 
     fn gateway_events(&self) -> GatewayStream {

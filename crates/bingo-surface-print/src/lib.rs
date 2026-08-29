@@ -97,7 +97,7 @@ pub(crate) async fn drive(
     err: &mut (dyn Write + Send),
 ) -> Result<Exit, KernelError> {
     let human = console.human();
-    let mut renderer = Renderer::new(Mode::from_args(&opts.args), human, tool_names(host));
+    let mut renderer = Renderer::new(Mode::from_args(&opts.args), human, tool_names(host).await);
     let prompt = prompt_from(opts.prompt, console)?;
 
     let Attachment {
@@ -142,12 +142,13 @@ pub(crate) async fn drive(
 
 /// The tools the stream-json preamble advertises; the host is the only place
 /// that knows them.
-fn tool_names(host: &HostHandle) -> Vec<String> {
+/// The tool names the init line lists; a catalogue that cannot be read
+/// lists none rather than stopping the run.
+async fn tool_names(host: &HostHandle) -> Vec<String> {
     host.catalog(CatalogKind::Tools)
-        .entries
-        .into_iter()
-        .map(|entry| entry.id)
-        .collect()
+        .await
+        .map(|c| c.entries.into_iter().map(|entry| entry.id).collect())
+        .unwrap_or_default()
 }
 
 /// The prompt from the command line, or the whole of stdin when there is none.
@@ -648,15 +649,15 @@ pub(crate) mod tests {
             Ok(())
         }
 
-        fn catalog(&self, kind: CatalogKind) -> Catalog {
-            Catalog {
+        async fn catalog(&self, kind: CatalogKind) -> Result<Catalog, KernelError> {
+            Ok(Catalog {
                 kind,
                 entries: vec![CatalogEntry {
                     id: "Read".into(),
                     label: "Read".into(),
                     meta: Value::Null,
                 }],
-            }
+            })
         }
 
         fn gateway_events(&self) -> GatewayStream {

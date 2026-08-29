@@ -133,27 +133,6 @@ mod tests {
             && characters.all(|character| character.is_ascii_alphanumeric())
     }
 
-    /// The sdk's tagged enums carry `rename_all = "camelCase"`, which renames
-    /// variants but not their fields — serde needs `rename_all_fields` for
-    /// those — so these twelve reach the wire in snake_case while every struct
-    /// field is camelCase. Fixing it changes the journal on disk, so it is the
-    /// sdk's call, not this surface's. The assertion below is exact: a new
-    /// violation fails, and the day the sdk is fixed this list must shrink.
-    static SDK_VARIANT_FIELDS: &[&str] = &[
-        "call_id",
-        "child_session",
-        "delay_ms",
-        "duration_ms",
-        "files_restored",
-        "free_text",
-        "is_error",
-        "media_type",
-        "provider_metadata",
-        "session_scope",
-        "to_turn",
-        "tool_use_id",
-    ];
-
     #[test]
     fn every_property_is_camel_case() {
         let mut names = Vec::new();
@@ -165,10 +144,7 @@ mod tests {
             .collect();
         snake.sort_unstable();
         snake.dedup();
-        assert_eq!(
-            snake, SDK_VARIANT_FIELDS,
-            "the wire's snake_case properties are exactly the known sdk gap, no more and no fewer"
-        );
+        assert!(snake.is_empty(), "snake_case on the wire: {snake:?}");
     }
 
     fn references(value: &Value, found: &mut Vec<String>) {

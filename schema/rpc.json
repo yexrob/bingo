@@ -369,7 +369,7 @@
         {
           "type": "object",
           "properties": {
-            "media_type": {
+            "mediaType": {
               "type": "string"
             },
             "data": {
@@ -383,7 +383,7 @@
           },
           "required": [
             "type",
-            "media_type",
+            "mediaType",
             "data"
           ]
         },
@@ -412,7 +412,7 @@
         {
           "type": "object",
           "properties": {
-            "tool_use_id": {
+            "toolUseId": {
               "type": "string"
             },
             "parts": {
@@ -421,7 +421,7 @@
                 "$ref": "#/$defs/ContentPart"
               }
             },
-            "is_error": {
+            "isError": {
               "type": "boolean",
               "default": false
             },
@@ -432,7 +432,7 @@
           },
           "required": [
             "type",
-            "tool_use_id",
+            "toolUseId",
             "parts"
           ]
         },
@@ -442,7 +442,7 @@
             "text": {
               "type": "string"
             },
-            "provider_metadata": {
+            "providerMetadata": {
               "type": "object",
               "additionalProperties": {
                 "type": "object",
@@ -669,7 +669,7 @@
               "format": "uint32",
               "minimum": 0
             },
-            "delay_ms": {
+            "delayMs": {
               "type": "integer",
               "format": "uint64",
               "minimum": 0
@@ -693,7 +693,7 @@
             "turn",
             "attempt",
             "max",
-            "delay_ms",
+            "delayMs",
             "dropped",
             "reason"
           ]
@@ -971,7 +971,7 @@
               "format": "uint64",
               "minimum": 0
             },
-            "to_turn": {
+            "toTurn": {
               "$ref": "#/$defs/TurnId"
             },
             "dropped": {
@@ -980,7 +980,7 @@
                 "$ref": "#/$defs/ItemId"
               }
             },
-            "files_restored": {
+            "filesRestored": {
               "type": "array",
               "items": {
                 "type": "string"
@@ -994,9 +994,9 @@
           "required": [
             "type",
             "generation",
-            "to_turn",
+            "toTurn",
             "dropped",
-            "files_restored"
+            "filesRestored"
           ]
         },
         {
@@ -1523,7 +1523,7 @@
                 }
               ]
             },
-            "session_scope": {
+            "sessionScope": {
               "type": [
                 "string",
                 "null"
@@ -1560,7 +1560,7 @@
                 "$ref": "#/$defs/QuestionOption"
               }
             },
-            "free_text": {
+            "freeText": {
               "type": "boolean",
               "default": false
             },
@@ -1789,7 +1789,7 @@
             "text": {
               "type": "string"
             },
-            "provider_metadata": {
+            "providerMetadata": {
               "type": "object",
               "additionalProperties": {
                 "type": "object",
@@ -1809,7 +1809,7 @@
         {
           "type": "object",
           "properties": {
-            "call_id": {
+            "callId": {
               "type": "string"
             },
             "name": {
@@ -1832,7 +1832,7 @@
                 "null"
               ]
             },
-            "child_session": {
+            "childSession": {
               "anyOf": [
                 {
                   "$ref": "#/$defs/SessionId"
@@ -1842,7 +1842,7 @@
                 }
               ]
             },
-            "duration_ms": {
+            "durationMs": {
               "type": [
                 "integer",
                 "null"
@@ -1857,7 +1857,7 @@
           },
           "required": [
             "kind",
-            "call_id",
+            "callId",
             "name",
             "input"
           ]
@@ -1904,7 +1904,7 @@
               "format": "uint64",
               "minimum": 0
             },
-            "duration_ms": {
+            "durationMs": {
               "type": "integer",
               "format": "uint64",
               "minimum": 0
@@ -1920,13 +1920,13 @@
             "replaced",
             "before",
             "after",
-            "duration_ms"
+            "durationMs"
           ]
         },
         {
           "type": "object",
           "properties": {
-            "to_turn": {
+            "toTurn": {
               "$ref": "#/$defs/TurnId"
             },
             "dropped": {
@@ -1941,7 +1941,7 @@
           },
           "required": [
             "kind",
-            "to_turn",
+            "toTurn",
             "dropped"
           ]
         },

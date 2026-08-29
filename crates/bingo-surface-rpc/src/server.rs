@@ -219,7 +219,7 @@ impl Server {
             name::SESSION_SUBMIT => self.submit(params),
             name::SESSION_INTERRUPT => self.interrupt(params),
             name::SESSION_ANSWER => self.answer(params),
-            name::CATALOG_READ => self.catalog(params),
+            name::CATALOG_READ => self.catalog(params).await,
             name::GATEWAY_SUBSCRIBE => self.subscribe(params),
             unknown => Err(RpcError::new(
                 METHOD_NOT_FOUND,
@@ -329,9 +329,10 @@ impl Server {
         Reply::empty()
     }
 
-    fn catalog(&mut self, params: Value) -> Result<Reply, RpcError> {
+    async fn catalog(&mut self, params: Value) -> Result<Reply, RpcError> {
         let params: CatalogParams = parse(params)?;
-        Reply::of(&self.host.catalog(params.kind))
+        let catalog = self.host.catalog(params.kind).await?;
+        Reply::of(&catalog)
     }
 
     fn subscribe(&mut self, params: Value) -> Result<Reply, RpcError> {

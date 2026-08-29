@@ -147,7 +147,7 @@ expression: frames
         "startedAt": "2023-11-14T22:13:20Z",
         "body": {
           "kind": "toolCall",
-          "call_id": "call_1",
+          "callId": "call_1",
           "name": "Edit",
           "input": {
             "file_path": "src/lib.rs"
@@ -176,7 +176,7 @@ expression: frames
             "kind": "diff",
             "unified": "--- a\n+++ b\n"
           },
-          "session_scope": "Edit(src/)"
+          "sessionScope": "Edit(src/)"
         },
         "answers": [
           "allowOnce",
@@ -227,7 +227,7 @@ expression: frames
         "startedAt": "2023-11-14T22:13:20Z",
         "body": {
           "kind": "toolCall",
-          "call_id": "call_1",
+          "callId": "call_1",
           "name": "Edit",
           "input": {},
           "progress": "writing…"
@@ -265,7 +265,7 @@ expression: frames
       "turn": "trn_1",
       "attempt": 1,
       "max": 10,
-      "delay_ms": 500,
+      "delayMs": 500,
       "dropped": [
         "itm_4"
       ],
@@ -313,11 +313,11 @@ expression: frames
     "event": {
       "type": "rewound",
       "generation": 2,
-      "to_turn": "trn_1",
+      "toTurn": "trn_1",
       "dropped": [
         "itm_3"
       ],
-      "files_restored": [
+      "filesRestored": [
         "src/lib.rs"
       ]
     }

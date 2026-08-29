@@ -122,15 +122,18 @@ async fn plugins_load_in_order_and_unmet_requirements_disable_not_crash() {
         statuses[2].reason.as_deref(),
         Some("unmet requirements: service:missing")
     );
-    let plugins = host.catalog(CatalogKind::Plugins);
+    let plugins = host.catalog(CatalogKind::Plugins).await.unwrap();
     assert_eq!(plugins.entries[2].meta["enabled"], json!(false));
-    assert_eq!(host.catalog(CatalogKind::Tools).entries[0].id, "Echo");
     assert_eq!(
-        host.catalog(CatalogKind::Providers).entries[0].id,
+        host.catalog(CatalogKind::Tools).await.unwrap().entries[0].id,
+        "Echo"
+    );
+    assert_eq!(
+        host.catalog(CatalogKind::Providers).await.unwrap().entries[0].id,
         "scripted"
     );
     assert_eq!(
-        host.catalog(CatalogKind::Models).entries[0].id,
+        host.catalog(CatalogKind::Models).await.unwrap().entries[0].id,
         "scripted/m"
     );
 }

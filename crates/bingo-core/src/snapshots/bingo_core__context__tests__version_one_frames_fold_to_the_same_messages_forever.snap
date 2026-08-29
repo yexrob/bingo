@@ -42,25 +42,25 @@ expression: messages
     "parts": [
       {
         "type": "toolResult",
-        "tool_use_id": "call_0_1",
+        "toolUseId": "call_0_1",
         "parts": [
           {
             "type": "text",
             "text": "     1\talpha\n     2\tbeta"
           }
         ],
-        "is_error": false
+        "isError": false
       },
       {
         "type": "toolResult",
-        "tool_use_id": "call_0_2",
+        "toolUseId": "call_0_2",
         "parts": [
           {
             "type": "text",
             "text": "/var/folders/5d/ylkbk1nx6mvgq8zgnsjf8lwr0000gn/T/tmp.usBOkQfZ4Y/notes.txt"
           }
         ],
-        "is_error": false
+        "isError": false
       }
     ]
   },

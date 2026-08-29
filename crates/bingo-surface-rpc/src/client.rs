@@ -19,10 +19,9 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::runtime::{Handle, RuntimeFlavor};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::sync::oneshot;
-use tokio::task::{self, JoinHandle};
+use tokio::task::JoinHandle;
 use tokio_util::codec::{FramedRead, FramedWrite};
 
 use crate::codec::{self, Id, Message, Notification, Outcome, Request, Response};
@@ -325,13 +324,6 @@ impl RemoteKernel {
             .await
     }
 
-    /// What `HostApi::catalog` would be if the trait let it await.
-    pub async fn catalog_async(&self, kind: CatalogKind) -> Result<Catalog, KernelError> {
-        self.connection
-            .call(name::CATALOG_READ, &CatalogParams { kind })
-            .await
-    }
-
     pub async fn shutdown(&self) -> Result<(), KernelError> {
         let Empty {} = self.connection.call(name::SHUTDOWN, &Empty {}).await?;
         Ok(())
@@ -431,23 +423,10 @@ impl HostApi for RemoteKernel {
         Ok(())
     }
 
-    /// The trait cannot await here, and a remote catalogue is a round trip. On a
-    /// multi-threaded runtime the call blocks its worker; anywhere else it would
-    /// deadlock, so it answers empty and the caller wants `catalog_async`.
-    fn catalog(&self, kind: CatalogKind) -> Catalog {
-        match Handle::try_current().map(|handle| handle.runtime_flavor()) {
-            Ok(RuntimeFlavor::MultiThread) => {
-                task::block_in_place(|| Handle::current().block_on(self.catalog_async(kind)))
-                    .unwrap_or_else(|error| {
-                        tracing::error!(%error, "the catalogue could not be read");
-                        empty_catalog(kind)
-                    })
-            }
-            _ => {
-                tracing::warn!("HostApi::catalog is synchronous; use catalog_async here");
-                empty_catalog(kind)
-            }
-        }
+    async fn catalog(&self, kind: CatalogKind) -> Result<Catalog, KernelError> {
+        self.connection
+            .call(name::CATALOG_READ, &CatalogParams { kind })
+            .await
     }
 
     fn gateway_events(&self) -> GatewayStream {
@@ -458,13 +437,6 @@ impl HostApi for RemoteKernel {
 
     fn service_any(&self, _key: &str) -> Option<Arc<dyn std::any::Any + Send + Sync>> {
         None
-    }
-}
-
-fn empty_catalog(kind: CatalogKind) -> Catalog {
-    Catalog {
-        kind,
-        entries: Vec::new(),
     }
 }
 

@@ -264,7 +264,7 @@ pub trait HostApi: Send + Sync {
 
     async fn delete(&self, session: &SessionId) -> Result<(), KernelError>;
 
-    fn catalog(&self, kind: CatalogKind) -> Catalog;
+    async fn catalog(&self, kind: CatalogKind) -> Result<Catalog, KernelError>;
 
     fn gateway_events(&self) -> GatewayStream;
 

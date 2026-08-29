@@ -595,11 +595,11 @@ impl HostApi for Host {
         Ok(())
     }
 
-    fn catalog(&self, kind: CatalogKind) -> Catalog {
-        Catalog {
+    async fn catalog(&self, kind: CatalogKind) -> Result<Catalog, KernelError> {
+        Ok(Catalog {
             kind,
             entries: catalog::entries(&self.registry, self.settings.kernel.model.as_deref(), kind),
-        }
+        })
     }
 
     fn gateway_events(&self) -> GatewayStream {
@@ -641,11 +641,11 @@ impl HostApi for Unavailable {
     async fn delete(&self, _: &SessionId) -> Result<(), KernelError> {
         Err(unavailable())
     }
-    fn catalog(&self, kind: CatalogKind) -> Catalog {
-        Catalog {
+    async fn catalog(&self, kind: CatalogKind) -> Result<Catalog, KernelError> {
+        Ok(Catalog {
             kind,
             entries: Vec::new(),
-        }
+        })
     }
     fn gateway_events(&self) -> GatewayStream {
         Box::pin(futures::stream::empty())
