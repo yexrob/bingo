@@ -335,6 +335,7 @@ impl Host {
 
     async fn choose_model(&self, spec: &SessionSpec) -> Result<ModelChoice, KernelError> {
         let provider = self.provider(spec.provider.as_deref())?;
+        check_auth(provider.as_ref())?;
         let model = self.model(provider.as_ref(), spec.model.as_deref()).await?;
         let capabilities = provider.capabilities(&model);
         let max_tokens = self
@@ -474,6 +475,21 @@ impl Host {
         found
             .map(Some)
             .ok_or_else(|| KernelError::new(ErrorCode::SessionNotFound, "no such session"))
+    }
+}
+
+/// A provider that cannot authenticate is refused before any turn is spent on it.
+fn check_auth(provider: &dyn Provider) -> Result<(), KernelError> {
+    match provider.auth() {
+        AuthStatus::Ready | AuthStatus::NotApplicable => Ok(()),
+        AuthStatus::Missing => Err(KernelError::new(
+            ErrorCode::AuthRequired,
+            format!("provider {} has no credentials", provider.id()),
+        )),
+        AuthStatus::Expired => Err(KernelError::new(
+            ErrorCode::AuthRequired,
+            format!("provider {} needs to log in again", provider.id()),
+        )),
     }
 }
 
