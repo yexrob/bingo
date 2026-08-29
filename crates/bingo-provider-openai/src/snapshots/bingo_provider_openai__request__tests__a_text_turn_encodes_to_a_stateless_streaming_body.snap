@@ -1,0 +1,23 @@
+---
+source: crates/bingo-provider-openai/src/request.rs
+expression: "encode(&request, Variant::Default)"
+---
+{
+  "model": "gpt-5.4",
+  "stream": true,
+  "store": false,
+  "max_output_tokens": 4096,
+  "instructions": "You are bingo.\n\nThe working directory is /repo.",
+  "input": [
+    {
+      "type": "message",
+      "role": "user",
+      "content": [
+        {
+          "type": "input_text",
+          "text": "hello"
+        }
+      ]
+    }
+  ]
+}
