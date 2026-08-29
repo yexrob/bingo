@@ -1,0 +1,2 @@
+{"format":"bingo-journal","version":2,"session":"ses_01JFIXTURE000000000000000"}
+{"seq":1,"ts":"2023-11-14T22:13:20Z","session":"ses_01JFIXTURE000000000000000","event":{"type":"sessionUpdated","summary":{"id":"ses_01JFIXTURE000000000000000","title":"the first name","cwd":"/work","model":"claude-fable-5","provider":"anthropic","createdAt":"2023-11-14T22:13:20Z","updatedAt":"2023-11-14T22:13:20Z","usage":{"inputTokens":0,"outputTokens":0,"cacheReadTokens":0,"cacheWriteTokens":0,"reasoningTokens":0},"busy":false}}}
