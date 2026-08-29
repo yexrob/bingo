@@ -8,7 +8,9 @@
 mod compact;
 mod estimate;
 mod files;
+mod hook;
 mod instructions;
+mod memory;
 mod prompt;
 mod root;
 mod split;
@@ -26,4 +28,6 @@ mod query;
 mod scripted;
 
 pub use compact::SummaryCompactor;
+pub use hook::MemoryHook;
 pub use instructions::InstructionsContributor;
+pub use memory::MemoryContributor;
