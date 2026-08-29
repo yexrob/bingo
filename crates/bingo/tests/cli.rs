@@ -322,3 +322,82 @@ fn a_slow_bash_command_streams_its_tail_as_deltas() {
             if !o.is_error && o.parts.iter().any(|p| p.as_text().is_some_and(|t| t.contains("line4"))))));
     assert!(done, "the final result carries every line");
 }
+
+/// The page a scripted turn fetches, served by wiremock on the loopback.
+async fn page_server() -> wiremock::MockServer {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, ResponseTemplate};
+    let server = wiremock::MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/guide"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            "<html><head><title>Guide</title></head><body><nav>menu</nav>\
+             <article><h1>Installing</h1><p>Run the <a href=\"/i\">installer</a> \
+             first, then read the rest of this page carefully because it says \
+             what the installer leaves for you to do by hand.</p></article>\
+             <script>track()</script></body></html>",
+            "text/html; charset=utf-8",
+        ))
+        .expect(1)
+        .mount(&server)
+        .await;
+    server
+}
+
+#[tokio::test]
+async fn web_fetch_hands_the_model_the_page_as_markdown() {
+    let server = page_server().await;
+    let url = format!("{}/guide", server.uri());
+    let script = script(&format!(
+        r#"{{"responses":[
+            {{"steps":[{{"toolCall":{{"name":"WebFetch","input":{{"url":"{url}"}}}}}}]}},
+            {{"steps":[{{"text":"Read it."}}]}}
+        ]}}"#
+    ));
+    let out = tokio::task::spawn_blocking(move || {
+        run(bingo()
+            .env("BINGO_FAKE_SCRIPT", script.path())
+            .env("HOME", tempfile::tempdir().unwrap().path())
+            .args([
+                "--print",
+                "--output-format",
+                "json",
+                "--allowed-tools",
+                "WebFetch(domain:127.0.0.1)",
+                "fetch the guide",
+            ]))
+    })
+    .await
+    .unwrap();
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    let frames: Vec<Frame> = stdout(&out)
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap_or_else(|e| panic!("{e}: {line}")))
+        .collect();
+    let markdown = frames
+        .iter()
+        .find_map(|f| match &f.event {
+            Event::ItemCompleted { item } => match &item.body {
+                bingo_sdk::ItemBody::ToolCall {
+                    name,
+                    output: Some(output),
+                    ..
+                } if name == "WebFetch" => Some(output.clone()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .expect("the WebFetch call completed with an output");
+    assert!(!markdown.is_error, "{markdown:?}");
+    let text = markdown
+        .parts
+        .iter()
+        .filter_map(|p| p.as_text())
+        .collect::<String>();
+    assert!(text.contains("# Installing"), "{text}");
+    assert!(text.contains("[installer]("), "{text}");
+    assert!(
+        !text.contains("track()") && !text.contains("menu"),
+        "{text}"
+    );
+}

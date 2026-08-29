@@ -17,6 +17,7 @@ bingo-provider-fake.workspace = true
 bingo-provider-anthropic.workspace = true
 bingo-tool-fs.workspace = true
 bingo-tool-bash.workspace = true
+bingo-tool-web.workspace = true
 bingo-permissions.workspace = true
 bingo-surface-print.workspace = true
 clap.workspace = true
@@ -25,3 +26,6 @@ serde_json.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+# Black-box turns against a scripted HTTP endpoint (`--provider openai`, WebFetch).
+wiremock.workspace = true
+tokio.workspace = true

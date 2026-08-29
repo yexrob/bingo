@@ -16,6 +16,7 @@ use bingo_sdk::{
 use bingo_surface_print::{PrintPlugin, error_report, notice_report};
 use bingo_tool_bash::BashPlugin;
 use bingo_tool_fs::FsPlugin;
+use bingo_tool_web::WebPlugin;
 use clap::{Parser, ValueEnum};
 use serde_json::{Map, Value, json};
 
@@ -141,6 +142,7 @@ fn plugins() -> Result<Vec<Box<dyn Plugin>>, KernelError> {
         Box::new(PermissionsPlugin),
         Box::new(FsPlugin),
         Box::new(BashPlugin),
+        Box::new(WebPlugin),
         Box::new(PrintPlugin),
     ])
 }

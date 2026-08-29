@@ -141,10 +141,12 @@ dependencies = [
  "bingo-surface-print",
  "bingo-tool-bash",
  "bingo-tool-fs",
+ "bingo-tool-web",
  "clap",
  "serde_json",
  "tempfile",
  "tokio",
+ "wiremock",
 ]
 
 [[package]]
