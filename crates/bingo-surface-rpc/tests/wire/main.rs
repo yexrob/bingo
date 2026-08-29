@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use bingo_sdk::{
     Activation, Answer, Attachment, CatalogKind, ErrorCode, Exit, HostApi, HostHandle, Input,
-    IntentId, InteractionId, InterruptScope, KernelError, Origin,
+    IntentId, InteractionId, InterruptScope, KernelError, OpenOptions, Origin,
 };
 use bingo_surface_rpc::codec::{
     self, INVALID_PARAMS, INVALID_REQUEST, Id, KERNEL_ERROR, METHOD_NOT_FOUND, Message,
@@ -521,7 +521,10 @@ async fn a_remote_kernel_folds_to_the_state_the_host_scripted() {
         mut events,
         handle,
         ..
-    } = kernel.open(selector(), who()).await.expect("the session");
+    } = kernel
+        .open(selector(), who(), OpenOptions::default())
+        .await
+        .expect("the session");
     handle.submit(
         IntentId::from_raw("req_remote"),
         Input::text("hi", Origin::surface("test")),

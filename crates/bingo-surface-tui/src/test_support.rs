@@ -107,7 +107,6 @@ pub fn tool(
             input,
             output,
             progress: None,
-            child_session: None,
             duration_ms: Some(12),
         },
     )
@@ -123,7 +122,6 @@ pub fn running_tool(id: &str, name: &str, progress: &str) -> Item {
             input: json!({ "command": "cargo test" }),
             output: None,
             progress: Some(progress.into()),
-            child_session: None,
             duration_ms: None,
         },
     )
@@ -339,8 +337,8 @@ use async_trait::async_trait;
 use bingo_sdk::{
     Activation, ArgSpec, Attachment, Catalog, CatalogEntry, CatalogKind, ClientIdentity,
     CloseReason, CommandSpec, FrameStream, GatewayStream, HistoryChunk, HistoryPage, HostApi,
-    HostHandle, Input, IntentId, InterruptScope, KernelError, SessionFilter, SessionHandle,
-    SessionPort, SessionSelector,
+    HostHandle, Input, IntentId, InterruptScope, KernelError, OpenOptions, SessionFilter,
+    SessionHandle, SessionPort, SessionSelector,
 };
 
 use crate::terminal::Screen;
@@ -459,6 +457,7 @@ impl HostApi for TestHost {
         &self,
         _selector: SessionSelector,
         _who: ClientIdentity,
+        _options: OpenOptions,
     ) -> Result<Attachment, KernelError> {
         Ok(Attachment {
             session: SessionId::from_raw("ses_1"),

@@ -190,6 +190,7 @@ async fn open_create_runs_a_turn_and_the_session_is_findable_afterwards() {
                 },
             },
             who(),
+            OpenOptions::default(),
         )
         .await
         .unwrap();
@@ -245,7 +246,10 @@ async fn open_create_runs_a_turn_and_the_session_is_findable_afterwards() {
             cwd: "/work".into(),
         },
     ] {
-        let again = host.open(selector, who()).await.unwrap();
+        let again = host
+            .open(selector, who(), OpenOptions::default())
+            .await
+            .unwrap();
         assert_eq!(again.session, session);
         assert_eq!(again.snapshot.items.len(), 2, "reopening sees the history");
     }
@@ -254,7 +258,8 @@ async fn open_create_runs_a_turn_and_the_session_is_findable_afterwards() {
             SessionSelector::Latest {
                 cwd: "/elsewhere".into()
             },
-            who()
+            who(),
+            OpenOptions::default()
         )
         .await
         .err()
@@ -269,7 +274,8 @@ async fn open_create_runs_a_turn_and_the_session_is_findable_afterwards() {
                     ..spec("/work")
                 }
             },
-            who()
+            who(),
+            OpenOptions::default()
         )
         .await
         .err()
@@ -298,6 +304,7 @@ async fn sub_sessions_are_sessions_with_a_parent_and_a_depth_limit() {
                 spec: spec("/work"),
             },
             who(),
+            OpenOptions::default(),
         )
         .await
         .unwrap();
@@ -315,6 +322,7 @@ async fn sub_sessions_are_sessions_with_a_parent_and_a_depth_limit() {
                 },
             },
             who(),
+            OpenOptions::default(),
         )
         .await
         .unwrap();
@@ -341,6 +349,7 @@ async fn sub_sessions_are_sessions_with_a_parent_and_a_depth_limit() {
                 },
             },
             who(),
+            OpenOptions::default(),
         )
         .await;
     assert_eq!(
@@ -357,7 +366,8 @@ async fn opening_without_a_provider_or_model_says_so() {
             SessionSelector::Create {
                 spec: spec("/work")
             },
-            who()
+            who(),
+            OpenOptions::default()
         )
         .await
         .err()
@@ -373,7 +383,8 @@ async fn opening_without_a_provider_or_model_says_so() {
                     ..spec("/work")
                 }
             },
-            who()
+            who(),
+            OpenOptions::default()
         )
         .await
         .err()
@@ -459,6 +470,7 @@ async fn a_declared_window_is_the_ruler_the_turn_measures_with() {
                 spec: spec("/work"),
             },
             who(),
+            OpenOptions::default(),
         )
         .await
         .unwrap();
@@ -526,6 +538,7 @@ async fn a_stored_session_reopens_on_another_host_with_its_history() {
                 spec: spec("/work"),
             },
             who(),
+            OpenOptions::default(),
         )
         .await
         .unwrap();
@@ -535,7 +548,11 @@ async fn a_stored_session_reopens_on_another_host_with_its_history() {
     let second = ScriptedProvider::new(vec![Script::Events(text("second answer"))]);
     let host_b = host_on(store.clone(), second.clone()).await;
     let mut b = host_b
-        .open(SessionSelector::ById { id: id.clone() }, who())
+        .open(
+            SessionSelector::ById { id: id.clone() },
+            who(),
+            OpenOptions::default(),
+        )
         .await
         .unwrap();
     assert_eq!(b.session, id);
@@ -584,6 +601,7 @@ async fn latest_in_a_directory_comes_from_the_store_when_nothing_is_live() {
                 spec: spec("/work"),
             },
             who(),
+            OpenOptions::default(),
         )
         .await
         .unwrap();
@@ -596,6 +614,7 @@ async fn latest_in_a_directory_comes_from_the_store_when_nothing_is_live() {
                 cwd: "/work".into(),
             },
             who(),
+            OpenOptions::default(),
         )
         .await
         .unwrap();
@@ -607,6 +626,7 @@ async fn latest_in_a_directory_comes_from_the_store_when_nothing_is_live() {
                 cwd: "/elsewhere".into(),
             },
             who(),
+            OpenOptions::default(),
         )
         .await
         .err()
@@ -618,6 +638,7 @@ async fn latest_in_a_directory_comes_from_the_store_when_nothing_is_live() {
                 id: SessionId::from_raw("ses_nope"),
             },
             who(),
+            OpenOptions::default(),
         )
         .await
         .err()

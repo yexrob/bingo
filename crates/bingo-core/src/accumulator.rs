@@ -176,7 +176,6 @@ impl Accumulator {
                 input: input.clone(),
                 output: None,
                 progress: None,
-                child_session: None,
                 duration_ms: None,
             },
             ItemStatus::Pending,

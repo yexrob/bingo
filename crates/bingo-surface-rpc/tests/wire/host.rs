@@ -11,8 +11,9 @@ use bingo_sdk::{
     Activation, Answer, Attachment, Catalog, CatalogEntry, CatalogKind, ClientIdentity,
     CloseReason, Event, Frame, FrameStream, GatewayEvent, GatewayStream, HistoryChunk, HistoryPage,
     HostApi, HostHandle, Input, IntentId, InteractionId, InterruptScope, Item, ItemBody, ItemId,
-    ItemStatus, KernelError, Seq, SessionFilter, SessionHandle, SessionId, SessionPort,
-    SessionSelector, SessionState, SessionSummary, TurnId, TurnOrigin, TurnStatus, Usage,
+    ItemStatus, KernelError, OpenOptions, Seq, SessionFilter, SessionHandle, SessionId,
+    SessionPort, SessionSelector, SessionState, SessionSummary, TurnId, TurnOrigin, TurnStatus,
+    Usage,
 };
 use jiff::Timestamp;
 use serde_json::Value;
@@ -219,6 +220,7 @@ impl HostApi for TestHost {
         &self,
         _selector: SessionSelector,
         _who: ClientIdentity,
+        _options: OpenOptions,
     ) -> Result<Attachment, KernelError> {
         Ok(Attachment {
             session: session_id(),

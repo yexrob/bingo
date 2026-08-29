@@ -167,9 +167,9 @@ pub(crate) mod tests {
     use std::path::PathBuf;
 
     use bingo_sdk::{
-        Answer, AnswerSpec, CancellationToken, Contribution, Env, Input, IntentId, InteractionKind,
-        ItemBody, ItemId, KernelError, Prompter, SessionId, SessionSpec, ToolContext, ToolHost,
-        TurnId,
+        Answer, AnswerSpec, CancellationToken, Contribution, Delivery, Env, Input, IntentId,
+        InteractionKind, ItemBody, ItemId, KernelError, Prompter, SessionId, SessionSpec,
+        ToolContext, ToolHost, TurnId,
     };
 
     /// A tool host that answers nothing: neither web tool reaches any of it.
@@ -199,7 +199,15 @@ pub(crate) mod tests {
             Ok(SessionId::from_raw("ses_test"))
         }
 
-        fn submit(&self, _to: &SessionId, _intent: IntentId, _input: Input) {}
+        fn deliver(
+            &self,
+            _: &SessionId,
+            _: IntentId,
+            _: Input,
+            _: Delivery,
+        ) -> Result<(), KernelError> {
+            Ok(())
+        }
 
         fn service_any(&self, _key: &str) -> Option<Arc<dyn Any + Send + Sync>> {
             None

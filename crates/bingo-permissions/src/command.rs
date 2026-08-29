@@ -96,8 +96,8 @@ mod tests {
 
     use bingo_sdk::{
         Attachment, Catalog, CatalogKind, ClientIdentity, CloseReason, Decision, GatewayStream,
-        HostApi, HostHandle, PermissionPolicy, PolicyInput, SessionFilter, SessionSelector,
-        SessionSummary, Subject, ToolCall, ToolTraits,
+        HostApi, HostHandle, OpenOptions, PermissionPolicy, PolicyInput, SessionFilter,
+        SessionSelector, SessionSummary, Subject, ToolCall, ToolTraits,
     };
     use serde_json::{Value, json};
 
@@ -120,6 +120,7 @@ mod tests {
             &self,
             _selector: SessionSelector,
             _who: ClientIdentity,
+            _options: OpenOptions,
         ) -> Result<Attachment, KernelError> {
             unreachable!("/permission opens no session")
         }

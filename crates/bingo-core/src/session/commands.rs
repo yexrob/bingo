@@ -210,7 +210,12 @@ impl HostApi for Unreachable {
     async fn sessions(&self, _: SessionFilter) -> Result<Vec<SessionSummary>, KernelError> {
         unreachable!("never constructed")
     }
-    async fn open(&self, _: SessionSelector, _: ClientIdentity) -> Result<Attachment, KernelError> {
+    async fn open(
+        &self,
+        _: SessionSelector,
+        _: ClientIdentity,
+        _: OpenOptions,
+    ) -> Result<Attachment, KernelError> {
         unreachable!("never constructed")
     }
     async fn close(&self, _: &SessionId, _: CloseReason) -> Result<(), KernelError> {

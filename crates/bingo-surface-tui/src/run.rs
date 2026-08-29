@@ -11,8 +11,9 @@ use std::time::{Duration, Instant};
 
 use bingo_sdk::{
     Attachment, CatalogKind, ClientIdentity, CloseReason, CommandSpec, Event, Exit, FrameStream,
-    HostHandle, Input, IntentId, IntentOutcome, InterruptScope, KernelError, Level, SessionFilter,
-    SessionHandle, SessionId, SessionSelector, SessionState, SessionSummary, SurfaceOptions, View,
+    HostHandle, Input, IntentId, IntentOutcome, InterruptScope, KernelError, Level, OpenOptions,
+    SessionFilter, SessionHandle, SessionId, SessionSelector, SessionState, SessionSummary,
+    SurfaceOptions, View,
 };
 use crossterm::event::Event as Term;
 use futures::{Stream, StreamExt};
@@ -75,7 +76,9 @@ pub(crate) async fn drive(
     screen: &mut dyn Screen,
     mut keys: Keys,
 ) -> Result<Exit, KernelError> {
-    let attachment = host.open(opts.selector, identity()).await?;
+    let attachment = host
+        .open(opts.selector, identity(), OpenOptions::default())
+        .await?;
     let (tx, mut replies) = mpsc::channel(16);
     let mut events = Some(attachment.events);
     let mut run = Run {
@@ -257,7 +260,7 @@ impl Run {
         self.ui.opening = true;
         let host = self.host.clone();
         self.spawn(async move {
-            host.open(selector, identity())
+            host.open(selector, identity(), OpenOptions::default())
                 .await
                 .map(|a| Reply::Attached(Box::new(a)))
         });

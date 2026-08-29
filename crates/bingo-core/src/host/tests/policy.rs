@@ -65,6 +65,7 @@ async fn the_policys_view_is_published_at_open_and_after_a_verdict() {
                 spec: spec("/work"),
             },
             who(),
+            OpenOptions::default(),
         )
         .await
         .unwrap();

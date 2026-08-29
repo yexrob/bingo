@@ -16,10 +16,10 @@ use async_trait::async_trait;
 use bingo_mcp::{Manager, McpCommand, McpSource, Server, Status};
 use bingo_sdk::{
     Answer, AnswerSpec, Attachment, CancellationToken, Catalog, CatalogKind, ClientIdentity,
-    CloseReason, Command, CommandContext, CommandOutcome, Env, GatewayStream, HostApi, HostHandle,
-    Input, IntentId, InteractionKind, ItemBody, ItemId, KernelError, Prompter, SessionFilter,
-    SessionId, SessionSelector, SessionSpec, SessionSummary, Tool, ToolContext, ToolHost,
-    ToolOutput, ToolSource, TurnId, View,
+    CloseReason, Command, CommandContext, CommandOutcome, Delivery, Env, GatewayStream, HostApi,
+    HostHandle, Input, IntentId, InteractionKind, ItemBody, ItemId, KernelError, OpenOptions,
+    Prompter, SessionFilter, SessionId, SessionSelector, SessionSpec, SessionSummary, Tool,
+    ToolContext, ToolHost, ToolOutput, ToolSource, TurnId, View,
 };
 use proptest::prelude::*;
 use proptest::test_runner::{Config, TestRunner};
@@ -146,7 +146,15 @@ impl ToolHost for NullHost {
         Ok(SessionId::from_raw("ses_test"))
     }
 
-    fn submit(&self, _to: &SessionId, _intent: IntentId, _input: Input) {}
+    fn deliver(
+        &self,
+        _: &SessionId,
+        _: IntentId,
+        _: Input,
+        _: Delivery,
+    ) -> Result<(), KernelError> {
+        Ok(())
+    }
 
     fn service_any(&self, _key: &str) -> Option<Arc<dyn Any + Send + Sync>> {
         None
@@ -166,6 +174,7 @@ impl HostApi for UnusedHost {
         &self,
         _selector: SessionSelector,
         _who: ClientIdentity,
+        _options: OpenOptions,
     ) -> Result<Attachment, KernelError> {
         unreachable!("/mcp opens no session")
     }

@@ -55,6 +55,7 @@ impl Client {
                     spec: spec("/work"),
                 },
                 who(),
+                OpenOptions::default(),
             )
             .await
             .unwrap();

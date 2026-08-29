@@ -50,6 +50,22 @@ pub struct SessionSpec {
     pub tools: Option<Vec<String>>,
 }
 
+/// What an attachment carries beyond the session itself (ADR-0010 §3).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", default)]
+pub struct OpenOptions {
+    /// The frames of every live descendant too, each stamped with its own
+    /// `session`; the handle answers an interaction wherever in the tree it
+    /// was opened.
+    pub children: bool,
+}
+
+impl OpenOptions {
+    pub fn with_children() -> Self {
+        Self { children: true }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum SessionSelector {
@@ -257,6 +273,7 @@ pub trait HostApi: Send + Sync {
         &self,
         selector: SessionSelector,
         who: ClientIdentity,
+        options: OpenOptions,
     ) -> Result<Attachment, KernelError>;
 
     /// Detach this client; the session keeps running.

@@ -10,8 +10,8 @@ use std::time::Duration;
 
 use bingo_sdk::{
     Activation, Answer, Attachment, CatalogKind, ClientIdentity, ErrorCode, Event, Frame,
-    HistoryPage, HostApi, Input, IntentId, InterruptScope, Origin, SessionFilter, SessionId,
-    SessionSelector, SessionSpec, SessionState, TurnStatus,
+    HistoryPage, HostApi, Input, IntentId, InterruptScope, OpenOptions, Origin, SessionFilter,
+    SessionId, SessionSelector, SessionSpec, SessionState, TurnStatus,
 };
 use bingo_surface_rpc::RemoteKernel;
 use futures::StreamExt;
@@ -126,7 +126,7 @@ async fn a_method_before_initialize_is_refused() {
     let mut server = Server::spawn(TEXT_TURN);
     let kernel = server.kernel();
     let err = kernel
-        .open(create(server.cwd()), who())
+        .open(create(server.cwd()), who(), OpenOptions::default())
         .await
         .err()
         .unwrap();
@@ -203,7 +203,10 @@ async fn stdout_carries_json_rpc_lines_only_and_an_unknown_method_is_refused() {
 async fn open_submit_and_the_events_arrive_in_seq_order_with_the_clients_intent() {
     let mut server = Server::spawn(TEXT_TURN);
     let kernel = ready(&mut server).await;
-    let mut attachment = kernel.open(create(server.cwd()), who()).await.unwrap();
+    let mut attachment = kernel
+        .open(create(server.cwd()), who(), OpenOptions::default())
+        .await
+        .unwrap();
     let opened_at = attachment.snapshot.seq;
     let intent = IntentId::mint();
     attachment
@@ -232,7 +235,10 @@ async fn an_interrupt_reaches_a_running_turn() {
         r#"{"responses":[{"steps":[{"text":"slow"},{"delay":{"ms":30000}},{"text":"never"}]}]}"#,
     );
     let kernel = ready(&mut server).await;
-    let mut attachment = kernel.open(create(server.cwd()), who()).await.unwrap();
+    let mut attachment = kernel
+        .open(create(server.cwd()), who(), OpenOptions::default())
+        .await
+        .unwrap();
     attachment
         .handle
         .submit(IntentId::mint(), Input::text("go", Origin::surface("test")));
@@ -275,7 +281,10 @@ async fn a_permission_is_answered_over_the_wire_and_the_tool_runs() {
         ]}"#,
     );
     let kernel = ready(&mut server).await;
-    let mut attachment = kernel.open(create(server.cwd()), who()).await.unwrap();
+    let mut attachment = kernel
+        .open(create(server.cwd()), who(), OpenOptions::default())
+        .await
+        .unwrap();
     attachment.handle.submit(
         IntentId::mint(),
         Input::text("write it", Origin::surface("test")),
@@ -316,7 +325,10 @@ async fn a_retry_is_visible_on_the_wire() {
         ]}"#,
     );
     let kernel = ready(&mut server).await;
-    let mut attachment = kernel.open(create(server.cwd()), who()).await.unwrap();
+    let mut attachment = kernel
+        .open(create(server.cwd()), who(), OpenOptions::default())
+        .await
+        .unwrap();
     attachment
         .handle
         .submit(IntentId::mint(), Input::text("go", Origin::surface("test")));
@@ -367,7 +379,11 @@ async fn a_session_written_by_a_print_run_reopens_by_id_with_its_items() {
         .unwrap();
     assert_eq!(listed.iter().map(|s| &s.id).collect::<Vec<_>>(), [&id]);
     let attachment = kernel
-        .open(SessionSelector::ById { id: id.clone() }, who())
+        .open(
+            SessionSelector::ById { id: id.clone() },
+            who(),
+            OpenOptions::default(),
+        )
         .await
         .unwrap();
     assert_eq!(attachment.session, id);
@@ -412,7 +428,10 @@ async fn the_catalogue_lists_the_fake_provider_and_the_tools() {
 async fn delete_removes_the_session_from_disk_and_shutdown_exits_zero() {
     let mut server = Server::spawn(TEXT_TURN);
     let kernel = ready(&mut server).await;
-    let mut attachment = kernel.open(create(server.cwd()), who()).await.unwrap();
+    let mut attachment = kernel
+        .open(create(server.cwd()), who(), OpenOptions::default())
+        .await
+        .unwrap();
     attachment
         .handle
         .submit(IntentId::mint(), Input::text("hi", Origin::surface("test")));
@@ -456,7 +475,10 @@ async fn a_shell_line_and_a_permission_mode_dispatch_as_commands() {
         ]}"#,
     );
     let kernel = ready(&mut server).await;
-    let mut attachment = kernel.open(create(server.cwd()), who()).await.unwrap();
+    let mut attachment = kernel
+        .open(create(server.cwd()), who(), OpenOptions::default())
+        .await
+        .unwrap();
 
     let shell = IntentId::mint();
     attachment.handle.submit(
@@ -573,7 +595,10 @@ async fn an_mcp_server_from_mcp_config_offers_its_tool_through_the_gate() {
     };
     assert_eq!(entry.meta["server"], "test");
 
-    let mut attachment = kernel.open(create(host.cwd()), who()).await.unwrap();
+    let mut attachment = kernel
+        .open(create(host.cwd()), who(), OpenOptions::default())
+        .await
+        .unwrap();
     attachment.handle.submit(
         IntentId::mint(),
         Input::text("echo it", Origin::surface("test")),

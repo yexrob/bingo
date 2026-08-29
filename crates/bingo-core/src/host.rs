@@ -7,6 +7,7 @@ mod catalog;
 mod registry;
 mod resume;
 mod tool_host;
+mod tree;
 mod unavailable;
 
 use std::any::Any;
@@ -295,6 +296,43 @@ impl Host {
             .get(id)
             .cloned()
             .ok_or_else(|| KernelError::new(ErrorCode::SessionNotFound, format!("no session {id}")))
+    }
+
+    /// Every live session under `root`, parents before their children.
+    fn descendants(&self, root: &SessionId) -> Vec<(SessionId, Mailbox)> {
+        let sessions = self.lock();
+        let mut out = Vec::new();
+        let mut frontier = vec![root.clone()];
+        while let Some(parent) = frontier.pop() {
+            for (id, live) in sessions.iter() {
+                if live.parent.as_ref() == Some(&parent) {
+                    out.push((id.clone(), live.mailbox.clone()));
+                    frontier.push(id.clone());
+                }
+            }
+        }
+        out
+    }
+
+    async fn delete_one(&self, session: &SessionId) -> Result<(), KernelError> {
+        let live = self.lock().remove(session);
+        if let Some(live) = &live {
+            live.mailbox.close(CloseReason::Deleted);
+        }
+        match &self.registry.store {
+            Some(store) => store.delete(session).await?,
+            None if live.is_none() => {
+                return Err(KernelError::new(
+                    ErrorCode::SessionNotFound,
+                    format!("no session {session}"),
+                ));
+            }
+            None => {}
+        }
+        let _ = self.gateway.send(GatewayEvent::SessionRemoved {
+            session: session.clone(),
+        });
+        Ok(())
     }
 
     fn depth(&self, id: &SessionId) -> u32 {
@@ -663,6 +701,7 @@ impl HostApi for Host {
         &self,
         selector: SessionSelector,
         who: ClientIdentity,
+        options: OpenOptions,
     ) -> Result<Attachment, KernelError> {
         let mailbox = match selector {
             SessionSelector::Create { spec } => self.create(spec).await?,
@@ -671,6 +710,9 @@ impl HostApi for Host {
                 None => self.reopen(other).await?,
             },
         };
+        if options.children {
+            return tree::attach(self.weak.clone(), &self.gateway, mailbox, who).await;
+        }
         let (snapshot, events) = mailbox.attach().await?;
         Ok(Attachment {
             session: mailbox.id().clone(),
@@ -685,25 +727,18 @@ impl HostApi for Host {
         self.live(session).map(|_| ())
     }
 
+    /// A session and everything under it, children first (ADR-0010 §6).
     async fn delete(&self, session: &SessionId) -> Result<(), KernelError> {
-        let live = self.lock().remove(session);
-        if let Some(live) = &live {
-            live.mailbox.close(CloseReason::Deleted);
+        let mut doomed: Vec<SessionId> = self
+            .descendants(session)
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+        doomed.reverse();
+        for id in &doomed {
+            self.delete_one(id).await?;
         }
-        match &self.registry.store {
-            Some(store) => store.delete(session).await?,
-            None if live.is_none() => {
-                return Err(KernelError::new(
-                    ErrorCode::SessionNotFound,
-                    format!("no session {session}"),
-                ));
-            }
-            None => {}
-        }
-        let _ = self.gateway.send(GatewayEvent::SessionRemoved {
-            session: session.clone(),
-        });
-        Ok(())
+        self.delete_one(session).await
     }
 
     async fn catalog(&self, kind: CatalogKind) -> Result<Catalog, KernelError> {

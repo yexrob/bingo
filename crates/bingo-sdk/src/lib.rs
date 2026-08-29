@@ -44,8 +44,8 @@ pub use state::{Applied, LiveTurn, Retry, SessionState};
 pub use store::SessionStore;
 pub use surface::{Exit, Surface, SurfaceKind, SurfaceOptions};
 pub use tool::{
-    Env, Interrupt, ResultLimit, Subject, Tool, ToolCall, ToolContext, ToolError, ToolHost,
-    ToolTraits, input_schema,
+    Delivery, Env, Interrupt, ResultLimit, Subject, Tool, ToolCall, ToolContext, ToolError,
+    ToolHost, ToolTraits, input_schema,
 };
 
 /// Re-exported so plugins share one cancellation type without naming tokio-util.

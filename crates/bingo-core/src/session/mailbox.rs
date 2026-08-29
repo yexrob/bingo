@@ -15,6 +15,12 @@ pub(crate) enum Msg {
         intent: IntentId,
         input: Input,
     },
+    /// A peer's prose (ADR-0010 §1): no command parse, no submit hooks.
+    Deliver {
+        intent: IntentId,
+        input: Input,
+        delivery: Delivery,
+    },
     Interrupt {
         intent: IntentId,
         scope: InterruptScope,
@@ -139,6 +145,14 @@ impl Mailbox {
 
     pub fn submit(&self, intent: IntentId, input: Input) {
         self.send(Msg::Submit { intent, input });
+    }
+
+    pub fn deliver(&self, intent: IntentId, input: Input, delivery: Delivery) {
+        self.send(Msg::Deliver {
+            intent,
+            input,
+            delivery,
+        });
     }
 
     pub fn interrupt(&self, intent: IntentId, scope: InterruptScope) {

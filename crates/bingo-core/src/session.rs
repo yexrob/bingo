@@ -108,6 +108,11 @@ impl Actor {
     async fn handle(&mut self, msg: Msg) -> Flow {
         match msg {
             Msg::Submit { intent, input } => self.submit(intent, input).await,
+            Msg::Deliver {
+                intent,
+                input,
+                delivery,
+            } => self.deliver(intent, input, delivery).await,
             Msg::Interrupt { intent, scope } => self.interrupt(intent, scope).await,
             Msg::Answer(answered) => self.answer(answered).await,
             Msg::Attach { reply } => {
@@ -580,21 +585,60 @@ impl Actor {
                         .await;
                 }
                 HookOutcome::Redirect { session } => {
-                    return self
-                        .reject(
-                            intent,
-                            ErrorCode::InvalidInput,
-                            format!("redirect to {session} is not supported"),
-                        )
-                        .await;
+                    return self.redirect(intent, session, input).await;
                 }
             }
         }
         if self.busy() {
             return self.enqueue(intent, input).await;
         }
-        self.start_turn(vec![(intent, input)], TurnOrigin::Submit, TurnKind::Respond)
+        let inputs = self.held_then(intent, input).await;
+        self.start_turn(inputs, TurnOrigin::Submit, TurnKind::Respond)
             .await;
+    }
+
+    /// `@name` and the like (ADR-0010 §2): the input as the hook left it goes
+    /// to another session under an intent of its own; this one says where.
+    async fn redirect(&mut self, intent: IntentId, to: SessionId, input: Input) {
+        let sent = self
+            .config
+            .tool_host
+            .deliver(&to, IntentId::mint(), input, Delivery::Wake);
+        match sent {
+            Ok(()) => self.applied(intent, json!({ "redirected": to })).await,
+            Err(e) => self.reject(intent, e.code, e.message).await,
+        }
+    }
+
+    /// A peer's message (ADR-0010 §1): prose from another session, past the
+    /// command parser and the submit hooks, into the queue or a `Peer` turn.
+    async fn deliver(&mut self, intent: IntentId, input: Input, delivery: Delivery) {
+        if self.state.closed || self.closing.is_some() {
+            return self
+                .reject(intent, ErrorCode::SessionClosed, "the session is closed")
+                .await;
+        }
+        if !matches!(input, Input::Text { .. }) {
+            return self
+                .reject(intent, ErrorCode::InvalidInput, "a peer delivers text")
+                .await;
+        }
+        if let Err(message) = validate(&input) {
+            return self.reject(intent, ErrorCode::InvalidInput, message).await;
+        }
+        if self.busy() || delivery == Delivery::Hold {
+            return self.enqueue(intent, input).await;
+        }
+        let inputs = self.held_then(intent, input).await;
+        self.start_turn(inputs, TurnOrigin::Peer, TurnKind::Respond)
+            .await;
+    }
+
+    /// Prose held in an idle session's queue goes first, in order.
+    async fn held_then(&mut self, intent: IntentId, input: Input) -> Vec<(IntentId, Input)> {
+        let mut inputs = self.take_queue().await;
+        inputs.push((intent, input));
+        inputs
     }
 
     async fn enqueue(&mut self, intent: IntentId, input: Input) {

@@ -25,8 +25,9 @@ use bingo_sdk::QuestionOption;
 use bingo_sdk::{
     Activation, Answer, AnswerSpec, Applied, Attachment, CatalogKind, ClientIdentity, CloseReason,
     ErrorCode, Event, Exit, Frame, FrameStream, HostHandle, Input, IntentId, IntentOutcome,
-    Interaction, InteractionKind, KernelError, Origin, Plugin, PluginError, PluginManifest,
-    Registrar, SessionHandle, SessionState, Surface, SurfaceKind, SurfaceOptions, TurnStatus,
+    Interaction, InteractionKind, KernelError, OpenOptions, Origin, Plugin, PluginError,
+    PluginManifest, Registrar, SessionHandle, SessionState, Surface, SurfaceKind, SurfaceOptions,
+    TurnStatus,
 };
 use futures::StreamExt;
 use tokio::sync::mpsc;
@@ -151,6 +152,7 @@ pub(crate) async fn drive(
                 name: SURFACE_ID.into(),
                 surface: SURFACE_ID.into(),
             },
+            OpenOptions::default(),
         )
         .await?;
     let run = Attached::open(attachment, renderer, console, out, err)?;
@@ -604,7 +606,6 @@ pub(crate) mod tests {
                 input: json!({ "file_path": "Cargo.toml" }),
                 output,
                 progress: None,
-                child_session: None,
                 duration_ms: Some(12),
             },
         )
@@ -865,6 +866,7 @@ pub(crate) mod tests {
             &self,
             _selector: SessionSelector,
             _who: ClientIdentity,
+            _options: OpenOptions,
         ) -> Result<Attachment, KernelError> {
             Ok(Attachment {
                 session: SessionId::from_raw("ses_1"),

@@ -50,12 +50,18 @@ impl ToolHost for SessionToolHost {
         Ok(mailbox.id().clone())
     }
 
-    fn submit(&self, to: &SessionId, intent: IntentId, input: Input) {
-        if let Some(host) = self.host.upgrade()
-            && let Ok(live) = host.live(to)
-        {
-            live.mailbox.submit(intent, input);
-        }
+    fn deliver(
+        &self,
+        to: &SessionId,
+        intent: IntentId,
+        input: Input,
+        delivery: Delivery,
+    ) -> Result<(), KernelError> {
+        self.host()?
+            .live(to)?
+            .mailbox
+            .deliver(intent, input, delivery);
+        Ok(())
     }
 
     fn service_any(&self, key: &str) -> Option<Arc<dyn Any + Send + Sync>> {

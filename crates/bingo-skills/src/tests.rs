@@ -8,10 +8,10 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use bingo_sdk::{
     Answer, AnswerSpec, Attachment, CancellationToken, Catalog, CatalogKind, ClientIdentity,
-    CloseReason, CommandContext, ContextQuery, ContextUsage, Env, GatewayStream, HostApi,
+    CloseReason, CommandContext, ContextQuery, ContextUsage, Delivery, Env, GatewayStream, HostApi,
     HostHandle, Input, IntentId, InteractionKind, Item, ItemBody, ItemId, KernelError,
-    ModelCapabilities, Prompter, SessionFilter, SessionId, SessionSelector, SessionSpec,
-    SessionSummary, ToolContext, ToolHost, TurnId, Usage,
+    ModelCapabilities, OpenOptions, Prompter, SessionFilter, SessionId, SessionSelector,
+    SessionSpec, SessionSummary, ToolContext, ToolHost, TurnId, Usage,
 };
 use jiff::Timestamp;
 
@@ -83,6 +83,7 @@ impl HostApi for UnusedHost {
         &self,
         _selector: SessionSelector,
         _who: ClientIdentity,
+        _options: OpenOptions,
     ) -> Result<Attachment, KernelError> {
         unreachable!("a skill opens no session")
     }
@@ -142,7 +143,15 @@ impl ToolHost for NullHost {
         unreachable!("a skill spawns nothing")
     }
 
-    fn submit(&self, _to: &SessionId, _intent: IntentId, _input: Input) {}
+    fn deliver(
+        &self,
+        _: &SessionId,
+        _: IntentId,
+        _: Input,
+        _: Delivery,
+    ) -> Result<(), KernelError> {
+        Ok(())
+    }
 
     fn service_any(&self, _key: &str) -> Option<Arc<dyn Any + Send + Sync>> {
         None

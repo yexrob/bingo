@@ -8,8 +8,8 @@
 
 use bingo_sdk::{
     Activation, Answer, Catalog, CatalogKind, ClientIdentity, Frame, GatewayEvent, HistoryChunk,
-    HistoryPage, Input, IntentId, InteractionId, InterruptScope, Seq, SessionFilter, SessionId,
-    SessionSelector, SessionState, SessionSummary,
+    HistoryPage, Input, IntentId, InteractionId, InterruptScope, OpenOptions, Seq, SessionFilter,
+    SessionId, SessionSelector, SessionState, SessionSummary,
 };
 use schemars::{JsonSchema, Schema, SchemaGenerator};
 use serde::{Deserialize, Serialize};
@@ -105,6 +105,8 @@ pub struct ListResult {
 #[serde(rename_all = "camelCase")]
 pub struct OpenParams {
     pub selector: SessionSelector,
+    #[serde(default)]
+    pub options: OpenOptions,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]

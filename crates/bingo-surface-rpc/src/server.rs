@@ -257,7 +257,7 @@ impl Server {
             snapshot,
             events,
             handle,
-        } = self.host.open(params.selector, who).await?;
+        } = self.host.open(params.selector, who, params.options).await?;
         let reply = Reply::of(&OpenResult {
             session: session.clone(),
             snapshot,

@@ -17,7 +17,12 @@ impl HostApi for Unavailable {
     async fn sessions(&self, _: SessionFilter) -> Result<Vec<SessionSummary>, KernelError> {
         Err(unavailable())
     }
-    async fn open(&self, _: SessionSelector, _: ClientIdentity) -> Result<Attachment, KernelError> {
+    async fn open(
+        &self,
+        _: SessionSelector,
+        _: ClientIdentity,
+        _: OpenOptions,
+    ) -> Result<Attachment, KernelError> {
         Err(unavailable())
     }
     async fn close(&self, _: &SessionId, _: CloseReason) -> Result<(), KernelError> {

@@ -228,7 +228,15 @@ mod tests {
         async fn spawn_session(&self, _: SessionSpec) -> Result<SessionId, KernelError> {
             Err(KernelError::new(ErrorCode::Internal, "no"))
         }
-        fn submit(&self, _: &SessionId, _: IntentId, _: Input) {}
+        fn deliver(
+            &self,
+            _: &SessionId,
+            _: IntentId,
+            _: Input,
+            _: Delivery,
+        ) -> Result<(), KernelError> {
+            Ok(())
+        }
         fn service_any(&self, _: &str) -> Option<Arc<dyn std::any::Any + Send + Sync>> {
             None
         }

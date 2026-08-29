@@ -1832,16 +1832,6 @@
                 "null"
               ]
             },
-            "childSession": {
-              "anyOf": [
-                {
-                  "$ref": "#/$defs/SessionId"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
             "durationMs": {
               "type": [
                 "integer",
@@ -2221,11 +2211,28 @@
         }
       ]
     },
+    "OpenOptions": {
+      "type": "object",
+      "properties": {
+        "children": {
+          "type": "boolean",
+          "description": "The frames of every live descendant too, each stamped with its own\n`session`; the handle answers an interaction wherever in the tree it\nwas opened.",
+          "default": false
+        }
+      },
+      "description": "What an attachment carries beyond the session itself (ADR-0010 §3)."
+    },
     "OpenParams": {
       "type": "object",
       "properties": {
         "selector": {
           "$ref": "#/$defs/SessionSelector"
+        },
+        "options": {
+          "$ref": "#/$defs/OpenOptions",
+          "default": {
+            "children": false
+          }
         }
       },
       "required": [

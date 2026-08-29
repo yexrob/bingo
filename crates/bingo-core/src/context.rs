@@ -102,7 +102,7 @@ impl Folder {
     fn item(&mut self, item: &Item) {
         let round = (item.turn.clone(), item.round);
         match &item.body {
-            ItemBody::User { parts, .. } => self.user(parts.clone()),
+            ItemBody::User { parts, origin } => self.user(spoken(parts, origin)),
             ItemBody::Assistant { text } => self.text(text),
             ItemBody::Reasoning {
                 text,
@@ -246,6 +246,19 @@ fn plain(value: &Value) -> String {
     }
 }
 
+/// A user item that names who spoke carries that name to the model
+/// (ADR-0010 §5): an agent's message, or a person's in a group, must not read
+/// as the one the session works for.
+fn spoken(parts: &[ContentPart], origin: &Origin) -> Vec<ContentPart> {
+    let Some(principal) = origin.principal.as_deref().filter(|p| !p.is_empty()) else {
+        return parts.to_vec();
+    };
+    let mut out = Vec::with_capacity(parts.len() + 1);
+    out.push(ContentPart::text(format!("[from {principal}]")));
+    out.extend(parts.iter().cloned());
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -284,7 +297,6 @@ mod tests {
                 input: serde_json::json!({"file_path": "x"}),
                 output: output.map(ToolOutput::text),
                 progress: None,
-                child_session: None,
                 duration_ms: None,
             },
         )

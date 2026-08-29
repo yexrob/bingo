@@ -11,8 +11,8 @@ use async_trait::async_trait;
 use bingo_sdk::{
     Activation, Answer, Attachment, Catalog, CatalogKind, ClientIdentity, CloseReason, ErrorCode,
     Frame, FrameStream, GatewayEvent, GatewayStream, HistoryChunk, HistoryPage, HostApi,
-    HostHandle, Input, IntentId, InteractionId, InterruptScope, KernelError, Seq, SessionFilter,
-    SessionHandle, SessionId, SessionPort, SessionSelector, SessionSummary,
+    HostHandle, Input, IntentId, InteractionId, InterruptScope, KernelError, OpenOptions, Seq,
+    SessionFilter, SessionHandle, SessionId, SessionPort, SessionSelector, SessionSummary,
 };
 use futures::{SinkExt, Stream, StreamExt};
 use serde::Serialize;
@@ -386,10 +386,11 @@ impl HostApi for RemoteKernel {
         &self,
         selector: SessionSelector,
         _who: ClientIdentity,
+        options: OpenOptions,
     ) -> Result<Attachment, KernelError> {
         let OpenResult { session, snapshot }: OpenResult = self
             .connection
-            .call(name::SESSION_OPEN, &OpenParams { selector })
+            .call(name::SESSION_OPEN, &OpenParams { selector, options })
             .await?;
         let events = self.connection.router.claim(&session);
         let handle = RemoteSession {

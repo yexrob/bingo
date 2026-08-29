@@ -21,7 +21,6 @@ fn frames_with_results(n: usize, chars: usize) -> Vec<Frame> {
                 input: json!({}),
                 output: Some(ToolOutput::text("x".repeat(chars))),
                 progress: None,
-                child_session: None,
                 duration_ms: None,
             },
             meta: Default::default(),

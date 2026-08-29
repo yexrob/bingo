@@ -180,6 +180,15 @@ impl ToolContext {
     }
 }
 
+/// How a peer message reaches a session's queue (ADR-0010 §1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Delivery {
+    /// An idle target opens a turn on it; a busy one absorbs it at the next barrier.
+    Wake,
+    /// It waits in the queue for whatever opens the next turn.
+    Hold,
+}
+
 /// The kernel-side capabilities a tool context delegates to.
 #[async_trait]
 pub trait ToolHost: Prompter {
@@ -188,8 +197,15 @@ pub trait ToolHost: Prompter {
     async fn record(&self, body: ItemBody) -> Result<ItemId, KernelError>;
     /// The sub-agent primitive: a child session sharing this registry.
     async fn spawn_session(&self, spec: SessionSpec) -> Result<SessionId, KernelError>;
-    /// The peer-messaging primitive: the target's queue is its inbox.
-    fn submit(&self, to: &SessionId, intent: IntentId, input: Input);
+    /// The peer-messaging primitive: the target's queue is its inbox. Fails
+    /// only for a session that is not live; the outcome is the target's ack.
+    fn deliver(
+        &self,
+        to: &SessionId,
+        intent: IntentId,
+        input: Input,
+        delivery: Delivery,
+    ) -> Result<(), KernelError>;
     fn service_any(&self, key: &str) -> Option<Arc<dyn Any + Send + Sync>>;
 }
 

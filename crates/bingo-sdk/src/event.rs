@@ -341,8 +341,6 @@ pub enum ItemBody {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         progress: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        child_session: Option<SessionId>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         duration_ms: Option<u64>,
     },
     /// A long-running non-turn operation (login, reconnect, team start).
@@ -810,7 +808,6 @@ mod tests {
                                 input: serde_json::json!({"file_path": "src/lib.rs"}),
                                 output: None,
                                 progress: None,
-                                child_session: None,
                                 duration_ms: None,
                             },
                         )
@@ -850,7 +847,6 @@ mod tests {
                                 input: serde_json::json!({}),
                                 output: None,
                                 progress: Some("writing…".into()),
-                                child_session: None,
                                 duration_ms: None,
                             },
                         )

@@ -92,7 +92,7 @@ mod tests {
 
     use bingo_sdk::{
         Attachment, Catalog, CatalogKind, ClientIdentity, CloseReason, GatewayStream, HostApi,
-        HostHandle, SessionFilter, SessionId, SessionSelector, SessionSummary,
+        HostHandle, OpenOptions, SessionFilter, SessionId, SessionSelector, SessionSummary,
     };
 
     /// A command context reads its session, its directory and a host; `!` never
@@ -113,6 +113,7 @@ mod tests {
             &self,
             _selector: SessionSelector,
             _who: ClientIdentity,
+            _options: OpenOptions,
         ) -> Result<Attachment, KernelError> {
             unreachable!("a shell line opens no session")
         }

@@ -45,7 +45,6 @@ pub fn tool(id: &str, name: &str, input: &str, output: Option<&str>) -> Item {
             input: serde_json::from_str(input).unwrap_or(serde_json::Value::Null),
             output: output.map(ToolOutput::text),
             progress: None,
-            child_session: None,
             duration_ms: None,
         },
     )

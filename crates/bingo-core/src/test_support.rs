@@ -142,7 +142,15 @@ impl ToolHost for NoHost {
     async fn spawn_session(&self, _: SessionSpec) -> Result<SessionId, KernelError> {
         Err(KernelError::new(ErrorCode::Internal, "no"))
     }
-    fn submit(&self, _: &SessionId, _: IntentId, _: Input) {}
+    fn deliver(
+        &self,
+        _: &SessionId,
+        _: IntentId,
+        _: Input,
+        _: Delivery,
+    ) -> Result<(), KernelError> {
+        Ok(())
+    }
     fn service_any(&self, _: &str) -> Option<Arc<dyn std::any::Any + Send + Sync>> {
         None
     }
@@ -411,7 +419,12 @@ impl HostApi for NoApi {
     async fn sessions(&self, _: SessionFilter) -> Result<Vec<SessionSummary>, KernelError> {
         Ok(Vec::new())
     }
-    async fn open(&self, _: SessionSelector, _: ClientIdentity) -> Result<Attachment, KernelError> {
+    async fn open(
+        &self,
+        _: SessionSelector,
+        _: ClientIdentity,
+        _: OpenOptions,
+    ) -> Result<Attachment, KernelError> {
         Err(KernelError::new(ErrorCode::Internal, "no"))
     }
     async fn close(&self, _: &SessionId, _: CloseReason) -> Result<(), KernelError> {
