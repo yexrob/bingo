@@ -25,3 +25,5 @@ jiff.workspace = true
 [dev-dependencies]
 insta.workspace = true
 wiremock.workspace = true
+# `tokio::time::pause`, so the 60s idle guard costs a test no wall time.
+tokio = { workspace = true, features = ["test-util"] }
