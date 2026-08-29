@@ -122,7 +122,12 @@ impl Folder {
             ItemBody::QuestionAnswer {
                 question, answer, ..
             } => self.note(format!("Q: {question}\nA: {answer}")),
-            ItemBody::Action { .. }
+            ItemBody::Action {
+                name,
+                args,
+                result: Some(result),
+            } => self.note(format!("[{name}] {}\n{}", plain(args), plain(result))),
+            ItemBody::Action { result: None, .. }
             | ItemBody::Rewind { .. }
             | ItemBody::Notice { .. }
             | ItemBody::PermissionReceipt { .. }
@@ -231,6 +236,15 @@ impl Folder {
 }
 
 pub use bingo_sdk::tokens::estimate as estimate_tokens;
+
+/// A JSON value as a person wrote it: a string verbatim, anything else compact.
+fn plain(value: &Value) -> String {
+    match value {
+        Value::String(s) => s.clone(),
+        Value::Null => String::new(),
+        other => other.to_string(),
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -668,5 +682,33 @@ mod tests {
             data: String::new(),
         }])];
         assert_eq!(estimate_tokens(&[], &msgs, &[]), 1_600);
+    }
+
+    /// An action with a result is told to the model as the person wrote it
+    /// (ADR-0008 §5); one still running has no wire form.
+    #[test]
+    fn actions_with_results_reach_the_model_as_notes() {
+        let done = item(
+            "a1",
+            ItemBody::Action {
+                name: "!".into(),
+                args: serde_json::json!("ls"),
+                result: Some(serde_json::json!("a\nb\n[exit 1]")),
+            },
+        );
+        let pending = item(
+            "a2",
+            ItemBody::Action {
+                name: "login".into(),
+                args: serde_json::json!({"provider": "x"}),
+                result: None,
+            },
+        );
+        let messages = ContextView::fold_items(&[done, pending]);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(
+            messages[0].parts[0].as_text(),
+            Some("[!] ls\na\nb\n[exit 1]")
+        );
     }
 }

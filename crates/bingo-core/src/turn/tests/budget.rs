@@ -49,6 +49,7 @@ fn run_on(
             history,
             generation: 0,
             cancel: CancellationToken::new(),
+            kind: TurnKind::Respond,
         },
         host,
     )

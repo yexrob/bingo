@@ -55,12 +55,22 @@ pub struct TurnRun {
     pub history: Vec<Frame>,
     pub generation: u64,
     pub cancel: CancellationToken,
+    pub kind: TurnKind,
+}
+
+/// What a turn is for: answering, or only making room (ADR-0008 §4).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TurnKind {
+    Respond,
+    Compact { instructions: Option<String> },
 }
 
 #[derive(Debug, PartialEq)]
 pub struct TurnOutcome {
     pub status: TurnStatus,
     pub usage: Usage,
+    /// The transcript as the turn left it, for the hooks that run after it.
+    pub items: Vec<Item>,
 }
 
 struct Turn<'a> {
@@ -124,24 +134,56 @@ pub async fn run_turn(cfg: &TurnConfig, run: TurnRun, host: &dyn TurnHost) -> Tu
         hook.on_turn(Phase::Start, &turn.id, &turn.items, &turn.hook_cx)
             .await;
     }
-    let mut step = Step::Assembling;
-    let status = loop {
-        step = match step {
-            Step::Assembling => turn.round_trip().await,
-            Step::Closing(status) => break status,
-        };
+    let status = match run.kind {
+        TurnKind::Respond => turn.respond().await,
+        TurnKind::Compact { instructions } => turn.compact_only(instructions).await,
     };
-    for hook in turn.hooks(HookPoint::Turn) {
-        hook.on_turn(Phase::End, &turn.id, &turn.items, &turn.hook_cx)
-            .await;
-    }
     TurnOutcome {
         status,
         usage: turn.usage,
+        items: turn.items,
     }
 }
 
 impl Turn<'_> {
+    /// Round trips until one closes the turn.
+    async fn respond(&mut self) -> TurnStatus {
+        let mut step = Step::Assembling;
+        loop {
+            step = match step {
+                Step::Assembling => self.round_trip().await,
+                Step::Closing(status) => break status,
+            };
+        }
+    }
+
+    /// One manual compaction, then done. What it bought or did not is said
+    /// on the stream, as for any other compaction.
+    async fn compact_only(&mut self, instructions: Option<String>) -> TurnStatus {
+        let Some(compactor) = self.cfg.compactor.clone() else {
+            return TurnStatus::Failed {
+                error: KernelError::new(
+                    ErrorCode::InvalidInput,
+                    "no compaction strategy is registered",
+                ),
+            };
+        };
+        let usage = self.measure(&self.cfg.system, &ContextView::fold_items(&self.items));
+        let usage = self.ruler.anchored(usage);
+        self.compact(
+            compactor.as_ref(),
+            CompactReason::Manual { instructions },
+            usage,
+        )
+        .await;
+        if self.cancel.is_cancelled() {
+            return TurnStatus::Interrupted {
+                reason: InterruptReason::UserCancel,
+            };
+        }
+        TurnStatus::Completed
+    }
+
     fn hooks(&self, point: HookPoint) -> Vec<Arc<dyn Hook>> {
         self.cfg
             .hooks

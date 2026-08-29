@@ -156,6 +156,7 @@ fn run(
             history: history("hello"),
             generation: 0,
             cancel,
+            kind: TurnKind::Respond,
         },
         host,
     )
@@ -498,6 +499,7 @@ async fn a_model_without_vision_gets_a_note_where_the_image_was() {
             history: frames,
             generation: 0,
             cancel: CancellationToken::new(),
+            kind: TurnKind::Respond,
         },
         &host,
     )

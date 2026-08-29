@@ -77,7 +77,7 @@ impl Host {
         let spec = spec_of(&head);
         self.check_key_free(spec.key.as_deref())?;
         let choice = self.choose_model(&spec).await?;
-        let mailbox = session::resume(frames, Some(store), |mailbox| {
+        let mailbox = session::resume(frames, Some(store), self.services(), |mailbox| {
             Arc::new(self.turn_config(&spec, &head, choice, mailbox))
         })?;
         let live = Live::new(mailbox, &head);

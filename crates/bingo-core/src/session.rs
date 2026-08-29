@@ -3,35 +3,43 @@
 //! actor mints `seq`, persists durable frames, folds them with the one reducer
 //! and fans them out to bounded subscriber channels. It never awaits a client.
 
+mod commands;
 mod interactions;
 mod mailbox;
+mod queue;
 mod spawn;
 mod subscribers;
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
+use std::time::Duration;
 
 use bingo_sdk::*;
 use futures::FutureExt;
 use jiff::Timestamp;
 use serde_json::{Value, json};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
+use tokio_util::task::TaskTracker;
 
+use commands::Commands;
+pub use commands::Services;
 pub use interactions::INTERACTION_GUARD_MS;
 use interactions::Pending;
 pub use mailbox::Mailbox;
 use mailbox::{Msg, TurnMail};
+use queue::{Queue, Unit};
 pub use spawn::{head_summary, resume, spawn};
 pub use subscribers::SUBSCRIBER_CAPACITY;
 use subscribers::Subscribers;
 
 use crate::gate::hook_applies;
-use crate::turn::{TurnConfig, TurnOutcome, TurnRun, run_turn};
+use crate::turn::{TurnConfig, TurnKind, TurnOutcome, TurnRun, run_turn};
 
-/// Characters of a queued input shown in `QueueChanged`.
-const PREVIEW_CHARS: usize = 80;
+/// How long a stopping actor waits for the work it spawned after its turns
+/// (ADR-0008 §7) before it lets go.
+pub const AFTER_TURN_DEADLINE: Duration = Duration::from_secs(30);
 
 struct Running {
     turn: TurnId,
@@ -58,8 +66,12 @@ struct Actor {
     config: Arc<TurnConfig>,
     subscribers: Subscribers,
     running: Option<Running>,
-    queue: VecDeque<(IntentId, Input)>,
-    queue_revision: u64,
+    queue: Queue,
+    commands: Commands,
+    /// Work that outlives a turn: the hooks that run after `TurnCompleted`.
+    tracker: TaskTracker,
+    /// Flipped when the actor is done, for whoever waits on the mailbox.
+    done: watch::Sender<bool>,
     pending: HashMap<InteractionId, Pending>,
     generation: u64,
     /// A close that waits for the running turn to wind down.
@@ -79,22 +91,21 @@ impl Actor {
             running.cancel.cancel();
             running.task.abort();
         }
+        self.tracker.close();
+        if tokio::time::timeout(AFTER_TURN_DEADLINE, self.tracker.wait())
+            .await
+            .is_err()
+        {
+            tracing::warn!(session = %self.id, "post-turn work did not finish in time");
+        }
+        let _ = self.done.send(true);
     }
 
     async fn handle(&mut self, msg: Msg) -> Flow {
         match msg {
             Msg::Submit { intent, input } => self.submit(intent, input).await,
             Msg::Interrupt { intent, scope } => self.interrupt(intent, scope).await,
-            Msg::Answer {
-                intent,
-                interaction,
-                answer,
-                activation,
-                who,
-            } => {
-                self.answer(intent, interaction, answer, activation, who)
-                    .await
-            }
+            Msg::Answer(answered) => self.answer(answered).await,
             Msg::Attach { reply } => {
                 let snapshot = self.state.clone();
                 let stream = self.subscribe(snapshot.seq);
@@ -130,6 +141,14 @@ impl Actor {
                 let _ = reply.send(id);
             }
             Msg::Progress { item, tail } => self.progress(item, tail).await,
+            Msg::CommandFinished { intent, outcome } => {
+                self.command_finished(intent, outcome).await
+            }
+            Msg::Reconfigure { config } => self.reconfigure(config).await,
+            Msg::Compact {
+                instructions,
+                reply,
+            } => drop(reply.send(self.compact(instructions).await)),
             Msg::Close { reason } => return self.close(reason).await,
         }
         Flow::Continue
@@ -143,7 +162,61 @@ impl Actor {
             ..self.state.summary.clone()
         };
         self.publish(Event::SessionUpdated { summary }, None).await;
+        self.publish_config().await;
         self.recover().await;
+    }
+
+    /// The settings a client may read and a command may change (ADR-0008 §4).
+    async fn publish_config(&mut self) {
+        let config = ConfigView {
+            kernel: json!({ "thinking": self.config.model.reasoning }),
+            plugins: Default::default(),
+        };
+        self.publish(Event::ConfigChanged { config }, None).await;
+    }
+
+    /// The next turn runs on a config the host rebuilt; the running one
+    /// keeps its own. The summary says what changed.
+    async fn reconfigure(&mut self, config: Arc<TurnConfig>) {
+        self.config = config;
+        let summary = SessionSummary {
+            model: Some(self.config.model.id.clone()),
+            provider: Some(self.config.model.provider.id().to_string()),
+            updated_at: Timestamp::now(),
+            ..self.state.summary.clone()
+        };
+        self.publish(Event::SessionUpdated { summary }, None).await;
+        self.publish_config().await;
+    }
+
+    /// A turn that only compacts (ADR-0008 §4): refused while one runs, so
+    /// that a queued `/compact` never races the turn ahead of it.
+    async fn compact(&mut self, instructions: Option<String>) -> Result<(), KernelError> {
+        if self.running.is_some() {
+            return Err(KernelError::new(ErrorCode::NotReady, "a turn is running"));
+        }
+        self.start_turn(
+            Vec::new(),
+            TurnOrigin::Auto,
+            TurnKind::Compact { instructions },
+        )
+        .await;
+        Ok(())
+    }
+
+    fn hook_context(&self) -> HookContext {
+        HookContext {
+            session: self.id.clone(),
+            turn: self.running.as_ref().map(|r| r.turn.clone()),
+            cwd: self.config.cwd.clone(),
+            provider: Some(self.config.model.provider.clone()),
+            model: Some(self.config.model.id.clone()),
+        }
+    }
+
+    /// Busy for the queue's purposes: a turn, or a command that holds it.
+    fn busy(&self) -> bool {
+        self.running.is_some() || self.commands.busy()
     }
 
     /// A resumed journal may end inside a turn the old process never
@@ -324,17 +397,97 @@ impl Actor {
                 .reject(intent, ErrorCode::SessionClosed, "the session is closed")
                 .await;
         }
+        match commands::parse(&input) {
+            Some(parsed) => self.submit_command(intent, input, parsed).await,
+            None => self.submit_prose(intent, input).await,
+        }
+    }
+
+    /// A command line: run now if instant, else behind whatever is running.
+    async fn submit_command(&mut self, intent: IntentId, input: Input, parsed: commands::Parsed) {
+        let Some(command) = self.commands.find(&parsed.name) else {
+            let shown = if parsed.name == "!" {
+                "!".to_string()
+            } else {
+                format!("/{}", parsed.name)
+            };
+            return self
+                .reject(
+                    intent,
+                    ErrorCode::InvalidInput,
+                    format!("unknown command: {shown}"),
+                )
+                .await;
+        };
+        let instant = command.spec().instant;
+        if !instant && self.busy() {
+            return self.enqueue(intent, input).await;
+        }
+        let origin = commands::origin_of(&input);
+        self.run_command(intent, origin, command, parsed.args, !instant)
+            .await;
+    }
+
+    async fn run_command(
+        &mut self,
+        intent: IntentId,
+        origin: Origin,
+        command: Arc<dyn Command>,
+        args: String,
+        holds: bool,
+    ) {
+        let spawned = self.commands.spawn(commands::Run {
+            intent: intent.clone(),
+            origin,
+            command,
+            args,
+            holds,
+        });
+        if let Err(e) = spawned {
+            self.reject(intent, e.code, e.message).await;
+        }
+    }
+
+    /// The command's outcome becomes its ack (ADR-0008 §3); then the queue
+    /// may move.
+    async fn command_finished(
+        &mut self,
+        intent: IntentId,
+        outcome: Result<CommandOutcome, KernelError>,
+    ) {
+        let Some(origin) = self.commands.finish(&intent) else {
+            tracing::warn!(session = %self.id, %intent, "completion from a command that is not running");
+            return;
+        };
+        match outcome {
+            Ok(CommandOutcome::Applied { message }) => {
+                let result = match message {
+                    Some(message) => json!({ "message": message }),
+                    None => json!({}),
+                };
+                self.applied(intent, result).await;
+            }
+            Ok(CommandOutcome::View { view }) => {
+                self.applied(intent, json!({ "view": view })).await
+            }
+            Ok(CommandOutcome::Record { body }) => {
+                let item = self.record(body).await;
+                self.applied(intent, json!({ "item": item })).await;
+            }
+            Ok(CommandOutcome::Prompt { text }) => {
+                self.submit_prose(intent, Input::text(text, origin)).await;
+            }
+            Err(e) => self.reject(intent, e.code, e.message).await,
+        }
+        self.drain_queue().await;
+    }
+
+    async fn submit_prose(&mut self, intent: IntentId, input: Input) {
         let mut input = input;
         if let Err(message) = validate(&input) {
             return self.reject(intent, ErrorCode::InvalidInput, message).await;
         }
-        let cx = HookContext {
-            session: self.id.clone(),
-            turn: self.running.as_ref().map(|r| r.turn.clone()),
-            cwd: self.config.cwd.clone(),
-            provider: Some(self.config.model.provider.clone()),
-            model: Some(self.config.model.id.clone()),
-        };
+        let cx = self.hook_context();
         let hooks: Vec<Arc<dyn Hook>> = self
             .config
             .hooks
@@ -361,25 +514,33 @@ impl Actor {
                 }
             }
         }
-        if self.running.is_some() {
-            self.queue.push_back((intent.clone(), input));
-            let position = self.queue.len() as u32;
-            self.publish_queue().await;
-            self.publish(
-                Event::IntentAck {
-                    intent: intent.clone(),
-                    outcome: IntentOutcome::Queued { position },
-                },
-                Some(intent),
-            )
-            .await;
-            return;
+        if self.busy() {
+            return self.enqueue(intent, input).await;
         }
-        self.start_turn(vec![(intent, input)], TurnOrigin::Submit)
+        self.start_turn(vec![(intent, input)], TurnOrigin::Submit, TurnKind::Respond)
             .await;
     }
 
-    async fn start_turn(&mut self, inputs: Vec<(IntentId, Input)>, origin: TurnOrigin) {
+    async fn enqueue(&mut self, intent: IntentId, input: Input) {
+        let position = self.queue.push(intent.clone(), input);
+        let changed = self.queue.changed();
+        self.publish(changed, None).await;
+        self.publish(
+            Event::IntentAck {
+                intent: intent.clone(),
+                outcome: IntentOutcome::Queued { position },
+            },
+            Some(intent),
+        )
+        .await;
+    }
+
+    async fn start_turn(
+        &mut self,
+        inputs: Vec<(IntentId, Input)>,
+        origin: TurnOrigin,
+        kind: TurnKind,
+    ) {
         let turn = TurnId::mint();
         let (ids, acks) = self.record_inputs(&turn, inputs).await;
         self.publish(
@@ -394,7 +555,7 @@ impl Actor {
         if origin == TurnOrigin::Submit {
             self.ack_turn_started(&turn, acks).await;
         }
-        let running = self.spawn_turn(turn, CancellationToken::new());
+        let running = self.spawn_turn(turn, CancellationToken::new(), kind);
         // Registered after the spawn: the task's first mail is handled only
         // once this function returns, so nothing can race the registration.
         self.running = Some(running);
@@ -444,12 +605,13 @@ impl Actor {
 
     /// The turn loop runs in its own task and reports back by mail; a panic in
     /// it becomes a failed turn rather than a lost session.
-    fn spawn_turn(&self, turn: TurnId, cancel: CancellationToken) -> Running {
+    fn spawn_turn(&self, turn: TurnId, cancel: CancellationToken, kind: TurnKind) -> Running {
         let run = TurnRun {
             turn: turn.clone(),
             history: self.journal.clone(),
             generation: self.generation,
             cancel: cancel.clone(),
+            kind,
         };
         let cfg = Arc::clone(&self.config);
         let mailbox = self.mailbox.clone();
@@ -476,8 +638,8 @@ impl Actor {
             return Flow::Continue;
         }
         self.cancel_interactions(CancelReason::TurnEnded).await;
-        let (status, usage) = match outcome {
-            Ok(outcome) => (outcome.status, outcome.usage),
+        let (status, usage, items) = match outcome {
+            Ok(outcome) => (outcome.status, outcome.usage, outcome.items),
             Err(panic) => (
                 TurnStatus::Failed {
                     error: KernelError::new(
@@ -486,27 +648,49 @@ impl Actor {
                     ),
                 },
                 Usage::default(),
+                Vec::new(),
             ),
         };
         self.running = None;
         self.publish(
             Event::TurnCompleted {
-                turn,
+                turn: turn.clone(),
                 status,
                 usage,
             },
             None,
         )
         .await;
+        self.after_turn(turn, items);
         if let Some(reason) = self.closing.take() {
             return self.finish_close(reason).await;
         }
-        if !self.queue.is_empty() {
-            let inputs: Vec<_> = self.queue.drain(..).collect();
-            self.publish_queue().await;
-            self.start_turn(inputs, TurnOrigin::Queue).await;
-        }
+        self.drain_queue().await;
         Flow::Continue
+    }
+
+    /// The turn-end hooks run after the terminal event (ADR-0008 §7), on a
+    /// task the actor waits for before it stops.
+    fn after_turn(&self, turn: TurnId, items: Vec<Item>) {
+        let hooks: Vec<Arc<dyn Hook>> = self
+            .config
+            .hooks
+            .iter()
+            .filter(|h| hook_applies(&h.matcher(), HookPoint::Turn, None))
+            .cloned()
+            .collect();
+        if hooks.is_empty() {
+            return;
+        }
+        let cx = HookContext {
+            turn: Some(turn.clone()),
+            ..self.hook_context()
+        };
+        self.tracker.spawn(async move {
+            for hook in hooks {
+                hook.on_turn(Phase::End, &turn, &items, &cx).await;
+            }
+        });
     }
 
     async fn interrupt(&mut self, intent: IntentId, scope: InterruptScope) {
@@ -530,40 +714,50 @@ impl Actor {
 
     // ----- queue -----
 
-    async fn publish_queue(&mut self) {
-        self.queue_revision += 1;
-        let entries = self
-            .queue
-            .iter()
-            .enumerate()
-            .map(|(i, (intent, input))| QueueEntry {
-                intent: intent.clone(),
-                position: i as u32 + 1,
-                preview: preview(input),
-                steerable: true,
-                origin: match input {
-                    Input::Text { origin, .. } => origin.clone(),
-                    Input::Action { .. } => Origin::default(),
-                },
-            })
-            .collect();
-        self.publish(
-            Event::QueueChanged {
-                revision: self.queue_revision,
-                entries,
-            },
-            None,
-        )
-        .await;
+    /// The prose a barrier may steer with: up to the first command.
+    async fn take_queue(&mut self) -> Vec<(IntentId, Input)> {
+        let taken = self.queue.take_prose();
+        if !taken.is_empty() {
+            let changed = self.queue.changed();
+            self.publish(changed, None).await;
+        }
+        taken
     }
 
-    async fn take_queue(&mut self) -> Vec<(IntentId, Input)> {
-        if self.queue.is_empty() {
-            return Vec::new();
+    /// An idle session takes the next unit off the queue (ADR-0008 §2).
+    async fn drain_queue(&mut self) {
+        if self.busy() {
+            return;
         }
-        let taken: Vec<_> = self.queue.drain(..).collect();
-        self.publish_queue().await;
-        taken
+        let Some(unit) = self.queue.take_unit() else {
+            return;
+        };
+        let changed = self.queue.changed();
+        self.publish(changed, None).await;
+        match unit {
+            Unit::Prose(inputs) => {
+                self.start_turn(inputs, TurnOrigin::Queue, TurnKind::Respond)
+                    .await
+            }
+            Unit::Command(intent, input) => self.run_queued(intent, input).await,
+        }
+    }
+
+    /// A command that waited its turn; the table may have lost it meanwhile.
+    async fn run_queued(&mut self, intent: IntentId, input: Input) {
+        let parsed = commands::parse(&input);
+        let command = parsed.as_ref().and_then(|p| self.commands.find(&p.name));
+        match (parsed, command) {
+            (Some(parsed), Some(command)) => {
+                let origin = commands::origin_of(&input);
+                self.run_command(intent, origin, command, parsed.args, true)
+                    .await
+            }
+            _ => {
+                self.reject(intent, ErrorCode::InvalidInput, "unknown command")
+                    .await
+            }
+        }
     }
 
     // ----- closing -----
@@ -582,8 +776,7 @@ impl Actor {
     }
 
     async fn finish_close(&mut self, reason: CloseReason) -> Flow {
-        let queued: Vec<_> = self.queue.drain(..).collect();
-        for (intent, _) in queued {
+        for (intent, _) in self.queue.drain_all() {
             self.reject(intent, ErrorCode::SessionClosed, "the session is closed")
                 .await;
         }
@@ -593,7 +786,7 @@ impl Actor {
     }
 }
 
-/// What the kernel accepts as a submission in M0: plain text.
+/// What the kernel accepts as prose: text, for now without attachments.
 fn validate(input: &Input) -> Result<(), String> {
     match input {
         Input::Text {
@@ -602,12 +795,6 @@ fn validate(input: &Input) -> Result<(), String> {
             if text.trim().is_empty() {
                 return Err("empty input".into());
             }
-            if text.trim_start().starts_with('/') {
-                return Err(format!(
-                    "unknown command: {}",
-                    text.split_whitespace().next().unwrap_or("/")
-                ));
-            }
             if !attachments.is_empty() {
                 return Err("attachments are not supported".into());
             }
@@ -615,14 +802,6 @@ fn validate(input: &Input) -> Result<(), String> {
         }
         Input::Action { action } => Err(format!("unknown action: {}", action.name)),
     }
-}
-
-fn preview(input: &Input) -> String {
-    let text = match input {
-        Input::Text { text, .. } => text.as_str(),
-        Input::Action { action } => action.name.as_str(),
-    };
-    text.chars().take(PREVIEW_CHARS).collect()
 }
 
 fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {

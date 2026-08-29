@@ -6,9 +6,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use bingo_sdk::*;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 
-use crate::turn::{TurnHost, TurnOutcome};
+use crate::turn::{TurnConfig, TurnHost, TurnOutcome};
 
 pub(crate) enum Msg {
     Submit {
@@ -19,13 +19,7 @@ pub(crate) enum Msg {
         intent: IntentId,
         scope: InterruptScope,
     },
-    Answer {
-        intent: IntentId,
-        interaction: InteractionId,
-        answer: Answer,
-        activation: Activation,
-        who: ClientIdentity,
-    },
+    Answer(Answered),
     Attach {
         reply: oneshot::Sender<(SessionState, FrameStream)>,
     },
@@ -66,9 +60,31 @@ pub(crate) enum Msg {
         item: ItemId,
         tail: String,
     },
+    CommandFinished {
+        intent: IntentId,
+        outcome: Result<CommandOutcome, KernelError>,
+    },
+    /// The host rebuilt the turn config; the next turn runs on it.
+    Reconfigure {
+        config: Arc<TurnConfig>,
+    },
+    /// A turn that only compacts (ADR-0008 §4).
+    Compact {
+        instructions: Option<String>,
+        reply: oneshot::Sender<Result<(), KernelError>>,
+    },
     Close {
         reason: CloseReason,
     },
+}
+
+/// A client's answer to an open interaction, with who gave it.
+pub(crate) struct Answered {
+    pub intent: IntentId,
+    pub interaction: InteractionId,
+    pub answer: Answer,
+    pub activation: Activation,
+    pub who: ClientIdentity,
 }
 
 /// The actor's address. Cheap to clone; every write is synchronous and
@@ -77,11 +93,17 @@ pub(crate) enum Msg {
 pub struct Mailbox {
     id: SessionId,
     tx: mpsc::UnboundedSender<Msg>,
+    /// `true` once the actor has stopped and its post-turn work is done.
+    done: watch::Receiver<bool>,
 }
 
 impl Mailbox {
-    pub(super) fn new(id: SessionId, tx: mpsc::UnboundedSender<Msg>) -> Self {
-        Self { id, tx }
+    pub(super) fn new(
+        id: SessionId,
+        tx: mpsc::UnboundedSender<Msg>,
+        done: watch::Receiver<bool>,
+    ) -> Self {
+        Self { id, tx, done }
     }
 }
 
@@ -131,13 +153,13 @@ impl Mailbox {
         activation: Activation,
         who: ClientIdentity,
     ) {
-        self.send(Msg::Answer {
+        self.send(Msg::Answer(Answered {
             intent,
             interaction,
             answer,
             activation,
             who,
-        });
+        }));
     }
 
     /// A snapshot and every frame after it.
@@ -184,6 +206,25 @@ impl Mailbox {
 
     pub fn close(&self, reason: CloseReason) {
         self.send(Msg::Close { reason });
+    }
+
+    /// Resolves once the actor has stopped, its post-turn work included.
+    pub async fn wait_closed(&self) {
+        let mut done = self.done.clone();
+        let _ = done.wait_for(|d| *d).await;
+    }
+
+    pub fn reconfigure(&self, config: Arc<TurnConfig>) {
+        self.send(Msg::Reconfigure { config });
+    }
+
+    /// Open a turn that only compacts; refused while a turn runs.
+    pub async fn compact(&self, instructions: Option<String>) -> Result<(), KernelError> {
+        self.call(|reply| Msg::Compact {
+            instructions,
+            reply,
+        })
+        .await?
     }
 
     /// The client-facing port, stamped with who is holding it.

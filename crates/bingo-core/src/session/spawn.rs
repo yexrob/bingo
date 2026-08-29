@@ -1,13 +1,16 @@
 //! Starting an actor: fresh from a summary, or back from its journal.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use bingo_sdk::*;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
+use tokio_util::task::TaskTracker;
 
 use super::Actor;
+use super::commands::{Commands, Services};
 use super::mailbox::Mailbox;
+use super::queue::Queue;
 use super::subscribers::Subscribers;
 use crate::turn::TurnConfig;
 
@@ -16,9 +19,10 @@ use crate::turn::TurnConfig;
 pub fn spawn(
     summary: SessionSummary,
     store: Option<Arc<dyn SessionStore>>,
+    services: Services,
     config: impl FnOnce(&Mailbox) -> Arc<TurnConfig>,
 ) -> Mailbox {
-    spawn_with(summary, Vec::new(), store, config)
+    spawn_with(summary, Vec::new(), store, services, config)
 }
 
 /// A session read back from its journal (ADR-0005): the frames are the
@@ -27,10 +31,11 @@ pub fn spawn(
 pub fn resume(
     frames: Vec<Frame>,
     store: Option<Arc<dyn SessionStore>>,
+    services: Services,
     config: impl FnOnce(&Mailbox) -> Arc<TurnConfig>,
 ) -> Result<Mailbox, KernelError> {
     let head = head_summary(&frames)?;
-    Ok(spawn_with(head, frames, store, config))
+    Ok(spawn_with(head, frames, store, services, config))
 }
 
 /// The first frame of every journal is the session saying what it is.
@@ -48,11 +53,14 @@ fn spawn_with(
     head: SessionSummary,
     journal: Vec<Frame>,
     store: Option<Arc<dyn SessionStore>>,
+    services: Services,
     config: impl FnOnce(&Mailbox) -> Arc<TurnConfig>,
 ) -> Mailbox {
     let (tx, rx) = mpsc::unbounded_channel();
-    let mailbox = Mailbox::new(head.id.clone(), tx);
+    let (done, finished) = watch::channel(false);
+    let mailbox = Mailbox::new(head.id.clone(), tx, finished);
     let config = config(&mailbox);
+    let commands = Commands::new(services, mailbox.clone(), config.cwd.clone());
     let mut state = SessionState::new(head.clone());
     for frame in &journal {
         state.apply(frame);
@@ -72,8 +80,10 @@ fn spawn_with(
         config,
         subscribers: Subscribers::default(),
         running: None,
-        queue: VecDeque::new(),
-        queue_revision: 0,
+        queue: Queue::default(),
+        commands,
+        tracker: TaskTracker::new(),
+        done,
         pending: HashMap::new(),
         closing: None,
         progress_n: 0,

@@ -7,6 +7,8 @@ use serde_json::json;
 use super::*;
 use crate::test_support::*;
 
+mod commands;
+
 fn who() -> ClientIdentity {
     ClientIdentity {
         name: "test".into(),
@@ -15,7 +17,7 @@ fn who() -> ClientIdentity {
 }
 
 fn start(provider: Arc<ScriptedProvider>, tools: Vec<Arc<dyn Tool>>) -> Mailbox {
-    spawn(summary("ses_1"), None, |_| {
+    spawn(summary("ses_1"), None, Services::none(), |_| {
         Arc::new(config(provider, tools, Arc::new(NoHost)))
     })
 }
@@ -46,7 +48,11 @@ async fn submit_starts_a_turn_and_streams_it_to_the_end() {
     let provider = ScriptedProvider::new(vec![Script::Events(text("hello"))]);
     let mailbox = start(provider, vec![]);
     let (mut state, mut events) = mailbox.attach().await.unwrap();
-    assert_eq!(state.seq, Seq(1), "the journal head is the summary frame");
+    assert_eq!(
+        state.seq,
+        Seq(2),
+        "the journal head is the summary frame, then the config"
+    );
 
     let intent = IntentId::mint();
     mailbox.submit(intent.clone(), Input::text("hi", Origin::surface("test")));
@@ -274,7 +280,7 @@ async fn interrupting_an_idle_session_is_rejected() {
 }
 
 #[tokio::test]
-async fn commands_actions_and_empty_text_are_rejected_in_this_milestone() {
+async fn an_unknown_command_an_unknown_action_and_empty_text_are_rejected() {
     let mailbox = start(ScriptedProvider::new(vec![]), vec![]);
     let (mut state, mut events) = mailbox.attach().await.unwrap();
     let inputs = vec![
@@ -480,12 +486,16 @@ async fn a_journal_cut_inside_a_turn_resumes_with_that_turn_lost() {
         ),
     ];
     let provider = ScriptedProvider::new(vec![Script::Events(text("back"))]);
-    let mailbox = resume(frames, None, |_| {
+    let mailbox = resume(frames, None, Services::none(), |_| {
         Arc::new(config(provider, vec![], Arc::new(NoHost)))
     })
     .unwrap();
     let (mut state, mut events) = mailbox.attach().await.unwrap();
-    assert_eq!(state.seq, Seq(4), "a new head, then the old turn closed");
+    assert_eq!(
+        state.seq,
+        Seq(5),
+        "a new head and its config, then the old turn closed"
+    );
     assert!(state.turn.is_none() && !state.busy());
     assert!(
         matches!(&state.last_turn, Some(TurnStatus::Failed { error }) if error.code == ErrorCode::TurnLost),
@@ -533,7 +543,7 @@ async fn a_journal_that_ends_closed_resumes_open() {
         },
     ];
     let provider = ScriptedProvider::new(vec![Script::Events(text("open again"))]);
-    let mailbox = resume(frames, None, |_| {
+    let mailbox = resume(frames, None, Services::none(), |_| {
         Arc::new(config(provider, vec![], Arc::new(NoHost)))
     })
     .unwrap();

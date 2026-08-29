@@ -176,6 +176,16 @@ impl Host {
         Ok(())
     }
 
+    /// What a session actor needs from the host: the command table and a
+    /// weak way back.
+    fn services(&self) -> session::Services {
+        let weak: Weak<dyn HostApi> = self.weak.clone();
+        session::Services {
+            commands: self.registry.commands.clone(),
+            host: weak,
+        }
+    }
+
     pub fn handle(&self) -> HostHandle {
         // The host is only ever built behind an `Arc`; a handle asked for
         // during teardown would be the only way to see `None`.
@@ -211,11 +221,19 @@ impl Host {
             .cloned()
     }
 
-    /// Close every session and stop every plugin, in reverse order.
+    /// Close every session, wait for their post-turn work (ADR-0008 §7),
+    /// then stop every plugin in reverse order.
     pub async fn shutdown(&self) {
         let live: Vec<Live> = self.lock().values().cloned().collect();
-        for session in live {
+        for session in &live {
             session.mailbox.close(CloseReason::Shutdown);
+        }
+        let closed = futures::future::join_all(live.iter().map(|s| s.mailbox.wait_closed()));
+        if tokio::time::timeout(session::AFTER_TURN_DEADLINE, closed)
+            .await
+            .is_err()
+        {
+            tracing::warn!("some sessions did not close in time");
         }
         for plugin in self.plugins.iter().rev() {
             if !self.registry.enabled(plugin.manifest().id) {
@@ -458,9 +476,12 @@ impl Host {
             store.create(&summary).await?;
             store.acquire(&summary.id).await?;
         }
-        let mailbox = session::spawn(summary.clone(), self.registry.store.clone(), |mailbox| {
-            Arc::new(self.turn_config(&spec, &summary, choice, mailbox))
-        });
+        let mailbox = session::spawn(
+            summary.clone(),
+            self.registry.store.clone(),
+            self.services(),
+            |mailbox| Arc::new(self.turn_config(&spec, &summary, choice, mailbox)),
+        );
         let live = Live::new(mailbox, &summary);
         self.lock().insert(summary.id.clone(), live.clone());
         let _ = self.gateway.send(GatewayEvent::SessionCreated {

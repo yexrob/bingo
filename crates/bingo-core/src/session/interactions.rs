@@ -8,6 +8,7 @@ use serde_json::Value;
 use tokio::sync::oneshot;
 
 use super::Actor;
+use super::mailbox::Answered;
 
 /// A keyboard answer inside this window after opening is a stray keystroke.
 pub const INTERACTION_GUARD_MS: i64 = 400;
@@ -88,14 +89,14 @@ impl Actor {
         None
     }
 
-    pub(super) async fn answer(
-        &mut self,
-        intent: IntentId,
-        id: InteractionId,
-        answer: Answer,
-        activation: Activation,
-        who: ClientIdentity,
-    ) {
+    pub(super) async fn answer(&mut self, answered: Answered) {
+        let Answered {
+            intent,
+            interaction: id,
+            answer,
+            activation,
+            who,
+        } = answered;
         if let Some((code, message)) = self.refuse(&id, &answer, activation) {
             return self.reject(intent, code, message).await;
         }

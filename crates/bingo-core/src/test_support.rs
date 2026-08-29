@@ -2,7 +2,7 @@
 //! and a tool host that answers nothing.
 
 use std::collections::VecDeque;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 
 use async_trait::async_trait;
 use bingo_sdk::*;
@@ -334,5 +334,143 @@ impl Compactor for ScriptedCompactor {
             .unwrap()
             .pop_front()
             .unwrap_or_else(|| Err(KernelError::new(ErrorCode::Internal, "compactor exhausted")))
+    }
+}
+
+/// A command that answers from a script, so a test decides its outcome; a
+/// gated one waits for the test before it answers.
+pub struct ScriptedCommand {
+    name: &'static str,
+    instant: bool,
+    outcome: Mutex<Option<Result<CommandOutcome, KernelError>>>,
+    calls: Mutex<Vec<String>>,
+    gate: Mutex<Option<Arc<tokio::sync::Notify>>>,
+}
+
+impl ScriptedCommand {
+    pub fn new(
+        name: &'static str,
+        instant: bool,
+        outcome: Result<CommandOutcome, KernelError>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            name,
+            instant,
+            outcome: Mutex::new(Some(outcome)),
+            calls: Mutex::new(Vec::new()),
+            gate: Mutex::new(None),
+        })
+    }
+
+    /// Make the run wait for a `notify_one` on the returned gate.
+    pub fn gated(&self) -> Arc<tokio::sync::Notify> {
+        let gate = Arc::new(tokio::sync::Notify::new());
+        *self.gate.lock().unwrap() = Some(gate.clone());
+        gate
+    }
+
+    pub fn calls(&self) -> Vec<String> {
+        self.calls.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl Command for ScriptedCommand {
+    fn spec(&self) -> CommandSpec {
+        CommandSpec {
+            name: self.name.into(),
+            aliases: Vec::new(),
+            hint: String::new(),
+            args: ArgSpec::None,
+            instant: self.instant,
+            family: "test".into(),
+        }
+    }
+
+    async fn run(&self, args: &str, _cx: &CommandContext) -> Result<CommandOutcome, KernelError> {
+        self.calls.lock().unwrap().push(args.to_string());
+        let gate = self.gate.lock().unwrap().clone();
+        if let Some(gate) = gate {
+            gate.notified().await;
+        }
+        self.outcome
+            .lock()
+            .unwrap()
+            .take()
+            .unwrap_or_else(|| Err(KernelError::new(ErrorCode::Internal, "already answered")))
+    }
+}
+
+/// A host that serves nothing, so a command context has one to hold.
+pub struct NoApi;
+
+#[async_trait]
+impl HostApi for NoApi {
+    async fn sessions(&self, _: SessionFilter) -> Result<Vec<SessionSummary>, KernelError> {
+        Ok(Vec::new())
+    }
+    async fn open(&self, _: SessionSelector, _: ClientIdentity) -> Result<Attachment, KernelError> {
+        Err(KernelError::new(ErrorCode::Internal, "no"))
+    }
+    async fn close(&self, _: &SessionId, _: CloseReason) -> Result<(), KernelError> {
+        Ok(())
+    }
+    async fn delete(&self, _: &SessionId) -> Result<(), KernelError> {
+        Ok(())
+    }
+    async fn catalog(&self, kind: CatalogKind) -> Result<Catalog, KernelError> {
+        Ok(Catalog {
+            kind,
+            entries: Vec::new(),
+        })
+    }
+    fn gateway_events(&self) -> GatewayStream {
+        Box::pin(futures::stream::empty())
+    }
+    fn service_any(&self, _: &str) -> Option<Arc<dyn std::any::Any + Send + Sync>> {
+        None
+    }
+}
+
+static NO_API: std::sync::LazyLock<Arc<NoApi>> = std::sync::LazyLock::new(|| Arc::new(NoApi));
+
+/// Services over `NoApi`, kept alive for the whole test binary.
+pub fn services(commands: Vec<Arc<dyn Command>>) -> crate::session::Services {
+    let weak = Arc::downgrade(&*NO_API);
+    let host: Weak<dyn HostApi> = weak;
+    crate::session::Services { commands, host }
+}
+
+/// A turn-end hook that waits for the test before it records that it ran.
+pub struct GatedHook {
+    pub gate: Arc<tokio::sync::Notify>,
+    pub fired: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl GatedHook {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self {
+            gate: Arc::new(tokio::sync::Notify::new()),
+            fired: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        })
+    }
+}
+
+#[async_trait]
+impl Hook for GatedHook {
+    fn id(&self) -> &str {
+        "gated"
+    }
+    fn matcher(&self) -> HookMatcher {
+        HookMatcher {
+            points: vec![HookPoint::Turn],
+            tool: None,
+        }
+    }
+    async fn on_turn(&self, phase: Phase, _: &TurnId, _: &[Item], _: &HookContext) {
+        if phase == Phase::End {
+            self.gate.notified().await;
+            self.fired.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
     }
 }
