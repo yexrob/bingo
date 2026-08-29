@@ -142,12 +142,15 @@ async fn a_busy_session_queues_and_the_queue_opens_the_next_turn() {
     );
 
     let labels = drive(&mut events, &mut state, turn_completed).await;
-    assert_eq!(labels[0], "queue:0");
-    assert_eq!(labels[1], "completed:user/completed");
-    assert_eq!(labels[2], "turnStarted");
-    assert!(
-        !labels.contains(&"ack:TurnStarted".to_string()),
-        "a queued intent is acked once"
+    assert_eq!(
+        &labels[..4],
+        [
+            "completed:user/completed",
+            "turnStarted",
+            "ack:TurnStarted",
+            "queue:0",
+        ],
+        "the queued intent learns its turn, and the queue empties only once that turn is open"
     );
     assert_eq!(
         labels.last().map(String::as_str),

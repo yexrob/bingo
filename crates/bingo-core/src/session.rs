@@ -552,9 +552,10 @@ impl Actor {
             None,
         )
         .await;
-        if origin == TurnOrigin::Submit {
-            self.ack_turn_started(&turn, acks).await;
-        }
+        // A queued intent was acknowledged `Queued` when it waited; the turn
+        // that runs it acknowledges it again, so a client learns which turn
+        // is its own without matching items.
+        self.ack_turn_started(&turn, acks).await;
         let running = self.spawn_turn(turn, CancellationToken::new(), kind);
         // Registered after the spawn: the task's first mail is handled only
         // once this function returns, so nothing can race the registration.
@@ -732,8 +733,6 @@ impl Actor {
         let Some(unit) = self.queue.take_unit() else {
             return;
         };
-        let changed = self.queue.changed();
-        self.publish(changed, None).await;
         match unit {
             Unit::Prose(inputs) => {
                 self.start_turn(inputs, TurnOrigin::Queue, TurnKind::Respond)
@@ -741,6 +740,10 @@ impl Actor {
             }
             Unit::Command(intent, input) => self.run_queued(intent, input).await,
         }
+        // Announced after the unit is under way, so no client ever folds an
+        // empty queue beside no turn while the next one is about to open.
+        let changed = self.queue.changed();
+        self.publish(changed, None).await;
     }
 
     /// A command that waited its turn; the table may have lost it meanwhile.
