@@ -1,0 +1,50 @@
+<!--
+  The result blocks of the keyless DuckDuckGo HTML endpoint
+  (https://html.duckduckgo.com/html/?q=…), reproduced around the two class
+  names the parser reads: `result__a` for the title and its link, and
+  `result__snippet` for the summary.
+
+  Three shapes the live endpoint serves and the parser must survive: a title
+  and URL behind the `/l/?uddg=` redirect wrapper with its entity-escaped
+  query, a link written directly, and a snippet with markup inside it.
+-->
+<!DOCTYPE html>
+<html lang="en">
+<body>
+  <div class="results">
+
+    <div class="result results_links results_links_deep web-result">
+      <div class="links_main links_deep result__body">
+        <h2 class="result__title">
+          <a rel="nofollow" class="result__a"
+             href="//duckduckgo.com/l/?uddg=https%3A%2F%2Frust%2Dlang%2Egithub%2Eio%2Fasync%2Dbook%2F&amp;rut=8f0c">Asynchronous Programming in Rust &amp; the async book</a>
+        </h2>
+        <a class="result__snippet" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Frust%2Dlang%2Egithub%2Eio%2Fasync%2Dbook%2F&amp;rut=8f0c">This book aims to be a complete guide to <b>async</b> Rust,
+          covering the language&#x27;s futures and the runtimes around them.</a>
+      </div>
+    </div>
+
+    <div class="result results_links results_links_deep web-result">
+      <div class="links_main links_deep result__body">
+        <h2 class="result__title">
+          <a rel="nofollow" class="result__a" href="https://docs.rs/tokio/latest/tokio/">tokio - Rust</a>
+        </h2>
+        <a class="result__snippet" href="https://docs.rs/tokio/latest/tokio/">A runtime for writing reliable network applications
+          without compromising speed.</a>
+      </div>
+    </div>
+
+    <div class="result results_links results_links_deep web-result">
+      <div class="links_main links_deep result__body">
+        <h2 class="result__title">
+          <a rel="nofollow" class="result__a"
+             href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fblog%2Espam%2Eexample%2Fasync%3Futm%3D1&amp;rut=1a2b">Async, explained &#8212; spam.example</a>
+        </h2>
+        <a class="result__snippet" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fblog%2Espam%2Eexample%2Fasync%3Futm%3D1&amp;rut=1a2b">Ten things about <b>async</b>
+          you will not believe.</a>
+      </div>
+    </div>
+
+  </div>
+</body>
+</html>
