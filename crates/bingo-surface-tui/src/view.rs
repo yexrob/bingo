@@ -5,7 +5,7 @@
 //!
 //! `draw` is pure of everything but the frame it paints.
 
-use bingo_sdk::{Interaction, LiveTurn, SessionState, View};
+use bingo_sdk::{LiveTurn, SessionState, View};
 use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Paragraph};
@@ -13,7 +13,8 @@ use ratatui::{Frame, style::Style};
 use unicode_width::UnicodeWidthStr;
 
 use crate::clock::Now;
-use crate::ui::{Picker, Ui};
+use crate::tree::{self, Status, Tree};
+use crate::ui::{Picker, Switcher, Ui};
 use crate::{dialog, keys, permission, theme, transcript, wrap};
 
 /// How tall the composer box may grow before it scrolls internally.
@@ -47,20 +48,17 @@ impl Section {
     }
 }
 
-pub fn draw(state: &SessionState, ui: &Ui, frame: &mut Frame, now: Now) {
+/// One render path for the whole tree: it paints the session in view and
+/// derives everything about the others — the band, the `↳` rows, the
+/// switcher — from their states.
+pub fn draw(tree: &Tree, ui: &Ui, frame: &mut Frame, now: Now) {
     let area = frame.area();
     let width = area.width as usize;
-    let sections = fit(chrome(state, ui, now, width), area.height);
+    let sections = fit(chrome(tree, ui, now, width), area.height);
     let used: u16 = sections.iter().map(Section::height).sum();
     let mut y = area.y;
     let rows = area.height.saturating_sub(used);
-    render_transcript(
-        state,
-        ui,
-        frame,
-        Rect::new(area.x, y, area.width, rows),
-        now,
-    );
+    render_transcript(tree, ui, frame, Rect::new(area.x, y, area.width, rows), now);
     y += rows;
     for section in sections {
         let height = section.height().min(area.bottom().saturating_sub(y));
@@ -73,12 +71,14 @@ pub fn draw(state: &SessionState, ui: &Ui, frame: &mut Frame, now: Now) {
 }
 
 /// Everything below the transcript, in the order it is stacked.
-fn chrome(state: &SessionState, ui: &Ui, now: Now, width: usize) -> Vec<Section> {
+fn chrome(tree: &Tree, ui: &Ui, now: Now, width: usize) -> Vec<Section> {
+    let state = tree.viewed();
     let mut out = vec![
+        Section::lines(band(tree)),
         Section::lines(status(state, ui, now)),
         Section::lines(notices(ui)),
         Section::lines(ui.block.as_ref().map(block).unwrap_or_default()),
-        Section::lines(wrap::wrap_all(&dialog_lines(state, ui), width)),
+        Section::lines(wrap::wrap_all(&dialog_lines(tree, ui), width)),
         Section::lines(help(ui, width)),
         composer(ui, width),
         Section::lines(menu(ui)),
@@ -132,12 +132,43 @@ fn paint(section: Section, frame: &mut Frame, area: Rect) {
     }
 }
 
+/// Which session is on screen and who else is in the tree. Nothing while
+/// the root is alone, so a session without sub-agents looks as it always did.
+fn band(tree: &Tree) -> Vec<Line<'static>> {
+    let mut spans = Vec::new();
+    if let Some(child) = tree.viewing() {
+        spans.push(Span::styled(
+            format!("{} {}", theme::CHILD, tree::name(child)),
+            theme::accent(),
+        ));
+        spans.push(Span::styled(
+            format!(" · {}", Status::of(child).label()),
+            theme::dim(),
+        ));
+    }
+    if let Some(tally) = tree.tally() {
+        if !spans.is_empty() {
+            spans.push(Span::styled(" · ".to_string(), theme::dim()));
+        }
+        spans.push(Span::styled(tally, theme::dim()));
+    }
+    if spans.is_empty() {
+        return Vec::new();
+    }
+    vec![Line::from(spans)]
+}
+
 /// The tail of the transcript, or the window the scroll keys parked on.
-fn render_transcript(state: &SessionState, ui: &Ui, frame: &mut Frame, area: Rect, now: Now) {
+fn render_transcript(tree: &Tree, ui: &Ui, frame: &mut Frame, area: Rect, now: Now) {
     if area.height == 0 {
         return;
     }
-    let all = transcript::lines(state, area.width as usize, ui.spinner(now.instant));
+    let all = transcript::lines(
+        tree.viewed(),
+        &tree.agents(),
+        area.width as usize,
+        ui.spinner(now.instant),
+    );
     let height = area.height as usize;
     let hidden = all.len().saturating_sub(height);
     let start = hidden.saturating_sub(ui.scroll.0);
@@ -277,16 +308,52 @@ fn row(cells: &[String], widths: &[usize]) -> String {
         .to_string()
 }
 
-/// The dialog slot: the kernel's open interaction, or the session picker.
-fn dialog_lines(state: &SessionState, ui: &Ui) -> Vec<Line<'static>> {
+/// The dialog slot: a picker, the switcher, or the open interaction — the
+/// tree's first, which may be a child's.
+fn dialog_lines(tree: &Tree, ui: &Ui) -> Vec<Line<'static>> {
     if let Some(picker) = ui.picker.as_ref() {
         return picker_lines(picker);
     }
-    state
-        .interactions
-        .first()
-        .map(|interaction: &Interaction| dialog::lines(&ui.dialog, interaction))
-        .unwrap_or_default()
+    if let Some(switcher) = ui.switcher.as_ref() {
+        return switcher_lines(tree, switcher);
+    }
+    let Some((owner, interaction)) = tree.open_interaction() else {
+        return Vec::new();
+    };
+    let asked_elsewhere = owner.summary.id != *tree.view();
+    let agent = asked_elsewhere.then(|| tree::name(owner));
+    dialog::lines(&ui.dialog, interaction, agent.as_deref())
+}
+
+/// The `ctrl+g` list: the root and its agents, with what each is doing.
+fn switcher_lines(tree: &Tree, switcher: &Switcher) -> Vec<Line<'static>> {
+    let mut out = vec![Line::from(Span::styled(
+        "Sessions".to_string(),
+        theme::accent().patch(theme::bold()),
+    ))];
+    for (index, row) in tree.rows().iter().enumerate() {
+        let selected = index == switcher.selected;
+        let style = if selected {
+            theme::accent()
+        } else {
+            theme::dim()
+        };
+        let mark = if row.attention { theme::THINKING } else { "" };
+        out.push(Line::from(Span::styled(
+            format!(
+                "{} {mark}{} · {}",
+                if selected { "❯" } else { " " },
+                row.name,
+                row.status.label()
+            ),
+            style,
+        )));
+    }
+    out.push(Line::from(Span::styled(
+        "  enter to switch · esc to close".to_string(),
+        theme::dim(),
+    )));
+    out
 }
 
 fn picker_lines(picker: &Picker) -> Vec<Line<'static>> {
@@ -613,7 +680,7 @@ mod tests {
         )]);
         let (mut ui, now) = scene();
         ui.dialog.focus_on(state.interactions.first());
-        crate::input::on_key(&mut ui, &state, ctrl('e'), now);
+        crate::input::on_key(&mut ui, &solo(&state), ctrl('e'), now);
         insta::assert_snapshot!(draw_sized(80, 34, &state, &ui, now));
     }
 
@@ -631,7 +698,7 @@ mod tests {
         )]);
         let (mut ui, now) = scene();
         ui.dialog.focus_on(state.interactions.first());
-        crate::input::on_key(&mut ui, &state, typed('n'), now);
+        crate::input::on_key(&mut ui, &solo(&state), typed('n'), now);
         write(&mut ui, &state, "use cargo clean", now);
         insta::assert_snapshot!(render(&state, &ui, now));
     }
@@ -649,7 +716,7 @@ mod tests {
         let state = folded(vec![frame(1, opened(question(true, true)))]);
         let (mut ui, now) = scene();
         ui.dialog.focus_on(state.interactions.first());
-        crate::input::on_key(&mut ui, &state, typed(' '), now);
+        crate::input::on_key(&mut ui, &solo(&state), typed(' '), now);
         insta::assert_snapshot!(render(&state, &ui, now));
     }
 
@@ -691,7 +758,7 @@ mod tests {
     fn the_first_ctrl_c_says_how_to_leave() {
         let state = state();
         let (mut ui, now) = scene();
-        crate::input::on_key(&mut ui, &state, ctrl('c'), now);
+        crate::input::on_key(&mut ui, &solo(&state), ctrl('c'), now);
         insta::assert_snapshot!(render(&state, &ui, now));
     }
 
@@ -858,6 +925,89 @@ mod tests {
         insta::assert_snapshot!(render(&state, &ui, now));
     }
 
+    // ---- the tree -------------------------------------------------------
+
+    /// A transcript whose tool call spawned `reviewer`, and the child's own
+    /// frames after it, in the order one stream delivers them.
+    fn spawned(child: Vec<bingo_sdk::Frame>) -> crate::tree::Tree {
+        let mut frames = vec![
+            item_frame(1, user("itm_0", "have it reviewed")),
+            item_frame(
+                2,
+                tool(
+                    "itm_1",
+                    "SpawnAgent",
+                    json!({"prompt": "review the diff"}),
+                    Some(ToolOutput {
+                        parts: vec![ContentPart::text("reviewer started")],
+                        is_error: false,
+                        display: None,
+                    }),
+                    ItemStatus::Completed,
+                ),
+            ),
+            child_frame(1, announced("reviewer")),
+        ];
+        frames.extend(child);
+        folded_tree(frames)
+    }
+
+    #[test]
+    fn a_tool_call_that_spawned_an_agent_says_what_it_is_doing() {
+        let tree = spawned(vec![child_frame(2, started("trn_9"))]);
+        let (ui, now) = scene();
+        let screen = render_tree(&tree, &ui, now);
+        assert!(screen.contains("↳ reviewer · running"), "{screen}");
+        insta::assert_snapshot!(screen);
+    }
+
+    #[test]
+    fn a_child_that_needs_a_person_is_counted_in_the_band() {
+        let tree = spawned(vec![child_frame(2, opened(child_permission()))]);
+        let (mut ui, now) = scene();
+        ui.dialog
+            .focus_on(tree.open_interaction().map(|(_, open)| open));
+        let screen = render_tree(&tree, &ui, now);
+        assert!(screen.contains("1 agent · 1 needs you"), "{screen}");
+        insta::assert_snapshot!(screen);
+    }
+
+    #[test]
+    fn the_view_of_a_child_is_its_own_transcript_under_its_own_name() {
+        let mut tree = spawned(vec![
+            child_frame(2, started("trn_9")),
+            child_frame(
+                3,
+                Event::ItemCompleted {
+                    item: user("itm_9", "review the diff"),
+                },
+            ),
+            child_frame(
+                4,
+                Event::ItemCompleted {
+                    item: assistant("itm_10", "Two nits, otherwise fine.", ItemStatus::Completed),
+                },
+            ),
+        ]);
+        tree.show(&child_id());
+        let (ui, now) = scene();
+        let screen = render_tree(&tree, &ui, now);
+        assert!(
+            screen.contains("↳ reviewer · running · 1 agent"),
+            "{screen}"
+        );
+        assert!(screen.contains("Two nits"), "{screen}");
+        insta::assert_snapshot!(screen);
+    }
+
+    #[test]
+    fn the_switcher_lists_the_root_and_its_agents() {
+        let tree = spawned(vec![child_frame(2, opened(child_permission()))]);
+        let (mut ui, now) = scene();
+        ui.switcher = Some(Switcher { selected: 1 });
+        insta::assert_snapshot!(render_tree(&tree, &ui, now));
+    }
+
     #[test]
     fn the_composer_survives_a_screen_too_small_for_the_chrome() {
         let state = folded(vec![frame(
@@ -892,7 +1042,12 @@ mod tests {
         );
         let (mut ui, now) = scene();
         let bottom = render(&state, &ui, now);
-        crate::input::on_key(&mut ui, &state, key(crossterm::event::KeyCode::PageUp), now);
+        crate::input::on_key(
+            &mut ui,
+            &solo(&state),
+            key(crossterm::event::KeyCode::PageUp),
+            now,
+        );
         let scrolled = render(&state, &ui, now);
         assert_ne!(bottom, scrolled, "page up must move the window");
         insta::assert_snapshot!(scrolled);

@@ -9,6 +9,8 @@ pub const USER: &str = "❯ ";
 pub const TOOL: &str = "● ";
 /// Reasoning, collapsed to one line, and the attention marker in the title.
 pub const THINKING: &str = "✻ ";
+/// A sub-session: in the transcript, the header band and the window title.
+pub const CHILD: &str = "↳";
 /// Terminal bell, written out of band between frames.
 pub const BELL: &[u8] = b"\x07";
 

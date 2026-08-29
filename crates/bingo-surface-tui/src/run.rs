@@ -3,9 +3,12 @@
 //! the kernel: `submit`, `interrupt` and `answer` return nothing, and `open`,
 //! `events_since`, `sessions` and `catalog` are spawned and mailed back. A key
 //! press can therefore never wait for a turn.
+//!
+//! The attachment carries the whole tree (ADR-0010 §3): one stream, every
+//! frame stamped with its own session, folded into one reducer state each by
+//! [`crate::tree::Tree`].
 
-use std::collections::HashSet;
-use std::path::Path;
+use std::collections::{HashMap, HashSet};
 use std::pin::Pin;
 use std::time::{Duration, Instant};
 
@@ -23,6 +26,7 @@ use tokio::sync::mpsc;
 use crate::clock::Now;
 use crate::effect::Effect;
 use crate::terminal::Screen;
+use crate::tree::{self, Tree};
 use crate::ui::{Picker, Ui};
 use crate::{SURFACE_ID, commands, history, input};
 
@@ -30,6 +34,9 @@ use crate::{SURFACE_ID, commands, history, input};
 const TICK: Duration = Duration::from_millis(100);
 /// Sessions the `/resume` picker lists.
 const RECENT: usize = 20;
+/// What a write says while the mailbox of the session in view is still on its
+/// way: it is refused, never held.
+pub const NOT_YET: &str = "still opening that session — try again";
 
 pub(crate) type Keys = Pin<Box<dyn Stream<Item = Term> + Send>>;
 
@@ -37,18 +44,39 @@ pub(crate) type Keys = Pin<Box<dyn Stream<Item = Term> + Send>>;
 enum Reply {
     Attached(Box<Attachment>),
     Resynced(FrameStream),
+    /// A child's mailbox, so a line typed in its view reaches it. The
+    /// attachment's own stream is dropped: the tree's carries the child.
+    Handle(SessionId, SessionHandle),
     Sessions(Vec<SessionSummary>),
     Commands(Vec<CommandSpec>),
     Models(Vec<String>),
     Failed(KernelError),
 }
 
-/// The session this surface is attached to. Its state is the reducer's, never
-/// the surface's.
+/// What this surface is attached to: the reducer's state for every session
+/// in the tree, and one mailbox per session it may write to.
 struct Attached {
-    id: SessionId,
-    state: SessionState,
-    handle: SessionHandle,
+    tree: Tree,
+    handles: HashMap<SessionId, SessionHandle>,
+}
+
+impl Attached {
+    fn new(snapshot: SessionState, handle: SessionHandle) -> Self {
+        let tree = Tree::new(snapshot);
+        let handles = HashMap::from([(tree.root_id().clone(), handle)]);
+        Self { tree, handles }
+    }
+
+    /// The mailbox the keyboard writes to: the session on screen.
+    fn writer(&self) -> Option<SessionHandle> {
+        self.handles.get(self.tree.view()).cloned()
+    }
+
+    /// The mailbox that answers an interaction, wherever in the tree it was
+    /// opened (ADR-0010 §3).
+    fn root(&self) -> Option<SessionHandle> {
+        self.handles.get(self.tree.root_id()).cloned()
+    }
 }
 
 struct Run {
@@ -77,18 +105,14 @@ pub(crate) async fn drive(
     mut keys: Keys,
 ) -> Result<Exit, KernelError> {
     let attachment = host
-        .open(opts.selector, identity(), OpenOptions::default())
+        .open(opts.selector, identity(), OpenOptions::with_children())
         .await?;
     let (tx, mut replies) = mpsc::channel(16);
     let mut events = Some(attachment.events);
     let mut run = Run {
         host: host.clone(),
         data_dir: opts.env.data_dir.clone(),
-        session: Attached {
-            id: attachment.session,
-            state: attachment.snapshot,
-            handle: attachment.handle,
-        },
+        session: Attached::new(attachment.snapshot, attachment.handle),
         ui: Ui::new(history::load(&opts.env.data_dir), Instant::now()),
         mine: HashSet::new(),
         replies: tx,
@@ -117,7 +141,8 @@ pub(crate) async fn drive(
         }
         run.ui.expire(Instant::now());
         if let Some(exit) = run.exit.take() {
-            let _ = run.host.close(&run.session.id, CloseReason::Client).await;
+            let root = run.session.tree.root_id().clone();
+            let _ = run.host.close(&root, CloseReason::Client).await;
             return Ok(exit);
         }
         run.paint(screen)?;
@@ -134,9 +159,9 @@ async fn next_frame(events: &mut Option<FrameStream>) -> Option<bingo_sdk::Frame
 
 impl Run {
     fn paint(&mut self, screen: &mut dyn Screen) -> Result<(), KernelError> {
-        screen.title(&title(&self.session.state)).map_err(stdio)?;
+        screen.title(&title(&self.session.tree)).map_err(stdio)?;
         screen
-            .draw(&self.session.state, &self.ui, Now::real())
+            .draw(&self.session.tree, &self.ui, Now::real())
             .map_err(stdio)
     }
 
@@ -145,12 +170,10 @@ impl Run {
         frame: &bingo_sdk::Frame,
         screen: &mut dyn Screen,
     ) -> Result<(), KernelError> {
-        if self.session.state.apply(frame) == bingo_sdk::Applied::Stale {
+        if self.session.tree.apply(frame) == bingo_sdk::Applied::Stale {
             return Ok(());
         }
-        self.ui
-            .dialog
-            .focus_on(self.session.state.interactions.first());
+        self.refocus();
         match &frame.event {
             // The lagged stream ends at its marker; the reducer left `seq` at
             // the last frame it applied, so replay from there fills the gap.
@@ -160,10 +183,27 @@ impl Run {
                 self.ui.notify(*level, text.clone(), Instant::now())
             }
             Event::IntentAck { intent, outcome } => self.ack(intent, outcome),
-            Event::SessionClosed { .. } => self.exit = Some(Exit { code: 0 }),
+            Event::SessionClosed { .. } => self.closed(&frame.session),
             _ => {}
         }
         Ok(())
+    }
+
+    /// The root closing ends the run; a child closing leaves the tree, and
+    /// the view comes back to the root with it.
+    fn closed(&mut self, session: &SessionId) {
+        if self.session.tree.is_root(session) {
+            self.exit = Some(Exit { code: 0 });
+            return;
+        }
+        self.session.tree.close(session);
+        self.session.handles.remove(session);
+    }
+
+    /// The dialog follows the tree's first open interaction, whosever it is.
+    fn refocus(&mut self) {
+        let open = self.session.tree.open_interaction().map(|(_, open)| open);
+        self.ui.dialog.focus_on(open);
     }
 
     /// An ack for an intent this client minted; another client's is its own
@@ -198,8 +238,8 @@ impl Run {
     fn terminal_event(&mut self, event: Term) {
         match event {
             Term::Key(key) => {
-                self.session.state.mark_read();
-                let effects = input::on_key(&mut self.ui, &self.session.state, key, Now::real());
+                self.session.tree.mark_read();
+                let effects = input::on_key(&mut self.ui, &self.session.tree, key, Now::real());
                 self.apply(effects);
             }
             Term::Paste(text) => input::on_paste(&mut self.ui, &text),
@@ -216,20 +256,13 @@ impl Run {
     fn effect(&mut self, effect: Effect) {
         match effect {
             Effect::Submit(input) => self.submit(input),
-            Effect::Interrupt => {
-                let intent = self.mint();
-                self.session.handle.interrupt(intent, InterruptScope::Head);
-            }
+            Effect::Interrupt => self.interrupt(),
             Effect::Answer {
                 interaction,
                 answer,
                 activation,
-            } => {
-                let intent = self.mint();
-                self.session
-                    .handle
-                    .answer(intent, interaction, answer, activation);
-            }
+            } => self.answer(interaction, answer, activation),
+            Effect::View(session) => self.show(session),
             Effect::Open(selector) => self.open(selector),
             Effect::ListSessions => self.list_sessions(),
             Effect::Exit => self.exit = Some(Exit { code: 0 }),
@@ -237,11 +270,62 @@ impl Run {
     }
 
     fn submit(&mut self, input: Input) {
+        let Some(handle) = self.session.writer() else {
+            return self.not_yet();
+        };
         if let Input::Text { text, .. } = &input {
             history::append(&self.data_dir, text);
         }
         let intent = self.mint();
-        self.session.handle.submit(intent, input);
+        handle.submit(intent, input);
+    }
+
+    fn interrupt(&mut self) {
+        let Some(handle) = self.session.writer() else {
+            return self.not_yet();
+        };
+        let intent = self.mint();
+        handle.interrupt(intent, InterruptScope::Head);
+    }
+
+    /// An answer goes through the root: its handle knows which session asked.
+    fn answer(
+        &mut self,
+        interaction: bingo_sdk::InteractionId,
+        answer: bingo_sdk::Answer,
+        activation: bingo_sdk::Activation,
+    ) {
+        let Some(handle) = self.session.root() else {
+            return self.not_yet();
+        };
+        let intent = self.mint();
+        handle.answer(intent, interaction, answer, activation);
+    }
+
+    fn not_yet(&mut self) {
+        self.ui.notify(Level::Warn, NOT_YET, Instant::now());
+    }
+
+    /// Paint another session of the tree, and fetch its mailbox the first
+    /// time, so what is typed there reaches it.
+    fn show(&mut self, session: SessionId) {
+        self.session.tree.show(&session);
+        self.ui.scroll = Default::default();
+        self.refocus();
+        if self.session.handles.contains_key(&session) {
+            return;
+        }
+        let host = self.host.clone();
+        let id = session.clone();
+        self.spawn(async move {
+            host.open(
+                SessionSelector::ById { id: session },
+                identity(),
+                OpenOptions::default(),
+            )
+            .await
+            .map(|attachment| Reply::Handle(id, attachment.handle))
+        });
     }
 
     fn mint(&mut self) -> IntentId {
@@ -250,17 +334,21 @@ impl Run {
         intent
     }
 
+    /// The tree's stream is the root's, and so is the replay that heals it.
     fn resync(&mut self) {
-        let handle = self.session.handle.clone();
-        let since = self.session.state.seq;
+        let Some(handle) = self.session.root() else {
+            return;
+        };
+        let since = self.session.tree.root().seq;
         self.spawn(async move { handle.events_since(since).await.map(Reply::Resynced) });
     }
 
+    /// `/clear` and `/resume` replace the whole tree, children and all.
     fn open(&mut self, selector: SessionSelector) {
         self.ui.opening = true;
         let host = self.host.clone();
         self.spawn(async move {
-            host.open(selector, identity(), OpenOptions::default())
+            host.open(selector, identity(), OpenOptions::with_children())
                 .await
                 .map(|a| Reply::Attached(Box::new(a)))
         });
@@ -269,7 +357,9 @@ impl Run {
     fn list_sessions(&mut self) {
         let host = self.host.clone();
         let filter = SessionFilter {
-            cwd: Some(std::path::PathBuf::from(&self.session.state.summary.cwd)),
+            cwd: Some(std::path::PathBuf::from(
+                &self.session.tree.root().summary.cwd,
+            )),
             parent: None,
             limit: Some(RECENT),
         };
@@ -305,6 +395,9 @@ impl Run {
         match reply {
             Reply::Attached(attachment) => self.attach(*attachment, events),
             Reply::Resynced(stream) => *events = Some(stream),
+            Reply::Handle(session, handle) => {
+                self.session.handles.insert(session, handle);
+            }
             Reply::Sessions(sessions) => {
                 self.ui.picker = Some(Picker {
                     sessions,
@@ -320,36 +413,37 @@ impl Run {
         }
     }
 
-    /// Swap sessions: the old attachment is closed on its own task, the new
-    /// state replaces the old, and the scroll starts at the bottom again.
+    /// Swap trees: the old attachment is closed on its own task, the new one
+    /// replaces it whole, and the scroll starts at the bottom again.
     fn attach(&mut self, attachment: Attachment, events: &mut Option<FrameStream>) {
         let host = self.host.clone();
-        let old = std::mem::replace(&mut self.session.id, attachment.session);
+        let old = self.session.tree.root_id().clone();
         tokio::spawn(async move { host.close(&old, CloseReason::Client).await });
-        self.session.state = attachment.snapshot;
-        self.session.handle = attachment.handle;
+        self.session = Attached::new(attachment.snapshot, attachment.handle);
         *events = Some(attachment.events);
         self.ui.opening = false;
         self.ui.scroll = Default::default();
         self.ui.picker = None;
-        self.ui
-            .dialog
-            .focus_on(self.session.state.interactions.first());
+        self.ui.switcher = None;
+        self.refocus();
     }
 }
 
-/// `bingo — <directory>`, marked while something needs a person.
-fn title(state: &SessionState) -> String {
-    let cwd = Path::new(&state.summary.cwd)
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| state.summary.cwd.clone());
-    let mark = if state.attention() {
+/// `bingo — <directory>`, and the session in view when it is not the root.
+/// The mark is the whole tree's: a child that asks is one a person must come
+/// back to.
+fn title(tree: &Tree) -> String {
+    let cwd = tree::directory(&tree.root().summary.cwd);
+    let mark = if tree.attention() {
         crate::theme::THINKING
     } else {
         ""
     };
-    format!("{mark}bingo — {cwd}")
+    let child = match tree.viewing() {
+        Some(child) => format!(" {} {}", crate::theme::CHILD, tree::name(child)),
+        None => String::new(),
+    };
+    format!("{mark}bingo — {cwd}{child}")
 }
 
 fn stdio(e: std::io::Error) -> KernelError {
@@ -545,6 +639,131 @@ mod tests {
             "{:?}",
             harness.recorder.titles
         );
+    }
+
+    #[test]
+    fn a_view_whose_mailbox_has_not_landed_writes_nowhere() {
+        let handle = bingo_sdk::SessionHandle(std::sync::Arc::new(TestSession::default()));
+        let mut attached = Attached::new(state(), handle);
+        attached.tree.apply(&child_frame(1, announced("reviewer")));
+        attached.tree.show(&child_id());
+        assert!(
+            attached.writer().is_none(),
+            "a key is refused until the child's mailbox arrives"
+        );
+        assert!(
+            attached.root().is_some(),
+            "an answer still has the root to go through"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_childs_frames_are_folded_into_its_own_state() {
+        let mut harness = Harness::new();
+        let frames = vec![
+            frame(
+                1,
+                Event::ItemCompleted {
+                    item: tool(
+                        "itm_1",
+                        "SpawnAgent",
+                        serde_json::json!({"prompt": "review it"}),
+                        None,
+                        ItemStatus::Completed,
+                    ),
+                },
+            ),
+            child_frame(1, announced("reviewer")),
+            child_frame(2, started("trn_9")),
+            closed(2),
+        ];
+        let (exit, _) = harness.go(frames, vec![], None).await;
+        assert_eq!(exit, Exit { code: 0 });
+        let screen = harness.recorder.last();
+        assert!(screen.contains("1 agent"), "{screen}");
+        assert!(screen.contains("↳ reviewer · running"), "{screen}");
+    }
+
+    #[tokio::test]
+    async fn a_permission_a_child_raised_is_answered_through_the_root_handle() {
+        let mut harness = Harness::new();
+        let frames = vec![
+            child_frame(1, announced("reviewer")),
+            child_frame(2, opened(child_permission())),
+        ];
+        let (_, session) = harness.go(frames, vec![typed('y'), ctrl('d')], None).await;
+        assert_eq!(
+            session.answers(),
+            vec![(
+                bingo_sdk::InteractionId::from_raw("int_2"),
+                bingo_sdk::Answer::AllowOnce,
+                bingo_sdk::Activation::Keyboard,
+            )],
+            "the tree's handle routes an answer to whoever asked"
+        );
+        assert!(
+            harness.recorder.last().contains("↳ reviewer"),
+            "the dialog names the child: {}",
+            harness.recorder.last()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_line_typed_in_a_childs_view_is_submitted_on_the_childs_handle() {
+        let mut harness = Harness::new();
+        let (host, root, child) = TestHost::tree(vec![
+            child_frame(1, announced("reviewer")),
+            child_frame(2, started("trn_9")),
+        ]);
+        let script = vec![
+            ctrl('g'),
+            key(KeyCode::Down),
+            key(KeyCode::Enter),
+            typed('h'),
+            typed('i'),
+            key(KeyCode::Enter),
+            ctrl('d'),
+        ];
+        let exit = drive(
+            &host,
+            options(None, harness.home.path()),
+            &mut harness.recorder,
+            keys(script),
+        )
+        .await
+        .expect("the loop ran");
+        assert_eq!(exit, Exit { code: 0 });
+        assert_eq!(
+            child.submitted(),
+            vec![Input::text("hi", bingo_sdk::Origin::surface("tui"))]
+        );
+        assert!(root.submitted().is_empty(), "the root was not written to");
+    }
+
+    #[tokio::test]
+    async fn a_child_that_closes_leaves_the_tree_and_the_run_goes_on() {
+        let mut harness = Harness::new();
+        let frames = vec![
+            child_frame(1, announced("reviewer")),
+            child_frame(
+                2,
+                Event::SessionClosed {
+                    reason: CloseReason::Client,
+                },
+            ),
+            frame(
+                1,
+                Event::ItemCompleted {
+                    item: assistant("itm_1", "still here", ItemStatus::Completed),
+                },
+            ),
+            closed(2),
+        ];
+        let (exit, _) = harness.go(frames, vec![], None).await;
+        assert_eq!(exit, Exit { code: 0 });
+        let screen = harness.recorder.last();
+        assert!(screen.contains("still here"), "{screen}");
+        assert!(!screen.contains("agent"), "the child is gone: {screen}");
     }
 
     #[tokio::test]

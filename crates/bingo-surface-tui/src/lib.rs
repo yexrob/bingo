@@ -16,6 +16,9 @@
 //!   [`effect::Effect`]s, so every binding is a test with no runtime in it.
 //! - [`view::draw`] is pure of everything but the frame it paints; the
 //!   transcript is what is left once the chrome below it has been measured.
+//! - [`tree::Tree`] holds one reducer state per session the attachment
+//!   carries — the root and its sub-sessions (ADR-0010 §3) — and which of
+//!   them is on screen.
 //! - [`transcript`], [`markdown`], [`dialog`], [`composer`], [`commands`],
 //!   [`keys`], [`permission`] and [`wrap`] are the bricks those two stand on.
 //!
@@ -40,6 +43,7 @@ mod run;
 mod terminal;
 mod theme;
 mod transcript;
+mod tree;
 mod ui;
 mod view;
 mod wrap;

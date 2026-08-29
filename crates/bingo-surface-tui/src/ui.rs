@@ -46,6 +46,13 @@ pub struct Picker {
     pub selected: usize,
 }
 
+/// The `ctrl+g` switcher over the sessions in the tree. Its rows are derived
+/// from the tree at render time; only the cursor is the surface's own.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Switcher {
+    pub selected: usize,
+}
+
 #[derive(Clone, Debug)]
 pub struct Ui {
     pub composer: Composer,
@@ -55,6 +62,7 @@ pub struct Ui {
     pub help: bool,
     pub menu: Menu,
     pub picker: Option<Picker>,
+    pub switcher: Option<Switcher>,
     pub notices: Vec<Notice>,
     /// A command's `View`, shown until the next key.
     pub block: Option<View>,
@@ -79,6 +87,7 @@ impl Ui {
             help: false,
             menu: Menu::default(),
             picker: None,
+            switcher: None,
             notices: Vec::new(),
             block: None,
             armed: None,

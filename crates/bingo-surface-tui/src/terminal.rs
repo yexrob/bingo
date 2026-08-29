@@ -26,6 +26,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::{Terminal, TerminalOptions, Viewport};
 
 use crate::clock::Now;
+use crate::tree::Tree;
 use crate::ui::Ui;
 use crate::view;
 
@@ -43,7 +44,7 @@ static HOOK: Once = Once::new();
 
 /// What the loop needs from a screen, so a test can be the screen.
 pub(crate) trait Screen: Send {
-    fn draw(&mut self, state: &bingo_sdk::SessionState, ui: &Ui, now: Now) -> io::Result<()>;
+    fn draw(&mut self, tree: &Tree, ui: &Ui, now: Now) -> io::Result<()>;
 
     /// Out-of-band bytes: they paint no cell, so they go between frames.
     fn title(&mut self, text: &str) -> io::Result<()>;
@@ -85,9 +86,9 @@ impl Tui {
 }
 
 impl Screen for Tui {
-    fn draw(&mut self, state: &bingo_sdk::SessionState, ui: &Ui, now: Now) -> io::Result<()> {
+    fn draw(&mut self, tree: &Tree, ui: &Ui, now: Now) -> io::Result<()> {
         self.terminal
-            .draw(|frame| view::draw(state, ui, frame, now))?;
+            .draw(|frame| view::draw(tree, ui, frame, now))?;
         Ok(())
     }
 

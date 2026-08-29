@@ -311,8 +311,14 @@ fn plain(label: &str, choice: Choice) -> Opt {
 }
 
 /// The dialog as lines. `width` bounds nothing here; the caller wraps.
-pub fn lines(dialog: &Dialog, interaction: &Interaction) -> Vec<Line<'static>> {
-    let mut out = vec![title(interaction)];
+/// `agent` names the sub-session that asked, when it was not the one on
+/// screen (ADR-0010 §3).
+pub fn lines(
+    dialog: &Dialog,
+    interaction: &Interaction,
+    agent: Option<&str>,
+) -> Vec<Line<'static>> {
+    let mut out = vec![title(interaction, agent)];
     out.extend(body(dialog, interaction));
     let options = options(interaction);
     if !options.is_empty() {
@@ -328,7 +334,7 @@ pub fn lines(dialog: &Dialog, interaction: &Interaction) -> Vec<Line<'static>> {
     out
 }
 
-fn title(interaction: &Interaction) -> Line<'static> {
+fn title(interaction: &Interaction, agent: Option<&str>) -> Line<'static> {
     let (kind, name) = match &interaction.kind {
         InteractionKind::Permission { tool, .. } => ("Permission", tool.clone()),
         InteractionKind::Question { header, .. } => {
@@ -343,6 +349,12 @@ fn title(interaction: &Interaction) -> Line<'static> {
     )];
     if !name.is_empty() {
         spans.push(Span::styled(format!(" · {name}"), theme::bold()));
+    }
+    if let Some(agent) = agent {
+        spans.push(Span::styled(
+            format!(" · {} {agent}", theme::CHILD),
+            theme::accent(),
+        ));
     }
     Line::from(spans)
 }

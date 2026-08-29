@@ -55,6 +55,10 @@ pub const BINDINGS: &[Binding] = &[
         description: "scroll the transcript",
     },
     Binding {
+        keys: "ctrl+g",
+        description: "switch to a sub-agent's view",
+    },
+    Binding {
         keys: "tab",
         description: "complete the command under the caret",
     },
