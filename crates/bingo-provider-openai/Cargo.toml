@@ -1,0 +1,31 @@
+[package]
+name = "bingo-provider-openai"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "OpenAI Responses API provider plugin for bingo"
+
+[lints]
+workspace = true
+
+[dependencies]
+bingo-sdk.workspace = true
+async-trait.workspace = true
+futures.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+schemars.workspace = true
+tokio.workspace = true
+# `retry-after` may be an HTTP date instead of a delay in seconds.
+jiff.workspace = true
+# The Codex account id is a base64url claim inside a JWT.
+base64.workspace = true
+
+[dev-dependencies]
+insta.workspace = true
+wiremock.workspace = true
+# `tokio::time::pause`, so the 60s idle guard costs a test no wall time.
+tokio = { workspace = true, features = ["test-util"] }
