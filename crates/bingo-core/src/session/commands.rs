@@ -15,6 +15,8 @@ use super::mailbox::{Mailbox, Msg};
 /// What the session actor needs from the host to run commands.
 pub struct Services {
     pub commands: Vec<Arc<dyn Command>>,
+    /// Commands that arrive after I/O, consulted when the table has no such name.
+    pub command_sources: Vec<Arc<dyn CommandSource>>,
     /// Weak: the host holds every session's mailbox, and a session must not
     /// hold the host.
     pub host: Weak<dyn HostApi>,
@@ -25,6 +27,7 @@ impl Services {
     pub fn none() -> Self {
         Self {
             commands: Vec::new(),
+            command_sources: Vec::new(),
             host: Weak::<Unreachable>::new(),
         }
     }
@@ -100,6 +103,7 @@ pub(super) struct Run {
 /// The table and the runs in flight.
 pub(super) struct Commands {
     table: Vec<Arc<dyn Command>>,
+    sources: Vec<Arc<dyn CommandSource>>,
     host: Weak<dyn HostApi>,
     mailbox: Mailbox,
     session: SessionId,
@@ -113,6 +117,7 @@ impl Commands {
     pub(super) fn new(services: Services, mailbox: Mailbox, cwd: PathBuf) -> Self {
         Self {
             table: services.commands,
+            sources: services.command_sources,
             host: services.host,
             session: mailbox.id().clone(),
             mailbox,
@@ -122,14 +127,17 @@ impl Commands {
         }
     }
 
-    pub(super) fn find(&self, name: &str) -> Option<Arc<dyn Command>> {
-        self.table
-            .iter()
-            .find(|c| {
-                let spec = c.spec();
-                spec.name == name || spec.aliases.iter().any(|a| a == name)
-            })
-            .cloned()
+    /// The table first, then each source in order (ADR-0009).
+    pub(super) async fn find(&self, name: &str) -> Option<Arc<dyn Command>> {
+        if let Some(found) = named(&self.table, name) {
+            return Some(found);
+        }
+        for source in &self.sources {
+            if let Some(found) = named(&source.commands().await, name) {
+                return Some(found);
+            }
+        }
+        None
     }
 
     /// A non-instant command is running: the queue waits.
@@ -182,6 +190,16 @@ impl Commands {
         }
         self.inflight.remove(intent)
     }
+}
+
+fn named(table: &[Arc<dyn Command>], name: &str) -> Option<Arc<dyn Command>> {
+    table
+        .iter()
+        .find(|c| {
+            let spec = c.spec();
+            spec.name == name || spec.aliases.iter().any(|a| a == name)
+        })
+        .cloned()
 }
 
 /// A host that is never there, for `Services::none`.

@@ -121,8 +121,14 @@ async fn model_and_think_change_the_next_turn_and_are_announced() {
     assert!(
         before
             .iter()
+            .any(|f| matches!(&f.event, Event::SessionUpdated { summary } if summary.model.as_deref() == Some("m2"))),
+        "the new model is announced before the ack"
+    );
+    assert!(
+        !before
+            .iter()
             .any(|f| matches!(f.event, Event::ConfigChanged { .. })),
-        "a config change is announced before the ack"
+        "nothing in the config view changed, so nothing was announced"
     );
 
     let (ack, _) = client.ack("/think high").await;

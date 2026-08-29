@@ -272,7 +272,7 @@ pub fn config(
             text: "You are bingo.".into(),
             cache: false,
         }],
-        tools,
+        tools: crate::turn::ToolSet::fixed(tools),
         policy: Arc::new(crate::gate::DefaultPolicy),
         hooks: vec![],
         contributors: vec![],
@@ -440,7 +440,11 @@ static NO_API: std::sync::LazyLock<Arc<NoApi>> = std::sync::LazyLock::new(|| Arc
 pub fn services(commands: Vec<Arc<dyn Command>>) -> crate::session::Services {
     let weak = Arc::downgrade(&*NO_API);
     let host: Weak<dyn HostApi> = weak;
-    crate::session::Services { commands, host }
+    crate::session::Services {
+        commands,
+        command_sources: Vec::new(),
+        host,
+    }
 }
 
 /// A turn-end hook that waits for the test before it records that it ran.
@@ -474,5 +478,130 @@ impl Hook for GatedHook {
             self.gate.notified().await;
             self.fired.store(true, std::sync::atomic::Ordering::SeqCst);
         }
+    }
+}
+
+/// A tool source a test fills after the fact, so a turn can see tools
+/// arrive (ADR-0009).
+#[derive(Default)]
+pub struct ScriptedToolSource {
+    tools: Mutex<Vec<Arc<dyn Tool>>>,
+}
+
+impl ScriptedToolSource {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self::default())
+    }
+
+    pub fn set(&self, tools: Vec<Arc<dyn Tool>>) {
+        *self.tools.lock().unwrap() = tools;
+    }
+}
+
+#[async_trait]
+impl ToolSource for ScriptedToolSource {
+    fn id(&self) -> &str {
+        "scripted"
+    }
+    async fn tools(&self) -> Vec<Arc<dyn Tool>> {
+        self.tools.lock().unwrap().clone()
+    }
+}
+
+/// A command source with a fixed table.
+pub struct ScriptedCommandSource {
+    commands: Vec<Arc<dyn Command>>,
+}
+
+impl ScriptedCommandSource {
+    pub fn new(commands: Vec<Arc<dyn Command>>) -> Arc<Self> {
+        Arc::new(Self { commands })
+    }
+}
+
+#[async_trait]
+impl CommandSource for ScriptedCommandSource {
+    fn id(&self) -> &str {
+        "scripted"
+    }
+    async fn commands(&self) -> Vec<Arc<dyn Command>> {
+        self.commands.clone()
+    }
+}
+
+/// A hook that asks a person before every tool, for a reason of its own.
+pub struct AskingHook {
+    pub reason: String,
+}
+
+#[async_trait]
+impl Hook for AskingHook {
+    fn id(&self) -> &str {
+        "asking"
+    }
+    fn matcher(&self) -> HookMatcher {
+        HookMatcher {
+            points: vec![HookPoint::BeforeTool],
+            tool: None,
+        }
+    }
+    async fn before_tool(&self, _: &mut ToolCall, _: &HookContext) -> HookOutcome {
+        HookOutcome::Ask {
+            reason: self.reason.clone(),
+        }
+    }
+}
+
+/// A hook that writes down every compaction, session and journal point it
+/// is called at. Its journal observer waits for `open()` when gated.
+pub struct RecordingHook {
+    calls: Mutex<Vec<String>>,
+    open: tokio::sync::watch::Sender<bool>,
+}
+
+impl RecordingHook {
+    pub fn new(gated: bool) -> Arc<Self> {
+        let (open, _) = tokio::sync::watch::channel(!gated);
+        Arc::new(Self {
+            calls: Mutex::new(Vec::new()),
+            open,
+        })
+    }
+
+    pub fn calls(&self) -> Vec<String> {
+        self.calls.lock().unwrap().clone()
+    }
+
+    /// Let the gated journal observer through.
+    pub fn open(&self) {
+        let _ = self.open.send(true);
+    }
+
+    fn note(&self, what: String) {
+        self.calls.lock().unwrap().push(what);
+    }
+}
+
+#[async_trait]
+impl Hook for RecordingHook {
+    fn id(&self) -> &str {
+        "recording"
+    }
+    fn matcher(&self) -> HookMatcher {
+        HookMatcher {
+            points: vec![HookPoint::Compact, HookPoint::Session, HookPoint::Event],
+            tool: None,
+        }
+    }
+    async fn on_compact(&self, phase: Phase, _: &HookContext) {
+        self.note(format!("compact:{phase:?}"));
+    }
+    async fn on_session(&self, phase: Phase, _: &HookContext) {
+        self.note(format!("session:{phase:?}"));
+    }
+    async fn on_event(&self, frame: &Frame, _: &HookContext) {
+        let mut open = self.open.subscribe();
+        let _ = open.wait_for(|o| *o).await;
+        self.note(format!("event:{}", frame.seq.0));
     }
 }

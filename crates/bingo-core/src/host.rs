@@ -28,7 +28,7 @@ use crate::models::{self, Learned, ModelCatalog};
 use crate::prompt::{self, PromptInput};
 use crate::session::{self, Mailbox};
 use crate::settings::{self, Claim, Layer, Merged, SettingsError};
-use crate::turn::{ModelChoice, TurnBudget, TurnConfig};
+use crate::turn::{ModelChoice, ToolSet, TurnBudget, TurnConfig};
 
 /// Gateway events buffered per subscriber before the oldest is dropped.
 const GATEWAY_CAPACITY: usize = 64;
@@ -222,6 +222,7 @@ impl Host {
         let weak: Weak<dyn HostApi> = self.weak.clone();
         session::Services {
             commands: self.registry.commands.clone(),
+            command_sources: self.registry.command_sources.clone(),
             host: weak,
         }
     }
@@ -486,7 +487,11 @@ impl Host {
             cwd: spec.cwd.clone(),
             model: choice,
             system,
-            tools: self.tools_for(spec.tools.as_deref()),
+            tools: ToolSet {
+                fixed: self.tools_for(spec.tools.as_deref()),
+                sources: self.registry.tool_sources.clone(),
+                only: spec.tools.clone(),
+            },
             policy: self
                 .registry
                 .policy
@@ -704,7 +709,8 @@ impl HostApi for Host {
     async fn catalog(&self, kind: CatalogKind) -> Result<Catalog, KernelError> {
         Ok(Catalog {
             kind,
-            entries: catalog::entries(&self.registry, self.settings.kernel.model.as_deref(), kind),
+            entries: catalog::entries(&self.registry, self.settings.kernel.model.as_deref(), kind)
+                .await,
         })
     }
 

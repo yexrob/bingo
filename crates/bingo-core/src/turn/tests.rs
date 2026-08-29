@@ -13,6 +13,7 @@ struct RecordingHost {
     events: Mutex<Vec<Event>>,
     answers: Mutex<VecDeque<Answer>>,
     queue: Mutex<Vec<(IntentId, Input)>>,
+    asked: Mutex<Vec<InteractionKind>>,
 }
 
 impl RecordingHost {
@@ -21,7 +22,11 @@ impl RecordingHost {
             events: Mutex::new(vec![]),
             answers: Mutex::new(VecDeque::new()),
             queue: Mutex::new(vec![]),
+            asked: Mutex::new(vec![]),
         }
+    }
+    fn asked(&self) -> Vec<InteractionKind> {
+        self.asked.lock().unwrap().clone()
     }
     fn events(&self) -> Vec<Event> {
         self.events.lock().unwrap().clone()
@@ -56,9 +61,10 @@ impl TurnHost for RecordingHost {
     async fn ask(
         &self,
         _item: Option<ItemId>,
-        _kind: InteractionKind,
+        kind: InteractionKind,
         _answers: Vec<AnswerSpec>,
     ) -> Result<Answer, KernelError> {
+        self.asked.lock().unwrap().push(kind);
         Ok(self
             .answers
             .lock()
@@ -104,7 +110,7 @@ fn config(provider: Arc<ScriptedProvider>, tools: Vec<Arc<dyn Tool>>) -> TurnCon
             text: "You are bingo.".into(),
             cache: false,
         }],
-        tools,
+        tools: ToolSet::fixed(tools),
         policy: Arc::new(DefaultPolicy),
         hooks: vec![],
         contributors: vec![],
@@ -559,4 +565,98 @@ async fn a_stream_that_ends_without_a_finish_is_retried_like_a_dropped_connectio
         "the half answer is withdrawn by the retry: {:?}",
         host.kinds()
     );
+}
+
+// ----- sources and hook points (ADR-0009) -----
+
+#[tokio::test]
+async fn a_source_tool_is_gathered_when_the_turn_starts_and_a_duplicate_is_dropped() {
+    let provider =
+        ScriptedProvider::new(vec![Script::Events(text("a")), Script::Events(text("b"))]);
+    let source = ScriptedToolSource::new();
+    let mut cfg = config(provider.clone(), vec![]);
+    cfg.tools = ToolSet {
+        fixed: vec![Arc::new(EchoTool { read_only: true })],
+        sources: vec![source.clone()],
+        only: None,
+    };
+    let host = RecordingHost::new();
+    run(&cfg, &host, CancellationToken::new()).await;
+    let names = |i: usize| -> Vec<String> {
+        provider.requests()[i]
+            .tools
+            .iter()
+            .map(|t| t.name.clone())
+            .collect()
+    };
+    assert_eq!(names(0), vec!["Echo"], "the source had nothing yet");
+
+    source.set(vec![
+        Arc::new(EchoTool { read_only: true }),
+        Arc::new(PanicTool),
+    ]);
+    run(&cfg, &host, CancellationToken::new()).await;
+    assert_eq!(
+        names(1),
+        vec!["Echo", "Panic"],
+        "the source's tools joined; the duplicate did not"
+    );
+    assert!(
+        host.kinds().contains(&"notice:TOOL_SHADOWED".to_string()),
+        "{:?}",
+        host.kinds()
+    );
+}
+
+#[tokio::test]
+async fn a_hook_that_asks_opens_a_permission_with_its_reason_and_allow_runs_the_tool() {
+    let provider = ScriptedProvider::new(vec![
+        Script::Events(tool_call("Echo", json!({ "v": 1 }))),
+        Script::Events(text("done")),
+    ]);
+    let mut cfg = config(provider, vec![Arc::new(EchoTool { read_only: true })]);
+    cfg.hooks = vec![Arc::new(AskingHook {
+        reason: "why".into(),
+    })];
+    let host = RecordingHost::new();
+    host.answers.lock().unwrap().push_back(Answer::AllowOnce);
+    let outcome = run(&cfg, &host, CancellationToken::new()).await;
+    assert_eq!(outcome.status, TurnStatus::Completed);
+    assert!(
+        matches!(&host.asked()[0], InteractionKind::Permission { summary, .. } if summary == "why"),
+        "{:?}",
+        host.asked()
+    );
+    assert!(
+        host.kinds()
+            .contains(&"completed:tool/completed".to_string()),
+        "{:?}",
+        host.kinds()
+    );
+}
+
+#[tokio::test]
+async fn compaction_hooks_bracket_the_cut() {
+    let provider = ScriptedProvider::new(vec![]);
+    let mut cfg = config(provider, vec![]);
+    cfg.compactor = Some(ScriptedCompactor::new(vec![ScriptedCompactor::cut(
+        "itm_none", 9_000, 100,
+    )]));
+    let hook = RecordingHook::new(false);
+    cfg.hooks = vec![hook.clone()];
+    let host = RecordingHost::new();
+    run_turn(
+        &cfg,
+        TurnRun {
+            turn: TurnId::from_raw("trn_1"),
+            history: history("hello"),
+            generation: 0,
+            cancel: CancellationToken::new(),
+            kind: TurnKind::Compact { instructions: None },
+        },
+        &host,
+    )
+    .await;
+    assert_eq!(hook.calls(), vec!["compact:Start", "compact:End"]);
+    assert!(host.kinds().contains(&"compacted".to_string()));
 }

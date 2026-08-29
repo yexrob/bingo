@@ -83,6 +83,7 @@ fn spawn_with(
         queue: Queue::default(),
         commands,
         tracker: TaskTracker::new(),
+        observed: None,
         done,
         pending: HashMap::new(),
         closing: None,

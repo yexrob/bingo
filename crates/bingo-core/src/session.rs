@@ -70,6 +70,9 @@ struct Actor {
     commands: Commands,
     /// Work that outlives a turn: the hooks that run after `TurnCompleted`.
     tracker: TaskTracker,
+    /// Durable frames for the hooks that observe the journal, in order, on a
+    /// task of their own; `None` when no hook asked (ADR-0009 §4).
+    observed: Option<mpsc::UnboundedSender<(Frame, HookContext)>>,
     /// Flipped when the actor is done, for whoever waits on the mailbox.
     done: watch::Sender<bool>,
     pending: HashMap<InteractionId, Pending>,
@@ -91,6 +94,7 @@ impl Actor {
             running.cancel.cancel();
             running.task.abort();
         }
+        drop(self.observed.take());
         self.tracker.close();
         if tokio::time::timeout(AFTER_TURN_DEADLINE, self.tracker.wait())
             .await
@@ -161,18 +165,74 @@ impl Actor {
             updated_at: Timestamp::now(),
             ..self.state.summary.clone()
         };
+        self.observe_journal();
         self.publish(Event::SessionUpdated { summary }, None).await;
-        self.publish_config().await;
+        self.refresh_config().await;
         self.recover().await;
+        self.session_hooks(Phase::Start);
     }
 
-    /// The settings a client may read and a command may change (ADR-0008 §4).
-    async fn publish_config(&mut self) {
+    /// What a client may read of this session's configuration: the kernel's
+    /// own keys (ADR-0008 §4) and what the policy says of itself (ADR-0009 §5).
+    /// Published when it differs from what the clients already hold.
+    async fn refresh_config(&mut self) {
+        let policy = &self.config.policy;
+        let mut plugins = std::collections::BTreeMap::new();
+        let described = policy.describe(&self.id);
+        if !described.is_null() {
+            plugins.insert(policy.id().to_string(), described);
+        }
         let config = ConfigView {
             kernel: json!({ "thinking": self.config.model.reasoning }),
-            plugins: Default::default(),
+            plugins,
         };
-        self.publish(Event::ConfigChanged { config }, None).await;
+        if config != self.state.config {
+            self.publish(Event::ConfigChanged { config }, None).await;
+        }
+    }
+
+    /// The session-lifecycle hooks, off the actor's path.
+    fn session_hooks(&self, phase: Phase) {
+        let hooks: Vec<Arc<dyn Hook>> = self
+            .config
+            .hooks
+            .iter()
+            .filter(|h| hook_applies(&h.matcher(), HookPoint::Session, None))
+            .cloned()
+            .collect();
+        if hooks.is_empty() {
+            return;
+        }
+        let cx = self.hook_context();
+        self.tracker.spawn(async move {
+            for hook in hooks {
+                hook.on_session(phase, &cx).await;
+            }
+        });
+    }
+
+    /// One ordered task feeds every durable frame to the hooks that observe
+    /// the journal; publishing never waits on them.
+    fn observe_journal(&mut self) {
+        let hooks: Vec<Arc<dyn Hook>> = self
+            .config
+            .hooks
+            .iter()
+            .filter(|h| hook_applies(&h.matcher(), HookPoint::Event, None))
+            .cloned()
+            .collect();
+        if hooks.is_empty() {
+            return;
+        }
+        let (tx, mut rx) = mpsc::unbounded_channel::<(Frame, HookContext)>();
+        self.observed = Some(tx);
+        self.tracker.spawn(async move {
+            while let Some((frame, cx)) = rx.recv().await {
+                for hook in &hooks {
+                    hook.on_event(&frame, &cx).await;
+                }
+            }
+        });
     }
 
     /// The next turn runs on a config the host rebuilt; the running one
@@ -186,7 +246,7 @@ impl Actor {
             ..self.state.summary.clone()
         };
         self.publish(Event::SessionUpdated { summary }, None).await;
-        self.publish_config().await;
+        self.refresh_config().await;
     }
 
     /// A turn that only compacts (ADR-0008 §4): refused while one runs, so
@@ -263,11 +323,19 @@ impl Actor {
 
     /// An event from the running turn. One from a turn that already ended is
     /// dropped: its seq would land after the `TurnCompleted` that closed it.
+    /// A permission receipt means the policy may have installed a rule.
     async fn emit(&mut self, turn: TurnId, event: Event) {
-        if self.is_running(&turn) {
-            self.publish(event, None).await;
-        } else {
+        if !self.is_running(&turn) {
             tracing::warn!(session = %self.id, %turn, "event from a turn that is not running");
+            return;
+        }
+        let receipt = matches!(
+            &event,
+            Event::ItemCompleted { item } if matches!(item.body, ItemBody::PermissionReceipt { .. })
+        );
+        self.publish(event, None).await;
+        if receipt {
+            self.refresh_config().await;
         }
     }
 
@@ -304,6 +372,9 @@ impl Actor {
                 tracing::error!(session = %self.id, error = %e, "journal append failed");
             }
             self.journal.push(frame.clone());
+            if let Some(observed) = &self.observed {
+                let _ = observed.send((frame.clone(), self.hook_context()));
+            }
         }
         self.state.apply(&frame);
         self.subscribers.fanout(&frame);
@@ -405,7 +476,7 @@ impl Actor {
 
     /// A command line: run now if instant, else behind whatever is running.
     async fn submit_command(&mut self, intent: IntentId, input: Input, parsed: commands::Parsed) {
-        let Some(command) = self.commands.find(&parsed.name) else {
+        let Some(command) = self.commands.find(&parsed.name).await else {
             let shown = if parsed.name == "!" {
                 "!".to_string()
             } else {
@@ -479,6 +550,7 @@ impl Actor {
             }
             Err(e) => self.reject(intent, e.code, e.message).await,
         }
+        self.refresh_config().await;
         self.drain_queue().await;
     }
 
@@ -749,7 +821,10 @@ impl Actor {
     /// A command that waited its turn; the table may have lost it meanwhile.
     async fn run_queued(&mut self, intent: IntentId, input: Input) {
         let parsed = commands::parse(&input);
-        let command = parsed.as_ref().and_then(|p| self.commands.find(&p.name));
+        let command = match &parsed {
+            Some(p) => self.commands.find(&p.name).await,
+            None => None,
+        };
         match (parsed, command) {
             (Some(parsed), Some(command)) => {
                 let origin = commands::origin_of(&input);
@@ -785,6 +860,7 @@ impl Actor {
         }
         self.publish(Event::SessionClosed { reason }, None).await;
         self.subscribers.clear();
+        self.session_hooks(Phase::End);
         Flow::Stop
     }
 }

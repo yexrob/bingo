@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 use super::Registry;
 use crate::models::ModelCatalog;
 
-pub(super) fn entries(
+pub(super) async fn entries(
     registry: &Registry,
     model: Option<&str>,
     kind: CatalogKind,
@@ -15,8 +15,8 @@ pub(super) fn entries(
     match kind {
         CatalogKind::Models => models(registry, model),
         CatalogKind::Providers => providers(registry),
-        CatalogKind::Tools => tools(registry),
-        CatalogKind::Commands => commands(registry),
+        CatalogKind::Tools => tools(registry).await,
+        CatalogKind::Commands => commands(registry).await,
         CatalogKind::Skills => Vec::new(),
         CatalogKind::Plugins => plugins(registry),
     }
@@ -58,25 +58,33 @@ fn providers(registry: &Registry) -> Vec<CatalogEntry> {
         .collect()
 }
 
-fn tools(registry: &Registry) -> Vec<CatalogEntry> {
-    registry
-        .tools
-        .iter()
+/// The registered tools, then every source's (ADR-0009); a tool's own
+/// `meta` rides beside its description.
+async fn tools(registry: &Registry) -> Vec<CatalogEntry> {
+    let mut all = registry.tools.clone();
+    for source in &registry.tool_sources {
+        all.extend(source.tools().await);
+    }
+    all.iter()
         .map(|t| {
             let spec = t.spec();
+            let mut meta = spec.meta;
+            meta.insert("description".into(), Value::String(spec.description));
             CatalogEntry {
                 id: spec.name.clone(),
                 label: spec.name,
-                meta: json!({ "description": spec.description }),
+                meta: Value::Object(meta),
             }
         })
         .collect()
 }
 
-fn commands(registry: &Registry) -> Vec<CatalogEntry> {
-    registry
-        .commands
-        .iter()
+async fn commands(registry: &Registry) -> Vec<CatalogEntry> {
+    let mut all = registry.commands.clone();
+    for source in &registry.command_sources {
+        all.extend(source.commands().await);
+    }
+    all.iter()
         .map(|c| {
             let spec = c.spec();
             CatalogEntry {

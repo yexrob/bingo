@@ -19,7 +19,7 @@ use async_trait::async_trait;
 use bingo_sdk::*;
 use jiff::Timestamp;
 
-pub use config::{Breaker, ModelChoice, TurnBudget, TurnConfig};
+pub use config::{Breaker, ModelChoice, ToolSet, TurnBudget, TurnConfig};
 use ruler::Ruler;
 use stream::Streamed;
 pub use stream::{MAX_RETRY_DELAY, MAX_SERVER_RETRY_DELAY, backoff};
@@ -78,6 +78,8 @@ struct Turn<'a> {
     host: &'a dyn TurnHost,
     id: TurnId,
     cancel: CancellationToken,
+    /// The tools this turn may call, gathered once when it started (ADR-0009).
+    tools: Vec<Arc<dyn Tool>>,
     items: Vec<Item>,
     round: u32,
     retries: u32,
@@ -114,11 +116,20 @@ pub async fn run_turn(cfg: &TurnConfig, run: TurnRun, host: &dyn TurnHost) -> Tu
         provider: Some(cfg.model.provider.clone()),
         model: Some(cfg.model.id.clone()),
     };
+    let (tools, shadowed) = cfg.tools.gather().await;
+    for name in shadowed {
+        host.emit(Event::Notice {
+            level: Level::Warn,
+            code: "TOOL_SHADOWED".into(),
+            text: format!("a second tool called {name} was dropped"),
+        });
+    }
     let mut turn = Turn {
         cfg,
         host,
         id: run.turn,
         cancel: run.cancel,
+        tools,
         items,
         round: 0,
         retries: 0,
@@ -268,7 +279,7 @@ impl Turn<'_> {
     }
 
     fn tool_specs(&self) -> Vec<ToolSpec> {
-        self.cfg.tools.iter().map(|t| t.spec()).collect()
+        self.tools.iter().map(|t| t.spec()).collect()
     }
 
     fn measure(&mut self, system: &[SystemBlock], messages: &[Message]) -> ContextUsage {
@@ -512,6 +523,9 @@ impl Turn<'_> {
         usage: ContextUsage,
     ) -> bool {
         let started = std::time::Instant::now();
+        for hook in self.hooks(HookPoint::Compact) {
+            hook.on_compact(Phase::Start, &self.hook_cx).await;
+        }
         let cx = CompactContext {
             items: &self.items,
             usage,
@@ -522,7 +536,11 @@ impl Turn<'_> {
             failures: self.cfg.compaction.failures(),
             keep_budget: self.ruler.lines.keep,
         };
-        match compactor.compact(cx, reason).await {
+        let outcome = compactor.compact(cx, reason).await;
+        for hook in self.hooks(HookPoint::Compact) {
+            hook.on_compact(Phase::End, &self.hook_cx).await;
+        }
+        match outcome {
             Ok(c) if c.after < c.before => {
                 self.usage.add(c.usage);
                 self.cfg.compaction.succeeded();
@@ -580,7 +598,6 @@ impl Turn<'_> {
         let mut calls = Vec::with_capacity(finished.tool_calls.len());
         for (item_id, call) in &finished.tool_calls {
             let tool = self
-                .cfg
                 .tools
                 .iter()
                 .find(|t| t.spec().name == call.name)

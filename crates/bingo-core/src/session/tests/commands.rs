@@ -315,3 +315,79 @@ async fn collect(
     }
     frames
 }
+
+#[tokio::test]
+async fn a_command_from_a_source_dispatches_like_a_registered_one() {
+    let late = ScriptedCommand::new(
+        "late",
+        true,
+        Ok(CommandOutcome::Applied {
+            message: Some("late!".into()),
+        }),
+    );
+    let mut services = services(vec![]);
+    services.command_sources = vec![ScriptedCommandSource::new(vec![late])];
+    let mailbox = spawn(summary("ses_1"), None, services, |_| {
+        Arc::new(config(
+            ScriptedProvider::new(vec![]),
+            vec![],
+            Arc::new(NoHost),
+        ))
+    });
+    let (mut state, mut events) = mailbox.attach().await.unwrap();
+    let intent = IntentId::mint();
+    mailbox.submit(
+        intent.clone(),
+        Input::text("/late", Origin::surface("test")),
+    );
+    let frames = collect(&mut events, &mut state, |f| {
+        matches!(f.event, Event::IntentAck { .. })
+    })
+    .await;
+    assert_eq!(
+        ack_of(&frames, &intent),
+        Some(IntentOutcome::Applied {
+            result: json!({ "message": "late!" })
+        })
+    );
+}
+
+/// The lifecycle hooks run off the actor's path, and the journal observer
+/// sees every durable frame in order without ever holding a frame back.
+#[tokio::test]
+async fn session_and_journal_hooks_observe_without_delaying_anything() {
+    let provider = ScriptedProvider::new(vec![Script::Events(text("hello"))]);
+    let hook = RecordingHook::new(true);
+    let mailbox = spawn(summary("ses_1"), None, Services::none(), |_| {
+        let mut cfg = config(provider, vec![], Arc::new(NoHost));
+        cfg.hooks = vec![hook.clone()];
+        Arc::new(cfg)
+    });
+    let (mut state, mut events) = mailbox.attach().await.unwrap();
+    mailbox.submit(IntentId::mint(), Input::text("hi", Origin::surface("test")));
+    drive(&mut events, &mut state, turn_completed).await;
+    assert!(
+        !hook.calls().iter().any(|c| c.starts_with("event:")),
+        "the observer is still gated, and every frame arrived regardless"
+    );
+    let durable: Vec<u64> = events_of(&mailbox).await.iter().map(|f| f.seq.0).collect();
+
+    hook.open();
+    mailbox.close(CloseReason::Client);
+    mailbox.wait_closed().await;
+    let calls = hook.calls();
+    assert_eq!(calls.first().map(String::as_str), Some("session:Start"));
+    assert_eq!(calls.last().map(String::as_str), Some("session:End"));
+    let seen: Vec<u64> = calls
+        .iter()
+        .filter_map(|c| c.strip_prefix("event:"))
+        .map(|n| n.parse().unwrap())
+        .collect();
+    let closed = seen.last().copied().unwrap();
+    assert_eq!(
+        seen[..seen.len() - 1],
+        durable[..],
+        "every durable frame, in order; the last is the close itself"
+    );
+    assert!(closed > durable[durable.len() - 1]);
+}

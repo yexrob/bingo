@@ -195,6 +195,15 @@ impl PermissionPolicy for PermissionsPolicy {
         decide::decide(&self.request(input), &self.rules_for(input.session))
     }
 
+    /// The mode this session runs in and the rules its person accepted, as a
+    /// client may show them (ADR-0009 §5).
+    fn describe(&self, session: &SessionId) -> serde_json::Value {
+        serde_json::json!({
+            "mode": self.mode_for(session),
+            "rules": self.sessions.rules(session).iter().map(Rule::raw).collect::<Vec<_>>(),
+        })
+    }
+
     async fn on_verdict(&self, input: PolicyInput<'_>, verdict: &Verdict) {
         let Verdict::Allow { scope: Some(rule) } = verdict else {
             return;
@@ -403,5 +412,26 @@ mod tests {
             ask_about(&policy, &session, "cargo build").await,
             Decision::Ask { .. }
         ));
+    }
+
+    #[test]
+    fn describe_names_the_mode_and_the_rules_a_session_accepted() {
+        let policy = PermissionsPolicy::new(Permissions::default(), None).expect("policy");
+        let session = SessionId::from_raw("ses_1");
+        assert_eq!(
+            policy.describe(&session),
+            json!({ "mode": "default", "rules": [] })
+        );
+        policy.choose_mode(&session, Mode::AcceptEdits);
+        assert!(policy.sessions.install(&session, "Bash(git status:*)"));
+        assert_eq!(
+            policy.describe(&session),
+            json!({ "mode": "acceptEdits", "rules": ["Bash(git status:*)"] })
+        );
+        assert_eq!(
+            policy.describe(&SessionId::from_raw("ses_2"))["mode"],
+            json!("default"),
+            "another session keeps the configured mode"
+        );
     }
 }

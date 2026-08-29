@@ -65,6 +65,57 @@ impl Breaker {
     }
 }
 
+/// The tools a session may call: the ones registered up front, the sources
+/// that answer late (ADR-0009), and the names the session is limited to.
+#[derive(Clone, Default)]
+pub struct ToolSet {
+    pub fixed: Vec<Arc<dyn Tool>>,
+    pub sources: Vec<Arc<dyn ToolSource>>,
+    /// `Some` restricts the set to these names; `None` is every tool.
+    pub only: Option<Vec<String>>,
+}
+
+impl ToolSet {
+    pub fn fixed(tools: Vec<Arc<dyn Tool>>) -> Self {
+        Self {
+            fixed: tools,
+            sources: Vec::new(),
+            only: None,
+        }
+    }
+
+    /// The set as it stands now: fixed tools first, then every source in
+    /// order; a later tool whose name is taken is dropped and reported.
+    pub async fn gather(&self) -> (Vec<Arc<dyn Tool>>, Vec<String>) {
+        let mut tools: Vec<Arc<dyn Tool>> = Vec::new();
+        let mut shadowed = Vec::new();
+        let mut take = |tool: Arc<dyn Tool>| {
+            let name = tool.spec().name;
+            if self
+                .only
+                .as_ref()
+                .is_some_and(|names| !names.contains(&name))
+            {
+                return;
+            }
+            if tools.iter().any(|t| t.spec().name == name) {
+                shadowed.push(name);
+            } else {
+                tools.push(tool);
+            }
+        };
+        for tool in &self.fixed {
+            take(tool.clone());
+        }
+        for source in &self.sources {
+            for tool in source.tools().await {
+                take(tool);
+            }
+        }
+        (tools, shadowed)
+    }
+}
+
 /// Everything a turn reads. Built by the host per session; plugins are already resolved.
 pub struct TurnConfig {
     pub session: SessionSummary,
@@ -72,7 +123,7 @@ pub struct TurnConfig {
     pub model: ModelChoice,
     pub compaction: Arc<Breaker>,
     pub system: Vec<SystemBlock>,
-    pub tools: Vec<Arc<dyn Tool>>,
+    pub tools: ToolSet,
     pub policy: Arc<dyn PermissionPolicy>,
     pub hooks: Vec<Arc<dyn Hook>>,
     pub contributors: Vec<Arc<dyn ContextContributor>>,

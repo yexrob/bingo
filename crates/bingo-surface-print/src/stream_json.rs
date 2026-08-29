@@ -27,8 +27,7 @@
 //! Documented fields bingo cannot fill are left out rather than invented:
 //! `uuid`, `claude_code_version`, `mcp_servers`, `slash_commands`,
 //! `output_style`, `modelUsage`, `permission_denials`, and the `result` line's
-//! `stop_reason`. What is written but constant: `permissionMode` is `default`
-//! because a surface never sees the permission plugin's config, `apiKeySource`
+//! `stop_reason`. What is written but constant: `apiKeySource`
 //! is `none`, `total_cost_usd` is `0.0` because nothing here prices a turn,
 //! `duration_api_ms` is `0` because only the whole turn is timed, and a
 //! message's `usage` is zero because bingo counts tokens per round
@@ -94,7 +93,7 @@ impl Encoder {
             "cwd": state.summary.cwd,
             "tools": self.tools,
             "model": state.summary.model,
-            "permissionMode": "default",
+            "permissionMode": permission_mode(state),
             "apiKeySource": "none",
         });
         drop_unknown(&mut line, "model");
@@ -368,6 +367,18 @@ fn drop_unknown(line: &mut Value, key: &str) {
     {
         object.remove(key);
     }
+}
+
+/// The session's permission mode as the policy describes it (ADR-0009 §5);
+/// `default` until a policy has said otherwise.
+fn permission_mode(state: &SessionState) -> &str {
+    state
+        .config
+        .plugins
+        .get("permissions")
+        .and_then(|p| p.get("mode"))
+        .and_then(Value::as_str)
+        .unwrap_or("default")
 }
 
 #[cfg(test)]
