@@ -10,7 +10,7 @@ use std::io::{self, Write};
 
 use bingo_sdk::{
     DeltaKind, ErrorCode, Event, Frame, Item, ItemBody, ItemId, ItemStatus, SessionState,
-    TurnStatus,
+    ToolOutput, TurnStatus,
 };
 use serde_json::Value;
 
@@ -89,8 +89,7 @@ impl Renderer {
         match self.mode {
             Mode::Json => {
                 let line = serde_json::to_string(frame).map_err(io::Error::other)?;
-                writeln!(out, "{line}")?;
-                out.flush()?;
+                write_line(&line, out)?;
                 self.failure(&frame.event, err)
             }
             Mode::Text => self.text(&frame.event, state, out, err),
@@ -201,9 +200,11 @@ impl Renderer {
                 duration_ms,
                 ..
             } => {
-                let failed = item.status == ItemStatus::Failed
-                    || output.as_ref().is_some_and(|o| o.is_error);
-                let verdict = if failed { "error" } else { "ok" };
+                let verdict = if tool_failed(item, output.as_ref()) {
+                    "error"
+                } else {
+                    "ok"
+                };
                 let ms = duration_ms.unwrap_or(0);
                 self.diagnostic(&format!("[tool] {name} {verdict} ({ms}ms)"), err)?;
             }
@@ -268,13 +269,23 @@ fn compact(input: &Value) -> String {
     serde_json::to_string(input).unwrap_or_else(|_| String::from("null"))
 }
 
+/// One line on stdout, flushed: a host reads this stream as it arrives.
+fn write_line(line: &str, out: &mut (impl Write + ?Sized)) -> io::Result<()> {
+    writeln!(out, "{line}")?;
+    out.flush()
+}
+
+/// The verdict a finished tool call gets, in one place: a failed status and an
+/// error output are the same news.
+fn tool_failed(item: &Item, output: Option<&ToolOutput>) -> bool {
+    item.status == ItemStatus::Failed || output.is_some_and(|o| o.is_error)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::tests::{assistant, frame, session_state, tool_call};
-    use bingo_sdk::{
-        ContentPart, KernelError, Level, Origin, ToolOutput, TurnId, TurnOrigin, Usage,
-    };
+    use bingo_sdk::{ContentPart, KernelError, Level, Origin, TurnId, TurnOrigin, Usage};
 
     struct Sinks {
         out: Vec<u8>,
