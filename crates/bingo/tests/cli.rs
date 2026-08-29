@@ -139,3 +139,70 @@ fn without_print_the_binary_says_what_is_missing() {
     assert_eq!(out.status.code(), Some(1));
     assert!(stderr(&out).contains("--print"));
 }
+
+#[test]
+fn a_question_is_declined_when_nobody_is_at_the_keyboard() {
+    let script = script(
+        r#"{"responses":[
+            {"steps":[{"text":"Asking."},{"toolCall":{"name":"AskUserQuestion","input":{"questions":[
+                {"question":"Which store?","header":"Store","options":[
+                    {"label":"Postgres","description":"relational"},{"label":"Redis","description":"key-value"}]}]}}}]},
+            {"steps":[{"text":"Fine."}]}
+        ]}"#,
+    );
+    let out = run(bingo()
+        .env("BINGO_FAKE_SCRIPT", script.path())
+        .args(["--print", "pick one"]));
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    assert_eq!(stdout(&out), "Asking.Fine.\n");
+    let err = stderr(&out);
+    assert!(err.contains("[tool] AskUserQuestion error"), "{err}");
+}
+
+#[test]
+fn an_edit_is_asked_and_denied_off_a_tty_under_the_default_policy() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("greeting.txt");
+    std::fs::write(&file, "alpha\n").unwrap();
+    let script = script(
+        r#"{"responses":[
+            {"steps":[{"toolCall":{"name":"Edit","input":{"file_path":"greeting.txt","old_string":"alpha","new_string":"beta"}}}]},
+            {"steps":[{"text":"Could not."}]}
+        ]}"#,
+    );
+    let out = run(bingo()
+        .env("BINGO_FAKE_SCRIPT", script.path())
+        .args(["--print", "--output-format", "json", "--cwd"])
+        .arg(dir.path())
+        .arg("change it"));
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    assert_eq!(
+        std::fs::read_to_string(&file).unwrap(),
+        "alpha\n",
+        "the file was edited"
+    );
+    let frames: Vec<Frame> = stdout(&out)
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let opened = frames.iter().any(|f| {
+        matches!(&f.event, Event::InteractionOpened { interaction }
+            if matches!(&interaction.kind, bingo_sdk::InteractionKind::Permission { tool, .. } if tool == "Edit"))
+    });
+    assert!(opened, "the gate asked for the edit");
+    let denied = frames.iter().any(|f| {
+        matches!(
+            &f.event,
+            Event::InteractionResolved {
+                answer: bingo_sdk::Answer::Deny { .. },
+                ..
+            }
+        )
+    });
+    assert!(denied, "the surface refused off a TTY");
+    let failed = frames.iter().any(|f| {
+        matches!(&f.event, Event::ItemCompleted { item }
+            if matches!(&item.body, bingo_sdk::ItemBody::ToolCall { output: Some(o), .. } if o.is_error))
+    });
+    assert!(failed, "the tool result carries the denial");
+}
