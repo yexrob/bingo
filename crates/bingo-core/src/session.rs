@@ -38,16 +38,53 @@ pub fn spawn(
     store: Option<Arc<dyn SessionStore>>,
     config: impl FnOnce(&Mailbox) -> Arc<TurnConfig>,
 ) -> Mailbox {
+    spawn_with(summary, Vec::new(), store, config)
+}
+
+/// A session read back from its journal (ADR-0005): the frames are the
+/// actor's own history, the state is their fold by the one reducer, and the
+/// seq goes on from the last frame.
+pub fn resume(
+    frames: Vec<Frame>,
+    store: Option<Arc<dyn SessionStore>>,
+    config: impl FnOnce(&Mailbox) -> Arc<TurnConfig>,
+) -> Result<Mailbox, KernelError> {
+    let head = head_summary(&frames)?;
+    Ok(spawn_with(head, frames, store, config))
+}
+
+/// The first frame of every journal is the session saying what it is.
+pub fn head_summary(frames: &[Frame]) -> Result<SessionSummary, KernelError> {
+    match frames.first().map(|f| &f.event) {
+        Some(Event::SessionUpdated { summary }) => Ok(summary.clone()),
+        _ => Err(KernelError::new(
+            ErrorCode::Storage,
+            "the journal does not start with the session's summary",
+        )),
+    }
+}
+
+fn spawn_with(
+    head: SessionSummary,
+    journal: Vec<Frame>,
+    store: Option<Arc<dyn SessionStore>>,
+    config: impl FnOnce(&Mailbox) -> Arc<TurnConfig>,
+) -> Mailbox {
     let (tx, rx) = mpsc::unbounded_channel();
-    let mailbox = Mailbox::new(summary.id.clone(), tx);
+    let mailbox = Mailbox::new(head.id.clone(), tx);
     let config = config(&mailbox);
+    let mut state = SessionState::new(head.clone());
+    for frame in &journal {
+        state.apply(frame);
+    }
     let actor = Actor {
-        id: summary.id.clone(),
+        id: head.id,
         mailbox: mailbox.clone(),
         rx,
-        state: SessionState::new(summary.clone()),
-        journal: Vec::new(),
-        seq: Seq::ZERO,
+        seq: journal.last().map_or(Seq::ZERO, |f| f.seq),
+        generation: state.history_generation,
+        state,
+        journal,
         store,
         config,
         subscribers: Subscribers::default(),
@@ -55,11 +92,10 @@ pub fn spawn(
         queue: VecDeque::new(),
         queue_revision: 0,
         pending: HashMap::new(),
-        generation: 0,
         closing: None,
         progress_n: 0,
     };
-    tokio::spawn(actor.run(summary));
+    tokio::spawn(actor.run());
     mailbox
 }
 
@@ -98,9 +134,8 @@ struct Actor {
 }
 
 impl Actor {
-    async fn run(mut self, summary: SessionSummary) {
-        // The journal head: what this session is.
-        self.publish(Event::SessionUpdated { summary }, None).await;
+    async fn run(mut self) {
+        self.open().await;
         while let Some(msg) = self.rx.recv().await {
             if self.handle(msg).await == Flow::Stop {
                 break;
@@ -164,6 +199,55 @@ impl Actor {
             Msg::Close { reason } => return self.close(reason).await,
         }
         Flow::Continue
+    }
+
+    /// The head of this segment of the journal: what the session is now.
+    async fn open(&mut self) {
+        let summary = SessionSummary {
+            busy: false,
+            updated_at: Timestamp::now(),
+            ..self.state.summary.clone()
+        };
+        self.publish(Event::SessionUpdated { summary }, None).await;
+        self.recover().await;
+    }
+
+    /// A resumed journal may end inside a turn the old process never
+    /// finished. Its questions can no longer be answered and its turn is
+    /// lost; both are said before anything new happens.
+    async fn recover(&mut self) {
+        let open: Vec<InteractionId> = self
+            .state
+            .interactions
+            .iter()
+            .map(|i| i.id.clone())
+            .collect();
+        for id in open {
+            self.publish(
+                Event::InteractionCancelled {
+                    id,
+                    reason: CancelReason::SessionClosed,
+                },
+                None,
+            )
+            .await;
+        }
+        if let Some(turn) = self.state.turn.clone() {
+            self.publish(
+                Event::TurnCompleted {
+                    turn: turn.id,
+                    status: TurnStatus::Failed {
+                        error: KernelError::new(
+                            ErrorCode::TurnLost,
+                            "the process ended during this turn",
+                        ),
+                    },
+                    usage: turn.usage,
+                },
+                None,
+            )
+            .await;
+        }
     }
 
     fn is_running(&self, turn: &TurnId) -> bool {

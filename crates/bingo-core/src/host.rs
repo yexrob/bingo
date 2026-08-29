@@ -5,6 +5,7 @@
 
 mod catalog;
 mod registry;
+mod resume;
 mod tool_host;
 
 use std::any::Any;
@@ -463,11 +464,12 @@ impl Host {
         Ok(live.mailbox)
     }
 
-    fn resolve(&self, selector: SessionSelector) -> Result<Option<Mailbox>, KernelError> {
+    /// The live session a selector names, if it is live in this host.
+    fn resolve(&self, selector: &SessionSelector) -> Option<Mailbox> {
         let sessions = self.lock();
-        let found = match selector {
-            SessionSelector::Create { .. } => return Ok(None),
-            SessionSelector::ById { id } => sessions.get(&id).map(|l| l.mailbox.clone()),
+        match selector {
+            SessionSelector::Create { .. } => None,
+            SessionSelector::ById { id } => sessions.get(id).map(|l| l.mailbox.clone()),
             SessionSelector::ByKey { key } => sessions
                 .values()
                 .find(|l| l.key.as_deref() == Some(key.as_str()))
@@ -480,10 +482,7 @@ impl Host {
                     .max_by_key(|l| l.created_at)
                     .map(|l| l.mailbox.clone())
             }
-        };
-        found
-            .map(Some)
-            .ok_or_else(|| KernelError::new(ErrorCode::SessionNotFound, "no such session"))
+        }
     }
 }
 
@@ -527,7 +526,17 @@ impl HostApi for Host {
                 out.push(summary);
             }
         }
-        out.sort_by_key(|s| std::cmp::Reverse(s.created_at));
+        if let Some(store) = &self.registry.store {
+            let live_ids: Vec<SessionId> = out.iter().map(|s| s.id.clone()).collect();
+            out.extend(
+                store
+                    .list(&filter)
+                    .await?
+                    .into_iter()
+                    .filter(|s| !live_ids.contains(&s.id)),
+            );
+        }
+        out.sort_by_key(|s| std::cmp::Reverse(s.updated_at));
         if let Some(limit) = filter.limit {
             out.truncate(limit);
         }
@@ -541,9 +550,10 @@ impl HostApi for Host {
     ) -> Result<Attachment, KernelError> {
         let mailbox = match selector {
             SessionSelector::Create { spec } => self.create(spec).await?,
-            other => self.resolve(other)?.ok_or_else(|| {
-                KernelError::new(ErrorCode::Internal, "selector resolved to nothing")
-            })?,
+            other => match self.resolve(&other) {
+                Some(mailbox) => mailbox,
+                None => self.reopen(other).await?,
+            },
         };
         let (snapshot, events) = mailbox.attach().await?;
         Ok(Attachment {
@@ -560,12 +570,19 @@ impl HostApi for Host {
     }
 
     async fn delete(&self, session: &SessionId) -> Result<(), KernelError> {
-        let live = self.lock().remove(session).ok_or_else(|| {
-            KernelError::new(ErrorCode::SessionNotFound, format!("no session {session}"))
-        })?;
-        live.mailbox.close(CloseReason::Deleted);
-        if let Some(store) = &self.registry.store {
-            store.delete(session).await?;
+        let live = self.lock().remove(session);
+        if let Some(live) = &live {
+            live.mailbox.close(CloseReason::Deleted);
+        }
+        match &self.registry.store {
+            Some(store) => store.delete(session).await?,
+            None if live.is_none() => {
+                return Err(KernelError::new(
+                    ErrorCode::SessionNotFound,
+                    format!("no session {session}"),
+                ));
+            }
+            None => {}
         }
         let _ = self.gateway.send(GatewayEvent::SessionRemoved {
             session: session.clone(),

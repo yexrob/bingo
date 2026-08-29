@@ -49,7 +49,7 @@ impl ContextView {
     pub fn fold_items(items: &[Item]) -> Vec<Message> {
         let mut out = Folder::default();
         for item in items {
-            out.item(&item.body);
+            out.item(item);
         }
         out.finish()
     }
@@ -79,17 +79,26 @@ pub(crate) fn splice_compaction(
     *items = next;
 }
 
+/// What the model reads when a journal opens on its own words: the API wants
+/// a person to speak first, and nothing is invented about what they said.
+const OPENING_NOTE: &str = "[The conversation begins here.]";
+
 #[derive(Default)]
 struct Folder {
     messages: Vec<Message>,
     /// Tool results owed to the next user message; they always come first in it.
     pending: Vec<ContentPart>,
+    /// The turn and round of the open assistant message: every tool call of
+    /// one response joins it, and their results join the one user message
+    /// after it, as the model produced them.
+    round: Option<(Option<TurnId>, u32)>,
 }
 
 impl Folder {
     /// One item as the provider sees it; a body with no wire form is skipped.
-    fn item(&mut self, body: &ItemBody) {
-        match body {
+    fn item(&mut self, item: &Item) {
+        let round = (item.turn.clone(), item.round);
+        match &item.body {
             ItemBody::User { parts, .. } => self.user(parts.clone()),
             ItemBody::Assistant { text } => self.text(text),
             ItemBody::Reasoning {
@@ -102,7 +111,7 @@ impl Folder {
                 input,
                 output,
                 ..
-            } => self.tool_call(call_id, name, input, output.as_ref()),
+            } => self.tool_call(round, call_id, name, input, output.as_ref()),
             ItemBody::Compaction { summary, .. } => {
                 self.note(format!("[Summary of the conversation so far]\n{summary}"))
             }
@@ -144,12 +153,28 @@ impl Folder {
 
     /// The call, then the result it owes the next user message. A call with no
     /// output never completed, and the model is told so.
-    fn tool_call(&mut self, call_id: &str, name: &str, input: &Value, output: Option<&ToolOutput>) {
-        self.assistant(vec![ContentPart::ToolUse {
+    fn tool_call(
+        &mut self,
+        round: (Option<TurnId>, u32),
+        call_id: &str,
+        name: &str,
+        input: &Value,
+        output: Option<&ToolOutput>,
+    ) {
+        let part = ContentPart::ToolUse {
             id: call_id.to_string(),
             name: name.to_string(),
             input: input.clone(),
-        }]);
+        };
+        match self.messages.last_mut() {
+            Some(m) if m.role == Role::Assistant && self.round.as_ref() == Some(&round) => {
+                m.parts.push(part);
+            }
+            _ => {
+                self.assistant(vec![part]);
+                self.round = Some(round);
+            }
+        }
         let (parts, is_error) = match output {
             Some(o) => (o.parts.clone(), o.is_error),
             None => (
@@ -190,6 +215,14 @@ impl Folder {
             self.user(owed);
         }
         self.messages.retain(|m| !m.parts.is_empty());
+        if self
+            .messages
+            .first()
+            .is_some_and(|m| m.role == Role::Assistant)
+        {
+            self.messages
+                .insert(0, Message::text(Role::User, OPENING_NOTE));
+        }
         self.messages
     }
 }
@@ -367,6 +400,189 @@ mod tests {
             }],
             "the encrypted part is replayed; the empty one is not"
         );
+    }
+
+    // ----- what every projection must satisfy, on random journals -----
+
+    /// One item of a random journal. Tool calls are numbered so their ids
+    /// are unique, as the kernel mints them.
+    #[derive(Clone, Debug)]
+    enum Shape {
+        User(String),
+        Assistant(String),
+        Reasoning { text: String, replay: bool },
+        Tool { answered: bool },
+        Interruption,
+        Compaction(String),
+    }
+
+    fn any_shape() -> impl proptest::strategy::Strategy<Value = Shape> {
+        use proptest::prelude::*;
+        prop_oneof![
+            "[a-z ]{0,12}".prop_map(Shape::User),
+            "[a-z ]{0,12}".prop_map(Shape::Assistant),
+            ("[a-z ]{0,12}", any::<bool>())
+                .prop_map(|(text, replay)| Shape::Reasoning { text, replay }),
+            any::<bool>().prop_map(|answered| Shape::Tool { answered }),
+            Just(Shape::Interruption),
+            "[a-z ]{1,12}".prop_map(Shape::Compaction),
+        ]
+    }
+
+    fn items_of(shapes: &[Shape]) -> Vec<Item> {
+        let mut replay = ProviderMetadata::new();
+        replay.insert("p".into(), serde_json::Map::new());
+        shapes
+            .iter()
+            .enumerate()
+            .map(|(n, shape)| {
+                let id = format!("i{n}");
+                match shape {
+                    Shape::User(text) => user(&id, text),
+                    Shape::Assistant(text) => item(&id, ItemBody::Assistant { text: text.clone() }),
+                    Shape::Reasoning { text, replay: r } => item(
+                        &id,
+                        ItemBody::Reasoning {
+                            text: text.clone(),
+                            provider_metadata: if *r {
+                                replay.clone()
+                            } else {
+                                ProviderMetadata::new()
+                            },
+                        },
+                    ),
+                    Shape::Tool { answered } => {
+                        tool(&id, &format!("c{n}"), answered.then_some("out"))
+                    }
+                    Shape::Interruption => item(
+                        &id,
+                        ItemBody::Interruption {
+                            marker: "[interrupted]".into(),
+                        },
+                    ),
+                    Shape::Compaction(summary) => item(
+                        &id,
+                        ItemBody::Compaction {
+                            summary: summary.clone(),
+                            replaced: 0,
+                            before: 0,
+                            after: 0,
+                            duration_ms: 0,
+                        },
+                    ),
+                }
+            })
+            .collect()
+    }
+
+    fn tool_use_ids(message: &Message) -> Vec<&str> {
+        message
+            .parts
+            .iter()
+            .filter_map(|p| match p {
+                ContentPart::ToolUse { id, .. } => Some(id.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn tool_result_ids(message: &Message) -> Vec<&str> {
+        message
+            .parts
+            .iter()
+            .filter_map(|p| match p {
+                ContentPart::ToolResult { tool_use_id, .. } => Some(tool_use_id.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The frames a live session would have written for these items.
+    fn frames_of(items: &[Item]) -> Vec<Frame> {
+        let ts = Timestamp::from_second(0).unwrap();
+        items
+            .iter()
+            .enumerate()
+            .flat_map(|(n, item)| {
+                let seq = |k: u64| Seq(1 + 2 * n as u64 + k);
+                [
+                    (seq(0), Event::ItemStarted { item: item.clone() }),
+                    (seq(1), Event::ItemCompleted { item: item.clone() }),
+                ]
+            })
+            .map(|(seq, event)| Frame {
+                seq,
+                ts,
+                session: SessionId::from_raw("ses_1"),
+                cause: None,
+                event,
+            })
+            .collect()
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn every_projection_is_legal_for_the_api(
+            shapes in proptest::collection::vec(any_shape(), 0..24)
+        ) {
+            let messages = ContextView::fold_items(&items_of(&shapes));
+            if let Some(first) = messages.first() {
+                proptest::prop_assert_eq!(first.role, Role::User, "a conversation opens with the user");
+            }
+            for message in &messages {
+                proptest::prop_assert!(!message.parts.is_empty(), "no message is empty");
+            }
+            for (n, message) in messages.iter().enumerate() {
+                let uses = tool_use_ids(message);
+                if uses.is_empty() {
+                    continue;
+                }
+                let next = messages.get(n + 1);
+                proptest::prop_assert!(next.is_some(), "a tool use is always answered");
+                let next = next.unwrap();
+                proptest::prop_assert_eq!(next.role, Role::User);
+                let mut results = tool_result_ids(next);
+                results.sort_unstable();
+                let mut wanted = uses.clone();
+                wanted.sort_unstable();
+                proptest::prop_assert_eq!(results, wanted, "one result per use, none extra");
+            }
+            for message in &messages {
+                proptest::prop_assert!(
+                    message.role == Role::User || tool_result_ids(message).is_empty(),
+                    "results are in user messages only"
+                );
+            }
+        }
+
+        #[test]
+        fn a_replayed_journal_folds_exactly_like_the_live_session(
+            shapes in proptest::collection::vec(any_shape(), 0..16)
+        ) {
+            let items = items_of(&shapes);
+            let replayed = ContextView::items(&frames_of(&items));
+            proptest::prop_assert_eq!(&replayed, &items);
+            proptest::prop_assert_eq!(
+                ContextView::fold_items(&replayed),
+                ContextView::fold_items(&items)
+            );
+        }
+    }
+
+    /// Version 1 frames, recorded from a real tool round through the fake
+    /// provider. What the kernel makes of them is pinned so a format change
+    /// is a deliberate migration, never an accident.
+    #[test]
+    fn version_one_frames_fold_to_the_same_messages_forever() {
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/frames-v1.jsonl");
+        let text = std::fs::read_to_string(&path).unwrap();
+        let frames: Vec<Frame> = text
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let messages = ContextView::fold_items(&ContextView::items(&frames));
+        insta::assert_json_snapshot!(messages);
     }
 
     #[test]

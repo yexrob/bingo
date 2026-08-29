@@ -468,3 +468,149 @@ async fn a_declared_window_is_the_ruler_the_turn_measures_with() {
     assert_eq!(window, Some(50_000));
     assert_eq!(provider.requests()[0].max_tokens, 25_000, "half the window");
 }
+
+static STORE: PluginManifest = PluginManifest {
+    id: "test.store",
+    version: "0",
+    sdk: "^0.1",
+    provides: &["store:memory"],
+    requires: &[],
+    config: None,
+};
+
+/// A host on a shared store, as a second process would be.
+async fn host_on(
+    store: Arc<crate::journal::MemoryStore>,
+    provider: Arc<ScriptedProvider>,
+) -> Arc<Host> {
+    let plugins = vec![
+        TestPlugin::boxed(&PROVIDER, vec![Contribution::Provider(provider)]),
+        TestPlugin::boxed(&STORE, vec![Contribution::Store(store)]),
+    ];
+    let config = HostConfig::new(env()).with_layer("cli", json!({"model": "m"}));
+    Host::build(plugins, config).await.unwrap()
+}
+
+/// Submit once and read until the turn completes; the seq of that frame.
+async fn one_turn(attachment: &mut Attachment, prompt: &str) -> Seq {
+    attachment.handle.submit(
+        IntentId::mint(),
+        Input::text(prompt, Origin::surface("test")),
+    );
+    while let Some(frame) = attachment.events.next().await {
+        if matches!(frame.event, Event::TurnCompleted { .. }) {
+            return frame.seq;
+        }
+    }
+    panic!("the turn never completed");
+}
+
+#[tokio::test]
+async fn a_stored_session_reopens_on_another_host_with_its_history() {
+    let store = Arc::new(crate::journal::MemoryStore::new());
+    let first = ScriptedProvider::new(vec![Script::Events(text("first answer"))]);
+    let host_a = host_on(store.clone(), first).await;
+    let mut a = host_a
+        .open(
+            SessionSelector::Create {
+                spec: spec("/work"),
+            },
+            who(),
+        )
+        .await
+        .unwrap();
+    let ended_at = one_turn(&mut a, "hello").await;
+    let id = a.session.clone();
+
+    let second = ScriptedProvider::new(vec![Script::Events(text("second answer"))]);
+    let host_b = host_on(store.clone(), second.clone()).await;
+    let mut b = host_b
+        .open(SessionSelector::ById { id: id.clone() }, who())
+        .await
+        .unwrap();
+    assert_eq!(b.session, id);
+    assert!(
+        b.snapshot.seq > ended_at,
+        "a new head after the old journal"
+    );
+    assert!(
+        b.snapshot
+            .items
+            .iter()
+            .any(|i| matches!(&i.body, ItemBody::Assistant { text } if text == "first answer")),
+        "the old items are in the snapshot"
+    );
+    assert!(!b.snapshot.busy());
+
+    one_turn(&mut b, "again").await;
+    let sent = &second.requests()[0].messages;
+    assert!(
+        sent.iter()
+            .any(|m| m.parts.iter().any(|p| p.as_text() == Some("first answer"))),
+        "the next request carries the old conversation: {sent:?}"
+    );
+
+    let listed = host_b
+        .sessions(SessionFilter {
+            cwd: Some("/work".into()),
+            ..SessionFilter::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(listed.iter().map(|s| &s.id).collect::<Vec<_>>(), [&id]);
+}
+
+#[tokio::test]
+async fn latest_in_a_directory_comes_from_the_store_when_nothing_is_live() {
+    let store = Arc::new(crate::journal::MemoryStore::new());
+    let host_a = host_on(
+        store.clone(),
+        ScriptedProvider::new(vec![Script::Events(text("one"))]),
+    )
+    .await;
+    let mut a = host_a
+        .open(
+            SessionSelector::Create {
+                spec: spec("/work"),
+            },
+            who(),
+        )
+        .await
+        .unwrap();
+    one_turn(&mut a, "hello").await;
+
+    let host_b = host_on(store.clone(), ScriptedProvider::new(vec![])).await;
+    let b = host_b
+        .open(
+            SessionSelector::Latest {
+                cwd: "/work".into(),
+            },
+            who(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(b.session, a.session);
+    assert_eq!(b.snapshot.summary.model.as_deref(), Some("m"));
+    let missing = host_b
+        .open(
+            SessionSelector::Latest {
+                cwd: "/elsewhere".into(),
+            },
+            who(),
+        )
+        .await
+        .err()
+        .unwrap();
+    assert_eq!(missing.code, ErrorCode::SessionNotFound);
+    let unknown = host_b
+        .open(
+            SessionSelector::ById {
+                id: SessionId::from_raw("ses_nope"),
+            },
+            who(),
+        )
+        .await
+        .err()
+        .unwrap();
+    assert_eq!(unknown.code, ErrorCode::SessionNotFound);
+}

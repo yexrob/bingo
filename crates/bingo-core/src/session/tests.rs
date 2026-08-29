@@ -451,3 +451,59 @@ async fn history_pages_backwards_from_the_newest_item() {
     let all = mailbox.history(HistoryPage::default()).await.unwrap();
     assert_eq!(all.items.len(), 5);
 }
+
+#[tokio::test]
+async fn a_journal_cut_inside_a_turn_resumes_with_that_turn_lost() {
+    let head = summary("ses_1");
+    let ts = jiff::Timestamp::from_second(0).unwrap();
+    let frame = |seq: u64, event: Event| Frame {
+        seq: Seq(seq),
+        ts,
+        session: SessionId::from_raw("ses_1"),
+        cause: None,
+        event,
+    };
+    let frames = vec![
+        frame(
+            1,
+            Event::SessionUpdated {
+                summary: head.clone(),
+            },
+        ),
+        frame(
+            2,
+            Event::TurnStarted {
+                turn: TurnId::from_raw("trn_old"),
+                inputs: vec![],
+                origin: TurnOrigin::Submit,
+            },
+        ),
+    ];
+    let provider = ScriptedProvider::new(vec![Script::Events(text("back"))]);
+    let mailbox = resume(frames, None, |_| {
+        Arc::new(config(provider, vec![], Arc::new(NoHost)))
+    })
+    .unwrap();
+    let (mut state, mut events) = mailbox.attach().await.unwrap();
+    assert_eq!(state.seq, Seq(4), "a new head, then the old turn closed");
+    assert!(state.turn.is_none() && !state.busy());
+    assert!(
+        matches!(&state.last_turn, Some(TurnStatus::Failed { error }) if error.code == ErrorCode::TurnLost),
+        "{:?}",
+        state.last_turn
+    );
+
+    mailbox.submit(IntentId::mint(), Input::text("hi", Origin::surface("test")));
+    let labels = drive(&mut events, &mut state, turn_completed).await;
+    assert_eq!(
+        labels.last().map(String::as_str),
+        Some("turnCompleted:Completed")
+    );
+    assert!(state.seq > Seq(4), "the seq goes on from the journal");
+}
+
+#[test]
+fn a_journal_without_its_head_cannot_be_resumed() {
+    let err = head_summary(&[]).unwrap_err();
+    assert_eq!(err.code, ErrorCode::Storage);
+}

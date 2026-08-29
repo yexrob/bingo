@@ -1,0 +1,76 @@
+---
+source: crates/bingo-core/src/context.rs
+expression: messages
+---
+[
+  {
+    "role": "user",
+    "parts": [
+      {
+        "type": "text",
+        "text": "what is in notes.txt?"
+      }
+    ]
+  },
+  {
+    "role": "assistant",
+    "parts": [
+      {
+        "type": "text",
+        "text": "Looking."
+      },
+      {
+        "type": "toolUse",
+        "id": "call_0_1",
+        "name": "Read",
+        "input": {
+          "file_path": "notes.txt"
+        }
+      },
+      {
+        "type": "toolUse",
+        "id": "call_0_2",
+        "name": "Glob",
+        "input": {
+          "pattern": "*.txt"
+        }
+      }
+    ]
+  },
+  {
+    "role": "user",
+    "parts": [
+      {
+        "type": "toolResult",
+        "tool_use_id": "call_0_1",
+        "parts": [
+          {
+            "type": "text",
+            "text": "     1\talpha\n     2\tbeta"
+          }
+        ],
+        "is_error": false
+      },
+      {
+        "type": "toolResult",
+        "tool_use_id": "call_0_2",
+        "parts": [
+          {
+            "type": "text",
+            "text": "/var/folders/5d/ylkbk1nx6mvgq8zgnsjf8lwr0000gn/T/tmp.usBOkQfZ4Y/notes.txt"
+          }
+        ],
+        "is_error": false
+      }
+    ]
+  },
+  {
+    "role": "assistant",
+    "parts": [
+      {
+        "type": "text",
+        "text": "Two lines, one file."
+      }
+    ]
+  }
+]
