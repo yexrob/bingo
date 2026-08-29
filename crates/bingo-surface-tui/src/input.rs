@@ -14,12 +14,15 @@ use crate::SURFACE_ID;
 use crate::clock::Now;
 use crate::commands::{self, Local};
 use crate::effect::Effect;
+use crate::permission;
 use crate::ui::{Scroll, Ui};
 
 /// Lines the transcript moves by on one page key.
 const PAGE: usize = 10;
 /// What the first ctrl+c on an empty composer says.
 pub const ARM_HINT: &str = "press ctrl+c again to exit";
+/// What shift+tab says when no policy published a mode it can walk.
+pub const UNKNOWN_MODE: &str = "permission mode unknown — /permission <mode>";
 
 pub fn on_key(ui: &mut Ui, state: &SessionState, key: KeyEvent, now: Now) -> Vec<Effect> {
     if key.kind == KeyEventKind::Release {
@@ -42,7 +45,7 @@ pub fn on_key(ui: &mut Ui, state: &SessionState, key: KeyEvent, now: Now) -> Vec
     if let Some(effects) = menu(ui, key) {
         return effects;
     }
-    editing(ui, state, key)
+    editing(ui, state, key, now)
 }
 
 /// A bracketed paste lands verbatim wherever the caret is.
@@ -157,14 +160,14 @@ fn complete(ui: &mut Ui) -> Vec<Effect> {
     Vec::new()
 }
 
-fn editing(ui: &mut Ui, state: &SessionState, key: KeyEvent) -> Vec<Effect> {
+fn editing(ui: &mut Ui, state: &SessionState, key: KeyEvent, now: Now) -> Vec<Effect> {
     if key.modifiers.contains(KeyModifiers::CONTROL) {
         return control(ui, key);
     }
     if key.modifiers.contains(KeyModifiers::ALT) {
         return alt(ui, key);
     }
-    plain(ui, state, key)
+    plain(ui, state, key, now)
 }
 
 fn control(ui: &mut Ui, key: KeyEvent) -> Vec<Effect> {
@@ -190,10 +193,11 @@ fn alt(ui: &mut Ui, key: KeyEvent) -> Vec<Effect> {
     Vec::new()
 }
 
-fn plain(ui: &mut Ui, state: &SessionState, key: KeyEvent) -> Vec<Effect> {
+fn plain(ui: &mut Ui, state: &SessionState, key: KeyEvent, now: Now) -> Vec<Effect> {
     match key.code {
         KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => newline(ui),
         KeyCode::Enter => return enter(ui, state),
+        KeyCode::BackTab => return cycle_mode(ui, state, now),
         KeyCode::Up => history_or_line(ui, Step::Up),
         KeyCode::Down => history_or_line(ui, Step::Down),
         KeyCode::PageUp => ui.scroll = Scroll(ui.scroll.0 + PAGE),
@@ -209,6 +213,20 @@ fn plain(ui: &mut Ui, state: &SessionState, key: KeyEvent) -> Vec<Effect> {
         _ => {}
     }
     Vec::new()
+}
+
+/// Shift+tab asks the policy for the next mode, as a typed `/permission`
+/// would: the kernel decides, and the badge moves when the config frame lands.
+/// Nothing is assumed here, so a refused command leaves the screen truthful.
+fn cycle_mode(ui: &mut Ui, state: &SessionState, now: Now) -> Vec<Effect> {
+    let Some(next) = permission::mode(state).and_then(permission::next) else {
+        ui.notify(Level::Warn, UNKNOWN_MODE, now.instant);
+        return Vec::new();
+    };
+    vec![Effect::Submit(Input::text(
+        format!("/permission {next}"),
+        Origin::surface(SURFACE_ID),
+    ))]
 }
 
 /// Enter sends, unless the line ends in a backslash — the newline chord for
@@ -369,6 +387,68 @@ mod tests {
         let (mut ui, now) = scene();
         assert!(line(&mut ui, &state(), "/help", now).is_empty());
         assert!(ui.help);
+    }
+
+    // ---- the permission mode --------------------------------------------
+
+    #[test]
+    fn shift_tab_asks_for_the_next_mode_and_wraps() {
+        let cycle = [
+            ("default", "acceptEdits"),
+            ("acceptEdits", "plan"),
+            ("plan", "bypassPermissions"),
+            ("bypassPermissions", "dontAsk"),
+            ("dontAsk", "default"),
+        ];
+        for (mode, next) in cycle {
+            let (mut ui, now) = scene();
+            assert_eq!(
+                press(
+                    &mut ui,
+                    &with_permission_mode(mode),
+                    shift(KeyCode::BackTab),
+                    now
+                ),
+                vec![Effect::Submit(Input::text(
+                    format!("/permission {next}"),
+                    Origin::surface("tui")
+                ))],
+                "{mode}"
+            );
+            assert!(ui.notices.is_empty(), "{mode}");
+        }
+    }
+
+    #[test]
+    fn shift_tab_says_so_when_the_mode_is_not_one_it_knows() {
+        for state in [state(), with_permission_mode("acceptedits")] {
+            let (mut ui, now) = scene();
+            assert!(press(&mut ui, &state, shift(KeyCode::BackTab), now).is_empty());
+            assert!(ui.notices.iter().any(|n| n.text == UNKNOWN_MODE));
+        }
+    }
+
+    #[test]
+    fn shift_tab_leaves_the_draft_where_it_was() {
+        let state = with_permission_mode("default");
+        let (mut ui, now) = scene();
+        write(&mut ui, &state, "half a thought", now);
+        press(&mut ui, &state, shift(KeyCode::BackTab), now);
+        assert_eq!(ui.composer.text(), "half a thought");
+    }
+
+    #[test]
+    fn an_open_dialog_keeps_shift_tab() {
+        let state = folded(vec![
+            frame(1, permission_view("default")),
+            frame(2, opened(permission(Some("Edit(src/)"), None))),
+        ]);
+        let (mut ui, now) = scene();
+        ui.dialog.focus_on(state.interactions.first());
+        assert!(
+            press(&mut ui, &state, shift(KeyCode::BackTab), now).is_empty(),
+            "the dialog answers keys, and it has no answer for this one"
+        );
     }
 
     // ---- newlines -------------------------------------------------------

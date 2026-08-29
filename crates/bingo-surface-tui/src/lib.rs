@@ -17,7 +17,7 @@
 //! - [`view::draw`] is pure of everything but the frame it paints; the
 //!   transcript is what is left once the chrome below it has been measured.
 //! - [`transcript`], [`markdown`], [`dialog`], [`composer`], [`commands`],
-//!   [`keys`] and [`wrap`] are the bricks those two stand on.
+//!   [`keys`], [`permission`] and [`wrap`] are the bricks those two stand on.
 //!
 //! # What a person types
 //!
@@ -34,6 +34,7 @@ mod history;
 mod input;
 mod keys;
 mod markdown;
+mod permission;
 mod preview;
 mod run;
 mod terminal;
