@@ -1,0 +1,39 @@
+event: response.created
+data: {"type":"response.created","response":{"id":"resp_01Reason","object":"response","model":"gpt-5.6","status":"in_progress","store":false,"output":[]}}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","output_index":0,"item":{"id":"rs_01","type":"reasoning","summary":[]}}
+
+event: response.reasoning_summary_part.added
+data: {"type":"response.reasoning_summary_part.added","item_id":"rs_01","output_index":0,"summary_index":0,"part":{"type":"summary_text","text":""}}
+
+event: response.reasoning_summary_text.delta
+data: {"type":"response.reasoning_summary_text.delta","item_id":"rs_01","output_index":0,"summary_index":0,"delta":"Summarising: "}
+
+event: response.reasoning_summary_text.delta
+data: {"type":"response.reasoning_summary_text.delta","item_id":"rs_01","output_index":0,"summary_index":0,"delta":"weigh the options."}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","output_index":0,"item":{"id":"rs_01","type":"reasoning","summary":[{"type":"summary_text","text":"Summarising: weigh the options."}],"encrypted_content":"gAAAAABsummary"}}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","output_index":1,"item":{"id":"rs_02","type":"reasoning","summary":[]}}
+
+event: response.reasoning_text.delta
+data: {"type":"response.reasoning_text.delta","item_id":"rs_02","output_index":1,"content_index":0,"delta":"The raw chain of thought."}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","output_index":1,"item":{"id":"rs_02","type":"reasoning","summary":[],"content":[{"type":"reasoning_text","text":"The raw chain of thought."}],"encrypted_content":"gAAAAABraw"}}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","output_index":2,"item":{"id":"msg_01Reason","type":"message","status":"in_progress","role":"assistant","content":[]}}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","item_id":"msg_01Reason","output_index":2,"content_index":0,"delta":"Because it is simpler."}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","output_index":2,"item":{"id":"msg_01Reason","type":"message","status":"completed","role":"assistant","content":[{"type":"output_text","text":"Because it is simpler."}]}}
+
+event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_01Reason","object":"response","model":"gpt-5.6","status":"completed","store":false,"incomplete_details":null,"usage":{"input_tokens":120,"input_tokens_details":{"cached_tokens":0},"output_tokens":900,"output_tokens_details":{"reasoning_tokens":768},"total_tokens":1020}}}
+

@@ -1,0 +1,30 @@
+event: response.created
+data: {"type":"response.created","response":{"id":"resp_01Tools","object":"response","model":"gpt-5.4","status":"in_progress","store":false,"output":[]}}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","output_index":0,"item":{"id":"msg_01Tools","type":"message","status":"in_progress","role":"assistant","content":[]}}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","item_id":"msg_01Tools","output_index":0,"content_index":0,"delta":"Let me look at the manifest."}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","output_index":0,"item":{"id":"msg_01Tools","type":"message","status":"completed","role":"assistant","content":[{"type":"output_text","text":"Let me look at the manifest."}]}}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","output_index":1,"item":{"id":"fc_01Read","type":"function_call","status":"in_progress","call_id":"call_01Read","name":"Read","arguments":""}}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","item_id":"fc_01Read","output_index":1,"delta":"{\"file_path\":"}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","item_id":"fc_01Read","output_index":1,"delta":"\"Cargo.toml\"}"}
+
+event: response.function_call_arguments.done
+data: {"type":"response.function_call_arguments.done","item_id":"fc_01Read","output_index":1,"arguments":"{\"file_path\":\"Cargo.toml\"}"}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","output_index":1,"item":{"id":"fc_01Read","type":"function_call","status":"completed","call_id":"call_01Read","name":"Read","arguments":"{\"file_path\":\"Cargo.toml\"}"}}
+
+event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_01Tools","object":"response","model":"gpt-5.4","status":"completed","store":false,"incomplete_details":null,"usage":{"input_tokens":11400,"input_tokens_details":{"cached_tokens":11000},"output_tokens":58,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":11458}}}
+

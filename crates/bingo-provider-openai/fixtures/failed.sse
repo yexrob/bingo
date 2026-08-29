@@ -1,0 +1,12 @@
+event: response.created
+data: {"type":"response.created","response":{"id":"resp_01Fail","object":"response","model":"gpt-5.4","status":"in_progress","store":false,"output":[]}}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","output_index":0,"item":{"id":"msg_01Fail","type":"message","status":"in_progress","role":"assistant","content":[]}}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","item_id":"msg_01Fail","output_index":0,"content_index":0,"delta":"Starting"}
+
+event: response.failed
+data: {"type":"response.failed","response":{"id":"resp_01Fail","object":"response","model":"gpt-5.4","status":"failed","error":{"code":"server_error","message":"The server had an error while processing your request."}}}
+
