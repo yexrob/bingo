@@ -14,11 +14,11 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
 
+use crate::output;
+use crate::path::resolve;
+
 /// Beyond this a read is a mistake, not a request; the model gets the size back.
 const MAX_BYTES: u64 = 8 * 1024 * 1024;
-
-/// The rendered text a single read may cost the context.
-const MAX_CHARS: usize = 20_000;
 
 /// Extensions the model can look at, and what to call them on the wire.
 const IMAGE_TYPES: &[(&str, &str)] = &[
@@ -56,15 +56,6 @@ impl ReadTool {
     }
 }
 
-fn resolve(file_path: &str, cwd: &Path) -> PathBuf {
-    let path = Path::new(file_path);
-    if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        cwd.join(path)
-    }
-}
-
 fn media_type(path: &Path) -> Option<&'static str> {
     let ext = path.extension()?.to_str()?.to_ascii_lowercase();
     IMAGE_TYPES
@@ -78,40 +69,17 @@ fn numbered(line: &str, n: usize) -> String {
     format!("{n:>6}\t{line}")
 }
 
-/// Render the window `offset..offset + limit`, stopping at the character cap.
-/// The truncation note counts the lines the model did not get.
+/// Render the window `offset..offset + limit`, bounded by the shared cap.
 fn render(text: &str, offset: Option<usize>, limit: Option<usize>) -> String {
     let first = offset.unwrap_or(1).max(1);
-    let lines: Vec<&str> = text.lines().collect();
-    let window: Vec<(usize, &str)> = lines
-        .iter()
+    let window: Vec<String> = text
+        .lines()
         .enumerate()
         .skip(first - 1)
         .take(limit.unwrap_or(usize::MAX))
-        .map(|(i, line)| (i + 1, *line))
+        .map(|(i, line)| numbered(line, i + 1))
         .collect();
-
-    let mut out = String::new();
-    let mut chars = 0;
-    let mut taken = 0;
-    for (n, line) in &window {
-        let rendered = numbered(line, *n);
-        let cost = rendered.chars().count() + usize::from(!out.is_empty());
-        if chars + cost > MAX_CHARS {
-            break;
-        }
-        if !out.is_empty() {
-            out.push('\n');
-        }
-        out.push_str(&rendered);
-        chars += cost;
-        taken += 1;
-    }
-    let dropped = window.len() - taken;
-    if dropped > 0 {
-        out.push_str(&format!("\n[truncated: {dropped} more lines]"));
-    }
-    out
+    output::join(&window, usize::MAX, "lines")
 }
 
 #[async_trait]
@@ -267,7 +235,10 @@ mod tests {
             .rsplit_once('\n')
             .map(|(head, _)| head.chars().count())
             .unwrap_or(0);
-        assert!(body_chars <= MAX_CHARS, "{body_chars} characters kept");
+        assert!(
+            body_chars <= output::MAX_CHARS,
+            "{body_chars} characters kept"
+        );
     }
 
     #[tokio::test]

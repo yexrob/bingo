@@ -1,5 +1,8 @@
-//! Filesystem tools. M0 registers one: `Read`.
+//! Filesystem tools: the ones a coding turn cannot do without.
 
+mod glob;
+mod output;
+mod path;
 mod read;
 
 use std::sync::Arc;
@@ -7,13 +10,14 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use bingo_sdk::{Plugin, PluginError, PluginManifest, Registrar, Tool};
 
+pub use glob::{GlobArgs, GlobTool};
 pub use read::{ReadArgs, ReadTool};
 
 static MANIFEST: PluginManifest = PluginManifest {
     id: "bingo.tools.fs",
     version: env!("CARGO_PKG_VERSION"),
     sdk: "^0.1",
-    provides: &["tool:Read"],
+    provides: &["tool:Read", "tool:Glob"],
     requires: &[],
     config: None,
 };
@@ -29,6 +33,7 @@ impl Plugin for FsPlugin {
 
     fn register(&self, registrar: &mut Registrar) -> Result<(), PluginError> {
         registrar.tool(Arc::new(ReadTool) as Arc<dyn Tool>);
+        registrar.tool(Arc::new(GlobTool) as Arc<dyn Tool>);
         Ok(())
     }
 }
@@ -45,7 +50,8 @@ pub(crate) mod tests {
         TurnId,
     };
 
-    /// A tool host that answers nothing: `Read` reaches none of it.
+    /// A tool host that answers nothing: every tool but `AskUserQuestion`
+    /// reaches none of it.
     #[derive(Debug)]
     struct NullHost;
 
@@ -101,15 +107,23 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn the_plugin_registers_the_read_tool() {
+    fn the_plugin_registers_every_tool_its_manifest_promises() {
         let mut registrar = Registrar::new("bingo.tools.fs", serde_json::Value::Null);
         FsPlugin.register(&mut registrar).expect("register");
-        let contributions = registrar.into_contributions();
-        assert_eq!(contributions.len(), 1);
-        match &contributions[0] {
-            Contribution::Tool(tool) => assert_eq!(tool.spec().name, "Read"),
-            other => panic!("expected a tool, got {other:?}"),
-        }
-        assert_eq!(FsPlugin.manifest().provides, &["tool:Read"]);
+        let names: Vec<String> = registrar
+            .into_contributions()
+            .iter()
+            .map(|c| match c {
+                Contribution::Tool(tool) => tool.spec().name.clone(),
+                other => panic!("expected a tool, got {other:?}"),
+            })
+            .collect();
+        let promised: Vec<String> = FsPlugin
+            .manifest()
+            .provides
+            .iter()
+            .map(|p| p.trim_start_matches("tool:").to_string())
+            .collect();
+        assert_eq!(names, promised);
     }
 }
