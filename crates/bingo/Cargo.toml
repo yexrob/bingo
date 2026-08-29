@@ -20,6 +20,7 @@ bingo-tool-fs.workspace = true
 bingo-tool-bash.workspace = true
 bingo-tool-web.workspace = true
 bingo-permissions.workspace = true
+bingo-store-jsonl.workspace = true
 bingo-surface-print.workspace = true
 clap.workspace = true
 tokio.workspace = true
