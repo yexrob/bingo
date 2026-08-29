@@ -4,4 +4,5 @@
 //! before anything is spawned ([`reject`]), the process lifecycle, the bounded
 //! output, and the live tail. See docs/plans/M1-provider-tools-gate.md.
 
+pub mod output;
 pub mod reject;
