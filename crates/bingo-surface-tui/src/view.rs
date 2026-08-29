@@ -50,7 +50,7 @@ impl Section {
 pub fn draw(state: &SessionState, ui: &Ui, frame: &mut Frame, now: Now) {
     let area = frame.area();
     let width = area.width as usize;
-    let sections = chrome(state, ui, now, width);
+    let sections = fit(chrome(state, ui, now, width), area.height);
     let used: u16 = sections.iter().map(Section::height).sum();
     let mut y = area.y;
     let rows = area.height.saturating_sub(used);
@@ -79,17 +79,37 @@ fn chrome(state: &SessionState, ui: &Ui, now: Now, width: usize) -> Vec<Section>
         Section::lines(notices(ui)),
         Section::lines(ui.block.as_ref().map(block).unwrap_or_default()),
         Section::lines(wrap::wrap_all(&dialog_lines(state, ui), width)),
-        Section::lines(if ui.help {
-            keys::help_lines(width)
-        } else {
-            Vec::new()
-        }),
+        Section::lines(help(ui, width)),
         composer(ui, width),
         Section::lines(menu(ui)),
         Section::lines(vec![footer(state, width)]),
     ];
     out.retain(|s| s.height() > 0);
     out
+}
+
+/// Fit the stack into the screen from the bottom up: the composer and the
+/// footer are never the ones that go. What does not fit is trimmed from the
+/// top of the topmost section that still has room, oldest rows first.
+fn fit(sections: Vec<Section>, height: u16) -> Vec<Section> {
+    let mut budget = height;
+    let mut kept = Vec::new();
+    for mut section in sections.into_iter().rev() {
+        let want = section.height();
+        if want <= budget {
+            budget -= want;
+            kept.push(section);
+            continue;
+        }
+        if budget > 0 && !section.boxed {
+            let drop = section.lines.len() - budget as usize;
+            section.lines.drain(..drop);
+            kept.push(section);
+        }
+        break;
+    }
+    kept.reverse();
+    kept
 }
 
 fn paint(section: Section, frame: &mut Frame, area: Rect) {
@@ -171,8 +191,29 @@ fn activity(state: &SessionState, turn: &LiveTurn) -> String {
         .unwrap_or_else(|| "Working…".to_string())
 }
 
+/// The `?` panel: the one binding table, then the commands this session can
+/// run — the surface's own and the kernel's, from the same list the dropdown
+/// ranks.
+fn help(ui: &Ui, width: usize) -> Vec<Line<'static>> {
+    if !ui.help {
+        return Vec::new();
+    }
+    let commands = ui.commands();
+    let column = commands.iter().map(|c| c.name.width()).max().unwrap_or(0);
+    let mut out = keys::help_lines(width);
+    out.push(Line::default());
+    out.extend(commands.iter().map(|spec| {
+        Line::from(Span::styled(
+            format!("/{:<column$}  {}", spec.name, spec.hint, column = column),
+            theme::dim(),
+        ))
+    }));
+    out
+}
+
 fn notices(ui: &Ui) -> Vec<Line<'static>> {
-    ui.notices
+    let mut out: Vec<Line<'static>> = ui
+        .notices
         .iter()
         .map(|notice| {
             Line::from(Span::styled(
@@ -180,7 +221,14 @@ fn notices(ui: &Ui) -> Vec<Line<'static>> {
                 theme::level(notice.level),
             ))
         })
-        .collect()
+        .collect();
+    if ui.opening {
+        out.push(Line::from(Span::styled(
+            "opening a session…".to_string(),
+            theme::dim(),
+        )));
+    }
+    out
 }
 
 /// A command's `View`, shown until the next key.
@@ -743,6 +791,31 @@ mod tests {
             selected: 0,
         });
         insta::assert_snapshot!(render(&state, &ui, now));
+    }
+
+    #[test]
+    fn the_composer_survives_a_screen_too_small_for_the_chrome() {
+        let state = folded(vec![frame(
+            1,
+            opened(permission(Some("E(s/)"), Some(long_diff()))),
+        )]);
+        let (mut ui, now) = scene();
+        ui.help = true;
+        ui.dialog.focus_on(state.interactions.first());
+        let screen = draw_sized(60, 12, &state, &ui, now);
+        let rows: Vec<&str> = screen.lines().collect();
+        assert!(rows[rows.len() - 4].contains('\u{256d}'), "{screen}");
+        assert!(rows[rows.len() - 3].contains('\u{276f}'), "{screen}");
+        assert!(rows[rows.len() - 2].contains('\u{256f}'), "{screen}");
+        assert!(rows[rows.len() - 1].contains("? for shortcuts"), "{screen}");
+    }
+
+    #[test]
+    fn a_terminal_too_small_for_anything_still_draws() {
+        let (ui, now) = scene();
+        for (width, height) in [(1u16, 1u16), (4, 2), (10, 3), (20, 5)] {
+            draw_sized(width, height, &state(), &ui, now);
+        }
     }
 
     #[test]
