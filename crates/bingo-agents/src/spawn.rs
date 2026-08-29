@@ -135,17 +135,20 @@ impl Plan {
 }
 
 /// What the child may call: the names the call or the definition asked for,
-/// else every tool this host has. `SpawnAgent` is dropped from either — the
-/// depth limit would refuse the call, and a tool that cannot work should not
-/// be offered.
+/// else every tool this host has. Two are dropped from either: `SpawnAgent`,
+/// which the depth limit would refuse, and `AskUserQuestion`, which the note
+/// tells the child it does not have — a tool that cannot work, or must not,
+/// is not offered.
 async fn child_tools(host: &HostHandle, asked: Option<Vec<String>>) -> Option<Vec<String>> {
     let mut names = match asked {
         Some(names) => names,
         None => registered(host).await?,
     };
-    names.retain(|name| name != SPAWN_AGENT);
+    names.retain(|name| !NOT_A_CHILDS.contains(&name.as_str()));
     Some(names)
 }
+
+const NOT_A_CHILDS: [&str; 2] = [SPAWN_AGENT, "AskUserQuestion"];
 
 /// Every tool name the host has now, or nothing when the catalogue cannot be
 /// read — in which case the child inherits the whole set, as a session does.
@@ -377,7 +380,9 @@ mod tests {
             .expect("a spawn");
         let tools = host.spawned()[0].tools.clone().unwrap_or_default();
         assert!(tools.contains(&"Read".to_string()), "{tools:?}");
-        assert!(!tools.contains(&SPAWN_AGENT.to_string()), "{tools:?}");
+        for kept_back in NOT_A_CHILDS {
+            assert!(!tools.contains(&kept_back.to_string()), "{tools:?}");
+        }
     }
 
     #[tokio::test]

@@ -269,7 +269,7 @@ impl HostApi for Fleet {
     async fn catalog(&self, kind: CatalogKind) -> Result<Catalog, KernelError> {
         Ok(Catalog {
             kind,
-            entries: ["Read", "Write", "SpawnAgent"]
+            entries: ["Read", "Write", "AskUserQuestion", "SpawnAgent"]
                 .map(str::to_string)
                 .into_iter()
                 .map(|name| CatalogEntry {

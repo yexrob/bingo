@@ -91,6 +91,61 @@ fn a_failed_turn_is_a_result_line_with_errors() {
     );
 }
 
+/// A sub-agent's lines are reported under the root (ADR-0010 §3–4): the same
+/// `session_id`, and as `parent_tool_use_id` the call that spawned it; the
+/// child's turn writes no `result` line of its own.
+#[test]
+fn a_sub_sessions_lines_carry_the_call_that_spawned_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = script(
+        r#"{"responses":[
+            {"steps":[{"toolCall":{"name":"SpawnAgent","input":{"prompt":"say hi","background":false}}}]},
+            {"steps":[{"text":"hi from the child"}]},
+            {"steps":[{"text":"The child said hi."}]}
+        ]}"#,
+    );
+    let out = run(bingo()
+        .env("BINGO_FAKE_SCRIPT", script.path())
+        .env("HOME", dir.path())
+        .args(["--print", "--output-format", "stream-json", "--cwd"])
+        .arg(dir.path())
+        .arg("ask an agent to say hi"));
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    let lines = lines_of(&out);
+    let root = lines[0]["session_id"].as_str().unwrap();
+    assert!(lines.iter().all(|l| l["session_id"] == root));
+    let spawn = lines
+        .iter()
+        .find(|l| l["message"]["content"][0]["name"] == "SpawnAgent")
+        .unwrap_or_else(|| panic!("the spawn call: {}", stdout(&out)));
+    let call = spawn["message"]["content"][0]["id"].as_str().unwrap();
+    let child_line = lines
+        .iter()
+        .find(|l| l["message"]["content"][0]["text"] == "hi from the child")
+        .unwrap_or_else(|| panic!("the child's words: {}", stdout(&out)));
+    assert_eq!(child_line["parent_tool_use_id"], call);
+    let results: Vec<&Value> = lines.iter().filter(|l| l["type"] == "result").collect();
+    assert_eq!(
+        results.len(),
+        1,
+        "one result line, the root's: {}",
+        stdout(&out)
+    );
+    assert_eq!(results[0]["result"], "The child said hi.");
+    let tool_result = lines
+        .iter()
+        .find(|l| l["message"]["content"][0]["type"] == "tool_result")
+        .unwrap();
+    assert!(
+        tool_result["message"]["content"][0]["content"]
+            .as_str()
+            .unwrap()
+            .contains("hi from the child"),
+        "the child's reply is the tool result: {tool_result}"
+    );
+    assert_eq!(tool_result["parent_tool_use_id"], Value::Null);
+}
+
 // ---- the host protocol on stdin -----------------------------------------
 
 /// The binary as a host drives it: one JSON line at a time in, one out.

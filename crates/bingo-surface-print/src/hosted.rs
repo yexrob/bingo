@@ -69,10 +69,8 @@ impl Attached<'_> {
         Ok(host.exit())
     }
 
-    /// A sub-session's frame concerns the host only when it needs a person:
-    /// its turns, acks and closing are the root's business to report.
     fn reaction(&mut self, frame: &Frame, host: &mut Hosted) -> Result<Next, KernelError> {
-        if frame.session != self.root && !asks_a_person(&frame.event) {
+        if !self.concerns_the_run(frame) {
             return Ok(Next::Await);
         }
         host.react(
@@ -330,15 +328,6 @@ impl Hosted {
         self.awaiting.retain(|other| other != intent);
         self.awaiting.len() != waiting
     }
-}
-
-fn asks_a_person(event: &Event) -> bool {
-    matches!(
-        event,
-        Event::InteractionOpened { .. }
-            | Event::InteractionResolved { .. }
-            | Event::InteractionCancelled { .. }
-    )
 }
 
 /// Whether the turn carried the item that intent submitted. The folded state is

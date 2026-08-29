@@ -288,10 +288,16 @@ impl<'a> Attached<'a> {
         Ok(())
     }
 
+    /// A sub-session's frame concerns the run only when it needs a person:
+    /// its turns, acks and closing are the root's business to report.
+    fn concerns_the_run(&self, frame: &Frame) -> bool {
+        frame.session == self.root || asks_a_person(&frame.event)
+    }
+
     /// One prompt, one turn, one exit code.
     async fn single(mut self) -> Result<Exit, KernelError> {
         while let Some(frame) = self.events.next().await {
-            if !self.show(&frame)? {
+            if !self.show(&frame)? || !self.concerns_the_run(&frame) {
                 continue;
             }
             match react(
@@ -341,6 +347,15 @@ fn prompt_from(
         ));
     }
     Ok(prompt)
+}
+
+fn asks_a_person(event: &Event) -> bool {
+    matches!(
+        event,
+        Event::InteractionOpened { .. }
+            | Event::InteractionResolved { .. }
+            | Event::InteractionCancelled { .. }
+    )
 }
 
 /// What a rendered frame leaves the run to do next.
@@ -1207,6 +1222,55 @@ pub(crate) mod tests {
             "[error] code=PROVIDER_UNAVAILABLE msg=no provider\n"
         );
         assert_eq!(run.out, "");
+    }
+
+    /// A stream-json run is attached to the tree (ADR-0010 §3): a sub-session's
+    /// turn ending is its own business, and the run goes on to the root's.
+    #[tokio::test]
+    async fn a_sub_sessions_turn_ending_does_not_end_the_run() {
+        let child = |seq: u64, event: Event| {
+            let mut f = frame(seq, event);
+            f.session = SessionId::from_raw("ses_2");
+            f
+        };
+        let mut child_summary = summary();
+        child_summary.id = SessionId::from_raw("ses_2");
+        child_summary.parent = Some(bingo_sdk::ParentLink {
+            session: SessionId::from_raw("ses_1"),
+            item: ItemId::from_raw("itm_1"),
+        });
+        let done = |turn: &str| Event::TurnCompleted {
+            turn: TurnId::from_raw(turn),
+            status: TurnStatus::Completed,
+            usage: Usage::default(),
+        };
+        let run = headless(vec![
+            frame(
+                1,
+                Event::TurnStarted {
+                    turn: TurnId::from_raw("trn_1"),
+                    inputs: Vec::new(),
+                    origin: TurnOrigin::Submit,
+                },
+            ),
+            child(
+                1,
+                Event::SessionUpdated {
+                    summary: child_summary,
+                },
+            ),
+            child(2, done("trn_c")),
+            frame(
+                2,
+                Event::ItemCompleted {
+                    item: assistant("itm_2", "after the child", ItemStatus::Completed),
+                },
+            ),
+            frame(3, done("trn_1")),
+        ])
+        .await;
+        assert_eq!(run.exit, Ok(Exit { code: 0 }));
+        assert!(run.out.contains("after the child"), "{}", run.out);
     }
 
     #[tokio::test]
