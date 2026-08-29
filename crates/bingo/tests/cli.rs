@@ -206,3 +206,16 @@ fn an_edit_is_asked_and_denied_off_a_tty_under_the_default_policy() {
     });
     assert!(failed, "the tool result carries the denial");
 }
+
+#[test]
+fn anthropic_without_credentials_fails_before_any_turn() {
+    let out = run(bingo()
+        .env_remove("ANTHROPIC_API_KEY")
+        .env("HOME", tempfile::tempdir().unwrap().path())
+        .args(["--print", "--provider", "anthropic", "hello"]));
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(stdout(&out), "");
+    let err = stderr(&out);
+    assert!(err.starts_with("[error] code=AUTH_REQUIRED msg="), "{err}");
+    assert_eq!(err.lines().count(), 1, "{err}");
+}

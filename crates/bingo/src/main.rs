@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use bingo_core::settings;
 use bingo_core::{Host, HostConfig};
+use bingo_provider_anthropic::AnthropicPlugin;
 use bingo_provider_fake::{FakePlugin, FakeProvider, Script};
 use bingo_sdk::{
     Env, ErrorCode, KernelError, Plugin, SessionSelector, SessionSpec, SurfaceOptions,
@@ -138,6 +139,7 @@ fn plugins() -> Result<Vec<Box<dyn Plugin>>, KernelError> {
         .unwrap_or_else(Script::demo);
     Ok(vec![
         Box::new(FakePlugin::new(Arc::new(FakeProvider::new(script)))),
+        Box::new(AnthropicPlugin),
         Box::new(FsPlugin),
         Box::new(BashPlugin),
         Box::new(PrintPlugin),
