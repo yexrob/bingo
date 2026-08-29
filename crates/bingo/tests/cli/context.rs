@@ -123,3 +123,50 @@ fn an_overflow_after_many_rounds_is_summarised_and_the_turn_goes_on() {
         })
     ));
 }
+
+#[test]
+fn a_working_turn_leaves_facts_in_the_project_memory() {
+    let home = tempfile::tempdir().unwrap();
+    std::fs::write(home.path().join("notes.txt"), "alpha\n").unwrap();
+    // A tool round, the answer, then what the extractor is told at turn end.
+    let first = script(
+        r#"{"responses":[
+            {"steps":[{"toolCall":{"name":"Read","input":{"file_path":"notes.txt"}}}]},
+            {"steps":[{"text":"One line."}]},
+            {"steps":[{"text":"notes.txt holds the alpha list\nthe project has no build step"}]}
+        ]}"#,
+    );
+    let out = run(bingo()
+        .env("BINGO_FAKE_SCRIPT", first.path())
+        .env("HOME", home.path())
+        .args(["--print", "--cwd"])
+        .arg(home.path())
+        .arg("what is in notes.txt?"));
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    assert_eq!(stdout(&out), "One line.\n");
+    let memory_dir = home.path().join(".bingo/data/memory");
+    let files: Vec<_> = std::fs::read_dir(&memory_dir)
+        .expect("a memory directory")
+        .flatten()
+        .map(|e| e.path())
+        .collect();
+    assert_eq!(files.len(), 1, "{files:?}");
+    let memory = std::fs::read_to_string(&files[0]).unwrap();
+    assert!(
+        memory.contains("notes.txt holds the alpha list"),
+        "{memory}"
+    );
+    assert!(memory.contains("the project has no build step"), "{memory}");
+
+    // The next run reads it back into the prompt and learns nothing new
+    // from a turn without a tool call.
+    let again = script(r#"{"responses":[{"steps":[{"text":"Still one line."}]}]}"#);
+    let out = run(bingo()
+        .env("BINGO_FAKE_SCRIPT", again.path())
+        .env("HOME", home.path())
+        .args(["--print", "--cwd"])
+        .arg(home.path())
+        .arg("and now?"));
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    assert_eq!(std::fs::read_to_string(&files[0]).unwrap(), memory);
+}
