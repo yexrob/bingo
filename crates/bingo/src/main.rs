@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 
+use bingo_context::ContextPlugin;
 use bingo_core::settings;
 use bingo_core::{Host, HostConfig};
 use bingo_permissions::PermissionsPlugin;
@@ -156,6 +157,7 @@ fn plugins() -> Result<Vec<Box<dyn Plugin>>, KernelError> {
         Box::new(OpenAiPlugin),
         Box::new(PermissionsPlugin),
         Box::new(JsonlStorePlugin::default()),
+        Box::new(ContextPlugin),
         Box::new(FsPlugin),
         Box::new(BashPlugin),
         Box::new(WebPlugin),
