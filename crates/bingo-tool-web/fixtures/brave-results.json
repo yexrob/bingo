@@ -1,0 +1,57 @@
+{
+  "type": "search",
+  "query": {
+    "original": "rust async book",
+    "show_strict_warning": false,
+    "is_navigational": false,
+    "country": "us"
+  },
+  "mixed": {
+    "type": "mixed",
+    "main": [{ "type": "web", "index": 0, "all": false }]
+  },
+  "web": {
+    "type": "search",
+    "family_friendly": true,
+    "results": [
+      {
+        "type": "search_result",
+        "subtype": "generic",
+        "title": "Asynchronous Programming in Rust",
+        "url": "https://rust-lang.github.io/async-book/",
+        "description": "This book aims to be a complete guide to <strong>async</strong> Rust.",
+        "is_source_local": false,
+        "is_source_both": false,
+        "profile": {
+          "name": "Rust",
+          "url": "https://rust-lang.github.io/async-book/",
+          "long_name": "rust-lang.github.io"
+        },
+        "language": "en",
+        "meta_url": {
+          "scheme": "https",
+          "netloc": "rust-lang.github.io",
+          "hostname": "rust-lang.github.io",
+          "path": "› async-book"
+        }
+      },
+      {
+        "type": "search_result",
+        "subtype": "generic",
+        "title": "tokio - Rust",
+        "url": "https://docs.rs/tokio/latest/tokio/",
+        "description": "A runtime for writing reliable network applications.",
+        "is_source_local": false,
+        "language": "en"
+      },
+      {
+        "type": "search_result",
+        "subtype": "generic",
+        "title": "Async, explained",
+        "url": "https://blog.spam.example/async",
+        "is_source_local": false,
+        "language": "en"
+      }
+    ]
+  }
+}

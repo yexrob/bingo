@@ -290,6 +290,7 @@ dependencies = [
  "dom_smoothie",
  "futures",
  "htmd",
+ "regex",
  "reqwest",
  "schemars",
  "serde",

@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Web tools plugin for bingo: WebFetch"
+description = "Web tools plugin for bingo: WebFetch, WebSearch"
 
 [lints]
 workspace = true
@@ -19,15 +19,20 @@ schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-# M2: the canonical URL is the cache key and the permission subject; parsing it
-# by hand is how credentials sneak past.
+tokio.workspace = true
+# M2: the canonical URL is the cache key and the permission subject, and the
+# host a search hit is filtered by; parsing it by hand is how credentials
+# sneak past.
 url.workspace = true
 # M2: a Readability port, so a page reaches the model as its article and not as
 # its navigation.
 dom_smoothie.workspace = true
 # M2: a Turndown port for the article HTML (`html2md` is GPL and banned).
 htmd.workspace = true
+# M2: the DuckDuckGo result blocks, whose HTML has no API.
+regex.workspace = true
 
 [dev-dependencies]
 wiremock.workspace = true
-tokio = { workspace = true, features = ["macros", "rt"] }
+# `tokio::time::pause`, so the 20s search bound costs a test no wall time.
+tokio = { workspace = true, features = ["macros", "rt", "test-util"] }

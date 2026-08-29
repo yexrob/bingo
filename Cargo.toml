@@ -58,6 +58,8 @@ url = "2.5.8"
 dom_smoothie = "0.18.0"
 # M2 (docs/plans/M2-second-provider-catalog-web.md)
 htmd = "0.5.5"
+# M2 (docs/plans/M2-second-provider-catalog-web.md)
+regex = "1.13.1"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
