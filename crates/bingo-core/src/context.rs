@@ -335,6 +335,22 @@ mod tests {
     }
 
     #[test]
+    fn a_user_item_from_a_named_principal_says_who_spoke() {
+        let mut said = user("i1", "ship it");
+        if let ItemBody::User { origin, .. } = &mut said.body {
+            origin.principal = Some("reviewer".into());
+        }
+        let msgs = ContextView::fold_items(&[said, user("i2", "ok")]);
+        assert_eq!(msgs.len(), 1);
+        let texts: Vec<Option<&str>> = msgs[0].parts.iter().map(|p| p.as_text()).collect();
+        assert_eq!(
+            texts,
+            [Some("[from reviewer]"), Some("ship it"), Some("ok")],
+            "a person's own line carries no prefix"
+        );
+    }
+
+    #[test]
     fn every_tool_use_gets_a_result_even_without_output() {
         let items = vec![user("i1", "go"), tool("i2", "c1", None)];
         let msgs = ContextView::fold_items(&items);

@@ -8,6 +8,7 @@ use super::*;
 use crate::test_support::*;
 
 mod commands;
+mod peers;
 
 fn who() -> ClientIdentity {
     ClientIdentity {
