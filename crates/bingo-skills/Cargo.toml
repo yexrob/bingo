@@ -1,0 +1,29 @@
+[package]
+name = "bingo-skills"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Skills plugin for bingo: SKILL.md files as /name commands, a Skill tool and a line in the prompt"
+
+[lints]
+workspace = true
+
+[dependencies]
+bingo-sdk.workspace = true
+async-trait.workspace = true
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde-saphyr.workspace = true
+
+[dev-dependencies]
+# M7: the prompt block is a wire the model reads, so a wording change is a
+# deliberate diff.
+insta.workspace = true
+# M7: a `SessionSummary` a contributor is asked about is stamped with a
+# `jiff::Timestamp`, so writing one down needs one.
+jiff.workspace = true
+tempfile.workspace = true
+tokio.workspace = true

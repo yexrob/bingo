@@ -1,0 +1,12 @@
+---
+source: crates/bingo-skills/src/contributor.rs
+assertion_line: 98
+expression: text(&pieces)
+---
+# Skills
+
+Procedures written down for this project and this machine. When one of these fits what you were asked, call the `Skill` tool with its name before you start and follow what comes back. A person reaches the same thing by typing `/<name>`.
+
+- deploy — Ship the build
+- review — Read a diff
+- guide — How bingo itself works: its commands, sessions, permission modes, settings, hooks, skills, MCP servers, and where its files live. Read it before answering any question about bingo, a `/` command, a permission prompt or configuration.

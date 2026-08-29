@@ -24,6 +24,7 @@ bingo-store-jsonl = { path = "crates/bingo-store-jsonl", version = "0.1.0" }
 bingo-context = { path = "crates/bingo-context", version = "0.1.0" }
 bingo-surface-rpc = { path = "crates/bingo-surface-rpc", version = "0.1.0" }
 bingo-surface-tui = { path = "crates/bingo-surface-tui", version = "0.1.0" }
+bingo-skills = { path = "crates/bingo-skills", version = "0.1.0" }
 
 tokio = { version = "1.53", default-features = false, features = ["rt-multi-thread", "macros", "sync", "time", "io-util", "io-std", "fs", "process", "signal"] }
 tokio-util = { version = "0.7.19", features = ["codec", "rt"] }
@@ -75,6 +76,9 @@ pulldown-cmark = { version = "0.13", default-features = false }
 unicode-width = "0.2"
 # M6 (docs/plans/M6-tui-mvp.md)
 unicode-segmentation = "1.13"
+# M7 (docs/plans/M7-hooks-skills-mcp.md). `serialize` is off: frontmatter is
+# read, never written, and `serde_yml`/`serde_yaml` are banned in deny.toml.
+serde-saphyr = { version = "1.1", default-features = false, features = ["deserialize"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
