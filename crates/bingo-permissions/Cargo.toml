@@ -13,7 +13,17 @@ workspace = true
 [dependencies]
 bingo-sdk.workspace = true
 async-trait.workspace = true
+serde.workspace = true
+schemars.workspace = true
+thiserror.workspace = true
 # M1: the Bash splitter parses with the real grammar; a hand-rolled scanner
 # cannot see command substitution or tell a syntax error from a command.
 tree-sitter.workspace = true
 tree-sitter-bash.workspace = true
+# M1: `shlex` reads a sub-command as the words the shell would see, `globset`
+# reads `Edit(/src/**)` as the glob it is written as.
+shlex.workspace = true
+globset.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
