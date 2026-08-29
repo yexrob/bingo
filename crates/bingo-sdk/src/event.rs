@@ -470,6 +470,9 @@ pub enum InteractionKind {
     },
     Question {
         question: String,
+        /// A short tag a surface may show before the question (`Auth method`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        header: Option<String>,
         options: Vec<QuestionOption>,
         #[serde(default)]
         free_text: bool,

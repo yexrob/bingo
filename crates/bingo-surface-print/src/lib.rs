@@ -238,9 +238,15 @@ fn decide(
             }
         }
         InteractionKind::Question {
-            question, options, ..
+            question,
+            header,
+            options,
+            ..
         } => {
-            writeln!(err, "[question] {question}")?;
+            match header {
+                Some(header) => writeln!(err, "[question] {header}: {question}")?,
+                None => writeln!(err, "[question] {question}")?,
+            }
             for option in options {
                 writeln!(err, "  {} — {}", option.id, option.label)?;
             }
@@ -410,6 +416,7 @@ pub(crate) mod tests {
         Interaction {
             kind: InteractionKind::Question {
                 question: "Which file?".into(),
+                header: None,
                 options: options
                     .iter()
                     .map(|(id, label)| QuestionOption {

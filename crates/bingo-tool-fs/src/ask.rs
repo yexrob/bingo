@@ -103,6 +103,7 @@ fn validate_options(question: &AskQuestion) -> Result<(), ToolError> {
 fn interaction(question: &AskQuestion) -> InteractionKind {
     InteractionKind::Question {
         question: question.question.clone(),
+        header: Some(question.header.clone()),
         options: question
             .options
             .iter()
@@ -286,6 +287,7 @@ mod tests {
         );
         let InteractionKind::Question {
             question,
+            header,
             options,
             free_text,
             multi,
@@ -294,6 +296,7 @@ mod tests {
             panic!("expected a question, got {kind:?}");
         };
         assert_eq!(question, "Which authentication method?");
+        assert_eq!(header.as_deref(), Some("Auth method"));
         assert!(*free_text && !*multi);
         assert_eq!(
             options,

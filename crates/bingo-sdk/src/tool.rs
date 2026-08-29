@@ -207,10 +207,14 @@ pub trait Tool: Send + Sync {
     async fn call(&self, input: Value, cx: &ToolContext) -> Result<ToolOutput, ToolError>;
 }
 
-/// The input schema for a tool's argument type, as the model receives it
-/// (no `$schema`, definitions inlined by schemars).
+/// The input schema for a tool's argument type, as the model receives it:
+/// no `$schema` or `title`, and nested types inlined so no provider has to
+/// resolve `$ref`.
 pub fn input_schema<T: JsonSchema>() -> Value {
-    let mut schema = schemars::schema_for!(T).to_value();
+    let generator = schemars::generate::SchemaSettings::default()
+        .with(|s| s.inline_subschemas = true)
+        .into_generator();
+    let mut schema = generator.into_root_schema_for::<T>().to_value();
     if let Some(obj) = schema.as_object_mut() {
         obj.remove("$schema");
         obj.remove("title");
@@ -235,6 +239,28 @@ mod tests {
         /// The file to read.
         file_path: String,
         offset: Option<u32>,
+    }
+
+    #[derive(JsonSchema)]
+    #[allow(dead_code)]
+    enum Mode {
+        Files,
+        Content,
+    }
+
+    #[derive(JsonSchema)]
+    #[allow(dead_code)]
+    struct Nested {
+        mode: Mode,
+        items: Vec<Args>,
+    }
+
+    #[test]
+    fn nested_types_are_inlined_not_referenced() {
+        let text = input_schema::<Nested>().to_string();
+        assert!(!text.contains("$ref"), "{text}");
+        assert!(!text.contains("$defs"), "{text}");
+        assert!(text.contains("\"Files\""));
     }
 
     #[test]
