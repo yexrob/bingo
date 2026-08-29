@@ -1001,7 +1001,11 @@ pub(crate) mod tests {
 
     #[test]
     fn the_plugin_registers_the_print_surface() {
-        let mut registrar = Registrar::new("bingo.surface.print", serde_json::Value::Null);
+        let mut registrar = Registrar::new(
+            "bingo.surface.print",
+            serde_json::Value::Null,
+            bingo_sdk::Env::rooted("/tmp"),
+        );
         PrintPlugin.register(&mut registrar).expect("register");
         let contributions = registrar.into_contributions();
         assert_eq!(contributions.len(), 1);

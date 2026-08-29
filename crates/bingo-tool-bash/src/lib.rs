@@ -245,7 +245,11 @@ pub(crate) mod tests {
 
     #[test]
     fn the_plugin_registers_the_bash_tool() {
-        let mut registrar = Registrar::new("bingo.tools.bash", Value::Null);
+        let mut registrar = Registrar::new(
+            "bingo.tools.bash",
+            Value::Null,
+            bingo_sdk::Env::rooted("/tmp"),
+        );
         BashPlugin.register(&mut registrar).expect("register");
         let contributions = registrar.into_contributions();
         assert_eq!(contributions.len(), 1);

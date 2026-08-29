@@ -275,7 +275,11 @@ pub(crate) mod tests {
 
     #[test]
     fn the_plugin_registers_the_provider_it_claims() {
-        let mut registrar = Registrar::new("bingo.provider.anthropic", json!({}));
+        let mut registrar = Registrar::new(
+            "bingo.provider.anthropic",
+            json!({}),
+            bingo_sdk::Env::rooted("/tmp"),
+        );
         AnthropicPlugin.register(&mut registrar).expect("register");
         let contributions = registrar.into_contributions();
         assert_eq!(contributions.len(), 1);
@@ -303,6 +307,7 @@ pub(crate) mod tests {
         let mut registrar = Registrar::new(
             "bingo.provider.anthropic",
             json!({ "anthropic": { "apiKey": "sk-ant-from-settings" } }),
+            bingo_sdk::Env::rooted("/tmp"),
         );
         AnthropicPlugin.register(&mut registrar).expect("register");
         match &registrar.into_contributions()[0] {

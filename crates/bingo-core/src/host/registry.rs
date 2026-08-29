@@ -62,6 +62,7 @@ impl Registry {
     pub(super) fn load(
         plugins: &[Box<dyn Plugin>],
         slices: &BTreeMap<String, Value>,
+        env: &Env,
     ) -> Result<Self, HostError> {
         let mut registry = Registry::default();
         let mut provided: HashSet<&'static str> = HashSet::new();
@@ -74,7 +75,7 @@ impl Registry {
                     .push(PluginStatus::disabled(manifest, reason));
                 continue;
             }
-            registry.register(plugin.as_ref(), slices)?;
+            registry.register(plugin.as_ref(), slices, env)?;
             provided.extend(manifest.provides.iter().copied());
             registry.plugins.push(PluginStatus::loaded(manifest));
         }
@@ -86,13 +87,14 @@ impl Registry {
         &mut self,
         plugin: &dyn Plugin,
         slices: &BTreeMap<String, Value>,
+        env: &Env,
     ) -> Result<(), HostError> {
         let manifest = plugin.manifest();
         let slice = slices
             .get(manifest.id)
             .cloned()
             .unwrap_or_else(|| Value::Object(Map::new()));
-        let mut registrar = Registrar::new(manifest.id, slice);
+        let mut registrar = Registrar::new(manifest.id, slice, env.clone());
         plugin
             .register(&mut registrar)
             .map_err(|source| HostError::Register {

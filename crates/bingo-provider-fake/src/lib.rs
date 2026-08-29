@@ -871,7 +871,11 @@ mod tests {
     #[test]
     fn the_plugin_registers_the_provider_it_was_built_with() {
         let plugin = FakePlugin::demo();
-        let mut registrar = Registrar::new("bingo.provider.fake", Value::Null);
+        let mut registrar = Registrar::new(
+            "bingo.provider.fake",
+            Value::Null,
+            bingo_sdk::Env::rooted("/tmp"),
+        );
         plugin.register(&mut registrar).expect("register");
         let contributions = registrar.into_contributions();
         assert_eq!(contributions.len(), 1);

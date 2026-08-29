@@ -129,6 +129,18 @@ pub struct Env {
     pub data_dir: PathBuf,
 }
 
+impl Env {
+    /// The layout under one directory: `<dir>/.bingo` for config, `.bingo/data` for data.
+    pub fn rooted(home: impl Into<PathBuf>) -> Self {
+        let home = home.into();
+        Self {
+            config_dir: home.join(".bingo"),
+            data_dir: home.join(".bingo").join("data"),
+            home,
+        }
+    }
+}
+
 /// What a tool may reach while it runs. Everything else is a service.
 pub struct ToolContext {
     pub call_id: String,

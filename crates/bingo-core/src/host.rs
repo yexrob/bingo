@@ -145,7 +145,7 @@ impl Host {
             .filter_map(|p| Claim::from_manifest(p.manifest()))
             .collect();
         let settings = settings::merge(&config.layers, &claims)?;
-        let registry = Registry::load(&plugins, &settings.plugins)?;
+        let registry = Registry::load(&plugins, &settings.plugins, &config.env)?;
         let (gateway, _) = broadcast::channel(GATEWAY_CAPACITY);
         let host = Arc::new_cyclic(|weak| Host {
             config,

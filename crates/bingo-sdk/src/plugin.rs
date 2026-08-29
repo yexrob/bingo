@@ -18,7 +18,7 @@ use crate::policy::PermissionPolicy;
 use crate::provider::Provider;
 use crate::store::SessionStore;
 use crate::surface::Surface;
-use crate::tool::Tool;
+use crate::tool::{Env, Tool};
 
 #[derive(Clone, Copy, Debug)]
 pub struct PluginManifest {
@@ -120,16 +120,23 @@ impl fmt::Debug for Contribution {
 pub struct Registrar {
     plugin_id: String,
     config: Value,
+    env: Env,
     contributions: Vec<Contribution>,
 }
 
 impl Registrar {
-    pub fn new(plugin_id: impl Into<String>, config: Value) -> Self {
+    pub fn new(plugin_id: impl Into<String>, config: Value, env: Env) -> Self {
         Self {
             plugin_id: plugin_id.into(),
             config,
+            env,
             contributions: Vec::new(),
         }
+    }
+
+    /// Where the host lives: home, config and data directories.
+    pub fn env(&self) -> &Env {
+        &self.env
     }
 
     pub fn plugin_id(&self) -> &str {

@@ -190,7 +190,11 @@ pub(crate) mod tests {
 
     #[test]
     fn the_plugin_registers_every_tool_its_manifest_promises() {
-        let mut registrar = Registrar::new("bingo.tools.fs", serde_json::Value::Null);
+        let mut registrar = Registrar::new(
+            "bingo.tools.fs",
+            serde_json::Value::Null,
+            bingo_sdk::Env::rooted("/tmp"),
+        );
         FsPlugin.register(&mut registrar).expect("register");
         let names: Vec<String> = registrar
             .into_contributions()
