@@ -83,7 +83,7 @@ Found while integrating (each is a commit body too):
 Open, carried forward:
 
 - `crates/bingo-core/src/session.rs` is 941 non-test lines (fails at 1000), and `crates/bingo/tests/rpc.rs` 910. The actor wants splitting, but its inherent impl already uses its two-file allowance (`session.rs`, `session/interactions.rs`), so the cohesion rule and the size rule now pull against each other: the next kernel change owes an ADR line and a third file.
-- A background child's report reaches an idle parent as a `Peer` turn and a busy one as `Queue`; the RPC scenario accepts either, because no script can order two sessions against one provider cursor.
+- A background child's report reaches an idle parent as a `Peer` turn and a busy one as `Queue`, and no script can order two sessions against one provider cursor. `TurnOrigin` says which door a turn came through, not who wrote its input — that is `origin.principal` on the item — so the RPC scenario asserts the item, its principal and the turn that carried it, and never the origin.
 - `@name` and `/agents` are unit-tested only; no black-box scenario drives them over the wire.
 - `ToolHost` cannot read one session's summary or open one, so `bingo-agents` keeps the `HostHandle` from `start` in a `OnceLock` and lists every session to find one by id. `SessionFilter` has no "live only", so a resumed session's dead children still hold their names.
 - A child's "finished" is inferred (idle with a last turn), not a fact on the wire; the TUI's `done` and the watcher's report both read it that way.

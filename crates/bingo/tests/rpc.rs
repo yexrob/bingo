@@ -870,41 +870,44 @@ async fn a_background_agent_wakes_the_root_and_says_who_it_is() {
     let named: serde_json::Value = serde_json::from_str(&started).expect("a name and a session");
     assert_eq!(named["name"], "reviewer");
 
-    let woken = mine
+    // The root's second turn ran the agent's message rather than leaving it in
+    // the queue. What is asserted is the item and the turn that carried it,
+    // never the turn's `origin`: that says which door the turn came through —
+    // `Peer` on an idle root, `Queue` on one still finishing its own round —
+    // and the two race for the next scripted response. Who wrote the message
+    // is `origin.principal` on the item, which does not move.
+    let second = mine
         .iter()
         .filter_map(|frame| match &frame.event {
-            Event::TurnStarted { origin, .. } => Some(*origin),
+            Event::TurnStarted { turn, .. } => Some(turn.clone()),
             _ => None,
         })
         .nth(1)
         .expect("a second turn on the root");
-    // Which of the two it is depends on whether the root's own follow-up
-    // round had ended when the agent reported: an idle root opens a `Peer`
-    // turn on the message, a busy one queues it and drains it as `Queue`.
-    // Both are ADR-0010 §1; no script can pin down which, because the root's
-    // second round and the child's first race for the next response.
-    assert!(
-        matches!(
-            woken,
-            bingo_sdk::TurnOrigin::Peer | bingo_sdk::TurnOrigin::Queue
-        ),
-        "the agent's message opened a turn on the root: {woken:?}"
-    );
-
-    let reported = attachment
+    let (turn, origin, text) = attachment
         .snapshot
         .items
         .iter()
         .find_map(|item| match &item.body {
             bingo_sdk::ItemBody::User { parts, origin } if origin.principal.is_some() => Some((
+                item.turn.clone(),
                 origin.clone(),
                 parts[0].as_text().unwrap_or_default().to_owned(),
             )),
             _ => None,
         })
         .expect("the agent's reply is a user item on the root");
-    assert_eq!(reported.0.principal.as_deref(), Some("reviewer"));
-    assert_eq!(reported.0.surface, "agent");
-    assert!(reported.1.starts_with("finished."), "{}", reported.1);
+    assert_eq!(origin.principal.as_deref(), Some("reviewer"));
+    assert_eq!(origin.surface, "agent");
+    assert_eq!(
+        turn.as_ref(),
+        Some(&second),
+        "the message the agent sent is what the root's second turn ran"
+    );
+    assert!(text.starts_with("finished."), "{text}");
+    assert!(
+        attachment.snapshot.queue.is_empty(),
+        "nothing was left waiting"
+    );
     kernel.shutdown().await.unwrap();
 }
