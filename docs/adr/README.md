@@ -8,3 +8,4 @@ One record per boundary decision: a trait shape, a wire format, a persisted form
 - [0004 — Model facts: catalogue, endpoint, server](0004-model-facts.md)
 - [0005 — Session persistence: JSONL journal, sidecar lock, derived summary](0005-session-persistence.md)
 - [0006 — Context budget: kernel measures and cuts, plugin summarises and remembers](0006-context-budget.md)
+- [0007 — The wire: JSON-RPC over NDJSON, methods 1:1 with HostApi, events verbatim](0007-rpc-wire.md)
