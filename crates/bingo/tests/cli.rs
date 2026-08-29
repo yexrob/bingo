@@ -401,3 +401,117 @@ async fn web_fetch_hands_the_model_the_page_as_markdown() {
         "{text}"
     );
 }
+
+/// A recorded Responses API stream from the provider crate's fixtures.
+fn responses_fixture(name: &str) -> String {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../bingo-provider-openai/fixtures")
+        .join(name);
+    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+}
+
+/// The Responses endpoint answering each `POST /v1/responses` with the next
+/// fixture in order, then refusing any further call.
+async fn responses_server(fixtures: &[&str]) -> wiremock::MockServer {
+    use wiremock::matchers::{header, method, path};
+    use wiremock::{Mock, ResponseTemplate};
+    let server = wiremock::MockServer::start().await;
+    for name in fixtures {
+        Mock::given(method("POST"))
+            .and(path("/v1/responses"))
+            .and(header("authorization", "Bearer sk-test"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_raw(responses_fixture(name), "text/event-stream"),
+            )
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+    }
+    server
+}
+
+fn openai(server: &wiremock::MockServer, cwd: &std::path::Path, prompt: &str) -> Command {
+    let mut cmd = bingo();
+    cmd.env("OPENAI_API_KEY", "sk-test")
+        .env("OPENAI_BASE_URL", server.uri())
+        .env("HOME", cwd)
+        .args([
+            "--print",
+            "--provider",
+            "openai",
+            "--model",
+            "gpt-5.4",
+            "--cwd",
+        ])
+        .arg(cwd)
+        .arg(prompt);
+    cmd
+}
+
+#[tokio::test]
+async fn openai_streams_a_text_turn_through_the_same_loop() {
+    let server = responses_server(&["text.sse"]).await;
+    let dir = tempfile::tempdir().unwrap();
+    let out = tokio::task::spawn_blocking(move || run(&mut openai(&server, dir.path(), "hi")))
+        .await
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    assert_eq!(stdout(&out), "Hello, world.\n");
+    assert_eq!(stderr(&out), "");
+}
+
+#[tokio::test]
+async fn openai_runs_a_tool_round_and_feeds_the_result_back() {
+    let server = responses_server(&["tools.sse", "text.sse"]).await;
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("Cargo.toml"), "[package]\nname = \"x\"\n").unwrap();
+    let out = tokio::task::spawn_blocking(move || {
+        run(openai(&server, dir.path(), "what is in the manifest?")
+            .args(["--output-format", "json"]))
+    })
+    .await
+    .unwrap();
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    let frames: Vec<Frame> = stdout(&out)
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap_or_else(|e| panic!("{e}: {line}")))
+        .collect();
+    let read_completed = frames.iter().any(|f| {
+        matches!(
+            &f.event,
+            Event::ItemCompleted { item }
+                if matches!(&item.body, bingo_sdk::ItemBody::ToolCall { name, output: Some(o), .. }
+                    if name == "Read" && !o.is_error)
+        )
+    });
+    assert!(read_completed, "the Read call completed: {}", stdout(&out));
+    assert!(matches!(
+        frames.last().map(|f| &f.event),
+        Some(Event::TurnCompleted {
+            status: TurnStatus::Completed,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn openai_without_credentials_names_the_variable_before_any_turn() {
+    let out = run(bingo()
+        .env_remove("OPENAI_API_KEY")
+        .env("HOME", tempfile::tempdir().unwrap().path())
+        .args([
+            "--print",
+            "--provider",
+            "openai",
+            "--model",
+            "gpt-5.4",
+            "hello",
+        ]));
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(stdout(&out), "");
+    let err = stderr(&out);
+    assert!(err.starts_with("[error] code=AUTH_REQUIRED msg="), "{err}");
+    assert!(err.contains("OPENAI_API_KEY"), "{err}");
+    assert_eq!(err.lines().count(), 1, "{err}");
+}

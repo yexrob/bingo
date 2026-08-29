@@ -10,6 +10,7 @@ use bingo_core::{Host, HostConfig};
 use bingo_permissions::PermissionsPlugin;
 use bingo_provider_anthropic::AnthropicPlugin;
 use bingo_provider_fake::{FakePlugin, FakeProvider, Script};
+use bingo_provider_openai::OpenAiPlugin;
 use bingo_sdk::{
     Env, ErrorCode, KernelError, Plugin, SessionSelector, SessionSpec, SurfaceOptions,
 };
@@ -139,6 +140,7 @@ fn plugins() -> Result<Vec<Box<dyn Plugin>>, KernelError> {
     Ok(vec![
         Box::new(FakePlugin::new(Arc::new(FakeProvider::new(script)))),
         Box::new(AnthropicPlugin),
+        Box::new(OpenAiPlugin),
         Box::new(PermissionsPlugin),
         Box::new(FsPlugin),
         Box::new(BashPlugin),

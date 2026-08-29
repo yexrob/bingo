@@ -137,6 +137,7 @@ dependencies = [
  "bingo-permissions",
  "bingo-provider-anthropic",
  "bingo-provider-fake",
+ "bingo-provider-openai",
  "bingo-sdk",
  "bingo-surface-print",
  "bingo-tool-bash",

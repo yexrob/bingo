@@ -15,6 +15,7 @@ bingo-sdk.workspace = true
 bingo-core.workspace = true
 bingo-provider-fake.workspace = true
 bingo-provider-anthropic.workspace = true
+bingo-provider-openai.workspace = true
 bingo-tool-fs.workspace = true
 bingo-tool-bash.workspace = true
 bingo-tool-web.workspace = true
