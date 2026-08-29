@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Filesystem tools plugin for bingo: Read, Glob, Grep, Edit, Write"
+description = "Filesystem tools plugin for bingo: Read, Glob, Grep, Edit, Write, AskUserQuestion"
 
 [lints]
 workspace = true
