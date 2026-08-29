@@ -1,0 +1,28 @@
+---
+source: crates/bingo-mcp/tests/server.rs
+expression: "json!({ \"headers\": headers, \"rows\": rows })"
+---
+{
+  "headers": [
+    "server",
+    "status",
+    "tools"
+  ],
+  "rows": [
+    [
+      "off",
+      "disabled",
+      ""
+    ],
+    [
+      "test",
+      "connected",
+      "4"
+    ],
+    [
+      "waiting",
+      "connecting",
+      ""
+    ]
+  ]
+}
