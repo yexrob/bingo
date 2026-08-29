@@ -14,9 +14,9 @@ use async_trait::async_trait;
 use bingo_sdk::QuestionOption;
 use bingo_sdk::{
     Activation, Answer, AnswerSpec, Applied, Attachment, ClientIdentity, CloseReason, ErrorCode,
-    Event, Exit, HostHandle, Input, IntentId, Interaction, InteractionKind, KernelError, Origin,
-    Plugin, PluginError, PluginManifest, Registrar, SessionHandle, Surface, SurfaceKind,
-    SurfaceOptions, TurnStatus,
+    Event, Exit, HostHandle, Input, IntentId, IntentOutcome, Interaction, InteractionKind,
+    KernelError, Origin, Plugin, PluginError, PluginManifest, Registrar, SessionHandle, Surface,
+    SurfaceKind, SurfaceOptions, TurnStatus,
 };
 use futures::StreamExt;
 
@@ -185,8 +185,23 @@ fn react(
         Event::SessionClosed { reason } => {
             closed(&close_message(reason), err, console.human()).map(Next::Exit)
         }
+        // The one submit this surface makes was refused: there will be no
+        // turn to wait for.
+        Event::IntentAck {
+            outcome: IntentOutcome::Rejected { error },
+            ..
+        } => rejected(error, err, console.human()).map(Next::Exit),
         _ => Ok(Next::Await),
     }
+}
+
+fn rejected(
+    error: &KernelError,
+    err: &mut (dyn Write + Send),
+    human: bool,
+) -> Result<Exit, KernelError> {
+    writeln!(err, "{}", error_report(error.code, &error.message, human)).map_err(stdio_error)?;
+    Ok(Exit { code: 1 })
 }
 
 fn closed(message: &str, err: &mut (dyn Write + Send), human: bool) -> Result<Exit, KernelError> {
@@ -779,6 +794,26 @@ pub(crate) mod tests {
             &submitted[0],
             Input::Text { text, origin, .. } if text == "hi" && origin.surface == "print"
         ));
+    }
+
+    #[tokio::test]
+    async fn a_rejected_submit_is_one_error_line_and_exit_one() {
+        let run = headless(vec![frame(
+            1,
+            Event::IntentAck {
+                intent: IntentId::from_raw("req_1"),
+                outcome: IntentOutcome::Rejected {
+                    error: KernelError::new(ErrorCode::SessionClosed, "the session is closed"),
+                },
+            },
+        )])
+        .await;
+        assert_eq!(run.exit, Ok(Exit { code: 1 }));
+        assert_eq!(run.out, "");
+        assert_eq!(
+            run.err,
+            "[error] code=SESSION_CLOSED msg=the session is closed\n"
+        );
     }
 
     #[tokio::test]
