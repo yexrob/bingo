@@ -1,6 +1,9 @@
 //! The second reducer: journal → provider messages. Also the one ruler for
 //! context size, used by the compaction trigger and by every display.
 
+pub mod budget;
+pub mod elide;
+
 use bingo_sdk::*;
 use serde_json::Value;
 

@@ -247,8 +247,12 @@ pub enum InterruptReason {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ContextUsage {
+    /// Tokens the next request would carry, anchored on the server's last count.
     pub used: u64,
+    /// The input side of the model's window: what is left once the output
+    /// budget is reserved (ADR-0006).
     pub window: u64,
+    /// `used` at which the older turns are summarised.
     pub trigger: u64,
 }
 

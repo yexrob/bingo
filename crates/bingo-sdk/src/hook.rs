@@ -1,12 +1,14 @@
 //! Typed lifecycle interceptors. Shell hooks are one plugin implementing this.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 
 use crate::event::{Frame, Item, ToolOutput};
 use crate::host::Input;
 use crate::ids::{SessionId, TurnId};
+use crate::provider::Provider;
 use crate::tool::ToolCall;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -54,11 +56,26 @@ pub enum Phase {
     End,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct HookContext {
     pub session: SessionId,
     pub turn: Option<TurnId>,
     pub cwd: PathBuf,
+    /// The session's provider and model, for a hook that asks the model
+    /// (memory extraction at turn end). Absent outside a session.
+    pub provider: Option<Arc<dyn Provider>>,
+    pub model: Option<String>,
+}
+
+impl std::fmt::Debug for HookContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HookContext")
+            .field("session", &self.session)
+            .field("turn", &self.turn)
+            .field("cwd", &self.cwd)
+            .field("model", &self.model)
+            .finish_non_exhaustive()
+    }
 }
 
 #[async_trait]

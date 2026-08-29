@@ -465,7 +465,11 @@ async fn a_declared_window_is_the_ruler_the_turn_measures_with() {
             _ => {}
         }
     }
-    assert_eq!(window, Some(50_000));
+    assert_eq!(
+        window,
+        Some(25_000),
+        "the input side: the window less the output budget"
+    );
     assert_eq!(provider.requests()[0].max_tokens, 25_000, "half the window");
 }
 

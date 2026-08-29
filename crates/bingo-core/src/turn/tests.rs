@@ -108,6 +108,7 @@ fn config(provider: Arc<ScriptedProvider>, tools: Vec<Arc<dyn Tool>>) -> TurnCon
         policy: Arc::new(DefaultPolicy),
         hooks: vec![],
         contributors: vec![],
+        compaction: Arc::new(crate::turn::Breaker::default()),
         compactor: None,
         budget: TurnBudget::default(),
         env: Arc::new(Env {
@@ -437,16 +438,29 @@ fn backoff_doubles_from_half_a_second_and_honours_the_server() {
 
 #[tokio::test]
 async fn an_overflow_teaches_the_window_the_server_named() {
-    let provider = ScriptedProvider::new(vec![Script::Fail(ProviderError::ContextOverflow {
-        message: "prompt is too long: 160000 tokens > 150000 maximum".into(),
-    })]);
-    let cfg = config(provider, vec![]);
+    let overflow = || {
+        Script::Fail(ProviderError::ContextOverflow {
+            message: "prompt is too long: 160000 tokens > 150000 maximum".into(),
+        })
+    };
+    let provider = ScriptedProvider::new(vec![overflow(), overflow()]);
+    let cfg = config(provider.clone(), vec![]);
     let host = RecordingHost::new();
     let out = run(&cfg, &host, CancellationToken::new()).await;
     assert!(
         matches!(&out.status, TurnStatus::Failed { error } if error.code == ErrorCode::ContextOverflow),
         "{:?}",
         out.status
+    );
+    assert_eq!(
+        provider.requests().len(),
+        2,
+        "one retry with the forced microcompact, then the turn fails"
+    );
+    assert!(
+        host.kinds().iter().any(|k| k.starts_with("retrying")),
+        "{:?}",
+        host.kinds()
     );
     assert_eq!(cfg.model.learned.window("scripted", "m"), Some(150_000));
     assert!(
@@ -498,3 +512,5 @@ async fn a_model_without_vision_gets_a_note_where_the_image_was() {
         ]
     );
 }
+
+mod budget;

@@ -274,6 +274,7 @@ pub fn config(
         policy: Arc::new(crate::gate::DefaultPolicy),
         hooks: vec![],
         contributors: vec![],
+        compaction: Arc::new(crate::turn::Breaker::default()),
         compactor: None,
         budget: crate::turn::TurnBudget::default(),
         env: Arc::new(Env {
@@ -282,5 +283,56 @@ pub fn config(
             data_dir: "/tmp".into(),
         }),
         tool_host,
+    }
+}
+
+/// A compaction strategy that answers from a script, so a test decides
+/// whether a summary shrinks anything.
+pub struct ScriptedCompactor {
+    answers: Mutex<VecDeque<Result<Compaction, KernelError>>>,
+    pub calls: Mutex<Vec<(CompactReason, u32, u64)>>,
+}
+
+impl ScriptedCompactor {
+    pub fn new(answers: Vec<Result<Compaction, KernelError>>) -> Arc<Self> {
+        Arc::new(Self {
+            answers: Mutex::new(answers.into()),
+            calls: Mutex::new(Vec::new()),
+        })
+    }
+
+    /// A cut at `boundary` that claims to go from `before` to `after` tokens.
+    pub fn cut(boundary: &str, before: u64, after: u64) -> Result<Compaction, KernelError> {
+        Ok(Compaction {
+            summary: "what happened so far".into(),
+            boundary: ItemId::from_raw(boundary),
+            kept: Vec::new(),
+            before,
+            after,
+            usage: Usage {
+                input_tokens: 100,
+                output_tokens: 20,
+                ..Usage::default()
+            },
+        })
+    }
+}
+
+#[async_trait]
+impl Compactor for ScriptedCompactor {
+    async fn compact(
+        &self,
+        cx: CompactContext<'_>,
+        reason: CompactReason,
+    ) -> Result<Compaction, KernelError> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push((reason, cx.failures, cx.keep_budget));
+        self.answers
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or_else(|| Err(KernelError::new(ErrorCode::Internal, "compactor exhausted")))
     }
 }

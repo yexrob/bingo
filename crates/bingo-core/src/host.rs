@@ -141,6 +141,9 @@ impl Host {
         let settings = settings::merge(&config.layers, &claims)?;
         let registry = Registry::load(&plugins, &settings.plugins, &config.env)?;
         let (gateway, _) = broadcast::channel(GATEWAY_CAPACITY);
+        let learned = Arc::new(Learned::load(
+            config.env.data_dir.join("learned-windows.json"),
+        ));
         let host = Arc::new_cyclic(|weak| Host {
             config,
             settings,
@@ -148,7 +151,7 @@ impl Host {
             plugins,
             sessions: Mutex::new(BTreeMap::new()),
             gateway,
-            learned: Arc::new(Learned::default()),
+            learned,
             weak: weak.clone(),
         });
         host.start_plugins().await?;
@@ -433,6 +436,7 @@ impl Host {
                 .unwrap_or_else(|| Arc::new(DefaultPolicy)),
             hooks: self.registry.hooks.clone(),
             contributors: self.registry.contributors.clone(),
+            compaction: Arc::new(crate::turn::Breaker::default()),
             compactor: self.registry.compactor.clone(),
             budget: self.config.budget,
             env: Arc::new(self.config.env.clone()),

@@ -9,6 +9,8 @@
 //! ```
 
 mod config;
+mod contributors;
+mod ruler;
 mod stream;
 
 use std::sync::Arc;
@@ -17,12 +19,13 @@ use async_trait::async_trait;
 use bingo_sdk::*;
 use jiff::Timestamp;
 
-pub use config::{ModelChoice, TurnBudget, TurnConfig};
+pub use config::{Breaker, ModelChoice, TurnBudget, TurnConfig};
+use ruler::Ruler;
 use stream::Streamed;
 pub use stream::{MAX_RETRY_DELAY, MAX_SERVER_RETRY_DELAY, backoff};
 
 use crate::accumulator::Finished;
-use crate::context::{ContextView, estimate_tokens, splice_compaction};
+use crate::context::{ContextView, budget, elide, estimate_tokens, splice_compaction};
 use crate::executor::{self, Gate, PendingCall};
 use crate::gate::{GateInput, gate_call, hook_applies};
 use crate::models::vision;
@@ -74,6 +77,7 @@ struct Turn<'a> {
     generation: u64,
     usage: Usage,
     hook_cx: HookContext,
+    ruler: Ruler,
 }
 
 enum Step {
@@ -97,6 +101,8 @@ pub async fn run_turn(cfg: &TurnConfig, run: TurnRun, host: &dyn TurnHost) -> Tu
         session: cfg.session.id.clone(),
         turn: Some(run.turn.clone()),
         cwd: cfg.cwd.clone(),
+        provider: Some(cfg.model.provider.clone()),
+        model: Some(cfg.model.id.clone()),
     };
     let mut turn = Turn {
         cfg,
@@ -109,6 +115,7 @@ pub async fn run_turn(cfg: &TurnConfig, run: TurnRun, host: &dyn TurnHost) -> Tu
         recoveries: 0,
         empty_retry_used: false,
         overflow_compacted: false,
+        ruler: Ruler::new(cfg.model.capabilities.context_window, cfg.model.max_tokens),
         generation: run.generation,
         usage: Usage::default(),
         hook_cx,
@@ -190,77 +197,72 @@ impl Turn<'_> {
         want: impl Fn(Placement) -> bool,
         usage: &ContextUsage,
     ) -> Vec<SystemBlock> {
-        let mut system = Vec::new();
-        let contributors: Vec<Arc<dyn ContextContributor>> = self
-            .cfg
-            .contributors
-            .iter()
-            .filter(|c| want(c.placement()))
-            .cloned()
-            .collect();
-        let mut ordered: Vec<(i32, Arc<dyn ContextContributor>)> = contributors
-            .into_iter()
-            .map(|c| {
-                (
-                    match c.placement() {
-                        Placement::System { order } => order,
-                        _ => 0,
-                    },
-                    c,
-                )
-            })
-            .collect();
-        ordered.sort_by_key(|(order, _)| *order);
-        for (_, c) in ordered {
-            let query = ContextQuery {
-                session: &self.cfg.session,
-                turn: &self.id,
-                round: self.round,
-                items: &self.items,
-                usage,
-                capabilities: &self.cfg.model.capabilities,
-                cwd: &self.cfg.cwd,
-            };
-            let pieces = match c.contribute(query).await {
-                Ok(p) => p,
-                Err(e) => {
-                    self.host.emit(Event::Notice {
-                        level: Level::Warn,
-                        code: "CONTRIBUTOR_FAILED".into(),
-                        text: format!("{}: {e}", c.id()),
-                    });
-                    continue;
-                }
-            };
-            for piece in pieces {
-                match piece {
-                    ContextPiece::System(block) => system.push(block),
-                    ContextPiece::User { parts, .. } => {
-                        self.user_piece(parts, format!("contributor:{}", c.id()))
-                    }
-                }
-            }
+        let query = ContextQuery {
+            session: &self.cfg.session,
+            turn: &self.id,
+            round: self.round,
+            items: &self.items,
+            usage,
+            capabilities: &self.cfg.model.capabilities,
+            cwd: &self.cfg.cwd,
+        };
+        let gathered = contributors::gather(&self.cfg.contributors, want, query).await;
+        for (id, e) in gathered.failed {
+            self.warn("CONTRIBUTOR_FAILED", format!("{id}: {e}"));
         }
-        system
+        for (label, parts) in gathered.user {
+            self.user_piece(parts, label);
+        }
+        gathered.system
+    }
+
+    /// A warning on the ephemeral stream: the person sees it, the journal does not.
+    fn warn(&self, code: &str, text: impl Into<String>) {
+        self.host.emit(Event::Notice {
+            level: Level::Warn,
+            code: code.into(),
+            text: text.into(),
+        });
     }
 
     fn tool_specs(&self) -> Vec<ToolSpec> {
         self.cfg.tools.iter().map(|t| t.spec()).collect()
     }
 
-    fn measure(&self, system: &[SystemBlock], messages: &[Message]) -> ContextUsage {
-        let used = estimate_tokens(system, messages, &self.tool_specs());
-        let window = self.cfg.model.capabilities.context_window;
-        let trigger = self
-            .cfg
-            .compactor
-            .as_ref()
-            .map(|c| c.threshold(&self.cfg.model.capabilities))
-            .unwrap_or(window);
-        ContextUsage {
-            used,
-            window,
-            trigger,
+    fn measure(&mut self, system: &[SystemBlock], messages: &[Message]) -> ContextUsage {
+        let estimate = estimate_tokens(system, messages, &self.tool_specs());
+        self.ruler.measure(estimate)
+    }
+
+    /// Stale tool results leave the wire past the micro line; after an
+    /// overflow the retry keeps fewer. The items are untouched.
+    fn microcompact(&self, messages: Vec<Message>, usage: &ContextUsage) -> Vec<Message> {
+        let Some(keep) = self.ruler.keep_recent(self.overflow_compacted, usage) else {
+            return messages;
+        };
+        elide::elide_old_results(&messages, keep, budget::ELIDE_MIN_CHARS).unwrap_or(messages)
+    }
+
+    /// An exact count when the endpoint offers one and the estimate has
+    /// drifted far enough from the last truth to be worth a request.
+    async fn recount(&mut self, request: &ModelRequest) {
+        if !self.cfg.model.capabilities.count_tokens || !self.ruler.recount_due() {
+            return;
+        }
+        match self.cfg.model.provider.count_tokens(request).await {
+            Ok(counted) => self.ruler.counted(counted),
+            Err(e) => tracing::debug!(error = %e, "count_tokens unavailable; the estimate stands"),
+        }
+    }
+
+    /// The person is told once per turn when the window is nearly spent.
+    fn warn_once(&mut self, usage: &ContextUsage) {
+        if let Some(text) = self.ruler.warning(usage) {
+            self.host.emit(Event::Notice {
+                level: Level::Warn,
+                code: "CONTEXT_WARNING".into(),
+                text,
+            });
         }
     }
 
@@ -307,28 +309,49 @@ impl Turn<'_> {
             .await;
         let mut system = self.cfg.system.clone();
         system.extend(extra_system);
-        let messages = self.without_images(ContextView::fold_items(&self.items));
+        let full = self.without_images(ContextView::fold_items(&self.items));
+        let usage = self.measure(&system, &full);
+        let messages = self.microcompact(full, &usage);
         let usage = self.measure(&system, &messages);
-        if let Some(compactor) = self.cfg.compactor.clone()
-            && usage.used >= compactor.threshold(&self.cfg.model.capabilities)
+        let request = ModelRequest {
+            model: self.cfg.model.id.clone(),
+            max_tokens: self.cfg.model.max_tokens,
+            system,
+            messages,
+            tools: self.tool_specs(),
+            reasoning: self.cfg.model.reasoning,
+            provider_options: ProviderMetadata::new(),
+        };
+        self.recount(&request).await;
+        let usage = self.ruler.anchored(usage);
+        self.warn_once(&usage);
+        if usage.used >= self.ruler.lines.trigger
             && self.round == 0
+            && self.try_compact(usage).await
         {
-            self.compact(compactor.as_ref(), CompactReason::Threshold, usage)
-                .await;
             return Assembled::Compacted;
         }
-        Assembled::Request {
-            request: ModelRequest {
-                model: self.cfg.model.id.clone(),
-                max_tokens: self.cfg.model.max_tokens,
-                system,
-                messages,
-                tools: self.tool_specs(),
-                reasoning: self.cfg.model.reasoning,
-                provider_options: ProviderMetadata::new(),
-            },
-            usage,
+        Assembled::Request { request, usage }
+    }
+
+    /// A threshold compaction, unless the breaker says the last three bought
+    /// nothing; then the turn goes on and the person is told.
+    async fn try_compact(&mut self, usage: ContextUsage) -> bool {
+        let Some(compactor) = self.cfg.compactor.clone() else {
+            return false;
+        };
+        if self.cfg.compaction.tripped() {
+            self.warn(
+                "COMPACTION_SKIPPED",
+                format!(
+                    "no summary: the last {} bought nothing; the turn goes on uncompacted",
+                    Breaker::TRIP
+                ),
+            );
+            return false;
         }
+        self.compact(compactor.as_ref(), CompactReason::Threshold, usage)
+            .await
     }
 
     /// A model without vision never sees an image part; the note stands in on
@@ -345,6 +368,7 @@ impl Turn<'_> {
     /// the estimate the assembler made.
     fn account(&mut self, finished: &Finished, usage: ContextUsage) {
         self.usage.add(finished.usage);
+        self.ruler.responded(finished.usage.input_total());
         let context = ContextUsage {
             used: finished.usage.input_total().max(usage.used),
             ..usage
@@ -437,12 +461,14 @@ impl Turn<'_> {
         })
     }
 
+    /// Ask the strategy for a cut and take it only if it shrinks something;
+    /// what it cost is billed either way. Returns whether the items changed.
     async fn compact(
         &mut self,
         compactor: &dyn Compactor,
         reason: CompactReason,
         usage: ContextUsage,
-    ) {
+    ) -> bool {
         let started = std::time::Instant::now();
         let cx = CompactContext {
             items: &self.items,
@@ -451,15 +477,30 @@ impl Turn<'_> {
             provider: self.cfg.model.provider.clone(),
             model: &self.cfg.model.id,
             cancel: self.cancel.child_token(),
+            failures: self.cfg.compaction.failures(),
+            keep_budget: self.ruler.lines.keep,
         };
-        let compacted = compactor.compact(cx, reason).await;
-        match compacted {
-            Ok(c) => self.absorb_compaction(c, started.elapsed()),
-            Err(e) => self.host.emit(Event::Notice {
-                level: Level::Warn,
-                code: "COMPACTION_FAILED".into(),
-                text: e.to_string(),
-            }),
+        match compactor.compact(cx, reason).await {
+            Ok(c) if c.after < c.before => {
+                self.usage.add(c.usage);
+                self.cfg.compaction.succeeded();
+                self.absorb_compaction(c, started.elapsed());
+                self.ruler.forget();
+                true
+            }
+            Ok(c) => {
+                self.usage.add(c.usage);
+                let failures = self.cfg.compaction.failed();
+                self.warn("COMPACTION_USELESS", format!(
+                        "the summary would not shrink the context ({} → {} tokens); discarded, {failures} in a row",
+                        c.before, c.after
+                    ));
+                false
+            }
+            Err(e) => {
+                self.warn("COMPACTION_FAILED", e.to_string());
+                false
+            }
         }
     }
 

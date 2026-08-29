@@ -126,19 +126,22 @@ impl Turn<'_> {
             self.learn_window(message);
         }
         if let ProviderError::ContextOverflow { .. } = &error
-            && let Some(compactor) = self.cfg.compactor.clone()
             && !self.overflow_compacted
         {
+            // One retry: the strategy's overflow cut if there is one, and
+            // the forced microcompact either way (ADR-0006).
             self.overflow_compacted = true;
             self.announce_retry(&error, dropped, 0);
-            self.compact(
-                compactor.as_ref(),
-                CompactReason::Overflow {
-                    message: error.to_string(),
-                },
-                usage,
-            )
-            .await;
+            if let Some(compactor) = self.cfg.compactor.clone() {
+                self.compact(
+                    compactor.as_ref(),
+                    CompactReason::Overflow {
+                        message: error.to_string(),
+                    },
+                    usage,
+                )
+                .await;
+            }
             return Step::Assembling;
         }
         if error.retryable() && self.retries < self.cfg.budget.max_retries {

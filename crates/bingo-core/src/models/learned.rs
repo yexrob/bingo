@@ -6,6 +6,7 @@
 //! the catalogue.
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use super::declared::key;
@@ -18,9 +19,32 @@ pub const MAX_WINDOW: u64 = 10_000_000;
 #[derive(Debug, Default)]
 pub struct Learned {
     map: Mutex<HashMap<String, u64>>,
+    /// Where the lessons outlive the process (ADR-0006); `None` keeps them
+    /// in memory, as tests do.
+    path: Option<PathBuf>,
 }
 
 impl Learned {
+    /// The lessons written by earlier processes, from `path`; a file that
+    /// is missing or unreadable is an empty start, never an error.
+    pub fn load(path: PathBuf) -> Self {
+        let map = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .unwrap_or_default();
+        Self {
+            map: Mutex::new(map),
+            path: Some(path),
+        }
+    }
+
+    fn save(&self, map: &HashMap<String, u64>) {
+        let Some(path) = &self.path else { return };
+        if let Err(e) = write_atomically(path, map) {
+            tracing::warn!(path = %path.display(), error = %e, "learned windows not saved");
+        }
+    }
+
     /// Keep the smallest window the server has named; returns whether the
     /// lesson changed anything.
     pub fn record(&self, provider: &str, model: &str, window: u64) -> bool {
@@ -29,12 +53,12 @@ impl Learned {
         }
         let mut map = self.map.lock().unwrap_or_else(|p| p.into_inner());
         let known = map.entry(key(provider, model)).or_insert(u64::MAX);
-        if window < *known {
-            *known = window;
-            true
-        } else {
-            false
+        if window >= *known {
+            return false;
         }
+        *known = window;
+        self.save(&map);
+        true
     }
 
     pub fn window(&self, provider: &str, model: &str) -> Option<u64> {
@@ -74,6 +98,15 @@ pub fn window_from_overflow(message: &str) -> Option<u64> {
             .max()
             .and_then(|rejected| sane(rejected.saturating_mul(85) / 100))
     })
+}
+
+fn write_atomically(path: &Path, map: &HashMap<String, u64>) -> std::io::Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, serde_json::to_vec_pretty(map)?)?;
+    std::fs::rename(tmp, path)
 }
 
 fn leading_number(text: &str) -> Option<u64> {
@@ -124,6 +157,20 @@ mod tests {
         assert_eq!(window_from_overflow("context overflow"), None);
         assert_eq!(window_from_overflow("limit: 1 + 2 > 3"), None);
         assert_eq!(window_from_overflow("req 123456789012 tokens"), None);
+    }
+
+    #[test]
+    fn a_lesson_outlives_the_process_through_its_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("learned-windows.json");
+        let first = Learned::load(path.clone());
+        assert!(first.record("p", "m", 128_000));
+        let second = Learned::load(path.clone());
+        assert_eq!(second.window("p", "m"), Some(128_000));
+        assert_eq!(
+            Learned::load(dir.path().join("absent.json")).window("p", "m"),
+            None
+        );
     }
 
     #[test]

@@ -3,6 +3,7 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use bingo_sdk::*;
 
@@ -36,11 +37,40 @@ pub struct ModelChoice {
     pub learned: Arc<Learned>,
 }
 
+/// Compactions the kernel discarded in a row, per session (ADR-0006). At
+/// `TRIP` the breaker is tripped: no more summaries are paid for until one
+/// shrinks something.
+#[derive(Debug, Default)]
+pub struct Breaker {
+    failures: AtomicU32,
+}
+
+impl Breaker {
+    pub const TRIP: u32 = 3;
+
+    pub fn failures(&self) -> u32 {
+        self.failures.load(Ordering::Relaxed)
+    }
+
+    pub fn tripped(&self) -> bool {
+        self.failures() >= Self::TRIP
+    }
+
+    pub fn failed(&self) -> u32 {
+        self.failures.fetch_add(1, Ordering::Relaxed) + 1
+    }
+
+    pub fn succeeded(&self) {
+        self.failures.store(0, Ordering::Relaxed);
+    }
+}
+
 /// Everything a turn reads. Built by the host per session; plugins are already resolved.
 pub struct TurnConfig {
     pub session: SessionSummary,
     pub cwd: PathBuf,
     pub model: ModelChoice,
+    pub compaction: Arc<Breaker>,
     pub system: Vec<SystemBlock>,
     pub tools: Vec<Arc<dyn Tool>>,
     pub policy: Arc<dyn PermissionPolicy>,
