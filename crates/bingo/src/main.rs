@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 
+use bingo_core::settings;
 use bingo_core::{Host, HostConfig};
 use bingo_provider_fake::{FakePlugin, FakeProvider, Script};
 use bingo_sdk::{
@@ -13,6 +14,7 @@ use bingo_sdk::{
 use bingo_surface_print::PrintPlugin;
 use bingo_tool_fs::FsPlugin;
 use clap::{Parser, ValueEnum};
+use serde_json::{Map, Value, json};
 
 #[derive(Parser, Debug)]
 #[command(name = "bingo", version, about = "A local coding-agent harness")]
@@ -28,13 +30,29 @@ struct Cli {
     #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
     output_format: OutputFormat,
 
-    /// The model provider to talk to.
-    #[arg(long, default_value = "fake")]
-    provider: String,
+    /// The model provider; the settings' `provider`, else the first registered.
+    #[arg(long)]
+    provider: Option<String>,
 
-    /// The model id; the provider's default when absent.
+    /// The model id; the settings' `model`, else the provider's default.
     #[arg(long)]
     model: Option<String>,
+
+    /// An extra settings file, above the user, project and local layers.
+    #[arg(long, value_name = "PATH")]
+    settings: Option<PathBuf>,
+
+    /// default | acceptEdits | plan | bypassPermissions | dontAsk
+    #[arg(long, value_name = "MODE")]
+    permission_mode: Option<String>,
+
+    /// Skip every permission prompt (the same as `--permission-mode bypassPermissions`).
+    #[arg(long)]
+    dangerously_skip_permissions: bool,
+
+    /// Permission rules to allow for this run, e.g. `Bash(git status:*)`.
+    #[arg(long, value_name = "RULE", value_delimiter = ',')]
+    allowed_tools: Vec<String>,
 
     /// The session's working directory; the process cwd when absent.
     #[arg(long)]
@@ -79,42 +97,64 @@ async fn run(cli: Cli) -> Result<i32, KernelError> {
             "the interactive interface is not built yet; run with --print",
         ));
     }
-    let cwd = match cli.cwd {
-        Some(cwd) => cwd,
-        None => std::env::current_dir().map_err(|e| {
-            KernelError::new(ErrorCode::Internal, format!("current directory: {e}"))
-        })?,
-    };
-    let home = std::env::home_dir().unwrap_or_else(|| cwd.clone());
-    let env = Env {
-        config_dir: home.join(".bingo"),
-        data_dir: home.join(".bingo").join("data"),
-        home,
-    };
-
-    let script = Script::from_env()
-        .map_err(|e| KernelError::new(ErrorCode::InvalidInput, e.to_string()))?
-        .unwrap_or_else(Script::demo);
-    let plugins: Vec<Box<dyn Plugin>> = vec![
-        Box::new(FakePlugin::new(Arc::new(FakeProvider::new(script)))),
-        Box::new(FsPlugin),
-        Box::new(PrintPlugin),
-    ];
-    let mut config = HostConfig::new(env);
-    config.provider = Some(cli.provider);
-    config.model = cli.model;
-    config.system_prompt = format!(
-        "You are bingo, a coding agent. The working directory is {}.",
-        cwd.display()
-    );
-    let host = Host::build(plugins, config)
+    let cwd = working_dir(cli.cwd.as_deref())?;
+    let config = host_config(&cli, &cwd)?;
+    let host = Host::build(plugins()?, config)
         .await
         .map_err(|e| KernelError::new(ErrorCode::Internal, e.to_string()))?;
-
+    for (code, text) in host.notices() {
+        eprintln!("[notice] {code} {text}");
+    }
     let surface = host
         .surface("print")
         .ok_or_else(|| KernelError::new(ErrorCode::Internal, "no print surface"))?;
-    let opts = SurfaceOptions {
+    let exit = surface.run(host.handle(), surface_options(cli, cwd)).await;
+    host.shutdown().await;
+    exit.map(|e| e.code)
+}
+
+fn working_dir(flag: Option<&std::path::Path>) -> Result<PathBuf, KernelError> {
+    match flag {
+        Some(cwd) => Ok(cwd.to_path_buf()),
+        None => std::env::current_dir()
+            .map_err(|e| KernelError::new(ErrorCode::Internal, format!("current directory: {e}"))),
+    }
+}
+
+fn environment(cwd: &std::path::Path) -> Env {
+    let home = std::env::home_dir().unwrap_or_else(|| cwd.to_path_buf());
+    Env {
+        config_dir: home.join(".bingo"),
+        data_dir: home.join(".bingo").join("data"),
+        home,
+    }
+}
+
+/// Every plugin this build ships, in registration order.
+fn plugins() -> Result<Vec<Box<dyn Plugin>>, KernelError> {
+    let script = Script::from_env()
+        .map_err(|e| KernelError::new(ErrorCode::InvalidInput, e.to_string()))?
+        .unwrap_or_else(Script::demo);
+    Ok(vec![
+        Box::new(FakePlugin::new(Arc::new(FakeProvider::new(script)))),
+        Box::new(FsPlugin),
+        Box::new(PrintPlugin),
+    ])
+}
+
+fn host_config(cli: &Cli, cwd: &std::path::Path) -> Result<HostConfig, KernelError> {
+    let mut config = HostConfig::new(environment(cwd));
+    config.layers = settings::load(&config.env, cwd, cli.settings.as_deref())
+        .map_err(|e| KernelError::new(ErrorCode::InvalidInput, e.to_string()))?;
+    config
+        .layers
+        .push(settings::Layer::new("cli", cli_layer(cli)));
+    config.shell = std::env::var("SHELL").ok();
+    Ok(config)
+}
+
+fn surface_options(cli: Cli, cwd: PathBuf) -> SurfaceOptions {
+    SurfaceOptions {
         cwd: cwd.clone(),
         selector: SessionSelector::Create {
             spec: SessionSpec {
@@ -124,9 +164,33 @@ async fn run(cli: Cli) -> Result<i32, KernelError> {
             },
         },
         prompt: cli.prompt,
-        args: serde_json::json!({ "outputFormat": cli.output_format.as_str() }),
+        args: json!({ "outputFormat": cli.output_format.as_str() }),
+    }
+}
+
+/// The command line as the highest settings layer: only what was given.
+fn cli_layer(cli: &Cli) -> Map<String, Value> {
+    let mut layer = Map::new();
+    if let Some(provider) = &cli.provider {
+        layer.insert("provider".into(), json!(provider));
+    }
+    if let Some(model) = &cli.model {
+        layer.insert("model".into(), json!(model));
+    }
+    let mut permissions = Map::new();
+    let mode = if cli.dangerously_skip_permissions {
+        Some("bypassPermissions".to_string())
+    } else {
+        cli.permission_mode.clone()
     };
-    let exit = surface.run(host.handle(), opts).await;
-    host.shutdown().await;
-    exit.map(|e| e.code)
+    if let Some(mode) = mode {
+        permissions.insert("defaultMode".into(), json!(mode));
+    }
+    if !cli.allowed_tools.is_empty() {
+        permissions.insert("allow".into(), json!(cli.allowed_tools));
+    }
+    if !permissions.is_empty() {
+        layer.insert("permissions".into(), Value::Object(permissions));
+    }
+    layer
 }
