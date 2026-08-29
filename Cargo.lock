@@ -152,6 +152,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "bingo-context"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bingo-sdk",
+ "futures",
+ "insta",
+ "jiff",
+ "proptest",
+ "schemars",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "bingo-core"
 version = "0.1.0"
 dependencies = [

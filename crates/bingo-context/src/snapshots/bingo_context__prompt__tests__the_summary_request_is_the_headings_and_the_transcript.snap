@@ -1,0 +1,23 @@
+---
+source: crates/bingo-context/src/prompt.rs
+expression: "json!({ \"system\": request.system, \"messages\": request.messages, })"
+---
+{
+  "system": [
+    {
+      "text": "You are compacting an agent conversation. Your summary replaces the transcript below, and it is all the agent will have of that work — anything you leave out is lost. Write it under these headings, skipping any heading with nothing to report:\n\n## Task and current state\nWhat the user asked for, and exactly where the work stands now.\n\n## Decisions and rationale\nChoices that were made and why, including approaches that were tried and rejected.\n\n## Files, commands and results\nFiles read or changed, with their paths. Commands that were executed and what they returned.\n\n## Outstanding work\nWhat is not done yet, in the order it should be tackled.\n\n## Constraints and preferences\nRules, conventions and user preferences that still apply.\n\nReproduce identifiers, paths, commands and error text exactly; never invent anything the transcript does not contain. Let the length follow the content — usually several hundred to a thousand words.",
+      "cache": false
+    }
+  ],
+  "messages": [
+    {
+      "role": "user",
+      "parts": [
+        {
+          "type": "text",
+          "text": "user: add a compaction test\nassistant: reading the compactor\ntool Read({\"path\":\"crates/bingo-context/src/compact.rs\"})\nresult: pub struct SummaryCompactor;\nassistant: the split is the interesting part\nuser: keep the tool pairs together"
+        }
+      ]
+    }
+  ]
+}
