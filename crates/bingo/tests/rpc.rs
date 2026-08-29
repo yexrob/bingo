@@ -418,3 +418,96 @@ async fn delete_removes_the_session_from_disk_and_shutdown_exits_zero() {
     kernel.shutdown().await.unwrap();
     assert!(server.child.wait().await.unwrap().success());
 }
+
+/// Fold frames until the ack for `intent`; the outcome.
+async fn ack_for(attachment: &mut Attachment, intent: &IntentId) -> bingo_sdk::IntentOutcome {
+    let deadline = tokio::time::sleep(Duration::from_secs(20));
+    tokio::pin!(deadline);
+    loop {
+        tokio::select! {
+            frame = attachment.events.next() => {
+                let frame = frame.expect("the stream stays open");
+                attachment.snapshot.apply(&frame);
+                if let Event::IntentAck { intent: i, outcome } = frame.event
+                    && &i == intent
+                {
+                    return outcome;
+                }
+            }
+            _ = &mut deadline => panic!("no ack for {intent}"),
+        }
+    }
+}
+
+/// A shell line is an action in the transcript; `/permission` changes what the
+/// gate does for this session; both are commands the kernel dispatches (ADR-0008).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_shell_line_and_a_permission_mode_dispatch_as_commands() {
+    let mut server = Server::spawn(
+        r#"{"responses":[
+            {"steps":[{"toolCall":{"name":"Write","input":{"file_path":"quiet.txt","content":"no prompt\n"}}}]},
+            {"steps":[{"text":"Written."}]}
+        ]}"#,
+    );
+    let kernel = ready(&mut server).await;
+    let mut attachment = kernel.open(create(server.cwd()), who()).await.unwrap();
+
+    let shell = IntentId::mint();
+    attachment.handle.submit(
+        shell.clone(),
+        Input::text("!echo hi over the wire", Origin::surface("test")),
+    );
+    let bingo_sdk::IntentOutcome::Applied { result } = ack_for(&mut attachment, &shell).await
+    else {
+        panic!("a shell line is applied");
+    };
+    let item = bingo_sdk::ItemId::from_raw(result["item"].as_str().unwrap());
+    let recorded = attachment.snapshot.item(&item).unwrap();
+    assert!(
+        matches!(
+            &recorded.body,
+            bingo_sdk::ItemBody::Action { name, args, result: Some(out) }
+                if name == "!" && args == "echo hi over the wire" && out == "hi over the wire\n"
+        ),
+        "{recorded:?}"
+    );
+
+    let mode = IntentId::mint();
+    attachment.handle.submit(
+        mode.clone(),
+        Input::text("/permission acceptEdits", Origin::surface("test")),
+    );
+    let ack = ack_for(&mut attachment, &mode).await;
+    assert!(
+        matches!(&ack, bingo_sdk::IntentOutcome::Applied { result } if result["message"] == "permission mode: acceptEdits"),
+        "{ack:?}"
+    );
+
+    let unknown = IntentId::mint();
+    attachment.handle.submit(
+        unknown.clone(),
+        Input::text("/nope", Origin::surface("test")),
+    );
+    assert!(matches!(
+        ack_for(&mut attachment, &unknown).await,
+        bingo_sdk::IntentOutcome::Rejected { error } if error.code == ErrorCode::InvalidInput
+    ));
+
+    attachment.handle.submit(
+        IntentId::mint(),
+        Input::text("write it", Origin::surface("test")),
+    );
+    let frames = until_completed(&mut attachment).await;
+    assert!(
+        frames
+            .iter()
+            .all(|f| !matches!(f.event, Event::InteractionOpened { .. })),
+        "acceptEdits asks nothing for a Write"
+    );
+    assert_eq!(attachment.snapshot.last_turn, Some(TurnStatus::Completed));
+    assert_eq!(
+        std::fs::read_to_string(server.cwd().join("quiet.txt")).unwrap(),
+        "no prompt\n"
+    );
+    kernel.shutdown().await.unwrap();
+}
