@@ -251,9 +251,17 @@ pub fn plugin_view(plugin: &str, value: Value) -> Event {
     }
 }
 
-/// What the permission policy publishes for a session.
+/// What the permission policy publishes for a session: the mode, the list
+/// it may be cycled through, the rules it accepted.
 pub fn permission_view(mode: &str) -> Event {
-    plugin_view("permissions", json!({ "mode": mode, "rules": [] }))
+    plugin_view(
+        "permissions",
+        json!({
+            "mode": mode,
+            "modes": ["default", "acceptEdits", "plan", "bypassPermissions", "dontAsk"],
+            "rules": [],
+        }),
+    )
 }
 
 /// A session whose policy has published this mode and nothing else.

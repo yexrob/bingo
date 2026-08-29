@@ -12,27 +12,26 @@ use bingo_sdk::SessionState;
 /// The policy whose view carries the mode, keyed by its plugin id.
 const POLICY: &str = "permissions";
 
-/// The modes in the order the chord walks them. The policy owns the list and
-/// rejects what it does not know; a mode this surface has never heard of
-/// simply does not cycle.
-const CYCLE: [&str; 5] = [
-    "default",
-    "acceptEdits",
-    "plan",
-    "bypassPermissions",
-    "dontAsk",
-];
-
 /// What the policy says this session's mode is, or nothing when no policy
 /// published one.
 pub fn mode(state: &SessionState) -> Option<&str> {
     state.config.plugins.get(POLICY)?.get("mode")?.as_str()
 }
 
-/// The mode after this one, wrapping. `None` when it is not one of the five.
-pub fn next(mode: &str) -> Option<&'static str> {
-    let at = CYCLE.iter().position(|known| *known == mode)?;
-    Some(CYCLE[(at + 1) % CYCLE.len()])
+/// The mode after the current one, wrapping, in the order the policy
+/// published (`modes`); it owns the list, this surface only walks it. `None`
+/// when there is no view, no list, or the mode is not in it.
+pub fn next(state: &SessionState) -> Option<&str> {
+    let view = state.config.plugins.get(POLICY)?;
+    let current = view.get("mode")?.as_str()?;
+    let modes: Vec<&str> = view
+        .get("modes")?
+        .as_array()?
+        .iter()
+        .filter_map(|m| m.as_str())
+        .collect();
+    let at = modes.iter().position(|known| *known == current)?;
+    modes.get((at + 1) % modes.len()).copied()
 }
 
 #[cfg(test)]
@@ -57,11 +56,16 @@ mod tests {
     }
 
     #[test]
-    fn the_cycle_walks_the_five_and_comes_back() {
-        let mut seen = vec!["default"];
-        for _ in 0..CYCLE.len() {
-            let last = seen.last().copied().expect("a mode to walk from");
-            seen.push(next(last).expect("a known mode has a successor"));
+    fn the_cycle_walks_the_list_the_policy_published_and_comes_back() {
+        let mut seen = vec!["default".to_string()];
+        for _ in 0..5 {
+            let last = seen.last().cloned().expect("a mode to walk from");
+            let state = with_permission_mode(&last);
+            seen.push(
+                next(&state)
+                    .expect("a known mode has a successor")
+                    .to_string(),
+            );
         }
         assert_eq!(
             seen,
@@ -77,8 +81,13 @@ mod tests {
     }
 
     #[test]
-    fn a_mode_this_surface_does_not_know_has_no_successor() {
-        assert_eq!(next("acceptedits"), None);
-        assert_eq!(next(""), None);
+    fn a_mode_outside_the_published_list_has_no_successor() {
+        assert_eq!(next(&with_permission_mode("acceptedits")), None);
+        assert_eq!(next(&state()), None);
+        let unlisted = folded(vec![frame(
+            1,
+            plugin_view("permissions", serde_json::json!({ "mode": "plan" })),
+        )]);
+        assert_eq!(next(&unlisted), None, "no list, no cycle");
     }
 }

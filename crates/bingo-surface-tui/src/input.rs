@@ -219,7 +219,7 @@ fn plain(ui: &mut Ui, state: &SessionState, key: KeyEvent, now: Now) -> Vec<Effe
 /// would: the kernel decides, and the badge moves when the config frame lands.
 /// Nothing is assumed here, so a refused command leaves the screen truthful.
 fn cycle_mode(ui: &mut Ui, state: &SessionState, now: Now) -> Vec<Effect> {
-    let Some(next) = permission::mode(state).and_then(permission::next) else {
+    let Some(next) = permission::next(state) else {
         ui.notify(Level::Warn, UNKNOWN_MODE, now.instant);
         return Vec::new();
     };

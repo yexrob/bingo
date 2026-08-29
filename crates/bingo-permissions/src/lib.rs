@@ -200,6 +200,7 @@ impl PermissionPolicy for PermissionsPolicy {
     fn describe(&self, session: &SessionId) -> serde_json::Value {
         serde_json::json!({
             "mode": self.mode_for(session),
+            "modes": Mode::ALL,
             "rules": self.sessions.rules(session).iter().map(Rule::raw).collect::<Vec<_>>(),
         })
     }
@@ -418,15 +419,22 @@ mod tests {
     fn describe_names_the_mode_and_the_rules_a_session_accepted() {
         let policy = PermissionsPolicy::new(Permissions::default(), None).expect("policy");
         let session = SessionId::from_raw("ses_1");
+        let modes = json!([
+            "default",
+            "acceptEdits",
+            "plan",
+            "bypassPermissions",
+            "dontAsk"
+        ]);
         assert_eq!(
             policy.describe(&session),
-            json!({ "mode": "default", "rules": [] })
+            json!({ "mode": "default", "modes": modes, "rules": [] })
         );
         policy.choose_mode(&session, Mode::AcceptEdits);
         assert!(policy.sessions.install(&session, "Bash(git status:*)"));
         assert_eq!(
             policy.describe(&session),
-            json!({ "mode": "acceptEdits", "rules": ["Bash(git status:*)"] })
+            json!({ "mode": "acceptEdits", "modes": modes, "rules": ["Bash(git status:*)"] })
         );
         assert_eq!(
             policy.describe(&SessionId::from_raw("ses_2"))["mode"],
