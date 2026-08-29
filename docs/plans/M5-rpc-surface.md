@@ -22,12 +22,12 @@ None new: `tokio-util` (`codec`) is already a workspace dependency; the client a
 
 ## Exit criteria
 
-- [ ] `cargo fmt --all -- --check`, `cargo check --workspace --all-targets --locked`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, `cargo test --workspace --locked`, `scripts/check_discipline.sh`, `scripts/budget.sh`, `cargo deny check`
-- [ ] Wire (unit, scripted `HostApi`): every method's params and result round-trip; `initialize` first; responses and notifications interleave in order; `session/open` then frames; `Lagged` → `session/events` resends from `since`; errors carry `data.code`; a parse error answers -32700 with `id: null`; `RemoteKernel` against the in-process server over a duplex pipe folds to the same `SessionState` as a direct attachment
-- [ ] Schema: `schema/rpc.json` matches `document()`; every property camelCase; every method in the table has both refs resolving to a `$defs` entry
-- [ ] stream-json: fixture frames → the exact lines (snapshot); a tool round is `assistant(tool_use)` then `user(tool_result)`; a failed turn is `result{is_error:true}`; stdout has no prose
-- [ ] Black-box: the twelve `tests/rpc.rs` scenarios; `--print --output-format stream-json` on a tool round parses line by line with `type` in `{system, assistant, user, result}`
-- [ ] sdk unchanged (or one change with the plugins it touched listed here)
+- [x] `cargo fmt --all -- --check`, `cargo check --workspace --all-targets --locked`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, `cargo test --workspace --locked`, `scripts/check_discipline.sh`, `scripts/budget.sh`, `cargo deny check`
+- [x] Wire (unit, scripted `HostApi`): every method's params and result round-trip; `initialize` first; responses and notifications interleave in order; `session/open` then frames; `Lagged` → `session/events` resends from `since`; errors carry `data.code`; a parse error answers -32700 with `id: null`; `RemoteKernel` against the in-process server over a duplex pipe folds to the same `SessionState` as a direct attachment
+- [x] Schema: `schema/rpc.json` matches `document()`; every property camelCase; every method in the table has both refs resolving to a `$defs` entry
+- [x] stream-json: fixture frames → the exact lines (snapshot); a tool round is `assistant(tool_use)` then `user(tool_result)`; a failed turn is `result{is_error:true}`; stdout has no prose
+- [x] Black-box: nine `tests/rpc.rs` scenarios covering the twelve listed facts; `--print --output-format stream-json` on a tool round parses line by line with `type` in `{system, assistant, user, result}`
+- [x] sdk changed once, for two corrections the wire exposed (ADR-0007 consequences): `rename_all_fields` on the tagged enums, `HostApi::catalog` async and fallible; touched `bingo-core`, `bingo-surface-print`, `bingo-surface-rpc`
 
 ## Non-goals
 
@@ -36,3 +36,40 @@ WebSocket transport and a token file (with the first browser or multi-client GUI
 ## Risks touched
 
 R2 — the RPC client and the TUI to come share the bounded channel + snapshot + resync design; the harness proves it before any TUI code exists. R1 — no sdk change planned. Ordering on one writer is the whole correctness of the server; it is one task by construction.
+
+## Verified (2026-08-29, commit 3c74314)
+
+```
+$ cargo fmt --all -- --check                                        exit 0
+$ cargo check --workspace --all-targets --locked                    exit 0
+$ cargo clippy --workspace --all-targets --locked -- -D warnings    exit 0
+$ cargo test --workspace --locked                                   exit 0, three runs in a row
+  bin (cli 26 + rpc 9) 35 · core 106 · sdk 19 · rpc 35 · print 50 · context 66 · store-jsonl 34 · provider-fake 19
+  provider-anthropic 68 · provider-openai 95 · tool-fs 69 · tool-bash 51 · tool-web 77 · permissions 92 = 816 passed
+$ scripts/check_discipline.sh                                       exit 0 (no warnings; surface crates hold no event mirror)
+$ scripts/budget.sh                                                 dependencies 216 (max 260); no crate added
+$ cargo deny check                                                  advisories ok, bans ok, licenses ok, sources ok
+$ printf '…initialize…shutdown…' | bingo serve --stdio              NOT_INITIALIZED, the handshake, {}; exit 0, stderr empty
+```
+
+Exit criteria, item by item:
+
+- Wire: `tests/wire` (rpc) drives `serve` over a duplex pair through raw JSON-RPC lines — every method round-trips, `initialize` first, the open response precedes the first event, `session/events` resends from `since`, `Lagged` is forwarded, -32700 with `id: null`, -32601, -32602, -32000 with `data.code`, `shutdown` ends `serve`; `RemoteKernel` against the in-process server folds to the scripted host's own state.
+- Schema: `schema/rpc.json` (71 `$defs`, 13 methods, 2 notifications) equals `document()`; every property camelCase with no allowance; every method ref resolves.
+- stream-json: four snapshots (text, tool round, failed, max-turns); every line typed; the error arm carries `errors`, not `result`, as the documented union says.
+- Black-box `tests/rpc.rs` over a spawned `bingo serve --stdio`: refused before `initialize`; stdout is JSON-RPC lines only across a turn, -32601 and -32700 with `id: null`; seq unbroken from the snapshot with the client's intent acknowledged; an interrupt into a running `Delay` ends `Interrupted` within seconds; a `Write` permission answered over the wire runs the tool; a 529 is a visible `TurnRetrying`; a `--print` run's session reopens `ById` with its items and pages `history`; the catalogue lists `fake` and `Read`; `delete` removes the directory; `shutdown` exits 0. `tests/cli/stream_json.rs`: a tool round is `system, assistant, assistant, user, assistant, result`; a failed turn is `result{is_error, errors}` and exit 1.
+
+Found while integrating (each is a commit body too):
+
+- The wire is the sdk, so building it audited the sdk: variant fields were snake_case on the wire (`rename_all_fields`, recorded frames and snapshots regenerated, journal stays version 1 — none had left a developer's machine); `HostApi::catalog` was synchronous (`be1c582`).
+- A kernel race the harness caught under `--workspace` load: the provider and the turn watch the same cancel token, and when the provider ended its stream first the turn read a completion; a cancelled token now makes the end an interruption, and a stream that ends without a finish otherwise is a retryable stream error (`3c74314`).
+- The shared flags (`--cwd`, `--settings`, provider/model, permissions, `--max-turns`) are global so `bingo serve --stdio --cwd X` parses.
+- `RemoteKernel` ignores `open`'s `who` (the `initialize` identity is the client) and `close`'s reason (a detach is a detach); both are said at the impl.
+
+Open, carried forward:
+
+- WebSocket transport, a token file and concurrent clients of one server — with the first browser or multi-client GUI.
+- `--input-format stream-json`, the command dispatcher (`Input::Action` is still `Rejected` on the wire), `HostHandle::env()`, a post-turn hook point — M6 with the TUI.
+- `SessionState` drops the finished `LiveTurn` at `TurnCompleted`, so the stream-json encoder keeps its own round count and start time; a `last_turn` carrying the finished `LiveTurn` would delete that state. `ConfigView` is never populated, so `permissionMode` in the init line is the constant `default`.
+- Protocol mismatch is not refused at `initialize`; the result carries `protocol` and the client decides.
+- Live smokes against Anthropic and OpenAI (M1, M2) — still need keys.
