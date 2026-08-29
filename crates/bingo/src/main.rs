@@ -17,6 +17,7 @@ use bingo_sdk::{
 };
 use bingo_store_jsonl::JsonlStorePlugin;
 use bingo_surface_print::{PrintPlugin, error_report, notice_report};
+use bingo_surface_rpc::RpcPlugin;
 use bingo_tool_bash::BashPlugin;
 use bingo_tool_fs::FsPlugin;
 use bingo_tool_web::WebPlugin;
@@ -205,6 +206,7 @@ fn plugins() -> Result<Vec<Box<dyn Plugin>>, KernelError> {
         Box::new(BashPlugin),
         Box::new(WebPlugin),
         Box::new(PrintPlugin),
+        Box::new(RpcPlugin),
     ])
 }
 
