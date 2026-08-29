@@ -113,11 +113,12 @@ impl SessionState {
         self.items.iter_mut().rev().find(|i| &i.id == id)
     }
 
-    fn upsert(&mut self, item: &Item) {
+    fn upsert(&mut self, item: &Item) -> Applied {
         match self.item_mut(&item.id) {
             Some(slot) => *slot = item.clone(),
             None => self.items.push(item.clone()),
         }
+        Applied::Item(item.id.clone())
     }
 
     pub fn apply(&mut self, frame: &Frame) -> Applied {
@@ -131,115 +132,141 @@ impl SessionState {
         }
         self.seq = frame.seq;
         match &frame.event {
-            Event::SessionUpdated { summary } => {
-                self.summary = summary.clone();
-                Applied::Session
-            }
-            Event::SessionClosed { .. } => {
-                self.closed = true;
-                self.turn = None;
-                self.interactions.clear();
-                Applied::Session
-            }
-            Event::TurnStarted { turn, origin, .. } => {
-                self.turn = Some(LiveTurn {
-                    id: turn.clone(),
-                    started_at: frame.ts,
-                    origin: *origin,
-                    round: 0,
-                    usage: Usage::default(),
-                    retrying: None,
-                });
-                self.summary.busy = true;
-                Applied::Turn
-            }
+            Event::SessionUpdated { summary } => self.session_updated(summary),
+            Event::SessionClosed { .. } => self.session_closed(),
+            Event::TurnStarted { turn, origin, .. } => self.turn_started(turn, *origin, frame.ts),
             Event::TurnRetrying {
                 attempt, dropped, ..
-            } => {
-                self.items.retain(|i| !dropped.contains(&i.id));
-                if let Some(t) = self.turn.as_mut() {
-                    t.retrying = Some(*attempt);
-                }
-                Applied::Turn
-            }
-            Event::TurnUsage { usage, context, .. } => {
-                if let Some(t) = self.turn.as_mut() {
-                    t.usage.add(*usage);
-                    t.round += 1;
-                    t.retrying = None;
-                }
-                self.summary.usage.add(*usage);
-                self.context = Some(*context);
-                Applied::Turn
-            }
-            Event::TurnCompleted { status, .. } => {
-                self.turn = None;
-                self.summary.busy = false;
-                self.last_turn = Some(status.clone());
-                self.unread = true;
-                Applied::Turn
-            }
+            } => self.turn_retrying(*attempt, dropped),
+            Event::TurnUsage { usage, context, .. } => self.turn_usage(*usage, *context),
+            Event::TurnCompleted { status, .. } => self.turn_completed(status),
             Event::ItemStarted { item }
             | Event::ItemUpdated { item }
-            | Event::ItemCompleted { item } => {
-                self.upsert(item);
-                Applied::Item(item.id.clone())
-            }
+            | Event::ItemCompleted { item } => self.upsert(item),
             Event::ItemDelta {
                 item, kind, data, ..
-            } => {
-                let Some(target) = self.item_mut(item) else {
-                    return Applied::Nothing;
-                };
-                if target.is_terminal() {
-                    return Applied::Nothing;
-                }
-                match (&mut target.body, kind) {
-                    (ItemBody::Assistant { text }, DeltaKind::Text) => text.push_str(data),
-                    (ItemBody::Reasoning { text, .. }, DeltaKind::Reasoning) => text.push_str(data),
-                    (ItemBody::ToolCall { progress, .. }, DeltaKind::Tail) => {
-                        *progress = Some(data.clone())
-                    }
-                    _ => return Applied::Nothing,
-                }
-                Applied::Item(item.clone())
-            }
-            Event::QueueChanged { entries, .. } => {
-                self.queue = entries.clone();
-                Applied::Queue
-            }
-            Event::InteractionOpened { interaction } => {
-                self.interactions.retain(|i| i.id != interaction.id);
-                self.interactions.push(interaction.clone());
-                Applied::Interaction(interaction.id.clone())
-            }
+            } => self.item_delta(item, *kind, data),
+            Event::QueueChanged { entries, .. } => self.queue_changed(entries),
+            Event::InteractionOpened { interaction } => self.interaction_opened(interaction),
             Event::InteractionResolved { id, .. } | Event::InteractionCancelled { id, .. } => {
-                self.interactions.retain(|i| &i.id != id);
-                Applied::Interaction(id.clone())
+                self.interaction_closed(id)
             }
             Event::IntentAck { intent, .. } => Applied::Intent(intent.clone()),
-            Event::Compacted { generation, .. } => {
-                self.history_generation = *generation;
-                Applied::History
-            }
+            Event::Compacted { generation, .. } => self.history_advanced(*generation, &[]),
             Event::Rewound {
                 generation,
                 dropped,
                 ..
-            } => {
-                self.history_generation = *generation;
-                self.items.retain(|i| !dropped.contains(&i.id));
-                Applied::History
-            }
-            Event::ConfigChanged { config } => {
-                self.config = config.clone();
-                Applied::Config
-            }
+            } => self.history_advanced(*generation, dropped),
+            Event::ConfigChanged { config } => self.config_changed(config),
             Event::CatalogChanged { .. } => Applied::Nothing,
             Event::Notice { .. } => Applied::Notice,
             Event::Extension { .. } => Applied::Extension,
             Event::Lagged { .. } => Applied::Lagged,
         }
+    }
+
+    fn session_updated(&mut self, summary: &SessionSummary) -> Applied {
+        self.summary = summary.clone();
+        Applied::Session
+    }
+
+    fn session_closed(&mut self) -> Applied {
+        self.closed = true;
+        self.turn = None;
+        self.interactions.clear();
+        Applied::Session
+    }
+
+    fn turn_started(
+        &mut self,
+        turn: &TurnId,
+        origin: TurnOrigin,
+        started_at: Timestamp,
+    ) -> Applied {
+        self.turn = Some(LiveTurn {
+            id: turn.clone(),
+            started_at,
+            origin,
+            round: 0,
+            usage: Usage::default(),
+            retrying: None,
+        });
+        self.summary.busy = true;
+        Applied::Turn
+    }
+
+    fn turn_retrying(&mut self, attempt: u32, dropped: &[ItemId]) -> Applied {
+        self.items.retain(|i| !dropped.contains(&i.id));
+        if let Some(t) = self.turn.as_mut() {
+            t.retrying = Some(attempt);
+        }
+        Applied::Turn
+    }
+
+    fn turn_usage(&mut self, usage: Usage, context: ContextUsage) -> Applied {
+        if let Some(t) = self.turn.as_mut() {
+            t.usage.add(usage);
+            t.round += 1;
+            t.retrying = None;
+        }
+        self.summary.usage.add(usage);
+        self.context = Some(context);
+        Applied::Turn
+    }
+
+    fn turn_completed(&mut self, status: &TurnStatus) -> Applied {
+        self.turn = None;
+        self.summary.busy = false;
+        self.last_turn = Some(status.clone());
+        self.unread = true;
+        Applied::Turn
+    }
+
+    fn item_delta(&mut self, item: &ItemId, kind: DeltaKind, data: &str) -> Applied {
+        let Some(target) = self.item_mut(item) else {
+            return Applied::Nothing;
+        };
+        if target.is_terminal() {
+            return Applied::Nothing;
+        }
+        match (&mut target.body, kind) {
+            (ItemBody::Assistant { text }, DeltaKind::Text) => text.push_str(data),
+            (ItemBody::Reasoning { text, .. }, DeltaKind::Reasoning) => text.push_str(data),
+            (ItemBody::ToolCall { progress, .. }, DeltaKind::Tail) => {
+                *progress = Some(data.to_string())
+            }
+            _ => return Applied::Nothing,
+        }
+        Applied::Item(item.clone())
+    }
+
+    fn queue_changed(&mut self, entries: &[QueueEntry]) -> Applied {
+        self.queue = entries.to_vec();
+        Applied::Queue
+    }
+
+    fn interaction_opened(&mut self, interaction: &Interaction) -> Applied {
+        self.interactions.retain(|i| i.id != interaction.id);
+        self.interactions.push(interaction.clone());
+        Applied::Interaction(interaction.id.clone())
+    }
+
+    fn interaction_closed(&mut self, id: &InteractionId) -> Applied {
+        self.interactions.retain(|i| &i.id != id);
+        Applied::Interaction(id.clone())
+    }
+
+    /// Both history events move the generation; only a rewind drops what it undid.
+    fn history_advanced(&mut self, generation: u64, dropped: &[ItemId]) -> Applied {
+        self.history_generation = generation;
+        self.items.retain(|i| !dropped.contains(&i.id));
+        Applied::History
+    }
+
+    fn config_changed(&mut self, config: &ConfigView) -> Applied {
+        self.config = config.clone();
+        Applied::Config
     }
 }
 
