@@ -25,15 +25,15 @@ None new. `bingo-agents` uses `serde-saphyr` (workspace) for frontmatter. `budge
 
 ## Exit criteria
 
-- [ ] `cargo fmt --all -- --check`, `cargo check --workspace --all-targets --locked`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, `cargo test --workspace --locked`, `scripts/check_discipline.sh`, `scripts/budget.sh`, `cargo deny check`, `scripts/tui-smoke.sh`
-- [ ] Actor: `deliver(Wake)` to an idle session opens a `Peer` turn whose user item carries the sender's origin; `deliver(Hold)` queues it and the next client submit runs it first, in order; `deliver` to a busy session is absorbed at the barrier; a `Redirect` hook lands the rewritten text in the target and the source acks `Applied{redirected}`; an unknown target is `Rejected{SESSION_NOT_FOUND}`; the fold shows `[from reviewer]`
-- [ ] Host: a `children: true` attachment yields a child's frames from `seq` 1, for a child created after the attachment too, each with its own `session`; answering a child's permission through the root handle resolves it and the child's tool runs; a child stream that lags is healed without a `Lagged` reaching the client; `delete(root)` removes the child from `sessions`
-- [ ] RPC: `session/open` with `options.children` streams the child's `event` notifications; schema unchanged but for `OpenParams` and `ToolCall`
-- [ ] Print: `--output-format stream-json` lines from the child carry `parent_tool_use_id` = the `SpawnAgent` call id and the root's `session_id`; text `--print` writes only the root's text
-- [ ] agents: layer order and override; the sub-agent note in the child's system prompt; foreground `SpawnAgent` returns the child's final text; background completion wakes the parent with a `Peer` turn whose user item says who; `SendMessage` is `Queued`, `FollowupTask` starts a turn; `WaitAgent` on an idle child returns at once; `@name` redirects and `@nobody` does not; `/agents` table; `ListAgents` names the child and its state; the kernel-noun grep stays clean
-- [ ] TUI: two-session fold snapshot; a child's permission dialog names the child and `y` resolves it; `↳ reviewer · running`; switcher lists and switches; a line typed in a child view reaches the child
-- [ ] Black-box: `--print` with a script whose first step calls `SpawnAgent` finishes with the child's text in the result; the RPC scenario sees a child frame whose `parent.item` is the root's tool item
-- [ ] sdk changed once (ADR-0010 lists what it touched)
+- [x] `cargo fmt --all -- --check`, `cargo check --workspace --all-targets --locked`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, `cargo test --workspace --locked`, `scripts/check_discipline.sh`, `scripts/budget.sh`, `cargo deny check`, `scripts/tui-smoke.sh`
+- [x] Actor: `deliver(Wake)` to an idle session opens a `Peer` turn whose user item carries the sender's origin; `deliver(Hold)` queues it and the next client submit runs it first, in order; `deliver` to a busy session is absorbed at the barrier; a `Redirect` hook lands the rewritten text in the target and the source acks `Applied{redirected}`; an unknown target is `Rejected{SESSION_NOT_FOUND}`; the fold shows `[from reviewer]`
+- [x] Host: a `children: true` attachment yields a child's frames from `seq` 1, for a child created after the attachment too, each with its own `session`; answering a child's permission through the root handle resolves it and the child's tool runs; a child stream that lags is healed without a `Lagged` reaching the client; `delete(root)` removes the child from `sessions`
+- [x] RPC: `session/open` with `options.children` streams the child's `event` notifications; schema unchanged but for `OpenParams` and `ToolCall`
+- [x] Print: `--output-format stream-json` lines from the child carry `parent_tool_use_id` = the `SpawnAgent` call id and the root's `session_id`; text `--print` writes only the root's text
+- [x] agents: layer order and override; the sub-agent note in the child's system prompt; foreground `SpawnAgent` returns the child's final text; background completion wakes the parent with a `Peer` turn whose user item says who; `SendMessage` is `Queued`, `FollowupTask` starts a turn; `WaitAgent` on an idle child returns at once; `@name` redirects and `@nobody` does not; `/agents` table; `ListAgents` names the child and its state; the kernel-noun grep stays clean
+- [x] TUI: two-session fold snapshot; a child's permission dialog names the child and `y` resolves it; `↳ reviewer · running`; switcher lists and switches; a line typed in a child view reaches the child
+- [x] Black-box: `--print` with a script whose first step calls `SpawnAgent` finishes with the child's text in the result; the RPC scenario sees a child frame whose `parent.item` is the root's tool item
+- [x] sdk changed once (ADR-0010 lists what it touched)
 
 ## Non-goals
 
@@ -42,3 +42,51 @@ Teams, rooms, tasks (M9). A definition as the primary persona (`mode`). Per-agen
 ## Risks touched
 
 R5 — `bingo-agents` stays under 2K lines and the plugin owns every noun; `check_discipline.sh`'s kernel-noun grep gains `agent`. R1 — one sdk change. R2 — the TUI holds a map of the reducer's states, never a state of its own; a child view is a key into that map. R6 — the five tools are read-only by declaration and a child's calls are gated in the child; a prompt that reaches the root is the child's own interaction, never a copy.
+
+## Verified (2026-08-29, commit 81078d6)
+
+```
+$ cargo fmt --all -- --check                                        exit 0
+$ cargo check --workspace --all-targets --locked                    exit 0
+$ cargo clippy --workspace --all-targets --locked -- -D warnings    exit 0
+$ cargo test --workspace --locked                                   exit 0
+  core 145 · tui 145 · hooks-shell 98 · permissions 96+6 · print 82 · provider-openai 80+15
+  tool-web 77 · agents 70 · tool-fs 69 · skills 68 · context 66 · tool-bash 60
+  provider-anthropic 56+12 · bin (cli 44 + rpc 13) 57 · mcp 46+14 · store-jsonl 34
+  provider-fake 19 · sdk 19 · rpc 16+20 = 1370 passed, 0 failed
+$ scripts/check_discipline.sh                                       exit 0 (four size warnings, below)
+$ scripts/budget.sh                                                 dependencies 265 (max 265, was 264); relink isolation 0
+$ cargo deny check                                                  advisories ok, bans ok, licenses ok, sources ok
+$ scripts/tui-smoke.sh                                              exit 0
+$ tmux drive of the real binary: `SpawnAgent` runs, the root shows `↳ reviewer · done` under the
+  call and `1 agent · 1 needs you`, ctrl+g lists root and reviewer, enter switches to the child's
+  own transcript, ctrl+g back, `@reviewer hello there` reaches the child, and the child's view
+  shows its answer
+```
+
+Exit criteria, item by item:
+
+- Actor (`session/tests/peers.rs`): `a_wake_delivery_to_an_idle_session_opens_a_peer_turn_that_says_who_spoke` — `TurnOrigin::Peer`, the item's origin, and `[from reviewer]` in the request the provider saw; `a_held_delivery_waits_in_the_queue_and_the_next_submit_carries_it_first` — `Queued`, then one turn carrying both inputs in order; `a_delivery_to_a_busy_session_is_queued_whatever_its_kind`; `a_peer_may_not_deliver_an_action`; `a_redirect_hook_sends_the_line_elsewhere_and_acks_where_it_went` — the target records the stripped text, the source records nothing and acks `Applied{redirected}`; `a_redirect_to_a_session_that_is_gone_is_rejected`. The fold's prefix: `a_user_item_from_a_named_principal_says_who_spoke` (`context.rs`).
+- Host (`host/tests/tree.rs`): `a_child_opened_after_the_attachment_streams_from_its_head_and_is_answered_through_the_root` — the child's head arrives on the root's stream and `AllowOnce` through the root handle resolves the child's permission and runs its tool; `a_child_that_already_exists_is_followed_from_its_head_too` (from `seq` 1, contiguous); `a_lagging_child_is_healed_and_the_client_never_sees_a_marker` — 768 held deliveries past a 256-frame channel, every durable `seq` arrives and no `Lagged` reaches the client; `deleting_the_root_deletes_its_children_first`.
+- RPC: `a_tree_attachment_routes_a_childs_frames_to_the_root_stream` (wire tests) — the `event` notification carries `root`, and `RemoteKernel` routes the child's frame to the root's stream. `schema/rpc.json` regenerated for `OpenParams.options`, `EventParams` and `ToolCall`.
+- Print: `a_sub_sessions_lines_carry_the_call_that_spawned_it` (`cli/stream_json.rs`) — the child's line carries the root's `session_id` and the `SpawnAgent` call id, there is exactly one `result` line and it is the root's; `a_sub_sessions_turn_ending_does_not_end_the_run` and `a_sub_sessions_lines_name_the_root_and_the_call_that_spawned_it` (unit).
+- agents (70 tests): layers and override, frontmatter, the note in `system_extra`, name suffixing under a live-key collision, the tool set a child is offered, foreground text, `a_background_spawn_names_the_child_at_once`, `a_finished_background_agent_wakes_its_parent_without_signing_the_text`, `SendMessage` holds / `FollowupTask` wakes, `WaitAgent` on an idle child, `ListAgents`, `@name` stripped and redirected / an unknown name left alone, every tool read-only and trusted. Black-box: `agents::a_foreground_agent_answers_the_root_and_stdout_stays_the_root_s`, `agents::the_child_s_reply_is_the_tool_call_s_result`, `agents::a_child_has_no_spawn_agent_to_call`, `agents::a_project_definition_names_the_agent_it_starts` (`cli/agents.rs`); `a_foreground_agent_is_a_child_session_on_the_root_s_attachment` and `a_background_agent_wakes_the_root_and_says_who_it_is` (`tests/rpc.rs`).
+- TUI (145 tests): `tree.rs` (join on the head frame, view fallback, an unknown session never shown, the tally and root-first dialog, a child found by its parent item, `done`); `run.rs` (a child's frames folded into its own state, a child's permission answered through the root handle, a line typed in a child's view submitted on the child's handle, a child closing without ending the run); `input.rs` (ctrl+g lists and switches, toggles and `esc`, opens on the child in view, a child's prompt answered from the root view, `/clear` from a child view); four snapshots (the `↳` row, the band, a child's transcript, the switcher).
+
+Found while integrating (each is a commit body too):
+
+- The wire needed more than `options`: `RemoteKernel` files a frame under `frame.session`, and a client only claims the root's route, so a child's frames landed in an unclaimed one. An `event` notification under a tree attachment now carries `root`, and the client routes by it.
+- `--print`'s single-prompt loop ended the run on the first `TurnCompleted` it saw, which under a tree attachment is the child's. Both print loops now react to the root's frames only, plus any interaction wherever it was opened.
+- A child is offered neither `SpawnAgent` (the depth limit refuses it) nor `AskUserQuestion` (the note says it does not have it, so the tool set says so too).
+- `agent` joined the kernel-noun grep in `check_discipline.sh`; it is a plugin noun like `room` and `team`.
+
+Open, carried forward:
+
+- `crates/bingo-core/src/session.rs` is 941 non-test lines (fails at 1000), and `crates/bingo/tests/rpc.rs` 910. The actor wants splitting, but its inherent impl already uses its two-file allowance (`session.rs`, `session/interactions.rs`), so the cohesion rule and the size rule now pull against each other: the next kernel change owes an ADR line and a third file.
+- A background child's report reaches an idle parent as a `Peer` turn and a busy one as `Queue`; the RPC scenario accepts either, because no script can order two sessions against one provider cursor.
+- `@name` and `/agents` are unit-tested only; no black-box scenario drives them over the wire.
+- `ToolHost` cannot read one session's summary or open one, so `bingo-agents` keeps the `HostHandle` from `start` in a `OnceLock` and lists every session to find one by id. `SessionFilter` has no "live only", so a resumed session's dead children still hold their names.
+- A child's "finished" is inferred (idle with a last turn), not a fact on the wire; the TUI's `done` and the watcher's report both read it that way.
+- Switching to a child in the TUI opens a second attachment for its handle and never closes it; a `HostApi::handle(session)` would remove that.
+- The watcher reports once, for the turn the spawn started. A follow-up's result reaches the parent only through `WaitAgent` or the child's own `SendMessage(to: "parent")`.
+- Everything M7 carried is still open (plugin notices, `HookContext.permission_mode`, `CommandSpec.description`, an sdk `testing` feature, the live provider smokes).
