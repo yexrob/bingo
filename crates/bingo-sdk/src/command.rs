@@ -1,4 +1,7 @@
-//! Slash commands. One registry serves dispatch, the catalog, completion and help.
+//! Slash commands. One registry serves dispatch, the catalog, completion and
+//! help. The session actor parses `/name args`, `!line` and `Input::Action`,
+//! runs the command on its own task and answers with an `IntentAck` whose
+//! `Applied.result` is `{"message"}`, `{"view"}` or `{"item"}` (ADR-0008).
 
 use std::path::PathBuf;
 
@@ -7,8 +10,9 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::error::KernelError;
+use crate::event::ItemBody;
 use crate::host::HostHandle;
-use crate::ids::{ItemId, SessionId};
+use crate::ids::SessionId;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -71,13 +75,14 @@ pub enum CommandOutcome {
     View {
         view: View,
     },
-    /// Becomes a turn.
+    /// Becomes a turn, submitted with the command's own intent and origin.
     Prompt {
         text: String,
     },
-    /// A long-running action recorded as an `Item::Action`.
-    Action {
-        item: ItemId,
+    /// One completed item the kernel records in the transcript (a shell
+    /// line's output, a login's receipt); the ack carries its id.
+    Record {
+        body: ItemBody,
     },
 }
 

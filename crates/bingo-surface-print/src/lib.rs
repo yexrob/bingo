@@ -724,6 +724,7 @@ pub(crate) mod tests {
             },
             prompt: prompt.map(str::to_owned),
             args,
+            env: Arc::new(bingo_sdk::Env::rooted("/tmp")),
         }
     }
 

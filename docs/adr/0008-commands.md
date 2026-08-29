@@ -17,7 +17,7 @@ The sdk has had one command table since M0 (`Command`: dispatch, catalogue, comp
 
 ## Consequences
 
-- sdk touched once: `CommandOutcome::Record` replaces `Action`; `SurfaceOptions.env`. Crates touched: `bingo-surface-print` (its test options), `bingo` (builds the options). `schema/rpc.json` regenerates for `CommandOutcome`.
+- sdk touched once: `CommandOutcome::Record` replaces `Action`; `SurfaceOptions.env`. Crates touched: `bingo-surface-print` (its test options), `bingo` (builds the options). The wire is unchanged: an outcome travels inside `IntentAck.result`, which the schema already types as JSON.
 - `Input::Action` on the wire now reaches commands: a GUI button is a command with a name.
 - `/permission <mode>` is the permissions plugin's command (instant; the per-session mode lives in the plugin, in memory, like session-scoped rules). It cannot publish into `ConfigView.plugins`; when a client needs to *read* a plugin's per-session setting, `CommandOutcome` grows a `Configure` variant the kernel folds into `ConfigView` — not before.
 - The catalogue's `Models` lists the embedded catalogue for each registered provider (plus the configured model), so `/model` has something to complete from without a network call.

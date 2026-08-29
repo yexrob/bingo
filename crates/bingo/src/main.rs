@@ -144,9 +144,10 @@ async fn run(cli: Cli) -> Result<i32, KernelError> {
         let human = std::io::IsTerminal::is_terminal(&std::io::stderr());
         eprintln!("{}", notice_report(&code, &text, human));
     }
+    let env = Arc::new(environment(&cwd));
     let (id, options) = match serve {
-        Some(stdio) => ("rpc", serve_options(stdio, cwd)?),
-        None => ("print", surface_options(cli, cwd)),
+        Some(stdio) => ("rpc", serve_options(stdio, cwd, env)?),
+        None => ("print", surface_options(cli, cwd, env)),
     };
     let surface = host
         .surface(id)
@@ -158,7 +159,7 @@ async fn run(cli: Cli) -> Result<i32, KernelError> {
 
 /// The server has no prompt and no session of its own; the selector is a
 /// placeholder the surface ignores (ADR-0007).
-fn serve_options(stdio: bool, cwd: PathBuf) -> Result<SurfaceOptions, KernelError> {
+fn serve_options(stdio: bool, cwd: PathBuf, env: Arc<Env>) -> Result<SurfaceOptions, KernelError> {
     if !stdio {
         return Err(KernelError::new(
             ErrorCode::InvalidInput,
@@ -175,6 +176,7 @@ fn serve_options(stdio: bool, cwd: PathBuf) -> Result<SurfaceOptions, KernelErro
         cwd,
         prompt: None,
         args: json!({ "transport": "stdio" }),
+        env,
     })
 }
 
@@ -223,12 +225,13 @@ fn host_config(cli: &Cli, cwd: &std::path::Path) -> Result<HostConfig, KernelErr
     Ok(config)
 }
 
-fn surface_options(cli: Cli, cwd: PathBuf) -> SurfaceOptions {
+fn surface_options(cli: Cli, cwd: PathBuf, env: Arc<Env>) -> SurfaceOptions {
     SurfaceOptions {
         selector: selector(&cli, cwd.clone()),
         cwd,
         prompt: cli.prompt,
         args: json!({ "outputFormat": cli.output_format.as_str() }),
+        env,
     }
 }
 
