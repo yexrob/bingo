@@ -38,8 +38,6 @@ pub struct HostConfig {
     pub layers: Vec<Layer>,
     /// A system block appended after the kernel's own (hosts, tests).
     pub extra_system: Option<String>,
-    /// The user's shell, named in the system prompt.
-    pub shell: Option<String>,
     pub budget: TurnBudget,
     pub env: Env,
     /// How deep a chain of sub-sessions may go; 1 = one level below a root.
@@ -53,7 +51,6 @@ impl HostConfig {
         Self {
             layers: Vec::new(),
             extra_system: None,
-            shell: None,
             budget: TurnBudget::default(),
             env,
             max_child_depth: 1,
@@ -387,7 +384,6 @@ impl Host {
             provider: choice.provider.id(),
             model: &choice.model,
             platform: std::env::consts::OS,
-            shell: self.config.shell.as_deref(),
             date: jiff::Zoned::now().date(),
         });
         let extras = [

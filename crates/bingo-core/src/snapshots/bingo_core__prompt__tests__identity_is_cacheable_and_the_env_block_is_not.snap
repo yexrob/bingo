@@ -5,7 +5,6 @@ expression: "blocks[1].text"
 <env>
 Working directory: /work/app
 Platform: macos
-Shell: /bin/zsh
 Today's date: 2026-08-29
 Model: claude-sonnet-4-5 (anthropic)
 </env>

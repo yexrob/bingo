@@ -13,7 +13,6 @@ pub struct PromptInput<'a> {
     pub provider: &'a str,
     pub model: &'a str,
     pub platform: &'a str,
-    pub shell: Option<&'a str>,
     pub date: jiff::civil::Date,
 }
 
@@ -36,9 +35,6 @@ fn env_block(input: &PromptInput<'_>) -> String {
     let mut out = String::from("<env>\n");
     out.push_str(&format!("Working directory: {}\n", input.cwd.display()));
     out.push_str(&format!("Platform: {}\n", input.platform));
-    if let Some(shell) = input.shell {
-        out.push_str(&format!("Shell: {shell}\n"));
-    }
     out.push_str(&format!("Today's date: {}\n", input.date));
     out.push_str(&format!("Model: {} ({})\n", input.model, input.provider));
     out.push_str("</env>");
@@ -88,7 +84,6 @@ mod tests {
             provider: "anthropic",
             model: "claude-sonnet-4-5",
             platform: "macos",
-            shell: Some("/bin/zsh"),
             date: jiff::civil::date(2026, 8, 29),
         }
     }
@@ -104,11 +99,8 @@ mod tests {
     }
 
     #[test]
-    fn the_env_block_omits_an_unknown_shell() {
-        let mut input = input(Path::new("/work"));
-        input.shell = None;
-        let text = env_block(&input);
-        assert!(!text.contains("Shell:"));
+    fn the_env_block_names_the_working_directory() {
+        let text = env_block(&input(Path::new("/work")));
         assert!(text.contains("Working directory: /work"));
     }
 }
