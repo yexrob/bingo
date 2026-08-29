@@ -544,3 +544,25 @@ fn scripted_run(
 mod context;
 mod sessions;
 mod stream_json;
+
+/// `--mcp-config` names a file whose `mcpServers` join the settings for this
+/// run; a file that is not there, or has none, stops the run before a turn.
+#[test]
+fn mcp_config_must_exist_and_carry_servers() {
+    let missing = run(bingo().args(["--print", "--mcp-config", "/no/such/mcp.json", "hi"]));
+    assert_eq!(missing.status.code(), Some(1));
+    assert!(stderr(&missing).contains("code=INVALID_INPUT"));
+    assert!(stderr(&missing).contains("does not exist"));
+
+    let file = script(r#"{"somethingElse": {}}"#);
+    let empty = run(bingo()
+        .args(["--print", "--mcp-config"])
+        .arg(file.path())
+        .arg("hi"));
+    assert_eq!(empty.status.code(), Some(1));
+    assert!(
+        stderr(&empty).contains("has no mcpServers"),
+        "{}",
+        stderr(&empty)
+    );
+}

@@ -136,7 +136,8 @@ pub fn load(env: &Env, cwd: &Path, extra: Option<&Path>) -> Result<Vec<Layer>, S
     Ok(layers)
 }
 
-fn read_layer(path: &Path) -> Result<Option<Layer>, SettingsError> {
+/// One file as a layer; `None` when it does not exist.
+pub fn read_layer(path: &Path) -> Result<Option<Layer>, SettingsError> {
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),

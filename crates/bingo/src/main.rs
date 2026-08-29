@@ -64,6 +64,10 @@ struct Cli {
     #[arg(long, value_name = "PATH", global = true)]
     settings: Option<PathBuf>,
 
+    /// A JSON file whose `mcpServers` are added for this run (a host's bundle).
+    #[arg(long, value_name = "PATH", global = true)]
+    mcp_config: Option<PathBuf>,
+
     /// default | acceptEdits | plan | bypassPermissions | dontAsk
     #[arg(long, value_name = "MODE", global = true)]
     permission_mode: Option<String>,
@@ -281,6 +285,9 @@ fn host_config(cli: &Cli, cwd: &std::path::Path) -> Result<HostConfig, KernelErr
     let mut config = HostConfig::new(environment(cwd));
     config.layers = settings::load(&config.env, cwd, cli.settings.as_deref())
         .map_err(|e| KernelError::new(ErrorCode::InvalidInput, e.to_string()))?;
+    if let Some(path) = &cli.mcp_config {
+        config.layers.push(mcp_layer(path)?);
+    }
     config
         .layers
         .push(settings::Layer::new("cli", cli_layer(cli)));
@@ -321,6 +328,24 @@ fn selector(cli: &Cli, cwd: PathBuf) -> SessionSelector {
             ..SessionSpec::default()
         },
     }
+}
+
+/// `--mcp-config`: the file's `mcpServers`, and nothing else in it, as a layer
+/// above the settings files (Claude Code's flag; OpenClaw's `bundleMcp`).
+fn mcp_layer(path: &std::path::Path) -> Result<settings::Layer, KernelError> {
+    let invalid = |message: String| KernelError::new(ErrorCode::InvalidInput, message);
+    let layer = settings::read_layer(path)
+        .map_err(|e| invalid(e.to_string()))?
+        .ok_or_else(|| invalid(format!("--mcp-config: {} does not exist", path.display())))?;
+    let servers = layer.value.get("mcpServers").cloned().ok_or_else(|| {
+        invalid(format!(
+            "--mcp-config: {} has no mcpServers",
+            path.display()
+        ))
+    })?;
+    let mut only = Map::new();
+    only.insert("mcpServers".into(), servers);
+    Ok(settings::Layer::new("mcp-config", only))
 }
 
 /// The command line as the highest settings layer: only what was given.
