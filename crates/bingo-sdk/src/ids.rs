@@ -17,7 +17,9 @@ fn next_ulid() -> ulid::Ulid {
     let generator = slot.get_or_insert_with(ulid::Generator::new);
     // The monotonic counter can overflow only after 2^80 ids in one
     // millisecond; a fresh random ulid is the honest fallback.
-    generator.generate().unwrap_or_else(|_| ulid::Ulid::generate())
+    generator
+        .generate()
+        .unwrap_or_else(|_| ulid::Ulid::generate())
 }
 
 macro_rules! id {
