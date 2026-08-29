@@ -7,6 +7,7 @@
 
 pub mod output;
 pub mod reject;
+pub mod run;
 pub mod tail;
 
 #[cfg(test)]
