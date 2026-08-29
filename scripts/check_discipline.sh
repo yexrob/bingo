@@ -56,6 +56,13 @@ nouns=$(grep -rEinw 'room|team|hire|experience' crates/bingo-sdk/src crates/bing
 if [ -n "$nouns" ]; then
   say "feature noun found in kernel/sdk code:"; say "$nouns" | head; fail=1
 fi
+# 4b. `agent` is a plugin noun too (ADR-0010): as an identifier in the kernel it is a leak;
+#     in a string it is prose (the system prompt calls the product an agent) or a test's surface name;
+#     a string continued with a trailing backslash is a string line too.
+agents=$(grep -rEinw 'agents?' crates/bingo-sdk/src crates/bingo-core/src --include='*.rs' 2>/dev/null | grep -vE '^[^:]+:[0-9]+:\s*//' | grep -v '"' | grep -vE '\\$' || true)
+if [ -n "$agents" ]; then
+  say "agent noun found in kernel/sdk code:"; say "$agents" | head; fail=1
+fi
 
 # 4b. A surface is a client of the one event stream (ADR-0002, ADR-0007): no private mirror enums.
 mirrors=$(grep -rEn '^\s*(pub(\([a-z]+\))?\s+)?enum\s+[A-Za-z]*Event\b' crates/bingo-surface-*/src --include='*.rs' 2>/dev/null || true)
