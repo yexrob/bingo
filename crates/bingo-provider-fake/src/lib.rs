@@ -275,50 +275,18 @@ fn beats(response: &Response, index: usize, input_chars: usize) -> Vec<Beat> {
         match step {
             Step::Text(text) => {
                 emitted += text.chars().count();
-                out.push(Beat::Event(ModelEvent::TextStart { id: block.clone() }));
-                for delta in chunks(text) {
-                    out.push(Beat::Event(ModelEvent::TextDelta {
-                        id: block.clone(),
-                        delta,
-                    }));
-                }
-                out.push(Beat::Event(ModelEvent::TextEnd { id: block }));
+                out.extend(text_beats(block, text));
             }
             Step::Reasoning(text) => {
                 emitted += text.chars().count();
-                out.push(Beat::Event(ModelEvent::ReasoningStart {
-                    id: block.clone(),
-                }));
-                for delta in chunks(text) {
-                    out.push(Beat::Event(ModelEvent::ReasoningDelta {
-                        id: block.clone(),
-                        delta,
-                    }));
-                }
-                out.push(Beat::Event(ModelEvent::ReasoningEnd {
-                    id: block,
-                    provider_metadata: Default::default(),
-                }));
+                out.extend(reasoning_beats(block, text));
             }
             Step::ToolCall { name, input } => {
                 called = true;
-                let call = format!("call_{index}_{step_index}");
                 let json = json_text(input);
                 emitted += json.chars().count();
-                out.push(Beat::Event(ModelEvent::ToolInputStart {
-                    id: call.clone(),
-                    name: name.clone(),
-                }));
-                out.push(Beat::Event(ModelEvent::ToolInputDelta {
-                    id: call.clone(),
-                    delta: json.clone(),
-                }));
-                out.push(Beat::Event(ModelEvent::ToolInputEnd { id: call.clone() }));
-                out.push(Beat::Event(ModelEvent::ToolCall {
-                    id: call,
-                    name: name.clone(),
-                    input: json,
-                }));
+                let call = format!("call_{index}_{step_index}");
+                out.extend(tool_call_beats(call, name, json));
             }
             Step::Error(error) => {
                 out.push(Beat::Fail(error.clone()));
@@ -327,20 +295,81 @@ fn beats(response: &Response, index: usize, input_chars: usize) -> Vec<Beat> {
             Step::Delay { ms } => out.push(Beat::Sleep(*ms)),
         }
     }
-    let unified = response.finish.unwrap_or(if called {
+    out.push(finish_beat(response.finish, called, input_chars, emitted));
+    out
+}
+
+/// One text block: start, the text in `CHUNK_CHARS`-wide deltas, end.
+fn text_beats(block: String, text: &str) -> Vec<Beat> {
+    let mut out = vec![Beat::Event(ModelEvent::TextStart { id: block.clone() })];
+    out.extend(chunks(text).into_iter().map(|delta| {
+        Beat::Event(ModelEvent::TextDelta {
+            id: block.clone(),
+            delta,
+        })
+    }));
+    out.push(Beat::Event(ModelEvent::TextEnd { id: block }));
+    out
+}
+
+/// One reasoning block, chunked the same way as prose.
+fn reasoning_beats(block: String, text: &str) -> Vec<Beat> {
+    let mut out = vec![Beat::Event(ModelEvent::ReasoningStart {
+        id: block.clone(),
+    })];
+    out.extend(chunks(text).into_iter().map(|delta| {
+        Beat::Event(ModelEvent::ReasoningDelta {
+            id: block.clone(),
+            delta,
+        })
+    }));
+    out.push(Beat::Event(ModelEvent::ReasoningEnd {
+        id: block,
+        provider_metadata: Default::default(),
+    }));
+    out
+}
+
+/// One tool call: the input arrives whole, in one delta, then the call itself.
+fn tool_call_beats(call: String, name: &str, input: String) -> Vec<Beat> {
+    vec![
+        Beat::Event(ModelEvent::ToolInputStart {
+            id: call.clone(),
+            name: name.to_string(),
+        }),
+        Beat::Event(ModelEvent::ToolInputDelta {
+            id: call.clone(),
+            delta: input.clone(),
+        }),
+        Beat::Event(ModelEvent::ToolInputEnd { id: call.clone() }),
+        Beat::Event(ModelEvent::ToolCall {
+            id: call,
+            name: name.to_string(),
+            input,
+        }),
+    ]
+}
+
+/// The response's own finish reason, or the one its steps imply.
+fn finish_beat(
+    finish: Option<UnifiedFinish>,
+    called: bool,
+    input_chars: usize,
+    output_chars: usize,
+) -> Beat {
+    let unified = finish.unwrap_or(if called {
         UnifiedFinish::ToolCalls
     } else {
         UnifiedFinish::Stop
     });
-    out.push(Beat::Event(ModelEvent::Finish {
+    Beat::Event(ModelEvent::Finish {
         usage: Usage {
             input_tokens: estimate_tokens(input_chars),
-            output_tokens: estimate_tokens(emitted),
+            output_tokens: estimate_tokens(output_chars),
             ..Default::default()
         },
         finish_reason: FinishReason::unified(unified),
-    }));
-    out
+    })
 }
 
 fn chunks(text: &str) -> Vec<String> {
