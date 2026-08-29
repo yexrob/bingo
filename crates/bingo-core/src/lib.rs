@@ -8,6 +8,7 @@ pub mod executor;
 pub mod gate;
 pub mod host;
 pub mod journal;
+pub mod models;
 pub mod prompt;
 pub mod session;
 pub mod settings;

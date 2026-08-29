@@ -9,6 +9,7 @@ use futures::StreamExt;
 
 use super::{Step, Turn};
 use crate::accumulator::{Accumulator, Emit, Finished};
+use crate::models::window_from_overflow;
 
 pub const MAX_RETRY_DELAY: Duration = Duration::from_secs(32);
 pub const MAX_SERVER_RETRY_DELAY: Duration = Duration::from_secs(60);
@@ -24,6 +25,7 @@ impl Turn<'_> {
     pub(super) async fn stream(&mut self, request: ModelRequest) -> Streamed {
         let mut stream = match self
             .cfg
+            .model
             .provider
             .stream(request, self.cancel.child_token())
             .await
@@ -87,6 +89,30 @@ impl Turn<'_> {
         }
     }
 
+    /// The server named its real window; later sessions on this model
+    /// measure against it (ADR-0004).
+    fn learn_window(&self, message: &str) {
+        let Some(window) = window_from_overflow(message) else {
+            return;
+        };
+        let provider = self.cfg.model.provider.id();
+        if self
+            .cfg
+            .model
+            .learned
+            .record(provider, &self.cfg.model.id, window)
+        {
+            self.host.emit(Event::Notice {
+                level: Level::Info,
+                code: "WINDOW_LEARNED".into(),
+                text: format!(
+                    "{provider}/{} takes {window} tokens of context; later sessions measure against it",
+                    self.cfg.model.id
+                ),
+            });
+        }
+    }
+
     /// A stream that failed: half-written items are withdrawn, then overflow
     /// compacts once, a retryable error waits, and anything else ends the turn.
     pub(super) async fn failed_stream(
@@ -96,6 +122,9 @@ impl Turn<'_> {
         usage: ContextUsage,
     ) -> Step {
         self.items.retain(|i| !dropped.contains(&i.id));
+        if let ProviderError::ContextOverflow { message } = &error {
+            self.learn_window(message);
+        }
         if let ProviderError::ContextOverflow { .. } = &error
             && let Some(compactor) = self.cfg.compactor.clone()
             && !self.overflow_compacted

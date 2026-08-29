@@ -6,6 +6,8 @@ use std::sync::Arc;
 
 use bingo_sdk::*;
 
+use crate::models::Learned;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TurnBudget {
     pub max_rounds: u32,
@@ -21,15 +23,24 @@ impl Default for TurnBudget {
     }
 }
 
+/// The model the host resolved for one session (ADR-0004): who serves it,
+/// what it may assume, how much output it asks for.
+pub struct ModelChoice {
+    pub provider: Arc<dyn Provider>,
+    pub id: String,
+    pub capabilities: ModelCapabilities,
+    pub max_tokens: u32,
+    /// Only set when the model reasons: the wire parameter would 400 otherwise.
+    pub reasoning: Option<Effort>,
+    /// Where an overflow's lesson about the window goes.
+    pub learned: Arc<Learned>,
+}
+
 /// Everything a turn reads. Built by the host per session; plugins are already resolved.
 pub struct TurnConfig {
     pub session: SessionSummary,
     pub cwd: PathBuf,
-    pub provider: Arc<dyn Provider>,
-    pub model: String,
-    pub capabilities: ModelCapabilities,
-    pub max_tokens: u32,
-    pub reasoning: Option<Effort>,
+    pub model: ModelChoice,
     pub system: Vec<SystemBlock>,
     pub tools: Vec<Arc<dyn Tool>>,
     pub policy: Arc<dyn PermissionPolicy>,
@@ -45,7 +56,7 @@ impl std::fmt::Debug for TurnConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TurnConfig")
             .field("session", &self.session.id)
-            .field("model", &self.model)
+            .field("model", &self.model.id)
             .finish_non_exhaustive()
     }
 }

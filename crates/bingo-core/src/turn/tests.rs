@@ -92,11 +92,14 @@ fn config(provider: Arc<ScriptedProvider>, tools: Vec<Arc<dyn Tool>>) -> TurnCon
     TurnConfig {
         session: summary(),
         cwd: "/tmp".into(),
-        capabilities: capabilities(),
-        provider,
-        model: "m".into(),
-        max_tokens: 1000,
-        reasoning: None,
+        model: ModelChoice {
+            provider,
+            id: "m".into(),
+            capabilities: capabilities(),
+            max_tokens: 1000,
+            reasoning: None,
+            learned: Arc::new(crate::models::Learned::default()),
+        },
         system: vec![SystemBlock {
             text: "You are bingo.".into(),
             cache: false,
@@ -430,4 +433,68 @@ fn backoff_doubles_from_half_a_second_and_honours_the_server() {
     assert_eq!(backoff(4, None), Duration::from_millis(4000));
     assert_eq!(backoff(20, None), MAX_RETRY_DELAY);
     assert_eq!(backoff(1, Some(90_000)), MAX_SERVER_RETRY_DELAY);
+}
+
+#[tokio::test]
+async fn an_overflow_teaches_the_window_the_server_named() {
+    let provider = ScriptedProvider::new(vec![Script::Fail(ProviderError::ContextOverflow {
+        message: "prompt is too long: 160000 tokens > 150000 maximum".into(),
+    })]);
+    let cfg = config(provider, vec![]);
+    let host = RecordingHost::new();
+    let out = run(&cfg, &host, CancellationToken::new()).await;
+    assert!(
+        matches!(&out.status, TurnStatus::Failed { error } if error.code == ErrorCode::ContextOverflow),
+        "{:?}",
+        out.status
+    );
+    assert_eq!(cfg.model.learned.window("scripted", "m"), Some(150_000));
+    assert!(
+        host.events().iter().any(|e| matches!(
+            e,
+            Event::Notice { code, text, .. } if code == "WINDOW_LEARNED" && text.contains("150000")
+        )),
+        "{:?}",
+        host.kinds()
+    );
+}
+
+#[tokio::test]
+async fn a_model_without_vision_gets_a_note_where_the_image_was() {
+    let provider = ScriptedProvider::new(vec![Script::Events(text("seen"))]);
+    let cfg = config(provider.clone(), vec![]);
+    assert!(
+        !cfg.model.capabilities.images,
+        "the scripted model is blind"
+    );
+    let host = RecordingHost::new();
+    let mut frames = history("look at this");
+    if let Event::ItemCompleted { item } = &mut frames[0].event
+        && let ItemBody::User { parts, .. } = &mut item.body
+    {
+        parts.push(ContentPart::Image {
+            media_type: "image/png".into(),
+            data: "iVBORw0KGgo=".into(),
+        });
+    }
+    let out = run_turn(
+        &cfg,
+        TurnRun {
+            turn: TurnId::from_raw("trn_1"),
+            history: frames,
+            generation: 0,
+            cancel: CancellationToken::new(),
+        },
+        &host,
+    )
+    .await;
+    assert_eq!(out.status, TurnStatus::Completed);
+    let sent = &provider.requests()[0].messages[0].parts;
+    assert_eq!(
+        sent,
+        &vec![
+            ContentPart::text("look at this"),
+            ContentPart::text("[image omitted: m has no vision]"),
+        ]
+    );
 }

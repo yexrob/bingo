@@ -11,10 +11,12 @@ use std::path::{Path, PathBuf};
 use bingo_sdk::{Effort, Env, Merge, PluginManifest};
 use serde_json::{Map, Value};
 
+use crate::models::Declared;
+
 pub use merge::merge;
 
 /// The keys the kernel reads itself.
-pub const KERNEL_KEYS: &[&str] = &["provider", "model", "thinking", "maxTokens"];
+pub const KERNEL_KEYS: &[&str] = &["provider", "model", "thinking", "maxTokens", "models"];
 
 /// One settings source, lowest priority first when listed.
 #[derive(Clone, Debug, PartialEq)]
@@ -67,6 +69,8 @@ pub struct KernelSettings {
     pub model: Option<String>,
     pub thinking: Option<Effort>,
     pub max_tokens: Option<u32>,
+    /// Per-model overrides of the catalogue, keyed `<provider>/<model>` (ADR-0004).
+    pub models: BTreeMap<String, Declared>,
 }
 
 /// A top-level key nobody claimed, with the layer that set it.

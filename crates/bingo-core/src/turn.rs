@@ -17,7 +17,7 @@ use async_trait::async_trait;
 use bingo_sdk::*;
 use jiff::Timestamp;
 
-pub use config::{TurnBudget, TurnConfig};
+pub use config::{ModelChoice, TurnBudget, TurnConfig};
 use stream::Streamed;
 pub use stream::{MAX_RETRY_DELAY, MAX_SERVER_RETRY_DELAY, backoff};
 
@@ -25,6 +25,7 @@ use crate::accumulator::Finished;
 use crate::context::{ContextView, estimate_tokens, splice_compaction};
 use crate::executor::{self, Gate, PendingCall};
 use crate::gate::{GateInput, gate_call, hook_applies};
+use crate::models::vision;
 
 pub const INTERRUPTED_MARKER: &str = "[Request interrupted by user]";
 pub const CONTINUE_PROMPT: &str = "Continue from where you left off.";
@@ -217,7 +218,7 @@ impl Turn<'_> {
                 round: self.round,
                 items: &self.items,
                 usage,
-                capabilities: &self.cfg.capabilities,
+                capabilities: &self.cfg.model.capabilities,
                 cwd: &self.cfg.cwd,
             };
             let pieces = match c.contribute(query).await {
@@ -249,12 +250,12 @@ impl Turn<'_> {
 
     fn measure(&self, system: &[SystemBlock], messages: &[Message]) -> ContextUsage {
         let used = estimate_tokens(system, messages, &self.tool_specs());
-        let window = self.cfg.capabilities.context_window;
+        let window = self.cfg.model.capabilities.context_window;
         let trigger = self
             .cfg
             .compactor
             .as_ref()
-            .map(|c| c.threshold(&self.cfg.capabilities))
+            .map(|c| c.threshold(&self.cfg.model.capabilities))
             .unwrap_or(window);
         ContextUsage {
             used,
@@ -306,10 +307,10 @@ impl Turn<'_> {
             .await;
         let mut system = self.cfg.system.clone();
         system.extend(extra_system);
-        let messages = ContextView::fold_items(&self.items);
+        let messages = self.without_images(ContextView::fold_items(&self.items));
         let usage = self.measure(&system, &messages);
         if let Some(compactor) = self.cfg.compactor.clone()
-            && usage.used >= compactor.threshold(&self.cfg.capabilities)
+            && usage.used >= compactor.threshold(&self.cfg.model.capabilities)
             && self.round == 0
         {
             self.compact(compactor.as_ref(), CompactReason::Threshold, usage)
@@ -318,16 +319,26 @@ impl Turn<'_> {
         }
         Assembled::Request {
             request: ModelRequest {
-                model: self.cfg.model.clone(),
-                max_tokens: self.cfg.max_tokens,
+                model: self.cfg.model.id.clone(),
+                max_tokens: self.cfg.model.max_tokens,
                 system,
                 messages,
                 tools: self.tool_specs(),
-                reasoning: self.cfg.reasoning,
+                reasoning: self.cfg.model.reasoning,
                 provider_options: ProviderMetadata::new(),
             },
             usage,
         }
+    }
+
+    /// A model without vision never sees an image part; the note stands in on
+    /// the wire only, and the items keep the image.
+    fn without_images(&self, messages: Vec<Message>) -> Vec<Message> {
+        if self.cfg.model.capabilities.images {
+            return messages;
+        }
+        vision::project_images_out(&messages, &vision::omitted_note(&self.cfg.model.id))
+            .unwrap_or(messages)
     }
 
     /// Bill the round to the turn. What the provider counted as input beats
@@ -335,7 +346,7 @@ impl Turn<'_> {
     fn account(&mut self, finished: &Finished, usage: ContextUsage) {
         self.usage.add(finished.usage);
         let context = ContextUsage {
-            used: finished.usage.input_tokens.max(usage.used),
+            used: finished.usage.input_total().max(usage.used),
             ..usage
         };
         self.host.emit(Event::TurnUsage {
@@ -436,9 +447,9 @@ impl Turn<'_> {
         let cx = CompactContext {
             items: &self.items,
             usage,
-            capabilities: &self.cfg.capabilities,
-            provider: self.cfg.provider.clone(),
-            model: &self.cfg.model,
+            capabilities: &self.cfg.model.capabilities,
+            provider: self.cfg.model.provider.clone(),
+            model: &self.cfg.model.id,
             cancel: self.cancel.child_token(),
         };
         let compacted = compactor.compact(cx, reason).await;

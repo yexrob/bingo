@@ -21,13 +21,11 @@ pub use registry::{PluginStatus, Registry};
 use tool_host::SessionToolHost;
 
 use crate::gate::DefaultPolicy;
+use crate::models::{self, Learned, ModelCatalog};
 use crate::prompt::{self, PromptInput};
 use crate::session::{self, Mailbox};
 use crate::settings::{self, Claim, Layer, Merged, SettingsError};
-use crate::turn::{TurnBudget, TurnConfig};
-
-/// Output tokens a turn may ask for when neither the model nor the config says.
-const DEFAULT_MAX_TOKENS: u64 = 8_192;
+use crate::turn::{ModelChoice, TurnBudget, TurnConfig};
 
 /// Gateway events buffered per subscriber before the oldest is dropped.
 const GATEWAY_CAPACITY: usize = 64;
@@ -94,6 +92,8 @@ pub struct Host {
     plugins: Vec<Box<dyn Plugin>>,
     sessions: Mutex<BTreeMap<SessionId, Live>>,
     gateway: broadcast::Sender<GatewayEvent>,
+    /// Windows the servers have corrected since this host started (ADR-0004).
+    learned: Arc<Learned>,
     weak: Weak<Host>,
 }
 
@@ -119,13 +119,6 @@ impl Live {
 }
 
 /// The provider and model a new session runs on, with the ceiling that follows.
-struct ModelChoice {
-    provider: Arc<dyn Provider>,
-    model: String,
-    capabilities: ModelCapabilities,
-    max_tokens: u32,
-}
-
 impl std::fmt::Debug for Host {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Host")
@@ -154,6 +147,7 @@ impl Host {
             plugins,
             sessions: Mutex::new(BTreeMap::new()),
             gateway,
+            learned: Arc::new(Learned::default()),
             weak: weak.clone(),
         });
         host.start_plugins().await?;
@@ -344,26 +338,30 @@ impl Host {
         let provider = self.provider(spec.provider.as_deref())?;
         check_auth(provider.as_ref())?;
         let model = self.model(provider.as_ref(), spec.model.as_deref()).await?;
-        let endpoint = provider.endpoint(&model);
-        let capabilities = ModelCapabilities {
-            context_window: 200_000,
-            max_output: DEFAULT_MAX_TOKENS,
-            images: endpoint.images,
-            reasoning: false,
-            count_tokens: endpoint.count_tokens,
-            caching: endpoint.caching,
-        };
-        let max_tokens = self
-            .settings
-            .kernel
-            .max_tokens
-            .unwrap_or_else(|| capabilities.max_output.min(DEFAULT_MAX_TOKENS) as u32);
+        let capabilities = self.resolve_model(provider.as_ref(), &model);
         Ok(ModelChoice {
+            max_tokens: models::max_tokens(&capabilities, self.settings.kernel.max_tokens),
+            reasoning: self
+                .settings
+                .kernel
+                .thinking
+                .filter(|_| capabilities.reasoning),
+            learned: self.learned.clone(),
             provider,
-            model,
+            id: model,
             capabilities,
-            max_tokens,
         })
+    }
+
+    /// The four owners of a model's facts, read once per session (ADR-0004).
+    fn resolve_model(&self, provider: &dyn Provider, model: &str) -> ModelCapabilities {
+        let key = models::declared::key(provider.id(), model);
+        models::resolve(
+            self.settings.kernel.models.get(&key),
+            self.learned.window(provider.id(), model),
+            ModelCatalog::embedded().lookup(provider.id(), model),
+            provider.endpoint(model),
+        )
     }
 
     fn summarize(&self, spec: &SessionSpec, choice: &ModelChoice) -> SessionSummary {
@@ -374,7 +372,7 @@ impl Host {
             title: spec.title.clone(),
             cwd: spec.cwd.display().to_string(),
             parent: spec.parent.clone(),
-            model: Some(choice.model.clone()),
+            model: Some(choice.id.clone()),
             provider: Some(choice.provider.id().to_string()),
             created_at: now,
             updated_at: now,
@@ -398,7 +396,7 @@ impl Host {
         let mut system = prompt::system_blocks(&PromptInput {
             cwd: &spec.cwd,
             provider: choice.provider.id(),
-            model: &choice.model,
+            model: &choice.id,
             platform: std::env::consts::OS,
             date: jiff::Zoned::now().date(),
         });
@@ -424,11 +422,7 @@ impl Host {
         TurnConfig {
             session: summary.clone(),
             cwd: spec.cwd.clone(),
-            provider: choice.provider,
-            model: choice.model,
-            capabilities: choice.capabilities,
-            max_tokens: choice.max_tokens,
-            reasoning: self.settings.kernel.thinking,
+            model: choice,
             system,
             tools: self.tools_for(spec.tools.as_deref()),
             policy: self

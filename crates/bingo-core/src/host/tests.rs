@@ -430,3 +430,41 @@ async fn a_plugin_receives_only_the_settings_it_claimed() {
         Some(json!({"greeting": {"text": "hi", "tags": ["a", "b"]}}))
     );
 }
+
+#[tokio::test]
+async fn a_declared_window_is_the_ruler_the_turn_measures_with() {
+    let provider = ScriptedProvider::new(vec![Script::Events(text("hello"))]);
+    let plugins = vec![TestPlugin::boxed(
+        &PROVIDER,
+        vec![Contribution::Provider(provider.clone())],
+    )];
+    let config = HostConfig::new(env())
+        .with_layer("user", json!({"model": "m"}))
+        .with_layer(
+            "project",
+            json!({"models": {"scripted/m": {"contextWindow": 50000, "maxOutput": 60000, "reasoning": true}}}),
+        );
+    let host = Host::build(plugins, config).await.unwrap();
+    let Attachment {
+        mut events, handle, ..
+    } = host
+        .open(
+            SessionSelector::Create {
+                spec: spec("/work"),
+            },
+            who(),
+        )
+        .await
+        .unwrap();
+    handle.submit(IntentId::mint(), Input::text("hi", Origin::surface("test")));
+    let mut window = None;
+    while let Some(frame) = events.next().await {
+        match frame.event {
+            Event::TurnUsage { context, .. } => window = Some(context.window),
+            Event::TurnCompleted { .. } => break,
+            _ => {}
+        }
+    }
+    assert_eq!(window, Some(50_000));
+    assert_eq!(provider.requests()[0].max_tokens, 25_000, "half the window");
+}

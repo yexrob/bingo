@@ -229,6 +229,7 @@ fn kernel_settings(
         model: typed(merged, layers, "model")?,
         thinking: typed(merged, layers, "thinking")?,
         max_tokens: typed(merged, layers, "maxTokens")?,
+        models: typed(merged, layers, "models")?.unwrap_or_default(),
     })
 }
 
@@ -276,6 +277,43 @@ mod tests {
             plugin: "bingo.provider.anthropic".into(),
             keys: vec![("anthropic".into(), Merge::Replace)],
         }
+    }
+
+    #[test]
+    fn model_declarations_merge_by_field_across_layers_and_refuse_a_typo() {
+        let merged = merge(
+            &[
+                layer(
+                    "user",
+                    json!({"models": {"openai/x": {"contextWindow": 128000}}}),
+                ),
+                layer(
+                    "project",
+                    json!({"models": {"openai/x": {"maxOutput": 8192}, "anthropic/y": {"images": false}}}),
+                ),
+            ],
+            &[],
+        )
+        .unwrap();
+        let x = &merged.kernel.models["openai/x"];
+        assert_eq!(
+            (x.context_window, x.max_output),
+            (Some(128_000), Some(8_192))
+        );
+        assert_eq!(merged.kernel.models["anthropic/y"].images, Some(false));
+
+        let err = merge(
+            &[layer(
+                "project",
+                json!({"models": {"openai/x": {"contextWindwo": 1}}}),
+            )],
+            &[],
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&err, SettingsError::Type { key, layer, .. } if key == "models" && layer == "project"),
+            "{err}"
+        );
     }
 
     #[test]

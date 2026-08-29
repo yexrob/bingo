@@ -154,6 +154,10 @@ pub struct ModelRequest {
     pub provider_options: ProviderMetadata,
 }
 
+/// Token counts as the provider reports them, the three input counts kept
+/// apart: `input_tokens` is what the model read fresh, the cache counts are
+/// what it read from or wrote to a cached prefix. The whole input side is
+/// `input_total()`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Usage {
@@ -168,6 +172,11 @@ pub struct Usage {
 }
 
 impl Usage {
+    /// Every input token the model saw this round, cached or not.
+    pub fn input_total(&self) -> u64 {
+        self.input_tokens + self.cache_read_tokens + self.cache_write_tokens
+    }
+
     pub fn add(&mut self, other: Usage) {
         self.input_tokens += other.input_tokens;
         self.output_tokens += other.output_tokens;
