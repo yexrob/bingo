@@ -33,3 +33,5 @@ tempfile.workspace = true
 # Black-box turns against a scripted HTTP endpoint (`--provider openai`, WebFetch).
 wiremock.workspace = true
 tokio.workspace = true
+# The JSON-RPC harness drives a spawned `bingo serve --stdio` through RemoteKernel.
+futures.workspace = true

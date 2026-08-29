@@ -42,31 +42,31 @@ struct Cli {
     output_format: OutputFormat,
 
     /// The model provider; the settings' `provider`, else the first registered.
-    #[arg(long)]
+    #[arg(long, global = true)]
     provider: Option<String>,
 
     /// The model id; the settings' `model`, else the provider's default.
-    #[arg(long)]
+    #[arg(long, global = true)]
     model: Option<String>,
 
     /// An extra settings file, above the user, project and local layers.
-    #[arg(long, value_name = "PATH")]
+    #[arg(long, value_name = "PATH", global = true)]
     settings: Option<PathBuf>,
 
     /// default | acceptEdits | plan | bypassPermissions | dontAsk
-    #[arg(long, value_name = "MODE")]
+    #[arg(long, value_name = "MODE", global = true)]
     permission_mode: Option<String>,
 
     /// Skip every permission prompt (the same as `--permission-mode bypassPermissions`).
-    #[arg(long)]
+    #[arg(long, global = true)]
     dangerously_skip_permissions: bool,
 
     /// Permission rules to allow for this run, e.g. `Bash(git status:*)`.
-    #[arg(long, value_name = "RULE", value_delimiter = ',')]
+    #[arg(long, value_name = "RULE", value_delimiter = ',', global = true)]
     allowed_tools: Vec<String>,
 
     /// The session's working directory; the process cwd when absent.
-    #[arg(long)]
+    #[arg(long, global = true)]
     cwd: Option<PathBuf>,
 
     /// An opaque key naming the session, for hosts that route by it.
@@ -82,7 +82,7 @@ struct Cli {
     resume: Option<String>,
 
     /// Stop the turn after this many model rounds.
-    #[arg(long, value_name = "N")]
+    #[arg(long, value_name = "N", global = true)]
     max_turns: Option<u32>,
 }
 

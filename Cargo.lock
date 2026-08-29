@@ -147,6 +147,7 @@ dependencies = [
  "bingo-tool-fs",
  "bingo-tool-web",
  "clap",
+ "futures",
  "serde_json",
  "tempfile",
  "tokio",
