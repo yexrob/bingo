@@ -13,3 +13,7 @@ workspace = true
 [dependencies]
 bingo-sdk.workspace = true
 async-trait.workspace = true
+# M1: the Bash splitter parses with the real grammar; a hand-rolled scanner
+# cannot see command substitution or tell a syntax error from a command.
+tree-sitter.workspace = true
+tree-sitter-bash.workspace = true

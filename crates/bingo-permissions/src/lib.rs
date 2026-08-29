@@ -1,1 +1,4 @@
-//! Placeholder: the plugin lands in M1 (docs/plans/M1-provider-tools-gate.md).
+//! The permission policy: five modes, an allow/deny/ask rule table, and a
+//! decision that fails closed at every step.
+
+pub mod split;
