@@ -70,8 +70,8 @@ struct Actor {
     commands: Commands,
     /// Work that outlives a turn: the hooks that run after `TurnCompleted`.
     tracker: TaskTracker,
-    /// Durable frames for the hooks that observe the journal, in order, on a
-    /// task of their own; `None` when no hook asked (ADR-0009 §4).
+    /// Every frame but the deltas for the hooks that observe the session, in
+    /// order, on a task of their own; `None` when no hook asked (ADR-0009 §4).
     observed: Option<mpsc::UnboundedSender<(Frame, HookContext)>>,
     /// Flipped when the actor is done, for whoever waits on the mailbox.
     done: watch::Sender<bool>,
@@ -211,8 +211,8 @@ impl Actor {
         });
     }
 
-    /// One ordered task feeds every durable frame to the hooks that observe
-    /// the journal; publishing never waits on them.
+    /// One ordered task feeds every frame but the deltas to the hooks that
+    /// observe the session; publishing never waits on them.
     fn observe_journal(&mut self) {
         let hooks: Vec<Arc<dyn Hook>> = self
             .config
@@ -372,9 +372,13 @@ impl Actor {
                 tracing::error!(session = %self.id, error = %e, "journal append failed");
             }
             self.journal.push(frame.clone());
-            if let Some(observed) = &self.observed {
-                let _ = observed.send((frame.clone(), self.hook_context()));
-            }
+        }
+        // Observers see notices too, which the journal does not keep; only
+        // the deltas, which are volume and nothing else, are spared them.
+        if let Some(observed) = &self.observed
+            && !matches!(frame.event, Event::ItemDelta { .. })
+        {
+            let _ = observed.send((frame.clone(), self.hook_context()));
         }
         self.state.apply(&frame);
         self.subscribers.fanout(&frame);

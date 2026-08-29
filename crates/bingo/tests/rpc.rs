@@ -28,6 +28,11 @@ struct Server {
 impl Server {
     /// `bingo serve --stdio` in a fresh home, the fake provider on `script`.
     fn spawn(script: &str) -> Server {
+        Server::spawn_with(script, &[])
+    }
+
+    /// The same, with extra command-line arguments after `--cwd`.
+    fn spawn_with(script: &str, extra: &[&str]) -> Server {
         let home = tempfile::tempdir().unwrap();
         let path = home.path().join("script.json");
         std::fs::File::create(&path)
@@ -37,6 +42,7 @@ impl Server {
         let child = Command::new(env!("CARGO_BIN_EXE_bingo"))
             .args(["serve", "--stdio", "--cwd"])
             .arg(home.path())
+            .args(extra)
             .env("BINGO_FAKE_SCRIPT", &path)
             .env("HOME", home.path())
             .stdin(Stdio::piped())
@@ -509,5 +515,100 @@ async fn a_shell_line_and_a_permission_mode_dispatch_as_commands() {
         std::fs::read_to_string(server.cwd().join("quiet.txt")).unwrap(),
         "no prompt\n"
     );
+    kernel.shutdown().await.unwrap();
+}
+
+/// The MCP test server `bingo-mcp` ships as an example. `cargo test
+/// --workspace` builds it; a run of this binary alone builds it here.
+fn echo_server() -> std::path::PathBuf {
+    let exe = std::env::current_exe().unwrap();
+    let profile = exe.parent().unwrap().parent().unwrap();
+    let server = profile.join("examples").join("echo_server");
+    if !server.exists() {
+        let built = std::process::Command::new(env!("CARGO"))
+            .args(["build", "-p", "bingo-mcp", "--example", "echo_server"])
+            .status()
+            .unwrap();
+        assert!(built.success(), "building the MCP example server");
+    }
+    server
+}
+
+/// A host's `--mcp-config` names a server; its tool arrives in the catalogue
+/// once the dial lands, reaches the model untrusted, and runs on approval.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_mcp_server_from_mcp_config_offers_its_tool_through_the_gate() {
+    let server = echo_server();
+    let config = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(
+        config.path(),
+        serde_json::json!({ "mcpServers": { "test": { "command": server } } }).to_string(),
+    )
+    .unwrap();
+    let config_path = config.path().to_string_lossy().into_owned();
+    let mut host = Server::spawn_with(
+        r#"{"responses":[
+            {"steps":[{"toolCall":{"name":"mcp__test__echo","input":{"text":"over mcp"}}}]},
+            {"steps":[{"text":"echoed"}]}
+        ]}"#,
+        &["--mcp-config", &config_path],
+    );
+    let kernel = ready(&mut host).await;
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let entry = loop {
+        let catalog = kernel.catalog(CatalogKind::Tools).await.unwrap();
+        if let Some(entry) = catalog
+            .entries
+            .into_iter()
+            .find(|e| e.id == "mcp__test__echo")
+        {
+            break entry;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the echo server's tool never reached the catalogue"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    assert_eq!(entry.meta["server"], "test");
+
+    let mut attachment = kernel.open(create(host.cwd()), who()).await.unwrap();
+    attachment.handle.submit(
+        IntentId::mint(),
+        Input::text("echo it", Origin::surface("test")),
+    );
+    let interaction = loop {
+        let frame = attachment.events.next().await.unwrap();
+        attachment.snapshot.apply(&frame);
+        if let Event::InteractionOpened { interaction } = frame.event {
+            break interaction;
+        }
+    };
+    assert!(
+        matches!(&interaction.kind, bingo_sdk::InteractionKind::Permission { tool, .. } if tool == "mcp__test__echo"),
+        "an MCP tool is untrusted, so the gate asks: {interaction:?}"
+    );
+    attachment.handle.answer(
+        IntentId::mint(),
+        interaction.id,
+        Answer::AllowOnce,
+        Activation::Pointer,
+    );
+    until_completed(&mut attachment).await;
+    assert_eq!(attachment.snapshot.last_turn, Some(TurnStatus::Completed));
+    let echoed = attachment
+        .snapshot
+        .items
+        .iter()
+        .find_map(|item| match &item.body {
+            bingo_sdk::ItemBody::ToolCall {
+                name,
+                output: Some(output),
+                ..
+            } if name == "mcp__test__echo" => output.parts[0].as_text().map(str::to_owned),
+            _ => None,
+        });
+    assert_eq!(echoed.as_deref(), Some("over mcp"));
     kernel.shutdown().await.unwrap();
 }

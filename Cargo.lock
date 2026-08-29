@@ -191,6 +191,8 @@ version = "0.1.0"
 dependencies = [
  "bingo-context",
  "bingo-core",
+ "bingo-hooks-shell",
+ "bingo-mcp",
  "bingo-permissions",
  "bingo-provider-anthropic",
  "bingo-provider-fake",

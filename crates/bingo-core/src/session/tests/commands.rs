@@ -365,12 +365,16 @@ async fn session_and_journal_hooks_observe_without_delaying_anything() {
     });
     let (mut state, mut events) = mailbox.attach().await.unwrap();
     mailbox.submit(IntentId::mint(), Input::text("hi", Origin::surface("test")));
-    drive(&mut events, &mut state, turn_completed).await;
+    let received = collect(&mut events, &mut state, turn_completed).await;
     assert!(
         !hook.calls().iter().any(|c| c.starts_with("event:")),
         "the observer is still gated, and every frame arrived regardless"
     );
-    let durable: Vec<u64> = events_of(&mailbox).await.iter().map(|f| f.seq.0).collect();
+    let durable: Vec<u64> = received
+        .iter()
+        .filter(|f| !matches!(f.event, Event::ItemDelta { .. }))
+        .map(|f| f.seq.0)
+        .collect();
 
     hook.open();
     mailbox.close(CloseReason::Client);
@@ -384,10 +388,12 @@ async fn session_and_journal_hooks_observe_without_delaying_anything() {
         .map(|n| n.parse().unwrap())
         .collect();
     let closed = seen.last().copied().unwrap();
+    // The head frames (seq 1, 2) preceded the attach, so they are the
+    // observer's alone; after them, every frame the client saw but the deltas.
     assert_eq!(
-        seen[..seen.len() - 1],
-        durable[..],
-        "every durable frame, in order; the last is the close itself"
+        &seen[2..seen.len() - 1],
+        &durable[..],
+        "every frame but the deltas, in order; the last is the close itself"
     );
     assert!(closed > durable[durable.len() - 1]);
 }

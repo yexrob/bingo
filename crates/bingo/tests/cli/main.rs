@@ -542,6 +542,7 @@ fn scripted_run(
 }
 
 mod context;
+mod hooks;
 mod sessions;
 mod skills;
 mod stream_json;

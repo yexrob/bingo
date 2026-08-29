@@ -8,6 +8,8 @@ use std::sync::Arc;
 use bingo_context::ContextPlugin;
 use bingo_core::settings;
 use bingo_core::{Host, HostConfig};
+use bingo_hooks_shell::ShellHooksPlugin;
+use bingo_mcp::McpPlugin;
 use bingo_permissions::PermissionsPlugin;
 use bingo_provider_anthropic::AnthropicPlugin;
 use bingo_provider_fake::{FakePlugin, FakeProvider, Script};
@@ -271,12 +273,14 @@ fn plugins() -> Result<Vec<Box<dyn Plugin>>, KernelError> {
         Box::new(AnthropicPlugin),
         Box::new(OpenAiPlugin),
         Box::new(PermissionsPlugin),
+        Box::new(ShellHooksPlugin),
         Box::new(JsonlStorePlugin::default()),
         Box::new(ContextPlugin),
         Box::new(FsPlugin),
         Box::new(BashPlugin),
         Box::new(WebPlugin),
         Box::new(SkillsPlugin),
+        Box::new(McpPlugin::default()),
         Box::new(PrintPlugin),
         Box::new(RpcPlugin),
         Box::new(TuiPlugin),
