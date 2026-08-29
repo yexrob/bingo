@@ -59,6 +59,10 @@ pub const BINDINGS: &[Binding] = &[
         description: "complete the command under the caret",
     },
     Binding {
+        keys: "shift+tab",
+        description: "cycle permission mode",
+    },
+    Binding {
         keys: "1-9 · y/a/n",
         description: "answer the open dialog",
     },

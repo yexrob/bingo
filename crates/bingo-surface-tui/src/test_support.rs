@@ -241,6 +241,26 @@ pub fn resolved() -> Event {
     }
 }
 
+/// The kernel's projection of one plugin's per-session setting (ADR-0009 §5).
+pub fn plugin_view(plugin: &str, value: Value) -> Event {
+    Event::ConfigChanged {
+        config: bingo_sdk::ConfigView {
+            plugins: std::collections::BTreeMap::from([(plugin.to_string(), value)]),
+            ..Default::default()
+        },
+    }
+}
+
+/// What the permission policy publishes for a session.
+pub fn permission_view(mode: &str) -> Event {
+    plugin_view("permissions", json!({ "mode": mode, "rules": [] }))
+}
+
+/// A session whose policy has published this mode and nothing else.
+pub fn with_permission_mode(mode: &str) -> SessionState {
+    folded(vec![frame(1, permission_view(mode))])
+}
+
 pub fn notice(level: Level, text: &str) -> Event {
     Event::Notice {
         level,
@@ -275,6 +295,11 @@ pub fn ctrl(c: char) -> KeyEvent {
 
 pub fn alt(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::ALT)
+}
+
+/// What a terminal sends for shift+tab: `BackTab`, with the modifier set.
+pub fn shift(code: KeyCode) -> KeyEvent {
+    KeyEvent::new(code, KeyModifiers::SHIFT)
 }
 
 /// Type a whole line, one key at a time, through the real handler.

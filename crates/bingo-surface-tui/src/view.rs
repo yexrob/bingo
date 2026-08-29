@@ -14,7 +14,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::clock::Now;
 use crate::ui::{Picker, Ui};
-use crate::{dialog, keys, theme, transcript, wrap};
+use crate::{dialog, keys, permission, theme, transcript, wrap};
 
 /// How tall the composer box may grow before it scrolls internally.
 const COMPOSER_ROWS: usize = 10;
@@ -380,25 +380,61 @@ fn menu(ui: &Ui) -> Vec<Line<'static>> {
         .collect()
 }
 
-/// Hints on the left, what the next turn will cost on the right.
+/// The mode and the hints on the left, what the next turn will cost on the
+/// right.
 fn footer(state: &SessionState, width: usize) -> Line<'static> {
-    let left = format!("{} · {}", keys::FOOTER_HINT, keys::FOOTER_MODES);
-    let mut right = Vec::new();
+    let left = hints(state);
+    let right = badges(state);
+    let taken: usize = left
+        .iter()
+        .chain(right.iter())
+        .map(|s| s.content.width())
+        .sum();
+    let mut spans = left;
+    spans.push(Span::raw(" ".repeat(width.saturating_sub(taken).max(1))));
+    spans.extend(right);
+    Line::from(spans)
+}
+
+/// The permission mode the policy published, then the chords.
+fn hints(state: &SessionState) -> Vec<Span<'static>> {
+    let mut out = Vec::new();
+    if let Some((mode, style)) = permission_badge(state) {
+        out.push(Span::styled(mode, style));
+        out.push(Span::styled(" · ", theme::dim()));
+    }
+    out.push(Span::styled(
+        format!("{} · {}", keys::FOOTER_HINT, keys::FOOTER_MODES),
+        theme::dim(),
+    ));
+    out
+}
+
+/// The model and how full its context is.
+fn badges(state: &SessionState) -> Vec<Span<'static>> {
+    let mut out = Vec::new();
     let (context, style) = context_badge(state);
     if let Some(model) = state.summary.model.clone().filter(|m| !m.is_empty()) {
         let gap = if context.is_empty() { "" } else { " " };
-        right.push(Span::styled(format!("{model}{gap}"), theme::dim()));
+        out.push(Span::styled(format!("{model}{gap}"), theme::dim()));
     }
     if !context.is_empty() {
-        right.push(Span::styled(context, style));
+        out.push(Span::styled(context, style));
     }
-    let taken: usize = right.iter().map(|s| s.content.width()).sum::<usize>() + left.width();
-    let mut spans = vec![
-        Span::styled(left, theme::dim()),
-        Span::raw(" ".repeat(width.saturating_sub(taken).max(1))),
-    ];
-    spans.extend(right);
-    Line::from(spans)
+    out
+}
+
+/// The mode chip, absent until a policy publishes one. `bypassPermissions` is
+/// the one mode that turns the gate off, so it is the one that catches the eye;
+/// `default` is what a session already is, so it says so quietly.
+fn permission_badge(state: &SessionState) -> Option<(String, Style)> {
+    let mode = permission::mode(state)?;
+    let style = match mode {
+        "bypassPermissions" => theme::caution(),
+        "default" => theme::dim(),
+        _ => theme::accent(),
+    };
+    Some((mode.to_string(), style))
 }
 
 fn context_badge(state: &SessionState) -> (String, Style) {
@@ -745,6 +781,35 @@ mod tests {
     fn the_context_badge_is_red_at_the_trigger() {
         let (ui, now) = scene();
         insta::assert_snapshot!(render(&with_context(185_000), &ui, now));
+    }
+
+    #[test]
+    fn the_footer_names_the_mode_the_policy_published() {
+        let (ui, now) = scene();
+        insta::assert_snapshot!(render(&with_permission_mode("acceptEdits"), &ui, now));
+    }
+
+    #[test]
+    fn the_footer_cautions_about_bypassing_the_gate() {
+        let state = with_permission_mode("bypassPermissions");
+        let (ui, now) = scene();
+        assert_eq!(
+            permission_badge(&state).map(|(_, style)| style),
+            Some(theme::caution()),
+            "the one mode that turns the gate off is the one that is coloured"
+        );
+        insta::assert_snapshot!(render(&state, &ui, now));
+    }
+
+    #[test]
+    fn a_config_without_a_mode_leaves_the_footer_as_it_was() {
+        let published = folded(vec![frame(1, plugin_view("hooks", json!({"events": 3})))]);
+        let (ui, now) = scene();
+        assert_eq!(
+            render(&published, &ui, now),
+            render(&state(), &ui, now),
+            "no badge until a policy publishes one"
+        );
     }
 
     #[test]
