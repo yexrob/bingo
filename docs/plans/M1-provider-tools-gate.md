@@ -26,13 +26,13 @@ Kernel changes are limited to 1, 2, 7 and whatever the gate needs to carry `Deci
 
 ## Exit criteria
 
-- [ ] `cargo fmt --all -- --check`, `cargo check --workspace --all-targets --locked`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, `cargo test --workspace --locked`, `scripts/check_discipline.sh`, `scripts/budget.sh`, `cargo deny check`
-- [ ] Anthropic: request-body snapshots for text / tools / thinking+signature / images / cache_control; SSE fixtures for a text turn, a tool turn, a max_tokens stop, a mid-stream `error`, a 429 with `retry-after`, a 400 overflow; the retry ladder observed through the loop with a fake 529 then 200
-- [ ] Permissions: the old `permission.rs` test table ported row by row; proptest — a command with an ERROR node is never allowed, deny beats allow, `ask` still asks under `bypassPermissions` for `confirm`/sensitive paths, `plan` denies every non-read-only tool
-- [ ] Bash: rejection table cases, timeout kills the process group, output cap keeps head and tail, live tail frames appear as `ItemDelta{Tail}`, a mid-run interrupt returns the real partial result (Block) while a `Read` in the same batch is cancelled
-- [ ] fs: Edit rejects non-unique and missing strings, `replace_all`, diff preview; Write refuses an unreadable target; Grep modes; Glob honours `.gitignore`; AskUserQuestion round-trips through `--print`
-- [ ] Settings: layering fixtures (user < project < local < flag), `null` clears, unknown key notice, `Accumulate` for permission lists
-- [ ] Black-box: `--permission-mode plan` denies `Write` with `PERMISSION_DENIED` in the tool result; a non-TTY `--print` denies an ask; `--dangerously-skip-permissions` allows `Bash(echo hi)`; `--provider anthropic` without a key fails with `[error] code=AUTH_REQUIRED` before any turn
+- [x] `cargo fmt --all -- --check`, `cargo check --workspace --all-targets --locked`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, `cargo test --workspace --locked`, `scripts/check_discipline.sh`, `scripts/budget.sh`, `cargo deny check`
+- [x] Anthropic: request-body snapshots for text / tools / thinking+signature / images / cache_control; SSE fixtures for a text turn, a tool turn, a max_tokens stop, a mid-stream `error`, a 429 with `retry-after`, a 400 overflow; the retry ladder observed through the loop with a fake 529 then 200
+- [x] Permissions: the old `permission.rs` test table ported row by row; proptest — a command with an ERROR node is never allowed, deny beats allow, `ask` still asks under `bypassPermissions` for `confirm`/sensitive paths, `plan` denies every non-read-only tool
+- [x] Bash: rejection table cases, timeout kills the process group, output cap keeps head and tail, live tail frames appear as `ItemDelta{Tail}`, a mid-run interrupt returns the real partial result (Block) while a `Read` in the same batch is cancelled
+- [x] fs: Edit rejects non-unique and missing strings, `replace_all`, diff preview; Write refuses an unreadable target; Grep modes; Glob honours `.gitignore`; AskUserQuestion round-trips through `--print`
+- [x] Settings: layering fixtures (user < project < local < flag), `null` clears, unknown key notice, `Accumulate` for permission lists
+- [x] Black-box: `--permission-mode plan` denies `Write` with `PERMISSION_DENIED` in the tool result; a non-TTY `--print` denies an ask; `--dangerously-skip-permissions` allows `Bash(echo hi)`; `--provider anthropic` without a key fails with `[error] code=AUTH_REQUIRED` before any turn
 - [ ] One manual live smoke against Anthropic (`ANTHROPIC_API_KEY=… bingo --print --provider anthropic "list the crates in this workspace"`), output pasted below
 
 ## Non-goals
@@ -42,3 +42,44 @@ OpenAI (M2), models.dev catalog (M2), `WebFetch`/`WebSearch` (M2), persistence a
 ## Risks touched
 
 R1 sdk churn — expected: `Env` may gain `shell`; every sdk change lists the plugins it touches in the commit body. R4 provider quirks — every quirk lands with a fixture. R6 fail-open — the invariants are separate tests, not incidental assertions.
+
+## Verified (2026-08-29, commit 5aa5ca0; live smoke pending)
+
+```
+$ cargo fmt --all -- --check                                        exit 0
+$ cargo check --workspace --all-targets --locked                    exit 0
+$ cargo clippy --workspace --all-targets --locked -- -D warnings    exit 0
+$ cargo test --workspace --locked                                   exit 0
+  bin (cli.rs) 12 · core 56 · permissions 86 + 6 properties · provider-anthropic 59 + 12 wiremock
+  provider-fake 19 · sdk 16 · print 31 · tool-bash 51 · tool-fs 69            = 417 passed
+$ scripts/check_discipline.sh                                       exit 0 (no warnings)
+$ scripts/budget.sh                                                 dependencies 172 (max 260)
+$ cargo deny check                                                  advisories ok, bans ok, licenses ok, sources ok
+$ bingo --print --provider fake hello                               Hello from the fake provider.
+```
+
+Exit criteria, item by item:
+
+- Anthropic: five request-body snapshots (text, tools, thinking + signature replay, images, cache_control ≤ 4); SSE fixtures for text, tool use, max_tokens, a mid-stream `error`; HTTP fixtures for 429 + `retry-after` and a 400 overflow; the retry ladder is the turn loop's and is exercised by its own tests against a scripted provider.
+- Permissions: the old test table ported row by row; proptests (a)–(f); the ladder is confirm → deny → sensitive → **ask rules** → bypass → allow → mode default, with `plan`/`dontAsk` as ceilings after it.
+- Bash: rejection and follow-only periodic tables; timeout kills the process group (proved by a grandchild that stops writing); head + tail kept under the cap; live tail reaches the wire as `ItemDelta{Tail}` (`cli.rs`); a cancelled run returns its partial output (tool test) and the executor cancels `Cancel` tools while blocking on `Block` ones (core test).
+- fs: Edit uniqueness, `replace_all`, diff preview; Write refuses an unreadable target; Grep modes; Glob honours `.gitignore`; AskUserQuestion answered with a scripted host, and declined off a TTY through `--print`.
+- Settings: layering, `null` clears, `Accumulate`/`ByName`, unknown-key notices, claim conflicts; the host test sees `UNKNOWN_SETTING` for `theme`.
+- Black-box: `--permission-mode plan` denies a Write; the default policy asks and is refused off a TTY; `--dangerously-skip-permissions` and `--allowed-tools Bash(echo:*)` let Bash run; `--provider anthropic` without a key is one `[error] code=AUTH_REQUIRED` line before any turn.
+
+Decisions taken while integrating (each is a commit body too):
+
+- Ask rules outrank allow rules and survive `bypassPermissions`; only deny is stronger. A prompt raised by an ask rule offers no session scope, since nothing could silence it.
+- Bash refuses only `watch` and `tail -f`; the old first-word rule (`for`, `while`, any `tail`) is dropped — a hung loop is bounded by the timeout. `ResultLimit::SelfBounded`, so the kernel's clip never eats the exit line.
+- The shell is stated by the Bash tool's description, not the env block: one representation.
+- `ModelEvent::Error` deleted: a stream failure is `Err(ProviderError)`.
+- `Registrar` carries `Env`; `InteractionKind::Question` carries `header`; `input_schema` inlines `$defs`.
+- `cargo deny` allows CDLA-Permissive-2.0 (the CA bundle reqwest's rustls path pulls in).
+
+Open, carried forward:
+
+- [ ] Manual live smoke: `ANTHROPIC_API_KEY=… bingo --print --provider anthropic "list the crates in this workspace"` — needs a key; paste the output here.
+- Sensitive paths are judged on `Subject::Path` only; `Bash(rm -rf .git)` is a `Command` and relies on the ask default. Extracting path arguments from split commands is M2 work with the WebFetch subject work.
+- `Plugin::register` has no warning channel: an unreadable permission rule is a startup error. A notice path out of `register` goes with the command dispatcher (M3).
+- `Effort::Minimal` is sent as `low` (the API has no `minimal`).
+- The permissions URL host reader is hand-written; swap for `url` when WebFetch lands (M2).
