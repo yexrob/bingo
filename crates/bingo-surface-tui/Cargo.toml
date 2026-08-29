@@ -1,0 +1,29 @@
+[package]
+name = "bingo-surface-tui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Full-screen terminal surface plugin for bingo"
+
+[lints]
+workspace = true
+
+[dependencies]
+bingo-sdk.workspace = true
+tokio.workspace = true
+futures.workspace = true
+async-trait.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+jiff.workspace = true
+ratatui.workspace = true
+crossterm.workspace = true
+pulldown-cmark.workspace = true
+unicode-width.workspace = true
+unicode-segmentation.workspace = true
+
+[dev-dependencies]
+insta.workspace = true
+tempfile.workspace = true
