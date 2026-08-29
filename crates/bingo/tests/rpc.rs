@@ -637,3 +637,274 @@ async fn an_mcp_server_from_mcp_config_offers_its_tool_through_the_gate() {
     assert_eq!(echoed.as_deref(), Some("over mcp"));
     kernel.shutdown().await.unwrap();
 }
+
+/// The root calls `SpawnAgent` and waits; the child answers; the root reports.
+/// One script serves both sessions — the fake provider hands its responses out
+/// in the order they are asked for, and a foreground spawn makes that order
+/// the tree's: root, child, root.
+const FOREGROUND_AGENT: &str = r#"{"responses":[
+    {"steps":[{"toolCall":{"name":"SpawnAgent","input":{"prompt":"say hi","background":false}}}]},
+    {"steps":[{"text":"hi from the child"}]},
+    {"steps":[{"text":"the child said hi"}]}
+]}"#;
+
+/// The same spawn left in the background. Both middle responses say the same
+/// thing because which of the two sessions asks first is a race no script can
+/// settle.
+const BACKGROUND_AGENT: &str = r#"{"responses":[
+    {"steps":[{"toolCall":{"name":"SpawnAgent","input":{"prompt":"say hi","name":"reviewer"}}}]},
+    {"steps":[{"text":"working"}]},
+    {"steps":[{"text":"working"}]},
+    {"steps":[{"text":"noted"}]}
+]}"#;
+
+/// A server driven by raw JSON-RPC lines. `RemoteKernel` files a frame under
+/// its own session, so a child's frames wait for a client that claims them by
+/// id; reading the wire is how a test sees everything a tree attachment
+/// forwards.
+struct Raw {
+    stdin: tokio::process::ChildStdin,
+    lines: tokio::io::Lines<BufReader<tokio::process::ChildStdout>>,
+    id: u32,
+}
+
+impl Raw {
+    fn new(server: &mut Server) -> Raw {
+        Raw {
+            stdin: server.child.stdin.take().unwrap(),
+            lines: BufReader::new(server.child.stdout.take().unwrap()).lines(),
+            id: 0,
+        }
+    }
+
+    /// A request, and the id its answer will carry.
+    async fn call(&mut self, method: &str, params: serde_json::Value) -> u32 {
+        self.id += 1;
+        let request = serde_json::json!({
+            "jsonrpc": "2.0", "id": self.id, "method": method, "params": params
+        });
+        send(&mut self.stdin, &request.to_string()).await;
+        self.id
+    }
+
+    async fn message(&mut self) -> serde_json::Value {
+        let line = tokio::time::timeout(Duration::from_secs(20), self.lines.next_line())
+            .await
+            .expect("the server answers within the timeout")
+            .unwrap()
+            .expect("the server is still there");
+        serde_json::from_str(&line).unwrap_or_else(|e| panic!("{e}: {line}"))
+    }
+
+    /// One request's result, over whatever notifications arrive first.
+    async fn result(&mut self, id: u32) -> serde_json::Value {
+        loop {
+            let message = self.message().await;
+            if message.get("id") == Some(&serde_json::json!(id)) {
+                assert!(message["result"].is_object(), "{message}");
+                return message["result"].clone();
+            }
+        }
+    }
+
+    /// Every frame the server sends until the root's turn ends.
+    async fn frames_until_idle(&mut self, root: &str) -> Vec<Frame> {
+        let mut frames = Vec::new();
+        loop {
+            let message = self.message().await;
+            if message["method"] != "event" {
+                continue;
+            }
+            let frame: Frame = serde_json::from_value(message["params"].clone())
+                .unwrap_or_else(|e| panic!("{e}: {message}"));
+            let idle = frame.session.as_str() == root
+                && matches!(frame.event, Event::TurnCompleted { .. });
+            frames.push(frame);
+            if idle {
+                return frames;
+            }
+        }
+    }
+}
+
+/// The item a completed call of `name` left, and the text it returned.
+fn tool_output(frames: &[Frame], name: &str) -> (bingo_sdk::ItemId, String) {
+    frames
+        .iter()
+        .rev()
+        .find_map(|frame| match &frame.event {
+            Event::ItemCompleted { item } => match &item.body {
+                bingo_sdk::ItemBody::ToolCall {
+                    name: called,
+                    output: Some(output),
+                    ..
+                } if called == name => Some((
+                    item.id.clone(),
+                    output
+                        .parts
+                        .iter()
+                        .filter_map(bingo_sdk::ContentPart::as_text)
+                        .collect(),
+                )),
+                _ => None,
+            },
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("no completed {name} call in {} frames", frames.len()))
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_foreground_agent_is_a_child_session_on_the_root_s_attachment() {
+    let mut server = Server::spawn(FOREGROUND_AGENT);
+    let cwd = server.cwd();
+    let mut raw = Raw::new(&mut server);
+    let hello = raw
+        .call(
+            "initialize",
+            serde_json::json!({"client": {"name": "harness", "surface": "test"}, "protocol": 1}),
+        )
+        .await;
+    raw.result(hello).await;
+
+    let opened = raw
+        .call(
+            "session/open",
+            serde_json::json!({
+                "selector": {"kind": "create", "spec": {"cwd": cwd}},
+                "options": {"children": true}
+            }),
+        )
+        .await;
+    let root = raw.result(opened).await["session"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    raw.call(
+        "session/submit",
+        serde_json::json!({
+            "session": root,
+            "intent": "req_01HARNESS0000000000000001",
+            "input": {"kind": "text", "text": "spawn one", "origin": {"surface": "test"}}
+        }),
+    )
+    .await;
+
+    let frames = raw.frames_until_idle(&root).await;
+    let (call, result) = tool_output(&frames, "SpawnAgent");
+    assert!(
+        result.contains("hi from the child"),
+        "the child's own text is the call's result: {result}"
+    );
+
+    let child = frames
+        .iter()
+        .find_map(|frame| match &frame.event {
+            Event::SessionUpdated { summary } if frame.session.as_str() != root => {
+                summary.parent.clone().map(|link| (summary.clone(), link))
+            }
+            _ => None,
+        })
+        .expect("a child's own frames arrive on a tree attachment");
+    assert_eq!(child.1.session.as_str(), root);
+    assert_eq!(
+        child.1.item, call,
+        "the child hangs under the call that made it"
+    );
+
+    let listed = raw
+        .call(
+            "session/list",
+            serde_json::json!({"filter": {"parent": root}}),
+        )
+        .await;
+    let sessions = raw.result(listed).await["sessions"].clone();
+    let sessions = sessions.as_array().unwrap();
+    assert_eq!(sessions.len(), 1, "{sessions:?}");
+    assert_eq!(sessions[0]["id"], child.0.id.as_str());
+    assert_eq!(sessions[0]["title"], "agent");
+
+    let bye = raw.call("shutdown", serde_json::json!({})).await;
+    raw.result(bye).await;
+    assert!(server.child.wait().await.unwrap().success());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_background_agent_wakes_the_root_and_says_who_it_is() {
+    let mut server = Server::spawn(BACKGROUND_AGENT);
+    let kernel = ready(&mut server).await;
+    let mut attachment = kernel
+        .open(create(server.cwd()), who(), OpenOptions::with_children())
+        .await
+        .unwrap();
+    let root = attachment.session.clone();
+    attachment.handle.submit(
+        IntentId::mint(),
+        Input::text("spawn one", Origin::surface("test")),
+    );
+
+    // The root's own frames: the turn that spawns, then the turn the agent's
+    // reply opens. A tree attachment carries the child's too, and they belong
+    // to no state here.
+    let mut turns = 0;
+    let mut mine = Vec::new();
+    let deadline = tokio::time::sleep(Duration::from_secs(30));
+    tokio::pin!(deadline);
+    while turns < 2 {
+        tokio::select! {
+            frame = attachment.events.next() => {
+                let frame = frame.expect("the stream stays open");
+                if frame.session != root {
+                    continue;
+                }
+                if matches!(frame.event, Event::TurnCompleted { .. }) {
+                    turns += 1;
+                }
+                attachment.snapshot.apply(&frame);
+                mine.push(frame);
+            }
+            _ = &mut deadline => panic!("the agent never woke its parent: {turns} turns"),
+        }
+    }
+
+    let (_, started) = tool_output(&mine, "SpawnAgent");
+    let named: serde_json::Value = serde_json::from_str(&started).expect("a name and a session");
+    assert_eq!(named["name"], "reviewer");
+
+    let woken = mine
+        .iter()
+        .filter_map(|frame| match &frame.event {
+            Event::TurnStarted { origin, .. } => Some(*origin),
+            _ => None,
+        })
+        .nth(1)
+        .expect("a second turn on the root");
+    // Which of the two it is depends on whether the root's own follow-up
+    // round had ended when the agent reported: an idle root opens a `Peer`
+    // turn on the message, a busy one queues it and drains it as `Queue`.
+    // Both are ADR-0010 §1; no script can pin down which, because the root's
+    // second round and the child's first race for the next response.
+    assert!(
+        matches!(
+            woken,
+            bingo_sdk::TurnOrigin::Peer | bingo_sdk::TurnOrigin::Queue
+        ),
+        "the agent's message opened a turn on the root: {woken:?}"
+    );
+
+    let reported = attachment
+        .snapshot
+        .items
+        .iter()
+        .find_map(|item| match &item.body {
+            bingo_sdk::ItemBody::User { parts, origin } if origin.principal.is_some() => Some((
+                origin.clone(),
+                parts[0].as_text().unwrap_or_default().to_owned(),
+            )),
+            _ => None,
+        })
+        .expect("the agent's reply is a user item on the root");
+    assert_eq!(reported.0.principal.as_deref(), Some("reviewer"));
+    assert_eq!(reported.0.surface, "agent");
+    assert!(reported.1.starts_with("finished."), "{}", reported.1);
+    kernel.shutdown().await.unwrap();
+}

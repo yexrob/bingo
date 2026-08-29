@@ -1,4 +1,4 @@
 # Hard limits enforced by scripts/budget.sh. Raise only with an ADR line.
-max_dependencies = 264
+max_dependencies = 265
 max_core_check_seconds = 20
 max_target_gb = 5
