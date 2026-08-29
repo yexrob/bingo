@@ -1,5 +1,7 @@
 //! Filesystem tools: the ones a coding turn cannot do without.
 
+mod diff;
+mod edit;
 mod glob;
 mod grep;
 mod output;
@@ -11,6 +13,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use bingo_sdk::{Plugin, PluginError, PluginManifest, Registrar, Tool};
 
+pub use edit::{EditArgs, EditTool};
 pub use glob::{GlobArgs, GlobTool};
 pub use grep::{GrepArgs, GrepTool, OutputMode};
 pub use read::{ReadArgs, ReadTool};
@@ -19,7 +22,7 @@ static MANIFEST: PluginManifest = PluginManifest {
     id: "bingo.tools.fs",
     version: env!("CARGO_PKG_VERSION"),
     sdk: "^0.1",
-    provides: &["tool:Read", "tool:Glob", "tool:Grep"],
+    provides: &["tool:Read", "tool:Glob", "tool:Grep", "tool:Edit"],
     requires: &[],
     config: None,
 };
@@ -37,6 +40,7 @@ impl Plugin for FsPlugin {
         registrar.tool(Arc::new(ReadTool) as Arc<dyn Tool>);
         registrar.tool(Arc::new(GlobTool) as Arc<dyn Tool>);
         registrar.tool(Arc::new(GrepTool) as Arc<dyn Tool>);
+        registrar.tool(Arc::new(EditTool) as Arc<dyn Tool>);
         Ok(())
     }
 }
