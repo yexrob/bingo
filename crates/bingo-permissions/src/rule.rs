@@ -100,6 +100,12 @@ impl Rule {
         if !self.tool.matches(call.name) {
             return false;
         }
+        // A command whose parse carried an error hides what it would run, and
+        // nothing is allowed on the strength of a text nobody can read — not
+        // even by a rule that names the tool and nothing else.
+        if mode == MatchMode::All && call.subjects.iter().any(unreadable) {
+            return false;
+        }
         let Some(content) = &self.content else {
             return true;
         };
@@ -204,6 +210,13 @@ impl Content {
             (Self::Literal(text), Subject::Name { name }) => name == text,
             (Self::Prefix(text), Subject::Name { name }) => name.starts_with(text),
         }
+    }
+}
+
+fn unreadable(subject: &Subject) -> bool {
+    match subject {
+        Subject::Command { command } => !split::split(command).is_parsed(),
+        _ => false,
     }
 }
 
@@ -390,12 +403,12 @@ mod tests {
         let subjects = command("ls \"; rm -rf ~");
         assert!(!allows("Bash(ls)", "Bash", &subjects));
         assert!(
-            allows("Bash", "Bash", &subjects),
-            "a bare rule is about the tool, not the text"
+            !allows("Bash", "Bash", &subjects),
+            "not even a rule that names the tool and nothing else"
         );
         assert!(
             denies("Bash(ls)", "Bash", &subjects),
-            "ask still reads what it can"
+            "deny and ask still read what they can"
         );
     }
 
