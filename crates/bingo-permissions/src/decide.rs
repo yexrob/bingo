@@ -41,12 +41,15 @@ pub fn decide(req: &Request<'_>, rules: &Rules) -> Decision {
 }
 
 fn steps(req: &Request<'_>, rules: &Rules) -> Decision {
+    // An ask rule is a person saying "always check with me": it outranks the
+    // allow rules and survives bypassPermissions, like confirm and sensitive
+    // paths do. Only a deny rule sits above it.
     step_confirm(req)
         .or_else(|| step_deny_rules(req, rules))
         .or_else(|| step_sensitive_path(req))
+        .or_else(|| step_ask_rules(req, rules))
         .or_else(|| step_bypass(req))
         .or_else(|| step_allow_rules(req, rules))
-        .or_else(|| step_ask_rules(req, rules))
         .unwrap_or_else(|| step_mode_default(req))
 }
 
@@ -84,7 +87,7 @@ fn step_sensitive_path(req: &Request<'_>) -> Option<Decision> {
     })
 }
 
-/// 4. The user asked for no gate.
+/// 5. The user asked for no gate.
 fn step_bypass(req: &Request<'_>) -> Option<Decision> {
     (req.mode == Mode::BypassPermissions).then(|| Decision::Allow {
         reason: Reason::Mode {
@@ -93,7 +96,7 @@ fn step_bypass(req: &Request<'_>) -> Option<Decision> {
     })
 }
 
-/// 5. An allow rule, read the narrow way: every subject and every sub-command.
+/// 6. An allow rule, read the narrow way: every subject and every sub-command.
 fn step_allow_rules(req: &Request<'_>, rules: &Rules) -> Option<Decision> {
     first_match(&rules.allow, req.call, MatchMode::All, &req.context()).map(|rule| {
         Decision::Allow {
@@ -104,7 +107,7 @@ fn step_allow_rules(req: &Request<'_>, rules: &Rules) -> Option<Decision> {
     })
 }
 
-/// 6. An ask rule, read the broad way like a deny rule.
+/// 4. An ask rule, read the broad way like a deny rule.
 fn step_ask_rules(req: &Request<'_>, rules: &Rules) -> Option<Decision> {
     first_match(&rules.ask, req.call, MatchMode::Any, &req.context()).map(|rule| Decision::Ask {
         reason: Reason::Rule {
@@ -751,20 +754,20 @@ pub(crate) mod tests {
     // --- the ladder's own order -----------------------------------------
 
     #[test]
-    fn an_allow_rule_outranks_an_ask_rule() {
+    fn an_ask_rule_outranks_an_allow_rule() {
         let probe = Probe::bash("git push").ask(&["Bash(git push)"]);
         assert_eq!(probe.clone().kind(), Kind::Ask);
         assert_eq!(
             probe.allow(&["Bash(git push:*)"]).kind(),
-            Kind::Allow,
-            "the narrower answer the user already gave wins"
+            Kind::Ask,
+            "a person asked to be checked with; a broader allow does not silence that"
         );
     }
 
     #[test]
-    fn bypass_outranks_an_ask_rule_but_not_a_deny_rule() {
+    fn an_ask_rule_survives_bypass_and_a_deny_rule_still_wins() {
         let probe = Probe::bash("git push").mode(Mode::BypassPermissions);
-        assert_eq!(probe.clone().ask(&["Bash(git push)"]).kind(), Kind::Allow);
+        assert_eq!(probe.clone().ask(&["Bash(git push)"]).kind(), Kind::Ask);
         assert_eq!(probe.deny(&["Bash(git push)"]).kind(), Kind::Deny);
     }
 
@@ -814,15 +817,14 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn an_ask_rule_can_be_scoped_away_because_allow_now_outranks_it() {
-        // The old gate read ask rules before allow rules, so a session scope
-        // would have been dead text; in this order it is the answer the user
-        // just gave, and it holds.
+    fn an_ask_rule_prompt_offers_no_session_scope() {
+        // An ask rule outranks every allow rule, so no session rule could
+        // silence the next call; offering one would be dead text.
         assert_eq!(
             Probe::write("/work/project/note.txt")
                 .ask(&["Write"])
                 .scope(),
-            Some("Write(/work/project/)".to_string())
+            None
         );
     }
 }

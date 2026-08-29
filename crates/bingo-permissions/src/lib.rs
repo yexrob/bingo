@@ -41,7 +41,13 @@ static MANIFEST: PluginManifest = PluginManifest {
     provides: &["policy:permissions"],
     requires: &[],
     config: Some(ConfigClaim {
-        keys: &[("permissions", Merge::ByName)],
+        keys: &[
+            ("permissions.defaultMode", Merge::Replace),
+            ("permissions.allow", Merge::Accumulate),
+            ("permissions.deny", Merge::Accumulate),
+            ("permissions.ask", Merge::Accumulate),
+            ("permissions.additionalDirectories", Merge::Accumulate),
+        ],
         schema,
     }),
 };
@@ -90,7 +96,8 @@ impl Plugin for PermissionsPlugin {
 
     fn register(&self, registrar: &mut Registrar) -> Result<(), PluginError> {
         let settings: Settings = registrar.config()?;
-        let policy = PermissionsPolicy::new(settings.permissions, std::env::home_dir())?;
+        let policy =
+            PermissionsPolicy::new(settings.permissions, Some(registrar.env().home.clone()))?;
         registrar.add(Contribution::Policy(
             Arc::new(policy) as Arc<dyn PermissionPolicy>
         ));
@@ -235,13 +242,24 @@ mod tests {
         assert_eq!(MANIFEST.id, "bingo.permissions");
         assert_eq!(MANIFEST.provides, ["policy:permissions"]);
         let claim = MANIFEST.config.expect("a config claim");
-        assert_eq!(claim.keys.len(), 1);
-        assert_eq!(claim.keys[0].0, "permissions");
+        assert_eq!(claim.keys.len(), 5);
+        assert!(
+            claim
+                .keys
+                .iter()
+                .all(|(k, _)| k.starts_with("permissions."))
+        );
+        assert_eq!(claim.keys[0], ("permissions.defaultMode", Merge::Replace));
+        assert_eq!(claim.keys[1], ("permissions.allow", Merge::Accumulate));
     }
 
     #[test]
     fn the_plugin_registers_one_policy() {
-        let mut registrar = Registrar::new("bingo.permissions", json!({}));
+        let mut registrar = Registrar::new(
+            "bingo.permissions",
+            json!({}),
+            bingo_sdk::Env::rooted("/tmp"),
+        );
         PermissionsPlugin
             .register(&mut registrar)
             .expect("register");
