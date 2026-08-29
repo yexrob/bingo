@@ -1,0 +1,81 @@
+---
+source: crates/bingo-provider-anthropic/src/request.rs
+expression: "encode(&request, &caps(false))"
+---
+{
+  "model": "claude-sonnet-4-5-20250929",
+  "max_tokens": 4096,
+  "messages": [
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "text",
+          "text": "read Cargo.toml"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "toolu_01Read",
+          "name": "Read",
+          "input": {
+            "file_path": "Cargo.toml"
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01Read",
+          "content": [
+            {
+              "type": "text",
+              "text": "[package]"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01Miss",
+          "content": [
+            {
+              "type": "text",
+              "text": "no such file"
+            }
+          ],
+          "is_error": true
+        }
+      ]
+    }
+  ],
+  "tools": [
+    {
+      "name": "Read",
+      "description": "Read a file from the filesystem.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "file_path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "file_path"
+        ]
+      }
+    }
+  ],
+  "stream": true
+}

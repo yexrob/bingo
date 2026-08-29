@@ -1,0 +1,28 @@
+---
+source: crates/bingo-provider-anthropic/src/request.rs
+expression: "encode(&request, &caps(false))"
+---
+{
+  "model": "claude-sonnet-4-5-20250929",
+  "max_tokens": 4096,
+  "messages": [
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "text",
+          "text": "what is this?"
+        },
+        {
+          "type": "image",
+          "source": {
+            "type": "base64",
+            "media_type": "image/png",
+            "data": "iVBORw0KGgo="
+          }
+        }
+      ]
+    }
+  ],
+  "stream": true
+}

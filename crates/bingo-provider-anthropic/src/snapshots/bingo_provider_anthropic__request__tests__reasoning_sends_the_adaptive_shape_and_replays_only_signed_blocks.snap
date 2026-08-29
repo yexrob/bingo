@@ -1,0 +1,44 @@
+---
+source: crates/bingo-provider-anthropic/src/request.rs
+expression: body
+---
+{
+  "model": "claude-sonnet-4-5-20250929",
+  "max_tokens": 4096,
+  "messages": [
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "text",
+          "text": "why?"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "thinking",
+          "thinking": "weigh the options",
+          "signature": "ErUBCkYIBBgCIkA="
+        },
+        {
+          "type": "redacted_thinking",
+          "data": "EroBCkYIBBgCKkBRedacted=="
+        },
+        {
+          "type": "text",
+          "text": "Because it is simpler."
+        }
+      ]
+    }
+  ],
+  "stream": true,
+  "thinking": {
+    "type": "adaptive"
+  },
+  "output_config": {
+    "effort": "xhigh"
+  }
+}
