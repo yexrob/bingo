@@ -1,0 +1,10 @@
+---
+source: crates/bingo-hooks-shell/src/events.rs
+expression: "user_prompt_submit(fixture(&session, &cwd), \"write the tests\")"
+---
+{
+  "hook_event_name": "UserPromptSubmit",
+  "session_id": "ses_01",
+  "cwd": "/work/project",
+  "prompt": "write the tests"
+}

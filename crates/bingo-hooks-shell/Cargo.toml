@@ -1,0 +1,32 @@
+[package]
+name = "bingo-hooks-shell"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Shell hooks plugin for bingo: Claude Code's hook contract over a person's own commands"
+
+[lints]
+workspace = true
+
+[dependencies]
+bingo-sdk.workspace = true
+async-trait.workspace = true
+# M7: a hook is its own process group, killed whole at its deadline.
+process-wrap.workspace = true
+# M7: a matcher is a whole-string-anchored regex over the event's subject.
+regex.workspace = true
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+insta.workspace = true
+# A test that hands `on_event` a frame has to stamp it: the sdk's `Frame.ts` is a
+# `jiff::Timestamp` and the sdk re-exports no constructor for one.
+jiff.workspace = true
+tempfile.workspace = true

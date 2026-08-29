@@ -1,0 +1,12 @@
+---
+source: crates/bingo-hooks-shell/src/events.rs
+expression: "notification(fixture(&session, &cwd), Level::Warn, \"TOOL_SHADOWED\",\n\"Echo2 is already a tool\")"
+---
+{
+  "hook_event_name": "Notification",
+  "session_id": "ses_01",
+  "cwd": "/work/project",
+  "notification_type": "TOOL_SHADOWED",
+  "level": "warn",
+  "message": "Echo2 is already a tool"
+}

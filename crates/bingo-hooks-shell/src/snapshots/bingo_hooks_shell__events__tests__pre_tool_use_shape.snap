@@ -1,0 +1,14 @@
+---
+source: crates/bingo-hooks-shell/src/events.rs
+expression: "pre_tool_use(fixture(&session, &cwd), &call())"
+---
+{
+  "hook_event_name": "PreToolUse",
+  "session_id": "ses_01",
+  "cwd": "/work/project",
+  "tool_name": "Bash",
+  "tool_input": {
+    "command": "ls -a"
+  },
+  "tool_use_id": "call_01"
+}

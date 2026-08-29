@@ -1,0 +1,23 @@
+---
+source: crates/bingo-hooks-shell/src/events.rs
+expression: "post_tool_use_failure(fixture(&session, &cwd), &call(), &output)"
+---
+{
+  "hook_event_name": "PostToolUseFailure",
+  "session_id": "ses_01",
+  "cwd": "/work/project",
+  "tool_name": "Bash",
+  "tool_input": {
+    "command": "ls -a"
+  },
+  "tool_use_id": "call_01",
+  "tool_error": {
+    "parts": [
+      {
+        "type": "text",
+        "text": "no such file"
+      }
+    ],
+    "isError": true
+  }
+}

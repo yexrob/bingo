@@ -225,6 +225,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "bingo-hooks-shell"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bingo-sdk",
+ "insta",
+ "jiff",
+ "process-wrap",
+ "regex",
+ "schemars",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "bingo-permissions"
 version = "0.1.0"
 dependencies = [

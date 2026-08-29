@@ -1,0 +1,10 @@
+---
+source: crates/bingo-hooks-shell/src/events.rs
+expression: "session_end(fixture(&session, &cwd))"
+---
+{
+  "hook_event_name": "SessionEnd",
+  "session_id": "ses_01",
+  "cwd": "/work/project",
+  "end_reason": "other"
+}

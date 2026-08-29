@@ -1,0 +1,11 @@
+---
+source: crates/bingo-hooks-shell/src/events.rs
+expression: "permission_request(fixture(&session, &cwd), \"Bash\", \"Bash(rm -rf build)\")"
+---
+{
+  "hook_event_name": "PermissionRequest",
+  "session_id": "ses_01",
+  "cwd": "/work/project",
+  "tool_name": "Bash",
+  "summary": "Bash(rm -rf build)"
+}

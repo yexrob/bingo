@@ -1,0 +1,10 @@
+---
+source: crates/bingo-hooks-shell/src/events.rs
+expression: session_start(plain)
+---
+{
+  "hook_event_name": "SessionStart",
+  "session_id": "ses_01",
+  "cwd": "/work/project",
+  "source": "startup"
+}

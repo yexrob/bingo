@@ -1,0 +1,10 @@
+---
+source: crates/bingo-hooks-shell/src/events.rs
+expression: "pre_compact(fixture(&session, &cwd))"
+---
+{
+  "hook_event_name": "PreCompact",
+  "session_id": "ses_01",
+  "cwd": "/work/project",
+  "trigger": "auto"
+}
