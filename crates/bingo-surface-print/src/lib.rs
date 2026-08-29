@@ -1,10 +1,19 @@
 //! The headless `--print` surface.
 //!
-//! It is a client like any other: it opens a session, submits one prompt, folds
-//! the frames with `SessionState::apply` and renders them. It holds no session
-//! state of its own (ADR-0002) and decides exactly two things — what to answer
-//! an interaction with when nobody is at the keyboard, and what to exit with.
+//! It is a client like any other: it opens a session, submits what it is asked
+//! to, folds the frames with `SessionState::apply` and renders them. It holds
+//! no session state of its own (ADR-0002) and decides exactly two things — what
+//! to answer an interaction with when nobody is at the keyboard, and what to
+//! exit with.
+//!
+//! It runs in one of two shapes. The plain one is a prompt, a turn and an exit
+//! code. Under `--input-format stream-json` it is instead a host protocol
+//! (`input`): prompts and control requests arrive on stdin as lines, each
+//! prompt is a turn, and the run ends when stdin has closed and every prompt
+//! has been answered.
 
+mod hosted;
+mod input;
 mod render;
 mod stream_json;
 
@@ -15,17 +24,24 @@ use async_trait::async_trait;
 use bingo_sdk::QuestionOption;
 use bingo_sdk::{
     Activation, Answer, AnswerSpec, Applied, Attachment, CatalogKind, ClientIdentity, CloseReason,
-    ErrorCode, Event, Exit, HostHandle, Input, IntentId, IntentOutcome, Interaction,
-    InteractionKind, KernelError, Origin, Plugin, PluginError, PluginManifest, Registrar,
-    SessionHandle, Surface, SurfaceKind, SurfaceOptions, TurnStatus,
+    ErrorCode, Event, Exit, Frame, FrameStream, HostHandle, Input, IntentId, IntentOutcome,
+    Interaction, InteractionKind, KernelError, Origin, Plugin, PluginError, PluginManifest,
+    Registrar, SessionHandle, SessionState, Surface, SurfaceKind, SurfaceOptions, TurnStatus,
 };
 use futures::StreamExt;
+use tokio::sync::mpsc;
 
+use input::Format;
 use render::{Mode, Renderer};
 pub use render::{error_report, notice_report};
 
 /// The surface id, and the origin every input it submits carries.
 pub const SURFACE_ID: &str = "print";
+
+/// Lines of stdin held for the run while it is busy with a turn. A host that
+/// writes faster than the kernel answers waits on the pipe, as it would for any
+/// program that reads its input line by line.
+const LINE_BUFFER: usize = 32;
 
 /// Everything the surface needs from the terminal, so a test can be the terminal.
 pub(crate) trait Console: Send {
@@ -40,6 +56,10 @@ pub(crate) trait Console: Send {
 
     /// One answer line from a person.
     fn read_line(&mut self) -> io::Result<String>;
+
+    /// Stdin as it arrives, one line at a time, for a run whose prompts come
+    /// from a host. The stream ends when stdin closes.
+    fn lines(&mut self) -> mpsc::Receiver<String>;
 }
 
 /// The real terminal.
@@ -64,6 +84,22 @@ impl Console for Terminal {
         io::stdin().read_line(&mut line)?;
         Ok(line)
     }
+
+    fn lines(&mut self) -> mpsc::Receiver<String> {
+        let (lines, stdin) = mpsc::channel(LINE_BUFFER);
+        // Reading stdin blocks; the frames must not wait behind it.
+        tokio::task::spawn_blocking(move || {
+            for line in io::stdin().lines() {
+                // A line that cannot be read ends the conversation, as the end
+                // of the file does.
+                let Ok(line) = line else { break };
+                if lines.blocking_send(line).is_err() {
+                    break;
+                }
+            }
+        });
+        stdin
+    }
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -87,8 +123,8 @@ impl Surface for PrintSurface {
     }
 }
 
-/// One prompt, one turn, one exit code. Every stream this touches is injected,
-/// so the whole surface is exercised without a terminal.
+/// One run, one exit code. Every stream this touches is injected, so the whole
+/// surface is exercised without a terminal.
 pub(crate) async fn drive(
     host: &HostHandle,
     opts: SurfaceOptions,
@@ -96,48 +132,158 @@ pub(crate) async fn drive(
     out: &mut (dyn Write + Send),
     err: &mut (dyn Write + Send),
 ) -> Result<Exit, KernelError> {
-    let human = console.human();
-    let mut renderer = Renderer::new(Mode::from_args(&opts.args), human, tool_names(host).await);
-    let prompt = prompt_from(opts.prompt, console)?;
-
-    let Attachment {
-        mut snapshot,
-        mut events,
-        handle,
+    let SurfaceOptions {
+        selector,
+        prompt,
+        args,
         ..
-    } = host
+    } = opts;
+    let renderer = Renderer::new(
+        Mode::from_args(&args),
+        console.human(),
+        tool_names(host).await,
+    );
+    let start = start(Format::from_args(&args), prompt, console)?;
+    let attachment = host
         .open(
-            opts.selector,
+            selector,
             ClientIdentity {
                 name: SURFACE_ID.into(),
                 surface: SURFACE_ID.into(),
             },
         )
         .await?;
-    renderer.open(&snapshot, &mut *out).map_err(stdio_error)?;
-    handle.submit(
-        IntentId::mint(),
-        Input::text(prompt, Origin::surface(SURFACE_ID)),
-    );
-
-    while let Some(frame) = events.next().await {
-        if snapshot.apply(&frame) == Applied::Stale {
-            continue;
+    let run = Attached::open(attachment, renderer, console, out, err)?;
+    match start {
+        Start::Once(prompt) => {
+            run.submit(IntentId::mint(), prompt);
+            run.single().await
         }
-        renderer
-            .render(&frame, &snapshot, &mut *out, &mut *err)
-            .map_err(stdio_error)?;
-        match react(&frame.event, &handle, console, err)? {
-            Next::Await => {}
-            Next::Resync => events = handle.events_since(snapshot.seq).await?,
-            Next::Exit(exit) => return Ok(exit),
+        Start::Hosted { first, lines } => {
+            run.hosted(lines, first, input::prompts_on_stdio(&args))
+                .await
         }
     }
-    closed(
-        "the event stream ended before the turn completed",
-        err,
-        human,
-    )
+}
+
+/// Where a run's inputs come from, decided before the session is opened
+/// because a text run reads the whole of stdin to find its prompt.
+enum Start {
+    /// One prompt, one turn.
+    Once(String),
+    /// The host protocol: the prompt argument, when there was one, and then
+    /// stdin's lines for as long as it stays open.
+    Hosted {
+        first: Option<String>,
+        lines: mpsc::Receiver<String>,
+    },
+}
+
+fn start(
+    format: Format,
+    prompt: Option<String>,
+    console: &mut (dyn Console + Send),
+) -> Result<Start, KernelError> {
+    match format {
+        Format::Text => prompt_from(prompt, console).map(Start::Once),
+        Format::StreamJson => Ok(Start::Hosted {
+            first: prompt,
+            lines: console.lines(),
+        }),
+    }
+}
+
+/// The attached session a run folds, and the streams it writes to. Both loops
+/// share it, and neither keeps anything the snapshot already holds.
+struct Attached<'a> {
+    snapshot: SessionState,
+    events: FrameStream,
+    handle: SessionHandle,
+    renderer: Renderer,
+    console: &'a mut (dyn Console + Send),
+    out: &'a mut (dyn Write + Send),
+    err: &'a mut (dyn Write + Send),
+}
+
+impl<'a> Attached<'a> {
+    /// The attachment, with the preamble its mode owes already written.
+    fn open(
+        attachment: Attachment,
+        renderer: Renderer,
+        console: &'a mut (dyn Console + Send),
+        out: &'a mut (dyn Write + Send),
+        err: &'a mut (dyn Write + Send),
+    ) -> Result<Self, KernelError> {
+        let Attachment {
+            snapshot,
+            events,
+            handle,
+            ..
+        } = attachment;
+        renderer.open(&snapshot, &mut *out).map_err(stdio_error)?;
+        Ok(Self {
+            snapshot,
+            events,
+            handle,
+            renderer,
+            console,
+            out,
+            err,
+        })
+    }
+
+    fn human(&self) -> bool {
+        self.console.human()
+    }
+
+    fn submit(&self, intent: IntentId, text: String) {
+        self.handle
+            .submit(intent, Input::text(text, Origin::surface(SURFACE_ID)));
+    }
+
+    /// Fold and render one frame; `false` when it was stale, and nothing else
+    /// should look at it.
+    fn show(&mut self, frame: &Frame) -> Result<bool, KernelError> {
+        if self.snapshot.apply(frame) == Applied::Stale {
+            return Ok(false);
+        }
+        self.renderer
+            .render(frame, &self.snapshot, &mut *self.out, &mut *self.err)
+            .map_err(stdio_error)?;
+        Ok(true)
+    }
+
+    /// Re-read the journal from the last frame applied, filling the gap a lag
+    /// marker announced.
+    async fn resync(&mut self) -> Result<(), KernelError> {
+        self.events = self.handle.events_since(self.snapshot.seq).await?;
+        Ok(())
+    }
+
+    /// One prompt, one turn, one exit code.
+    async fn single(mut self) -> Result<Exit, KernelError> {
+        while let Some(frame) = self.events.next().await {
+            if !self.show(&frame)? {
+                continue;
+            }
+            match react(
+                &frame.event,
+                &self.handle,
+                &mut *self.console,
+                &mut *self.err,
+            )? {
+                Next::Await => {}
+                Next::Resync => self.resync().await?,
+                Next::Exit(exit) => return Ok(exit),
+            }
+        }
+        let human = self.human();
+        closed(
+            "the event stream ended before the turn completed",
+            &mut *self.err,
+            human,
+        )
+    }
 }
 
 /// The tools the stream-json preamble advertises; the host is the only place
@@ -377,12 +523,14 @@ pub(crate) mod tests {
     use std::any::Any;
     use std::collections::VecDeque;
     use std::sync::Mutex;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     use bingo_sdk::{
         Catalog, CatalogEntry, ContentPart, DeltaKind, Frame, FrameStream, GatewayStream,
         HistoryChunk, HistoryPage, HostApi, InteractionId, InterruptReason, InterruptScope, Item,
         ItemBody, ItemId, ItemStatus, QuestionOption, Seq, SessionFilter, SessionHandle, SessionId,
-        SessionPort, SessionSelector, SessionState, SessionSummary, ToolOutput, TurnId, Usage,
+        SessionPort, SessionSelector, SessionState, SessionSummary, ToolOutput, TurnId, TurnOrigin,
+        Usage,
     };
     use jiff::Timestamp;
     use serde_json::{Value, json};
@@ -462,7 +610,7 @@ pub(crate) mod tests {
         )
     }
 
-    fn permission(session_scope: Option<&str>) -> Interaction {
+    pub(crate) fn permission(session_scope: Option<&str>) -> Interaction {
         Interaction {
             id: InteractionId::from_raw("int_1"),
             session: SessionId::from_raw("ses_1"),
@@ -485,7 +633,7 @@ pub(crate) mod tests {
         }
     }
 
-    fn question(options: &[(&str, &str)]) -> Interaction {
+    pub(crate) fn question(options: &[(&str, &str)]) -> Interaction {
         Interaction {
             kind: InteractionKind::Question {
                 question: "Which file?".into(),
@@ -519,50 +667,135 @@ pub(crate) mod tests {
 
     // ---- the test double ------------------------------------------------
 
-    /// A session that hands back a scripted frame list and remembers the writes.
-    #[derive(Debug, Default)]
-    struct TestSession {
+    pub(crate) fn locked<T>(slot: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+        slot.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// A session that hands back a scripted frame list and remembers the
+    /// writes. A *live* one also answers: its stream stays open the way an
+    /// attached session's does, and every submission becomes a turn, so a run
+    /// that waits for its turns can be driven to its exit.
+    #[derive(Debug)]
+    pub(crate) struct TestSession {
         frames: Vec<Frame>,
+        /// The live end of the stream, kept only while the session answers.
+        publisher: Mutex<Option<mpsc::UnboundedSender<Frame>>>,
+        /// The stream `open` hands out, taken once.
+        stream: Mutex<Option<mpsc::UnboundedReceiver<Frame>>>,
+        seq: AtomicU64,
+        turns: AtomicU64,
         submitted: Mutex<Vec<Input>>,
         answers: Mutex<Vec<(InteractionId, Answer, Activation)>>,
+        interrupts: Mutex<Vec<InterruptScope>>,
     }
 
     impl TestSession {
-        fn stream(&self, since: Seq) -> FrameStream {
-            let frames: Vec<_> = self
-                .frames
+        fn new(frames: Vec<Frame>, live: bool) -> Self {
+            let (publisher, stream) = mpsc::unbounded_channel();
+            for frame in &frames {
+                let _ = publisher.send(frame.clone());
+            }
+            let seq = frames.iter().map(|f| f.seq.0).max().unwrap_or(0);
+            Self {
+                frames,
+                publisher: Mutex::new(live.then_some(publisher)),
+                stream: Mutex::new(Some(stream)),
+                seq: AtomicU64::new(seq),
+                turns: AtomicU64::new(0),
+                submitted: Mutex::default(),
+                answers: Mutex::default(),
+                interrupts: Mutex::default(),
+            }
+        }
+
+        /// The canned frames, then whatever the session publishes; a session
+        /// that is not live has dropped its end, so the stream ends with them.
+        fn stream(&self) -> FrameStream {
+            let Some(stream) = locked(&self.stream).take() else {
+                return Box::pin(futures::stream::empty());
+            };
+            Box::pin(futures::stream::unfold(stream, |mut stream| async move {
+                stream.recv().await.map(|frame| (frame, stream))
+            }))
+        }
+
+        fn publish(&self, event: Event) {
+            let seq = self.seq.fetch_add(1, Ordering::Relaxed) + 1;
+            if let Some(publisher) = &*locked(&self.publisher) {
+                let _ = publisher.send(frame(seq, event));
+            }
+        }
+
+        /// The frames a live kernel would answer a submission with: the input
+        /// as an item of a turn, and the turn, opened and closed.
+        fn run_turn(&self, intent: IntentId, text: &str, origin: Origin) {
+            let turn = TurnId::from_raw(format!(
+                "trn_{}",
+                self.turns.fetch_add(1, Ordering::Relaxed) + 1
+            ));
+            let item = Item {
+                id: ItemId::from_raw(format!("itm_{turn}")),
+                turn: Some(turn.clone()),
+                intent: Some(intent.clone()),
+                body: ItemBody::User {
+                    parts: vec![ContentPart::text(text)],
+                    origin,
+                },
+                ..assistant("itm_0", "", ItemStatus::Completed)
+            };
+            let inputs = vec![item.id.clone()];
+            self.publish(Event::ItemCompleted { item });
+            self.publish(Event::TurnStarted {
+                turn: turn.clone(),
+                inputs,
+                origin: TurnOrigin::Submit,
+            });
+            self.publish(Event::IntentAck {
+                intent,
+                outcome: IntentOutcome::TurnStarted { turn: turn.clone() },
+            });
+            self.publish(Event::TurnCompleted {
+                turn,
+                status: TurnStatus::Completed,
+                usage: Usage::default(),
+            });
+        }
+
+        pub(crate) fn submitted(&self) -> Vec<Input> {
+            locked(&self.submitted).clone()
+        }
+
+        pub(crate) fn prompts(&self) -> Vec<String> {
+            self.submitted()
                 .iter()
-                .filter(|f| f.seq > since)
-                .cloned()
-                .collect();
-            Box::pin(futures::stream::iter(frames))
+                .filter_map(|input| match input {
+                    Input::Text { text, .. } => Some(text.clone()),
+                    Input::Action { .. } => None,
+                })
+                .collect()
         }
 
-        fn submitted(&self) -> Vec<Input> {
-            self.submitted
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .clone()
+        pub(crate) fn answers(&self) -> Vec<(InteractionId, Answer, Activation)> {
+            locked(&self.answers).clone()
         }
 
-        fn answers(&self) -> Vec<(InteractionId, Answer, Activation)> {
-            self.answers
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .clone()
+        pub(crate) fn interrupts(&self) -> Vec<InterruptScope> {
+            locked(&self.interrupts).clone()
         }
     }
 
     #[async_trait]
     impl SessionPort for TestSession {
-        fn submit(&self, _intent: IntentId, input: Input) {
-            self.submitted
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .push(input);
+        fn submit(&self, intent: IntentId, input: Input) {
+            locked(&self.submitted).push(input.clone());
+            if let Input::Text { text, origin, .. } = input {
+                self.run_turn(intent, &text, origin);
+            }
         }
 
-        fn interrupt(&self, _intent: IntentId, _scope: InterruptScope) {}
+        fn interrupt(&self, _intent: IntentId, scope: InterruptScope) {
+            locked(&self.interrupts).push(scope);
+        }
 
         fn answer(
             &self,
@@ -571,10 +804,7 @@ pub(crate) mod tests {
             answer: Answer,
             activation: Activation,
         ) {
-            self.answers
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .push((interaction, answer, activation));
+            locked(&self.answers).push((interaction, answer, activation));
         }
 
         async fn history(&self, _page: HistoryPage) -> Result<HistoryChunk, KernelError> {
@@ -598,16 +828,23 @@ pub(crate) mod tests {
     }
 
     #[derive(Debug)]
-    struct TestHost {
+    pub(crate) struct TestHost {
         session: Arc<TestSession>,
     }
 
     impl TestHost {
+        /// A session that replays the frames and then ends the stream.
         fn with(frames: Vec<Frame>) -> (HostHandle, Arc<TestSession>) {
-            let session = Arc::new(TestSession {
-                frames,
-                ..Default::default()
-            });
+            Self::of(TestSession::new(frames, false))
+        }
+
+        /// A session that stays open and answers what it is asked.
+        pub(crate) fn live(frames: Vec<Frame>) -> (HostHandle, Arc<TestSession>) {
+            Self::of(TestSession::new(frames, true))
+        }
+
+        fn of(session: TestSession) -> (HostHandle, Arc<TestSession>) {
+            let session = Arc::new(session);
             let host = TestHost {
                 session: Arc::clone(&session),
             };
@@ -632,7 +869,7 @@ pub(crate) mod tests {
             Ok(Attachment {
                 session: SessionId::from_raw("ses_1"),
                 snapshot: session_state(),
-                events: self.session.stream(Seq::ZERO),
+                events: self.session.stream(),
                 handle: SessionHandle(Arc::clone(&self.session) as Arc<dyn SessionPort>),
             })
         }
@@ -671,11 +908,13 @@ pub(crate) mod tests {
 
     /// A console a test speaks through.
     #[derive(Debug)]
-    struct TestConsole {
+    pub(crate) struct TestConsole {
         interactive: bool,
         human: bool,
         stdin: String,
         lines: VecDeque<String>,
+        /// The host protocol's stdin; absent means a stdin already at its end.
+        host: Option<mpsc::Receiver<String>>,
     }
 
     impl TestConsole {
@@ -685,16 +924,41 @@ pub(crate) mod tests {
                 human: false,
                 stdin: String::new(),
                 lines: VecDeque::new(),
+                host: None,
             }
         }
 
         fn typing(lines: &[&str]) -> Self {
             Self {
                 interactive: true,
-                human: false,
-                stdin: String::new(),
                 lines: lines.iter().map(|l| format!("{l}\n")).collect(),
+                ..Self::headless()
             }
+        }
+
+        /// A console whose stdin is these lines and then the end of the file.
+        pub(crate) fn hosted(lines: &[String]) -> Self {
+            let (writer, host) = mpsc::channel(lines.len().max(1));
+            for line in lines {
+                let _ = writer.try_send(line.clone());
+            }
+            Self {
+                host: Some(host),
+                ..Self::headless()
+            }
+        }
+
+        /// A console whose stdin the test writes to as the run goes; dropping
+        /// the sender is the end of the file.
+        pub(crate) fn fed() -> (Self, mpsc::Sender<String>) {
+            let (writer, host) = mpsc::channel(LINE_BUFFER);
+            (
+                Self {
+                    host: Some(host),
+                    ..Self::headless()
+                },
+                writer,
+            )
         }
     }
 
@@ -714,9 +978,16 @@ pub(crate) mod tests {
         fn read_line(&mut self) -> io::Result<String> {
             Ok(self.lines.pop_front().unwrap_or_default())
         }
+
+        fn lines(&mut self) -> mpsc::Receiver<String> {
+            self.host.take().unwrap_or_else(|| {
+                let (_closed, stdin) = mpsc::channel(1);
+                stdin
+            })
+        }
     }
 
-    fn options(prompt: Option<&str>, args: serde_json::Value) -> SurfaceOptions {
+    pub(crate) fn options(prompt: Option<&str>, args: serde_json::Value) -> SurfaceOptions {
         SurfaceOptions {
             cwd: "/tmp".into(),
             selector: SessionSelector::ById {
@@ -728,11 +999,11 @@ pub(crate) mod tests {
         }
     }
 
-    struct Run {
-        exit: Result<Exit, KernelError>,
-        out: String,
-        err: String,
-        session: Arc<TestSession>,
+    pub(crate) struct Run {
+        pub(crate) exit: Result<Exit, KernelError>,
+        pub(crate) out: String,
+        pub(crate) err: String,
+        pub(crate) session: Arc<TestSession>,
     }
 
     async fn play(frames: Vec<Frame>, console: &mut TestConsole, opts: SurfaceOptions) -> Run {
@@ -1160,7 +1431,6 @@ pub(crate) mod tests {
         .await;
         assert_eq!(run.out, "");
     }
-
     #[test]
     fn the_plugin_registers_the_print_surface() {
         let mut registrar = Registrar::new(

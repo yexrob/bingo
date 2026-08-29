@@ -41,6 +41,16 @@ struct Cli {
     #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
     output_format: OutputFormat,
 
+    /// What `--print` reads from stdin: one prompt, or Claude Code's host
+    /// protocol, a turn per line (ADR-0007).
+    #[arg(long, value_enum, default_value_t = InputFormat::Text)]
+    input_format: InputFormat,
+
+    /// Who answers permission prompts headlessly. `stdio` is the host on the
+    /// other end of `--input-format stream-json`.
+    #[arg(long, value_name = "TOOL")]
+    permission_prompt_tool: Option<PromptTool>,
+
     /// The model provider; the settings' `provider`, else the first registered.
     #[arg(long, global = true)]
     provider: Option<String>,
@@ -114,6 +124,37 @@ impl OutputFormat {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum InputFormat {
+    /// One prompt: the argument, or the whole of stdin.
+    Text,
+    /// Claude Code's host protocol, one JSON object per line (ADR-0007).
+    StreamJson,
+}
+
+impl InputFormat {
+    fn as_str(self) -> &'static str {
+        match self {
+            InputFormat::Text => "text",
+            InputFormat::StreamJson => "stream-json",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum PromptTool {
+    /// The host on the other end of the stream-json protocol.
+    Stdio,
+}
+
+impl PromptTool {
+    fn as_str(self) -> &'static str {
+        match self {
+            PromptTool::Stdio => "stdio",
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> ExitCode {
     let cli = Cli::parse();
@@ -135,6 +176,7 @@ async fn run(cli: Cli) -> Result<i32, KernelError> {
             "the interactive interface is not built yet; run with --print",
         ));
     }
+    check_input(&cli)?;
     let cwd = working_dir(cli.cwd.as_deref())?;
     let config = host_config(&cli, &cwd)?;
     let host = Host::build(plugins()?, config)
@@ -155,6 +197,24 @@ async fn run(cli: Cli) -> Result<i32, KernelError> {
     let exit = surface.run(host.handle(), options).await;
     host.shutdown().await;
     exit.map(|e| e.code)
+}
+
+/// The flag combinations that would leave a flag with nothing to act on.
+fn check_input(cli: &Cli) -> Result<(), KernelError> {
+    if cli.input_format == InputFormat::StreamJson && !cli.print {
+        return Err(KernelError::new(
+            ErrorCode::InvalidInput,
+            "--input-format stream-json is a headless protocol: it needs --print",
+        ));
+    }
+    if cli.permission_prompt_tool.is_some() && cli.input_format != InputFormat::StreamJson {
+        return Err(KernelError::new(
+            ErrorCode::InvalidInput,
+            "--permission-prompt-tool needs --input-format stream-json: \
+             there is no other way for an answer to arrive",
+        ));
+    }
+    Ok(())
 }
 
 /// The server has no prompt and no session of its own; the selector is a
@@ -230,7 +290,11 @@ fn surface_options(cli: Cli, cwd: PathBuf, env: Arc<Env>) -> SurfaceOptions {
         selector: selector(&cli, cwd.clone()),
         cwd,
         prompt: cli.prompt,
-        args: json!({ "outputFormat": cli.output_format.as_str() }),
+        args: json!({
+            "outputFormat": cli.output_format.as_str(),
+            "inputFormat": cli.input_format.as_str(),
+            "permissionPromptTool": cli.permission_prompt_tool.map(PromptTool::as_str),
+        }),
         env,
     }
 }
