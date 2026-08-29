@@ -25,8 +25,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use bingo_sdk::{
-    Interrupt, Plugin, PluginError, PluginManifest, Registrar, Subject, Tool, ToolContext,
-    ToolError, ToolOutput, ToolSpec, ToolTraits, input_schema,
+    Interrupt, Plugin, PluginError, PluginManifest, Registrar, ResultLimit, Subject, Tool,
+    ToolContext, ToolError, ToolOutput, ToolSpec, ToolTraits, input_schema,
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -101,6 +101,9 @@ impl Tool for BashTool {
         ToolTraits {
             trusted: true,
             interrupt: Interrupt::Block,
+            // The tool caps its own output; the kernel's clip would take the
+            // exit line with it.
+            result_limit: ResultLimit::SelfBounded,
             ..ToolTraits::default()
         }
     }
@@ -357,20 +360,30 @@ pub(crate) mod tests {
     async fn a_never_ending_command_is_refused_until_it_is_bounded() {
         let (_host, cx) = context();
         let refused = BashTool
-            .call(serde_json::json!({"command": "tail -n 1 /etc/hosts"}), &cx)
+            .call(serde_json::json!({"command": "tail -f /etc/hosts"}), &cx)
             .await
             .expect("the call answered");
         assert!(refused.is_error);
         assert!(text(&refused).contains("timeout"), "{}", text(&refused));
+        assert!(
+            !text(&refused).starts_with("$ "),
+            "the command was run anyway"
+        );
+
+        let finite = BashTool
+            .call(serde_json::json!({"command": "tail -n 1 /etc/hosts"}), &cx)
+            .await
+            .expect("the call ran");
+        assert!(!finite.is_error, "{}", text(&finite));
 
         let bounded = BashTool
             .call(
-                serde_json::json!({"command": "tail -n 1 /etc/hosts", "timeout": 5_000}),
+                serde_json::json!({"command": "tail -f /etc/hosts", "timeout": 300}),
                 &cx,
             )
             .await
             .expect("the call ran");
-        assert!(!bounded.is_error, "{}", text(&bounded));
+        assert!(text(&bounded).starts_with("$ "), "{}", text(&bounded));
     }
 
     #[tokio::test]

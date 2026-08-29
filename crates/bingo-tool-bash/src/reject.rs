@@ -48,21 +48,28 @@ pub fn interactive_reason(command: &str) -> Option<String> {
 
 /// Why this command never ends on its own, if it does not.
 ///
-/// Ported as written from the old `periodic_bash_interval`: the rule reads the
-/// first whitespace-separated word only — `watch`, and the loop and follow
-/// starters `while`, `until`, `for`, `tail`. The old harness turned these into
-/// background tasks; here there is no background, so they are refused unless the
-/// call bounds itself with a `timeout`.
+/// Only the two commands that truly never exit are refused: `watch`, and
+/// `tail` asked to follow. The old harness also refused every shell loop and
+/// every `tail`, which turned `for f in *.rs` and `tail -n 20 app.log` into
+/// friction; a loop that hangs is bounded by the timeout like anything else.
 pub fn periodic_reason(command: &str) -> Option<String> {
-    let what = match command.split_whitespace().next()? {
+    let words = tokenise(command);
+    let what = match words.first().map(String::as_str)? {
         "watch" => "`watch` repeats until something stops it",
-        "while" | "until" | "for" => "a shell loop may never finish",
-        "tail" => "`tail` follows its file until something stops it",
+        "tail" if follows(&words[1..]) => "`tail -f` follows its file until something stops it",
         _ => return None,
     };
     Some(format!(
         "{what}, and this tool waits for the command to exit; rejected. Pass `timeout` (milliseconds) to bound the run"
     ))
+}
+
+/// `-f`, `-F`, `--follow[=…]`, or a short-flag cluster holding `f`/`F`.
+fn follows(args: &[String]) -> bool {
+    args.iter().any(|arg| {
+        arg.starts_with("--follow")
+            || (arg.starts_with('-') && !arg.starts_with("--") && arg.contains(['f', 'F']))
+    })
 }
 
 /// Shell words, quotes honoured. An unbalanced quote is the shell's problem, not
@@ -588,12 +595,13 @@ mod tests {
     const PERIODIC: &[(&str, bool)] = &[
         ("watch ls", true),
         ("watch -n 2 ls", true),
-        ("while true; do echo hi; done", true),
-        ("until false; do echo hi; done", true),
-        ("for i in 1 2 3; do echo $i; done", true),
         ("tail -f app.log", true),
-        // The ported rule reads the first word only: any `tail` is refused.
-        ("tail -n 20 app.log", true),
+        ("tail -F app.log", true),
+        ("tail --follow=name app.log", true),
+        ("tail -fn 10 app.log", true),
+        ("tail -n 20 app.log", false),
+        ("while true; do echo hi; done", false),
+        ("for i in 1 2 3; do echo $i; done", false),
         ("echo watch", false),
         ("ls | tail -f", false),
         ("cargo watch", false),
