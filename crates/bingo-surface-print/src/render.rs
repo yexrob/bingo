@@ -317,7 +317,7 @@ fn compact(input: &Value) -> String {
 }
 
 /// One line on stdout, flushed: a host reads this stream as it arrives.
-fn write_line(line: &str, out: &mut (impl Write + ?Sized)) -> io::Result<()> {
+pub(crate) fn write_line(line: &str, out: &mut (impl Write + ?Sized)) -> io::Result<()> {
     writeln!(out, "{line}")?;
     out.flush()
 }
