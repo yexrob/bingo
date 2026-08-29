@@ -1,1 +1,3 @@
-//! Placeholder: the plugin lands in M1 (docs/plans/M1-provider-tools-gate.md).
+//! The Anthropic Messages API as a `Provider` plugin.
+
+pub mod sse;
