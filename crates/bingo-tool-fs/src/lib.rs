@@ -7,6 +7,7 @@ mod grep;
 mod output;
 mod path;
 mod read;
+mod write;
 
 use std::sync::Arc;
 
@@ -17,12 +18,19 @@ pub use edit::{EditArgs, EditTool};
 pub use glob::{GlobArgs, GlobTool};
 pub use grep::{GrepArgs, GrepTool, OutputMode};
 pub use read::{ReadArgs, ReadTool};
+pub use write::{WriteArgs, WriteTool};
 
 static MANIFEST: PluginManifest = PluginManifest {
     id: "bingo.tools.fs",
     version: env!("CARGO_PKG_VERSION"),
     sdk: "^0.1",
-    provides: &["tool:Read", "tool:Glob", "tool:Grep", "tool:Edit"],
+    provides: &[
+        "tool:Read",
+        "tool:Glob",
+        "tool:Grep",
+        "tool:Edit",
+        "tool:Write",
+    ],
     requires: &[],
     config: None,
 };
@@ -41,6 +49,7 @@ impl Plugin for FsPlugin {
         registrar.tool(Arc::new(GlobTool) as Arc<dyn Tool>);
         registrar.tool(Arc::new(GrepTool) as Arc<dyn Tool>);
         registrar.tool(Arc::new(EditTool) as Arc<dyn Tool>);
+        registrar.tool(Arc::new(WriteTool) as Arc<dyn Tool>);
         Ok(())
     }
 }
