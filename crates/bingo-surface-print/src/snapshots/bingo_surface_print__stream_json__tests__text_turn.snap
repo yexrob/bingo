@@ -1,0 +1,7 @@
+---
+source: crates/bingo-surface-print/src/stream_json.rs
+expression: play_stream(&text_round()).out()
+---
+{"type":"system","subtype":"init","session_id":"ses_1","cwd":"/tmp","tools":["Read","Bash"],"model":"fake-1","permissionMode":"default","apiKeySource":"none"}
+{"type":"assistant","message":{"id":"itm_1","type":"message","role":"assistant","model":"fake-1","content":[{"type":"text","text":"Hello"}],"stop_reason":null,"usage":{"input_tokens":0,"output_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}},"parent_tool_use_id":null,"session_id":"ses_1"}
+{"type":"result","subtype":"success","is_error":false,"duration_ms":1500,"duration_api_ms":0,"num_turns":1,"result":"Hello","session_id":"ses_1","total_cost_usd":0.0,"usage":{"input_tokens":12,"output_tokens":34,"cache_read_input_tokens":56,"cache_creation_input_tokens":78}}

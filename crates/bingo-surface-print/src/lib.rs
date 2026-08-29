@@ -6,6 +6,7 @@
 //! an interaction with when nobody is at the keyboard, and what to exit with.
 
 mod render;
+mod stream_json;
 
 use std::io::{self, IsTerminal, Write};
 use std::sync::Arc;
@@ -13,10 +14,10 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use bingo_sdk::QuestionOption;
 use bingo_sdk::{
-    Activation, Answer, AnswerSpec, Applied, Attachment, ClientIdentity, CloseReason, ErrorCode,
-    Event, Exit, HostHandle, Input, IntentId, IntentOutcome, Interaction, InteractionKind,
-    KernelError, Origin, Plugin, PluginError, PluginManifest, Registrar, SessionHandle, Surface,
-    SurfaceKind, SurfaceOptions, TurnStatus,
+    Activation, Answer, AnswerSpec, Applied, Attachment, CatalogKind, ClientIdentity, CloseReason,
+    ErrorCode, Event, Exit, HostHandle, Input, IntentId, IntentOutcome, Interaction,
+    InteractionKind, KernelError, Origin, Plugin, PluginError, PluginManifest, Registrar,
+    SessionHandle, Surface, SurfaceKind, SurfaceOptions, TurnStatus,
 };
 use futures::StreamExt;
 
@@ -96,7 +97,7 @@ pub(crate) async fn drive(
     err: &mut (dyn Write + Send),
 ) -> Result<Exit, KernelError> {
     let human = console.human();
-    let mut renderer = Renderer::new(Mode::from_args(&opts.args), human);
+    let mut renderer = Renderer::new(Mode::from_args(&opts.args), human, tool_names(host));
     let prompt = prompt_from(opts.prompt, console)?;
 
     let Attachment {
@@ -113,6 +114,7 @@ pub(crate) async fn drive(
             },
         )
         .await?;
+    renderer.open(&snapshot, &mut *out).map_err(stdio_error)?;
     handle.submit(
         IntentId::mint(),
         Input::text(prompt, Origin::surface(SURFACE_ID)),
@@ -136,6 +138,16 @@ pub(crate) async fn drive(
         err,
         human,
     )
+}
+
+/// The tools the stream-json preamble advertises; the host is the only place
+/// that knows them.
+fn tool_names(host: &HostHandle) -> Vec<String> {
+    host.catalog(CatalogKind::Tools)
+        .entries
+        .into_iter()
+        .map(|entry| entry.id)
+        .collect()
 }
 
 /// The prompt from the command line, or the whole of stdin when there is none.
@@ -366,13 +378,13 @@ pub(crate) mod tests {
     use std::sync::Mutex;
 
     use bingo_sdk::{
-        Catalog, CatalogKind, ContentPart, DeltaKind, Frame, FrameStream, GatewayStream,
+        Catalog, CatalogEntry, ContentPart, DeltaKind, Frame, FrameStream, GatewayStream,
         HistoryChunk, HistoryPage, HostApi, InteractionId, InterruptReason, InterruptScope, Item,
         ItemBody, ItemId, ItemStatus, QuestionOption, Seq, SessionFilter, SessionHandle, SessionId,
         SessionPort, SessionSelector, SessionState, SessionSummary, ToolOutput, TurnId, Usage,
     };
     use jiff::Timestamp;
-    use serde_json::json;
+    use serde_json::{Value, json};
 
     // ---- fixtures -------------------------------------------------------
 
@@ -639,7 +651,11 @@ pub(crate) mod tests {
         fn catalog(&self, kind: CatalogKind) -> Catalog {
             Catalog {
                 kind,
-                entries: Vec::new(),
+                entries: vec![CatalogEntry {
+                    id: "Read".into(),
+                    label: "Read".into(),
+                    meta: Value::Null,
+                }],
             }
         }
 
@@ -837,6 +853,38 @@ pub(crate) mod tests {
         for line in run.out.lines() {
             serde_json::from_str::<Frame>(line).expect("a frame per line");
         }
+    }
+
+    /// The preamble is written when the session opens, before the prompt is
+    /// even submitted, and it carries the host's tool catalogue.
+    #[tokio::test]
+    async fn stream_json_mode_opens_with_the_preamble_and_ends_with_the_result() {
+        let run = play(
+            vec![
+                frame(
+                    1,
+                    Event::ItemCompleted {
+                        item: assistant("itm_1", "Hello", ItemStatus::Completed),
+                    },
+                ),
+                completed(2),
+            ],
+            &mut TestConsole::headless(),
+            options(Some("hi"), json!({ "outputFormat": "stream-json" })),
+        )
+        .await;
+        assert_eq!(run.exit, Ok(Exit { code: 0 }));
+        let lines: Vec<Value> = run
+            .out
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("one JSON object per line"))
+            .collect();
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0]["subtype"], json!("init"));
+        assert_eq!(lines[0]["tools"], json!(["Read"]));
+        assert_eq!(lines[1]["type"], json!("assistant"));
+        assert_eq!(lines[2]["result"], json!("Hello"));
+        assert_eq!(run.err, "");
     }
 
     #[tokio::test]
