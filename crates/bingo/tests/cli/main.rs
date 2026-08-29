@@ -541,6 +541,7 @@ fn scripted_run(
         .arg(prompt))
 }
 
+mod agents;
 mod context;
 mod hooks;
 mod sessions;

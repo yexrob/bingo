@@ -1,0 +1,32 @@
+[package]
+name = "bingo-agents"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Sub-agents plugin for bingo: an agent is a child session, five tools, @name and /agents"
+
+[lints]
+workspace = true
+
+[dependencies]
+bingo-sdk.workspace = true
+async-trait.workspace = true
+# M8: a child's frames are a stream the watcher folds.
+futures.workspace = true
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+# M8: an agent definition's frontmatter, read the way a skill's is.
+serde-saphyr.workspace = true
+# M8: the watcher task, and the timeout and cancellation a waiting tool honours.
+tokio.workspace = true
+# M8: a background watcher has nobody to return an error to.
+tracing.workspace = true
+
+[dev-dependencies]
+# M8: a `SessionSummary` a double writes down is stamped with a
+# `jiff::Timestamp`, so writing one needs one.
+jiff.workspace = true
+tempfile.workspace = true

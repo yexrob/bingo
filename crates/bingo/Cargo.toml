@@ -28,6 +28,7 @@ bingo-surface-tui.workspace = true
 bingo-skills.workspace = true
 bingo-hooks-shell.workspace = true
 bingo-mcp.workspace = true
+bingo-agents.workspace = true
 clap.workspace = true
 tokio.workspace = true
 serde_json.workspace = true

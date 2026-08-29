@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 
+use bingo_agents::AgentsPlugin;
 use bingo_context::ContextPlugin;
 use bingo_core::settings;
 use bingo_core::{Host, HostConfig};
@@ -281,6 +282,7 @@ fn plugins() -> Result<Vec<Box<dyn Plugin>>, KernelError> {
         Box::new(WebPlugin),
         Box::new(SkillsPlugin),
         Box::new(McpPlugin::default()),
+        Box::new(AgentsPlugin::default()),
         Box::new(PrintPlugin),
         Box::new(RpcPlugin),
         Box::new(TuiPlugin),
