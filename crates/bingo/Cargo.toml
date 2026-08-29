@@ -25,6 +25,7 @@ bingo-context.workspace = true
 bingo-surface-print.workspace = true
 bingo-surface-rpc.workspace = true
 bingo-surface-tui.workspace = true
+bingo-skills.workspace = true
 clap.workspace = true
 tokio.workspace = true
 serde_json.workspace = true

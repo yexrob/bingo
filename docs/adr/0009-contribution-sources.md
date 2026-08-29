@@ -15,7 +15,7 @@
 
 ## Consequences
 
-- sdk touched once: `ToolSource`, `CommandSource`, two `Contribution` variants, `PermissionPolicy::describe`, `LiveTurn.retrying`. Crates touched: `bingo-core` (registry, turn, actor, catalogue, hooks), `bingo-permissions` (`describe`), `bingo-surface-tui` (the badge, `retrying N/M`), `bingo-surface-print` (the stream-json init line's `permissionMode` becomes real), `bingo-surface-rpc` (schema regenerates for `LiveTurn`).
+- sdk touched once: `ToolSource`, `CommandSource`, two `Contribution` variants, `PermissionPolicy::describe`, `LiveTurn.retrying` — plus one correction the skills plugin exposed: `CommandSource::commands` takes the session's `cwd`, because which `/name`s exist depends on where the line is typed; the catalogue, which has no session, asks for the process's directory. Crates touched: `bingo-core` (registry, turn, actor, catalogue, hooks), `bingo-permissions` (`describe`), `bingo-surface-tui` (the badge, `retrying N/M`), `bingo-surface-print` (the stream-json init line's `permissionMode` becomes real), `bingo-surface-rpc` (schema regenerates for `LiveTurn`).
 - A turn's tool set is fixed for that turn; a reconnect shows up on the next one. Nothing hot-swaps a tool under a running call.
 - Dependencies: `rmcp` 3.1 (`client`, `transport-child-process`, `transport-streamable-http-client-reqwest`), the first crate outside the kernel's tree with a runtime of its own; `serde-saphyr` 1.1 for frontmatter YAML. `scripts/budget.toml` rises to 290; `check_discipline.sh` keeps `rmcp` out of `bingo-core`'s tree.
 - The kernel still knows no plugin by name: a source is a trait object like every other contribution, and `mcp__` is a string the permission grammar owns.

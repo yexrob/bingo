@@ -3,6 +3,7 @@
 
 use std::any::Any;
 use std::fmt;
+use std::path::Path;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -88,11 +89,12 @@ pub trait ToolSource: Send + Sync {
 }
 
 /// Commands that exist only after I/O — a directory's skills. Read when a
-/// name is not in the static table (ADR-0009).
+/// name is not in the static table (ADR-0009), for the directory the
+/// session works in: what `/name` means depends on where it is typed.
 #[async_trait]
 pub trait CommandSource: Send + Sync {
     fn id(&self) -> &str;
-    async fn commands(&self) -> Vec<Arc<dyn Command>>;
+    async fn commands(&self, cwd: &Path) -> Vec<Arc<dyn Command>>;
 }
 
 /// What a plugin hands the host. One enum so the in-process path and a future

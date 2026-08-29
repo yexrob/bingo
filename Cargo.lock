@@ -187,6 +187,7 @@ dependencies = [
  "bingo-provider-fake",
  "bingo-provider-openai",
  "bingo-sdk",
+ "bingo-skills",
  "bingo-store-jsonl",
  "bingo-surface-print",
  "bingo-surface-rpc",

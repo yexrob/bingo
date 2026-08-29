@@ -79,10 +79,13 @@ async fn tools(registry: &Registry) -> Vec<CatalogEntry> {
         .collect()
 }
 
+/// The catalogue has no session, so a source is asked for the process's own
+/// directory; a session working elsewhere still dispatches by its own.
 async fn commands(registry: &Registry) -> Vec<CatalogEntry> {
+    let here = std::env::current_dir().unwrap_or_default();
     let mut all = registry.commands.clone();
     for source in &registry.command_sources {
-        all.extend(source.commands().await);
+        all.extend(source.commands(&here).await);
     }
     all.iter()
         .map(|c| {

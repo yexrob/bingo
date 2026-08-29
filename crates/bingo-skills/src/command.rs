@@ -1,7 +1,7 @@
 //! Skills as `/name` commands. The source answers from the library, which is
 //! why a skill saved mid-session is in the next completion (ADR-0009 §1).
 
-use std::path::PathBuf;
+use std::path::Path;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -34,22 +34,14 @@ impl CommandSource for SkillCommands {
         "skills"
     }
 
-    async fn commands(&self) -> Vec<Arc<dyn Command>> {
+    async fn commands(&self, cwd: &Path) -> Vec<Arc<dyn Command>> {
         self.library
-            .skills(&here())
+            .skills(cwd)
             .iter()
             .cloned()
             .map(|skill| Arc::new(SkillCommand::new(skill)) as Arc<dyn Command>)
             .collect()
     }
-}
-
-/// A `CommandSource` is asked for the process's commands, not a session's, so
-/// the project layers it can see are the ones under the process's own
-/// directory. A session working elsewhere still reaches every skill through
-/// the `Skill` tool and the prompt, which are told their `cwd`.
-fn here() -> PathBuf {
-    std::env::current_dir().unwrap_or_default()
 }
 
 /// One skill, typed as `/name args`.
@@ -99,6 +91,8 @@ impl Command for SkillCommand {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::*;
     use crate::tests::{Tree, command_context};
 
@@ -166,7 +160,7 @@ mod tests {
         // The project layers come from the process's own directory, so assert
         // what this tree put there rather than the whole list.
         let names: Vec<String> = source
-            .commands()
+            .commands(&tree.cwd())
             .await
             .iter()
             .map(|command| command.spec().name)

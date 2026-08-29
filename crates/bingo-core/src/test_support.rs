@@ -524,7 +524,7 @@ impl CommandSource for ScriptedCommandSource {
     fn id(&self) -> &str {
         "scripted"
     }
-    async fn commands(&self) -> Vec<Arc<dyn Command>> {
+    async fn commands(&self, _: &std::path::Path) -> Vec<Arc<dyn Command>> {
         self.commands.clone()
     }
 }

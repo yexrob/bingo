@@ -133,7 +133,7 @@ impl Commands {
             return Some(found);
         }
         for source in &self.sources {
-            if let Some(found) = named(&source.commands().await, name) {
+            if let Some(found) = named(&source.commands(&self.cwd).await, name) {
                 return Some(found);
             }
         }

@@ -15,6 +15,7 @@ use bingo_provider_openai::OpenAiPlugin;
 use bingo_sdk::{
     Env, ErrorCode, KernelError, Plugin, SessionId, SessionSelector, SessionSpec, SurfaceOptions,
 };
+use bingo_skills::SkillsPlugin;
 use bingo_store_jsonl::JsonlStorePlugin;
 use bingo_surface_print::{PrintPlugin, error_report, notice_report};
 use bingo_surface_rpc::RpcPlugin;
@@ -275,6 +276,7 @@ fn plugins() -> Result<Vec<Box<dyn Plugin>>, KernelError> {
         Box::new(FsPlugin),
         Box::new(BashPlugin),
         Box::new(WebPlugin),
+        Box::new(SkillsPlugin),
         Box::new(PrintPlugin),
         Box::new(RpcPlugin),
         Box::new(TuiPlugin),

@@ -543,6 +543,7 @@ fn scripted_run(
 
 mod context;
 mod sessions;
+mod skills;
 mod stream_json;
 
 /// `--mcp-config` names a file whose `mcpServers` join the settings for this
