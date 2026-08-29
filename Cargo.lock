@@ -303,6 +303,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "bingo-surface-rpc"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bingo-sdk",
+ "futures",
+ "jiff",
+ "schemars",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
 name = "bingo-tool-bash"
 version = "0.1.0"
 dependencies = [
