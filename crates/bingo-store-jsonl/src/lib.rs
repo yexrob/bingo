@@ -5,19 +5,24 @@
 //! journal body, and the lock is the only claim of ownership. The kernel says
 //! when to take and give back that claim — `create` does not lock by itself.
 
+pub mod gc;
 pub mod journal;
 pub mod layout;
 pub mod lock;
 pub mod summary;
 
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, OnceLock};
 
-use crate::lock::Locks;
 use async_trait::async_trait;
 use bingo_sdk::{
-    ErrorCode, Event, Frame, KernelError, Seq, SessionFilter, SessionId, SessionStore,
-    SessionSummary,
+    Contribution, ErrorCode, Event, Frame, HostHandle, KernelError, Plugin, PluginError,
+    PluginManifest, Registrar, Seq, SessionFilter, SessionId, SessionStore, SessionSummary,
 };
+use jiff::Timestamp;
+
+use crate::gc::Gc;
+use crate::lock::Locks;
 
 /// The disk failing is the store's fault, never the kernel's.
 pub(crate) fn storage(message: impl Into<String>) -> KernelError {
@@ -107,11 +112,59 @@ impl SessionStore for JsonlStore {
     }
 }
 
+static MANIFEST: PluginManifest = PluginManifest {
+    id: "bingo.store.jsonl",
+    version: env!("CARGO_PKG_VERSION"),
+    sdk: "^0.1",
+    provides: &["store:jsonl"],
+    requires: &[],
+    config: None,
+};
+
+/// Registers the store under `<data_dir>/sessions` and collects what it may
+/// when the host starts.
+#[derive(Debug, Default)]
+pub struct JsonlStorePlugin {
+    /// `register` learns the root from the registrar; `start` gets no env, so
+    /// the store it built is kept here rather than derived a second time.
+    store: OnceLock<Arc<JsonlStore>>,
+}
+
+#[async_trait]
+impl Plugin for JsonlStorePlugin {
+    fn manifest(&self) -> &'static PluginManifest {
+        &MANIFEST
+    }
+
+    fn register(&self, registrar: &mut Registrar) -> Result<(), PluginError> {
+        let store = Arc::new(JsonlStore::new(registrar.env().data_dir.join("sessions")));
+        // One host registers a plugin once; a second attempt keeps the first.
+        let _ = self.store.set(Arc::clone(&store));
+        registrar.add(Contribution::Store(store));
+        Ok(())
+    }
+
+    async fn start(&self, _host: HostHandle) -> Result<(), PluginError> {
+        let Some(store) = self.store.get() else {
+            return Ok(());
+        };
+        // Collection that cannot run is not a reason to refuse to start: the
+        // sessions are still readable, there are only more of them.
+        match Gc::daily(Timestamp::now()).run(store.root()) {
+            Ok(removed) if !removed.is_empty() => {
+                tracing::info!(count = removed.len(), sessions = ?removed, "collected old sessions");
+            }
+            Ok(_) => {}
+            Err(e) => tracing::warn!(error = %e, "session collection failed"),
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
     use bingo_sdk::{CloseReason, Level, ParentLink, Usage};
-    use jiff::Timestamp;
 
     /// The session the fixtures under `fixtures/` were written for.
     pub(crate) fn session() -> SessionId {
@@ -402,6 +455,29 @@ pub(crate) mod tests {
                 .await
                 .expect("list")
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn the_manifest_says_what_it_provides() {
+        assert_eq!(MANIFEST.id, "bingo.store.jsonl");
+        assert_eq!(MANIFEST.provides, ["store:jsonl"]);
+        assert!(MANIFEST.config.is_none(), "the store claims no settings");
+    }
+
+    #[test]
+    fn the_plugin_registers_one_store_under_the_data_directory() {
+        let plugin = JsonlStorePlugin::default();
+        let env = bingo_sdk::Env::rooted("/home/someone");
+        let mut registrar = Registrar::new("bingo.store.jsonl", serde_json::Value::Null, env);
+        plugin.register(&mut registrar).expect("register");
+
+        let contributions = registrar.into_contributions();
+        assert_eq!(contributions.len(), 1);
+        assert!(matches!(contributions[0], Contribution::Store(_)));
+        assert_eq!(
+            plugin.store.get().expect("the store").root(),
+            Path::new("/home/someone/.bingo/data/sessions")
         );
     }
 }
