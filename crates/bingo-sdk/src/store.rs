@@ -19,4 +19,14 @@ pub trait SessionStore: Send + Sync {
     async fn list(&self, filter: &SessionFilter) -> Result<Vec<SessionSummary>, KernelError>;
 
     async fn delete(&self, session: &SessionId) -> Result<(), KernelError>;
+
+    /// Take the session for this process, from create or resume until
+    /// `release` or exit; a second holder gets `SessionLocked` (ADR-0005).
+    async fn acquire(&self, _session: &SessionId) -> Result<(), KernelError> {
+        Ok(())
+    }
+
+    async fn release(&self, _session: &SessionId) -> Result<(), KernelError> {
+        Ok(())
+    }
 }

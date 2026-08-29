@@ -27,6 +27,8 @@ pub enum ErrorCode {
     ServerError,
     TurnLost,
     TurnBudgetExhausted,
+    /// The store could not read or write; the disk, not the kernel.
+    Storage,
     Internal,
 }
 
@@ -53,6 +55,7 @@ impl ErrorCode {
             ErrorCode::ServerError => "SERVER_ERROR",
             ErrorCode::TurnLost => "TURN_LOST",
             ErrorCode::TurnBudgetExhausted => "TURN_BUDGET_EXHAUSTED",
+            ErrorCode::Storage => "STORAGE",
             ErrorCode::Internal => "INTERNAL",
         }
     }
@@ -85,6 +88,7 @@ mod tests {
             ErrorCode::SessionNotFound,
             ErrorCode::InteractionClosed,
             ErrorCode::TurnBudgetExhausted,
+            ErrorCode::Storage,
             ErrorCode::Internal,
         ] {
             let json = serde_json::to_string(&code).unwrap();
