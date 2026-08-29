@@ -129,8 +129,12 @@ impl Folder {
         }
     }
 
+    /// Reasoning with no text still goes back when it carries the provider's
+    /// replay data: an encrypted chain of thought without a summary is what
+    /// a stateless OpenAI turn gets, and dropping it makes the model think
+    /// again from nothing.
     fn reasoning(&mut self, text: &str, provider_metadata: &ProviderMetadata) {
-        if !text.is_empty() {
+        if !text.is_empty() || !provider_metadata.is_empty() {
             self.assistant(vec![ContentPart::Reasoning {
                 text: text.to_string(),
                 provider_metadata: provider_metadata.clone(),
@@ -326,6 +330,43 @@ mod tests {
             ),
         ];
         assert_eq!(ContextView::fold_items(&items).len(), 1);
+    }
+
+    #[test]
+    fn reasoning_with_only_replay_data_still_goes_back_to_the_provider() {
+        let mut replay = ProviderMetadata::new();
+        replay.insert(
+            "openai".into(),
+            serde_json::from_value(serde_json::json!({"id": "rs_1", "encrypted_content": "gAAA"}))
+                .unwrap(),
+        );
+        let items = vec![
+            user("i1", "go"),
+            item(
+                "i2",
+                ItemBody::Reasoning {
+                    text: String::new(),
+                    provider_metadata: replay.clone(),
+                },
+            ),
+            item(
+                "i3",
+                ItemBody::Reasoning {
+                    text: String::new(),
+                    provider_metadata: ProviderMetadata::new(),
+                },
+            ),
+        ];
+        let messages = ContextView::fold_items(&items);
+        assert_eq!(messages.len(), 2);
+        assert_eq!(
+            messages[1].parts,
+            vec![ContentPart::Reasoning {
+                text: String::new(),
+                provider_metadata: replay,
+            }],
+            "the encrypted part is replayed; the empty one is not"
+        );
     }
 
     #[test]
