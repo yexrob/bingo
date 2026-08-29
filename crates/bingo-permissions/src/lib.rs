@@ -1,11 +1,13 @@
 //! The permission policy: five modes, an allow/deny/ask rule table, and a
 //! decision that fails closed at every step.
 //!
-//! The plugin registers one `PermissionPolicy`; the kernel's gate asks it and
-//! enforces the answer, resolving `Ask` through a person and handing back what
-//! they decided. A rule accepted "for the session" comes back through
-//! `on_verdict` and lives in memory only.
+//! The plugin registers one `PermissionPolicy` and the `/permission` command
+//! that reads and sets its mode; the kernel's gate asks the policy and enforces
+//! the answer, resolving `Ask` through a person and handing back what they
+//! decided. A rule accepted "for the session", and a mode chosen for it, come
+//! back into the same in-memory store and live no longer than the session.
 
+pub mod command;
 pub mod decide;
 pub mod mode;
 pub mod path;
@@ -20,7 +22,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use bingo_sdk::{
-    ConfigClaim, Contribution, Decision, Merge, PermissionPolicy, Plugin, PluginError,
+    Command, ConfigClaim, Contribution, Decision, Merge, PermissionPolicy, Plugin, PluginError,
     PluginManifest, PolicyInput, Registrar, SessionId, Verdict,
 };
 use schemars::JsonSchema;
@@ -28,8 +30,9 @@ use serde::Deserialize;
 
 use crate::decide::Request;
 use crate::rule::{Call, Rules};
-use crate::session::SessionRules;
+use crate::session::Sessions;
 
+pub use command::PermissionCommand;
 pub use decide::decide;
 pub use mode::{Mode, UnknownMode};
 pub use rule::Rule;
@@ -38,7 +41,7 @@ static MANIFEST: PluginManifest = PluginManifest {
     id: "bingo.permissions",
     version: env!("CARGO_PKG_VERSION"),
     sdk: "^0.1",
-    provides: &["policy:permissions"],
+    provides: &["policy:permissions", "command:permission"],
     requires: &[],
     config: Some(ConfigClaim {
         keys: &[
@@ -94,12 +97,19 @@ impl Plugin for PermissionsPlugin {
         &MANIFEST
     }
 
+    /// The command and the gate are the same policy: what `/permission` sets is
+    /// what the next call is decided against.
     fn register(&self, registrar: &mut Registrar) -> Result<(), PluginError> {
         let settings: Settings = registrar.config()?;
-        let policy =
-            PermissionsPolicy::new(settings.permissions, Some(registrar.env().home.clone()))?;
+        let policy = Arc::new(PermissionsPolicy::new(
+            settings.permissions,
+            Some(registrar.env().home.clone()),
+        )?);
         registrar.add(Contribution::Policy(
-            Arc::new(policy) as Arc<dyn PermissionPolicy>
+            Arc::clone(&policy) as Arc<dyn PermissionPolicy>
+        ));
+        registrar.add(Contribution::Command(
+            Arc::new(PermissionCommand::new(policy)) as Arc<dyn Command>,
         ));
         Ok(())
     }
@@ -111,7 +121,7 @@ pub struct PermissionsPolicy {
     rules: Rules,
     extra_dirs: Vec<PathBuf>,
     home: Option<PathBuf>,
-    session: SessionRules,
+    sessions: Sessions,
 }
 
 impl PermissionsPolicy {
@@ -127,8 +137,19 @@ impl PermissionsPolicy {
             },
             extra_dirs: settings.additional_directories,
             home,
-            session: SessionRules::default(),
+            sessions: Sessions::default(),
         })
+    }
+
+    /// The mode this session runs in: the one `/permission` gave it, else the
+    /// configured one. The configured mode is never written to.
+    pub fn mode_for(&self, session: &SessionId) -> Mode {
+        self.sessions.mode(session).unwrap_or(self.mode)
+    }
+
+    /// Run this session in `mode` from now on, for as long as it lives.
+    pub fn choose_mode(&self, session: &SessionId, mode: Mode) {
+        self.sessions.choose_mode(session, mode);
     }
 
     fn request<'a>(&'a self, input: PolicyInput<'a>) -> Request<'a> {
@@ -139,7 +160,7 @@ impl PermissionsPolicy {
             },
             traits: input.traits,
             confirm: input.confirm,
-            mode: self.mode,
+            mode: self.mode_for(input.session),
             cwd: input.cwd,
             home: self.home.as_deref(),
             extra_dirs: &self.extra_dirs,
@@ -149,7 +170,7 @@ impl PermissionsPolicy {
     /// The configured tables, plus whatever this session's person accepted.
     fn rules_for(&self, session: &SessionId) -> Rules {
         let mut rules = self.rules.clone();
-        rules.allow.extend(self.session.of(session));
+        rules.allow.extend(self.sessions.rules(session));
         rules
     }
 }
@@ -178,7 +199,7 @@ impl PermissionPolicy for PermissionsPolicy {
         let Verdict::Allow { scope: Some(rule) } = verdict else {
             return;
         };
-        if !self.session.install(input.session, rule) {
+        if !self.sessions.install(input.session, rule) {
             tracing::warn!(
                 rule,
                 "a session scope this grammar cannot read installs nothing"
@@ -240,7 +261,10 @@ mod tests {
     #[test]
     fn the_manifest_says_what_it_provides() {
         assert_eq!(MANIFEST.id, "bingo.permissions");
-        assert_eq!(MANIFEST.provides, ["policy:permissions"]);
+        assert_eq!(
+            MANIFEST.provides,
+            ["policy:permissions", "command:permission"]
+        );
         let claim = MANIFEST.config.expect("a config claim");
         assert_eq!(claim.keys.len(), 5);
         assert!(
@@ -254,7 +278,7 @@ mod tests {
     }
 
     #[test]
-    fn the_plugin_registers_one_policy() {
+    fn the_plugin_registers_one_policy_and_the_command_that_reads_it() {
         let mut registrar = Registrar::new(
             "bingo.permissions",
             json!({}),
@@ -264,8 +288,12 @@ mod tests {
             .register(&mut registrar)
             .expect("register");
         let contributions = registrar.into_contributions();
-        assert_eq!(contributions.len(), 1);
+        assert_eq!(contributions.len(), 2);
         assert!(matches!(contributions[0], Contribution::Policy(_)));
+        match &contributions[1] {
+            Contribution::Command(command) => assert_eq!(command.spec().name, "permission"),
+            other => panic!("expected a command, got {other:?}"),
+        }
     }
 
     #[test]
