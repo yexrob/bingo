@@ -4,6 +4,7 @@
 //! seen from the other end of the pipe; [`schema::document`] is both of them
 //! written down as JSON Schema, committed at `schema/rpc.json`.
 
+pub mod client;
 pub mod codec;
 pub mod methods;
 pub mod schema;
@@ -19,6 +20,7 @@ use bingo_sdk::{
 };
 use serde_json::Value;
 
+pub use client::{RemoteKernel, RemoteSession};
 pub use schema::document;
 pub use server::serve;
 
