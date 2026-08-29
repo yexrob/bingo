@@ -311,10 +311,7 @@ async fn the_model_catalogue_comes_from_the_data_envelope() {
         models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
         ["claude-3-5-haiku-20241022", MODEL]
     );
-    assert_eq!(
-        models[1].capabilities.as_ref().map(|c| c.max_output),
-        Some(64_000)
-    );
+    assert_eq!(models[1].display.as_deref(), Some("Claude Sonnet 4.5"));
 }
 
 #[tokio::test]

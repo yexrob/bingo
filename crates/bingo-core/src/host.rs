@@ -344,7 +344,15 @@ impl Host {
         let provider = self.provider(spec.provider.as_deref())?;
         check_auth(provider.as_ref())?;
         let model = self.model(provider.as_ref(), spec.model.as_deref()).await?;
-        let capabilities = provider.capabilities(&model);
+        let endpoint = provider.endpoint(&model);
+        let capabilities = ModelCapabilities {
+            context_window: 200_000,
+            max_output: DEFAULT_MAX_TOKENS,
+            images: endpoint.images,
+            reasoning: false,
+            count_tokens: endpoint.count_tokens,
+            caching: endpoint.caching,
+        };
         let max_tokens = self
             .settings
             .kernel

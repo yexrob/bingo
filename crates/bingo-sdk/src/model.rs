@@ -202,7 +202,24 @@ impl FinishReason {
     }
 }
 
-/// What a model can do; the kernel's ruler and gate read this.
+/// What an endpoint does with a request, as only the provider can know:
+/// whether image parts reach the model, whether tokens can be counted ahead,
+/// whether prefixes are cached. The model's own facts — window, output
+/// budget, reasoning, vision — are the kernel catalogue's (ADR-0004).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct EndpointCapabilities {
+    #[serde(default)]
+    pub images: bool,
+    #[serde(default)]
+    pub count_tokens: bool,
+    #[serde(default)]
+    pub caching: bool,
+}
+
+/// What a turn may assume about its model: the kernel's resolution of the
+/// user's settings, the catalogue, the server's corrections and the
+/// endpoint's facts (ADR-0004). The ruler and the gate read this.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelCapabilities {

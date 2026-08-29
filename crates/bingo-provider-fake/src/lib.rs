@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use bingo_sdk::{
-    CancellationToken, ContentPart, FinishReason, ModelCapabilities, ModelEvent, ModelInfo,
+    CancellationToken, ContentPart, EndpointCapabilities, FinishReason, ModelEvent, ModelInfo,
     ModelRequest, ModelStream, Plugin, PluginError, PluginManifest, Provider, ProviderError,
     Registrar, Role, UnifiedFinish, Usage,
 };
@@ -386,12 +386,9 @@ impl Provider for FakeProvider {
         "fake"
     }
 
-    fn capabilities(&self, _model: &str) -> ModelCapabilities {
-        ModelCapabilities {
-            context_window: 200_000,
-            max_output: 8_192,
+    fn endpoint(&self, _model: &str) -> EndpointCapabilities {
+        EndpointCapabilities {
             images: true,
-            reasoning: true,
             count_tokens: true,
             caching: false,
         }
@@ -443,7 +440,6 @@ impl Provider for FakeProvider {
         Ok(vec![ModelInfo {
             id: FAKE_MODEL.to_string(),
             display: None,
-            capabilities: Some(self.capabilities(FAKE_MODEL)),
         }])
     }
 }
@@ -815,8 +811,8 @@ mod tests {
         let models = provider.models().await.expect("models");
         assert_eq!(models.len(), 1);
         assert_eq!(models[0].id, FAKE_MODEL);
-        assert_eq!(provider.capabilities(FAKE_MODEL).context_window, 200_000);
-        assert!(!provider.capabilities(FAKE_MODEL).caching);
+        assert!(provider.endpoint(FAKE_MODEL).images);
+        assert!(!provider.endpoint(FAKE_MODEL).caching);
     }
 
     #[test]

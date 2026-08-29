@@ -1,11 +1,11 @@
 //! `ModelRequest` → the Messages API wire body.
 //!
-//! Pure: capabilities and the request decide everything, so a snapshot pins
+//! Pure: the endpoint and the request decide everything, so a snapshot pins
 //! every shape the API is picky about — the thinking parameters, the cache
 //! breakpoints, and the blocks a reasoning turn has to replay.
 
 use bingo_sdk::{
-    ContentPart, Effort, Message, ModelCapabilities, ModelRequest, ProviderMetadata, Role,
+    ContentPart, Effort, EndpointCapabilities, Message, ModelRequest, ProviderMetadata, Role,
     SystemBlock, ToolSpec,
 };
 use serde_json::{Map, Value, json};
@@ -22,7 +22,7 @@ const MAX_BREAKPOINTS: usize = 4;
 const CACHEABLE: &[&str] = &["text", "image", "tool_use", "tool_result"];
 
 /// The `POST /v1/messages` body.
-pub fn encode(request: &ModelRequest, caps: &ModelCapabilities) -> Value {
+pub fn encode(request: &ModelRequest, caps: &EndpointCapabilities) -> Value {
     let parts = Parts::of(request, caps);
     let mut body = Map::new();
     body.insert("model".into(), json!(request.model));
@@ -40,7 +40,7 @@ pub fn encode(request: &ModelRequest, caps: &ModelCapabilities) -> Value {
 /// send, without the generation parameters. A count that skipped the tool
 /// schemas read far under the real input and let the window overrun before
 /// the compactor ever fired.
-pub fn count_tokens(request: &ModelRequest, caps: &ModelCapabilities) -> Value {
+pub fn count_tokens(request: &ModelRequest, caps: &EndpointCapabilities) -> Value {
     let mut body = Map::new();
     body.insert("model".into(), json!(request.model));
     Parts::of(request, caps).install(&mut body);
@@ -56,7 +56,7 @@ struct Parts {
 }
 
 impl Parts {
-    fn of(request: &ModelRequest, caps: &ModelCapabilities) -> Self {
+    fn of(request: &ModelRequest, caps: &EndpointCapabilities) -> Self {
         let mut budget = if caps.caching { MAX_BREAKPOINTS } else { 0 };
         Self {
             system: system_blocks(&request.system, &mut budget),
@@ -256,12 +256,9 @@ fn tool(spec: &ToolSpec) -> Value {
 mod tests {
     use super::*;
 
-    fn caps(caching: bool) -> ModelCapabilities {
-        ModelCapabilities {
-            context_window: 200_000,
-            max_output: 64_000,
+    fn caps(caching: bool) -> EndpointCapabilities {
+        EndpointCapabilities {
             images: true,
-            reasoning: true,
             count_tokens: true,
             caching,
         }

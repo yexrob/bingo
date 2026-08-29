@@ -92,7 +92,7 @@ fn config(provider: Arc<ScriptedProvider>, tools: Vec<Arc<dyn Tool>>) -> TurnCon
     TurnConfig {
         session: summary(),
         cwd: "/tmp".into(),
-        capabilities: provider.capabilities("m"),
+        capabilities: capabilities(),
         provider,
         model: "m".into(),
         max_tokens: 1000,

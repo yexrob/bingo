@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
 use crate::host::Prompter;
-use crate::model::{ModelCapabilities, ModelRequest, ModelStream, ProviderError};
+use crate::model::{EndpointCapabilities, ModelRequest, ModelStream, ProviderError};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "camelCase")]
@@ -31,8 +31,6 @@ pub struct ModelInfo {
     pub id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub capabilities: Option<ModelCapabilities>,
 }
 
 #[async_trait]
@@ -40,7 +38,9 @@ pub trait Provider: Send + Sync {
     /// The provider id configuration refers to (`anthropic`, `openai`, `codex`, `fake`).
     fn id(&self) -> &str;
 
-    fn capabilities(&self, model: &str) -> ModelCapabilities;
+    /// What this endpoint does with a request for `model`. Fails closed: a
+    /// provider that does not know says `false`.
+    fn endpoint(&self, model: &str) -> EndpointCapabilities;
 
     /// Stream one response. Non-streaming completion is this, drained.
     async fn stream(

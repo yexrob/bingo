@@ -4,7 +4,7 @@
 //! failure and hands it back, and the turn loop owns the retry ladder and the
 //! overflow compaction (`crates/bingo-core/src/turn.rs`). Everything below
 //! `lib.rs` is pure — request encoding, SSE framing, the event state machine,
-//! error classification, the capability table — so the wire format is pinned
+//! error classification, the catalogue reader — so the wire format is pinned
 //! by fixtures and snapshots rather than by a live endpoint.
 
 pub mod error;
@@ -19,8 +19,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use bingo_sdk::{
-    AuthStatus, CancellationToken, ConfigClaim, Merge, ModelCapabilities, ModelInfo, ModelRequest,
-    ModelStream, Plugin, PluginError, PluginManifest, Provider, ProviderError, Registrar,
+    AuthStatus, CancellationToken, ConfigClaim, EndpointCapabilities, Merge, ModelInfo,
+    ModelRequest, ModelStream, Plugin, PluginError, PluginManifest, Provider, ProviderError,
+    Registrar,
 };
 use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderValue};
 use schemars::JsonSchema;
@@ -175,8 +176,14 @@ impl Provider for AnthropicProvider {
         "anthropic"
     }
 
-    fn capabilities(&self, model: &str) -> ModelCapabilities {
-        models::capabilities(model)
+    /// Every Claude endpoint sees images, counts tokens and caches prefixes;
+    /// what each model can do is the kernel catalogue's to say (ADR-0004).
+    fn endpoint(&self, _model: &str) -> EndpointCapabilities {
+        EndpointCapabilities {
+            images: true,
+            count_tokens: true,
+            caching: true,
+        }
     }
 
     async fn stream(
@@ -184,13 +191,13 @@ impl Provider for AnthropicProvider {
         request: ModelRequest,
         cancel: CancellationToken,
     ) -> Result<ModelStream, ProviderError> {
-        let body = request::encode(&request, &self.capabilities(&request.model));
+        let body = request::encode(&request, &self.endpoint(&request.model));
         let response = self.send(self.post("/v1/messages", &body)?).await?;
         Ok(stream::model_stream(stream::chunks(response), cancel))
     }
 
     async fn count_tokens(&self, request: &ModelRequest) -> Result<u64, ProviderError> {
-        let body = request::count_tokens(request, &self.capabilities(&request.model));
+        let body = request::count_tokens(request, &self.endpoint(&request.model));
         let counted = self
             .json(self.post("/v1/messages/count_tokens", &body)?)
             .await?;

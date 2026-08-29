@@ -38,15 +38,8 @@ impl Provider for ScriptedProvider {
     fn id(&self) -> &str {
         "scripted"
     }
-    fn capabilities(&self, _: &str) -> ModelCapabilities {
-        ModelCapabilities {
-            context_window: 100_000,
-            max_output: 4_000,
-            images: false,
-            reasoning: false,
-            count_tokens: false,
-            caching: false,
-        }
+    fn endpoint(&self, _: &str) -> EndpointCapabilities {
+        EndpointCapabilities::default()
     }
     async fn stream(
         &self,
@@ -226,6 +219,19 @@ impl Tool for PanicTool {
     }
 }
 
+/// The scripted model as a turn sees it: a small window, no vision, no
+/// reasoning, so a test that needs a fact turns it on explicitly.
+pub fn capabilities() -> ModelCapabilities {
+    ModelCapabilities {
+        context_window: 100_000,
+        max_output: 4_000,
+        images: false,
+        reasoning: false,
+        count_tokens: false,
+        caching: false,
+    }
+}
+
 pub fn summary(id: &str) -> SessionSummary {
     let ts = jiff::Timestamp::from_second(0).unwrap();
     SessionSummary {
@@ -252,7 +258,7 @@ pub fn config(
     crate::turn::TurnConfig {
         session: summary("ses_1"),
         cwd: "/tmp".into(),
-        capabilities: provider.capabilities("m"),
+        capabilities: capabilities(),
         provider,
         model: "m".into(),
         max_tokens: 1000,
