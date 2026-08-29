@@ -12,6 +12,7 @@ use bingo_sdk::{
     Env, ErrorCode, KernelError, Plugin, SessionSelector, SessionSpec, SurfaceOptions,
 };
 use bingo_surface_print::PrintPlugin;
+use bingo_tool_bash::BashPlugin;
 use bingo_tool_fs::FsPlugin;
 use clap::{Parser, ValueEnum};
 use serde_json::{Map, Value, json};
@@ -138,6 +139,7 @@ fn plugins() -> Result<Vec<Box<dyn Plugin>>, KernelError> {
     Ok(vec![
         Box::new(FakePlugin::new(Arc::new(FakeProvider::new(script)))),
         Box::new(FsPlugin),
+        Box::new(BashPlugin),
         Box::new(PrintPlugin),
     ])
 }
@@ -149,7 +151,6 @@ fn host_config(cli: &Cli, cwd: &std::path::Path) -> Result<HostConfig, KernelErr
     config
         .layers
         .push(settings::Layer::new("cli", cli_layer(cli)));
-    config.shell = std::env::var("SHELL").ok();
     Ok(config)
 }
 

@@ -86,6 +86,7 @@ dependencies = [
  "bingo-provider-fake",
  "bingo-sdk",
  "bingo-surface-print",
+ "bingo-tool-bash",
  "bingo-tool-fs",
  "clap",
  "serde_json",
