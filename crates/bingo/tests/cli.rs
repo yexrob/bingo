@@ -532,3 +532,15 @@ fn max_turns_stops_a_tool_loop_with_a_named_error() {
     let err = stderr(&out);
     assert!(err.contains("TURN_BUDGET_EXHAUSTED"), "{err}");
 }
+
+#[test]
+fn resuming_an_unknown_session_is_not_found_before_any_turn() {
+    let out = run(bingo()
+        .env("HOME", tempfile::tempdir().unwrap().path())
+        .args(["--print", "--resume", "ses_nope", "hello"]));
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(stdout(&out), "");
+    let err = stderr(&out);
+    assert!(err.starts_with("[error] code=SESSION_NOT_FOUND"), "{err}");
+    assert_eq!(err.lines().count(), 1, "{err}");
+}
