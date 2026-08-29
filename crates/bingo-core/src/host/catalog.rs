@@ -5,6 +5,7 @@ use bingo_sdk::*;
 use serde_json::{Value, json};
 
 use super::Registry;
+use crate::models::ModelCatalog;
 
 pub(super) fn entries(
     registry: &Registry,
@@ -21,17 +22,24 @@ pub(super) fn entries(
     }
 }
 
-/// Only the configured model, once per provider; nothing here asks a provider
-/// for its list, which would be a network call.
-fn models(registry: &Registry, model: Option<&str>) -> Vec<CatalogEntry> {
+/// The embedded catalogue's models for each registered provider, plus the
+/// configured one; nothing here asks a provider for its list, which would
+/// be a network call.
+fn models(registry: &Registry, configured: Option<&str>) -> Vec<CatalogEntry> {
+    let catalogue = ModelCatalog::embedded();
     registry
         .providers
         .iter()
-        .filter_map(|p| {
-            let model = model?.to_string();
-            Some(CatalogEntry {
+        .flat_map(|p| {
+            let mut ids: Vec<&str> = configured.into_iter().collect();
+            ids.extend(
+                catalogue
+                    .models_of(p.id())
+                    .filter(|m| Some(*m) != configured),
+            );
+            ids.into_iter().map(|model| CatalogEntry {
                 id: format!("{}/{model}", p.id()),
-                label: model,
+                label: model.to_string(),
                 meta: json!({ "provider": p.id() }),
             })
         })

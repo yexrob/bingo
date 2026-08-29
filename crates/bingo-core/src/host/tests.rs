@@ -7,6 +7,8 @@ use serde_json::json;
 use super::*;
 use crate::test_support::*;
 
+mod commands;
+
 /// A plugin assembled from parts, so tests can shape manifests freely.
 struct TestPlugin {
     manifest: &'static PluginManifest,

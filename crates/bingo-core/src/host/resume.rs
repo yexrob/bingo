@@ -76,11 +76,12 @@ impl Host {
         let head = session::head_summary(&frames)?;
         let spec = spec_of(&head);
         self.check_key_free(spec.key.as_deref())?;
-        let choice = self.choose_model(&spec).await?;
+        let thinking = self.settings.kernel.thinking;
+        let choice = self.choose_model(&spec, thinking).await?;
         let mailbox = session::resume(frames, Some(store), self.services(), |mailbox| {
             Arc::new(self.turn_config(&spec, &head, choice, mailbox))
         })?;
-        let live = Live::new(mailbox, &head);
+        let live = Live::new(mailbox, &head, spec, thinking);
         self.lock().insert(head.id.clone(), live.clone());
         let _ = self.gateway.send(GatewayEvent::SessionCreated {
             summary: Box::new(head),

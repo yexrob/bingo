@@ -162,6 +162,16 @@ impl Registry {
         Ok(())
     }
 
+    /// The kernel's own commands, added last: a plugin that took a name
+    /// first keeps it.
+    pub(super) fn add_builtins(&mut self, commands: Vec<Arc<dyn Command>>) {
+        for command in commands {
+            if let Err(taken) = self.add_command(command) {
+                tracing::debug!(%taken, "a plugin's command shadows the kernel's");
+            }
+        }
+    }
+
     fn add_command(&mut self, command: Arc<dyn Command>) -> Result<(), String> {
         let name = command.spec().name;
         if self.commands.iter().any(|c| c.spec().name == name) {

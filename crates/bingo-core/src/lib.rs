@@ -3,6 +3,7 @@
 //! it runs is a plugin registered through `bingo_sdk`.
 
 pub mod accumulator;
+pub(crate) mod commands;
 pub mod context;
 pub mod executor;
 pub mod gate;

@@ -7,6 +7,7 @@ mod catalog;
 mod registry;
 mod resume;
 mod tool_host;
+mod unavailable;
 
 use std::any::Any;
 use std::collections::BTreeMap;
@@ -20,6 +21,7 @@ use tokio::sync::broadcast;
 
 pub use registry::{PluginStatus, Registry};
 use tool_host::SessionToolHost;
+use unavailable::Unavailable;
 
 use crate::gate::DefaultPolicy;
 use crate::models::{self, Learned, ModelCatalog};
@@ -105,21 +107,56 @@ struct Live {
     cwd: String,
     parent: Option<SessionId>,
     created_at: Timestamp,
+    /// What the session was opened with; `/model` rewrites it (ADR-0008 §4).
+    spec: SessionSpec,
+    /// The effort the session asks for; `None` is off.
+    thinking: Option<Effort>,
 }
 
 impl Live {
-    fn new(mailbox: Mailbox, summary: &SessionSummary) -> Self {
+    fn new(
+        mailbox: Mailbox,
+        summary: &SessionSummary,
+        spec: SessionSpec,
+        thinking: Option<Effort>,
+    ) -> Self {
         Self {
             mailbox,
             key: summary.key.clone(),
             cwd: summary.cwd.clone(),
             parent: summary.parent.as_ref().map(|p| p.session.clone()),
             created_at: summary.created_at,
+            spec,
+            thinking,
         }
     }
 }
 
-/// The provider and model a new session runs on, with the ceiling that follows.
+/// What a command may change about a running session.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Change {
+    Model {
+        /// Stays as it was when absent.
+        provider: Option<String>,
+        model: String,
+    },
+    Thinking(Option<Effort>),
+}
+
+impl Change {
+    fn apply(self, spec: &mut SessionSpec, thinking: &mut Option<Effort>) {
+        match self {
+            Change::Model { provider, model } => {
+                if provider.is_some() {
+                    spec.provider = provider;
+                }
+                spec.model = Some(model);
+            }
+            Change::Thinking(level) => *thinking = level,
+        }
+    }
+}
+
 impl std::fmt::Debug for Host {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Host")
@@ -139,20 +176,23 @@ impl Host {
             .filter_map(|p| Claim::from_manifest(p.manifest()))
             .collect();
         let settings = settings::merge(&config.layers, &claims)?;
-        let registry = Registry::load(&plugins, &settings.plugins, &config.env)?;
+        let mut registry = Registry::load(&plugins, &settings.plugins, &config.env)?;
         let (gateway, _) = broadcast::channel(GATEWAY_CAPACITY);
         let learned = Arc::new(Learned::load(
             config.env.data_dir.join("learned-windows.json"),
         ));
-        let host = Arc::new_cyclic(|weak| Host {
-            config,
-            settings,
-            registry,
-            plugins,
-            sessions: Mutex::new(BTreeMap::new()),
-            gateway,
-            learned,
-            weak: weak.clone(),
+        let host = Arc::new_cyclic(|weak| {
+            registry.add_builtins(crate::commands::builtins(weak.clone()));
+            Host {
+                config,
+                settings,
+                registry,
+                plugins,
+                sessions: Mutex::new(BTreeMap::new()),
+                gateway,
+                learned,
+                weak: weak.clone(),
+            }
         });
         host.start_plugins().await?;
         Ok(host)
@@ -356,18 +396,18 @@ impl Host {
         Ok(())
     }
 
-    async fn choose_model(&self, spec: &SessionSpec) -> Result<ModelChoice, KernelError> {
+    async fn choose_model(
+        &self,
+        spec: &SessionSpec,
+        thinking: Option<Effort>,
+    ) -> Result<ModelChoice, KernelError> {
         let provider = self.provider(spec.provider.as_deref())?;
         check_auth(provider.as_ref())?;
         let model = self.model(provider.as_ref(), spec.model.as_deref()).await?;
         let capabilities = self.resolve_model(provider.as_ref(), &model);
         Ok(ModelChoice {
             max_tokens: models::max_tokens(&capabilities, self.settings.kernel.max_tokens),
-            reasoning: self
-                .settings
-                .kernel
-                .thinking
-                .filter(|_| capabilities.reasoning),
+            reasoning: thinking.filter(|_| capabilities.reasoning),
             learned: self.learned.clone(),
             provider,
             id: model,
@@ -470,7 +510,8 @@ impl Host {
             self.check_parent_limits(&parent.session)?;
         }
         self.check_key_free(spec.key.as_deref())?;
-        let choice = self.choose_model(&spec).await?;
+        let thinking = self.settings.kernel.thinking;
+        let choice = self.choose_model(&spec, thinking).await?;
         let summary = self.summarize(&spec, &choice);
         if let Some(store) = &self.registry.store {
             store.create(&summary).await?;
@@ -482,12 +523,56 @@ impl Host {
             self.services(),
             |mailbox| Arc::new(self.turn_config(&spec, &summary, choice, mailbox)),
         );
-        let live = Live::new(mailbox, &summary);
+        let live = Live::new(mailbox, &summary, spec, thinking);
         self.lock().insert(summary.id.clone(), live.clone());
         let _ = self.gateway.send(GatewayEvent::SessionCreated {
             summary: Box::new(summary),
         });
         Ok(live.mailbox)
+    }
+
+    /// Re-choose the model for a live session and hand the actor the config
+    /// its next turn runs on (ADR-0008 §4). Returns the summary as it now is.
+    pub async fn reconfigure(
+        &self,
+        id: &SessionId,
+        change: Change,
+    ) -> Result<SessionSummary, KernelError> {
+        let live = self.live(id)?;
+        let (mut spec, mut thinking) = (live.spec.clone(), live.thinking);
+        change.apply(&mut spec, &mut thinking);
+        let choice = self.choose_model(&spec, thinking).await?;
+        let mut summary = live.mailbox.summary().await?;
+        summary.model = Some(choice.id.clone());
+        summary.provider = Some(choice.provider.id().to_string());
+        let config = Arc::new(self.turn_config(&spec, &summary, choice, &live.mailbox));
+        if let Some(entry) = self.lock().get_mut(id) {
+            entry.spec = spec;
+            entry.thinking = thinking;
+        }
+        live.mailbox.reconfigure(config);
+        Ok(summary)
+    }
+
+    /// Open a turn on a live session that only compacts.
+    pub async fn compact(
+        &self,
+        id: &SessionId,
+        instructions: Option<String>,
+    ) -> Result<(), KernelError> {
+        self.live(id)?.mailbox.compact(instructions).await
+    }
+
+    pub fn session_thinking(&self, id: &SessionId) -> Result<Option<Effort>, KernelError> {
+        self.live(id).map(|l| l.thinking)
+    }
+
+    pub async fn session_summary(&self, id: &SessionId) -> Result<SessionSummary, KernelError> {
+        self.live(id)?.mailbox.summary().await
+    }
+
+    pub fn has_provider(&self, id: &str) -> bool {
+        self.registry.providers.iter().any(|p| p.id() == id)
     }
 
     /// The live session a selector names, if it is live in this host.
@@ -638,41 +723,6 @@ impl HostApi for Host {
 
     fn service_any(&self, key: &str) -> Option<Arc<dyn Any + Send + Sync>> {
         self.registry.services.get(key).cloned()
-    }
-}
-
-/// The handle a host hands out after it has been torn down.
-struct Unavailable;
-
-fn unavailable() -> KernelError {
-    KernelError::new(ErrorCode::SessionClosed, "the host is shut down")
-}
-
-#[async_trait]
-impl HostApi for Unavailable {
-    async fn sessions(&self, _: SessionFilter) -> Result<Vec<SessionSummary>, KernelError> {
-        Err(unavailable())
-    }
-    async fn open(&self, _: SessionSelector, _: ClientIdentity) -> Result<Attachment, KernelError> {
-        Err(unavailable())
-    }
-    async fn close(&self, _: &SessionId, _: CloseReason) -> Result<(), KernelError> {
-        Err(unavailable())
-    }
-    async fn delete(&self, _: &SessionId) -> Result<(), KernelError> {
-        Err(unavailable())
-    }
-    async fn catalog(&self, kind: CatalogKind) -> Result<Catalog, KernelError> {
-        Ok(Catalog {
-            kind,
-            entries: Vec::new(),
-        })
-    }
-    fn gateway_events(&self) -> GatewayStream {
-        Box::pin(futures::stream::empty())
-    }
-    fn service_any(&self, _: &str) -> Option<Arc<dyn Any + Send + Sync>> {
-        None
     }
 }
 

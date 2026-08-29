@@ -88,6 +88,14 @@ impl ModelCatalog {
             .or_else(|| self.anywhere(model))
     }
 
+    /// Every model the catalogue lists under a provider, in id order.
+    pub fn models_of(&self, provider: &str) -> impl Iterator<Item = &str> {
+        self.providers
+            .get(provider)
+            .into_iter()
+            .flat_map(|p| p.models.keys().map(String::as_str))
+    }
+
     fn in_provider(&self, provider: &str, model: &str) -> Option<ModelFacts> {
         let models = &self.providers.get(provider)?.models;
         exact(models, model).or_else(|| by_prefix(models, model))
@@ -190,5 +198,13 @@ mod tests {
             .expect("anthropic entries");
         assert!(claude.reasoning && claude.images);
         assert!(catalog.lookup("openai", "gpt-5").is_some());
+    }
+
+    #[test]
+    fn a_provider_lists_its_models_in_id_order() {
+        let ids: Vec<&str> = ModelCatalog::embedded().models_of("anthropic").collect();
+        assert!(ids.len() > 3, "{ids:?}");
+        assert!(ids.windows(2).all(|w| w[0] < w[1]));
+        assert_eq!(ModelCatalog::embedded().models_of("nobody").count(), 0);
     }
 }
