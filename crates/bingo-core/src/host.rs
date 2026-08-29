@@ -257,7 +257,10 @@ impl Host {
             .or_else(|| self.settings.kernel.provider.clone())
             .or_else(|| self.registry.providers.first().map(|p| p.id().to_string()))
             .ok_or_else(|| {
-                KernelError::new(ErrorCode::ProviderUnavailable, "no provider is registered")
+                KernelError::new(
+                    ErrorCode::ProviderUnavailable,
+                    "No model provider is registered in this build.",
+                )
             })?;
         self.registry
             .providers
@@ -265,9 +268,13 @@ impl Host {
             .find(|p| p.id() == wanted)
             .cloned()
             .ok_or_else(|| {
+                let known: Vec<&str> = self.registry.providers.iter().map(|p| p.id()).collect();
                 KernelError::new(
                     ErrorCode::ProviderUnavailable,
-                    format!("no provider {wanted}"),
+                    format!(
+                        "No provider called `{wanted}`. Registered: {}.",
+                        known.join(", ")
+                    ),
                 )
             })
     }
@@ -480,15 +487,16 @@ impl Host {
 
 /// A provider that cannot authenticate is refused before any turn is spent on it.
 fn check_auth(provider: &dyn Provider) -> Result<(), KernelError> {
+    let refuse = |message: String| Err(KernelError::new(ErrorCode::AuthRequired, message));
     match provider.auth() {
         AuthStatus::Ready | AuthStatus::NotApplicable => Ok(()),
-        AuthStatus::Missing => Err(KernelError::new(
-            ErrorCode::AuthRequired,
-            format!("provider {} has no credentials", provider.id()),
+        AuthStatus::Missing { hint } => refuse(format!(
+            "The {} provider has no credentials. {hint}",
+            provider.id()
         )),
-        AuthStatus::Expired => Err(KernelError::new(
-            ErrorCode::AuthRequired,
-            format!("provider {} needs to log in again", provider.id()),
+        AuthStatus::Expired { hint } => refuse(format!(
+            "The {} provider's credentials have expired. {hint}",
+            provider.id()
         )),
     }
 }

@@ -14,6 +14,7 @@ pub mod request;
 pub mod sse;
 pub mod stream;
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -59,15 +60,29 @@ pub struct AnthropicProvider {
     http: reqwest::Client,
     api_key: Option<String>,
     base_url: String,
+    /// Where a person puts a key, named in the auth status.
+    settings_file: Option<PathBuf>,
 }
 
 impl AnthropicProvider {
     /// The settings slice, resolved against the environment.
-    pub fn new(config: AnthropicConfig) -> Self {
-        Self::with_endpoint(
+    pub fn new(config: AnthropicConfig, settings_file: PathBuf) -> Self {
+        let mut provider = Self::with_endpoint(
             resolve(API_KEY_ENV, config.api_key),
             resolve(BASE_URL_ENV, config.base_url).unwrap_or_else(|| DEFAULT_BASE_URL.to_string()),
-        )
+        );
+        provider.settings_file = Some(settings_file);
+        provider
+    }
+
+    fn missing_key_hint(&self) -> String {
+        match &self.settings_file {
+            Some(file) => format!(
+                "Set {API_KEY_ENV}, or add \"anthropic\": {{\"apiKey\": \"...\"}} to {}.",
+                file.display()
+            ),
+            None => format!("Set {API_KEY_ENV}, or configure anthropic.apiKey in settings."),
+        }
     }
 
     /// An endpoint as given, with no environment lookup — what a test or an
@@ -77,6 +92,7 @@ impl AnthropicProvider {
             http: reqwest::Client::new(),
             api_key,
             base_url: base_url.into().trim_end_matches('/').to_string(),
+            settings_file: None,
         }
     }
 
@@ -191,7 +207,9 @@ impl Provider for AnthropicProvider {
     fn auth(&self) -> AuthStatus {
         match self.api_key {
             Some(_) => AuthStatus::Ready,
-            None => AuthStatus::Missing,
+            None => AuthStatus::Missing {
+                hint: self.missing_key_hint(),
+            },
         }
     }
 }
@@ -246,7 +264,8 @@ impl Plugin for AnthropicPlugin {
 
     fn register(&self, registrar: &mut Registrar) -> Result<(), PluginError> {
         let settings: Settings = registrar.config()?;
-        let provider = AnthropicProvider::new(settings.anthropic);
+        let settings_file = registrar.env().config_dir.join("settings.json");
+        let provider = AnthropicProvider::new(settings.anthropic, settings_file);
         registrar.provider(Arc::new(provider) as Arc<dyn Provider>);
         Ok(())
     }
@@ -321,7 +340,7 @@ pub(crate) mod tests {
     /// through the resolver the provider is built from.
     #[test]
     fn no_key_anywhere_leaves_authentication_missing() {
-        assert_eq!(hermetic(None).auth(), AuthStatus::Missing);
+        assert!(matches!(hermetic(None).auth(), AuthStatus::Missing { .. }));
         assert_eq!(hermetic(Some("sk-ant-test")).auth(), AuthStatus::Ready);
         assert_eq!(resolve("BINGO_NO_SUCH_VARIABLE", None), None);
         assert_eq!(resolve("BINGO_NO_SUCH_VARIABLE", Some("  ".into())), None);
@@ -362,7 +381,10 @@ pub(crate) mod tests {
     #[test]
     fn the_base_url_defaults_and_a_setting_overrides_it_without_a_trailing_slash() {
         if std::env::var(BASE_URL_ENV).is_err() {
-            let default = AnthropicProvider::new(AnthropicConfig::default());
+            let default = AnthropicProvider::new(
+                AnthropicConfig::default(),
+                PathBuf::from("/tmp/settings.json"),
+            );
             assert_eq!(default.base_url(), DEFAULT_BASE_URL);
         }
         let custom = AnthropicProvider::with_endpoint(None, "http://127.0.0.1:8080/");

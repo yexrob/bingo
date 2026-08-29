@@ -10,13 +10,19 @@ use tokio_util::sync::CancellationToken;
 use crate::host::Prompter;
 use crate::model::{ModelCapabilities, ModelRequest, ModelStream, ProviderError};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "camelCase")]
 pub enum AuthStatus {
     NotApplicable,
     Ready,
-    Missing,
-    Expired,
+    /// No credentials; `hint` says where to put them, in the user's words.
+    Missing {
+        hint: String,
+    },
+    /// Credentials that stopped working; `hint` says how to renew them.
+    Expired {
+        hint: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
