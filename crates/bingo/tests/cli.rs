@@ -219,3 +219,61 @@ fn anthropic_without_credentials_fails_before_any_turn() {
     assert!(err.starts_with("[error] code=AUTH_REQUIRED msg="), "{err}");
     assert_eq!(err.lines().count(), 1, "{err}");
 }
+
+#[test]
+fn plan_mode_denies_a_write_and_the_turn_goes_on() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = script(
+        r#"{"responses":[
+            {"steps":[{"toolCall":{"name":"Write","input":{"file_path":"new.txt","content":"x"}}}]},
+            {"steps":[{"text":"Blocked."}]}
+        ]}"#,
+    );
+    let out = run(bingo()
+        .env("BINGO_FAKE_SCRIPT", script.path())
+        .env("HOME", dir.path())
+        .args(["--print", "--permission-mode", "plan", "--cwd"])
+        .arg(dir.path())
+        .arg("write it"));
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    assert!(
+        !dir.path().join("new.txt").exists(),
+        "plan mode wrote a file"
+    );
+    assert!(
+        stderr(&out).contains("[tool] Write error"),
+        "{}",
+        stderr(&out)
+    );
+    assert_eq!(stdout(&out), "Blocked.\n");
+}
+
+#[test]
+fn bash_runs_only_when_the_flags_allow_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let script_json = r#"{"responses":[
+        {"steps":[{"toolCall":{"name":"Bash","input":{"command":"echo hi"}}}]},
+        {"steps":[{"text":"Ran."}]}
+    ]}"#;
+    let cases: [(&[&str], &str); 3] = [
+        (&[], "[tool] Bash error"),
+        (&["--dangerously-skip-permissions"], "[tool] Bash ok"),
+        (&["--allowed-tools", "Bash(echo:*)"], "[tool] Bash ok"),
+    ];
+    for (flags, expected) in cases {
+        let script = script(script_json);
+        let out = run(bingo()
+            .env("BINGO_FAKE_SCRIPT", script.path())
+            .env("HOME", dir.path())
+            .args(["--print", "--cwd"])
+            .arg(dir.path())
+            .args(flags)
+            .arg("run it"));
+        assert_eq!(out.status.code(), Some(0), "{flags:?}: {}", stderr(&out));
+        assert!(
+            stderr(&out).contains(expected),
+            "{flags:?}: {}",
+            stderr(&out)
+        );
+    }
+}

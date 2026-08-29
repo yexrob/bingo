@@ -17,6 +17,7 @@ bingo-provider-fake.workspace = true
 bingo-provider-anthropic.workspace = true
 bingo-tool-fs.workspace = true
 bingo-tool-bash.workspace = true
+bingo-permissions.workspace = true
 bingo-surface-print.workspace = true
 clap.workspace = true
 tokio.workspace = true

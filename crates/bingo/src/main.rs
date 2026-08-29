@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use bingo_core::settings;
 use bingo_core::{Host, HostConfig};
+use bingo_permissions::PermissionsPlugin;
 use bingo_provider_anthropic::AnthropicPlugin;
 use bingo_provider_fake::{FakePlugin, FakeProvider, Script};
 use bingo_sdk::{
@@ -124,12 +125,7 @@ fn working_dir(flag: Option<&std::path::Path>) -> Result<PathBuf, KernelError> {
 }
 
 fn environment(cwd: &std::path::Path) -> Env {
-    let home = std::env::home_dir().unwrap_or_else(|| cwd.to_path_buf());
-    Env {
-        config_dir: home.join(".bingo"),
-        data_dir: home.join(".bingo").join("data"),
-        home,
-    }
+    Env::rooted(std::env::home_dir().unwrap_or_else(|| cwd.to_path_buf()))
 }
 
 /// Every plugin this build ships, in registration order.
@@ -140,6 +136,7 @@ fn plugins() -> Result<Vec<Box<dyn Plugin>>, KernelError> {
     Ok(vec![
         Box::new(FakePlugin::new(Arc::new(FakeProvider::new(script)))),
         Box::new(AnthropicPlugin),
+        Box::new(PermissionsPlugin),
         Box::new(FsPlugin),
         Box::new(BashPlugin),
         Box::new(PrintPlugin),

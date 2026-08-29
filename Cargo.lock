@@ -134,6 +134,7 @@ name = "bingo"
 version = "0.1.0"
 dependencies = [
  "bingo-core",
+ "bingo-permissions",
  "bingo-provider-anthropic",
  "bingo-provider-fake",
  "bingo-sdk",
