@@ -255,7 +255,7 @@ pub fn plugin_view(plugin: &str, value: Value) -> Event {
 /// it may be cycled through, the rules it accepted.
 pub fn permission_view(mode: &str) -> Event {
     plugin_view(
-        "permissions",
+        "bingo.permissions",
         json!({
             "mode": mode,
             "modes": ["default", "acceptEdits", "plan", "bypassPermissions", "dontAsk"],

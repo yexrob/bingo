@@ -375,7 +375,7 @@ fn permission_mode(state: &SessionState) -> &str {
     state
         .config
         .plugins
-        .get("permissions")
+        .get("bingo.permissions")
         .and_then(|p| p.get("mode"))
         .and_then(Value::as_str)
         .unwrap_or("default")

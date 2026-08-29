@@ -1,7 +1,7 @@
 //! The permission mode as this surface sees it.
 //!
 //! The policy owns the mode; the kernel publishes its projection as
-//! `ConfigView.plugins["permissions"]` (ADR-0009 §5) and this reads the one
+//! `ConfigView.plugins["bingo.permissions"]` (ADR-0009 §5) and this reads the one
 //! field it draws. Nothing here remembers a mode: the chord submits
 //! `/permission <next>` like any typed line and the badge moves when the
 //! `ConfigChanged` frame lands, so the screen can never disagree with the
@@ -9,8 +9,9 @@
 
 use bingo_sdk::SessionState;
 
-/// The policy whose view carries the mode, keyed by its plugin id.
-const POLICY: &str = "permissions";
+/// The policy whose view carries the mode, keyed by its plugin id (the same
+/// id that names its settings slice and its catalogue entry).
+const POLICY: &str = "bingo.permissions";
 
 /// What the policy says this session's mode is, or nothing when no policy
 /// published one.
@@ -86,7 +87,7 @@ mod tests {
         assert_eq!(next(&state()), None);
         let unlisted = folded(vec![frame(
             1,
-            plugin_view("permissions", serde_json::json!({ "mode": "plan" })),
+            plugin_view("bingo.permissions", serde_json::json!({ "mode": "plan" })),
         )]);
         assert_eq!(next(&unlisted), None, "no list, no cycle");
     }
