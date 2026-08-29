@@ -26,6 +26,7 @@ bingo-surface-rpc = { path = "crates/bingo-surface-rpc", version = "0.1.0" }
 bingo-surface-tui = { path = "crates/bingo-surface-tui", version = "0.1.0" }
 bingo-skills = { path = "crates/bingo-skills", version = "0.1.0" }
 bingo-mcp = { path = "crates/bingo-mcp", version = "0.1.0" }
+bingo-hooks-shell = { path = "crates/bingo-hooks-shell", version = "0.1.0" }
 
 tokio = { version = "1.53", default-features = false, features = ["rt-multi-thread", "macros", "sync", "time", "io-util", "io-std", "fs", "process", "signal"] }
 tokio-util = { version = "0.7.19", features = ["codec", "rt"] }

@@ -1,0 +1,11 @@
+---
+source: crates/bingo-hooks-shell/src/events.rs
+expression: "session_start(fixture(&session, &cwd))"
+---
+{
+  "hook_event_name": "SessionStart",
+  "session_id": "ses_01",
+  "cwd": "/work/project",
+  "source": "startup",
+  "model": "anthropic/claude-sonnet-4"
+}
