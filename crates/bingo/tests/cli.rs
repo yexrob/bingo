@@ -515,3 +515,20 @@ fn openai_without_credentials_names_the_variable_before_any_turn() {
     assert!(err.contains("OPENAI_API_KEY"), "{err}");
     assert_eq!(err.lines().count(), 1, "{err}");
 }
+
+#[test]
+fn max_turns_stops_a_tool_loop_with_a_named_error() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.txt"), "x\n").unwrap();
+    let read = r#"{"steps":[{"toolCall":{"name":"Read","input":{"file_path":"a.txt"}}}]}"#;
+    let script = script(&format!(r#"{{"responses":[{read},{read},{read}]}}"#));
+    let out = run(bingo()
+        .env("BINGO_FAKE_SCRIPT", script.path())
+        .env("HOME", dir.path())
+        .args(["--print", "--max-turns", "2", "--cwd"])
+        .arg(dir.path())
+        .arg("loop"));
+    assert_eq!(out.status.code(), Some(1), "stderr: {}", stderr(&out));
+    let err = stderr(&out);
+    assert!(err.contains("TURN_BUDGET_EXHAUSTED"), "{err}");
+}

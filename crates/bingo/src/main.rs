@@ -12,7 +12,7 @@ use bingo_provider_anthropic::AnthropicPlugin;
 use bingo_provider_fake::{FakePlugin, FakeProvider, Script};
 use bingo_provider_openai::OpenAiPlugin;
 use bingo_sdk::{
-    Env, ErrorCode, KernelError, Plugin, SessionSelector, SessionSpec, SurfaceOptions,
+    Env, ErrorCode, KernelError, Plugin, SessionId, SessionSelector, SessionSpec, SurfaceOptions,
 };
 use bingo_surface_print::{PrintPlugin, error_report, notice_report};
 use bingo_tool_bash::BashPlugin;
@@ -66,6 +66,18 @@ struct Cli {
     /// An opaque key naming the session, for hosts that route by it.
     #[arg(long)]
     session_id: Option<String>,
+
+    /// Reopen the most recent session in this directory.
+    #[arg(long, conflicts_with_all = ["resume", "session_id"])]
+    r#continue: bool,
+
+    /// Reopen the session with this id.
+    #[arg(long, value_name = "ID", conflicts_with = "session_id")]
+    resume: Option<String>,
+
+    /// Stop the turn after this many model rounds.
+    #[arg(long, value_name = "N")]
+    max_turns: Option<u32>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -156,21 +168,37 @@ fn host_config(cli: &Cli, cwd: &std::path::Path) -> Result<HostConfig, KernelErr
     config
         .layers
         .push(settings::Layer::new("cli", cli_layer(cli)));
+    if let Some(rounds) = cli.max_turns {
+        config.budget.max_rounds = rounds;
+    }
     Ok(config)
 }
 
 fn surface_options(cli: Cli, cwd: PathBuf) -> SurfaceOptions {
     SurfaceOptions {
-        cwd: cwd.clone(),
-        selector: SessionSelector::Create {
-            spec: SessionSpec {
-                cwd,
-                key: cli.session_id.map(|k| format!("host/{k}")),
-                ..SessionSpec::default()
-            },
-        },
+        selector: selector(&cli, cwd.clone()),
+        cwd,
         prompt: cli.prompt,
         args: json!({ "outputFormat": cli.output_format.as_str() }),
+    }
+}
+
+/// Which session the run is about: a new one unless told to reopen.
+fn selector(cli: &Cli, cwd: PathBuf) -> SessionSelector {
+    if cli.r#continue {
+        return SessionSelector::Latest { cwd };
+    }
+    if let Some(id) = &cli.resume {
+        return SessionSelector::ById {
+            id: SessionId::from_raw(id),
+        };
+    }
+    SessionSelector::Create {
+        spec: SessionSpec {
+            cwd,
+            key: cli.session_id.as_ref().map(|k| format!("host/{k}")),
+            ..SessionSpec::default()
+        },
     }
 }
 
