@@ -1,0 +1,40 @@
+[package]
+name = "bingo-mcp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "MCP client plugin for bingo: servers dialled in the background, their tools untrusted"
+
+[lints]
+workspace = true
+
+[dependencies]
+bingo-sdk.workspace = true
+async-trait.workspace = true
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+# M7: the MCP client, its stdio child transport and its streamable-HTTP
+# transport over the reqwest this workspace already builds.
+rmcp = { workspace = true, features = [
+  "client",
+  "reqwest",
+  "transport-child-process",
+  "transport-streamable-http-client-reqwest",
+] }
+# M7: the header types an HTTP server's `headers` map becomes, taken from the
+# `http` re-export so the plugin adds no second HTTP stack.
+reqwest.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt", "test-util"] }
+proptest.workspace = true
+insta.workspace = true
+# M7: the scripted server the tests dial is an example binary of this crate,
+# speaking the protocol with the same implementation the plugin dials.
+rmcp = { workspace = true, features = ["server", "transport-io"] }
