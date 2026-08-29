@@ -107,7 +107,11 @@ fn message(outcome: &IntentOutcome) -> String {
 
 #[tokio::test]
 async fn model_and_think_change_the_next_turn_and_are_announced() {
-    let (host, provider) = host_for(vec![Script::Events(text("hi"))], None).await;
+    let (host, provider) = host_for(
+        vec![Script::Events(text("hi")), Script::Events(text("again"))],
+        None,
+    )
+    .await;
     let mut client = Client::open(&host).await;
     assert_eq!(client.state.config.kernel, json!({ "thinking": null }));
 
@@ -134,6 +138,13 @@ async fn model_and_think_change_the_next_turn_and_are_announced() {
     let (ack, _) = client.ack("/think off").await;
     assert_eq!(message(&ack), "thinking: off");
     assert_eq!(client.state.config.kernel, json!({ "thinking": null }));
+    client.ack("and again").await;
+    client.until_turn_completed().await;
+    assert_eq!(
+        provider.requests()[1].reasoning,
+        None,
+        "off means no reasoning parameter on the wire"
+    );
 
     let (ack, _) = client.ack("/think loud").await;
     assert!(
