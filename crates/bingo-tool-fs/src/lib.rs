@@ -1,6 +1,7 @@
 //! Filesystem tools: the ones a coding turn cannot do without.
 
 mod glob;
+mod grep;
 mod output;
 mod path;
 mod read;
@@ -11,13 +12,14 @@ use async_trait::async_trait;
 use bingo_sdk::{Plugin, PluginError, PluginManifest, Registrar, Tool};
 
 pub use glob::{GlobArgs, GlobTool};
+pub use grep::{GrepArgs, GrepTool, OutputMode};
 pub use read::{ReadArgs, ReadTool};
 
 static MANIFEST: PluginManifest = PluginManifest {
     id: "bingo.tools.fs",
     version: env!("CARGO_PKG_VERSION"),
     sdk: "^0.1",
-    provides: &["tool:Read", "tool:Glob"],
+    provides: &["tool:Read", "tool:Glob", "tool:Grep"],
     requires: &[],
     config: None,
 };
@@ -34,6 +36,7 @@ impl Plugin for FsPlugin {
     fn register(&self, registrar: &mut Registrar) -> Result<(), PluginError> {
         registrar.tool(Arc::new(ReadTool) as Arc<dyn Tool>);
         registrar.tool(Arc::new(GlobTool) as Arc<dyn Tool>);
+        registrar.tool(Arc::new(GrepTool) as Arc<dyn Tool>);
         Ok(())
     }
 }
