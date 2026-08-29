@@ -7,7 +7,10 @@
 
 mod compact;
 mod estimate;
+mod files;
+mod instructions;
 mod prompt;
+mod root;
 mod split;
 mod stream;
 mod tail;
@@ -16,6 +19,11 @@ mod transcript;
 #[cfg(test)]
 mod fixtures;
 #[cfg(test)]
+mod git;
+#[cfg(test)]
+mod query;
+#[cfg(test)]
 mod scripted;
 
 pub use compact::SummaryCompactor;
+pub use instructions::InstructionsContributor;
