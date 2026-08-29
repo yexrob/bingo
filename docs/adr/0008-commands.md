@@ -1,0 +1,29 @@
+# 0008 — Commands: parsed and dispatched by the session actor, outcomes as acks
+
+## Context
+
+The sdk has had one command table since M0 (`Command`: dispatch, catalogue, completion and help from one spec), and the actor has rejected every `/` line and every `Input::Action` since then. A TUI types `/model` and `!ls`; a GUI sends `Input::Action`; a host on the wire sends either. The old project parsed 24 slash commands in the TUI, kept a second "instant" table, and had `/quit` wait behind a running turn while `/exit` did not. Some commands are a surface's own — `/help` draws a panel, `/clear` and `/resume` open sessions, `/exit` leaves — and never concern the kernel. `/model` and `/think` change what the next turn runs on, which the kernel owns (ADR-0004). Memory extraction (`on_turn(End)`, ADR-0006) runs before `TurnCompleted`, so a person waits for it after the answer is on screen.
+
+## Decision
+
+1. **Parsing is the actor's.** An `Input::Text` whose trimmed text starts with `/` is `name = the first word without the slash, args = the rest`; one starting with `!` is name `!`, args = the rest of the line; `Input::Action{name, args}` is the same pair, `args` taken verbatim when it is a string, else its JSON. Everything else is prose. No surface parses a command it does not own.
+2. **Dispatch.** The name (or an alias) is looked up in the registry. Unknown → `IntentAck{Rejected{INVALID_INPUT, "unknown command: /x"}}`. An `instant` command runs at once, even during a turn. Any other waits in the queue behind the running turn or command, and the queue is drained **one unit at a time**: a run of prose is one turn, a command is one unit; the barrier absorbs prose only up to the first command. A command runs on its own task and reports back by mail; the actor never awaits it.
+3. **Outcomes are acks.** `Applied{message}` → `IntentAck{Applied{result: {"message"}}}`; `View{view}` → `{"view": View}`; `Record{body}` → the kernel records one completed item (`turn` = the running one, if any) and acks `{"item": id}`; `Prompt{text}` re-enters `submit` with the same intent and origin, so its ack is `TurnStarted` or `Queued`. A failure is `Rejected{error}`. `CommandOutcome::Action{item}` is removed: nothing could mint the item it named.
+4. **Kernel built-ins**: `/model [<provider>/]<model>`, `/think <minimal|low|medium|high|xhigh|max|off>`, `/compact [instructions]`, registered by the host and listed in the catalogue like any plugin's. A session's provider, model and thinking level are its own, initialised from its spec and the settings; `/model` and `/think` rebuild the turn config for the next turn and publish `SessionUpdated` (model, provider) and `ConfigChanged{kernel: {"thinking"}}` — the one place a client reads the level. `/compact` opens a turn with no inputs (`TurnOrigin::Auto`) that compacts with `CompactReason::Manual` and closes; it is not instant, so the queue orders it after a running turn.
+5. **`!` is the bash plugin's command**, instant: it runs the line under the session's cwd without the gate (the person typed it) and records `Action{name: "!", args: "<line>", result: "<output>"}` (`\n[exit N]` appended when N ≠ 0). `ContextView::fold` tells the model about every `Action` that has a result, as a user note `[name] args\nresult` — strings verbatim, any other JSON compact; an action without a result has no wire form.
+6. **Surface-local commands** (`/help`, `/clear`, `/resume`, `/exit`) are the surface's, never submitted; a surface's dropdown merges them with the catalogue's.
+7. **`on_turn(End)` runs after `TurnCompleted`**, on a task the actor tracks; the actor's stop and the host's shutdown wait for those tasks, 30 s at most. A `--print` run prints its answer first and lingers for the extraction.
+8. **`SurfaceOptions.env`**: a surface runs in a process that has directories (prompt history lives in `data_dir`); `HostApi` stays the wire and gains nothing process-local.
+
+## Consequences
+
+- sdk touched once: `CommandOutcome::Record` replaces `Action`; `SurfaceOptions.env`. Crates touched: `bingo-surface-print` (its test options), `bingo` (builds the options). `schema/rpc.json` regenerates for `CommandOutcome`.
+- `Input::Action` on the wire now reaches commands: a GUI button is a command with a name.
+- `/permission <mode>` is the permissions plugin's command (instant; the per-session mode lives in the plugin, in memory, like session-scoped rules). It cannot publish into `ConfigView.plugins`; when a client needs to *read* a plugin's per-session setting, `CommandOutcome` grows a `Configure` variant the kernel folds into `ConfigView` — not before.
+- The catalogue's `Models` lists the embedded catalogue for each registered provider (plus the configured model), so `/model` has something to complete from without a network call.
+- `/provider` does not exist: `/model anthropic/claude-x` names both, as the catalogue and ADR-0004's keys do.
+- `@name` routing (the third prefix ADR-0002 named) waits for M8's agents plugin, which owns the names.
+
+## Supersedes
+
+—
