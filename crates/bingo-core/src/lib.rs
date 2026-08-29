@@ -9,6 +9,7 @@ pub mod gate;
 pub mod host;
 pub mod journal;
 pub mod session;
+pub mod settings;
 pub mod turn;
 
 #[cfg(test)]
