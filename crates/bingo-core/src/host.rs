@@ -452,6 +452,7 @@ impl Host {
         let summary = self.summarize(&spec, &choice);
         if let Some(store) = &self.registry.store {
             store.create(&summary).await?;
+            store.acquire(&summary.id).await?;
         }
         let mailbox = session::spawn(summary.clone(), self.registry.store.clone(), |mailbox| {
             Arc::new(self.turn_config(&spec, &summary, choice, mailbox))

@@ -92,7 +92,7 @@ impl SessionStore for MemoryStore {
                     .is_none_or(|p| s.parent.as_ref().is_some_and(|l| &l.session == p))
             })
             .collect();
-        out.sort_by_key(|s| std::cmp::Reverse(s.created_at));
+        out.sort_by_key(|s| std::cmp::Reverse(s.updated_at));
         if let Some(limit) = filter.limit {
             out.truncate(limit);
         }

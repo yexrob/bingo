@@ -507,3 +507,42 @@ fn a_journal_without_its_head_cannot_be_resumed() {
     let err = head_summary(&[]).unwrap_err();
     assert_eq!(err.code, ErrorCode::Storage);
 }
+
+#[tokio::test]
+async fn a_journal_that_ends_closed_resumes_open() {
+    let head = summary("ses_1");
+    let ts = jiff::Timestamp::from_second(0).unwrap();
+    let frames = vec![
+        Frame {
+            seq: Seq(1),
+            ts,
+            session: SessionId::from_raw("ses_1"),
+            cause: None,
+            event: Event::SessionUpdated {
+                summary: head.clone(),
+            },
+        },
+        Frame {
+            seq: Seq(2),
+            ts,
+            session: SessionId::from_raw("ses_1"),
+            cause: None,
+            event: Event::SessionClosed {
+                reason: CloseReason::Shutdown,
+            },
+        },
+    ];
+    let provider = ScriptedProvider::new(vec![Script::Events(text("open again"))]);
+    let mailbox = resume(frames, None, |_| {
+        Arc::new(config(provider, vec![], Arc::new(NoHost)))
+    })
+    .unwrap();
+    let (mut state, mut events) = mailbox.attach().await.unwrap();
+    assert!(!state.closed);
+    mailbox.submit(IntentId::mint(), Input::text("hi", Origin::surface("test")));
+    let labels = drive(&mut events, &mut state, turn_completed).await;
+    assert_eq!(
+        labels.last().map(String::as_str),
+        Some("turnCompleted:Completed")
+    );
+}

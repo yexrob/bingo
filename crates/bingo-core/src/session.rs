@@ -77,6 +77,9 @@ fn spawn_with(
     for frame in &journal {
         state.apply(frame);
     }
+    // A `SessionClosed` in the journal ended the last process's segment, not
+    // the session: it is open again by being here.
+    state.closed = false;
     let actor = Actor {
         id: head.id,
         mailbox: mailbox.clone(),
