@@ -7,7 +7,6 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use bingo_sdk::*;
-use jiff::Timestamp;
 
 use crate::executor::Gate;
 
@@ -279,8 +278,4 @@ pub fn summarize(call: &ToolCall) -> String {
     let input = call.input.to_string();
     let input: String = input.chars().take(120).collect();
     format!("{} {input}", call.name)
-}
-
-pub fn now() -> Timestamp {
-    Timestamp::now()
 }

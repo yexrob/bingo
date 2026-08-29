@@ -4,15 +4,15 @@
 use bingo_sdk::*;
 use serde_json::{Value, json};
 
-use super::{HostConfig, Registry};
+use super::Registry;
 
 pub(super) fn entries(
     registry: &Registry,
-    config: &HostConfig,
+    model: Option<&str>,
     kind: CatalogKind,
 ) -> Vec<CatalogEntry> {
     match kind {
-        CatalogKind::Models => models(registry, config),
+        CatalogKind::Models => models(registry, model),
         CatalogKind::Providers => providers(registry),
         CatalogKind::Tools => tools(registry),
         CatalogKind::Commands => commands(registry),
@@ -23,12 +23,12 @@ pub(super) fn entries(
 
 /// Only the configured model, once per provider; nothing here asks a provider
 /// for its list, which would be a network call.
-fn models(registry: &Registry, config: &HostConfig) -> Vec<CatalogEntry> {
+fn models(registry: &Registry, model: Option<&str>) -> Vec<CatalogEntry> {
     registry
         .providers
         .iter()
         .filter_map(|p| {
-            let model = config.model.clone()?;
+            let model = model?.to_string();
             Some(CatalogEntry {
                 id: format!("{}/{model}", p.id()),
                 label: model,

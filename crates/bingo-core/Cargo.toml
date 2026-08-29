@@ -27,3 +27,4 @@ async-trait.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 tempfile.workspace = true
 insta.workspace = true
+schemars.workspace = true

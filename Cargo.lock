@@ -94,6 +94,7 @@ dependencies = [
  "insta",
  "jiff",
  "jsonc-parser",
+ "schemars",
  "serde",
  "serde_json",
  "tempfile",

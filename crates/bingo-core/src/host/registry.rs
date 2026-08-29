@@ -5,9 +5,12 @@ use std::any::Any;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use bingo_sdk::*;
+use std::collections::BTreeMap;
 
-use super::{HostConfig, HostError};
+use bingo_sdk::*;
+use serde_json::{Map, Value};
+
+use super::HostError;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PluginStatus {
@@ -55,9 +58,10 @@ pub struct Registry {
 impl Registry {
     /// Load plugins in the order given. One whose requirements no earlier
     /// plugin provides is disabled with a reason, never fatal.
+    /// `slices` holds each plugin's claimed settings, by plugin id.
     pub(super) fn load(
         plugins: &[Box<dyn Plugin>],
-        config: &HostConfig,
+        slices: &BTreeMap<String, Value>,
     ) -> Result<Self, HostError> {
         let mut registry = Registry::default();
         let mut provided: HashSet<&'static str> = HashSet::new();
@@ -70,7 +74,7 @@ impl Registry {
                     .push(PluginStatus::disabled(manifest, reason));
                 continue;
             }
-            registry.register(plugin.as_ref(), config)?;
+            registry.register(plugin.as_ref(), slices)?;
             provided.extend(manifest.provides.iter().copied());
             registry.plugins.push(PluginStatus::loaded(manifest));
         }
@@ -78,9 +82,17 @@ impl Registry {
     }
 
     /// Take one plugin's contributions, with the settings slice it claimed.
-    fn register(&mut self, plugin: &dyn Plugin, config: &HostConfig) -> Result<(), HostError> {
+    fn register(
+        &mut self,
+        plugin: &dyn Plugin,
+        slices: &BTreeMap<String, Value>,
+    ) -> Result<(), HostError> {
         let manifest = plugin.manifest();
-        let mut registrar = Registrar::new(manifest.id, config.plugin_settings(manifest));
+        let slice = slices
+            .get(manifest.id)
+            .cloned()
+            .unwrap_or_else(|| Value::Object(Map::new()));
+        let mut registrar = Registrar::new(manifest.id, slice);
         plugin
             .register(&mut registrar)
             .map_err(|source| HostError::Register {

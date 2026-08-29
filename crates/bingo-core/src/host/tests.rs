@@ -97,9 +97,9 @@ async fn host_with(scripts: Vec<Script>) -> (Arc<Host>, Arc<ScriptedProvider>) {
         ),
         TestPlugin::boxed(&NEEDY, vec![]),
     ];
-    let mut config = HostConfig::new(env());
-    config.model = Some("m".into());
-    config.system_prompt = "You are bingo.".into();
+    let config = HostConfig::new(env())
+        .with_layer("user", json!({"model": "u", "theme": "dark"}))
+        .with_layer("cli", json!({"model": "m"}));
     (Host::build(plugins, config).await.unwrap(), provider)
 }
 
@@ -202,7 +202,19 @@ async fn open_create_runs_a_turn_and_the_session_is_findable_afterwards() {
     }
     assert_eq!(snapshot.last_turn, Some(TurnStatus::Completed));
     let request = &provider.requests()[0];
-    assert_eq!(request.system[0].text, "You are bingo.");
+    assert!(request.system[0].text.starts_with("You are bingo"));
+    assert!(
+        request.system[0].cache,
+        "the identity block is the cache prefix"
+    );
+    assert!(request.system[1].text.contains("Working directory: /work"));
+    assert_eq!(
+        host.notices(),
+        vec![(
+            "UNKNOWN_SETTING".to_string(),
+            "unknown setting `theme` in user".to_string()
+        )]
+    );
     assert_eq!(
         request
             .tools
@@ -361,5 +373,60 @@ async fn opening_without_a_provider_or_model_says_so() {
         .err()
         .map(|e| e.code),
         Some(ErrorCode::ProviderUnavailable)
+    );
+}
+
+#[tokio::test]
+async fn a_plugin_receives_only_the_settings_it_claimed() {
+    static CLAIMING: PluginManifest = PluginManifest {
+        id: "test.claiming",
+        version: "0",
+        sdk: "^0.1",
+        provides: &[],
+        requires: &[],
+        config: Some(ConfigClaim {
+            keys: &[
+                ("greeting.text", Merge::Replace),
+                ("greeting.tags", Merge::Accumulate),
+            ],
+            schema: || schemars::schema_for!(serde_json::Value),
+        }),
+    };
+    struct Claiming(std::sync::Mutex<Option<Value>>);
+    #[async_trait]
+    impl Plugin for Claiming {
+        fn manifest(&self) -> &'static PluginManifest {
+            &CLAIMING
+        }
+        fn register(&self, registrar: &mut Registrar) -> Result<(), PluginError> {
+            *self.0.lock().unwrap() = Some(registrar.config::<Value>()?);
+            Ok(())
+        }
+    }
+    let seen: Arc<std::sync::Mutex<Option<Value>>> = Arc::new(std::sync::Mutex::new(None));
+    struct Relay(Arc<std::sync::Mutex<Option<Value>>>);
+    #[async_trait]
+    impl Plugin for Relay {
+        fn manifest(&self) -> &'static PluginManifest {
+            &CLAIMING
+        }
+        fn register(&self, registrar: &mut Registrar) -> Result<(), PluginError> {
+            *self.0.lock().unwrap() = Some(registrar.config::<Value>()?);
+            Ok(())
+        }
+    }
+    let _ = Claiming(std::sync::Mutex::new(None));
+    let config = HostConfig::new(env())
+        .with_layer(
+            "user",
+            json!({"greeting": {"text": "hi", "tags": ["a"]}, "model": "m"}),
+        )
+        .with_layer("project", json!({"greeting": {"tags": ["b"]}}));
+    Host::build(vec![Box::new(Relay(Arc::clone(&seen)))], config)
+        .await
+        .unwrap();
+    assert_eq!(
+        seen.lock().unwrap().clone(),
+        Some(json!({"greeting": {"text": "hi", "tags": ["a", "b"]}}))
     );
 }

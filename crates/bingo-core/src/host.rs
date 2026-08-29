@@ -14,14 +14,16 @@ use std::sync::{Arc, Mutex, Weak};
 use async_trait::async_trait;
 use bingo_sdk::*;
 use jiff::Timestamp;
-use serde_json::{Map, Value};
+use serde_json::Value;
 use tokio::sync::broadcast;
 
 pub use registry::{PluginStatus, Registry};
 use tool_host::SessionToolHost;
 
 use crate::gate::DefaultPolicy;
+use crate::prompt::{self, PromptInput};
 use crate::session::{self, Mailbox};
+use crate::settings::{self, Claim, Layer, Merged, SettingsError};
 use crate::turn::{TurnBudget, TurnConfig};
 
 /// Output tokens a turn may ask for when neither the model nor the config says.
@@ -32,15 +34,14 @@ const GATEWAY_CAPACITY: usize = 64;
 
 #[derive(Clone, Debug)]
 pub struct HostConfig {
-    pub provider: Option<String>,
-    pub model: Option<String>,
-    pub max_tokens: Option<u32>,
-    pub reasoning: Option<Effort>,
-    pub system_prompt: String,
+    /// Settings layers, lowest priority first; the command line is the last.
+    pub layers: Vec<Layer>,
+    /// A system block appended after the kernel's own (hosts, tests).
+    pub extra_system: Option<String>,
+    /// The user's shell, named in the system prompt.
+    pub shell: Option<String>,
     pub budget: TurnBudget,
     pub env: Env,
-    /// The merged settings object; plugins receive the keys they claim.
-    pub settings: Value,
     /// How deep a chain of sub-sessions may go; 1 = one level below a root.
     pub max_child_depth: u32,
     /// Live children one session may have.
@@ -50,31 +51,22 @@ pub struct HostConfig {
 impl HostConfig {
     pub fn new(env: Env) -> Self {
         Self {
-            provider: None,
-            model: None,
-            max_tokens: None,
-            reasoning: None,
-            system_prompt: String::new(),
+            layers: Vec::new(),
+            extra_system: None,
+            shell: None,
             budget: TurnBudget::default(),
             env,
-            settings: Value::Object(Map::new()),
             max_child_depth: 1,
             max_children: 20,
         }
     }
 
-    /// The slice of settings a plugin claimed; an empty object when it claims none.
-    fn plugin_settings(&self, manifest: &PluginManifest) -> Value {
-        let Some(claim) = manifest.config else {
-            return Value::Object(Map::new());
-        };
-        let mut out = Map::new();
-        for (key, _) in claim.keys {
-            if let Some(value) = self.settings.get(key) {
-                out.insert((*key).to_string(), value.clone());
-            }
+    /// Add the highest-priority layer so far; a non-object is ignored.
+    pub fn with_layer(mut self, source: &str, value: Value) -> Self {
+        if let Value::Object(map) = value {
+            self.layers.push(Layer::new(source, map));
         }
-        Value::Object(out)
+        self
     }
 }
 
@@ -94,10 +86,13 @@ pub enum HostError {
         #[source]
         source: PluginError,
     },
+    #[error(transparent)]
+    Settings(#[from] SettingsError),
 }
 
 pub struct Host {
     config: HostConfig,
+    settings: Merged,
     registry: Registry,
     plugins: Vec<Box<dyn Plugin>>,
     sessions: Mutex<BTreeMap<SessionId, Live>>,
@@ -148,10 +143,16 @@ impl Host {
         plugins: Vec<Box<dyn Plugin>>,
         config: HostConfig,
     ) -> Result<Arc<Host>, HostError> {
-        let registry = Registry::load(&plugins, &config)?;
+        let claims: Vec<Claim> = plugins
+            .iter()
+            .filter_map(|p| Claim::from_manifest(p.manifest()))
+            .collect();
+        let settings = settings::merge(&config.layers, &claims)?;
+        let registry = Registry::load(&plugins, &settings.plugins)?;
         let (gateway, _) = broadcast::channel(GATEWAY_CAPACITY);
         let host = Arc::new_cyclic(|weak| Host {
             config,
+            settings,
             registry,
             plugins,
             sessions: Mutex::new(BTreeMap::new()),
@@ -191,6 +192,20 @@ impl Host {
 
     pub fn registry(&self) -> &Registry {
         &self.registry
+    }
+
+    /// What startup found worth telling a person: `(code, text)` pairs.
+    pub fn notices(&self) -> Vec<(String, String)> {
+        self.settings
+            .unknown
+            .iter()
+            .map(|u| {
+                (
+                    "UNKNOWN_SETTING".to_string(),
+                    format!("unknown setting `{}` in {}", u.key, u.source),
+                )
+            })
+            .collect()
     }
 
     pub fn surface(&self, id: &str) -> Option<Arc<dyn Surface>> {
@@ -242,7 +257,7 @@ impl Host {
     fn provider(&self, id: Option<&str>) -> Result<Arc<dyn Provider>, KernelError> {
         let wanted = id
             .map(str::to_string)
-            .or_else(|| self.config.provider.clone())
+            .or_else(|| self.settings.kernel.provider.clone())
             .or_else(|| self.registry.providers.first().map(|p| p.id().to_string()))
             .ok_or_else(|| {
                 KernelError::new(ErrorCode::ProviderUnavailable, "no provider is registered")
@@ -267,7 +282,7 @@ impl Host {
     ) -> Result<String, KernelError> {
         if let Some(model) = wanted
             .map(str::to_string)
-            .or_else(|| self.config.model.clone())
+            .or_else(|| self.settings.kernel.model.clone())
         {
             return Ok(model);
         }
@@ -326,7 +341,8 @@ impl Host {
         let model = self.model(provider.as_ref(), spec.model.as_deref()).await?;
         let capabilities = provider.capabilities(&model);
         let max_tokens = self
-            .config
+            .settings
+            .kernel
             .max_tokens
             .unwrap_or_else(|| capabilities.max_output.min(DEFAULT_MAX_TOKENS) as u32);
         Ok(ModelChoice {
@@ -365,20 +381,23 @@ impl Host {
     }
 
     /// The host prompt, cached, then whatever this session adds on top.
-    fn system_blocks(&self, extra: Option<&str>) -> Vec<SystemBlock> {
-        let mut system = Vec::new();
-        if !self.config.system_prompt.is_empty() {
-            system.push(SystemBlock {
-                text: self.config.system_prompt.clone(),
-                cache: true,
-            });
-        }
-        if let Some(extra) = extra {
-            system.push(SystemBlock {
-                text: extra.to_string(),
-                cache: false,
-            });
-        }
+    fn system_blocks(&self, spec: &SessionSpec, choice: &ModelChoice) -> Vec<SystemBlock> {
+        let mut system = prompt::system_blocks(&PromptInput {
+            cwd: &spec.cwd,
+            provider: choice.provider.id(),
+            model: &choice.model,
+            platform: std::env::consts::OS,
+            shell: self.config.shell.as_deref(),
+            date: jiff::Zoned::now().date(),
+        });
+        let extras = [
+            self.config.extra_system.as_deref(),
+            spec.system_extra.as_deref(),
+        ];
+        system.extend(extras.into_iter().flatten().map(|text| SystemBlock {
+            text: text.to_string(),
+            cache: false,
+        }));
         system
     }
 
@@ -389,6 +408,7 @@ impl Host {
         choice: ModelChoice,
         mailbox: &Mailbox,
     ) -> TurnConfig {
+        let system = self.system_blocks(spec, &choice);
         TurnConfig {
             session: summary.clone(),
             cwd: spec.cwd.clone(),
@@ -396,8 +416,8 @@ impl Host {
             model: choice.model,
             capabilities: choice.capabilities,
             max_tokens: choice.max_tokens,
-            reasoning: self.config.reasoning,
-            system: self.system_blocks(spec.system_extra.as_deref()),
+            reasoning: self.settings.kernel.thinking,
+            system,
             tools: self.tools_for(spec.tools.as_deref()),
             policy: self
                 .registry
@@ -534,7 +554,7 @@ impl HostApi for Host {
     fn catalog(&self, kind: CatalogKind) -> Catalog {
         Catalog {
             kind,
-            entries: catalog::entries(&self.registry, &self.config, kind),
+            entries: catalog::entries(&self.registry, self.settings.kernel.model.as_deref(), kind),
         }
     }
 

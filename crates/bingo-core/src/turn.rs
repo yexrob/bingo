@@ -24,7 +24,7 @@ pub use stream::{MAX_RETRY_DELAY, MAX_SERVER_RETRY_DELAY, backoff};
 use crate::accumulator::Finished;
 use crate::context::{ContextView, estimate_tokens, splice_compaction};
 use crate::executor::{self, Gate, PendingCall};
-use crate::gate::{GateInput, gate_call, hook_applies, summarize};
+use crate::gate::{GateInput, gate_call, hook_applies};
 
 pub const INTERRUPTED_MARKER: &str = "[Request interrupted by user]";
 pub const CONTINUE_PROMPT: &str = "Continue from where you left off.";
@@ -639,10 +639,6 @@ impl Prompter for AskVia<'_> {
     ) -> Result<Answer, KernelError> {
         self.host.ask(Some(self.item.clone()), kind, answers).await
     }
-}
-
-pub fn summarize_call(call: &ToolCall) -> String {
-    summarize(call)
 }
 
 #[cfg(test)]
