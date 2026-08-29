@@ -131,15 +131,73 @@ impl Accumulator {
         }
     }
 
+    fn start_text(&mut self, id: String) -> Emit {
+        self.start_block(
+            id,
+            ItemBody::Assistant {
+                text: String::new(),
+            },
+        )
+    }
+
+    fn start_reasoning(&mut self, id: String) -> Emit {
+        self.start_block(
+            id,
+            ItemBody::Reasoning {
+                text: String::new(),
+                provider_metadata: ProviderMetadata::new(),
+            },
+        )
+    }
+
+    /// The signature rides on the end event, so it lands before the close.
+    fn end_reasoning(&mut self, id: &str, provider_metadata: ProviderMetadata) -> Vec<Emit> {
+        if let Some(open) = self.open.get_mut(id)
+            && let ItemBody::Reasoning {
+                provider_metadata: slot,
+                ..
+            } = &mut open.item.body
+        {
+            *slot = provider_metadata;
+        }
+        self.end_block(id, ItemStatus::Completed)
+            .into_iter()
+            .collect()
+    }
+
+    /// A complete call: its buffered input is spent and the item awaits the gate.
+    fn start_call(&mut self, call_id: String, name: String, raw: String) -> Emit {
+        self.tool_inputs.remove(&call_id);
+        let (input, meta) = parse_input(raw);
+        let mut item = self.fresh(
+            ItemBody::ToolCall {
+                call_id: call_id.clone(),
+                name: name.clone(),
+                input: input.clone(),
+                output: None,
+                progress: None,
+                child_session: None,
+                duration_ms: None,
+            },
+            ItemStatus::Pending,
+        );
+        item.meta = meta;
+        self.items.push(item.clone());
+        self.tool_calls.push((
+            item.id.clone(),
+            ToolCall {
+                call_id,
+                name,
+                input,
+            },
+        ));
+        Emit::Started(item)
+    }
+
     pub fn push(&mut self, event: ModelEvent) -> Vec<Emit> {
         match event {
             ModelEvent::StreamStart { .. } | ModelEvent::ResponseMetadata { .. } => Vec::new(),
-            ModelEvent::TextStart { id } => vec![self.start_block(
-                id,
-                ItemBody::Assistant {
-                    text: String::new(),
-                },
-            )],
+            ModelEvent::TextStart { id } => vec![self.start_text(id)],
             ModelEvent::TextDelta { id, delta } => self
                 .delta(&id, DeltaKind::Text, delta)
                 .into_iter()
@@ -148,13 +206,7 @@ impl Accumulator {
                 .end_block(&id, ItemStatus::Completed)
                 .into_iter()
                 .collect(),
-            ModelEvent::ReasoningStart { id } => vec![self.start_block(
-                id,
-                ItemBody::Reasoning {
-                    text: String::new(),
-                    provider_metadata: ProviderMetadata::new(),
-                },
-            )],
+            ModelEvent::ReasoningStart { id } => vec![self.start_reasoning(id)],
             ModelEvent::ReasoningDelta { id, delta } => self
                 .delta(&id, DeltaKind::Reasoning, delta)
                 .into_iter()
@@ -162,19 +214,7 @@ impl Accumulator {
             ModelEvent::ReasoningEnd {
                 id,
                 provider_metadata,
-            } => {
-                if let Some(open) = self.open.get_mut(&id)
-                    && let ItemBody::Reasoning {
-                        provider_metadata: slot,
-                        ..
-                    } = &mut open.item.body
-                {
-                    *slot = provider_metadata;
-                }
-                self.end_block(&id, ItemStatus::Completed)
-                    .into_iter()
-                    .collect()
-            }
+            } => self.end_reasoning(&id, provider_metadata),
             ModelEvent::ToolInputStart { id, name } => {
                 self.tool_inputs.insert(id, (name, String::new()));
                 Vec::new()
@@ -186,40 +226,7 @@ impl Accumulator {
                 Vec::new()
             }
             ModelEvent::ToolInputEnd { .. } => Vec::new(),
-            ModelEvent::ToolCall { id, name, input } => {
-                self.tool_inputs.remove(&id);
-                let (input, meta) = match serde_json::from_str::<Value>(&input) {
-                    Ok(v) => (v, serde_json::Map::new()),
-                    Err(e) => {
-                        let mut meta = serde_json::Map::new();
-                        meta.insert("invalidInput".into(), Value::String(e.to_string()));
-                        (Value::String(input), meta)
-                    }
-                };
-                let mut item = self.fresh(
-                    ItemBody::ToolCall {
-                        call_id: id.clone(),
-                        name: name.clone(),
-                        input: input.clone(),
-                        output: None,
-                        progress: None,
-                        child_session: None,
-                        duration_ms: None,
-                    },
-                    ItemStatus::Pending,
-                );
-                item.meta = meta;
-                self.items.push(item.clone());
-                self.tool_calls.push((
-                    item.id.clone(),
-                    ToolCall {
-                        call_id: id,
-                        name,
-                        input,
-                    },
-                ));
-                vec![Emit::Started(item)]
-            }
+            ModelEvent::ToolCall { id, name, input } => vec![self.start_call(id, name, input)],
             ModelEvent::Finish {
                 usage,
                 finish_reason,
@@ -233,16 +240,7 @@ impl Accumulator {
                 retryable,
                 retry_after_ms,
             } => {
-                self.error = Some(if retryable {
-                    match retry_after_ms {
-                        Some(ms) => ProviderError::RateLimited {
-                            retry_after_ms: Some(ms),
-                        },
-                        None => ProviderError::Stream { message },
-                    }
-                } else {
-                    ProviderError::Request { message }
-                });
+                self.error = Some(classify(message, retryable, retry_after_ms));
                 Vec::new()
             }
         }
@@ -280,6 +278,29 @@ impl Accumulator {
             truncated,
         };
         (emits, finished)
+    }
+}
+
+/// A call's input as JSON; input the model malformed is kept verbatim and flagged.
+fn parse_input(raw: String) -> (Value, serde_json::Map<String, Value>) {
+    match serde_json::from_str::<Value>(&raw) {
+        Ok(value) => (value, serde_json::Map::new()),
+        Err(e) => {
+            let mut meta = serde_json::Map::new();
+            meta.insert("invalidInput".into(), Value::String(e.to_string()));
+            (Value::String(raw), meta)
+        }
+    }
+}
+
+/// A stream error as a provider error: a retryable one with a stated delay is a rate limit.
+fn classify(message: String, retryable: bool, retry_after_ms: Option<u64>) -> ProviderError {
+    match (retryable, retry_after_ms) {
+        (true, Some(ms)) => ProviderError::RateLimited {
+            retry_after_ms: Some(ms),
+        },
+        (true, None) => ProviderError::Stream { message },
+        (false, _) => ProviderError::Request { message },
     }
 }
 

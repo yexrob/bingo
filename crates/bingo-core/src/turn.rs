@@ -8,69 +8,27 @@
 //!                 └ cancel → Closing
 //! ```
 
-use std::path::PathBuf;
+mod config;
+mod stream;
+
 use std::sync::Arc;
-use std::time::Duration;
 
 use async_trait::async_trait;
 use bingo_sdk::*;
-use futures::StreamExt;
 use jiff::Timestamp;
 
-use crate::accumulator::{Accumulator, Emit, Finished};
-use crate::context::{ContextView, estimate_tokens};
+pub use config::{TurnBudget, TurnConfig};
+use stream::Streamed;
+pub use stream::{MAX_RETRY_DELAY, MAX_SERVER_RETRY_DELAY, backoff};
+
+use crate::accumulator::Finished;
+use crate::context::{ContextView, estimate_tokens, splice_compaction};
 use crate::executor::{self, Gate, PendingCall};
 use crate::gate::{GateInput, gate_call, hook_applies, summarize};
 
 pub const INTERRUPTED_MARKER: &str = "[Request interrupted by user]";
 pub const CONTINUE_PROMPT: &str = "Continue from where you left off.";
 pub const MAX_LENGTH_RECOVERIES: u32 = 3;
-pub const MAX_RETRY_DELAY: Duration = Duration::from_secs(32);
-pub const MAX_SERVER_RETRY_DELAY: Duration = Duration::from_secs(60);
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct TurnBudget {
-    pub max_rounds: u32,
-    pub max_retries: u32,
-}
-
-impl Default for TurnBudget {
-    fn default() -> Self {
-        Self {
-            max_rounds: 100,
-            max_retries: 10,
-        }
-    }
-}
-
-/// Everything a turn reads. Built by the host per session; plugins are already resolved.
-pub struct TurnConfig {
-    pub session: SessionSummary,
-    pub cwd: PathBuf,
-    pub provider: Arc<dyn Provider>,
-    pub model: String,
-    pub capabilities: ModelCapabilities,
-    pub max_tokens: u32,
-    pub reasoning: Option<Effort>,
-    pub system: Vec<SystemBlock>,
-    pub tools: Vec<Arc<dyn Tool>>,
-    pub policy: Arc<dyn PermissionPolicy>,
-    pub hooks: Vec<Arc<dyn Hook>>,
-    pub contributors: Vec<Arc<dyn ContextContributor>>,
-    pub compactor: Option<Arc<dyn Compactor>>,
-    pub budget: TurnBudget,
-    pub env: Arc<Env>,
-    pub tool_host: Arc<dyn ToolHost>,
-}
-
-impl std::fmt::Debug for TurnConfig {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("TurnConfig")
-            .field("session", &self.session.id)
-            .field("model", &self.model)
-            .finish_non_exhaustive()
-    }
-}
 
 /// The session actor as the turn sees it: a place to publish, a way to ask, a queue to absorb.
 #[async_trait]
@@ -122,6 +80,16 @@ enum Step {
     Closing(TurnStatus),
 }
 
+/// What assembling produced: something to send, or a compaction that has to be
+/// assembled around before anything is sent.
+enum Assembled {
+    Request {
+        request: ModelRequest,
+        usage: ContextUsage,
+    },
+    Compacted,
+}
+
 pub async fn run_turn(cfg: &TurnConfig, run: TurnRun, host: &dyn TurnHost) -> TurnOutcome {
     let items = ContextView::items(&run.history);
     let hook_cx = HookContext {
@@ -163,12 +131,6 @@ pub async fn run_turn(cfg: &TurnConfig, run: TurnRun, host: &dyn TurnHost) -> Tu
         status,
         usage: turn.usage,
     }
-}
-
-enum Streamed {
-    Done(Finished),
-    Failed(ProviderError, Vec<ItemId>),
-    Cancelled,
 }
 
 impl Turn<'_> {
@@ -314,6 +276,27 @@ impl Turn<'_> {
                 ),
             });
         }
+        let (request, usage) = match self.assemble().await {
+            Assembled::Request { request, usage } => (request, usage),
+            Assembled::Compacted => return Step::Assembling,
+        };
+        let finished = match self.stream(request).await {
+            Streamed::Done(f) => f,
+            Streamed::Cancelled => return self.interrupted(),
+            Streamed::Failed(error, dropped) => {
+                return self.failed_stream(error, dropped, usage).await;
+            }
+        };
+        self.account(&finished, usage);
+        match self.decide(&finished).await {
+            Some(step) => step,
+            None => self.act(&finished).await,
+        }
+    }
+
+    /// Let the contributors speak, then measure. A first round that is already
+    /// over the compaction threshold compacts before it sends anything.
+    async fn assemble(&mut self) -> Assembled {
         let preliminary = self.measure(&self.cfg.system, &ContextView::fold_items(&self.items));
         let extra_system = self
             .contribute(
@@ -331,24 +314,25 @@ impl Turn<'_> {
         {
             self.compact(compactor.as_ref(), CompactReason::Threshold, usage)
                 .await;
-            return Step::Assembling;
+            return Assembled::Compacted;
         }
-        let request = ModelRequest {
-            model: self.cfg.model.clone(),
-            max_tokens: self.cfg.max_tokens,
-            system,
-            messages,
-            tools: self.tool_specs(),
-            reasoning: self.cfg.reasoning,
-            provider_options: ProviderMetadata::new(),
-        };
-        let finished = match self.stream(request).await {
-            Streamed::Done(f) => f,
-            Streamed::Cancelled => return self.interrupted(),
-            Streamed::Failed(error, dropped) => {
-                return self.failed_stream(error, dropped, usage).await;
-            }
-        };
+        Assembled::Request {
+            request: ModelRequest {
+                model: self.cfg.model.clone(),
+                max_tokens: self.cfg.max_tokens,
+                system,
+                messages,
+                tools: self.tool_specs(),
+                reasoning: self.cfg.reasoning,
+                provider_options: ProviderMetadata::new(),
+            },
+            usage,
+        }
+    }
+
+    /// Bill the round to the turn. What the provider counted as input beats
+    /// the estimate the assembler made.
+    fn account(&mut self, finished: &Finished, usage: ContextUsage) {
         self.usage.add(finished.usage);
         let context = ContextUsage {
             used: finished.usage.input_tokens.max(usage.used),
@@ -359,35 +343,51 @@ impl Turn<'_> {
             usage: finished.usage,
             context,
         });
+    }
+
+    /// What the response means when it asks for no tool: `None` means it does,
+    /// and the round goes on to act.
+    async fn decide(&mut self, finished: &Finished) -> Option<Step> {
         if finished.items.is_empty() {
+            // One empty response is a provider hiccup; two is an answer.
             if !self.empty_retry_used {
                 self.empty_retry_used = true;
-                return Step::Assembling;
+                return Some(Step::Assembling);
             }
-            return Step::Closing(TurnStatus::Completed);
+            return Some(Step::Closing(TurnStatus::Completed));
         }
-        if finished.tool_calls.is_empty() {
-            if finished.finish_reason.as_ref().map(|r| r.unified) == Some(UnifiedFinish::Length)
-                && self.recoveries < MAX_LENGTH_RECOVERIES
-            {
-                self.recoveries += 1;
-                self.user_piece(vec![ContentPart::text(CONTINUE_PROMPT)], "kernel".into());
+        if !finished.tool_calls.is_empty() {
+            return None;
+        }
+        if finished.finish_reason.as_ref().map(|r| r.unified) == Some(UnifiedFinish::Length)
+            && self.recoveries < MAX_LENGTH_RECOVERIES
+        {
+            self.recoveries += 1;
+            self.user_piece(vec![ContentPart::text(CONTINUE_PROMPT)], "kernel".into());
+            self.round += 1;
+            return Some(Step::Assembling);
+        }
+        Some(self.stop_hooks().await)
+    }
+
+    /// A `Stop` hook may push the turn into another round instead of ending it.
+    async fn stop_hooks(&mut self) -> Step {
+        for hook in self.hooks(HookPoint::Stop) {
+            if let HookOutcome::Block { reason } = hook.on_stop(&self.hook_cx).await {
+                self.user_piece(
+                    vec![ContentPart::text(reason)],
+                    format!("hook:{}", hook.id()),
+                );
                 self.round += 1;
                 return Step::Assembling;
             }
-            for hook in self.hooks(HookPoint::Stop) {
-                if let HookOutcome::Block { reason } = hook.on_stop(&self.hook_cx).await {
-                    self.user_piece(
-                        vec![ContentPart::text(reason)],
-                        format!("hook:{}", hook.id()),
-                    );
-                    self.round += 1;
-                    return Step::Assembling;
-                }
-            }
-            return Step::Closing(TurnStatus::Completed);
         }
-        let calls = self.gate(&finished).await;
+        Step::Closing(TurnStatus::Completed)
+    }
+
+    /// Gate the calls, run them, then hold the barrier before the next round.
+    async fn act(&mut self, finished: &Finished) -> Step {
+        let calls = self.gate(finished).await;
         let stop_after = self.execute(calls).await;
         if self.cancel.is_cancelled() {
             return self.interrupted();
@@ -395,8 +395,15 @@ impl Turn<'_> {
         if stop_after {
             return Step::Closing(TurnStatus::Completed);
         }
-        let absorbed = self.host.absorb().await;
-        for (_intent, input) in absorbed {
+        self.barrier().await;
+        self.round += 1;
+        Step::Assembling
+    }
+
+    /// The barrier: steering queued during the round joins the transcript, then
+    /// the barrier contributors see the round that just happened.
+    async fn barrier(&mut self) {
+        for (_intent, input) in self.host.absorb().await {
             if let Input::Text { text, origin, .. } = input {
                 self.record(ItemBody::User {
                     parts: vec![ContentPart::text(text)],
@@ -404,12 +411,10 @@ impl Turn<'_> {
                 });
             }
         }
-        let usage_now = self.measure(&self.cfg.system, &ContextView::fold_items(&self.items));
+        let usage = self.measure(&self.cfg.system, &ContextView::fold_items(&self.items));
         let _ = self
-            .contribute(|p| matches!(p, Placement::Barrier), &usage_now)
+            .contribute(|p| matches!(p, Placement::Barrier), &usage)
             .await;
-        self.round += 1;
-        Step::Assembling
     }
 
     fn interrupted(&mut self) -> Step {
@@ -418,123 +423,6 @@ impl Turn<'_> {
         });
         Step::Closing(TurnStatus::Interrupted {
             reason: InterruptReason::UserCancel,
-        })
-    }
-
-    async fn stream(&mut self, request: ModelRequest) -> Streamed {
-        let mut stream = match self
-            .cfg
-            .provider
-            .stream(request, self.cancel.child_token())
-            .await
-        {
-            Ok(s) => s,
-            Err(e) => return Streamed::Failed(e, Vec::new()),
-        };
-        let mut acc = Accumulator::new(self.id.clone(), self.round);
-        let mut cancelled = false;
-        let mut error: Option<ProviderError> = None;
-        loop {
-            tokio::select! {
-                next = stream.next() => match next {
-                    Some(Ok(event)) => {
-                        for emit in acc.push(event) {
-                            self.publish(emit);
-                        }
-                    }
-                    Some(Err(e)) => { error = Some(e); break; }
-                    None => break,
-                },
-                _ = self.cancel.cancelled() => { cancelled = true; break; }
-            }
-        }
-        let dropped = acc.item_ids();
-        let (emits, mut finished) = acc.finish(cancelled);
-        for emit in emits {
-            self.publish(emit);
-        }
-        if cancelled {
-            return Streamed::Cancelled;
-        }
-        if let Some(e) = error.or_else(|| finished.error.take()) {
-            return Streamed::Failed(e, dropped);
-        }
-        Streamed::Done(finished)
-    }
-
-    fn publish(&mut self, emit: Emit) {
-        match emit {
-            Emit::Started(item) => {
-                self.upsert(&item);
-                self.host.emit(Event::ItemStarted { item });
-            }
-            Emit::Delta {
-                item,
-                n,
-                kind,
-                data,
-            } => self.host.emit(Event::ItemDelta {
-                item,
-                n,
-                kind,
-                data,
-            }),
-            Emit::Completed(item) => {
-                self.upsert(&item);
-                self.host.emit(Event::ItemCompleted { item });
-            }
-        }
-    }
-
-    async fn failed_stream(
-        &mut self,
-        error: ProviderError,
-        dropped: Vec<ItemId>,
-        usage: ContextUsage,
-    ) -> Step {
-        self.items.retain(|i| !dropped.contains(&i.id));
-        if let ProviderError::ContextOverflow { .. } = &error
-            && let Some(compactor) = self.cfg.compactor.clone()
-            && !self.overflow_compacted
-        {
-            self.overflow_compacted = true;
-            self.host.emit(Event::TurnRetrying {
-                turn: self.id.clone(),
-                attempt: self.retries,
-                max: self.cfg.budget.max_retries,
-                delay_ms: 0,
-                dropped,
-                reason: error.to_string(),
-            });
-            self.compact(
-                compactor.as_ref(),
-                CompactReason::Overflow {
-                    message: error.to_string(),
-                },
-                usage,
-            )
-            .await;
-            return Step::Assembling;
-        }
-        if error.retryable() && self.retries < self.cfg.budget.max_retries {
-            self.retries += 1;
-            let delay = backoff(self.retries, error.retry_after_ms());
-            self.host.emit(Event::TurnRetrying {
-                turn: self.id.clone(),
-                attempt: self.retries,
-                max: self.cfg.budget.max_retries,
-                delay_ms: delay.as_millis() as u64,
-                dropped,
-                reason: error.to_string(),
-            });
-            tokio::select! {
-                _ = tokio::time::sleep(delay) => {}
-                _ = self.cancel.cancelled() => return self.interrupted(),
-            }
-            return Step::Assembling;
-        }
-        Step::Closing(TurnStatus::Failed {
-            error: KernelError::new(error.code(), error.to_string()),
         })
     }
 
@@ -553,55 +441,45 @@ impl Turn<'_> {
             model: &self.cfg.model,
             cancel: self.cancel.child_token(),
         };
-        match compactor.compact(cx, reason).await {
-            Ok(c) => {
-                let replaced = self
-                    .items
-                    .iter()
-                    .take_while(|i| i.id != c.boundary)
-                    .filter(|i| !c.kept.contains(&i.id))
-                    .count() as u32;
-                let summary = self.record(ItemBody::Compaction {
-                    summary: c.summary.clone(),
-                    replaced,
-                    before: c.before,
-                    after: c.after,
-                    duration_ms: started.elapsed().as_millis() as u64,
-                });
-                self.generation += 1;
-                self.host.emit(Event::Compacted {
-                    generation: self.generation,
-                    boundary: c.boundary.clone(),
-                    summary: summary.clone(),
-                    kept: c.kept.clone(),
-                });
-                let cut = self
-                    .items
-                    .iter()
-                    .position(|i| i.id == c.boundary)
-                    .unwrap_or(0);
-                let summary_item = self
-                    .items
-                    .iter()
-                    .position(|i| i.id == summary)
-                    .map(|p| self.items.remove(p));
-                let cut = cut.min(self.items.len());
-                let (head, tail) = self.items.split_at(cut);
-                let mut next: Vec<Item> = head
-                    .iter()
-                    .filter(|i| c.kept.contains(&i.id))
-                    .cloned()
-                    .collect();
-                next.extend(summary_item);
-                next.extend(tail.iter().cloned());
-                self.items = next;
-            }
+        let compacted = compactor.compact(cx, reason).await;
+        match compacted {
+            Ok(c) => self.absorb_compaction(c, started.elapsed()),
             Err(e) => self.host.emit(Event::Notice {
                 level: Level::Warn,
                 code: "COMPACTION_FAILED".into(),
                 text: e.to_string(),
             }),
         }
+    }
+
+    /// Record the summary, announce the cut, and apply it to the transcript.
+    fn absorb_compaction(&mut self, c: Compaction, took: std::time::Duration) {
+        let replaced = self
+            .items
+            .iter()
+            .take_while(|i| i.id != c.boundary)
+            .filter(|i| !c.kept.contains(&i.id))
+            .count() as u32;
+        let summary = self.record(ItemBody::Compaction {
+            summary: c.summary.clone(),
+            replaced,
+            before: c.before,
+            after: c.after,
+            duration_ms: took.as_millis() as u64,
+        });
+        self.generation += 1;
+        self.host.emit(Event::Compacted {
+            generation: self.generation,
+            boundary: c.boundary.clone(),
+            summary: summary.clone(),
+            kept: c.kept.clone(),
+        });
+        let cut = self
+            .items
+            .iter()
+            .position(|i| i.id == c.boundary)
+            .unwrap_or(0);
+        splice_compaction(&mut self.items, cut, &c.kept, &summary);
     }
 
     async fn gate(&mut self, finished: &Finished) -> Vec<PendingCall> {
@@ -656,15 +534,16 @@ impl Turn<'_> {
 
     /// Returns whether an `after_tool` hook asked to end the turn after this round.
     async fn execute(&mut self, calls: Vec<PendingCall>) -> bool {
+        let outcomes = self.run_tools(calls).await;
+        self.after_tool_hooks(&outcomes).await
+    }
+
+    /// Run the gated calls and fold each result back into the item that made it.
+    async fn run_tools(&mut self, calls: Vec<PendingCall>) -> Vec<executor::Outcome> {
         let cfg = self.cfg;
         let session = cfg.session.id.clone();
         let turn = self.id.clone();
         let cancel = self.cancel.clone();
-        let started: std::collections::HashMap<ItemId, Timestamp> = self
-            .items
-            .iter()
-            .map(|i| (i.id.clone(), i.started_at))
-            .collect();
         let host = self.host;
         let mut completed: Vec<Item> = Vec::new();
         let outcomes = executor::execute(
@@ -695,7 +574,6 @@ impl Turn<'_> {
                         *duration_ms = Some(o.duration_ms);
                         *progress = None;
                     }
-                    let _ = started.get(&o.item);
                     host.emit(Event::ItemCompleted { item: item.clone() });
                     completed.push(item);
                 }
@@ -705,8 +583,13 @@ impl Turn<'_> {
         for item in &completed {
             self.upsert(item);
         }
+        outcomes
+    }
+
+    /// Let the `AfterTool` hooks see each result; one of them may stop the turn.
+    async fn after_tool_hooks(&self, outcomes: &[executor::Outcome]) -> bool {
         let mut stop_after = false;
-        for o in &outcomes {
+        for o in outcomes {
             let Some(item) = self.items.iter().find(|i| i.id == o.item) else {
                 continue;
             };
@@ -756,15 +639,6 @@ impl Prompter for AskVia<'_> {
     ) -> Result<Answer, KernelError> {
         self.host.ask(Some(self.item.clone()), kind, answers).await
     }
-}
-
-/// 500 ms doubling, capped at 32 s; a server-stated delay wins, capped at 60 s.
-pub fn backoff(attempt: u32, retry_after_ms: Option<u64>) -> Duration {
-    if let Some(ms) = retry_after_ms {
-        return Duration::from_millis(ms).min(MAX_SERVER_RETRY_DELAY);
-    }
-    let exp = attempt.saturating_sub(1).min(6);
-    Duration::from_millis(500 * (1u64 << exp)).min(MAX_RETRY_DELAY)
 }
 
 pub fn summarize_call(call: &ToolCall) -> String {

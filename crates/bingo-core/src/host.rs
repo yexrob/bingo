@@ -3,15 +3,22 @@
 //! collects every contribution into one registry, and serves `HostApi` over
 //! a map of session actors. It knows no plugin by name.
 
+mod catalog;
+mod registry;
+mod tool_host;
+
 use std::any::Any;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, Weak};
 
 use async_trait::async_trait;
 use bingo_sdk::*;
 use jiff::Timestamp;
-use serde_json::{Map, Value, json};
+use serde_json::{Map, Value};
 use tokio::sync::broadcast;
+
+pub use registry::{PluginStatus, Registry};
+use tool_host::SessionToolHost;
 
 use crate::gate::DefaultPolicy;
 use crate::session::{self, Mailbox};
@@ -89,102 +96,6 @@ pub enum HostError {
     },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PluginStatus {
-    pub id: String,
-    pub version: String,
-    pub enabled: bool,
-    pub reason: Option<String>,
-}
-
-#[derive(Default)]
-pub struct Registry {
-    pub tools: Vec<Arc<dyn Tool>>,
-    pub providers: Vec<Arc<dyn Provider>>,
-    pub policy: Option<Arc<dyn PermissionPolicy>>,
-    pub hooks: Vec<Arc<dyn Hook>>,
-    pub contributors: Vec<Arc<dyn ContextContributor>>,
-    pub commands: Vec<Arc<dyn Command>>,
-    pub surfaces: Vec<Arc<dyn Surface>>,
-    pub store: Option<Arc<dyn SessionStore>>,
-    pub compactor: Option<Arc<dyn Compactor>>,
-    pub services: HashMap<String, Arc<dyn Any + Send + Sync>>,
-    pub plugins: Vec<PluginStatus>,
-}
-
-impl Registry {
-    fn add(&mut self, plugin: &str, contribution: Contribution) -> Result<(), HostError> {
-        let conflict = |what: String| HostError::Conflict {
-            plugin: plugin.to_string(),
-            what,
-        };
-        match contribution {
-            Contribution::Tool(tool) => {
-                let name = tool.spec().name;
-                if self.tools.iter().any(|t| t.spec().name == name) {
-                    return Err(conflict(format!("tool {name} is already registered")));
-                }
-                self.tools.push(tool);
-            }
-            Contribution::Provider(provider) => {
-                if self.providers.iter().any(|p| p.id() == provider.id()) {
-                    return Err(conflict(format!(
-                        "provider {} is already registered",
-                        provider.id()
-                    )));
-                }
-                self.providers.push(provider);
-            }
-            Contribution::Policy(policy) => {
-                if let Some(existing) = &self.policy {
-                    return Err(conflict(format!(
-                        "policy {} is already active",
-                        existing.id()
-                    )));
-                }
-                self.policy = Some(policy);
-            }
-            Contribution::Hook(hook) => self.hooks.push(hook),
-            Contribution::Context(contributor) => self.contributors.push(contributor),
-            Contribution::Command(command) => {
-                let name = command.spec().name;
-                if self.commands.iter().any(|c| c.spec().name == name) {
-                    return Err(conflict(format!("command {name} is already registered")));
-                }
-                self.commands.push(command);
-            }
-            Contribution::Surface(surface) => {
-                if self.surfaces.iter().any(|s| s.id() == surface.id()) {
-                    return Err(conflict(format!(
-                        "surface {} is already registered",
-                        surface.id()
-                    )));
-                }
-                self.surfaces.push(surface);
-            }
-            Contribution::Store(store) => {
-                if self.store.is_some() {
-                    return Err(conflict("a session store is already registered".into()));
-                }
-                self.store = Some(store);
-            }
-            Contribution::Compactor(compactor) => {
-                if self.compactor.is_some() {
-                    return Err(conflict("a compactor is already registered".into()));
-                }
-                self.compactor = Some(compactor);
-            }
-            Contribution::Service { key, value } => {
-                if self.services.contains_key(&key) {
-                    return Err(conflict(format!("service {key} is already registered")));
-                }
-                self.services.insert(key, value);
-            }
-        }
-        Ok(())
-    }
-}
-
 pub struct Host {
     config: HostConfig,
     registry: Registry,
@@ -203,6 +114,26 @@ struct Live {
     created_at: Timestamp,
 }
 
+impl Live {
+    fn new(mailbox: Mailbox, summary: &SessionSummary) -> Self {
+        Self {
+            mailbox,
+            key: summary.key.clone(),
+            cwd: summary.cwd.clone(),
+            parent: summary.parent.as_ref().map(|p| p.session.clone()),
+            created_at: summary.created_at,
+        }
+    }
+}
+
+/// The provider and model a new session runs on, with the ceiling that follows.
+struct ModelChoice {
+    provider: Arc<dyn Provider>,
+    model: String,
+    capabilities: ModelCapabilities,
+    max_tokens: u32,
+}
+
 impl std::fmt::Debug for Host {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Host")
@@ -217,45 +148,7 @@ impl Host {
         plugins: Vec<Box<dyn Plugin>>,
         config: HostConfig,
     ) -> Result<Arc<Host>, HostError> {
-        let mut registry = Registry::default();
-        let mut provided: HashSet<&'static str> = HashSet::new();
-        for plugin in &plugins {
-            let manifest = plugin.manifest();
-            let missing: Vec<&str> = manifest
-                .requires
-                .iter()
-                .copied()
-                .filter(|r| !provided.contains(r))
-                .collect();
-            if !missing.is_empty() {
-                let reason = format!("unmet requirements: {}", missing.join(", "));
-                tracing::warn!(plugin = manifest.id, %reason, "plugin disabled");
-                registry.plugins.push(PluginStatus {
-                    id: manifest.id.to_string(),
-                    version: manifest.version.to_string(),
-                    enabled: false,
-                    reason: Some(reason),
-                });
-                continue;
-            }
-            let mut registrar = Registrar::new(manifest.id, config.plugin_settings(manifest));
-            plugin
-                .register(&mut registrar)
-                .map_err(|source| HostError::Register {
-                    plugin: manifest.id.to_string(),
-                    source,
-                })?;
-            for contribution in registrar.into_contributions() {
-                registry.add(manifest.id, contribution)?;
-            }
-            provided.extend(manifest.provides.iter().copied());
-            registry.plugins.push(PluginStatus {
-                id: manifest.id.to_string(),
-                version: manifest.version.to_string(),
-                enabled: true,
-                reason: None,
-            });
-        }
+        let registry = Registry::load(&plugins, &config)?;
         let (gateway, _) = broadcast::channel(GATEWAY_CAPACITY);
         let host = Arc::new_cyclic(|weak| Host {
             config,
@@ -265,20 +158,26 @@ impl Host {
             gateway,
             weak: weak.clone(),
         });
-        for plugin in &host.plugins {
+        host.start_plugins().await?;
+        Ok(host)
+    }
+
+    /// Start the enabled plugins in load order; each receives a host handle.
+    async fn start_plugins(&self) -> Result<(), HostError> {
+        for plugin in &self.plugins {
             let manifest = plugin.manifest();
-            if !host.enabled(manifest.id) {
+            if !self.registry.enabled(manifest.id) {
                 continue;
             }
             plugin
-                .start(host.handle())
+                .start(self.handle())
                 .await
                 .map_err(|source| HostError::Start {
                     plugin: manifest.id.to_string(),
                     source,
                 })?;
         }
-        Ok(host)
+        Ok(())
     }
 
     pub fn handle(&self) -> HostHandle {
@@ -302,13 +201,6 @@ impl Host {
             .cloned()
     }
 
-    fn enabled(&self, plugin: &str) -> bool {
-        self.registry
-            .plugins
-            .iter()
-            .any(|p| p.id == plugin && p.enabled)
-    }
-
     /// Close every session and stop every plugin, in reverse order.
     pub async fn shutdown(&self) {
         let live: Vec<Live> = self.lock().values().cloned().collect();
@@ -316,7 +208,7 @@ impl Host {
             session.mailbox.close(CloseReason::Shutdown);
         }
         for plugin in self.plugins.iter().rev() {
-            if !self.enabled(plugin.manifest().id) {
+            if !self.registry.enabled(plugin.manifest().id) {
                 continue;
             }
             if let Err(e) = plugin.stop().await {
@@ -391,39 +283,45 @@ impl Host {
         })
     }
 
-    async fn create(&self, spec: SessionSpec) -> Result<Mailbox, KernelError> {
-        if let Some(parent) = &spec.parent {
-            let parent_id = &parent.session;
-            self.live(parent_id)?;
-            if self.depth(parent_id) + 1 > self.config.max_child_depth {
-                return Err(KernelError::new(
-                    ErrorCode::InvalidInput,
-                    format!(
-                        "sub-session depth limit {} reached",
-                        self.config.max_child_depth
-                    ),
-                ));
-            }
-            let children = self
-                .lock()
-                .values()
-                .filter(|l| l.parent.as_ref() == Some(parent_id))
-                .count();
-            if children >= self.config.max_children {
-                return Err(KernelError::new(
-                    ErrorCode::InvalidInput,
-                    format!("sub-session limit {} reached", self.config.max_children),
-                ));
-            }
+    /// A sub-session may go neither deeper nor wider than the host allows.
+    fn check_parent_limits(&self, parent: &SessionId) -> Result<(), KernelError> {
+        self.live(parent)?;
+        if self.depth(parent) + 1 > self.config.max_child_depth {
+            return Err(KernelError::new(
+                ErrorCode::InvalidInput,
+                format!(
+                    "sub-session depth limit {} reached",
+                    self.config.max_child_depth
+                ),
+            ));
         }
-        if let Some(key) = &spec.key
-            && self.lock().values().any(|l| l.key.as_ref() == Some(key))
-        {
+        let children = self
+            .lock()
+            .values()
+            .filter(|l| l.parent.as_ref() == Some(parent))
+            .count();
+        if children >= self.config.max_children {
+            return Err(KernelError::new(
+                ErrorCode::InvalidInput,
+                format!("sub-session limit {} reached", self.config.max_children),
+            ));
+        }
+        Ok(())
+    }
+
+    /// A routing key names one live session at a time.
+    fn check_key_free(&self, key: Option<&str>) -> Result<(), KernelError> {
+        let Some(key) = key else { return Ok(()) };
+        if self.lock().values().any(|l| l.key.as_deref() == Some(key)) {
             return Err(KernelError::new(
                 ErrorCode::SessionLocked,
                 format!("session key {key} is in use"),
             ));
         }
+        Ok(())
+    }
+
+    async fn choose_model(&self, spec: &SessionSpec) -> Result<ModelChoice, KernelError> {
         let provider = self.provider(spec.provider.as_deref())?;
         let model = self.model(provider.as_ref(), spec.model.as_deref()).await?;
         let capabilities = provider.capabilities(&model);
@@ -431,34 +329,43 @@ impl Host {
             .config
             .max_tokens
             .unwrap_or_else(|| capabilities.max_output.min(DEFAULT_MAX_TOKENS) as u32);
+        Ok(ModelChoice {
+            provider,
+            model,
+            capabilities,
+            max_tokens,
+        })
+    }
+
+    fn summarize(&self, spec: &SessionSpec, choice: &ModelChoice) -> SessionSummary {
         let now = Timestamp::now();
-        let summary = SessionSummary {
+        SessionSummary {
             id: SessionId::mint(),
             key: spec.key.clone(),
             title: spec.title.clone(),
             cwd: spec.cwd.display().to_string(),
             parent: spec.parent.clone(),
-            model: Some(model.clone()),
-            provider: Some(provider.id().to_string()),
+            model: Some(choice.model.clone()),
+            provider: Some(choice.provider.id().to_string()),
             created_at: now,
             updated_at: now,
             usage: Usage::default(),
             busy: false,
-        };
-        if let Some(store) = &self.registry.store {
-            store.create(&summary).await?;
         }
-        let tools: Vec<Arc<dyn Tool>> = self
-            .registry
+    }
+
+    /// The registered tools this session may call; `None` means every one.
+    fn tools_for(&self, wanted: Option<&[String]>) -> Vec<Arc<dyn Tool>> {
+        self.registry
             .tools
             .iter()
-            .filter(|t| {
-                spec.tools
-                    .as_ref()
-                    .is_none_or(|names| names.contains(&t.spec().name))
-            })
+            .filter(|t| wanted.is_none_or(|names| names.contains(&t.spec().name)))
             .cloned()
-            .collect();
+            .collect()
+    }
+
+    /// The host prompt, cached, then whatever this session adds on top.
+    fn system_blocks(&self, extra: Option<&str>) -> Vec<SystemBlock> {
         let mut system = Vec::new();
         if !self.config.system_prompt.is_empty() {
             system.push(SystemBlock {
@@ -466,47 +373,63 @@ impl Host {
                 cache: true,
             });
         }
-        if let Some(extra) = &spec.system_extra {
+        if let Some(extra) = extra {
             system.push(SystemBlock {
-                text: extra.clone(),
+                text: extra.to_string(),
                 cache: false,
             });
         }
-        let policy = self
-            .registry
-            .policy
-            .clone()
-            .unwrap_or_else(|| Arc::new(DefaultPolicy));
-        let weak = self.weak.clone();
-        let live = Live {
-            mailbox: session::spawn(summary.clone(), self.registry.store.clone(), |mailbox| {
-                Arc::new(TurnConfig {
-                    session: summary.clone(),
-                    cwd: spec.cwd.clone(),
-                    provider,
-                    model,
-                    capabilities,
-                    max_tokens,
-                    reasoning: self.config.reasoning,
-                    system,
-                    tools,
-                    policy,
-                    hooks: self.registry.hooks.clone(),
-                    contributors: self.registry.contributors.clone(),
-                    compactor: self.registry.compactor.clone(),
-                    budget: self.config.budget,
-                    env: Arc::new(self.config.env.clone()),
-                    tool_host: Arc::new(SessionToolHost {
-                        mailbox: mailbox.clone(),
-                        host: weak,
-                    }),
-                })
+        system
+    }
+
+    fn turn_config(
+        &self,
+        spec: &SessionSpec,
+        summary: &SessionSummary,
+        choice: ModelChoice,
+        mailbox: &Mailbox,
+    ) -> TurnConfig {
+        TurnConfig {
+            session: summary.clone(),
+            cwd: spec.cwd.clone(),
+            provider: choice.provider,
+            model: choice.model,
+            capabilities: choice.capabilities,
+            max_tokens: choice.max_tokens,
+            reasoning: self.config.reasoning,
+            system: self.system_blocks(spec.system_extra.as_deref()),
+            tools: self.tools_for(spec.tools.as_deref()),
+            policy: self
+                .registry
+                .policy
+                .clone()
+                .unwrap_or_else(|| Arc::new(DefaultPolicy)),
+            hooks: self.registry.hooks.clone(),
+            contributors: self.registry.contributors.clone(),
+            compactor: self.registry.compactor.clone(),
+            budget: self.config.budget,
+            env: Arc::new(self.config.env.clone()),
+            tool_host: Arc::new(SessionToolHost {
+                mailbox: mailbox.clone(),
+                host: self.weak.clone(),
             }),
-            key: summary.key.clone(),
-            cwd: summary.cwd.clone(),
-            parent: summary.parent.as_ref().map(|p| p.session.clone()),
-            created_at: summary.created_at,
-        };
+        }
+    }
+
+    async fn create(&self, spec: SessionSpec) -> Result<Mailbox, KernelError> {
+        if let Some(parent) = &spec.parent {
+            self.check_parent_limits(&parent.session)?;
+        }
+        self.check_key_free(spec.key.as_deref())?;
+        let choice = self.choose_model(&spec).await?;
+        let summary = self.summarize(&spec, &choice);
+        if let Some(store) = &self.registry.store {
+            store.create(&summary).await?;
+        }
+        let mailbox = session::spawn(summary.clone(), self.registry.store.clone(), |mailbox| {
+            Arc::new(self.turn_config(&spec, &summary, choice, mailbox))
+        });
+        let live = Live::new(mailbox, &summary);
         self.lock().insert(summary.id.clone(), live.clone());
         let _ = self.gateway.send(GatewayEvent::SessionCreated {
             summary: Box::new(summary),
@@ -609,69 +532,10 @@ impl HostApi for Host {
     }
 
     fn catalog(&self, kind: CatalogKind) -> Catalog {
-        let entries = match kind {
-            CatalogKind::Models => self
-                .registry
-                .providers
-                .iter()
-                .filter_map(|p| {
-                    let model = self.config.model.clone()?;
-                    Some(CatalogEntry {
-                        id: format!("{}/{model}", p.id()),
-                        label: model,
-                        meta: json!({ "provider": p.id() }),
-                    })
-                })
-                .collect(),
-            CatalogKind::Providers => self
-                .registry
-                .providers
-                .iter()
-                .map(|p| CatalogEntry {
-                    id: p.id().to_string(),
-                    label: p.id().to_string(),
-                    meta: json!({ "auth": p.auth() }),
-                })
-                .collect(),
-            CatalogKind::Tools => self
-                .registry
-                .tools
-                .iter()
-                .map(|t| {
-                    let spec = t.spec();
-                    CatalogEntry {
-                        id: spec.name.clone(),
-                        label: spec.name,
-                        meta: json!({ "description": spec.description }),
-                    }
-                })
-                .collect(),
-            CatalogKind::Commands => self
-                .registry
-                .commands
-                .iter()
-                .map(|c| {
-                    let spec = c.spec();
-                    CatalogEntry {
-                        id: spec.name.clone(),
-                        label: spec.hint.clone(),
-                        meta: serde_json::to_value(spec).unwrap_or(Value::Null),
-                    }
-                })
-                .collect(),
-            CatalogKind::Skills => Vec::new(),
-            CatalogKind::Plugins => self
-                .registry
-                .plugins
-                .iter()
-                .map(|p| CatalogEntry {
-                    id: p.id.clone(),
-                    label: format!("{} {}", p.id, p.version),
-                    meta: json!({ "enabled": p.enabled, "reason": p.reason }),
-                })
-                .collect(),
-        };
-        Catalog { kind, entries }
+        Catalog {
+            kind,
+            entries: catalog::entries(&self.registry, &self.config, kind),
+        }
     }
 
     fn gateway_events(&self) -> GatewayStream {
@@ -689,60 +553,6 @@ impl HostApi for Host {
 
     fn service_any(&self, key: &str) -> Option<Arc<dyn Any + Send + Sync>> {
         self.registry.services.get(key).cloned()
-    }
-}
-
-/// What a tool can reach: its own session by mail, the rest through the host.
-struct SessionToolHost {
-    mailbox: Mailbox,
-    host: Weak<Host>,
-}
-
-impl SessionToolHost {
-    fn host(&self) -> Result<Arc<Host>, KernelError> {
-        self.host
-            .upgrade()
-            .ok_or_else(|| KernelError::new(ErrorCode::SessionClosed, "the host is gone"))
-    }
-}
-
-#[async_trait]
-impl Prompter for SessionToolHost {
-    async fn ask(
-        &self,
-        kind: InteractionKind,
-        answers: Vec<AnswerSpec>,
-    ) -> Result<Answer, KernelError> {
-        self.mailbox.ask(None, kind, answers).await
-    }
-}
-
-#[async_trait]
-impl ToolHost for SessionToolHost {
-    fn progress(&self, item: &ItemId, tail: String) {
-        self.mailbox.progress(item.clone(), tail);
-    }
-
-    async fn record(&self, body: ItemBody) -> Result<ItemId, KernelError> {
-        self.mailbox.record(body).await
-    }
-
-    async fn spawn_session(&self, spec: SessionSpec) -> Result<SessionId, KernelError> {
-        let host = self.host()?;
-        let mailbox = host.create(spec).await?;
-        Ok(mailbox.id().clone())
-    }
-
-    fn submit(&self, to: &SessionId, intent: IntentId, input: Input) {
-        if let Some(host) = self.host.upgrade()
-            && let Ok(live) = host.live(to)
-        {
-            live.mailbox.submit(intent, input);
-        }
-    }
-
-    fn service_any(&self, key: &str) -> Option<Arc<dyn Any + Send + Sync>> {
-        self.host.upgrade()?.registry.services.get(key).cloned()
     }
 }
 

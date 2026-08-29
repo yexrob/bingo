@@ -69,7 +69,146 @@ pub struct Gated {
     pub receipt: Option<ItemBody>,
 }
 
-/// Decide one call. Hooks may rewrite the input; the first non-`Continue` wins.
+impl Gated {
+    /// Through the gate with nobody asked, so nothing to receipt.
+    fn allowed(call: ToolCall, traits: ToolTraits) -> Self {
+        Self {
+            call,
+            traits,
+            gate: Gate::Allowed,
+            receipt: None,
+        }
+    }
+
+    /// Stopped by a hook or the policy, so nobody was asked either.
+    fn denied(call: ToolCall, traits: ToolTraits, message: String) -> Self {
+        Self {
+            call,
+            traits,
+            gate: Gate::Denied { message },
+            receipt: None,
+        }
+    }
+}
+
+/// What the `BeforeTool` hooks decided; the first non-`Continue` wins.
+enum HookVerdict {
+    Continue,
+    /// A hook wants a person to answer, for this reason.
+    Ask(String),
+    Refused(String),
+}
+
+/// What the policy decided, once an allow that needs no confirmation is settled.
+enum PolicyVerdict {
+    Allowed,
+    Denied(String),
+    /// A person must answer; the scope is the rule that would silence the prompt.
+    Ask(Option<String>),
+}
+
+/// Run the hooks that claim this call. They may rewrite its input.
+async fn run_hooks(call: &mut ToolCall, hooks: &[Arc<dyn Hook>], cx: &HookContext) -> HookVerdict {
+    let name = call.name.clone();
+    let applicable: Vec<&Arc<dyn Hook>> = hooks
+        .iter()
+        .filter(|h| hook_applies(&h.matcher(), HookPoint::BeforeTool, Some(&name)))
+        .collect();
+    for hook in applicable {
+        match hook.before_tool(call, cx).await {
+            HookOutcome::Continue | HookOutcome::Redirect { .. } => {}
+            HookOutcome::Deny { reason } | HookOutcome::Block { reason } => {
+                return HookVerdict::Refused(format!("Denied by hook {}: {reason}", hook.id()));
+            }
+            HookOutcome::Ask { reason } => return HookVerdict::Ask(reason),
+        }
+    }
+    HookVerdict::Continue
+}
+
+/// Ask the one policy. A tool that asks to confirm is never silently allowed.
+async fn run_policy(policy: &dyn PermissionPolicy, input: PolicyInput<'_>) -> PolicyVerdict {
+    match policy.decide(input).await {
+        Decision::Deny { reason } => {
+            PolicyVerdict::Denied(format!("Permission denied ({})", describe(&reason)))
+        }
+        Decision::Allow { .. } if input.confirm.is_none() => PolicyVerdict::Allowed,
+        Decision::Allow { .. } => PolicyVerdict::Ask(None),
+        Decision::Ask { scope, .. } => PolicyVerdict::Ask(scope),
+    }
+}
+
+/// Put the call to a person; their answer is the gate and, session-scoped, a rule.
+async fn ask_person(
+    input: PolicyInput<'_>,
+    tool: &dyn Tool,
+    scope: Option<String>,
+    policy: &dyn PermissionPolicy,
+    prompter: &dyn Prompter,
+) -> (Gate, DecisionKind, Option<String>) {
+    let kind = InteractionKind::Permission {
+        tool: input.call.name.clone(),
+        summary: input
+            .confirm
+            .map(str::to_string)
+            .unwrap_or_else(|| summarize(input.call)),
+        preview: tool.preview(&input.call.input, input.cwd),
+        session_scope: scope.clone(),
+    };
+    let mut answers = vec![AnswerSpec::AllowOnce];
+    if scope.is_some() {
+        answers.push(AnswerSpec::AllowSession);
+    }
+    answers.push(AnswerSpec::Deny);
+    match prompter.ask(kind, answers).await.unwrap_or(Answer::Cancel) {
+        Answer::AllowOnce | Answer::Confirm => (Gate::Allowed, DecisionKind::Allow, None),
+        Answer::AllowSession { scope } => {
+            policy
+                .on_verdict(input, &Verdict::Allow { scope: Some(scope) })
+                .await;
+            (Gate::Allowed, DecisionKind::AllowSession, None)
+        }
+        Answer::Deny { feedback } => {
+            policy
+                .on_verdict(
+                    input,
+                    &Verdict::Deny {
+                        feedback: feedback.clone(),
+                    },
+                )
+                .await;
+            let gate = denied_by_user(feedback.as_deref());
+            (gate, DecisionKind::Deny, feedback)
+        }
+        Answer::Cancel | Answer::Choice { .. } | Answer::Text { .. } => (
+            Gate::Denied {
+                message: "Permission request cancelled".into(),
+            },
+            DecisionKind::Deny,
+            None,
+        ),
+    }
+}
+
+fn denied_by_user(feedback: Option<&str>) -> Gate {
+    let mut message = "Permission denied by the user".to_string();
+    if let Some(f) = feedback {
+        message.push_str(": ");
+        message.push_str(f);
+    }
+    Gate::Denied { message }
+}
+
+fn receipt_for(call: &ToolCall, decision: DecisionKind, feedback: Option<String>) -> ItemBody {
+    ItemBody::PermissionReceipt {
+        interaction: InteractionId::from_raw("pending"),
+        tool: call.name.clone(),
+        decision,
+        feedback,
+    }
+}
+
+/// Decide one call: hooks, then the policy, then a person when the answer is `Ask`.
 pub async fn gate_call(input: GateInput<'_>, prompter: &dyn Prompter) -> Gated {
     let GateInput {
         session,
@@ -81,43 +220,20 @@ pub async fn gate_call(input: GateInput<'_>, prompter: &dyn Prompter) -> Gated {
         hooks,
         hook_cx,
     } = input;
-    let mut forced_ask: Option<String> = None;
-    let name = call.name.clone();
-    let applicable: Vec<&Arc<dyn Hook>> = hooks
-        .iter()
-        .filter(|h| hook_applies(&h.matcher(), HookPoint::BeforeTool, Some(&name)))
-        .collect();
-    for hook in applicable {
-        match hook.before_tool(&mut call, hook_cx).await {
-            HookOutcome::Continue => {}
-            HookOutcome::Deny { reason } | HookOutcome::Block { reason } => {
-                let traits = tool
-                    .as_ref()
-                    .map(|t| t.traits(&call.input))
-                    .unwrap_or_default();
-                return Gated {
-                    call,
-                    traits,
-                    gate: Gate::Denied {
-                        message: format!("Denied by hook {}: {reason}", hook.id()),
-                    },
-                    receipt: None,
-                };
-            }
-            HookOutcome::Ask { reason } => {
-                forced_ask = Some(reason);
-                break;
-            }
-            HookOutcome::Redirect { .. } => {}
+    let forced_ask = match run_hooks(&mut call, hooks, hook_cx).await {
+        HookVerdict::Continue => None,
+        HookVerdict::Ask(reason) => Some(reason),
+        HookVerdict::Refused(message) => {
+            let traits = tool
+                .as_ref()
+                .map(|t| t.traits(&call.input))
+                .unwrap_or_default();
+            return Gated::denied(call, traits, message);
         }
-    }
+    };
+    // An unregistered tool has no traits to judge; the executor refuses it.
     let Some(tool) = tool else {
-        return Gated {
-            call,
-            traits: ToolTraits::default(),
-            gate: Gate::Allowed,
-            receipt: None,
-        };
+        return Gated::allowed(call, ToolTraits::default());
     };
     let traits = tool.traits(&call.input);
     let subjects = tool.subjects(&call.input, cwd);
@@ -130,82 +246,14 @@ pub async fn gate_call(input: GateInput<'_>, prompter: &dyn Prompter) -> Gated {
         session,
         cwd,
     };
-    let decision = policy.decide(policy_input).await;
-    let (scope, reason) = match decision {
-        Decision::Deny { reason } => {
-            return Gated {
-                call,
-                traits,
-                gate: Gate::Denied {
-                    message: format!("Permission denied ({})", describe(&reason)),
-                },
-                receipt: None,
-            };
-        }
-        Decision::Allow { reason } if confirm.is_none() => {
-            let _ = reason;
-            return Gated {
-                call,
-                traits,
-                gate: Gate::Allowed,
-                receipt: None,
-            };
-        }
-        Decision::Allow { reason } => (None, reason),
-        Decision::Ask { reason, scope } => (scope, reason),
+    let scope = match run_policy(policy, policy_input).await {
+        PolicyVerdict::Allowed => return Gated::allowed(call, traits),
+        PolicyVerdict::Denied(message) => return Gated::denied(call, traits, message),
+        PolicyVerdict::Ask(scope) => scope,
     };
-    let _ = reason;
-    let preview = tool.preview(&call.input, cwd);
-    let kind = InteractionKind::Permission {
-        tool: call.name.clone(),
-        summary: confirm.clone().unwrap_or_else(|| summarize(&call)),
-        preview,
-        session_scope: scope.clone(),
-    };
-    let mut answers = vec![AnswerSpec::AllowOnce];
-    if scope.is_some() {
-        answers.push(AnswerSpec::AllowSession);
-    }
-    answers.push(AnswerSpec::Deny);
-    let answer = prompter.ask(kind, answers).await.unwrap_or(Answer::Cancel);
-    let (gate, decision, feedback) = match answer {
-        Answer::AllowOnce | Answer::Confirm => (Gate::Allowed, DecisionKind::Allow, None),
-        Answer::AllowSession { scope } => {
-            policy
-                .on_verdict(policy_input, &Verdict::Allow { scope: Some(scope) })
-                .await;
-            (Gate::Allowed, DecisionKind::AllowSession, None)
-        }
-        Answer::Deny { feedback } => {
-            policy
-                .on_verdict(
-                    policy_input,
-                    &Verdict::Deny {
-                        feedback: feedback.clone(),
-                    },
-                )
-                .await;
-            let mut message = "Permission denied by the user".to_string();
-            if let Some(f) = &feedback {
-                message.push_str(": ");
-                message.push_str(f);
-            }
-            (Gate::Denied { message }, DecisionKind::Deny, feedback)
-        }
-        Answer::Cancel | Answer::Choice { .. } | Answer::Text { .. } => (
-            Gate::Denied {
-                message: "Permission request cancelled".into(),
-            },
-            DecisionKind::Deny,
-            None,
-        ),
-    };
-    let receipt = ItemBody::PermissionReceipt {
-        interaction: InteractionId::from_raw("pending"),
-        tool: call.name.clone(),
-        decision,
-        feedback,
-    };
+    let (gate, decision, feedback) =
+        ask_person(policy_input, tool.as_ref(), scope, policy, prompter).await;
+    let receipt = receipt_for(&call, decision, feedback);
     Gated {
         call,
         traits,

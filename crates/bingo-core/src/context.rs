@@ -2,6 +2,7 @@
 //! context size, used by the compaction trigger and by every display.
 
 use bingo_sdk::*;
+use serde_json::Value;
 
 /// Folds items into the messages a provider receives. Pure; the golden tests
 /// per journal version live next to it.
@@ -33,23 +34,10 @@ impl ContextView {
                     summary,
                     ..
                 } => {
-                    let Some(cut) = items.iter().position(|i| &i.id == boundary) else {
-                        continue;
-                    };
-                    let summary_item = items
-                        .iter()
-                        .position(|i| &i.id == summary)
-                        .map(|p| items.remove(p));
-                    let cut = cut.min(items.len());
-                    let (head, tail) = items.split_at(cut);
-                    let mut next: Vec<Item> = head
-                        .iter()
-                        .filter(|i| kept.contains(&i.id))
-                        .cloned()
-                        .collect();
-                    next.extend(summary_item);
-                    next.extend(tail.iter().cloned());
-                    items = next;
+                    // A boundary this journal never saw is not a cut it can make.
+                    if let Some(cut) = items.iter().position(|i| &i.id == boundary) {
+                        splice_compaction(&mut items, cut, kept, summary);
+                    }
                 }
                 Event::Rewound { dropped, .. } => items.retain(|i| !dropped.contains(&i.id)),
                 _ => {}
@@ -61,73 +49,34 @@ impl ContextView {
     pub fn fold_items(items: &[Item]) -> Vec<Message> {
         let mut out = Folder::default();
         for item in items {
-            match &item.body {
-                ItemBody::User { parts, .. } => out.user(parts.clone()),
-                ItemBody::Assistant { text } => {
-                    if !text.is_empty() {
-                        out.assistant(vec![ContentPart::text(text.clone())]);
-                    }
-                }
-                ItemBody::Reasoning {
-                    text,
-                    provider_metadata,
-                } => {
-                    if !text.is_empty() {
-                        out.assistant(vec![ContentPart::Reasoning {
-                            text: text.clone(),
-                            provider_metadata: provider_metadata.clone(),
-                        }]);
-                    }
-                }
-                ItemBody::ToolCall {
-                    call_id,
-                    name,
-                    input,
-                    output,
-                    ..
-                } => {
-                    out.assistant(vec![ContentPart::ToolUse {
-                        id: call_id.clone(),
-                        name: name.clone(),
-                        input: input.clone(),
-                    }]);
-                    let (parts, is_error) = match output {
-                        Some(o) => (o.parts.clone(), o.is_error),
-                        None => (
-                            vec![ContentPart::text("[no result: the call did not complete]")],
-                            true,
-                        ),
-                    };
-                    out.pending.push(ContentPart::ToolResult {
-                        tool_use_id: call_id.clone(),
-                        parts,
-                        is_error,
-                    });
-                }
-                ItemBody::Compaction { summary, .. } => {
-                    out.user(vec![ContentPart::text(format!(
-                        "[Summary of the conversation so far]\n{summary}"
-                    ))]);
-                }
-                ItemBody::Interruption { marker } => {
-                    out.user(vec![ContentPart::text(marker.clone())])
-                }
-                ItemBody::QuestionAnswer {
-                    question, answer, ..
-                } => {
-                    out.user(vec![ContentPart::text(format!(
-                        "Q: {question}\nA: {answer}"
-                    ))]);
-                }
-                ItemBody::Action { .. }
-                | ItemBody::Rewind { .. }
-                | ItemBody::Notice { .. }
-                | ItemBody::PermissionReceipt { .. }
-                | ItemBody::Asset { .. } => {}
-            }
+            out.item(&item.body);
         }
         out.finish()
     }
+}
+
+/// The one splice a compaction performs: before `cut` only `kept` survives, the
+/// summary item takes the seam, the tail is untouched.
+pub(crate) fn splice_compaction(
+    items: &mut Vec<Item>,
+    cut: usize,
+    kept: &[ItemId],
+    summary: &ItemId,
+) {
+    let summary_item = items
+        .iter()
+        .position(|i| &i.id == summary)
+        .map(|p| items.remove(p));
+    let cut = cut.min(items.len());
+    let (head, tail) = items.split_at(cut);
+    let mut next: Vec<Item> = head
+        .iter()
+        .filter(|i| kept.contains(&i.id))
+        .cloned()
+        .collect();
+    next.extend(summary_item);
+    next.extend(tail.iter().cloned());
+    *items = next;
 }
 
 #[derive(Default)]
@@ -138,6 +87,79 @@ struct Folder {
 }
 
 impl Folder {
+    /// One item as the provider sees it; a body with no wire form is skipped.
+    fn item(&mut self, body: &ItemBody) {
+        match body {
+            ItemBody::User { parts, .. } => self.user(parts.clone()),
+            ItemBody::Assistant { text } => self.text(text),
+            ItemBody::Reasoning {
+                text,
+                provider_metadata,
+            } => self.reasoning(text, provider_metadata),
+            ItemBody::ToolCall {
+                call_id,
+                name,
+                input,
+                output,
+                ..
+            } => self.tool_call(call_id, name, input, output.as_ref()),
+            ItemBody::Compaction { summary, .. } => {
+                self.note(format!("[Summary of the conversation so far]\n{summary}"))
+            }
+            ItemBody::Interruption { marker } => self.note(marker.clone()),
+            ItemBody::QuestionAnswer {
+                question, answer, ..
+            } => self.note(format!("Q: {question}\nA: {answer}")),
+            ItemBody::Action { .. }
+            | ItemBody::Rewind { .. }
+            | ItemBody::Notice { .. }
+            | ItemBody::PermissionReceipt { .. }
+            | ItemBody::Asset { .. } => {}
+        }
+    }
+
+    /// The kernel speaking to the model in the user's turn.
+    fn note(&mut self, text: String) {
+        self.user(vec![ContentPart::text(text)]);
+    }
+
+    fn text(&mut self, text: &str) {
+        if !text.is_empty() {
+            self.assistant(vec![ContentPart::text(text.to_string())]);
+        }
+    }
+
+    fn reasoning(&mut self, text: &str, provider_metadata: &ProviderMetadata) {
+        if !text.is_empty() {
+            self.assistant(vec![ContentPart::Reasoning {
+                text: text.to_string(),
+                provider_metadata: provider_metadata.clone(),
+            }]);
+        }
+    }
+
+    /// The call, then the result it owes the next user message. A call with no
+    /// output never completed, and the model is told so.
+    fn tool_call(&mut self, call_id: &str, name: &str, input: &Value, output: Option<&ToolOutput>) {
+        self.assistant(vec![ContentPart::ToolUse {
+            id: call_id.to_string(),
+            name: name.to_string(),
+            input: input.clone(),
+        }]);
+        let (parts, is_error) = match output {
+            Some(o) => (o.parts.clone(), o.is_error),
+            None => (
+                vec![ContentPart::text("[no result: the call did not complete]")],
+                true,
+            ),
+        };
+        self.pending.push(ContentPart::ToolResult {
+            tool_use_id: call_id.to_string(),
+            parts,
+            is_error,
+        });
+    }
+
     fn user(&mut self, parts: Vec<ContentPart>) {
         let mut all = std::mem::take(&mut self.pending);
         all.extend(parts);

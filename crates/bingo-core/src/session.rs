@@ -3,30 +3,30 @@
 //! actor mints `seq`, persists durable frames, folds them with the one reducer
 //! and fans them out to bounded subscriber channels. It never awaits a client.
 
+mod interactions;
 mod mailbox;
+mod subscribers;
 
 use std::collections::{HashMap, VecDeque};
 use std::panic::AssertUnwindSafe;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use bingo_sdk::*;
-use futures::{FutureExt, StreamExt};
-use jiff::{SignedDuration, Timestamp};
+use futures::FutureExt;
+use jiff::Timestamp;
 use serde_json::{Value, json};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
+pub use interactions::INTERACTION_GUARD_MS;
+use interactions::Pending;
 pub use mailbox::Mailbox;
 use mailbox::{Msg, TurnMail};
+pub use subscribers::SUBSCRIBER_CAPACITY;
+use subscribers::Subscribers;
 
 use crate::gate::hook_applies;
 use crate::turn::{TurnConfig, TurnOutcome, TurnRun, run_turn};
-
-/// Frames a subscriber may fall behind by before it is told to resync.
-pub const SUBSCRIBER_CAPACITY: usize = 256;
-
-/// A keyboard answer inside this window after opening is a stray keystroke.
-pub const INTERACTION_GUARD_MS: i64 = 400;
 
 /// Characters of a queued input shown in `QueueChanged`.
 const PREVIEW_CHARS: usize = 80;
@@ -50,7 +50,7 @@ pub fn spawn(
         seq: Seq::ZERO,
         store,
         config,
-        subscribers: Vec::new(),
+        subscribers: Subscribers::default(),
         running: None,
         queue: VecDeque::new(),
         queue_revision: 0,
@@ -63,25 +63,10 @@ pub fn spawn(
     mailbox
 }
 
-/// The gap a subscriber fell behind by: first and last missed seq. Shared
-/// with its stream, which turns it into the `Lagged` marker once the frames
-/// it did get are drained — and then ends, so the client has to resync.
-type Lag = Arc<Mutex<Option<(Seq, Seq)>>>;
-
-struct Subscriber {
-    tx: mpsc::Sender<Frame>,
-    lag: Lag,
-}
-
 struct Running {
     turn: TurnId,
     cancel: CancellationToken,
     task: JoinHandle<()>,
-}
-
-struct Pending {
-    interaction: Interaction,
-    reply: oneshot::Sender<Result<Answer, KernelError>>,
 }
 
 #[derive(PartialEq, Eq)]
@@ -101,7 +86,7 @@ struct Actor {
     seq: Seq,
     store: Option<Arc<dyn SessionStore>>,
     config: Arc<TurnConfig>,
-    subscribers: Vec<Subscriber>,
+    subscribers: Subscribers,
     running: Option<Running>,
     queue: VecDeque<(IntentId, Input)>,
     queue_revision: u64,
@@ -155,13 +140,7 @@ impl Actor {
             Msg::Summary { reply } => {
                 let _ = reply.send(self.state.summary.clone());
             }
-            Msg::Emit { turn, event } => {
-                if self.is_running(&turn) {
-                    self.publish(*event, None).await;
-                } else {
-                    tracing::warn!(session = %self.id, %turn, "event from a turn that is not running");
-                }
-            }
+            Msg::Emit { turn, event } => self.emit(turn, *event).await,
             Msg::Ask {
                 item,
                 kind,
@@ -181,19 +160,7 @@ impl Actor {
                 let id = self.record(body).await;
                 let _ = reply.send(id);
             }
-            Msg::Progress { item, tail } => {
-                self.progress_n += 1;
-                self.publish(
-                    Event::ItemDelta {
-                        item,
-                        n: self.progress_n,
-                        kind: DeltaKind::Tail,
-                        data: tail,
-                    },
-                    None,
-                )
-                .await;
-            }
+            Msg::Progress { item, tail } => self.progress(item, tail).await,
             Msg::Close { reason } => return self.close(reason).await,
         }
         Flow::Continue
@@ -201,6 +168,31 @@ impl Actor {
 
     fn is_running(&self, turn: &TurnId) -> bool {
         self.running.as_ref().is_some_and(|r| &r.turn == turn)
+    }
+
+    /// An event from the running turn. One from a turn that already ended is
+    /// dropped: its seq would land after the `TurnCompleted` that closed it.
+    async fn emit(&mut self, turn: TurnId, event: Event) {
+        if self.is_running(&turn) {
+            self.publish(event, None).await;
+        } else {
+            tracing::warn!(session = %self.id, %turn, "event from a turn that is not running");
+        }
+    }
+
+    /// A running tool's own tail, numbered per session so clients can order it.
+    async fn progress(&mut self, item: ItemId, tail: String) {
+        self.progress_n += 1;
+        self.publish(
+            Event::ItemDelta {
+                item,
+                n: self.progress_n,
+                kind: DeltaKind::Tail,
+                data: tail,
+            },
+            None,
+        )
+        .await;
     }
 
     // ----- publishing -----
@@ -223,70 +215,18 @@ impl Actor {
             self.journal.push(frame.clone());
         }
         self.state.apply(&frame);
-        self.fanout(&frame);
+        self.subscribers.fanout(&frame);
         frame.seq
     }
 
-    fn fanout(&mut self, frame: &Frame) {
-        self.subscribers.retain_mut(|s| {
-            let mut lag = s.lag.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some((_, to)) = lag.as_mut() {
-                // Already behind: the stream ends at the marker, so nothing
-                // after the gap is worth queueing.
-                *to = frame.seq;
-                return !s.tx.is_closed();
-            }
-            match s.tx.try_send(frame.clone()) {
-                Ok(()) => true,
-                Err(mpsc::error::TrySendError::Full(_)) => {
-                    *lag = Some((frame.seq, frame.seq));
-                    true
-                }
-                Err(mpsc::error::TrySendError::Closed(_)) => false,
-            }
-        });
-    }
-
     fn subscribe(&mut self, since: Seq) -> FrameStream {
-        let (tx, rx) = mpsc::channel(SUBSCRIBER_CAPACITY);
-        let lag: Lag = Arc::new(Mutex::new(None));
-        self.subscribers.push(Subscriber {
-            tx,
-            lag: Arc::clone(&lag),
-        });
         let replay: Vec<Frame> = self
             .journal
             .iter()
             .filter(|f| f.seq > since)
             .cloned()
             .collect();
-        let session = self.id.clone();
-        let live = futures::stream::unfold(Some((rx, lag)), move |slot| {
-            let session = session.clone();
-            async move {
-                let (mut rx, lag) = slot?;
-                match rx.try_recv() {
-                    Ok(frame) => return Some((frame, Some((rx, lag)))),
-                    Err(mpsc::error::TryRecvError::Disconnected) => return None,
-                    Err(mpsc::error::TryRecvError::Empty) => {}
-                }
-                let gap = lag.lock().unwrap_or_else(|e| e.into_inner()).take();
-                if let Some((from, to)) = gap {
-                    let marker = Frame {
-                        seq: to,
-                        ts: Timestamp::now(),
-                        session,
-                        cause: None,
-                        event: Event::Lagged { from, to },
-                    };
-                    // Dropping the receiver ends the subscription on the
-                    // actor's side too.
-                    return Some((marker, None));
-                }
-                rx.recv().await.map(|frame| (frame, Some((rx, lag))))
-            }
-        });
-        Box::pin(futures::stream::iter(replay).chain(live))
+        self.subscribers.add(self.id.clone(), replay)
     }
 
     async fn reject(&mut self, intent: IntentId, code: ErrorCode, message: impl Into<String>) {
@@ -421,7 +361,32 @@ impl Actor {
 
     async fn start_turn(&mut self, inputs: Vec<(IntentId, Input)>, origin: TurnOrigin) {
         let turn = TurnId::mint();
-        let cancel = CancellationToken::new();
+        let (ids, acks) = self.record_inputs(&turn, inputs).await;
+        self.publish(
+            Event::TurnStarted {
+                turn: turn.clone(),
+                inputs: ids,
+                origin,
+            },
+            None,
+        )
+        .await;
+        if origin == TurnOrigin::Submit {
+            self.ack_turn_started(&turn, acks).await;
+        }
+        let running = self.spawn_turn(turn, CancellationToken::new());
+        // Registered after the spawn: the task's first mail is handled only
+        // once this function returns, so nothing can race the registration.
+        self.running = Some(running);
+    }
+
+    /// Journal one user item per text input; the item ids open the turn and
+    /// the intents behind them are the ones to acknowledge.
+    async fn record_inputs(
+        &mut self,
+        turn: &TurnId,
+        inputs: Vec<(IntentId, Input)>,
+    ) -> (Vec<ItemId>, Vec<IntentId>) {
         let mut ids = Vec::new();
         let mut acks = Vec::new();
         for (intent, input) in inputs {
@@ -441,27 +406,25 @@ impl Actor {
             self.publish(Event::ItemCompleted { item }, Some(intent))
                 .await;
         }
-        self.publish(
-            Event::TurnStarted {
-                turn: turn.clone(),
-                inputs: ids,
-                origin,
-            },
-            None,
-        )
-        .await;
-        if origin == TurnOrigin::Submit {
-            for intent in acks {
-                self.publish(
-                    Event::IntentAck {
-                        intent: intent.clone(),
-                        outcome: IntentOutcome::TurnStarted { turn: turn.clone() },
-                    },
-                    Some(intent),
-                )
-                .await;
-            }
+        (ids, acks)
+    }
+
+    async fn ack_turn_started(&mut self, turn: &TurnId, intents: Vec<IntentId>) {
+        for intent in intents {
+            self.publish(
+                Event::IntentAck {
+                    intent: intent.clone(),
+                    outcome: IntentOutcome::TurnStarted { turn: turn.clone() },
+                },
+                Some(intent),
+            )
+            .await;
         }
+    }
+
+    /// The turn loop runs in its own task and reports back by mail; a panic in
+    /// it becomes a failed turn rather than a lost session.
+    fn spawn_turn(&self, turn: TurnId, cancel: CancellationToken) -> Running {
         let run = TurnRun {
             turn: turn.clone(),
             history: self.journal.clone(),
@@ -484,9 +447,7 @@ impl Actor {
                 outcome,
             });
         });
-        // Registered after the spawn: the task's first mail is handled only
-        // once this function returns, so nothing can race the registration.
-        self.running = Some(Running { turn, cancel, task });
+        Running { turn, cancel, task }
     }
 
     async fn turn_finished(&mut self, turn: TurnId, outcome: Result<TurnOutcome, String>) -> Flow {
@@ -583,116 +544,6 @@ impl Actor {
         let taken: Vec<_> = self.queue.drain(..).collect();
         self.publish_queue().await;
         taken
-    }
-
-    // ----- interactions -----
-
-    async fn open_interaction(
-        &mut self,
-        item: Option<ItemId>,
-        kind: InteractionKind,
-        answers: Vec<AnswerSpec>,
-        reply: oneshot::Sender<Result<Answer, KernelError>>,
-    ) {
-        let Some(running) = &self.running else {
-            let _ = reply.send(Err(KernelError::new(
-                ErrorCode::NotReady,
-                "no turn is running",
-            )));
-            return;
-        };
-        let now = Timestamp::now();
-        let interaction = Interaction {
-            id: InteractionId::mint(),
-            session: self.id.clone(),
-            turn: Some(running.turn.clone()),
-            item,
-            opened_at: now,
-            guard_until: now
-                .checked_add(SignedDuration::from_millis(INTERACTION_GUARD_MS))
-                .ok(),
-            expires_at: None,
-            kind,
-            answers,
-        };
-        self.pending.insert(
-            interaction.id.clone(),
-            Pending {
-                interaction: interaction.clone(),
-                reply,
-            },
-        );
-        self.publish(Event::InteractionOpened { interaction }, None)
-            .await;
-    }
-
-    async fn answer(
-        &mut self,
-        intent: IntentId,
-        id: InteractionId,
-        answer: Answer,
-        activation: Activation,
-        who: ClientIdentity,
-    ) {
-        let Some(pending) = self.pending.get(&id) else {
-            return self
-                .reject(
-                    intent,
-                    ErrorCode::InteractionClosed,
-                    "no such open interaction",
-                )
-                .await;
-        };
-        if !pending.interaction.answers.contains(&answer.spec()) {
-            return self
-                .reject(
-                    intent,
-                    ErrorCode::InvalidInput,
-                    format!("{:?} is not an accepted answer here", answer.spec()),
-                )
-                .await;
-        }
-        if activation == Activation::Keyboard
-            && let Some(guard) = pending.interaction.guard_until
-            && Timestamp::now() < guard
-        {
-            return self
-                .reject(
-                    intent,
-                    ErrorCode::NotReady,
-                    "answered too soon after opening",
-                )
-                .await;
-        }
-        let Some(pending) = self.pending.remove(&id) else {
-            return;
-        };
-        let _ = pending.reply.send(Ok(answer.clone()));
-        self.publish(
-            Event::InteractionResolved {
-                id,
-                answer,
-                by: ResolvedBy::Client {
-                    name: who.name,
-                    surface: who.surface,
-                },
-            },
-            Some(intent.clone()),
-        )
-        .await;
-        self.applied(intent, Value::Null).await;
-    }
-
-    async fn cancel_interactions(&mut self, reason: CancelReason) {
-        let pending: Vec<_> = self.pending.drain().collect();
-        for (id, pending) in pending {
-            let _ = pending.reply.send(Err(KernelError::new(
-                ErrorCode::InteractionClosed,
-                format!("cancelled: {reason:?}"),
-            )));
-            self.publish(Event::InteractionCancelled { id, reason }, None)
-                .await;
-        }
     }
 
     // ----- closing -----
