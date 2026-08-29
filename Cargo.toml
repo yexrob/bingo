@@ -16,6 +16,7 @@ bingo-provider-fake = { path = "crates/bingo-provider-fake", version = "0.1.0" }
 bingo-tool-fs = { path = "crates/bingo-tool-fs", version = "0.1.0" }
 bingo-surface-print = { path = "crates/bingo-surface-print", version = "0.1.0" }
 bingo-provider-anthropic = { path = "crates/bingo-provider-anthropic", version = "0.1.0" }
+bingo-provider-openai = { path = "crates/bingo-provider-openai", version = "0.1.0" }
 bingo-tool-bash = { path = "crates/bingo-tool-bash", version = "0.1.0" }
 bingo-permissions = { path = "crates/bingo-permissions", version = "0.1.0" }
 bingo-tool-web = { path = "crates/bingo-tool-web", version = "0.1.0" }

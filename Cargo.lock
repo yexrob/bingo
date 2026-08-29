@@ -221,6 +221,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "bingo-provider-openai"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "base64 0.23.1",
+ "bingo-sdk",
+ "futures",
+ "insta",
+ "jiff",
+ "reqwest",
+ "schemars",
+ "serde",
+ "serde_json",
+ "tokio",
+ "wiremock",
+]
+
+[[package]]
 name = "bingo-sdk"
 version = "0.1.0"
 dependencies = [

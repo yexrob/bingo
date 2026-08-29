@@ -1,0 +1,26 @@
+---
+source: crates/bingo-provider-openai/src/request.rs
+expression: "encode(&request, Variant::Default)"
+---
+{
+  "model": "gpt-5.4",
+  "stream": true,
+  "store": false,
+  "max_output_tokens": 4096,
+  "input": [
+    {
+      "type": "message",
+      "role": "user",
+      "content": [
+        {
+          "type": "input_text",
+          "text": "what is this?"
+        },
+        {
+          "type": "input_image",
+          "image_url": "data:image/png;base64,iVBORw0KGgo="
+        }
+      ]
+    }
+  ]
+}

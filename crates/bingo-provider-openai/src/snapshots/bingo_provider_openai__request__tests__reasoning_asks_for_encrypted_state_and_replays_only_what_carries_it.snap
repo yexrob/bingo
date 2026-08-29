@@ -1,0 +1,45 @@
+---
+source: crates/bingo-provider-openai/src/request.rs
+expression: body
+---
+{
+  "model": "gpt-5.4",
+  "stream": true,
+  "store": false,
+  "max_output_tokens": 4096,
+  "input": [
+    {
+      "type": "message",
+      "role": "user",
+      "content": [
+        {
+          "type": "input_text",
+          "text": "why?"
+        }
+      ]
+    },
+    {
+      "type": "reasoning",
+      "id": "rs_01",
+      "summary": [],
+      "encrypted_content": "gAAAAAB"
+    },
+    {
+      "type": "message",
+      "role": "assistant",
+      "content": [
+        {
+          "type": "output_text",
+          "text": "Because it is simpler."
+        }
+      ]
+    }
+  ],
+  "reasoning": {
+    "effort": "high",
+    "summary": "auto"
+  },
+  "include": [
+    "reasoning.encrypted_content"
+  ]
+}
