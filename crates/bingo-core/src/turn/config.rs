@@ -46,7 +46,7 @@ pub struct Breaker {
 }
 
 impl Breaker {
-    pub const TRIP: u32 = 3;
+    pub const TRIP: u32 = bingo_sdk::compactor::BREAKER_TRIP;
 
     pub fn failures(&self) -> u32 {
         self.failures.load(Ordering::Relaxed)

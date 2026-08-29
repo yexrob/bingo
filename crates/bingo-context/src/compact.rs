@@ -2,6 +2,7 @@
 //! there is no summary to be had.
 
 use async_trait::async_trait;
+use bingo_sdk::compactor::BREAKER_TRIP;
 use bingo_sdk::{
     CompactContext, CompactReason, Compaction, Compactor, ErrorCode, Item, ItemId, KernelError,
     Usage,
@@ -13,12 +14,6 @@ use crate::{estimate, prompt, split, stream};
 /// still a cut: an honest gap shrinks the window, and a model that reads it
 /// knows not to answer about what came before.
 const DROPPED: &str = "[earlier conversation dropped]";
-
-/// Consecutive discarded summaries after which the kernel's breaker is
-/// tripped. The kernel owns the count (`bingo_core::turn::Breaker::TRIP`) and
-/// passes it as `CompactContext::failures`; the number is repeated here
-/// because the sdk does not carry it.
-const TRIP: u32 = 3;
 
 /// Summarises the old turns through the session's own model.
 #[derive(Debug, Default, Clone, Copy)]
@@ -51,7 +46,7 @@ impl Compactor for SummaryCompactor {
 /// Asking again is throwing money after the last three: an overflow still has
 /// to shrink, so it takes the rung that needs no model.
 fn spent(reason: &CompactReason, failures: u32) -> bool {
-    matches!(reason, CompactReason::Overflow { .. }) && failures >= TRIP
+    matches!(reason, CompactReason::Overflow { .. }) && failures >= BREAKER_TRIP
 }
 
 fn instructions(reason: &CompactReason) -> Option<&str> {

@@ -20,6 +20,7 @@ pub mod provider;
 pub mod state;
 pub mod store;
 pub mod surface;
+pub mod tokens;
 pub mod tool;
 
 pub use command::{

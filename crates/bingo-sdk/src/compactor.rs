@@ -12,6 +12,10 @@ use crate::ids::ItemId;
 use crate::model::{ModelCapabilities, Usage};
 use crate::provider::Provider;
 
+/// Consecutive discarded compactions at which the kernel's breaker trips
+/// and a strategy takes its rung that needs no model (ADR-0006).
+pub const BREAKER_TRIP: u32 = 3;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CompactReason {
     Threshold,

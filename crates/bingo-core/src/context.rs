@@ -230,42 +230,7 @@ impl Folder {
     }
 }
 
-/// A cheap estimate when the provider cannot count: ~4 ASCII chars or one
-/// non-ASCII char per token, a flat 1,600 per image, schemas as their JSON.
-pub fn estimate_tokens(system: &[SystemBlock], messages: &[Message], tools: &[ToolSpec]) -> u64 {
-    let mut n: u64 = system.iter().map(|b| text_tokens(&b.text)).sum();
-    for m in messages {
-        n += parts_tokens(&m.parts);
-    }
-    for t in tools {
-        n += text_tokens(&t.name)
-            + text_tokens(&t.description)
-            + text_tokens(&t.input_schema.to_string());
-    }
-    n
-}
-
-fn parts_tokens(parts: &[ContentPart]) -> u64 {
-    parts
-        .iter()
-        .map(|p| match p {
-            ContentPart::Text { text } => text_tokens(text),
-            ContentPart::Image { .. } => 1_600,
-            ContentPart::ToolUse { name, input, .. } => {
-                text_tokens(name) + text_tokens(&input.to_string())
-            }
-            ContentPart::ToolResult { parts, .. } => parts_tokens(parts),
-            ContentPart::Reasoning { text, .. } => text_tokens(text),
-        })
-        .sum()
-}
-
-fn text_tokens(s: &str) -> u64 {
-    let (ascii, other) = s.chars().fold((0u64, 0u64), |(a, o), c| {
-        if c.is_ascii() { (a + 1, o) } else { (a, o + 1) }
-    });
-    ascii.div_ceil(4) + other
-}
+pub use bingo_sdk::tokens::estimate as estimate_tokens;
 
 #[cfg(test)]
 mod tests {
@@ -696,8 +661,8 @@ mod tests {
 
     #[test]
     fn the_estimate_counts_cjk_per_character_and_images_flat() {
-        assert_eq!(text_tokens("abcdefgh"), 2);
-        assert_eq!(text_tokens("你好"), 2);
+        assert_eq!(bingo_sdk::tokens::text("abcdefgh"), 2);
+        assert_eq!(bingo_sdk::tokens::text("你好"), 2);
         let msgs = vec![Message::user(vec![ContentPart::Image {
             media_type: "image/png".into(),
             data: String::new(),
