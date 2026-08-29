@@ -11,6 +11,7 @@ use std::io::{self, IsTerminal, Write};
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use bingo_sdk::QuestionOption;
 use bingo_sdk::{
     Activation, Answer, AnswerSpec, Applied, Attachment, ClientIdentity, CloseReason, ErrorCode,
     Event, Exit, HostHandle, Input, IntentId, Interaction, InteractionKind, KernelError, Origin,
@@ -218,49 +219,73 @@ fn decide(
             summary,
             session_scope,
             ..
-        } => {
-            writeln!(
-                err,
-                "[permission] {tool}: {summary}  [y]es / [a]lways this session / [n]o"
-            )?;
-            err.flush()?;
-            match console.read_line()?.trim().chars().next() {
-                Some('y' | 'Y') => Answer::AllowOnce,
-                // Without a scope there is no session rule to install, so the
-                // widest honest answer is this one call.
-                Some('a' | 'A') => match session_scope {
-                    Some(scope) => Answer::AllowSession {
-                        scope: scope.clone(),
-                    },
-                    None => Answer::AllowOnce,
-                },
-                _ => Answer::Deny { feedback: None },
-            }
-        }
+        } => ask_permission(tool, summary, session_scope.as_deref(), console, err)?,
         InteractionKind::Question {
             question,
             header,
             options,
             ..
-        } => {
-            match header {
-                Some(header) => writeln!(err, "[question] {header}: {question}")?,
-                None => writeln!(err, "[question] {question}")?,
-            }
-            for option in options {
-                writeln!(err, "  {} — {}", option.id, option.label)?;
-            }
-            err.flush()?;
-            let chosen = console.read_line()?.trim().to_string();
-            if options.iter().any(|o| o.id == chosen) {
-                Answer::Choice { ids: vec![chosen] }
-            } else {
-                refuse(interaction, "no such option")
-            }
-        }
+        } => ask_question(
+            interaction,
+            question,
+            header.as_deref(),
+            options,
+            console,
+            err,
+        )?,
         _ => refuse(interaction, "this surface cannot answer that"),
     };
     Ok((answer, Activation::Keyboard))
+}
+
+fn ask_permission(
+    tool: &str,
+    summary: &str,
+    session_scope: Option<&str>,
+    console: &mut (dyn Console + Send),
+    err: &mut (dyn Write + Send),
+) -> io::Result<Answer> {
+    writeln!(
+        err,
+        "[permission] {tool}: {summary}  [y]es / [a]lways this session / [n]o"
+    )?;
+    err.flush()?;
+    Ok(match console.read_line()?.trim().chars().next() {
+        Some('y' | 'Y') => Answer::AllowOnce,
+        // Without a scope there is no session rule to install, so the
+        // widest honest answer is this one call.
+        Some('a' | 'A') => match session_scope {
+            Some(scope) => Answer::AllowSession {
+                scope: scope.to_string(),
+            },
+            None => Answer::AllowOnce,
+        },
+        _ => Answer::Deny { feedback: None },
+    })
+}
+
+fn ask_question(
+    interaction: &Interaction,
+    question: &str,
+    header: Option<&str>,
+    options: &[QuestionOption],
+    console: &mut (dyn Console + Send),
+    err: &mut (dyn Write + Send),
+) -> io::Result<Answer> {
+    match header {
+        Some(header) => writeln!(err, "[question] {header}: {question}")?,
+        None => writeln!(err, "[question] {question}")?,
+    }
+    for option in options {
+        writeln!(err, "  {} — {}", option.id, option.label)?;
+    }
+    err.flush()?;
+    let chosen = console.read_line()?.trim().to_string();
+    Ok(if options.iter().any(|o| o.id == chosen) {
+        Answer::Choice { ids: vec![chosen] }
+    } else {
+        refuse(interaction, "no such option")
+    })
 }
 
 /// The narrowest refusal the interaction will accept.
