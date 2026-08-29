@@ -173,6 +173,7 @@ dependencies = [
  "bingo-store-jsonl",
  "bingo-surface-print",
  "bingo-surface-rpc",
+ "bingo-surface-tui",
  "bingo-tool-bash",
  "bingo-tool-fs",
  "bingo-tool-web",

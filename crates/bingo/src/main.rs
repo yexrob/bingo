@@ -18,6 +18,7 @@ use bingo_sdk::{
 use bingo_store_jsonl::JsonlStorePlugin;
 use bingo_surface_print::{PrintPlugin, error_report, notice_report};
 use bingo_surface_rpc::RpcPlugin;
+use bingo_surface_tui::TuiPlugin;
 use bingo_tool_bash::BashPlugin;
 use bingo_tool_fs::FsPlugin;
 use bingo_tool_web::WebPlugin;
@@ -129,12 +130,7 @@ async fn main() -> ExitCode {
 
 async fn run(cli: Cli) -> Result<i32, KernelError> {
     let serve = cli.command.as_ref().map(|Command::Serve { stdio }| *stdio);
-    if serve.is_none() && !cli.print {
-        return Err(KernelError::new(
-            ErrorCode::InvalidInput,
-            "the interactive interface is not built yet; run with --print",
-        ));
-    }
+    let interactive = interactive(&cli);
     let cwd = working_dir(cli.cwd.as_deref())?;
     let config = host_config(&cli, &cwd)?;
     let host = Host::build(plugins()?, config)
@@ -147,6 +143,7 @@ async fn run(cli: Cli) -> Result<i32, KernelError> {
     let env = Arc::new(environment(&cwd));
     let (id, options) = match serve {
         Some(stdio) => ("rpc", serve_options(stdio, cwd, env)?),
+        None if interactive => ("tui", surface_options(cli, cwd, env)),
         None => ("print", surface_options(cli, cwd, env)),
     };
     let surface = host
@@ -155,6 +152,13 @@ async fn run(cli: Cli) -> Result<i32, KernelError> {
     let exit = surface.run(host.handle(), options).await;
     host.shutdown().await;
     exit.map(|e| e.code)
+}
+
+/// The terminal interface when a person is at both ends of the pipe;
+/// `--print` and any redirection keep the headless one.
+fn interactive(cli: &Cli) -> bool {
+    use std::io::IsTerminal;
+    !cli.print && std::io::stdin().is_terminal() && std::io::stdout().is_terminal()
 }
 
 /// The server has no prompt and no session of its own; the selector is a
@@ -209,6 +213,7 @@ fn plugins() -> Result<Vec<Box<dyn Plugin>>, KernelError> {
         Box::new(WebPlugin),
         Box::new(PrintPlugin),
         Box::new(RpcPlugin),
+        Box::new(TuiPlugin),
     ])
 }
 

@@ -133,11 +133,13 @@ fn a_missing_prompt_and_an_unknown_provider_are_errors_before_any_turn() {
     assert_eq!(stdout(&out), "");
 }
 
+/// The terminal interface needs a terminal at both ends; a pipe keeps the
+/// headless one, with or without `--print`.
 #[test]
-fn without_print_the_binary_says_what_is_missing() {
+fn a_pipe_without_print_still_runs_headlessly() {
     let out = run(bingo().arg("hello"));
-    assert_eq!(out.status.code(), Some(1));
-    assert!(stderr(&out).contains("--print"));
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    assert_eq!(stdout(&out), "Hello from the fake provider.\n");
 }
 
 #[test]
