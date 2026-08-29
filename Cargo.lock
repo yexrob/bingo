@@ -257,6 +257,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "bingo-store-jsonl"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bingo-sdk",
+ "jiff",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "bingo-surface-print"
 version = "0.1.0"
 dependencies = [
