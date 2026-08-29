@@ -541,3 +541,4 @@ fn scripted_run(
 
 mod context;
 mod sessions;
+mod stream_json;

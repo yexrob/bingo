@@ -99,6 +99,8 @@ enum Command {
 enum OutputFormat {
     Text,
     Json,
+    /// Claude Code's envelope, for hosts that already speak it (ADR-0007).
+    StreamJson,
 }
 
 impl OutputFormat {
@@ -106,6 +108,7 @@ impl OutputFormat {
         match self {
             OutputFormat::Text => "text",
             OutputFormat::Json => "json",
+            OutputFormat::StreamJson => "stream-json",
         }
     }
 }
