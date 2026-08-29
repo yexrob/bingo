@@ -23,6 +23,7 @@ bingo-tool-web = { path = "crates/bingo-tool-web", version = "0.1.0" }
 bingo-store-jsonl = { path = "crates/bingo-store-jsonl", version = "0.1.0" }
 bingo-context = { path = "crates/bingo-context", version = "0.1.0" }
 bingo-surface-rpc = { path = "crates/bingo-surface-rpc", version = "0.1.0" }
+bingo-surface-tui = { path = "crates/bingo-surface-tui", version = "0.1.0" }
 
 tokio = { version = "1.53", default-features = false, features = ["rt-multi-thread", "macros", "sync", "time", "io-util", "io-std", "fs", "process", "signal"] }
 tokio-util = { version = "0.7.19", features = ["codec", "rt"] }
@@ -64,6 +65,16 @@ dom_smoothie = "0.18.0"
 htmd = "0.5.5"
 # M2 (docs/plans/M2-second-provider-catalog-web.md)
 regex = "1.13.1"
+# M6 (docs/plans/M6-tui-mvp.md)
+ratatui = { version = "0.30", default-features = false, features = ["crossterm", "layout-cache", "underline-color"] }
+# M6 (docs/plans/M6-tui-mvp.md)
+crossterm = { version = "0.29", features = ["event-stream"] }
+# M6 (docs/plans/M6-tui-mvp.md)
+pulldown-cmark = { version = "0.13", default-features = false }
+# M6 (docs/plans/M6-tui-mvp.md)
+unicode-width = "0.2"
+# M6 (docs/plans/M6-tui-mvp.md)
+unicode-segmentation = "1.13"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

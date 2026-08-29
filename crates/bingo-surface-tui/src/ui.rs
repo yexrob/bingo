@@ -1,0 +1,184 @@
+//! Everything that is the surface's own and nothing that is the session's.
+//! The transcript, the turn, the queue and the open interactions all live in
+//! `SessionState`; what lives here is what a second client would not share —
+//! where the caret is, what is scrolled, what was armed and when.
+//!
+//! Every time-dependent decision takes `now`, so a test never sleeps.
+
+use std::time::{Duration, Instant};
+
+use bingo_sdk::{CommandSpec, Level, SessionSummary, View};
+
+use crate::commands::{self, Suggestion};
+use crate::composer::Composer;
+use crate::dialog::Dialog;
+use crate::history::PromptHistory;
+
+/// How long a transient notice stays up.
+const NOTICE: Duration = Duration::from_secs(5);
+/// A second ctrl+c within this window leaves.
+pub const EXIT_WINDOW: Duration = Duration::from_secs(2);
+
+/// A message that is not transcript: an ack, a warning, a hint.
+#[derive(Clone, Debug)]
+pub struct Notice {
+    pub level: Level,
+    pub text: String,
+    pub until: Instant,
+}
+
+/// How far the transcript is scrolled back, in wrapped lines from the bottom.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Scroll(pub usize);
+
+/// The command dropdown's own state; its rows are derived from the composer.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Menu {
+    pub selected: usize,
+    /// Esc closed it; typing opens it again.
+    pub dismissed: bool,
+}
+
+/// The `/resume` picker, filled by the host and answered by Enter.
+#[derive(Clone, Debug, Default)]
+pub struct Picker {
+    pub sessions: Vec<SessionSummary>,
+    pub selected: usize,
+}
+
+#[derive(Clone, Debug)]
+pub struct Ui {
+    pub composer: Composer,
+    pub history: PromptHistory,
+    pub dialog: Dialog,
+    pub scroll: Scroll,
+    pub help: bool,
+    pub menu: Menu,
+    pub picker: Option<Picker>,
+    pub notices: Vec<Notice>,
+    /// A command's `View`, shown until the next key.
+    pub block: Option<View>,
+    /// When ctrl+c was pressed on an empty composer.
+    pub armed: Option<Instant>,
+    /// The kernel's command catalogue, read once at start.
+    pub catalog: Vec<CommandSpec>,
+    pub models: Vec<String>,
+    /// An `open` is in flight; the swap happens when it lands.
+    pub opening: bool,
+    /// When this surface started, which is what the spinner turns on.
+    pub started: Instant,
+}
+
+impl Ui {
+    pub fn new(history: Vec<String>, started: Instant) -> Self {
+        Self {
+            composer: Composer::default(),
+            history: PromptHistory::new(history),
+            dialog: Dialog::default(),
+            scroll: Scroll::default(),
+            help: false,
+            menu: Menu::default(),
+            picker: None,
+            notices: Vec::new(),
+            block: None,
+            armed: None,
+            catalog: Vec::new(),
+            models: Vec::new(),
+            opening: false,
+            started,
+        }
+    }
+
+    pub fn notify(&mut self, level: Level, text: impl Into<String>, now: Instant) {
+        self.notices.push(Notice {
+            level,
+            text: text.into(),
+            until: now + NOTICE,
+        });
+    }
+
+    /// Drop the notices whose time is up. Drawing never mutates, so the loop
+    /// calls this.
+    pub fn expire(&mut self, now: Instant) {
+        self.notices.retain(|n| n.until > now);
+    }
+
+    /// Every command the dropdown may offer: the surface's own and the
+    /// kernel's, in that order.
+    pub fn commands(&self) -> Vec<CommandSpec> {
+        let mut all = commands::local_specs();
+        all.extend(self.catalog.iter().cloned());
+        all
+    }
+
+    /// The dropdown's rows for the line being typed. Empty means no dropdown.
+    pub fn suggestions(&self) -> Vec<Suggestion> {
+        if self.menu.dismissed {
+            return Vec::new();
+        }
+        commands::suggestions(self.composer.text(), &self.commands(), &self.models)
+    }
+
+    pub fn selected_suggestion(&self) -> Option<Suggestion> {
+        let rows = self.suggestions();
+        rows.get(self.menu.selected.min(rows.len().saturating_sub(1)))
+            .cloned()
+    }
+
+    /// The composer changed: the dropdown reopens and the history walk ends.
+    pub fn edited(&mut self) {
+        self.menu = Menu::default();
+        self.history.reset();
+    }
+
+    /// Whether a second ctrl+c would leave.
+    pub fn exit_armed(&self, now: Instant) -> bool {
+        self.armed
+            .is_some_and(|at| now.duration_since(at) < EXIT_WINDOW)
+    }
+
+    /// The spinner frame for this instant.
+    pub fn spinner(&self, now: Instant) -> &'static str {
+        crate::theme::spinner(now.duration_since(self.started))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ui() -> Ui {
+        Ui::new(Vec::new(), Instant::now())
+    }
+
+    #[test]
+    fn a_notice_lives_exactly_as_long_as_its_window() {
+        let now = Instant::now();
+        let mut ui = ui();
+        ui.notify(Level::Warn, "careful", now);
+        ui.expire(now + NOTICE - Duration::from_millis(1));
+        assert_eq!(ui.notices.len(), 1);
+        ui.expire(now + NOTICE);
+        assert!(ui.notices.is_empty());
+    }
+
+    #[test]
+    fn the_exit_arm_lapses() {
+        let now = Instant::now();
+        let mut ui = ui();
+        ui.armed = Some(now);
+        assert!(ui.exit_armed(now + Duration::from_millis(1999)));
+        assert!(!ui.exit_armed(now + EXIT_WINDOW));
+    }
+
+    #[test]
+    fn dismissing_the_dropdown_hides_it_until_the_next_edit() {
+        let mut ui = ui();
+        ui.composer.insert("/he");
+        assert!(!ui.suggestions().is_empty());
+        ui.menu.dismissed = true;
+        assert!(ui.suggestions().is_empty());
+        ui.edited();
+        assert!(!ui.suggestions().is_empty());
+    }
+}
