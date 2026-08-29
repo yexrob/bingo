@@ -20,7 +20,8 @@ use bingo_sdk::{
 };
 use futures::StreamExt;
 
-use render::{Mode, Renderer, error_line};
+use render::{Mode, Renderer};
+pub use render::{error_report, notice_report};
 
 /// The surface id, and the origin every input it submits carries.
 pub const SURFACE_ID: &str = "print";
@@ -29,6 +30,9 @@ pub const SURFACE_ID: &str = "print";
 pub(crate) trait Console: Send {
     /// Whether a person is at the other end of stdin.
     fn interactive(&self) -> bool;
+
+    /// Whether a person reads stderr (a terminal), so diagnostics are prose.
+    fn human(&self) -> bool;
 
     /// The whole of stdin, read when no prompt came from the command line.
     fn read_all(&mut self) -> io::Result<String>;
@@ -44,6 +48,10 @@ struct Terminal;
 impl Console for Terminal {
     fn interactive(&self) -> bool {
         io::stdin().is_terminal()
+    }
+
+    fn human(&self) -> bool {
+        io::stderr().is_terminal()
     }
 
     fn read_all(&mut self) -> io::Result<String> {
@@ -87,7 +95,8 @@ pub(crate) async fn drive(
     out: &mut (dyn Write + Send),
     err: &mut (dyn Write + Send),
 ) -> Result<Exit, KernelError> {
-    let mut renderer = Renderer::new(Mode::from_args(&opts.args));
+    let human = console.human();
+    let mut renderer = Renderer::new(Mode::from_args(&opts.args), human);
     let prompt = prompt_from(opts.prompt, console)?;
 
     let Attachment {
@@ -122,7 +131,11 @@ pub(crate) async fn drive(
             Next::Exit(exit) => return Ok(exit),
         }
     }
-    closed("the event stream ended before the turn completed", err)
+    closed(
+        "the event stream ended before the turn completed",
+        err,
+        human,
+    )
 }
 
 /// The prompt from the command line, or the whole of stdin when there is none.
@@ -169,13 +182,20 @@ fn react(
         // last frame it applied, so replay from there fills the gap.
         Event::Lagged { .. } => Ok(Next::Resync),
         Event::TurnCompleted { status, .. } => Ok(Next::Exit(exit_for(status))),
-        Event::SessionClosed { reason } => closed(&close_message(reason), err).map(Next::Exit),
+        Event::SessionClosed { reason } => {
+            closed(&close_message(reason), err, console.human()).map(Next::Exit)
+        }
         _ => Ok(Next::Await),
     }
 }
 
-fn closed(message: &str, err: &mut (dyn Write + Send)) -> Result<Exit, KernelError> {
-    writeln!(err, "{}", error_line(ErrorCode::SessionClosed, message)).map_err(stdio_error)?;
+fn closed(message: &str, err: &mut (dyn Write + Send), human: bool) -> Result<Exit, KernelError> {
+    writeln!(
+        err,
+        "{}",
+        error_report(ErrorCode::SessionClosed, message, human)
+    )
+    .map_err(stdio_error)?;
     Ok(Exit { code: 1 })
 }
 
@@ -621,6 +641,7 @@ pub(crate) mod tests {
     #[derive(Debug)]
     struct TestConsole {
         interactive: bool,
+        human: bool,
         stdin: String,
         lines: VecDeque<String>,
     }
@@ -629,6 +650,7 @@ pub(crate) mod tests {
         fn headless() -> Self {
             Self {
                 interactive: false,
+                human: false,
                 stdin: String::new(),
                 lines: VecDeque::new(),
             }
@@ -637,6 +659,7 @@ pub(crate) mod tests {
         fn typing(lines: &[&str]) -> Self {
             Self {
                 interactive: true,
+                human: false,
                 stdin: String::new(),
                 lines: lines.iter().map(|l| format!("{l}\n")).collect(),
             }
@@ -646,6 +669,10 @@ pub(crate) mod tests {
     impl Console for TestConsole {
         fn interactive(&self) -> bool {
             self.interactive
+        }
+
+        fn human(&self) -> bool {
+            self.human
         }
 
         fn read_all(&mut self) -> io::Result<String> {
@@ -952,6 +979,31 @@ pub(crate) mod tests {
             &run.session.submitted()[0],
             Input::Text { text, .. } if text == "from stdin\n"
         ));
+    }
+
+    #[tokio::test]
+    async fn a_person_at_the_terminal_reads_prose_not_the_machine_line() {
+        let mut console = TestConsole::headless();
+        console.human = true;
+        let failed = frame(
+            1,
+            Event::TurnCompleted {
+                turn: TurnId::from_raw("trn_1"),
+                status: TurnStatus::Failed {
+                    error: KernelError::new(
+                        ErrorCode::AuthRequired,
+                        "The anthropic provider has no credentials. Set ANTHROPIC_API_KEY.",
+                    ),
+                },
+                usage: Usage::default(),
+            },
+        );
+        let run = play(vec![failed], &mut console, options(Some("hi"), json!({}))).await;
+        assert_eq!(run.exit, Ok(Exit { code: 1 }));
+        assert_eq!(
+            run.err,
+            "error: The anthropic provider has no credentials. Set ANTHROPIC_API_KEY.\n"
+        );
     }
 
     #[tokio::test]

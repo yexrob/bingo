@@ -36,16 +36,33 @@ impl Mode {
     }
 }
 
-/// `[error] code=… msg=…`, the one shape a machine reads errors in.
-pub fn error_line(code: ErrorCode, message: &str) -> String {
+/// One failure, one line. A person at the terminal reads prose; a program
+/// on the other end of a pipe reads `[error] code=… msg=…`, the contract
+/// hosts parse.
+pub fn error_report(code: ErrorCode, message: &str, human: bool) -> String {
     let flat = message.replace(['\n', '\r'], " ");
     let msg: String = flat.chars().take(MAX_ERROR_CHARS).collect();
-    format!("[error] code={} msg={msg}", code.as_str())
+    if human {
+        format!("error: {msg}")
+    } else {
+        format!("[error] code={} msg={msg}", code.as_str())
+    }
+}
+
+/// A startup notice in the same two registers.
+pub fn notice_report(code: &str, text: &str, human: bool) -> String {
+    if human {
+        format!("note: {text}")
+    } else {
+        format!("[notice] {code} {text}")
+    }
 }
 
 #[derive(Debug)]
 pub struct Renderer {
     mode: Mode,
+    /// Stderr is a terminal: diagnostics are for a person.
+    human: bool,
     /// Bytes of each assistant item already on stdout.
     written: HashMap<ItemId, usize>,
     /// Stdout ends mid-line, so the next diagnostic owes it a newline.
@@ -53,9 +70,10 @@ pub struct Renderer {
 }
 
 impl Renderer {
-    pub fn new(mode: Mode) -> Self {
+    pub fn new(mode: Mode, human: bool) -> Self {
         Self {
             mode,
+            human,
             written: HashMap::new(),
             open_line: false,
         }
@@ -213,7 +231,11 @@ impl Renderer {
             ..
         } = event
         {
-            writeln!(err, "{}", error_line(error.code, &error.message))?;
+            writeln!(
+                err,
+                "{}",
+                error_report(error.code, &error.message, self.human)
+            )?;
             err.flush()?;
         }
         Ok(())
@@ -272,7 +294,7 @@ mod tests {
     /// Fold the frames the way the surface does, rendering each one.
     fn play(mode: Mode, frames: &[Frame]) -> Sinks {
         let mut state = session_state();
-        let mut renderer = Renderer::new(mode);
+        let mut renderer = Renderer::new(mode, false);
         let mut sinks = Sinks {
             out: Vec::new(),
             err: Vec::new(),
@@ -450,6 +472,26 @@ mod tests {
     }
 
     #[test]
+    fn the_two_registers_of_a_report() {
+        assert_eq!(
+            error_report(ErrorCode::AuthRequired, "No key.\nSet one.", false),
+            "[error] code=AUTH_REQUIRED msg=No key. Set one."
+        );
+        assert_eq!(
+            error_report(ErrorCode::AuthRequired, "No key.", true),
+            "error: No key."
+        );
+        assert_eq!(
+            notice_report("UNKNOWN_SETTING", "unknown `theme`", false),
+            "[notice] UNKNOWN_SETTING unknown `theme`"
+        );
+        assert_eq!(
+            notice_report("UNKNOWN_SETTING", "unknown `theme`", true),
+            "note: unknown `theme`"
+        );
+    }
+
+    #[test]
     fn a_failed_turn_writes_one_error_line_to_stderr() {
         let frames = vec![frame(
             1,
@@ -474,7 +516,7 @@ mod tests {
 
     #[test]
     fn a_long_error_message_is_cut_at_two_hundred_characters() {
-        let line = error_line(ErrorCode::Internal, &"x".repeat(500));
+        let line = error_report(ErrorCode::Internal, &"x".repeat(500), false);
         let msg = line
             .strip_prefix("[error] code=INTERNAL msg=")
             .expect("prefix");

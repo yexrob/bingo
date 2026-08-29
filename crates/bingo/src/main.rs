@@ -13,7 +13,7 @@ use bingo_provider_fake::{FakePlugin, FakeProvider, Script};
 use bingo_sdk::{
     Env, ErrorCode, KernelError, Plugin, SessionSelector, SessionSpec, SurfaceOptions,
 };
-use bingo_surface_print::PrintPlugin;
+use bingo_surface_print::{PrintPlugin, error_report, notice_report};
 use bingo_tool_bash::BashPlugin;
 use bingo_tool_fs::FsPlugin;
 use clap::{Parser, ValueEnum};
@@ -87,7 +87,8 @@ async fn main() -> ExitCode {
     match run(cli).await {
         Ok(code) => ExitCode::from(u8::try_from(code).unwrap_or(1)),
         Err(e) => {
-            eprintln!("[error] code={} msg={}", e.code.as_str(), e.message);
+            let human = std::io::IsTerminal::is_terminal(&std::io::stderr());
+            eprintln!("{}", error_report(e.code, &e.message, human));
             ExitCode::from(1)
         }
     }
@@ -106,7 +107,8 @@ async fn run(cli: Cli) -> Result<i32, KernelError> {
         .await
         .map_err(|e| KernelError::new(ErrorCode::Internal, e.to_string()))?;
     for (code, text) in host.notices() {
-        eprintln!("[notice] {code} {text}");
+        let human = std::io::IsTerminal::is_terminal(&std::io::stderr());
+        eprintln!("{}", notice_report(&code, &text, human));
     }
     let surface = host
         .surface("print")
