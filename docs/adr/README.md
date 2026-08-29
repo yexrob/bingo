@@ -11,3 +11,4 @@ One record per boundary decision: a trait shape, a wire format, a persisted form
 - [0007 — The wire: JSON-RPC over NDJSON, methods 1:1 with HostApi, events verbatim](0007-rpc-wire.md)
 - [0008 — Commands: parsed and dispatched by the session actor, outcomes as acks](0008-commands.md)
 - [0009 — Contribution sources: tools and commands that exist only after I/O](0009-contribution-sources.md)
+- [0010 — Sub-sessions: peer delivery, redirect, tree attachment](0010-sub-sessions.md)
