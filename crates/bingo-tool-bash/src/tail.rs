@@ -2,9 +2,9 @@
 //!
 //! A build or a test run says nothing for minutes, so the call's progress line
 //! carries the last few lines of its output while it works. The sample is taken
-//! on a clock the caller owns; this module only decides what a sample is and
-//! whether it is worth sending — an output that has not moved must not wake
-//! every surface again.
+//! on a clock the caller owns; this module only decides what a sample is, where
+//! it goes and whether it is worth sending — an output that has not moved must
+//! not wake every surface again.
 
 use std::time::Duration;
 
@@ -20,21 +20,42 @@ const LINES: usize = 5;
 /// How often the output is sampled while a command runs.
 pub const INTERVAL: Duration = Duration::from_millis(100);
 
-/// The progress tail of one call, and the last thing it sent.
+/// Where a running command's tail goes.
+pub trait Progress: Send + Sync {
+    fn tail(&self, lines: String);
+}
+
+/// A tool call watches its own command: the tail is the call's progress line.
+pub struct ToCall<'a>(pub &'a ToolContext);
+
+impl Progress for ToCall<'_> {
+    fn tail(&self, lines: String) {
+        self.0.progress(lines);
+    }
+}
+
+/// Nobody is watching: a line a person typed has no call to hang a tail on.
+pub struct Unwatched;
+
+impl Progress for Unwatched {
+    fn tail(&self, _lines: String) {}
+}
+
+/// The progress tail of one command, and the last thing it sent.
 #[derive(Debug, Default)]
 pub struct Tail {
     sent: Option<String>,
 }
 
 impl Tail {
-    /// Replace the call's progress tail, if the output has moved since the last
+    /// Replace the progress tail, if the output has moved since the last
     /// sample. A command that has written nothing yet has no tail to show.
-    pub async fn sample(&mut self, output: &Mutex<Bounded>, cx: &ToolContext) {
+    pub async fn sample(&mut self, output: &Mutex<Bounded>, to: &dyn Progress) {
         let lines = output.lock().await.tail_lines(LINES);
         if lines.is_empty() || self.sent.as_deref() == Some(lines.as_str()) {
             return;
         }
-        cx.progress(lines.clone());
+        to.tail(lines.clone());
         self.sent = Some(lines);
     }
 }
@@ -54,7 +75,7 @@ mod tests {
     async fn the_tail_is_the_output_so_far() {
         let (host, cx) = context();
         let output = written("one\ntwo\n").await;
-        Tail::default().sample(&output, &cx).await;
+        Tail::default().sample(&output, &ToCall(&cx)).await;
         assert_eq!(host.tails(), vec!["one\ntwo".to_string()]);
     }
 
@@ -62,7 +83,7 @@ mod tests {
     async fn only_the_last_lines_go_out() {
         let (host, cx) = context();
         let output = written("1\n2\n3\n4\n5\n6\n7\n8\n").await;
-        Tail::default().sample(&output, &cx).await;
+        Tail::default().sample(&output, &ToCall(&cx)).await;
         assert_eq!(host.tails(), vec!["4\n5\n6\n7\n8".to_string()]);
     }
 
@@ -71,10 +92,10 @@ mod tests {
         let (host, cx) = context();
         let output = written("working\n").await;
         let mut tail = Tail::default();
-        tail.sample(&output, &cx).await;
-        tail.sample(&output, &cx).await;
+        tail.sample(&output, &ToCall(&cx)).await;
+        tail.sample(&output, &ToCall(&cx)).await;
         output.lock().await.push("done\n");
-        tail.sample(&output, &cx).await;
+        tail.sample(&output, &ToCall(&cx)).await;
         assert_eq!(
             host.tails(),
             vec!["working".to_string(), "working\ndone".to_string()]
@@ -85,7 +106,7 @@ mod tests {
     async fn a_command_that_has_written_nothing_has_no_tail() {
         let (host, cx) = context();
         let output = written("").await;
-        Tail::default().sample(&output, &cx).await;
+        Tail::default().sample(&output, &ToCall(&cx)).await;
         assert!(host.tails().is_empty());
     }
 }

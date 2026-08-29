@@ -1,8 +1,12 @@
-//! The `Bash` tool: one shell command per call, in its own process group.
+//! The `Bash` tool: one shell command per call, in its own process group. The
+//! plugin also owns `!`, the same shell for the person at the keyboard
+//! (`shell`).
 //!
-//! Four bricks under it: the tables that refuse a command before anything is
+//! Four bricks under both: the tables that refuse a command before anything is
 //! spawned (`reject`), the bounded `output`, the `tail` the user watches while
-//! the command works, and the process lifecycle (`run`).
+//! the command works, and the process lifecycle (`run`), which takes its
+//! directory, its interrupt and its progress sink from whichever of the two
+//! asked.
 //!
 //! The traits fail closed except for `trusted`: a shell command is not read-only
 //! and not concurrency-safe — whether it may run at all is the permission
@@ -17,6 +21,7 @@
 mod output;
 mod reject;
 mod run;
+mod shell;
 mod tail;
 
 use std::path::Path;
@@ -25,12 +30,14 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use bingo_sdk::{
-    Interrupt, Plugin, PluginError, PluginManifest, Registrar, ResultLimit, Subject, Tool,
-    ToolContext, ToolError, ToolOutput, ToolSpec, ToolTraits, input_schema,
+    Command, Contribution, Interrupt, Plugin, PluginError, PluginManifest, Registrar, ResultLimit,
+    Subject, Tool, ToolContext, ToolError, ToolOutput, ToolSpec, ToolTraits, input_schema,
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
+
+pub use shell::ShellCommand;
 
 /// How long a command runs when the call does not say.
 const DEFAULT_TIMEOUT_MS: u64 = 120_000;
@@ -125,7 +132,12 @@ impl Tool for BashTool {
         {
             return Ok(ToolOutput::error(reason));
         }
-        let finished = run::run(&args.command, deadline(args.timeout), cx).await?;
+        let finished = run::run(
+            &args.command,
+            deadline(args.timeout),
+            &run::Context::of_call(cx),
+        )
+        .await?;
         Ok(output::shape(
             &args.command,
             &finished.output,
@@ -138,7 +150,7 @@ static MANIFEST: PluginManifest = PluginManifest {
     id: "bingo.tools.bash",
     version: env!("CARGO_PKG_VERSION"),
     sdk: "^0.1",
-    provides: &["tool:Bash"],
+    provides: &["tool:Bash", "command:!"],
     requires: &[],
     config: None,
 };
@@ -154,6 +166,9 @@ impl Plugin for BashPlugin {
 
     fn register(&self, registrar: &mut Registrar) -> Result<(), PluginError> {
         registrar.tool(Arc::new(BashTool) as Arc<dyn Tool>);
+        registrar.add(Contribution::Command(
+            Arc::new(ShellCommand) as Arc<dyn Command>
+        ));
         Ok(())
     }
 }
@@ -244,7 +259,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn the_plugin_registers_the_bash_tool() {
+    fn the_plugin_registers_the_bash_tool_and_the_shell_command() {
         let mut registrar = Registrar::new(
             "bingo.tools.bash",
             Value::Null,
@@ -252,13 +267,17 @@ pub(crate) mod tests {
         );
         BashPlugin.register(&mut registrar).expect("register");
         let contributions = registrar.into_contributions();
-        assert_eq!(contributions.len(), 1);
+        assert_eq!(contributions.len(), 2);
         match &contributions[0] {
             Contribution::Tool(tool) => assert_eq!(tool.spec().name, "Bash"),
             other => panic!("expected a tool, got {other:?}"),
         }
+        match &contributions[1] {
+            Contribution::Command(command) => assert_eq!(command.spec().name, "!"),
+            other => panic!("expected a command, got {other:?}"),
+        }
         assert_eq!(BashPlugin.manifest().id, "bingo.tools.bash");
-        assert_eq!(BashPlugin.manifest().provides, &["tool:Bash"]);
+        assert_eq!(BashPlugin.manifest().provides, &["tool:Bash", "command:!"]);
     }
 
     #[test]

@@ -17,7 +17,7 @@ use std::process::{ExitStatus, Stdio};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use bingo_sdk::{ToolContext, ToolError};
+use bingo_sdk::{CancellationToken, ToolContext, ToolError};
 use process_wrap::tokio::{ChildWrapper, CommandWrap, KillOnDrop, ProcessGroup};
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::Command;
@@ -25,7 +25,7 @@ use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 
 use crate::output::{Bounded, Ended, MAX_OUTPUT_CHARS};
-use crate::tail::{self, Tail};
+use crate::tail::{self, Progress, Tail, ToCall, Unwatched};
 
 /// How long the pipes are given once the process is gone. A grandchild that
 /// inherited them and outlived the kill must not hold the turn open.
@@ -53,9 +53,41 @@ pub struct Run {
     pub ended: Ended,
 }
 
+/// What running a command takes from whoever asked for it: the directory it
+/// starts in, the token that stops it early, and where its tail goes while it
+/// works. A tool call lends all three; a line a person typed lends only the
+/// first.
+pub struct Context<'a> {
+    cwd: &'a Path,
+    cancel: CancellationToken,
+    progress: Box<dyn Progress + 'a>,
+}
+
+impl<'a> Context<'a> {
+    /// A tool call: the turn's interrupt stops the command, and the call's own
+    /// progress line is where its tail goes.
+    pub fn of_call(cx: &'a ToolContext) -> Self {
+        Self {
+            cwd: &cx.cwd,
+            cancel: cx.cancel.clone(),
+            progress: Box::new(ToCall(cx)),
+        }
+    }
+
+    /// A line a person typed: nothing but the timeout stops it, and no call is
+    /// watching it.
+    pub fn unwatched(cwd: &'a Path) -> Self {
+        Self {
+            cwd,
+            cancel: CancellationToken::new(),
+            progress: Box::new(Unwatched),
+        }
+    }
+}
+
 /// Run one command to its end, to the timeout, or to the interrupt.
-pub async fn run(command: &str, timeout: Duration, cx: &ToolContext) -> Result<Run, ToolError> {
-    let mut child = spawn(command, &cx.cwd)?;
+pub async fn run(command: &str, timeout: Duration, cx: &Context<'_>) -> Result<Run, ToolError> {
+    let mut child = spawn(command, cx.cwd)?;
     let output = Arc::new(Mutex::new(Bounded::new(MAX_OUTPUT_CHARS)));
     let readers = read_pipes(child.as_mut(), &output);
     let ended = watch(&mut child, timeout, cx, &output).await?;
@@ -93,7 +125,7 @@ enum Stop {
 async fn watch(
     child: &mut Box<dyn ChildWrapper>,
     timeout: Duration,
-    cx: &ToolContext,
+    cx: &Context<'_>,
     output: &Mutex<Bounded>,
 ) -> Result<Ended, ToolError> {
     let deadline = tokio::time::Instant::now() + timeout;
@@ -106,7 +138,7 @@ async fn watch(
             () = tokio::time::sleep_until(deadline) => Stop::Timeout,
             () = cx.cancel.cancelled() => Stop::Interrupted,
             () = tokio::time::sleep(tail::INTERVAL) => {
-                tail.sample(output, cx).await;
+                tail.sample(output, cx.progress.as_ref()).await;
                 continue;
             }
         };
@@ -243,7 +275,7 @@ mod tests {
 
     async fn bash(command: &str) -> Run {
         let (_host, cx) = context();
-        run(command, NO_TIMEOUT, &cx)
+        run(command, NO_TIMEOUT, &Context::of_call(&cx))
             .await
             .expect("the command ran")
     }
@@ -273,14 +305,28 @@ mod tests {
         let dir = tempfile::tempdir().expect("temp dir");
         std::fs::write(dir.path().join("marker"), "").expect("write");
         let (_host, cx) = context_in(dir.path().to_path_buf());
-        let out = run("ls", NO_TIMEOUT, &cx).await.expect("the command ran");
+        let out = run("ls", NO_TIMEOUT, &Context::of_call(&cx))
+            .await
+            .expect("the command ran");
+        assert_eq!(out.output, "marker\n");
+    }
+
+    #[tokio::test]
+    async fn a_command_nobody_watches_still_runs_where_it_was_told() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::write(dir.path().join("marker"), "").expect("write");
+        let out = run("ls", NO_TIMEOUT, &Context::unwatched(dir.path()))
+            .await
+            .expect("the command ran");
         assert_eq!(out.output, "marker\n");
     }
 
     #[tokio::test]
     async fn a_directory_that_is_not_there_fails_to_spawn() {
         let (_host, cx) = context_in(PathBuf::from("/no/such/directory/here"));
-        let error = run("echo hi", NO_TIMEOUT, &cx).await.err();
+        let error = run("echo hi", NO_TIMEOUT, &Context::of_call(&cx))
+            .await
+            .err();
         assert!(
             matches!(&error, Some(ToolError::Failed(m)) if m.starts_with("could not run")),
             "got {error:?}"
@@ -306,7 +352,7 @@ mod tests {
         );
 
         let started = Instant::now();
-        let out = run(&command, Duration::from_millis(200), &cx)
+        let out = run(&command, Duration::from_millis(200), &Context::of_call(&cx))
             .await
             .expect("the command ran");
         let elapsed = started.elapsed();
@@ -346,7 +392,7 @@ mod tests {
         });
 
         let started = Instant::now();
-        let out = run("echo started; sleep 30", NO_TIMEOUT, &cx)
+        let out = run("echo started; sleep 30", NO_TIMEOUT, &Context::of_call(&cx))
             .await
             .expect("the command ran");
 
@@ -361,7 +407,7 @@ mod tests {
         let out = run(
             "for i in 1 2 3; do echo line $i; sleep 0.15; done",
             NO_TIMEOUT,
-            &cx,
+            &Context::of_call(&cx),
         )
         .await
         .expect("the command ran");

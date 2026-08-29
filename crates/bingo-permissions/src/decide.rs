@@ -416,14 +416,6 @@ pub(crate) mod tests {
             .collect()
     }
 
-    const EVERY_MODE: [Mode; 5] = [
-        Mode::Default,
-        Mode::AcceptEdits,
-        Mode::Plan,
-        Mode::BypassPermissions,
-        Mode::DontAsk,
-    ];
-
     // --- the mode table -------------------------------------------------
 
     #[test]
@@ -449,7 +441,7 @@ pub(crate) mod tests {
     #[test]
     fn a_trusted_read_only_tool_is_allowed_in_every_mode() {
         let probe = Probe::read("Cargo.toml");
-        for mode in EVERY_MODE {
+        for mode in Mode::ALL {
             assert_eq!(probe.clone().mode(mode).kind(), Kind::Allow, "{mode}");
         }
         assert!(matches!(
@@ -514,7 +506,7 @@ pub(crate) mod tests {
     #[test]
     fn a_deny_rule_beats_the_mode_that_would_have_allowed() {
         let probe = Probe::bash("rm -rf /tmp/x").deny(&["Bash(rm -rf)"]);
-        for mode in EVERY_MODE {
+        for mode in Mode::ALL {
             assert_eq!(probe.clone().mode(mode).kind(), Kind::Deny, "{mode}");
         }
     }
