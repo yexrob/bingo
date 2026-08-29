@@ -514,3 +514,47 @@ async fn a_model_without_vision_gets_a_note_where_the_image_was() {
 }
 
 mod budget;
+
+#[tokio::test]
+async fn a_stream_that_ends_without_a_finish_is_retried_like_a_dropped_connection() {
+    let cut_off = vec![
+        Ok(ModelEvent::TextStart { id: "b".into() }),
+        Ok(ModelEvent::TextDelta {
+            id: "b".into(),
+            delta: "half".into(),
+        }),
+    ];
+    let provider =
+        ScriptedProvider::new(vec![Script::Events(cut_off), Script::Events(text("whole"))]);
+    let cfg = config(provider.clone(), vec![]);
+    let host = RecordingHost::new();
+    let out = run(&cfg, &host, CancellationToken::new()).await;
+    assert_eq!(out.status, TurnStatus::Completed, "{:?}", host.kinds());
+    assert_eq!(provider.requests().len(), 2);
+    assert!(
+        host.kinds().iter().any(|k| k == "retrying"),
+        "{:?}",
+        host.kinds()
+    );
+    let events = host.events();
+    let answers: Vec<(ItemId, String)> = events
+        .iter()
+        .filter_map(|e| match e {
+            Event::ItemCompleted { item } => match &item.body {
+                ItemBody::Assistant { text } => Some((item.id.clone(), text.clone())),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+    assert_eq!(answers.len(), 2, "{answers:?}");
+    assert_eq!(answers[1].1, "whole");
+    let withdrawn = events.iter().any(
+        |e| matches!(e, Event::TurnRetrying { dropped, .. } if dropped == &[answers[0].0.clone()]),
+    );
+    assert!(
+        withdrawn,
+        "the half answer is withdrawn by the retry: {:?}",
+        host.kinds()
+    );
+}

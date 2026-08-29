@@ -50,6 +50,9 @@ impl Turn<'_> {
                 _ = self.cancel.cancelled() => { cancelled = true; break; }
             }
         }
+        // The provider watches the same token; when it ends its stream first,
+        // the end is still an interruption, not a completion.
+        let cancelled = cancelled || self.cancel.is_cancelled();
         let dropped = acc.item_ids();
         let (emits, mut finished) = acc.finish(cancelled);
         for emit in emits {
@@ -60,6 +63,13 @@ impl Turn<'_> {
         }
         if let Some(e) = error.or_else(|| finished.error.take()) {
             return Streamed::Failed(e, dropped);
+        }
+        if finished.finish_reason.is_none() {
+            // A connection that dropped mid-response: retryable, like a 5xx.
+            let ended = ProviderError::Stream {
+                message: "the stream ended without a finish".into(),
+            };
+            return Streamed::Failed(ended, dropped);
         }
         Streamed::Done(finished)
     }

@@ -246,13 +246,17 @@ async fn an_interrupt_reaches_a_running_turn() {
         started.elapsed() < Duration::from_secs(10),
         "the interrupt did not wait for the delay"
     );
-    assert!(matches!(
-        frames.last().map(|f| &f.event),
-        Some(Event::TurnCompleted {
-            status: TurnStatus::Interrupted { .. },
-            ..
-        })
-    ));
+    assert!(
+        matches!(
+            frames.last().map(|f| &f.event),
+            Some(Event::TurnCompleted {
+                status: TurnStatus::Interrupted { .. },
+                ..
+            })
+        ),
+        "{:?}",
+        frames.iter().map(|f| &f.event).collect::<Vec<_>>()
+    );
     kernel.shutdown().await.unwrap();
 }
 
