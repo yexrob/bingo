@@ -150,7 +150,7 @@ async fn ask_person(
         summary: input
             .confirm
             .map(str::to_string)
-            .unwrap_or_else(|| summarize(input.call)),
+            .unwrap_or_else(|| summarize(input.call, input.subjects)),
         preview: tool.preview(&input.call.input, input.cwd),
         session_scope: scope.clone(),
     };
@@ -274,8 +274,66 @@ fn describe(reason: &Reason) -> String {
 }
 
 /// `Name {"k":"v"}` clipped to one line for the prompt.
-pub fn summarize(call: &ToolCall) -> String {
-    let input = call.input.to_string();
-    let input: String = input.chars().take(120).collect();
-    format!("{} {input}", call.name)
+/// What a person is asked to approve: the tool and what it touches — its
+/// subjects when it names any (paths, a command, a url, a name), else its
+/// input, so a tool with no subjects still shows something.
+pub fn summarize(call: &ToolCall, subjects: &[Subject]) -> String {
+    let target = if subjects.is_empty() {
+        call.input.to_string()
+    } else {
+        subjects
+            .iter()
+            .map(subject_text)
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let target: String = target
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(120)
+        .collect();
+    format!("{} {target}", call.name)
+}
+
+fn subject_text(subject: &Subject) -> String {
+    match subject {
+        Subject::Path { path } => path.display().to_string(),
+        Subject::Command { command } => command.clone(),
+        Subject::Url { url } => url.clone(),
+        Subject::Name { name } => name.clone(),
+    }
+}
+
+#[cfg(test)]
+mod summary_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn call(name: &str, input: serde_json::Value) -> ToolCall {
+        ToolCall {
+            call_id: "c".into(),
+            name: name.into(),
+            input,
+        }
+    }
+
+    #[test]
+    fn a_summary_names_the_subjects_and_falls_back_to_the_input() {
+        let write = call("Write", json!({"file_path": "note.txt", "content": "x\n"}));
+        let path = Subject::Path {
+            path: "/work/note.txt".into(),
+        };
+        assert_eq!(summarize(&write, &[path]), "Write /work/note.txt");
+        let bash = call("Bash", json!({"command": "ls\n  -la"}));
+        let command = Subject::Command {
+            command: "ls\n  -la".into(),
+        };
+        assert_eq!(summarize(&bash, &[command]), "Bash ls -la");
+        assert_eq!(
+            summarize(&call("Echo", json!({"v": 1})), &[]),
+            "Echo {\"v\":1}"
+        );
+    }
 }
