@@ -277,3 +277,48 @@ fn bash_runs_only_when_the_flags_allow_it() {
         );
     }
 }
+
+#[test]
+fn a_slow_bash_command_streams_its_tail_as_deltas() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = script(
+        r#"{"responses":[
+            {"steps":[{"toolCall":{"name":"Bash","input":{"command":"for i in 1 2 3 4; do echo line$i; sleep 0.12; done"}}}]},
+            {"steps":[{"text":"Streamed."}]}
+        ]}"#,
+    );
+    let out = run(bingo()
+        .env("BINGO_FAKE_SCRIPT", script.path())
+        .env("HOME", dir.path())
+        .args([
+            "--print",
+            "--output-format",
+            "json",
+            "--dangerously-skip-permissions",
+            "--cwd",
+        ])
+        .arg(dir.path())
+        .arg("count"));
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    let frames: Vec<Frame> = stdout(&out)
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let tails: Vec<&str> = frames
+        .iter()
+        .filter_map(|f| match &f.event {
+            Event::ItemDelta {
+                kind: bingo_sdk::DeltaKind::Tail,
+                data,
+                ..
+            } => Some(data.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(!tails.is_empty(), "no live tail reached the wire");
+    assert!(tails.last().unwrap().contains("line"), "{tails:?}");
+    let done = frames.iter().any(|f| matches!(&f.event, Event::ItemCompleted { item }
+        if matches!(&item.body, bingo_sdk::ItemBody::ToolCall { output: Some(o), .. }
+            if !o.is_error && o.parts.iter().any(|p| p.as_text().is_some_and(|t| t.contains("line4"))))));
+    assert!(done, "the final result carries every line");
+}
