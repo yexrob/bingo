@@ -3,9 +3,22 @@
 //! idempotency keys. All are prefixed ULIDs, so they sort by time within a kind.
 
 use std::fmt;
+use std::sync::Mutex;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+
+/// One generator per process, so ids minted within the same millisecond
+/// still sort in minting order (a bare `Ulid::generate` randomises them).
+static GENERATOR: Mutex<Option<ulid::Generator>> = Mutex::new(None);
+
+fn next_ulid() -> ulid::Ulid {
+    let mut slot = GENERATOR.lock().unwrap_or_else(|e| e.into_inner());
+    let generator = slot.get_or_insert_with(ulid::Generator::new);
+    // The monotonic counter can overflow only after 2^80 ids in one
+    // millisecond; a fresh random ulid is the honest fallback.
+    generator.generate().unwrap_or_else(|_| ulid::Ulid::generate())
+}
 
 macro_rules! id {
     ($name:ident, $prefix:literal, $doc:literal) => {
@@ -19,7 +32,7 @@ macro_rules! id {
         impl $name {
             /// Mint a fresh, time-ordered id.
             pub fn mint() -> Self {
-                Self(format!("{}_{}", $prefix, ulid::Ulid::generate()))
+                Self(format!("{}_{}", $prefix, next_ulid()))
             }
 
             /// Wrap an id that already exists (replay, wire, tests).
@@ -101,11 +114,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn ids_are_prefixed_and_time_ordered() {
-        let a = SessionId::mint();
-        let b = SessionId::mint();
-        assert!(a.as_str().starts_with("ses_"));
-        assert!(a <= b);
+    fn ids_are_prefixed_and_minted_in_order() {
+        let ids: Vec<SessionId> = (0..1000).map(|_| SessionId::mint()).collect();
+        assert!(ids.iter().all(|id| id.as_str().starts_with("ses_")));
+        assert!(
+            ids.windows(2).all(|w| w[0] < w[1]),
+            "ids minted back to back must sort in minting order"
+        );
     }
 
     #[test]
