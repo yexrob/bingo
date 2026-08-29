@@ -2,3 +2,6 @@
 
 pub mod codec;
 pub mod methods;
+pub mod schema;
+
+pub use schema::document;
