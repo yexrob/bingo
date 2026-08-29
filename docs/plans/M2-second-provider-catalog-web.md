@@ -18,17 +18,17 @@
 
 ## Dependencies (verify on crates.io before adding; `scripts/budget.sh` and `cargo deny check` after)
 
-`url` (already in the tree through reqwest) — WebFetch validation; `dom_smoothie` — Readability port, MIT; `htmd` — Turndown port, MIT (`html2md` is GPL and banned in `deny.toml`); `regex` — the DuckDuckGo result blocks. The OpenAI provider needs nothing new. Expected count ≈ 200 of 260.
+`url` (already in the tree through reqwest) — WebFetch validation; `dom_smoothie` — Readability port, MIT; `htmd` — Turndown port, Apache-2.0 (`html2md` is GPL and banned in `deny.toml`); `regex` — the DuckDuckGo result blocks. The OpenAI provider needs nothing new. Expected count ≈ 200 of 260.
 
 ## Exit criteria
 
-- [ ] `cargo fmt --all -- --check`, `cargo check --workspace --all-targets --locked`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, `cargo test --workspace --locked`, `scripts/check_discipline.sh`, `scripts/budget.sh`, `cargo deny check`
-- [ ] OpenAI: request-body snapshots for text / tools / reasoning replay / images, and the Codex isolation test (`store:false`, no `max_output_tokens`, `include` differs, streaming forced, the two headers) ported from `openai.rs:985-1004`; SSE fixtures for a text turn, a tool turn, a reasoning turn with both delta names, `incomplete` on `max_output_tokens`, `response.failed`; HTTP fixtures for 429 (header seconds and body ms) and a 400 overflow
-- [ ] Catalogue: fixture lookups (exact, dated snapshot by prefix, cross-provider id, unknown → default); proptest — `declared` beats every tier, a learned clamp never rises above the catalogue and never below 8k, `effective_window >= window / 2` for every input, `images` is false whenever either owner says so; `window_from_overflow` parses the Anthropic `A + B > C`, the OpenAI "maximum context length is N" and the "resulted in N tokens" shapes
-- [ ] Vision: a request to a model without vision carries the note in place of each image part while the items keep the image
-- [ ] Web: `WebFetch` validation table, https upgrade, streamed cap, cache hit within TTL, readability on a fixture page; `read_only` for `docs.rs` and not for `example.com`; `WebSearch` parses a recorded DuckDuckGo page and a recorded Brave body, honours allowed/blocked domains
-- [ ] Black-box: `--provider openai` completes a text turn and a tool round against wiremock; `--provider openai` without a key is one `AUTH_REQUIRED` line naming `OPENAI_API_KEY`; `WebFetch` of a wiremock page returns markdown
-- [ ] sdk changed exactly once, ADR-0004 lists the plugins it touched
+- [x] `cargo fmt --all -- --check`, `cargo check --workspace --all-targets --locked`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, `cargo test --workspace --locked`, `scripts/check_discipline.sh`, `scripts/budget.sh`, `cargo deny check`
+- [x] OpenAI: request-body snapshots for text / tools / reasoning replay / images, and the Codex isolation test (`store:false`, no `max_output_tokens`, `include` differs, streaming forced, the two headers) ported from `openai.rs:985-1004`; SSE fixtures for a text turn, a tool turn, a reasoning turn with both delta names, `incomplete` on `max_output_tokens`, `response.failed`; HTTP fixtures for 429 (header seconds and body ms) and a 400 overflow
+- [x] Catalogue: fixture lookups (exact, dated snapshot by prefix, cross-provider id, unknown → default); proptest — `declared` beats every tier, a learned clamp never rises above the catalogue and never below 8k, `effective_window >= window / 2` for every input, `images` is false whenever either owner says so; `window_from_overflow` parses the Anthropic `A + B > C`, the OpenAI "maximum context length is N" and the "resulted in N tokens" shapes
+- [x] Vision: a request to a model without vision carries the note in place of each image part while the items keep the image
+- [x] Web: `WebFetch` validation table, https upgrade, streamed cap, cache hit within TTL, readability on a fixture page; `read_only` for `docs.rs` and not for `example.com`; `WebSearch` parses a recorded DuckDuckGo page and a recorded Brave body, honours allowed/blocked domains
+- [x] Black-box: `--provider openai` completes a text turn and a tool round against wiremock; `--provider openai` without a key is one `AUTH_REQUIRED` line naming `OPENAI_API_KEY`; `WebFetch` of a wiremock page returns markdown
+- [x] sdk changed exactly once, ADR-0004 lists the plugins it touched
 
 ## Non-goals
 
@@ -37,3 +37,47 @@ Refreshing the catalogue from models.dev at runtime (the snapshot is the raw api
 ## Risks touched
 
 R1 sdk churn — this is the one change M2 allows, made first so both workers build on it. R4 provider quirks — every quirk lands with a fixture; the two delta names and the Codex isolation are regression tests, not comments. Catalogue disagreement with vendor docs (models.dev lists 1M windows for Claude 4.5+) — the learned clamp corrects the first overflow, `models` in settings corrects it before that.
+
+## Verified (2026-08-29, commit 9091361; live smokes below)
+
+```
+$ cargo fmt --all -- --check                                        exit 0
+$ cargo check --workspace --all-targets --locked                    exit 0
+$ cargo clippy --workspace --all-targets --locked -- -D warnings    exit 0
+$ cargo test --workspace --locked                                   exit 0
+  bin (cli.rs) 16 · core 82 · sdk 16 · provider-fake 19 · provider-anthropic 68 · provider-openai 95
+  tool-fs 69 · tool-bash 51 · tool-web 77 · permissions 92 · print 33            = 618 passed
+$ scripts/check_discipline.sh                                       exit 0 (no warnings)
+$ scripts/budget.sh                                                 dependencies 213 (max 260), warm core check 1 s
+$ cargo deny check                                                  advisories ok, bans ok, licenses ok, sources ok
+$ BINGO_FAKE_SCRIPT=… bingo --print --output-format json            WebFetch http://doc.rust-lang.org/stable/book/ch01-00-getting-started.html
+                                                                    → https, article as markdown ("## Getting Started …"), 1.1 s
+                                                                    WebSearch "rust async book tokio tutorial" → duckduckgo answered
+                                                                    with an anti-bot challenge; the error names the Brave alternative
+```
+
+Exit criteria, item by item:
+
+- OpenAI: four request snapshots (text, tools + a round, reasoning replay with `encrypted_content`, images), the Codex isolation test, the effort table from models.dev; SSE fixtures text / tools / reasoning (both delta names) / incomplete / failed through wiremock; 429 header and body, 400 overflow, 401, 503, the 60 s idle guard under `tokio::time::pause`.
+- Catalogue: exact, dated-snapshot prefix, cross-provider id, unknown → default; four proptests on `resolve`/`max_tokens`; the three overflow shapes; the embedded snapshot must parse (a test) and knows both first-party providers.
+- Vision: a blind scripted model receives `[image omitted: m has no vision]` in place of the part; the items keep the image.
+- Web: validation table, https upgrade (loopback exempt), streamed cap with nothing kept, cache hit with `expect(1)`, readability on a fixture, `read_only` for `docs.rs`/`github.com/anthropics/x` and not `example.com`/`github.com/other`, DuckDuckGo and Brave parsers on fixtures, allowed/blocked filtering.
+- Black-box: `--provider openai` text turn and tool round against wiremock through `OPENAI_BASE_URL`; no key → one `AUTH_REQUIRED` line naming `OPENAI_API_KEY`; `WebFetch` of a wiremock page reaches the model as markdown under `--allowed-tools WebFetch(domain:127.0.0.1)`.
+- sdk changed once (`c50e8ca`), ADR-0004 names the plugins.
+
+Decisions taken while integrating (each is a commit body too):
+
+- `TurnConfig.model: ModelChoice{provider, id, capabilities, max_tokens, reasoning, learned}` — the host's resolution is one noun, and the 16-field cohesion cap said so.
+- The ruler counts cached input: `Usage::input_total()`; the three counts stay apart on the wire (Anthropic reports them apart; OpenAI's `cached_tokens` is split out).
+- A reasoning part with replay data and no text is folded back into the request (`3773b79`); the accumulator kept it, the fold dropped it.
+- OpenAI sends `store:false` + `include:["reasoning.encrypted_content"]` on both variants; `effort_for` never answers `none` (an `Option` already says that); a failed tool result is `{"is_error":true,"content":…}` because the wire has no flag.
+- `WebFetch` is `ResultLimit::SelfBounded` at 100 000 chars (the kernel's 50 000 would make the cap dead code); `http`→`https` skips loopback so a local server stays reachable; `docs.rs` joins the pre-approved list; a DuckDuckGo challenge page is an error, not "no results".
+
+Open, carried forward:
+
+- [ ] Live smoke against OpenAI: `OPENAI_API_KEY=… bingo --print --provider openai --model gpt-5.4 "list the crates in this workspace"` — needs a key; paste here. (Anthropic's from M1 still pending too.)
+- Keyless search is unreliable: DuckDuckGo challenges this network. Either a second keyless backend or Brave as the documented path — decide when the command dispatcher can tell the user (M3).
+- `sse.rs`, the idle guard, `retry-after` parsing and the classify-on-send shape are written twice (anthropic, openai). The third consumer — the loopback SSE server in `provider-fake` (M5) — is when they move to one crate.
+- Catalogue refresh from models.dev (M3, a download into `<data_dir>/models.dev.json`); learned windows persisted (M3) and applied inside the session that learned them (M4).
+- `WebFetch` judges `read_only` on the initial URL; a redirect may leave the approved host. `htmd` could go if `dom_smoothie`'s markdown mode proves as faithful (about ten dependencies).
+- Bash path subjects for the sensitive-path check (needs destructive-verb classification); the Codex variant is encoded and tested, not exercised live until OAuth (M10).
