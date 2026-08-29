@@ -183,6 +183,25 @@ pub fn schema_of<T: JsonSchema>(generator: &mut SchemaGenerator) -> Schema {
 /// A method: its name, its params, its result.
 pub type Method = (&'static str, Ref, Ref);
 
+/// `event`: one frame, and — under a tree attachment (ADR-0010 §3) — the root
+/// it was opened through, which is the stream the client routes it to. A
+/// frame of the root itself carries no `root`, so the line is the frame verbatim.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct EventParams {
+    #[serde(flatten)]
+    pub frame: Frame,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root: Option<SessionId>,
+}
+
+impl EventParams {
+    /// Where the client routes it: the root of a tree attachment, else the frame's own session.
+    pub fn route(&self) -> &SessionId {
+        self.root.as_ref().unwrap_or(&self.frame.session)
+    }
+}
+
 /// A notification: its name and its params.
 pub type Notification = (&'static str, Ref);
 
@@ -251,7 +270,7 @@ pub static METHODS: &[Method] = &[
 ];
 
 pub static NOTIFICATIONS: &[Notification] = &[
-    (name::EVENT, schema_of::<Frame>),
+    (name::EVENT, schema_of::<EventParams>),
     (name::GATEWAY_EVENT, schema_of::<GatewayEvent>),
 ];
 

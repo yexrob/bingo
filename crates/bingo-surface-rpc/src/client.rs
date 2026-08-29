@@ -26,7 +26,7 @@ use tokio_util::codec::{FramedRead, FramedWrite};
 
 use crate::codec::{self, Id, Message, Notification, Outcome, Request, Response};
 use crate::methods::{
-    AnswerParams, CatalogParams, Empty, EventsParams, HistoryParams, InitializeParams,
+    AnswerParams, CatalogParams, Empty, EventParams, EventsParams, HistoryParams, InitializeParams,
     InitializeResult, InterruptParams, ListParams, ListResult, OpenParams, OpenResult, PROTOCOL,
     SessionParams, SubmitParams, name,
 };
@@ -115,8 +115,8 @@ impl Router {
 
     fn notification(&self, notification: Notification) {
         match notification.method.as_str() {
-            name::EVENT => match serde_json::from_value::<Frame>(notification.params) {
-                Ok(frame) => self.frame(frame),
+            name::EVENT => match serde_json::from_value::<EventParams>(notification.params) {
+                Ok(params) => self.frame(params),
                 Err(error) => tracing::warn!(%error, "an event that is not a frame"),
             },
             name::GATEWAY_EVENT => {
@@ -129,12 +129,12 @@ impl Router {
         }
     }
 
-    fn frame(&self, frame: Frame) {
+    fn frame(&self, params: EventParams) {
         let mut routes = self.routes();
         let route = routes
-            .entry(frame.session.clone())
+            .entry(params.route().clone())
             .or_insert_with(Route::pending);
-        if route.events.send(frame).is_err() {
+        if route.events.send(params.frame).is_err() {
             tracing::debug!("a frame for a stream the caller dropped");
         }
     }

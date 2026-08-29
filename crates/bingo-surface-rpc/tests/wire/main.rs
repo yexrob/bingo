@@ -23,7 +23,7 @@ use bingo_surface_rpc::{RemoteKernel, serve};
 use futures::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 
-use host::{TestHost, fresh_state, last_seq, script, selector, session_id, who};
+use host::{TestHost, child_id, fresh_state, last_seq, script, selector, session_id, who};
 use tokio::io::{DuplexStream, ReadHalf, WriteHalf};
 use tokio::task::JoinHandle;
 use tokio_util::codec::{FramedRead, FramedWrite};
@@ -550,6 +550,45 @@ async fn a_remote_kernel_folds_to_the_state_the_host_scripted() {
     let submits = session.submits();
     assert_eq!(submits.len(), 1);
     assert_eq!(submits[0].0, IntentId::from_raw("req_remote"));
+}
+
+/// A tree attachment's frames are routed by the root they were opened through
+/// (ADR-0010 §3): a child's frame reaches the same stream, stamped with its own
+/// session, and the wire says which root it belongs to.
+#[tokio::test]
+async fn a_tree_attachment_routes_a_childs_frames_to_the_root_stream() {
+    let (host, _) = TestHost::with(script());
+    let (client, server) = tokio::io::duplex(64 * 1024);
+    let (server_reader, server_writer) = tokio::io::split(server);
+    let (client_reader, client_writer) = tokio::io::split(client);
+    let served = tokio::spawn(serve(host, server_reader, server_writer));
+    let kernel = RemoteKernel::connect(client_reader, client_writer);
+    kernel.initialize(who()).await.expect("the handshake");
+
+    let Attachment { mut events, .. } = kernel
+        .open(selector(), who(), OpenOptions::with_children())
+        .await
+        .expect("the session");
+    let mut sessions = Vec::new();
+    while let Some(frame) = events.next().await {
+        sessions.push(frame.session.clone());
+        if frame.session == child_id() {
+            break;
+        }
+    }
+    assert_eq!(
+        sessions.last(),
+        Some(&child_id()),
+        "the child's head arrived"
+    );
+    assert_eq!(
+        sessions.iter().filter(|s| **s == session_id()).count(),
+        script().len(),
+        "after every frame of the root"
+    );
+
+    kernel.shutdown().await.expect("shutdown is answered");
+    served.await.expect("the server task did not panic").ok();
 }
 
 /// `HostApi::catalog` cannot await, so the remote one blocks its worker; that

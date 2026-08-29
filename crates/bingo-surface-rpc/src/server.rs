@@ -25,7 +25,7 @@ use crate::codec::{
     PARSE_ERROR, Request, Response, RpcError,
 };
 use crate::methods::{
-    AnswerParams, CatalogParams, Empty, EventsParams, HistoryParams, InitializeParams,
+    AnswerParams, CatalogParams, Empty, EventParams, EventsParams, HistoryParams, InitializeParams,
     InitializeResult, InterruptParams, ListParams, ListResult, OpenParams, OpenResult,
     SessionParams, SubmitParams, name,
 };
@@ -114,6 +114,8 @@ enum Start {
         session: SessionId,
         events: FrameStream,
         handle: SessionHandle,
+        /// A tree attachment: every frame is notified with this root.
+        tree: bool,
     },
     Gateway(bingo_sdk::GatewayStream),
 }
@@ -266,6 +268,7 @@ impl Server {
             session,
             events,
             handle,
+            tree: params.options.children,
         }))
     }
 
@@ -301,6 +304,7 @@ impl Server {
             session: params.session,
             events,
             handle,
+            tree: false,
         }))
     }
 
@@ -351,7 +355,13 @@ impl Server {
                 session,
                 events,
                 handle,
+                tree,
             } => {
+                let root = tree.then(|| session.clone());
+                let events = events.map(move |frame| EventParams {
+                    frame,
+                    root: root.clone(),
+                });
                 let pump = Pump::spawn(name::EVENT, events, self.out.clone());
                 // Replacing drops the old forwarder, which stops its task.
                 self.open.insert(session, Forwarder::new(handle, pump));

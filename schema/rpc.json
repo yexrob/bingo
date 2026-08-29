@@ -1102,23 +1102,7 @@
         }
       ]
     },
-    "EventsParams": {
-      "type": "object",
-      "properties": {
-        "session": {
-          "$ref": "#/$defs/SessionId"
-        },
-        "since": {
-          "$ref": "#/$defs/Seq",
-          "description": "Frames after this one are re-sent, then the stream goes live.",
-          "default": 0
-        }
-      },
-      "required": [
-        "session"
-      ]
-    },
-    "Frame": {
+    "EventParams": {
       "type": "object",
       "properties": {
         "seq": {
@@ -1143,6 +1127,16 @@
         },
         "event": {
           "$ref": "#/$defs/Event"
+        },
+        "root": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SessionId"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
@@ -1150,6 +1144,23 @@
         "ts",
         "session",
         "event"
+      ],
+      "description": "`event`: one frame, and — under a tree attachment (ADR-0010 §3) — the root\nit was opened through, which is the stream the client routes it to. A\nframe of the root itself carries no `root`, so the line is the frame verbatim."
+    },
+    "EventsParams": {
+      "type": "object",
+      "properties": {
+        "session": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "since": {
+          "$ref": "#/$defs/Seq",
+          "description": "Frames after this one are re-sent, then the stream goes live.",
+          "default": 0
+        }
+      },
+      "required": [
+        "session"
       ]
     },
     "GatewayEvent": {
@@ -3082,7 +3093,7 @@
   "notifications": {
     "event": {
       "params": {
-        "$ref": "#/$defs/Frame"
+        "$ref": "#/$defs/EventParams"
       }
     },
     "gateway/event": {

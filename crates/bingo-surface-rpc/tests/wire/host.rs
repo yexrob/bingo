@@ -15,6 +15,7 @@ use bingo_sdk::{
     SessionPort, SessionSelector, SessionState, SessionSummary, TurnId, TurnOrigin, TurnStatus,
     Usage,
 };
+use futures::StreamExt;
 use jiff::Timestamp;
 use serde_json::Value;
 
@@ -39,6 +40,28 @@ pub fn summary() -> SessionSummary {
         updated_at: ts(),
         usage: Usage::default(),
         busy: false,
+    }
+}
+
+pub fn child_id() -> SessionId {
+    SessionId::from_raw("ses_2")
+}
+
+/// The head frame of a child of the scripted session, as a tree attachment
+/// would carry it after the root's own frames.
+pub fn child_head() -> Frame {
+    let mut summary = summary();
+    summary.id = child_id();
+    summary.parent = Some(bingo_sdk::ParentLink {
+        session: session_id(),
+        item: ItemId::from_raw("itm_1"),
+    });
+    Frame {
+        seq: Seq(1),
+        ts: ts(),
+        session: child_id(),
+        cause: None,
+        event: Event::SessionUpdated { summary },
     }
 }
 
@@ -220,12 +243,18 @@ impl HostApi for TestHost {
         &self,
         _selector: SessionSelector,
         _who: ClientIdentity,
-        _options: OpenOptions,
+        options: OpenOptions,
     ) -> Result<Attachment, KernelError> {
+        let own = self.session.stream(Seq::ZERO, false);
+        let events: FrameStream = if options.children {
+            Box::pin(own.chain(futures::stream::iter([child_head()])))
+        } else {
+            own
+        };
         Ok(Attachment {
             session: session_id(),
             snapshot: fresh_state(),
-            events: self.session.stream(Seq::ZERO, false),
+            events,
             handle: SessionHandle(Arc::clone(&self.session) as Arc<dyn SessionPort>),
         })
     }
