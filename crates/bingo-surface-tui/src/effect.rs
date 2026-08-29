@@ -2,7 +2,7 @@
 //! call that reaches the kernel or the terminal leaves as one of these, so a
 //! key table is a test with no runtime in it.
 
-use bingo_sdk::{Activation, Answer, Input, InteractionId, SessionSelector};
+use bingo_sdk::{Activation, Answer, Input, InteractionId, SessionId, SessionSelector};
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Effect {
@@ -13,6 +13,9 @@ pub enum Effect {
         answer: Answer,
         activation: Activation,
     },
+    /// Paint another session of the attached tree; the loop fetches its
+    /// mailbox the first time.
+    View(SessionId),
     /// Attach to another session; the loop closes the old attachment first.
     Open(SessionSelector),
     /// Fill the session picker from the host.

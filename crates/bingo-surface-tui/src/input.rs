@@ -15,7 +15,8 @@ use crate::clock::Now;
 use crate::commands::{self, Local};
 use crate::effect::Effect;
 use crate::permission;
-use crate::ui::{Scroll, Ui};
+use crate::tree::Tree;
+use crate::ui::{Scroll, Switcher, Ui};
 
 /// Lines the transcript moves by on one page key.
 const PAGE: usize = 10;
@@ -23,21 +24,32 @@ const PAGE: usize = 10;
 pub const ARM_HINT: &str = "press ctrl+c again to exit";
 /// What shift+tab says when no policy published a mode it can walk.
 pub const UNKNOWN_MODE: &str = "permission mode unknown — /permission <mode>";
+/// What ctrl+g says when the session has spawned nobody to switch to.
+pub const NO_AGENTS: &str = "no sub-agents in this session";
 
-pub fn on_key(ui: &mut Ui, state: &SessionState, key: KeyEvent, now: Now) -> Vec<Effect> {
+pub fn on_key(ui: &mut Ui, tree: &Tree, key: KeyEvent, now: Now) -> Vec<Effect> {
     if key.kind == KeyEventKind::Release {
         return Vec::new();
     }
     ui.block = None;
+    let state = tree.viewed();
     if let Some(effects) = leaving(ui, state, key, now) {
         return effects;
     }
     if ui.picker.is_some() {
         return picker(ui, key);
     }
-    if let Some(interaction) = state.interactions.first() {
-        let effects = ui.dialog.on_key(interaction, key, now);
-        return effects;
+    if chord(key, 'g') {
+        toggle_switcher(ui, tree, now);
+        return Vec::new();
+    }
+    if ui.switcher.is_some() {
+        return switcher(ui, tree, key);
+    }
+    // A prompt raised anywhere in the tree is answered from wherever the
+    // person is looking; the handle routes the answer back to who asked.
+    if let Some((_, interaction)) = tree.open_interaction() {
+        return ui.dialog.on_key(interaction, key, now);
     }
     if key.code == KeyCode::Esc {
         return escape(ui, state);
@@ -45,7 +57,11 @@ pub fn on_key(ui: &mut Ui, state: &SessionState, key: KeyEvent, now: Now) -> Vec
     if let Some(effects) = menu(ui, key) {
         return effects;
     }
-    editing(ui, state, key, now)
+    editing(ui, tree, key, now)
+}
+
+fn chord(key: KeyEvent, c: char) -> bool {
+    key.code == KeyCode::Char(c) && key.modifiers.contains(KeyModifiers::CONTROL)
 }
 
 /// A bracketed paste lands verbatim wherever the caret is.
@@ -125,6 +141,49 @@ fn picker(ui: &mut Ui, key: KeyEvent) -> Vec<Effect> {
     Vec::new()
 }
 
+/// Open the switcher on the session in view, or close it again. There is
+/// nothing to switch between until the session has spawned somebody.
+fn toggle_switcher(ui: &mut Ui, tree: &Tree, now: Now) {
+    if ui.switcher.take().is_some() {
+        return;
+    }
+    let rows = tree.rows();
+    if rows.len() < 2 {
+        ui.notify(Level::Info, NO_AGENTS, now.instant);
+        return;
+    }
+    let selected = rows
+        .iter()
+        .position(|row| row.session == tree.view())
+        .unwrap_or(0);
+    ui.switcher = Some(Switcher { selected });
+}
+
+fn switcher(ui: &mut Ui, tree: &Tree, key: KeyEvent) -> Vec<Effect> {
+    let rows = tree.rows();
+    let Some(mut selected) = ui.switcher.map(|s| s.selected) else {
+        return Vec::new();
+    };
+    match key.code {
+        KeyCode::Up => selected = selected.saturating_sub(1),
+        KeyCode::Down => selected = (selected + 1).min(rows.len().saturating_sub(1)),
+        KeyCode::Esc => {
+            ui.switcher = None;
+            return Vec::new();
+        }
+        KeyCode::Enter => {
+            ui.switcher = None;
+            return rows
+                .get(selected)
+                .map(|row| vec![Effect::View(row.session.clone())])
+                .unwrap_or_default();
+        }
+        _ => {}
+    }
+    ui.switcher = Some(Switcher { selected });
+    Vec::new()
+}
+
 /// The dropdown owns the arrows and the completion keys while it is open.
 fn menu(ui: &mut Ui, key: KeyEvent) -> Option<Vec<Effect>> {
     let rows = ui.suggestions();
@@ -160,14 +219,14 @@ fn complete(ui: &mut Ui) -> Vec<Effect> {
     Vec::new()
 }
 
-fn editing(ui: &mut Ui, state: &SessionState, key: KeyEvent, now: Now) -> Vec<Effect> {
+fn editing(ui: &mut Ui, tree: &Tree, key: KeyEvent, now: Now) -> Vec<Effect> {
     if key.modifiers.contains(KeyModifiers::CONTROL) {
         return control(ui, key);
     }
     if key.modifiers.contains(KeyModifiers::ALT) {
         return alt(ui, key);
     }
-    plain(ui, state, key, now)
+    plain(ui, tree, key, now)
 }
 
 fn control(ui: &mut Ui, key: KeyEvent) -> Vec<Effect> {
@@ -193,11 +252,11 @@ fn alt(ui: &mut Ui, key: KeyEvent) -> Vec<Effect> {
     Vec::new()
 }
 
-fn plain(ui: &mut Ui, state: &SessionState, key: KeyEvent, now: Now) -> Vec<Effect> {
+fn plain(ui: &mut Ui, tree: &Tree, key: KeyEvent, now: Now) -> Vec<Effect> {
     match key.code {
         KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => newline(ui),
-        KeyCode::Enter => return enter(ui, state),
-        KeyCode::BackTab => return cycle_mode(ui, state, now),
+        KeyCode::Enter => return enter(ui, tree),
+        KeyCode::BackTab => return cycle_mode(ui, tree.viewed(), now),
         KeyCode::Up => history_or_line(ui, Step::Up),
         KeyCode::Down => history_or_line(ui, Step::Down),
         KeyCode::PageUp => ui.scroll = Scroll(ui.scroll.0 + PAGE),
@@ -231,7 +290,7 @@ fn cycle_mode(ui: &mut Ui, state: &SessionState, now: Now) -> Vec<Effect> {
 
 /// Enter sends, unless the line ends in a backslash — the newline chord for
 /// terminals that cannot tell shift+enter from enter.
-fn enter(ui: &mut Ui, state: &SessionState) -> Vec<Effect> {
+fn enter(ui: &mut Ui, tree: &Tree) -> Vec<Effect> {
     if ui.composer.text().ends_with('\\') {
         ui.composer.backspace();
         newline(ui);
@@ -240,10 +299,12 @@ fn enter(ui: &mut Ui, state: &SessionState) -> Vec<Effect> {
     if ui.composer.text().trim().is_empty() {
         return Vec::new();
     }
-    submit(ui, state)
+    submit(ui, tree)
 }
 
-fn submit(ui: &mut Ui, state: &SessionState) -> Vec<Effect> {
+/// What a line does. `/clear` starts a fresh session beside the root's, not
+/// beside whichever child is on screen.
+fn submit(ui: &mut Ui, tree: &Tree) -> Vec<Effect> {
     let text = ui.composer.take();
     ui.history.remember(&text);
     ui.edited();
@@ -255,7 +316,7 @@ fn submit(ui: &mut Ui, state: &SessionState) -> Vec<Effect> {
         }
         Some(Local::Clear) => vec![Effect::Open(SessionSelector::Create {
             spec: SessionSpec {
-                cwd: PathBuf::from(&state.summary.cwd),
+                cwd: PathBuf::from(&tree.root().summary.cwd),
                 ..SessionSpec::default()
             },
         })],
@@ -317,7 +378,22 @@ mod tests {
         key: crossterm::event::KeyEvent,
         now: Now,
     ) -> Vec<Effect> {
-        on_key(ui, state, key, now)
+        on_key(ui, &solo(state), key, now)
+    }
+
+    fn press_tree(
+        ui: &mut Ui,
+        tree: &Tree,
+        key: crossterm::event::KeyEvent,
+        now: Now,
+    ) -> Vec<Effect> {
+        on_key(ui, tree, key, now)
+    }
+
+    /// A root with one sub-agent under it.
+    fn with_child(mut frames: Vec<bingo_sdk::Frame>) -> Tree {
+        frames.insert(0, child_frame(1, announced("reviewer")));
+        folded_tree(frames)
     }
 
     fn line(ui: &mut Ui, state: &SessionState, text: &str, now: Now) -> Vec<Effect> {
@@ -836,6 +912,93 @@ mod tests {
             })]
         );
         assert!(ui.picker.is_none());
+    }
+
+    // ---- the switcher ---------------------------------------------------
+
+    #[test]
+    fn ctrl_g_lists_the_tree_and_enter_switches_the_view() {
+        let tree = with_child(vec![]);
+        let (mut ui, now) = scene();
+        assert!(press_tree(&mut ui, &tree, ctrl('g'), now).is_empty());
+        assert_eq!(
+            ui.switcher.map(|s| s.selected),
+            Some(0),
+            "it opens on the session in view"
+        );
+        press_tree(&mut ui, &tree, key(KeyCode::Down), now);
+        assert_eq!(
+            press_tree(&mut ui, &tree, key(KeyCode::Enter), now),
+            vec![Effect::View(child_id())]
+        );
+        assert!(ui.switcher.is_none());
+    }
+
+    #[test]
+    fn ctrl_g_toggles_and_esc_closes_the_switcher() {
+        let tree = with_child(vec![]);
+        let (mut ui, now) = scene();
+        press_tree(&mut ui, &tree, ctrl('g'), now);
+        press_tree(&mut ui, &tree, ctrl('g'), now);
+        assert!(ui.switcher.is_none(), "the same chord closes it");
+        press_tree(&mut ui, &tree, ctrl('g'), now);
+        press_tree(&mut ui, &tree, key(KeyCode::Esc), now);
+        assert!(ui.switcher.is_none());
+    }
+
+    #[test]
+    fn ctrl_g_says_so_when_there_is_nobody_to_switch_to() {
+        let (mut ui, now) = scene();
+        assert!(press(&mut ui, &state(), ctrl('g'), now).is_empty());
+        assert!(ui.switcher.is_none());
+        assert!(ui.notices.iter().any(|n| n.text == NO_AGENTS));
+    }
+
+    #[test]
+    fn the_switcher_opens_on_the_child_that_is_already_in_view() {
+        let mut tree = with_child(vec![]);
+        tree.show(&child_id());
+        let (mut ui, now) = scene();
+        press_tree(&mut ui, &tree, ctrl('g'), now);
+        assert_eq!(ui.switcher.map(|s| s.selected), Some(1));
+        assert_eq!(
+            press_tree(&mut ui, &tree, key(KeyCode::Enter), now),
+            vec![Effect::View(child_id())]
+        );
+    }
+
+    #[test]
+    fn a_prompt_a_child_raised_is_answered_from_the_root_view() {
+        let tree = with_child(vec![child_frame(2, opened(child_permission()))]);
+        let (mut ui, now) = scene();
+        ui.dialog
+            .focus_on(tree.open_interaction().map(|(_, open)| open));
+        assert_eq!(
+            press_tree(&mut ui, &tree, typed('y'), now),
+            vec![Effect::Answer {
+                interaction: bingo_sdk::InteractionId::from_raw("int_2"),
+                answer: Answer::AllowOnce,
+                activation: Activation::Keyboard,
+            }],
+            "the root's handle routes it back to whoever asked"
+        );
+    }
+
+    #[test]
+    fn clear_starts_beside_the_root_even_from_a_child_view() {
+        let mut tree = with_child(vec![]);
+        tree.show(&child_id());
+        let (mut ui, now) = scene();
+        write(&mut ui, tree.viewed(), "/clear", now);
+        assert_eq!(
+            press_tree(&mut ui, &tree, key(KeyCode::Enter), now),
+            vec![Effect::Open(SessionSelector::Create {
+                spec: SessionSpec {
+                    cwd: PathBuf::from("/tmp/project"),
+                    ..SessionSpec::default()
+                }
+            })]
+        );
     }
 
     #[test]

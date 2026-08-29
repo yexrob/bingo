@@ -9,6 +9,7 @@ use bingo_sdk::{
 use ratatui::text::{Line, Span};
 use serde_json::Value;
 
+use crate::tree::Agents;
 use crate::{markdown, preview, theme, wrap};
 
 /// Output lines shown under a tool row before it is folded.
@@ -20,13 +21,22 @@ const CONNECTOR: &str = "  ⎿  ";
 const INDENT: &str = "     ";
 
 /// The transcript, wrapped to `width`. `spinner` is the frame a running tool
-/// shows; the caller owns the clock.
-pub fn lines(state: &SessionState, width: usize, spinner: &str) -> Vec<Line<'static>> {
+/// shows and `agents` the sub-sessions this transcript's tool calls spawned;
+/// the caller owns the clock and the tree.
+pub fn lines(
+    state: &SessionState,
+    agents: &Agents,
+    width: usize,
+    spinner: &str,
+) -> Vec<Line<'static>> {
     let mut out: Vec<Line<'static>> = Vec::new();
     for item in &state.items {
-        let block = item_lines(item, width, spinner);
+        let mut block = item_lines(item, width, spinner);
         if block.is_empty() {
             continue;
+        }
+        if let Some(agent) = agents.get(&item.id) {
+            block.push(child_line(agent));
         }
         if !out.is_empty() {
             out.push(Line::default());
@@ -51,6 +61,15 @@ fn failure(state: &SessionState) -> Vec<Line<'static>> {
             theme::danger(),
         )),
     ]
+}
+
+/// The tool call that spawned a sub-session says so under its own row; what
+/// the child is doing is read from its state, never copied into this one.
+fn child_line(agent: &str) -> Line<'static> {
+    Line::from(Span::styled(
+        format!("  {} {agent}", theme::CHILD),
+        theme::dim(),
+    ))
 }
 
 fn item_lines(item: &Item, width: usize, spinner: &str) -> Vec<Line<'static>> {

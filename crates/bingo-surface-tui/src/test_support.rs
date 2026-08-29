@@ -6,8 +6,8 @@ use std::time::Instant;
 
 use bingo_sdk::{
     Answer, AnswerSpec, ContentPart, Display, Event, Frame, Interaction, InteractionId,
-    InteractionKind, Item, ItemBody, ItemId, ItemStatus, Level, Origin, Preview, QuestionOption,
-    Seq, SessionId, SessionState, SessionSummary, ToolOutput, TurnId, Usage,
+    InteractionKind, Item, ItemBody, ItemId, ItemStatus, Level, Origin, ParentLink, Preview,
+    QuestionOption, Seq, SessionId, SessionState, SessionSummary, ToolOutput, TurnId, Usage,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use jiff::Timestamp;
@@ -16,6 +16,7 @@ use ratatui::backend::TestBackend;
 use serde_json::{Value, json};
 
 use crate::clock::Now;
+use crate::tree::Tree;
 use crate::ui::Ui;
 use crate::view;
 
@@ -50,6 +51,46 @@ pub fn frame(seq: u64, event: Event) -> Frame {
         session: SessionId::from_raw("ses_1"),
         cause: None,
         event,
+    }
+}
+
+/// The sub-session the root's tool call spawned, as its own frames name it.
+pub fn child_id() -> SessionId {
+    SessionId::from_raw("ses_2")
+}
+
+pub fn child_summary(title: &str) -> SessionSummary {
+    SessionSummary {
+        id: child_id(),
+        title: Some(title.into()),
+        parent: Some(ParentLink {
+            session: SessionId::from_raw("ses_1"),
+            item: ItemId::from_raw("itm_1"),
+        }),
+        ..summary()
+    }
+}
+
+/// The frame at the head of a child's stream: who it is and whose it is.
+pub fn announced(title: &str) -> Event {
+    Event::SessionUpdated {
+        summary: child_summary(title),
+    }
+}
+
+pub fn child_frame(seq: u64, event: Event) -> Frame {
+    Frame {
+        session: child_id(),
+        ..frame(seq, event)
+    }
+}
+
+/// A permission the child raised; the root's handle answers it.
+pub fn child_permission() -> Interaction {
+    Interaction {
+        id: InteractionId::from_raw("int_2"),
+        session: child_id(),
+        ..permission(Some("Edit(src/)"), None)
     }
 }
 
@@ -308,10 +349,26 @@ pub fn shift(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::SHIFT)
 }
 
+/// A tree of one session, which is what most of these tests are about.
+pub fn solo(state: &SessionState) -> Tree {
+    Tree::new(state.clone())
+}
+
+/// Fold frames into a fresh tree, routed by `frame.session` the way the loop
+/// does; a child joins on the `SessionUpdated` at the head of its stream.
+pub fn folded_tree(frames: Vec<Frame>) -> Tree {
+    let mut tree = Tree::new(state());
+    for frame in &frames {
+        tree.apply(frame);
+    }
+    tree
+}
+
 /// Type a whole line, one key at a time, through the real handler.
 pub fn write(ui: &mut Ui, state: &SessionState, text: &str, now: Now) {
+    let tree = solo(state);
     for c in text.chars() {
-        crate::input::on_key(ui, state, typed(c), now);
+        crate::input::on_key(ui, &tree, typed(c), now);
     }
 }
 
@@ -321,9 +378,17 @@ pub fn render(state: &SessionState, ui: &Ui, now: Now) -> String {
 }
 
 pub fn draw_sized(width: u16, height: u16, state: &SessionState, ui: &Ui, now: Now) -> String {
+    draw_tree(width, height, &solo(state), ui, now)
+}
+
+pub fn render_tree(tree: &Tree, ui: &Ui, now: Now) -> String {
+    draw_tree(80, 24, tree, ui, now)
+}
+
+pub fn draw_tree(width: u16, height: u16, tree: &Tree, ui: &Ui, now: Now) -> String {
     let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("a test terminal");
     terminal
-        .draw(|frame| view::draw(state, ui, frame, now))
+        .draw(|frame| view::draw(tree, ui, frame, now))
         .expect("a drawn frame");
     terminal.backend().to_string()
 }
@@ -430,20 +495,30 @@ impl SessionPort for TestSession {
 #[derive(Debug)]
 pub struct TestHost {
     session: Arc<TestSession>,
+    /// The mailbox `open(ById)` hands out for the child in the tree.
+    child: Arc<TestSession>,
     closed: Mutex<Vec<SessionId>>,
 }
 
 impl TestHost {
     pub fn with(frames: Vec<bingo_sdk::Frame>) -> (HostHandle, Arc<TestSession>) {
+        let (host, session, _) = Self::tree(frames);
+        (host, session)
+    }
+
+    /// The root's mailbox and the child's, which `open(ById)` answers with.
+    pub fn tree(frames: Vec<bingo_sdk::Frame>) -> (HostHandle, Arc<TestSession>, Arc<TestSession>) {
         let session = Arc::new(TestSession {
             frames,
             ..Default::default()
         });
+        let child = Arc::new(TestSession::default());
         let host = TestHost {
             session: Arc::clone(&session),
+            child: Arc::clone(&child),
             closed: Mutex::new(Vec::new()),
         };
-        (HostHandle(Arc::new(host)), session)
+        (HostHandle(Arc::new(host)), session, child)
     }
 }
 
@@ -453,12 +528,22 @@ impl HostApi for TestHost {
         Ok(vec![summary()])
     }
 
+    /// The tree's stream comes with the root; a child is opened for its
+    /// mailbox alone, so its stream is empty.
     async fn open(
         &self,
-        _selector: SessionSelector,
+        selector: SessionSelector,
         _who: ClientIdentity,
         _options: OpenOptions,
     ) -> Result<Attachment, KernelError> {
+        if matches!(&selector, SessionSelector::ById { id } if id == &child_id()) {
+            return Ok(Attachment {
+                session: child_id(),
+                snapshot: SessionState::new(child_summary("reviewer")),
+                events: Box::pin(futures::stream::empty()),
+                handle: SessionHandle(Arc::clone(&self.child) as Arc<dyn SessionPort>),
+            });
+        }
         Ok(Attachment {
             session: SessionId::from_raw("ses_1"),
             snapshot: state(),
@@ -529,8 +614,8 @@ impl Recorder {
 }
 
 impl Screen for Recorder {
-    fn draw(&mut self, state: &SessionState, ui: &Ui, now: Now) -> std::io::Result<()> {
-        self.frames.push(draw_sized(80, 24, state, ui, now));
+    fn draw(&mut self, tree: &Tree, ui: &Ui, now: Now) -> std::io::Result<()> {
+        self.frames.push(render_tree(tree, ui, now));
         Ok(())
     }
 

@@ -1,0 +1,28 @@
+---
+source: crates/bingo-surface-tui/src/view.rs
+expression: screen
+---
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"❯ have it reviewed                                                              "
+"                                                                                "
+"✓ SpawnAgent review the diff                                                    "
+"  ⎿  reviewer started                                                           "
+"  ↳ reviewer · idle                                                             "
+"1 agent · 1 needs you                                                           "
+"Permission · Edit · ↳ reviewer                                                  "
+"  Edit src/lib.rs                                                               "
+"                                                                                "
+"❯ 1. Yes                                                                        "
+"  2. Yes, for this session (Edit(src/))                                         "
+"  3. No, and tell it what to do instead                                         "
+"  enter to select · ↑/↓ to navigate · esc to deny                               "
+"╭──────────────────────────────────────────────────────────────────────────────╮"
+"│❯ ask anything · / for commands · ! for shell                                 │"
+"╰──────────────────────────────────────────────────────────────────────────────╯"
+"? for shortcuts · / commands · ! shell                                    fake-1"
