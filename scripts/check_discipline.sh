@@ -57,6 +57,12 @@ if [ -n "$nouns" ]; then
   say "feature noun found in kernel/sdk code:"; say "$nouns" | head; fail=1
 fi
 
+# 4b. A surface is a client of the one event stream (ADR-0002, ADR-0007): no private mirror enums.
+mirrors=$(grep -rEn '^\s*(pub(\([a-z]+\))?\s+)?enum\s+[A-Za-z]*Event\b' crates/bingo-surface-*/src --include='*.rs' 2>/dev/null || true)
+if [ -n "$mirrors" ]; then
+  say "event mirror enum in a surface crate (surfaces fold bingo_sdk::Event, they do not redefine it):"; say "$mirrors" | head; fail=1
+fi
+
 # 5. Struct field count ≤ 16 and inherent impl spread ≤ 2 files per type (best effort, grep-based).
 python3 - <<'PY' || fail=1
 import re, sys, pathlib
