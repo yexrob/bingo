@@ -81,4 +81,43 @@ if bad:
 print("cohesion ok")
 PY
 
+# 6. Function length: physical lines from `fn` to its closing brace (warn 60, fail 120).
+python3 - <<'PY' || fail=1
+import re, sys, pathlib
+WARN, FAIL = 60, 120
+bad = 0
+def bodies(src):
+    # Yield (name, start_line, end_line) for every fn with a block body.
+    lines = src.splitlines()
+    i = 0
+    while i < len(lines):
+        m = re.match(r"\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+|const\s+|unsafe\s+)*fn\s+(\w+)", lines[i])
+        if not m:
+            i += 1; continue
+        depth, j, opened = 0, i, False
+        while j < len(lines):
+            code = re.sub(r'"(?:\\.|[^"\\])*"', '""', lines[j]).split("//")[0]
+            if not opened and ";" in code and "{" not in code:
+                break  # a trait signature, no body
+            for ch in code:
+                if ch == "{": depth += 1; opened = True
+                elif ch == "}": depth -= 1
+            if opened and depth == 0:
+                yield m.group(1), i + 1, j + 1
+                break
+            j += 1
+        i = j + 1 if opened else i + 1
+for f in sorted(pathlib.Path("crates").rglob("*.rs")):
+    if f.name == "tests.rs" or "tests" in f.parts or "test_support" in f.name:
+        continue  # a test may be as long as its scenario
+    src = f.read_text(encoding="utf-8").split("#[cfg(test)]")[0]
+    for name, start, end in bodies(src):
+        n = end - start + 1
+        if n > FAIL:
+            print(f"FAIL {f}:{start} fn {name} is {n} lines (>{FAIL})"); bad += 1
+        elif n > WARN:
+            print(f"warn {f}:{start} fn {name} is {n} lines (>{WARN})")
+sys.exit(1 if bad else 0)
+PY
+
 [ "$fail" -eq 0 ] && say "discipline ok" || { say "discipline FAILED"; exit 1; }

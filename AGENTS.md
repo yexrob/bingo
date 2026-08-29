@@ -6,6 +6,7 @@ A local coding-agent harness in Rust: a minimal kernel, everything else a plugin
 
 - Rust 2024, `thiserror` for library errors, `anyhow` only at the binary edge. `unwrap`/`expect` are lint errors outside tests; `unsafe` is forbidden.
 - Write code the way the surrounding code is written. Names carry meaning; comments say only *why*.
+- **One responsibility per function, one per module.** A function does one thing at one level of abstraction: a match arm that grows a body becomes a function, a loop body that decides and acts becomes two. A module owns one noun; when it owns two, split it. Split eagerly — a small function with a good name costs nothing, a long one hides its second job. `scripts/check_discipline.sh` warns at 60 lines per function and fails at 120.
 - Model-facing text, UI copy, docs, tests and commit messages are English.
 - No new dependency without a line in the ADR or plan that justifies it and a `scripts/budget.sh` run. `cargo deny check` must pass.
 
