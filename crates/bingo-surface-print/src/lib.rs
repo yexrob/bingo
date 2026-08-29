@@ -17,6 +17,7 @@ mod input;
 mod render;
 mod stream_json;
 
+use std::collections::BTreeMap;
 use std::io::{self, IsTerminal, Write};
 use std::sync::Arc;
 
@@ -26,8 +27,8 @@ use bingo_sdk::{
     Activation, Answer, AnswerSpec, Applied, Attachment, CatalogKind, ClientIdentity, CloseReason,
     ErrorCode, Event, Exit, Frame, FrameStream, HostHandle, Input, IntentId, IntentOutcome,
     Interaction, InteractionKind, KernelError, OpenOptions, Origin, Plugin, PluginError,
-    PluginManifest, Registrar, SessionHandle, SessionState, Surface, SurfaceKind, SurfaceOptions,
-    TurnStatus,
+    PluginManifest, Registrar, SessionHandle, SessionId, SessionState, Surface, SurfaceKind,
+    SurfaceOptions, TurnStatus,
 };
 use futures::StreamExt;
 use tokio::sync::mpsc;
@@ -139,11 +140,8 @@ pub(crate) async fn drive(
         args,
         ..
     } = opts;
-    let renderer = Renderer::new(
-        Mode::from_args(&args),
-        console.human(),
-        tool_names(host).await,
-    );
+    let mode = Mode::from_args(&args);
+    let renderer = Renderer::new(mode, console.human(), tool_names(host).await);
     let start = start(Format::from_args(&args), prompt, console)?;
     let attachment = host
         .open(
@@ -152,7 +150,11 @@ pub(crate) async fn drive(
                 name: SURFACE_ID.into(),
                 surface: SURFACE_ID.into(),
             },
-            OpenOptions::default(),
+            // Only the envelope has a shape for a sub-session's lines
+            // (`parent_tool_use_id`); text and json runs report the root alone.
+            OpenOptions {
+                children: matches!(mode, Mode::StreamJson),
+            },
         )
         .await?;
     let run = Attached::open(attachment, renderer, console, out, err)?;
@@ -195,10 +197,13 @@ fn start(
     }
 }
 
-/// The attached session a run folds, and the streams it writes to. Both loops
-/// share it, and neither keeps anything the snapshot already holds.
+/// The attached session a run folds — with its sub-sessions when the mode
+/// reports them — and the streams it writes to. Both loops share it, and
+/// neither keeps anything the states already hold.
 struct Attached<'a> {
-    snapshot: SessionState,
+    root: SessionId,
+    /// One reducer per session in the tree, the root's from the snapshot.
+    states: BTreeMap<SessionId, SessionState>,
     events: FrameStream,
     handle: SessionHandle,
     renderer: Renderer,
@@ -217,14 +222,15 @@ impl<'a> Attached<'a> {
         err: &'a mut (dyn Write + Send),
     ) -> Result<Self, KernelError> {
         let Attachment {
+            session,
             snapshot,
             events,
             handle,
-            ..
         } = attachment;
         renderer.open(&snapshot, &mut *out).map_err(stdio_error)?;
         Ok(Self {
-            snapshot,
+            root: session.clone(),
+            states: BTreeMap::from([(session, snapshot)]),
             events,
             handle,
             renderer,
@@ -243,22 +249,42 @@ impl<'a> Attached<'a> {
             .submit(intent, Input::text(text, Origin::surface(SURFACE_ID)));
     }
 
-    /// Fold and render one frame; `false` when it was stale, and nothing else
-    /// should look at it.
+    /// Fold and render one frame; `false` when it was stale or from a session
+    /// this run has no head for, and nothing else should look at it.
     fn show(&mut self, frame: &Frame) -> Result<bool, KernelError> {
-        if self.snapshot.apply(frame) == Applied::Stale {
+        let Some(state) = self.state_of(frame) else {
+            return Ok(false);
+        };
+        if state.apply(frame) == Applied::Stale {
             return Ok(false);
         }
+        let (state, root) = (&self.states[&frame.session], &self.states[&self.root]);
         self.renderer
-            .render(frame, &self.snapshot, &mut *self.out, &mut *self.err)
+            .render(frame, state, root, &mut *self.out, &mut *self.err)
             .map_err(stdio_error)?;
         Ok(true)
+    }
+
+    /// The frame's session, folded from its head when it is new.
+    fn state_of(&mut self, frame: &Frame) -> Option<&mut SessionState> {
+        if !self.states.contains_key(&frame.session) {
+            let Event::SessionUpdated { summary } = &frame.event else {
+                return None;
+            };
+            self.states
+                .insert(frame.session.clone(), SessionState::new(summary.clone()));
+        }
+        self.states.get_mut(&frame.session)
+    }
+
+    fn root(&self) -> &SessionState {
+        &self.states[&self.root]
     }
 
     /// Re-read the journal from the last frame applied, filling the gap a lag
     /// marker announced.
     async fn resync(&mut self) -> Result<(), KernelError> {
-        self.events = self.handle.events_since(self.snapshot.seq).await?;
+        self.events = self.handle.events_since(self.root().seq).await?;
         Ok(())
     }
 

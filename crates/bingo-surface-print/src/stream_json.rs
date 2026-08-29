@@ -37,6 +37,43 @@ use bingo_sdk::{
     ContentPart, ErrorCode, Event, Frame, InterruptReason, Item, ItemBody, SessionState,
     ToolOutput, TurnStatus, Usage,
 };
+
+/// Whose frame is being encoded, and the root it is reported under. A
+/// sub-session's lines carry the root's `session_id` and, as
+/// `parent_tool_use_id`, the call that spawned it (ADR-0010 §4): the child's
+/// `parent.item` names the root's tool call, whose `call_id` is the id the
+/// envelope already wrote for that `tool_use`.
+struct Scope<'a> {
+    state: &'a SessionState,
+    root: &'a SessionState,
+}
+
+impl Scope<'_> {
+    fn is_root(&self) -> bool {
+        self.state.summary.id == self.root.summary.id
+    }
+
+    fn session_id(&self) -> &str {
+        self.root.summary.id.as_str()
+    }
+
+    fn parent_tool_use_id(&self) -> Value {
+        if self.is_root() {
+            return Value::Null;
+        }
+        let call = self
+            .state
+            .summary
+            .parent
+            .as_ref()
+            .and_then(|link| self.root.item(&link.item))
+            .and_then(|item| match &item.body {
+                ItemBody::ToolCall { call_id, .. } => Some(call_id.clone()),
+                _ => None,
+            });
+        call.map_or(Value::Null, Value::String)
+    }
+}
 use serde_json::{Value, json};
 
 use crate::render::tool_failed;
@@ -89,7 +126,7 @@ impl Encoder {
         let mut line = json!({
             "type": "system",
             "subtype": "init",
-            "session_id": session(state),
+            "session_id": state.summary.id.as_str(),
             "cwd": state.summary.cwd,
             "tools": self.tools,
             "model": state.summary.model,
@@ -101,22 +138,32 @@ impl Encoder {
     }
 
     /// At most one line per frame; `None` for everything the envelope has no
-    /// shape for.
-    pub(crate) fn line(&mut self, frame: &Frame, state: &SessionState) -> Option<Value> {
+    /// shape for. `root` is the session the run opened; a frame of one of its
+    /// sub-sessions is reported under it, and its turns write no `result`.
+    pub(crate) fn line(
+        &mut self,
+        frame: &Frame,
+        state: &SessionState,
+        root: &SessionState,
+    ) -> Option<Value> {
+        let scope = Scope { state, root };
         match &frame.event {
-            Event::TurnStarted { .. } => {
+            Event::TurnStarted { .. } if scope.is_root() => {
                 self.turn = Turn::started_at(frame.ts.as_millisecond());
                 None
             }
-            Event::TurnUsage { .. } => {
+            Event::TurnUsage { .. } if scope.is_root() => {
                 self.turn.rounds += 1;
                 None
             }
-            Event::TurnCompleted { status, usage, .. } => {
-                Some(self.result(frame, state, status, *usage))
+            Event::TurnCompleted { status, usage, .. } if scope.is_root() => {
+                Some(self.result(frame, &scope, status, *usage))
             }
-            Event::ItemStarted { item } => started(item, state),
-            Event::ItemCompleted { item } => self.completed(item, state),
+            Event::TurnStarted { .. } | Event::TurnUsage { .. } | Event::TurnCompleted { .. } => {
+                None
+            }
+            Event::ItemStarted { item } => started(item, &scope),
+            Event::ItemCompleted { item } => self.completed(item, &scope),
             // A delta is a `stream_event` line, which Claude Code writes only
             // under `--include-partial-messages`. The rest has no shape in this
             // envelope and reaches stderr exactly as `--output-format json`
@@ -141,13 +188,13 @@ impl Encoder {
         }
     }
 
-    fn completed(&mut self, item: &Item, state: &SessionState) -> Option<Value> {
+    fn completed(&mut self, item: &Item, scope: &Scope<'_>) -> Option<Value> {
         match &item.body {
-            ItemBody::Assistant { text } => self.assistant_text(item, state, text),
+            ItemBody::Assistant { text } => self.assistant_text(item, scope, text),
             ItemBody::ToolCall {
                 call_id, output, ..
             } => Some(tool_result(
-                state,
+                scope,
                 call_id,
                 output.as_ref(),
                 tool_failed(item, output.as_ref()),
@@ -168,21 +215,17 @@ impl Encoder {
 
     /// The completion is authoritative over every delta before it. An empty one
     /// is a round that only called tools, and has no message to report.
-    fn assistant_text(&mut self, item: &Item, state: &SessionState, text: &str) -> Option<Value> {
+    fn assistant_text(&mut self, item: &Item, scope: &Scope<'_>, text: &str) -> Option<Value> {
         if text.is_empty() {
             return None;
         }
-        self.turn.text = text.to_string();
-        Some(assistant(state, item.id.as_str(), text_block(text)))
+        if scope.is_root() {
+            self.turn.text = text.to_string();
+        }
+        Some(assistant(scope, item.id.as_str(), text_block(text)))
     }
 
-    fn result(
-        &self,
-        frame: &Frame,
-        state: &SessionState,
-        status: &TurnStatus,
-        total: Usage,
-    ) -> Value {
+    fn result(&self, frame: &Frame, scope: &Scope<'_>, status: &TurnStatus, total: Usage) -> Value {
         let (outcome_key, outcome) = outcome(status, &self.turn.text);
         json!({
             "type": "result",
@@ -192,7 +235,7 @@ impl Encoder {
             "duration_api_ms": 0,
             "num_turns": self.turn.rounds,
             outcome_key: outcome,
-            "session_id": session(state),
+            "session_id": scope.session_id(),
             "total_cost_usd": 0.0,
             "usage": tokens(total),
         })
@@ -200,7 +243,7 @@ impl Encoder {
 }
 
 /// A tool call reaches the envelope as the assistant asking for it.
-fn started(item: &Item, state: &SessionState) -> Option<Value> {
+fn started(item: &Item, scope: &Scope<'_>) -> Option<Value> {
     let ItemBody::ToolCall {
         call_id,
         name,
@@ -211,7 +254,7 @@ fn started(item: &Item, state: &SessionState) -> Option<Value> {
         return None;
     };
     Some(assistant(
-        state,
+        scope,
         item.id.as_str(),
         tool_use_block(call_id, name, input),
     ))
@@ -219,12 +262,12 @@ fn started(item: &Item, state: &SessionState) -> Option<Value> {
 
 /// One assistant message around one content block: a bingo item is one thing,
 /// so no line carries two.
-fn assistant(state: &SessionState, id: &str, content: Value) -> Value {
+fn assistant(scope: &Scope<'_>, id: &str, content: Value) -> Value {
     let mut message = json!({
         "id": id,
         "type": "message",
         "role": "assistant",
-        "model": state.summary.model,
+        "model": scope.state.summary.model,
         "content": [content],
         // Documented as nullable: this message reports no stop reason.
         "stop_reason": Value::Null,
@@ -234,14 +277,13 @@ fn assistant(state: &SessionState, id: &str, content: Value) -> Value {
     json!({
         "type": "assistant",
         "message": message,
-        // Sub-sessions arrive in M8; until then nothing has a parent.
-        "parent_tool_use_id": Value::Null,
-        "session_id": session(state),
+        "parent_tool_use_id": scope.parent_tool_use_id(),
+        "session_id": scope.session_id(),
     })
 }
 
 fn tool_result(
-    state: &SessionState,
+    scope: &Scope<'_>,
     call_id: &str,
     output: Option<&ToolOutput>,
     is_error: bool,
@@ -257,8 +299,8 @@ fn tool_result(
                 "is_error": is_error,
             }],
         },
-        "parent_tool_use_id": Value::Null,
-        "session_id": session(state),
+        "parent_tool_use_id": scope.parent_tool_use_id(),
+        "session_id": scope.session_id(),
     })
 }
 
@@ -345,10 +387,6 @@ fn interrupted(reason: InterruptReason) -> &'static str {
 }
 
 /// The one place the envelope names the session.
-fn session(state: &SessionState) -> &str {
-    state.summary.id.as_str()
-}
-
 /// Token counts under the names the Anthropic API gives them.
 fn tokens(usage: Usage) -> Value {
     json!({
@@ -388,8 +426,8 @@ mod tests {
     use crate::render::tests::{Sinks, play, play_with, text_turn};
     use crate::tests::{assistant, frame, session_state, tool_call};
     use bingo_sdk::{
-        ContextUsage, DeltaKind, InterruptReason, ItemId, ItemStatus, KernelError, Level, TurnId,
-        TurnOrigin,
+        ContextUsage, DeltaKind, InterruptReason, ItemId, ItemStatus, KernelError, Level,
+        SessionId, TurnId, TurnOrigin,
     };
     use jiff::Timestamp;
 
@@ -692,6 +730,70 @@ mod tests {
 
     /// Text alone is the string form; an image forces the block form the API
     /// documents for a `tool_result`.
+    /// A root whose running tool call `i1` spawned `ses_2`, and that child.
+    fn root_and_child() -> (SessionState, SessionState) {
+        let mut root = session_state();
+        root.apply(&frame(
+            1,
+            Event::ItemStarted {
+                item: tool_call("i1", "SpawnAgent", None, ItemStatus::Running),
+            },
+        ));
+        let mut child_summary = root.summary.clone();
+        child_summary.id = SessionId::from_raw("ses_2");
+        child_summary.parent = Some(bingo_sdk::ParentLink {
+            session: root.summary.id.clone(),
+            item: ItemId::from_raw("i1"),
+        });
+        (root, SessionState::new(child_summary))
+    }
+
+    fn child_frame(seq: u64, event: Event) -> Frame {
+        let mut f = frame(seq, event);
+        f.session = SessionId::from_raw("ses_2");
+        f
+    }
+
+    #[test]
+    fn a_sub_sessions_lines_name_the_root_and_the_call_that_spawned_it() {
+        let (root, mut child) = root_and_child();
+        let mut encoder = Encoder::new(tools());
+        let said = child_frame(
+            2,
+            Event::ItemCompleted {
+                item: assistant("c1", "hi from the child", ItemStatus::Completed),
+            },
+        );
+        child.apply(&said);
+        let line = encoder
+            .line(&said, &child, &root)
+            .expect("an assistant line");
+        assert_eq!(line["type"], "assistant");
+        assert_eq!(line["parent_tool_use_id"], "call_1");
+        assert_eq!(line["session_id"], "ses_1");
+
+        let over = child_frame(
+            3,
+            Event::TurnCompleted {
+                turn: TurnId::from_raw("trn_c"),
+                status: TurnStatus::Completed,
+                usage: counted(),
+            },
+        );
+        assert_eq!(
+            encoder.line(&over, &child, &root),
+            None,
+            "a child's turn writes no result line"
+        );
+        let result = encoder
+            .line(&ended(4, TurnStatus::Completed), &root, &root)
+            .expect("the root's result");
+        assert_eq!(
+            result["result"], "",
+            "the child's words are not the root's answer"
+        );
+    }
+
     #[test]
     fn an_image_in_a_tool_result_becomes_a_block_array() {
         let output = ToolOutput {

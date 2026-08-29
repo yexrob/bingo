@@ -108,17 +108,21 @@ impl Renderer {
         write_line(&encoder.init(state).to_string(), out)
     }
 
+    /// `state` is the frame's own session, `root` the one the run opened;
+    /// they differ only for a sub-session's frame, which only the stream-json
+    /// mode is ever handed.
     pub fn render(
         &mut self,
         frame: &Frame,
         state: &SessionState,
+        root: &SessionState,
         out: &mut (impl Write + ?Sized),
         err: &mut (impl Write + ?Sized),
     ) -> io::Result<()> {
         if matches!(self.output, Output::Text) {
             return self.text(&frame.event, state, out, err);
         }
-        self.machine(frame, state, out)?;
+        self.machine(frame, state, root, out)?;
         self.failure(&frame.event, err)
     }
 
@@ -127,6 +131,7 @@ impl Renderer {
         &mut self,
         frame: &Frame,
         state: &SessionState,
+        root: &SessionState,
         out: &mut (impl Write + ?Sized),
     ) -> io::Result<()> {
         match &mut self.output {
@@ -134,7 +139,7 @@ impl Renderer {
                 let line = serde_json::to_string(frame).map_err(io::Error::other)?;
                 write_line(&line, out)
             }
-            Output::Stream(encoder) => match encoder.line(frame, state) {
+            Output::Stream(encoder) => match encoder.line(frame, state, root) {
                 Some(line) => write_line(&line.to_string(), out),
                 None => Ok(()),
             },
@@ -368,7 +373,7 @@ pub(crate) mod tests {
         for frame in frames {
             state.apply(frame);
             renderer
-                .render(frame, &state, &mut sinks.out, &mut sinks.err)
+                .render(frame, &state, &state, &mut sinks.out, &mut sinks.err)
                 .expect("writing to a vector cannot fail");
         }
         sinks
