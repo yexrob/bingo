@@ -14,6 +14,8 @@ use bingo_sdk::{
 };
 use serde_json::Value;
 
+use crate::stream_json::Encoder;
+
 /// The longest error message a person is asked to read on one line.
 const MAX_ERROR_CHARS: usize = 200;
 
@@ -24,6 +26,8 @@ pub enum Mode {
     Text,
     /// One `Frame` per line on stdout, nothing else.
     Json,
+    /// Claude Code's envelope on stdout, one object per line (ADR-0007 §8).
+    StreamJson,
 }
 
 impl Mode {
@@ -31,6 +35,7 @@ impl Mode {
     pub fn from_args(args: &Value) -> Self {
         match args.get("outputFormat").and_then(Value::as_str) {
             Some("json") => Mode::Json,
+            Some("stream-json") => Mode::StreamJson,
             _ => Mode::Text,
         }
     }
@@ -60,7 +65,7 @@ pub fn notice_report(code: &str, text: &str, human: bool) -> String {
 
 #[derive(Debug)]
 pub struct Renderer {
-    mode: Mode,
+    output: Output,
     /// Stderr is a terminal: diagnostics are for a person.
     human: bool,
     /// Bytes of each assistant item already on stdout.
@@ -69,14 +74,38 @@ pub struct Renderer {
     open_line: bool,
 }
 
+/// The mode holding the state it needs, so the renderer never carries a second
+/// copy of which mode it is in.
+#[derive(Debug)]
+enum Output {
+    Text,
+    Json,
+    Stream(Encoder),
+}
+
 impl Renderer {
-    pub fn new(mode: Mode, human: bool) -> Self {
+    /// `tools` names the catalogue for the stream-json preamble; no other mode
+    /// reads it, and only the host knows it.
+    pub fn new(mode: Mode, human: bool, tools: Vec<String>) -> Self {
         Self {
-            mode,
+            output: match mode {
+                Mode::Text => Output::Text,
+                Mode::Json => Output::Json,
+                Mode::StreamJson => Output::Stream(Encoder::new(tools)),
+            },
             human,
             written: HashMap::new(),
             open_line: false,
         }
+    }
+
+    /// The preamble a mode owes before any frame: the stream-json `init` line,
+    /// and nothing at all otherwise.
+    pub fn open(&self, state: &SessionState, out: &mut (impl Write + ?Sized)) -> io::Result<()> {
+        let Output::Stream(encoder) = &self.output else {
+            return Ok(());
+        };
+        write_line(&encoder.init(state).to_string(), out)
     }
 
     pub fn render(
@@ -86,13 +115,31 @@ impl Renderer {
         out: &mut (impl Write + ?Sized),
         err: &mut (impl Write + ?Sized),
     ) -> io::Result<()> {
-        match self.mode {
-            Mode::Json => {
+        if matches!(self.output, Output::Text) {
+            return self.text(&frame.event, state, out, err);
+        }
+        self.machine(frame, state, out)?;
+        self.failure(&frame.event, err)
+    }
+
+    /// The two machine-readable modes: at most one line per frame on stdout.
+    fn machine(
+        &mut self,
+        frame: &Frame,
+        state: &SessionState,
+        out: &mut (impl Write + ?Sized),
+    ) -> io::Result<()> {
+        match &mut self.output {
+            Output::Json => {
                 let line = serde_json::to_string(frame).map_err(io::Error::other)?;
-                write_line(&line, out)?;
-                self.failure(&frame.event, err)
+                write_line(&line, out)
             }
-            Mode::Text => self.text(&frame.event, state, out, err),
+            Output::Stream(encoder) => match encoder.line(frame, state) {
+                Some(line) => write_line(&line.to_string(), out),
+                None => Ok(()),
+            },
+            // Rendered as prose before this is reached.
+            Output::Text => Ok(()),
         }
     }
 
@@ -275,41 +322,49 @@ fn write_line(line: &str, out: &mut (impl Write + ?Sized)) -> io::Result<()> {
     out.flush()
 }
 
-/// The verdict a finished tool call gets, in one place: a failed status and an
-/// error output are the same news.
-fn tool_failed(item: &Item, output: Option<&ToolOutput>) -> bool {
+/// The verdict both modes report for a finished tool call, in one place: a
+/// failed status and an error output are the same news.
+pub(crate) fn tool_failed(item: &Item, output: Option<&ToolOutput>) -> bool {
     item.status == ItemStatus::Failed || output.is_some_and(|o| o.is_error)
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::tests::{assistant, frame, session_state, tool_call};
     use bingo_sdk::{ContentPart, KernelError, Level, Origin, TurnId, TurnOrigin, Usage};
 
-    struct Sinks {
+    pub(crate) struct Sinks {
         out: Vec<u8>,
         err: Vec<u8>,
     }
 
     impl Sinks {
-        fn out(&self) -> String {
+        pub(crate) fn out(&self) -> String {
             String::from_utf8_lossy(&self.out).into_owned()
         }
 
-        fn err(&self) -> String {
+        pub(crate) fn err(&self) -> String {
             String::from_utf8_lossy(&self.err).into_owned()
         }
     }
 
     /// Fold the frames the way the surface does, rendering each one.
-    fn play(mode: Mode, frames: &[Frame]) -> Sinks {
+    pub(crate) fn play(mode: Mode, frames: &[Frame]) -> Sinks {
+        play_with(mode, frames, Vec::new())
+    }
+
+    /// The same, for a mode that reads the tool catalogue.
+    pub(crate) fn play_with(mode: Mode, frames: &[Frame], tools: Vec<String>) -> Sinks {
         let mut state = session_state();
-        let mut renderer = Renderer::new(mode, false);
+        let mut renderer = Renderer::new(mode, false, tools);
         let mut sinks = Sinks {
             out: Vec::new(),
             err: Vec::new(),
         };
+        renderer
+            .open(&state, &mut sinks.out)
+            .expect("writing to a vector cannot fail");
         for frame in frames {
             state.apply(frame);
             renderer
@@ -319,7 +374,7 @@ mod tests {
         sinks
     }
 
-    fn text_turn() -> Vec<Frame> {
+    pub(crate) fn text_turn() -> Vec<Frame> {
         vec![
             frame(
                 1,
@@ -570,6 +625,10 @@ mod tests {
         assert_eq!(
             Mode::from_args(&serde_json::json!({"outputFormat": "json"})),
             Mode::Json
+        );
+        assert_eq!(
+            Mode::from_args(&serde_json::json!({"outputFormat": "stream-json"})),
+            Mode::StreamJson
         );
         assert_eq!(
             Mode::from_args(&serde_json::json!({"outputFormat": "text"})),

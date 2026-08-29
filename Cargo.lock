@@ -297,6 +297,7 @@ dependencies = [
  "async-trait",
  "bingo-sdk",
  "futures",
+ "insta",
  "jiff",
  "serde_json",
  "tokio",

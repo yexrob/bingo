@@ -20,3 +20,5 @@ serde_json.workspace = true
 [dev-dependencies]
 # Frame timestamps in the fixtures; the surface itself mints none.
 jiff.workspace = true
+# The stream-json lines are a wire format: snapshots are the fixture.
+insta.workspace = true
