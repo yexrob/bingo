@@ -235,14 +235,6 @@ impl Accumulator {
                 self.finish_reason = Some(finish_reason);
                 Vec::new()
             }
-            ModelEvent::Error {
-                message,
-                retryable,
-                retry_after_ms,
-            } => {
-                self.error = Some(classify(message, retryable, retry_after_ms));
-                Vec::new()
-            }
         }
     }
 
@@ -290,17 +282,6 @@ fn parse_input(raw: String) -> (Value, serde_json::Map<String, Value>) {
             meta.insert("invalidInput".into(), Value::String(e.to_string()));
             (Value::String(raw), meta)
         }
-    }
-}
-
-/// A stream error as a provider error: a retryable one with a stated delay is a rate limit.
-fn classify(message: String, retryable: bool, retry_after_ms: Option<u64>) -> ProviderError {
-    match (retryable, retry_after_ms) {
-        (true, Some(ms)) => ProviderError::RateLimited {
-            retry_after_ms: Some(ms),
-        },
-        (true, None) => ProviderError::Stream { message },
-        (false, _) => ProviderError::Request { message },
     }
 }
 
@@ -448,26 +429,6 @@ mod tests {
                 text: "partial".into()
             }
         );
-    }
-
-    #[test]
-    fn a_stream_error_is_classified_by_retryability() {
-        let mut a = acc();
-        a.push(ModelEvent::Error {
-            message: "overloaded".into(),
-            retryable: true,
-            retry_after_ms: None,
-        });
-        let (_, fin) = a.finish(false);
-        assert!(matches!(fin.error, Some(ProviderError::Stream { .. })));
-        let mut b = acc();
-        b.push(ModelEvent::Error {
-            message: "bad".into(),
-            retryable: false,
-            retry_after_ms: None,
-        });
-        let (_, fin) = b.finish(false);
-        assert!(matches!(fin.error, Some(ProviderError::Request { .. })));
     }
 
     #[test]

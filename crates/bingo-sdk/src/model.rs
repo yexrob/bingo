@@ -275,12 +275,6 @@ pub enum ModelEvent {
         usage: Usage,
         finish_reason: FinishReason,
     },
-    Error {
-        message: String,
-        retryable: bool,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        retry_after_ms: Option<u64>,
-    },
 }
 
 pub type ModelStream = Pin<Box<dyn Stream<Item = Result<ModelEvent, ProviderError>> + Send>>;
