@@ -88,6 +88,7 @@ impl Tool for GlobTool {
             name: "Glob".into(),
             description: DESCRIPTION.into(),
             input_schema: input_schema::<GlobArgs>(),
+            meta: Default::default(),
         }
     }
 

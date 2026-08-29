@@ -52,7 +52,15 @@ pub struct LiveTurn {
     #[serde(default)]
     pub usage: Usage,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub retrying: Option<u32>,
+    pub retrying: Option<Retry>,
+}
+
+/// A stream attempt failed and the turn is waiting to try again.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct Retry {
+    pub attempt: u32,
+    pub max: u32,
 }
 
 /// What a frame changed, so a renderer can redraw only that.
@@ -136,8 +144,17 @@ impl SessionState {
             Event::SessionClosed { .. } => self.session_closed(),
             Event::TurnStarted { turn, origin, .. } => self.turn_started(turn, *origin, frame.ts),
             Event::TurnRetrying {
-                attempt, dropped, ..
-            } => self.turn_retrying(*attempt, dropped),
+                attempt,
+                max,
+                dropped,
+                ..
+            } => self.turn_retrying(
+                Retry {
+                    attempt: *attempt,
+                    max: *max,
+                },
+                dropped,
+            ),
             Event::TurnUsage { usage, context, .. } => self.turn_usage(*usage, *context),
             Event::TurnCompleted { status, .. } => self.turn_completed(status),
             Event::ItemStarted { item }
@@ -196,10 +213,10 @@ impl SessionState {
         Applied::Turn
     }
 
-    fn turn_retrying(&mut self, attempt: u32, dropped: &[ItemId]) -> Applied {
+    fn turn_retrying(&mut self, retry: Retry, dropped: &[ItemId]) -> Applied {
         self.items.retain(|i| !dropped.contains(&i.id));
         if let Some(t) = self.turn.as_mut() {
-            t.retrying = Some(attempt);
+            t.retrying = Some(retry);
         }
         Applied::Turn
     }

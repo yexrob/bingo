@@ -111,6 +111,7 @@ mod tests {
             name: "Read".into(),
             description: "read".into(),
             input_schema: serde_json::json!({}),
+            meta: Default::default(),
         }];
         assert_eq!(estimate(&system, &messages, &tools), 2 + 1 + 1 + 1 + 1);
     }

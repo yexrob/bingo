@@ -101,6 +101,7 @@ impl Tool for BashTool {
             name: "Bash".into(),
             description: description(),
             input_schema: input_schema::<BashArgs>(),
+            meta: Default::default(),
         }
     }
 

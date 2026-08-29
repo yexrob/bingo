@@ -159,9 +159,9 @@ fn status(state: &SessionState, ui: &Ui, now: Now) -> Vec<Line<'static>> {
         Span::raw(activity(state, turn)),
         Span::styled(format!(" (esc to interrupt · {elapsed}s)"), theme::dim()),
     ];
-    if let Some(attempt) = turn.retrying {
+    if let Some(retry) = turn.retrying {
         spans.push(Span::styled(
-            format!(" retrying {attempt}"),
+            format!(" retrying {}/{}", retry.attempt, retry.max),
             theme::caution(),
         ));
     }

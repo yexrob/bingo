@@ -71,6 +71,7 @@ impl Tool for WebSearchTool {
             name: "WebSearch".into(),
             description: DESCRIPTION.into(),
             input_schema: input_schema::<SearchArgs>(),
+            meta: Default::default(),
         }
     }
 

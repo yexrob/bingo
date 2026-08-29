@@ -35,11 +35,12 @@ pub use host::*;
 pub use ids::*;
 pub use model::*;
 pub use plugin::{
-    ConfigClaim, Contribution, Merge, Plugin, PluginError, PluginManifest, Registrar,
+    CommandSource, ConfigClaim, Contribution, Merge, Plugin, PluginError, PluginManifest,
+    Registrar, ToolSource,
 };
 pub use policy::{Decision, PermissionPolicy, PolicyInput, Reason, Verdict};
 pub use provider::{AuthStatus, ModelInfo, Provider};
-pub use state::{Applied, LiveTurn, SessionState};
+pub use state::{Applied, LiveTurn, Retry, SessionState};
 pub use store::SessionStore;
 pub use surface::{Exit, Surface, SurfaceKind, SurfaceOptions};
 pub use tool::{

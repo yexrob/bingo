@@ -128,6 +128,14 @@ pub struct ToolSpec {
     pub name: String,
     pub description: String,
     pub input_schema: Value,
+    /// What a catalogue may show beside the tool (an MCP tool's `server`);
+    /// never sent to a model.
+    #[serde(default, skip_serializing_if = "is_empty_map")]
+    pub meta: serde_json::Map<String, Value>,
+}
+
+fn is_empty_map(m: &serde_json::Map<String, Value>) -> bool {
+    m.is_empty()
 }
 
 /// Reasoning effort, in the vocabulary providers converge on.

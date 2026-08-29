@@ -109,6 +109,7 @@ impl Tool for EchoTool {
             name: "Echo".into(),
             description: "echo".into(),
             input_schema: json!({"type": "object"}),
+            meta: Default::default(),
         }
     }
     fn traits(&self, _: &Value) -> ToolTraits {
@@ -209,6 +210,7 @@ impl Tool for PanicTool {
             name: "Panic".into(),
             description: "panics".into(),
             input_schema: json!({"type": "object"}),
+            meta: Default::default(),
         }
     }
     fn traits(&self, _: &Value) -> ToolTraits {

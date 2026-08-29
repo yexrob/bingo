@@ -136,6 +136,7 @@ mod tests {
                 "properties": { "file_path": { "type": "string" } },
                 "required": ["file_path"],
             }),
+            meta: Default::default(),
         }
     }
 

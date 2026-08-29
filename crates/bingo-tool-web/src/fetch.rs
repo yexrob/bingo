@@ -133,6 +133,7 @@ impl Tool for WebFetchTool {
             name: "WebFetch".into(),
             description: DESCRIPTION.into(),
             input_schema: input_schema::<FetchArgs>(),
+            meta: Default::default(),
         }
     }
 

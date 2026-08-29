@@ -89,6 +89,7 @@ impl Tool for ReadTool {
             name: "Read".into(),
             description: DESCRIPTION.into(),
             input_schema: input_schema::<ReadArgs>(),
+            meta: Default::default(),
         }
     }
 

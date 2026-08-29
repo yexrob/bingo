@@ -43,11 +43,15 @@ impl PluginStatus {
 #[derive(Default)]
 pub struct Registry {
     pub tools: Vec<Arc<dyn Tool>>,
+    /// Tools that arrive after I/O, read when a turn starts (ADR-0009).
+    pub tool_sources: Vec<Arc<dyn ToolSource>>,
     pub providers: Vec<Arc<dyn Provider>>,
     pub policy: Option<Arc<dyn PermissionPolicy>>,
     pub hooks: Vec<Arc<dyn Hook>>,
     pub contributors: Vec<Arc<dyn ContextContributor>>,
     pub commands: Vec<Arc<dyn Command>>,
+    /// Commands that arrive after I/O, read when a name is not in `commands`.
+    pub command_sources: Vec<Arc<dyn CommandSource>>,
     pub surfaces: Vec<Arc<dyn Surface>>,
     pub store: Option<Arc<dyn SessionStore>>,
     pub compactor: Option<Arc<dyn Compactor>>,
@@ -118,6 +122,10 @@ impl Registry {
         };
         match contribution {
             Contribution::Tool(tool) => self.add_tool(tool),
+            Contribution::Tools(source) => {
+                self.tool_sources.push(source);
+                Ok(())
+            }
             Contribution::Provider(provider) => self.add_provider(provider),
             Contribution::Policy(policy) => self.set_policy(policy),
             Contribution::Hook(hook) => {
@@ -129,6 +137,10 @@ impl Registry {
                 Ok(())
             }
             Contribution::Command(command) => self.add_command(command),
+            Contribution::Commands(source) => {
+                self.command_sources.push(source);
+                Ok(())
+            }
             Contribution::Surface(surface) => self.add_surface(surface),
             Contribution::Store(store) => self.set_store(store),
             Contribution::Compactor(compactor) => self.set_compactor(compactor),

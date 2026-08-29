@@ -79,15 +79,35 @@ pub trait Plugin: Send + Sync + 'static {
     }
 }
 
+/// Tools that exist only after I/O — a server's, once it has answered. Read
+/// when a turn starts; answers from what it has now (ADR-0009).
+#[async_trait]
+pub trait ToolSource: Send + Sync {
+    fn id(&self) -> &str;
+    async fn tools(&self) -> Vec<Arc<dyn Tool>>;
+}
+
+/// Commands that exist only after I/O — a directory's skills. Read when a
+/// name is not in the static table (ADR-0009).
+#[async_trait]
+pub trait CommandSource: Send + Sync {
+    fn id(&self) -> &str;
+    async fn commands(&self) -> Vec<Arc<dyn Command>>;
+}
+
 /// What a plugin hands the host. One enum so the in-process path and a future
 /// out-of-process bridge share one representation.
 pub enum Contribution {
     Tool(Arc<dyn Tool>),
+    /// Tools resolved late, from a source that does its I/O elsewhere.
+    Tools(Arc<dyn ToolSource>),
     Provider(Arc<dyn Provider>),
     Policy(Arc<dyn PermissionPolicy>),
     Hook(Arc<dyn Hook>),
     Context(Arc<dyn ContextContributor>),
     Command(Arc<dyn Command>),
+    /// Commands resolved late, from a source that does its I/O elsewhere.
+    Commands(Arc<dyn CommandSource>),
     Surface(Arc<dyn Surface>),
     Store(Arc<dyn SessionStore>),
     Compactor(Arc<dyn Compactor>),
@@ -102,11 +122,13 @@ impl fmt::Debug for Contribution {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Contribution::Tool(t) => write!(f, "Tool({})", t.spec().name),
+            Contribution::Tools(s) => write!(f, "Tools({})", s.id()),
             Contribution::Provider(p) => write!(f, "Provider({})", p.id()),
             Contribution::Policy(p) => write!(f, "Policy({})", p.id()),
             Contribution::Hook(h) => write!(f, "Hook({})", h.id()),
             Contribution::Context(c) => write!(f, "Context({})", c.id()),
             Contribution::Command(c) => write!(f, "Command({})", c.spec().name),
+            Contribution::Commands(s) => write!(f, "Commands({})", s.id()),
             Contribution::Surface(s) => write!(f, "Surface({})", s.id()),
             Contribution::Store(_) => write!(f, "Store"),
             Contribution::Compactor(_) => write!(f, "Compactor"),

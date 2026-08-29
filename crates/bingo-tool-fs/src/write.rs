@@ -63,6 +63,7 @@ impl Tool for WriteTool {
             name: "Write".into(),
             description: DESCRIPTION.into(),
             input_schema: input_schema::<WriteArgs>(),
+            meta: Default::default(),
         }
     }
 

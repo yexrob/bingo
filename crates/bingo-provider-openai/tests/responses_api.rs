@@ -345,6 +345,7 @@ async fn the_body_on_the_wire_is_the_stateless_encoding_the_snapshots_pin() {
         name: "Read".into(),
         description: "Read a file.".into(),
         input_schema: json!({ "type": "object" }),
+        meta: Default::default(),
     }];
     request.reasoning = Some(Effort::Max);
     drain(&provider(&server), request).await;

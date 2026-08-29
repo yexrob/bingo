@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::ids::SessionId;
 use crate::tool::{Subject, ToolCall, ToolTraits};
+use serde_json::Value;
 
 #[derive(Clone, Copy, Debug)]
 pub struct PolicyInput<'a> {
@@ -65,4 +66,11 @@ pub trait PermissionPolicy: Send + Sync {
 
     /// Install the session-scoped rule the user accepted. Never persisted by the kernel.
     async fn on_verdict(&self, _input: PolicyInput<'_>, _verdict: &Verdict) {}
+
+    /// What a client may show of this session's policy — the mode, the rules
+    /// it accepted. The kernel publishes it as `ConfigView.plugins[id]`
+    /// whenever it changes (ADR-0009).
+    fn describe(&self, _session: &SessionId) -> Value {
+        Value::Null
+    }
 }

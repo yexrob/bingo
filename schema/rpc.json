@@ -2153,12 +2153,14 @@
           }
         },
         "retrying": {
-          "type": [
-            "integer",
-            "null"
-          ],
-          "format": "uint32",
-          "minimum": 0
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Retry"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
@@ -2437,6 +2439,26 @@
           ]
         }
       ]
+    },
+    "Retry": {
+      "type": "object",
+      "properties": {
+        "attempt": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "max": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "attempt",
+        "max"
+      ],
+      "description": "A stream attempt failed and the turn is waiting to try again."
     },
     "Seq": {
       "type": "integer",

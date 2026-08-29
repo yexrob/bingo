@@ -177,6 +177,7 @@ impl Tool for AskUserQuestionTool {
             name: "AskUserQuestion".into(),
             description: DESCRIPTION.into(),
             input_schema: input_schema::<AskArgs>(),
+            meta: Default::default(),
         }
     }
 

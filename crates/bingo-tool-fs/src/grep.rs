@@ -304,6 +304,7 @@ impl Tool for GrepTool {
             name: "Grep".into(),
             description: DESCRIPTION.into(),
             input_schema: input_schema::<GrepArgs>(),
+            meta: Default::default(),
         }
     }
 

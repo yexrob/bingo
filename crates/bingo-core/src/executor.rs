@@ -194,6 +194,7 @@ mod tests {
                 name: "Echo".into(),
                 description: String::new(),
                 input_schema: json!({}),
+                meta: Default::default(),
             }
         }
         fn traits(&self, _: &Value) -> ToolTraits {

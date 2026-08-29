@@ -105,6 +105,7 @@ impl Tool for EditTool {
             name: "Edit".into(),
             description: DESCRIPTION.into(),
             input_schema: input_schema::<EditArgs>(),
+            meta: Default::default(),
         }
     }
 
