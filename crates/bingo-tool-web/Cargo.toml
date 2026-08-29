@@ -1,0 +1,33 @@
+[package]
+name = "bingo-tool-web"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Web tools plugin for bingo: WebFetch"
+
+[lints]
+workspace = true
+
+[dependencies]
+bingo-sdk.workspace = true
+async-trait.workspace = true
+futures.workspace = true
+reqwest.workspace = true
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+# M2: the canonical URL is the cache key and the permission subject; parsing it
+# by hand is how credentials sneak past.
+url.workspace = true
+# M2: a Readability port, so a page reaches the model as its article and not as
+# its navigation.
+dom_smoothie.workspace = true
+# M2: a Turndown port for the article HTML (`html2md` is GPL and banned).
+htmd.workspace = true
+
+[dev-dependencies]
+wiremock.workspace = true
+tokio = { workspace = true, features = ["macros", "rt"] }

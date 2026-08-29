@@ -18,6 +18,7 @@ bingo-surface-print = { path = "crates/bingo-surface-print", version = "0.1.0" }
 bingo-provider-anthropic = { path = "crates/bingo-provider-anthropic", version = "0.1.0" }
 bingo-tool-bash = { path = "crates/bingo-tool-bash", version = "0.1.0" }
 bingo-permissions = { path = "crates/bingo-permissions", version = "0.1.0" }
+bingo-tool-web = { path = "crates/bingo-tool-web", version = "0.1.0" }
 
 tokio = { version = "1.53", default-features = false, features = ["rt-multi-thread", "macros", "sync", "time", "io-util", "io-std", "fs", "process", "signal"] }
 tokio-util = { version = "0.7.19", features = ["codec", "rt"] }
@@ -51,6 +52,12 @@ process-wrap = { version = "10.0", features = ["tokio1"] }
 jsonc-parser = { version = "0.33", features = ["serde"] }
 wiremock = "0.6"
 proptest = "1.11"
+# M2 (docs/plans/M2-second-provider-catalog-web.md)
+url = "2.5.8"
+# M2 (docs/plans/M2-second-provider-catalog-web.md)
+dom_smoothie = "0.18.0"
+# M2 (docs/plans/M2-second-provider-catalog-web.md)
+htmd = "0.5.5"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
