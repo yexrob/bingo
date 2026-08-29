@@ -15,6 +15,9 @@ bingo-core = { path = "crates/bingo-core", version = "0.1.0" }
 bingo-provider-fake = { path = "crates/bingo-provider-fake", version = "0.1.0" }
 bingo-tool-fs = { path = "crates/bingo-tool-fs", version = "0.1.0" }
 bingo-surface-print = { path = "crates/bingo-surface-print", version = "0.1.0" }
+bingo-provider-anthropic = { path = "crates/bingo-provider-anthropic", version = "0.1.0" }
+bingo-tool-bash = { path = "crates/bingo-tool-bash", version = "0.1.0" }
+bingo-permissions = { path = "crates/bingo-permissions", version = "0.1.0" }
 
 tokio = { version = "1.53", default-features = false, features = ["rt-multi-thread", "macros", "sync", "time", "io-util", "io-std", "fs", "process", "signal"] }
 tokio-util = { version = "0.7.19", features = ["codec", "rt"] }
@@ -34,6 +37,20 @@ tracing = "0.1"
 base64 = { version = "0.23", default-features = false, features = ["std"] }
 insta = { version = "1.48", features = ["json"] }
 tempfile = "3.27"
+# M1 (docs/plans/M1-provider-tools-gate.md, "Dependencies")
+reqwest = { version = "0.13", features = ["json", "stream"] }
+similar = "3.2"
+ignore = "0.4"
+globset = "0.4"
+grep-regex = "0.1"
+grep-searcher = "0.1"
+tree-sitter = "0.26"
+tree-sitter-bash = "0.25"
+shlex = "2.0"
+process-wrap = { version = "10.0", features = ["tokio1"] }
+jsonc-parser = { version = "0.33", features = ["serde"] }
+wiremock = "0.6"
+proptest = "1.11"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

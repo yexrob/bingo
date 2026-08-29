@@ -101,6 +101,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "bingo-permissions"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bingo-sdk",
+]
+
+[[package]]
+name = "bingo-provider-anthropic"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bingo-sdk",
+]
+
+[[package]]
 name = "bingo-provider-fake"
 version = "0.1.0"
 dependencies = [
@@ -141,6 +157,14 @@ dependencies = [
  "jiff",
  "serde_json",
  "tokio",
+]
+
+[[package]]
+name = "bingo-tool-bash"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bingo-sdk",
 ]
 
 [[package]]

@@ -1,0 +1,15 @@
+[package]
+name = "bingo-permissions"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Permission policy plugin for bingo: modes, rules, command splitting"
+
+[lints]
+workspace = true
+
+[dependencies]
+bingo-sdk.workspace = true
+async-trait.workspace = true
