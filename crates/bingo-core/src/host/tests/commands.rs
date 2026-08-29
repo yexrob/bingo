@@ -222,3 +222,50 @@ async fn the_catalogue_lists_the_builtins_and_the_models() {
     let models = host.catalog(CatalogKind::Models).await.unwrap();
     assert_eq!(models.entries[0].id, "scripted/m");
 }
+
+/// A source's tools and commands are in the catalogue beside the registered
+/// ones, a tool's meta riding along (ADR-0009 §1).
+#[tokio::test]
+async fn the_catalogue_reads_the_sources_too() {
+    static SOURCES: PluginManifest = PluginManifest {
+        id: "test.sources",
+        version: "0",
+        sdk: "^0.1",
+        provides: &["tools:scripted", "commands:scripted"],
+        requires: &[],
+        config: None,
+    };
+    let tools = ScriptedToolSource::new();
+    tools.set(vec![Arc::new(EchoTool { read_only: true })]);
+    let late = ScriptedCommand::new("late", true, Ok(CommandOutcome::Applied { message: None }));
+    let plugins = vec![
+        TestPlugin::boxed(
+            &PROVIDER,
+            vec![Contribution::Provider(ScriptedProvider::new(vec![]))],
+        ),
+        TestPlugin::boxed(
+            &SOURCES,
+            vec![
+                Contribution::Tools(tools),
+                Contribution::Commands(ScriptedCommandSource::new(vec![late])),
+            ],
+        ),
+    ];
+    let host = Host::build(plugins, HostConfig::new(env())).await.unwrap();
+    let tools = host.catalog(CatalogKind::Tools).await.unwrap();
+    let echo = tools
+        .entries
+        .iter()
+        .find(|e| e.id == "Echo")
+        .expect("the source's tool");
+    assert_eq!(echo.meta["description"], json!("echo"));
+    let commands = host.catalog(CatalogKind::Commands).await.unwrap();
+    assert!(
+        commands.entries.iter().any(|e| e.id == "late"),
+        "{commands:?}"
+    );
+    assert!(
+        commands.entries.iter().any(|e| e.id == "model"),
+        "the built-ins are there too"
+    );
+}
