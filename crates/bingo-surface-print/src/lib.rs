@@ -14,8 +14,8 @@ use async_trait::async_trait;
 use bingo_sdk::{
     Activation, Answer, AnswerSpec, Applied, Attachment, ClientIdentity, CloseReason, ErrorCode,
     Event, Exit, HostHandle, Input, IntentId, Interaction, InteractionKind, KernelError, Origin,
-    Plugin, PluginError, PluginManifest, Registrar, Surface, SurfaceKind, SurfaceOptions,
-    TurnStatus,
+    Plugin, PluginError, PluginManifest, Registrar, SessionHandle, Surface, SurfaceKind,
+    SurfaceOptions, TurnStatus,
 };
 use futures::StreamExt;
 
@@ -87,16 +87,7 @@ pub(crate) async fn drive(
     err: &mut (dyn Write + Send),
 ) -> Result<Exit, KernelError> {
     let mut renderer = Renderer::new(Mode::from_args(&opts.args));
-    let prompt = match opts.prompt {
-        Some(prompt) => prompt,
-        None => console.read_all().map_err(stdio_error)?,
-    };
-    if prompt.trim().is_empty() {
-        return Err(KernelError::new(
-            ErrorCode::InvalidInput,
-            "no prompt: pass one as an argument or on stdin",
-        ));
-    }
+    let prompt = prompt_from(opts.prompt, console)?;
 
     let Attachment {
         mut snapshot,
@@ -124,23 +115,62 @@ pub(crate) async fn drive(
         renderer
             .render(&frame, &snapshot, &mut *out, &mut *err)
             .map_err(stdio_error)?;
-        match &frame.event {
-            Event::InteractionOpened { interaction } => {
-                let (answer, activation) =
-                    decide(interaction, console, err).map_err(stdio_error)?;
-                handle.answer(IntentId::mint(), interaction.id.clone(), answer, activation);
-            }
-            // The lagged stream ends at its marker; the reducer left `seq` at
-            // the last frame it applied, so replay from there fills the gap.
-            Event::Lagged { .. } => events = handle.events_since(snapshot.seq).await?,
-            Event::TurnCompleted { status, .. } => return Ok(exit_for(status)),
-            Event::SessionClosed { reason } => {
-                return closed(&close_message(reason), err);
-            }
-            _ => {}
+        match react(&frame.event, &handle, console, err)? {
+            Next::Await => {}
+            Next::Resync => events = handle.events_since(snapshot.seq).await?,
+            Next::Exit(exit) => return Ok(exit),
         }
     }
     closed("the event stream ended before the turn completed", err)
+}
+
+/// The prompt from the command line, or the whole of stdin when there is none.
+fn prompt_from(
+    argument: Option<String>,
+    console: &mut (dyn Console + Send),
+) -> Result<String, KernelError> {
+    let prompt = match argument {
+        Some(prompt) => prompt,
+        None => console.read_all().map_err(stdio_error)?,
+    };
+    if prompt.trim().is_empty() {
+        return Err(KernelError::new(
+            ErrorCode::InvalidInput,
+            "no prompt: pass one as an argument or on stdin",
+        ));
+    }
+    Ok(prompt)
+}
+
+/// What a rendered frame leaves the run to do next.
+enum Next {
+    /// Keep reading the current stream.
+    Await,
+    /// Re-read the journal from the last applied frame.
+    Resync,
+    Exit(Exit),
+}
+
+/// Everything a frame asks of the surface once it has been rendered.
+fn react(
+    event: &Event,
+    handle: &SessionHandle,
+    console: &mut (dyn Console + Send),
+    err: &mut (dyn Write + Send),
+) -> Result<Next, KernelError> {
+    match event {
+        Event::InteractionOpened { interaction } => {
+            let (answer, activation) = decide(interaction, console, err).map_err(stdio_error)?;
+            handle.answer(IntentId::mint(), interaction.id.clone(), answer, activation);
+            Ok(Next::Await)
+        }
+        // The lagged stream ends at its marker; the reducer left `seq` at the
+        // last frame it applied, so replay from there fills the gap.
+        Event::Lagged { .. } => Ok(Next::Resync),
+        Event::TurnCompleted { status, .. } => Ok(Next::Exit(exit_for(status))),
+        Event::SessionClosed { reason } => closed(&close_message(reason), err).map(Next::Exit),
+        _ => Ok(Next::Await),
+    }
 }
 
 fn closed(message: &str, err: &mut (dyn Write + Send)) -> Result<Exit, KernelError> {

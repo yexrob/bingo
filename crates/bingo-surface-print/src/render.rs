@@ -92,22 +92,8 @@ impl Renderer {
                 kind: DeltaKind::Text,
                 data,
                 ..
-            } => {
-                // A text delta is assistant prose by construction; the folded
-                // state is the authority whenever it knows the item.
-                if state
-                    .item(item)
-                    .is_none_or(|i| matches!(i.body, ItemBody::Assistant { .. }))
-                {
-                    *self.written.entry(item.clone()).or_default() += data.len();
-                    self.prose(data, out)?;
-                }
-            }
-            Event::ItemStarted { item } => {
-                if let ItemBody::ToolCall { name, input, .. } = &item.body {
-                    self.diagnostic(&format!("[tool] {name} {}", compact(input)), err)?;
-                }
-            }
+            } => self.delta(item, data, state, out)?,
+            Event::ItemStarted { item } => self.started(item, err)?,
             Event::ItemCompleted { item } => self.completed(item, out, err)?,
             Event::Notice { code, text, .. } => {
                 self.diagnostic(&format!("[notice] {code} {text}"), err)?
@@ -143,6 +129,33 @@ impl Renderer {
             | Event::CatalogChanged { .. }
             | Event::Extension { .. }
             | Event::Lagged { .. } => {}
+        }
+        Ok(())
+    }
+
+    /// A text delta is assistant prose by construction; the folded state is the
+    /// authority whenever it knows the item.
+    fn delta(
+        &mut self,
+        item: &ItemId,
+        data: &str,
+        state: &SessionState,
+        out: &mut (impl Write + ?Sized),
+    ) -> io::Result<()> {
+        if state
+            .item(item)
+            .is_none_or(|i| matches!(i.body, ItemBody::Assistant { .. }))
+        {
+            *self.written.entry(item.clone()).or_default() += data.len();
+            self.prose(data, out)?;
+        }
+        Ok(())
+    }
+
+    /// A tool call announces its input when it starts; its verdict comes at completion.
+    fn started(&mut self, item: &Item, err: &mut (impl Write + ?Sized)) -> io::Result<()> {
+        if let ItemBody::ToolCall { name, input, .. } = &item.body {
+            self.diagnostic(&format!("[tool] {name} {}", compact(input)), err)?;
         }
         Ok(())
     }
