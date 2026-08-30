@@ -74,6 +74,48 @@ fn the_child_s_reply_is_the_tool_call_s_result() {
     assert!(text.contains("hi from the child"), "{text}");
 }
 
+/// A text or json run is attached to the tree as well (ADR-0010 §3): off a
+/// tty the child's permission prompt is refused as the root's would be, and
+/// the run ends instead of waiting on a prompt nobody can see. The output
+/// itself stays the root's.
+#[test]
+fn a_childs_permission_is_refused_off_a_tty_in_every_output_format() {
+    let script = script(
+        r#"{"responses":[
+            {"steps":[{"toolCall":{"name":"SpawnAgent","input":{"prompt":"run it","background":false}}}]},
+            {"steps":[{"toolCall":{"name":"Bash","input":{"command":"echo hi"}}}]},
+            {"steps":[{"text":"the child was refused"}]},
+            {"steps":[{"text":"root done"}]}
+        ]}"#,
+    );
+    for format in ["text", "json"] {
+        let home = tempfile::tempdir().unwrap();
+        let out = run_within(
+            bingo()
+                .env("BINGO_FAKE_SCRIPT", script.path())
+                .env("HOME", home.path())
+                .args(["--print", "--output-format", format, "--cwd"])
+                .arg(home.path())
+                .arg("spawn one"),
+            Duration::from_secs(30),
+        );
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "{format}: stderr: {}",
+            stderr(&out)
+        );
+        match format {
+            "text" => assert_eq!(stdout(&out), "root done\n"),
+            _ => {
+                let frames = frames_of(&out);
+                let root = &frames[0].session;
+                assert!(frames.iter().all(|f| &f.session == root), "{format}");
+            }
+        }
+    }
+}
+
 /// A definition names the persona; the sub-agent note is the kernel's own
 /// business, but the name a definition carries is the plugin's.
 #[test]

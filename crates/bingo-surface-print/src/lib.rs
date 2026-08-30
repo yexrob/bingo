@@ -150,11 +150,11 @@ pub(crate) async fn drive(
                 name: SURFACE_ID.into(),
                 surface: SURFACE_ID.into(),
             },
-            // Only the envelope has a shape for a sub-session's lines
-            // (`parent_tool_use_id`); text and json runs report the root alone.
-            OpenOptions {
-                children: matches!(mode, Mode::StreamJson),
-            },
+            // The whole tree, whatever the mode: a sub-session's permission
+            // prompt reaches a run only through it (ADR-0010 §3), and a run
+            // that cannot see the prompt waits on it forever. What of the
+            // tree is reported is the renderer's decision.
+            OpenOptions::with_children(),
         )
         .await?;
     let run = Attached::open(attachment, renderer, console, out, err)?;
@@ -726,6 +726,8 @@ pub(crate) mod tests {
         stream: Mutex<Option<mpsc::UnboundedReceiver<Frame>>>,
         seq: AtomicU64,
         turns: AtomicU64,
+        /// The options each `open` asked for.
+        opened: Mutex<Vec<OpenOptions>>,
         submitted: Mutex<Vec<Input>>,
         answers: Mutex<Vec<(InteractionId, Answer, Activation)>>,
         interrupts: Mutex<Vec<InterruptScope>>,
@@ -744,6 +746,7 @@ pub(crate) mod tests {
                 stream: Mutex::new(Some(stream)),
                 seq: AtomicU64::new(seq),
                 turns: AtomicU64::new(0),
+                opened: Mutex::default(),
                 submitted: Mutex::default(),
                 answers: Mutex::default(),
                 interrupts: Mutex::default(),
@@ -801,6 +804,10 @@ pub(crate) mod tests {
                 status: TurnStatus::Completed,
                 usage: Usage::default(),
             });
+        }
+
+        pub(crate) fn opened(&self) -> Vec<OpenOptions> {
+            locked(&self.opened).clone()
         }
 
         pub(crate) fn submitted(&self) -> Vec<Input> {
@@ -907,8 +914,9 @@ pub(crate) mod tests {
             &self,
             _selector: SessionSelector,
             _who: ClientIdentity,
-            _options: OpenOptions,
+            options: OpenOptions,
         ) -> Result<Attachment, KernelError> {
+            locked(&self.session.opened).push(options);
             Ok(Attachment {
                 session: SessionId::from_raw("ses_1"),
                 snapshot: session_state(),
@@ -1224,27 +1232,35 @@ pub(crate) mod tests {
         assert_eq!(run.out, "");
     }
 
-    /// A stream-json run is attached to the tree (ADR-0010 §3): a sub-session's
-    /// turn ending is its own business, and the run goes on to the root's.
-    #[tokio::test]
-    async fn a_sub_sessions_turn_ending_does_not_end_the_run() {
-        let child = |seq: u64, event: Event| {
-            let mut f = frame(seq, event);
-            f.session = SessionId::from_raw("ses_2");
-            f
-        };
+    /// A frame of the sub-session `ses_2`, whose parent is the root.
+    fn child(seq: u64, event: Event) -> Frame {
+        let mut f = frame(seq, event);
+        f.session = SessionId::from_raw("ses_2");
+        f
+    }
+
+    fn done(turn: &str) -> Event {
+        Event::TurnCompleted {
+            turn: TurnId::from_raw(turn),
+            status: TurnStatus::Completed,
+            usage: Usage::default(),
+        }
+    }
+
+    /// The root's turn, during which a sub-session announces itself, asks a
+    /// permission, says something and ends its turn; then the root answers.
+    fn a_tree_with_a_childs_prompt() -> Vec<Frame> {
         let mut child_summary = summary();
         child_summary.id = SessionId::from_raw("ses_2");
         child_summary.parent = Some(bingo_sdk::ParentLink {
             session: SessionId::from_raw("ses_1"),
             item: ItemId::from_raw("itm_1"),
         });
-        let done = |turn: &str| Event::TurnCompleted {
-            turn: TurnId::from_raw(turn),
-            status: TurnStatus::Completed,
-            usage: Usage::default(),
+        let asked = Interaction {
+            session: SessionId::from_raw("ses_2"),
+            ..permission(None)
         };
-        let run = headless(vec![
+        vec![
             frame(
                 1,
                 Event::TurnStarted {
@@ -1259,7 +1275,14 @@ pub(crate) mod tests {
                     summary: child_summary,
                 },
             ),
-            child(2, done("trn_c")),
+            child(2, Event::InteractionOpened { interaction: asked }),
+            child(
+                3,
+                Event::ItemCompleted {
+                    item: assistant("itm_c", "the child's prose", ItemStatus::Completed),
+                },
+            ),
+            child(4, done("trn_c")),
             frame(
                 2,
                 Event::ItemCompleted {
@@ -1267,10 +1290,51 @@ pub(crate) mod tests {
                 },
             ),
             frame(3, done("trn_1")),
-        ])
-        .await;
+        ]
+    }
+
+    /// The run is attached to the tree (ADR-0010 §3): a sub-session's turn
+    /// ending is its own business, and the run goes on to the root's.
+    #[tokio::test]
+    async fn a_sub_sessions_turn_ending_does_not_end_the_run() {
+        let run = headless(a_tree_with_a_childs_prompt()).await;
         assert_eq!(run.exit, Ok(Exit { code: 0 }));
         assert!(run.out.contains("after the child"), "{}", run.out);
+    }
+
+    /// A text run attaches to the tree as well: a sub-session's prompt has
+    /// nobody else to reach, so it is refused here as the root's would be,
+    /// while what the sub-session says stays off stdout.
+    #[tokio::test]
+    async fn a_text_run_refuses_a_sub_sessions_prompt_and_keeps_its_prose_off_stdout() {
+        let run = headless(a_tree_with_a_childs_prompt()).await;
+        assert_eq!(run.exit, Ok(Exit { code: 0 }));
+        assert_eq!(run.out, "after the child\n");
+        assert_eq!(run.session.opened(), [OpenOptions::with_children()]);
+        let answers = run.session.answers();
+        assert_eq!(answers.len(), 1);
+        assert_eq!(answers[0].0, InteractionId::from_raw("int_1"));
+        assert!(matches!(answers[0].1, Answer::Deny { .. }), "{answers:?}");
+    }
+
+    #[tokio::test]
+    async fn a_json_run_reports_the_root_alone_while_answering_the_tree() {
+        let run = play(
+            a_tree_with_a_childs_prompt(),
+            &mut TestConsole::headless(),
+            options(Some("hi"), json!({ "outputFormat": "json" })),
+        )
+        .await;
+        assert_eq!(run.exit, Ok(Exit { code: 0 }));
+        for line in run.out.lines() {
+            let frame: Frame = serde_json::from_str(line).expect("a frame per line");
+            assert_eq!(frame.session, SessionId::from_raw("ses_1"), "{line}");
+        }
+        assert_eq!(
+            run.session.answers().len(),
+            1,
+            "the child's prompt was answered"
+        );
     }
 
     #[tokio::test]

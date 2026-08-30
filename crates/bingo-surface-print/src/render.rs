@@ -109,8 +109,7 @@ impl Renderer {
     }
 
     /// `state` is the frame's own session, `root` the one the run opened;
-    /// they differ only for a sub-session's frame, which only the stream-json
-    /// mode is ever handed.
+    /// they differ only for a sub-session's frame.
     pub fn render(
         &mut self,
         frame: &Frame,
@@ -119,11 +118,22 @@ impl Renderer {
         out: &mut (impl Write + ?Sized),
         err: &mut (impl Write + ?Sized),
     ) -> io::Result<()> {
+        if !self.reports(state, root) {
+            return Ok(());
+        }
         if matches!(self.output, Output::Text) {
             return self.text(&frame.event, state, out, err);
         }
         self.machine(frame, state, root, out)?;
         self.failure(&frame.event, err)
+    }
+
+    /// Text and json report the root alone; only the envelope has a shape
+    /// for a sub-session's lines (`parent_tool_use_id`, ADR-0010 §4). The run
+    /// still folds and answers the whole tree — that is not the renderer's
+    /// business.
+    fn reports(&self, state: &SessionState, root: &SessionState) -> bool {
+        matches!(self.output, Output::Stream(_)) || state.summary.id == root.summary.id
     }
 
     /// The two machine-readable modes: at most one line per frame on stdout.
@@ -337,7 +347,9 @@ pub(crate) fn tool_failed(item: &Item, output: Option<&ToolOutput>) -> bool {
 pub(crate) mod tests {
     use super::*;
     use crate::tests::{assistant, frame, session_state, tool_call};
-    use bingo_sdk::{ContentPart, KernelError, Level, Origin, TurnId, TurnOrigin, Usage};
+    use bingo_sdk::{
+        ContentPart, KernelError, Level, Origin, SessionId, TurnId, TurnOrigin, Usage,
+    };
 
     pub(crate) struct Sinks {
         out: Vec<u8>,
@@ -662,6 +674,34 @@ pub(crate) mod tests {
             ),
         ];
         assert_eq!(play(Mode::Text, &frames).out(), "");
+    }
+
+    #[test]
+    fn text_and_json_report_the_root_alone_and_the_envelope_the_tree() {
+        let root = session_state();
+        let mut child = session_state();
+        child.summary.id = SessionId::from_raw("ses_2");
+        let mut said = frame(
+            1,
+            Event::ItemCompleted {
+                item: assistant("itm_1", "from the child", ItemStatus::Completed),
+            },
+        );
+        said.session = SessionId::from_raw("ses_2");
+        for mode in [Mode::Text, Mode::Json, Mode::StreamJson] {
+            let mut renderer = Renderer::new(mode, false, Vec::new());
+            let (mut out, mut err) = (Vec::new(), Vec::new());
+            renderer
+                .render(&said, &child, &root, &mut out, &mut err)
+                .expect("writing to a vector cannot fail");
+            assert_eq!(
+                !out.is_empty(),
+                mode == Mode::StreamJson,
+                "{mode:?} wrote {:?}",
+                String::from_utf8_lossy(&out)
+            );
+            assert!(err.is_empty());
+        }
     }
 
     #[test]

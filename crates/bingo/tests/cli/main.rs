@@ -7,6 +7,7 @@
 
 use std::io::Write;
 use std::process::{Command, Output, Stdio};
+use std::time::{Duration, Instant};
 
 use bingo_sdk::{Event, Frame, TurnStatus};
 
@@ -21,6 +22,25 @@ fn bingo() -> Command {
 
 fn run(cmd: &mut Command) -> Output {
     cmd.output().expect("the binary runs")
+}
+
+/// `run`, for a scenario whose failure is a hang: past `limit` the process is
+/// killed and the test fails, instead of the suite waiting on it. The output
+/// is read once the process has exited, so it must fit the pipe.
+fn run_within(cmd: &mut Command, limit: Duration) -> Output {
+    let mut child = cmd.spawn().expect("the binary runs");
+    let started = Instant::now();
+    loop {
+        if child.try_wait().expect("wait").is_some() {
+            return child.wait_with_output().expect("output");
+        }
+        if started.elapsed() > limit {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("bingo did not exit within {limit:?}");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }
 
 fn stdout(out: &Output) -> String {
