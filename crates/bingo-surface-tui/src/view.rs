@@ -168,9 +168,14 @@ fn card(tree: &Tree, ui: &Ui, frame: &mut Frame, regions: Regions, now: Now) {
 /// Where the row that asked ends, in screen rows, when it is on the screen.
 fn asking_row(ui: &Ui, interaction: &bingo_sdk::Interaction, regions: Regions) -> Option<u16> {
     let painted = ui.painted.borrow();
+    let region = regions.transcript;
     let line = painted.blocks.span(interaction.item.as_ref()?)?.1;
-    let row = u16::try_from(line.checked_sub(painted.top)?).ok()?;
-    (row < regions.transcript.height).then(|| regions.transcript.y + row)
+    // A short transcript hangs from the foot of its region, so the rows above
+    // it are padding the line numbers know nothing about.
+    let rows = usize::from(region.height);
+    let padding = rows - painted.height.min(rows);
+    let row = u16::try_from(line.checked_sub(painted.top)? + padding).ok()?;
+    (row < region.height).then(|| region.y + row)
 }
 
 /// How far into its arrival a card the kernel opened is.
@@ -641,6 +646,56 @@ mod tests {
             "by the third frame it has arrived"
         );
         insta::assert_snapshot!(screens.join("\n"));
+    }
+
+    #[test]
+    fn a_card_hangs_under_the_row_that_asked_for_it() {
+        // The permission fixture names `itm_2` as the row that asked; the
+        // rows after it are what the card comes down over.
+        let mut frames = vec![
+            item_frame(1, user("itm_1", "edit it")),
+            item_frame(
+                2,
+                tool(
+                    "itm_2",
+                    "Edit",
+                    json!({"file_path": "src/lib.rs"}),
+                    None,
+                    ItemStatus::Running,
+                ),
+            ),
+        ];
+        frames.extend((3..12).map(|i| {
+            item_frame(
+                i,
+                assistant(
+                    &format!("itm_{i}"),
+                    &format!("after {i}"),
+                    ItemStatus::Completed,
+                ),
+            )
+        }));
+        let state = folded(frames);
+        let mut state = state.clone();
+        state.apply(&frame(12, opened(permission(Some("Edit(src/)"), None))));
+        let (mut ui, now) = settled();
+        ui.dialog.focus_on(state.interactions.first());
+        let screen = render(&state, &ui, now);
+        let rows: Vec<&str> = screen.lines().collect();
+        let asked = rows
+            .iter()
+            .position(|row| row.contains("Edit src/lib.rs"))
+            .expect("the row that asked");
+        let card = rows
+            .iter()
+            .position(|row| row.contains('╭'))
+            .expect("the card's top edge");
+        assert_eq!(card, asked + 1, "the box opens under it:\n{screen}");
+        assert!(
+            rows.last().is_some_and(|row| row.contains("fake-1")),
+            "and the frame under it did not move:\n{screen}"
+        );
+        insta::assert_snapshot!(screen);
     }
 
     #[test]
