@@ -15,6 +15,7 @@ use bingo_permissions::PermissionsPlugin;
 use bingo_provider_anthropic::AnthropicPlugin;
 use bingo_provider_fake::{FakePlugin, FakeProvider, Script};
 use bingo_provider_openai::OpenAiPlugin;
+use bingo_rooms::RoomsPlugin;
 use bingo_sdk::{
     Env, ErrorCode, KernelError, Plugin, SessionId, SessionSelector, SessionSpec, SurfaceOptions,
 };
@@ -284,6 +285,7 @@ fn plugins() -> Result<Vec<Box<dyn Plugin>>, KernelError> {
         Box::new(SkillsPlugin),
         Box::new(McpPlugin::default()),
         Box::new(AgentsPlugin::default()),
+        Box::new(RoomsPlugin),
         Box::new(TasksPlugin),
         Box::new(PrintPlugin),
         Box::new(RpcPlugin),

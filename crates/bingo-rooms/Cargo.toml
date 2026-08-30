@@ -1,0 +1,33 @@
+[package]
+name = "bingo-rooms"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Rooms plugin for bingo: a room is a session nobody answers, and a post reaches every member"
+
+[lints]
+workspace = true
+
+[dependencies]
+bingo-sdk.workspace = true
+async-trait.workspace = true
+# M9: `.bingo/team.json` declares rooms, and a room's membership is a payload.
+serde.workspace = true
+serde_json.workspace = true
+# M9: a hook has nobody to return an error to; a member nobody is, and a team
+# file that will not parse, are reported here.
+tracing.workspace = true
+# M9: reading the team file fails in two ways worth telling apart.
+thiserror.workspace = true
+
+[dev-dependencies]
+bingo-sdk = { workspace = true, features = ["testing"] }
+# M9: the attachment the host double hands back carries a frame stream.
+futures.workspace = true
+# M9: a `SessionSummary` the double writes down is stamped with a
+# `jiff::Timestamp`, so writing one needs one.
+jiff.workspace = true
+tempfile.workspace = true
+tokio.workspace = true
