@@ -25,6 +25,30 @@ pub enum AuthStatus {
     },
 }
 
+/// How a person wants to sign in (ADR-0012 §4); `None` is the provider's
+/// default. The flow that results is what `LoginFlow` shows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum LoginMethod {
+    /// A browser on this machine and a loopback callback.
+    Browser,
+    /// A code entered in a browser anywhere; polled here.
+    Device,
+    /// A credential minted elsewhere, pasted in.
+    Paste,
+}
+
+impl LoginMethod {
+    pub fn parse(text: &str) -> Option<Self> {
+        match text.trim().to_ascii_lowercase().as_str() {
+            "browser" => Some(Self::Browser),
+            "device" => Some(Self::Device),
+            "paste" => Some(Self::Paste),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelInfo {
@@ -63,10 +87,23 @@ pub trait Provider: Send + Sync {
         AuthStatus::NotApplicable
     }
 
-    /// Interactive login (OAuth flows ask through the prompter).
-    async fn login(&self, _prompter: Arc<dyn Prompter>) -> Result<(), ProviderError> {
+    /// Interactive login (ADR-0012 §4): an OAuth flow shows itself through
+    /// the prompter as `InteractionKind::Login` and answers with a receipt
+    /// a person can read (`Signed in to codex as …`).
+    async fn login(
+        &self,
+        _prompter: Arc<dyn Prompter>,
+        _method: Option<LoginMethod>,
+    ) -> Result<String, ProviderError> {
         Err(ProviderError::Unsupported {
             message: "login".into(),
+        })
+    }
+
+    /// Forget the stored credential, revoking it where the issuer allows.
+    async fn logout(&self) -> Result<String, ProviderError> {
+        Err(ProviderError::Unsupported {
+            message: "logout".into(),
         })
     }
 }

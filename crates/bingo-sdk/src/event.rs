@@ -595,6 +595,8 @@ pub enum ResolvedBy {
 #[serde(rename_all = "camelCase")]
 pub enum CancelReason {
     TurnEnded,
+    /// The holding command that asked has finished (ADR-0012 §5).
+    CommandEnded,
     Interrupted,
     SessionClosed,
     Expired,

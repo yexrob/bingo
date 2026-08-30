@@ -42,7 +42,7 @@ pub use plugin::{
     Registrar, ToolSource,
 };
 pub use policy::{Decision, PermissionPolicy, PolicyInput, Reason, Verdict};
-pub use provider::{AuthStatus, ModelInfo, Provider};
+pub use provider::{AuthStatus, LoginMethod, ModelInfo, Provider};
 pub use state::{Applied, LiveTurn, Retry, SessionState};
 pub use store::SessionStore;
 pub use surface::{Exit, Surface, SurfaceKind, SurfaceOptions};

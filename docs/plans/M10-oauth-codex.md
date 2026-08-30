@@ -1,0 +1,41 @@
+# M10 — OAuth and the Codex provider
+
+## Goal
+
+`bingo login codex` signs a person into their ChatGPT subscription from a terminal — the browser opens, or a device code is shown — and from then on `bingo --provider codex --model gpt-5.4 "…"` runs a coding turn over the subscription endpoint with no key in any file but `auth.json`. Inside a session `/login codex` does the same through a dialog, and `/logout codex` undoes it. Tokens refresh before they expire and once more on a 401; a dead refresh token reads as `Expired` with the way back. The flows live in a library crate that a second provider can use (ADR-0012).
+
+## Bricks, in build order (owner)
+
+1. **ADR-0012 + sdk** (kernel) — `LoginMethod::{Browser, Device, Paste}`; `Provider::login(&self, prompter, method: Option<LoginMethod>)`; `Provider::logout(&self)` (default `Unsupported`); `CancelReason::CommandEnded`. `scripts/check_discipline.sh` reads `package.metadata.bingo.tier`: a library depends on the sdk only, a plugin on the sdk and libraries. `schema/rpc.json` regenerated.
+2. **`bingo-auth-oauth`** (worker A, new library crate) — pure bricks first: `pkce::{verifier, challenge}` (S256 over `aws-lc-rs`), `jwt::{claims, account_id}` (moved from `provider-openai::variant`), `callback::parse(request_head) -> Result<(code, state)>`, `tokens::Tokens::from_response(json, now)` with `is_fresh(now)` at a 300 s lead, `error::permanent(body)`. Then `Issuer` (client id, base, the six paths, scope, extra authorize params), `CredentialStore` (`<data_dir>/auth.json`, entries per ADR-0012 §2), `loopback::Callback` (bind 1455…1475, one request, `state` check, a "you can close this tab" page), `device::{start, poll}`, `browser::open(url)` (best-effort `open`/`xdg-open`/`cmd /c start`, `BINGO_NO_BROWSER` skips), and `TokenSource` (§3): `status()` sync, `access_token()`, `refreshed()` (forced), `login(prompter, method, open_browser)`, `logout()`. Tests: every brick pure; the store's 0600, atomicity, corrupt file; each flow against a wiremock issuer (`usercode` → 403 pending → granted → exchange; loopback callback hit by reqwest with the right and a wrong `state`; refresh rotation; a permanent failure clearing the entry; eight concurrent `access_token()` calls making one refresh; `Cancel` aborting a device poll).
+3. **`codex` in `bingo-provider-openai`** (worker A, after 2) — `Credential::{Key(String), Tokens(Arc<TokenSource>)}` replaces `api_key`; `bearer()` async; a 401 with `Tokens` refreshes once and retries once; `auth()`: `Ready` when signed in, `Missing{hint: "Run `bingo login codex`, or `/login codex` in a session."}`, `Expired{hint}`; `login`/`logout` delegate; `models()` for `Variant::Codex` reads `GET {base}/codex/models?client_version=0.146.0` (`models[].slug`, skip `visibility: "hide"`, `priority` ascending; `display_name` as `display`) and falls back to the nine-model static list on any failure; `OpenAiPlugin` registers `openai` and `codex` (`provides: ["provider:openai", "provider:codex"]`), settings claim gains `("codex", Replace)` with `CodexConfig { base_url, issuer }`; `Env.data_dir` names the store. Tests: the header table (bearer from the store, `ChatGPT-Account-Id` from its claim), the 401-refresh-retry against wiremock, the models parse on a recorded body and the fallback, the plugin registering both providers.
+4. **Kernel** (kernel) — `commands/{login,logout}.rs`: `/login <provider> [browser|device|paste]` (not instant; `ArgSpec::Catalog{providers}`) finds the provider, runs `provider.login(prompter, method)` with the session's own prompter, receipts `Record{Action{login, provider, "Signed in to codex as …"}}`; `/logout <provider>`. `open_interaction` accepts `turn: None` while a holding command runs; `command_finished` cancels the pendings `CommandEnded`. `Host::provider(id)` and `Host::prompter(session)` become `pub(crate)`/`pub` as the two need.
+5. **bin** (kernel) — `bingo login <provider> [--device|--paste]`, `bingo logout <provider>`: build the host, run the provider's method with a `TerminalPrompter` (stderr shows the URL and code; `Paste` reads one line from stdin; `Cancel` on ctrl-c), print the receipt, exit 0/1. The kernel's `AUTH_REQUIRED` refusal names the command through the provider's hint.
+6. **TUI** (kernel) — the `Login` dialog offers `Cancel` as a row and Esc; a `Paste` flow opens the words row and sends `Answer::Text`; a `TestBackend` snapshot per flow.
+7. **Black-box** (kernel) — `crates/bingo/tests/cli/login.rs` with a wiremock issuer and a wiremock Codex endpoint reached through `--settings`: `bingo login codex --device` completes and `auth.json` is 0600 with an `oauth` entry; `--provider codex` then runs a text turn with `Authorization: Bearer` and `ChatGPT-Account-Id` on the wire; `--provider codex` before any login is one `AUTH_REQUIRED` line naming `bingo login codex`; over RPC `/login codex paste` opens a `Login{Paste}` interaction whose `Text` answer stores the key and acks a receipt; `bingo logout codex` hits `/oauth/revoke` and empties the entry; a 401 mid-turn is followed by one refresh and the turn completes.
+
+## Files
+
+`docs/adr/0012-oauth-credentials.md`, `crates/bingo-sdk/src/{provider,event}.rs`, `schema/rpc.json`, `scripts/check_discipline.sh`, `crates/bingo-auth-oauth/**`, `crates/bingo-provider-openai/src/{lib,variant,models,credential}.rs` + `fixtures/codex_models.json`, `crates/bingo-core/src/commands/{mod,login,logout}.rs`, `crates/bingo-core/src/{host,session}.rs`, `session/{interactions,inputs}.rs`, `crates/bingo/src/{main,login}.rs`, `crates/bingo-surface-tui/src/dialog.rs`, `crates/bingo/tests/cli/login.rs`, `Cargo.toml`, `scripts/budget.toml`, `ARCHITECTURE.md`.
+
+## Dependencies
+
+`aws-lc-rs` (SHA-256, `SystemRandom`) — already resolved under `rustls`; a direct edge, no new crate. One workspace crate: `budget.toml` 267 → 268.
+
+## Exit criteria
+
+- [ ] `cargo fmt --all -- --check`, `cargo check --workspace --all-targets --locked`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, `cargo test --workspace --locked`, `scripts/check_discipline.sh`, `scripts/budget.sh`, `cargo deny check`, `scripts/tui-smoke.sh`
+- [ ] Library: every brick in 2 has its test; the loopback flow rejects a wrong `state`; the device poll stops at the cap and on `Cancel`; a permanent refresh failure clears the entry and `status()` reads `Expired`; eight concurrent callers refresh once; `auth.json` is 0600 after a write and after a rewrite
+- [ ] Provider: `codex_request_params_isolation` (M2) still passes; the 401 → refresh → retry path; `models()` dynamic and fallback; both providers registered from one plugin
+- [ ] Kernel: a holding command may open an interaction with `turn: None`; it is cancelled `CommandEnded` when the command finishes; `/login` on an unknown provider is `PROVIDER_UNAVAILABLE`; `/login fake` is `UNSUPPORTED`… the fake provider says so
+- [ ] Surfaces: the TUI shows the URL and code and Esc cancels; `bingo login codex --device` on a terminal prints them on stderr and nothing on stdout; the RPC `Login{Paste}` round trip
+- [ ] Black-box: every scenario in 7
+- [ ] sdk changed once; ADR-0012 lists what it touched; `check_discipline.sh` accepts `provider-openai → auth-oauth` and would reject `auth-oauth → provider-openai`
+
+## Non-goals
+
+A keyring backend. Reading opencode's or codex's own `auth.json`. Anthropic subscription login (the library is ready for it; the issuer is not known). Moving API keys from settings into `auth.json` (`{"type":"api"}` is read if present, never written by this milestone). The catalogue listing a provider's dynamic models. Per-account selection when one issuer holds several.
+
+## Risks touched
+
+R1 sdk churn — one change, three additions, made first. R4 provider quirks — the Codex endpoint has never been exercised live in this project; the fake issuer proves the flows, the user's own subscription proves the endpoint (a live smoke is the last exit criterion and needs the user). Security — the callback binds loopback only, `state` is random per attempt, the verifier never leaves the process, the store is 0600; nothing is logged. `aws-lc-rs` as a direct dependency — if reqwest's TLS backend moves, the edge is a one-line swap to `sha2`.

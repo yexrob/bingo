@@ -175,13 +175,22 @@
       ]
     },
     "CancelReason": {
-      "type": "string",
-      "enum": [
-        "turnEnded",
-        "interrupted",
-        "sessionClosed",
-        "expired",
-        "superseded"
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "turnEnded",
+            "interrupted",
+            "sessionClosed",
+            "expired",
+            "superseded"
+          ]
+        },
+        {
+          "type": "string",
+          "const": "commandEnded",
+          "description": "The holding command that asked has finished (ADR-0012 §5)."
+        }
       ]
     },
     "Capabilities": {

@@ -13,3 +13,4 @@ One record per boundary decision: a trait shape, a wire format, a persisted form
 - [0009 — Contribution sources: tools and commands that exist only after I/O](0009-contribution-sources.md)
 - [0010 — Sub-sessions: peer delivery, redirect, tree attachment](0010-sub-sessions.md)
 - [0011 — Log sessions, plugin state in the journal, the host in hand](0011-log-sessions-and-plugin-state.md)
+- [0012 — OAuth credentials: a library tier, one store, login as an interaction](0012-oauth-credentials.md)
