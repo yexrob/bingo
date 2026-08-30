@@ -198,6 +198,7 @@ dependencies = [
  "bingo-provider-anthropic",
  "bingo-provider-fake",
  "bingo-provider-openai",
+ "bingo-rooms",
  "bingo-sdk",
  "bingo-skills",
  "bingo-store-jsonl",
@@ -374,6 +375,22 @@ dependencies = [
  "serde_json",
  "tokio",
  "wiremock",
+]
+
+[[package]]
+name = "bingo-rooms"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bingo-sdk",
+ "futures",
+ "jiff",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
