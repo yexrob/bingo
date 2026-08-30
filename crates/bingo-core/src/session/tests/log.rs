@@ -108,3 +108,70 @@ async fn an_extension_is_durable_folded_and_the_latest_payload_is_the_state() {
     }
     assert_eq!(journaled, 2, "durable: both are in the journal");
 }
+
+/// A hook that keeps every extension payload it observes.
+#[derive(Default)]
+struct Seen(std::sync::Mutex<Vec<Value>>);
+
+#[async_trait::async_trait]
+impl Hook for Seen {
+    fn id(&self) -> &str {
+        "seen"
+    }
+    fn matcher(&self) -> HookMatcher {
+        HookMatcher {
+            points: vec![HookPoint::Event],
+            tool: None,
+        }
+    }
+    async fn on_event(&self, frame: &Frame, _: &HookContext) {
+        if let Event::Extension { payload, .. } = &frame.event {
+            self.0.lock().unwrap().push(payload.clone());
+        }
+    }
+}
+
+/// A session that comes back restates its extensions at the head of the new
+/// segment, so a hook observing the journal folds what the snapshot holds.
+#[tokio::test]
+async fn a_resumed_session_restates_its_extensions_for_the_observers() {
+    let first = log_session();
+    let (mut state, mut events) = first.attach().await.unwrap();
+    first.extend("bingo.test".into(), "things".into(), json!({ "n": 1 }));
+    frames_until(&mut events, &mut state, |f| {
+        matches!(f.event, Event::Extension { .. })
+    })
+    .await;
+    let mut replay = first.events_since(Seq::ZERO).await.unwrap();
+    let mut journal = Vec::new();
+    while let Some(Some(frame)) = replay.next().now_or_never() {
+        journal.push(frame);
+    }
+
+    let seen = Arc::new(Seen::default());
+    let provider = ScriptedProvider::new(vec![]);
+    let observer = seen.clone();
+    let second = resume(journal, None, Services::none(), move |_| {
+        let mut cfg = config(provider, vec![], Arc::new(NoHost));
+        cfg.model = None;
+        cfg.hooks = vec![observer as Arc<dyn Hook>];
+        Arc::new(cfg)
+    })
+    .unwrap();
+    let (snapshot, _) = second.attach().await.unwrap();
+    assert_eq!(
+        snapshot.extensions["bingo.test"]["things"],
+        json!({ "n": 1 })
+    );
+    for _ in 0..100 {
+        if !seen.0.lock().unwrap().is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        seen.0.lock().unwrap().as_slice(),
+        [json!({ "n": 1 })],
+        "the observer folds the same state the snapshot holds"
+    );
+}

@@ -193,9 +193,29 @@ impl Actor {
         };
         self.observe_journal();
         self.publish(Event::SessionUpdated { summary }, None).await;
+        self.restate_extensions().await;
         self.refresh_config().await;
         self.recover().await;
         self.session_hooks(Phase::Start);
+    }
+
+    /// The head of a segment restates the plugin state the journal already
+    /// holds (ADR-0011 §2), so an observer that joins here — a hook after a
+    /// restart — folds the same state a client is handed in its snapshot.
+    async fn restate_extensions(&mut self) {
+        let held: Vec<(String, String, Value)> = self
+            .state
+            .extensions
+            .iter()
+            .flat_map(|(plugin, kinds)| {
+                kinds
+                    .iter()
+                    .map(move |(kind, payload)| (plugin.clone(), kind.clone(), payload.clone()))
+            })
+            .collect();
+        for (plugin, kind, payload) in held {
+            self.extend(plugin, kind, payload).await;
+        }
     }
 
     /// What a client may read of this session's configuration: the kernel's
