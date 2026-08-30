@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 use bingo_sdk::{
-    Display, Preview, Subject, Tool, ToolContext, ToolError, ToolOutput, ToolSpec, ToolTraits,
+    Preview, Subject, Tool, ToolContext, ToolError, ToolOutput, ToolSpec, ToolTraits, View,
     input_schema,
 };
 use schemars::JsonSchema;
@@ -141,7 +141,7 @@ impl Tool for EditTool {
             .map_err(|e| ToolError::Failed(format!("cannot write {}: {e}", path.display())))?;
 
         let mut out = ToolOutput::text(summary(&path, count));
-        out.display = Some(Display::Diff { unified });
+        out.display = Some(View::Diff { unified });
         Ok(out)
     }
 }
@@ -212,7 +212,7 @@ mod tests {
         let input = args("a.txt", "two", "too", false);
         let preview = EditTool.preview(&input, dir.path()).expect("a preview");
         let out = EditTool.call(input, &cx).await.expect("edit");
-        let Some(Display::Diff { unified }) = out.display else {
+        let Some(View::Diff { unified }) = out.display else {
             panic!("expected a diff, got {:?}", out.display);
         };
         assert_eq!(

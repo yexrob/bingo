@@ -36,6 +36,7 @@ pub mod name {
     pub const SESSION_ANSWER: &str = "session/answer";
     pub const SESSION_DELIVER: &str = "session/deliver";
     pub const SESSION_EXTEND: &str = "session/extend";
+    pub const SESSION_SIGNAL: &str = "session/signal";
     pub const CATALOG_READ: &str = "catalog/read";
     pub const GATEWAY_SUBSCRIBE: &str = "gateway/subscribe";
 
@@ -140,6 +141,16 @@ pub struct DeliverParams {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ExtendParams {
+    pub session: SessionId,
+    pub plugin: String,
+    pub kind: String,
+    pub payload: Value,
+}
+
+/// `HostApi::signal` (ADR-0013 §2): a plugin's live state onto a session's stream.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SignalParams {
     pub session: SessionId,
     pub plugin: String,
     pub kind: String,
@@ -266,6 +277,11 @@ pub static METHODS: &[Method] = &[
         schema_of::<Empty>,
     ),
     (
+        name::SESSION_SIGNAL,
+        schema_of::<SignalParams>,
+        schema_of::<Empty>,
+    ),
+    (
         name::SESSION_HISTORY,
         schema_of::<HistoryParams>,
         schema_of::<HistoryChunk>,
@@ -312,8 +328,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_wire_has_thirteen_methods_and_two_notifications() {
-        assert_eq!(METHODS.len(), 15, "ADR-0007 fixes the method count");
+    fn the_wire_has_sixteen_methods_and_two_notifications() {
+        assert_eq!(METHODS.len(), 16, "ADR-0007 fixes the method count");
         assert_eq!(NOTIFICATIONS.len(), 2);
     }
 

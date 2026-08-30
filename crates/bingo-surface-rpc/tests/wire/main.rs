@@ -248,15 +248,21 @@ fn params_for(method: &str) -> Value {
             "kind": "things",
             "payload": [1, 2, 3],
         }),
+        name::SESSION_SIGNAL => json!({
+            "session": session,
+            "plugin": "bingo.test",
+            "kind": "progress",
+            "payload": { "kind": "progress", "value": 1, "total": 3 },
+        }),
         name::CATALOG_READ => json!({ "kind": CatalogKind::Providers }),
         _ => json!({}),
     }
 }
 
-/// `session/deliver` and `session/extend` are `HostApi` one-to-one
-/// (ADR-0011): what a client sends is what the kernel is handed.
+/// `session/deliver`, `session/extend` and `session/signal` are `HostApi`
+/// one-to-one (ADR-0011, ADR-0013): what a client sends is what the kernel is handed.
 #[tokio::test]
-async fn a_delivery_and_an_extension_reach_the_kernel_verbatim() {
+async fn a_delivery_an_extension_and_a_signal_reach_the_kernel_verbatim() {
     let (host, session) = TestHost::with(script());
     let mut wire = Wire::opened(host).await;
     let result = wire
@@ -267,7 +273,19 @@ async fn a_delivery_and_an_extension_reach_the_kernel_verbatim() {
     wire.call(name::SESSION_EXTEND, params_for(name::SESSION_EXTEND))
         .await
         .expect("an extension is accepted");
+    wire.call(name::SESSION_SIGNAL, params_for(name::SESSION_SIGNAL))
+        .await
+        .expect("a signal is accepted");
     assert_eq!(wire.finish().await, Exit { code: 0 });
+    let signalled = session.signalled.lock().unwrap();
+    assert_eq!(
+        signalled.as_slice(),
+        [(
+            "bingo.test".to_string(),
+            "progress".to_string(),
+            json!({ "kind": "progress", "value": 1, "total": 3 })
+        )]
+    );
 
     let delivered = session.delivered.lock().unwrap();
     assert_eq!(delivered.len(), 1);

@@ -139,6 +139,33 @@ impl HostApi for Journals {
         Ok(())
     }
 
+    async fn signal(
+        &self,
+        session: &SessionId,
+        plugin: &str,
+        kind: &str,
+        payload: Value,
+    ) -> Result<(), KernelError> {
+        let frame = Frame {
+            seq: self.next_seq(),
+            ts: Timestamp::UNIX_EPOCH,
+            session: session.clone(),
+            cause: None,
+            event: Event::Signal {
+                plugin: plugin.to_string(),
+                kind: kind.to_string(),
+                payload,
+            },
+        };
+        let mut states = self.states();
+        let state = states
+            .iter_mut()
+            .find(|state| &state.summary.id == session)
+            .ok_or_else(|| KernelError::new(ErrorCode::SessionNotFound, "no such session"))?;
+        state.apply(&frame);
+        Ok(())
+    }
+
     async fn catalog(&self, _kind: CatalogKind) -> Result<Catalog, KernelError> {
         unreachable!("this plugin reads no catalog")
     }

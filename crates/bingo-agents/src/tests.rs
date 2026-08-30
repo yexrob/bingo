@@ -352,6 +352,16 @@ impl HostApi for Fleet {
         unreachable!("this plugin extends no session")
     }
 
+    async fn signal(
+        &self,
+        _session: &SessionId,
+        _plugin: &str,
+        _kind: &str,
+        _payload: serde_json::Value,
+    ) -> Result<(), KernelError> {
+        unreachable!("this plugin signals no session")
+    }
+
     /// Three tools, one of them the one a child may never have.
     async fn catalog(&self, kind: CatalogKind) -> Result<Catalog, KernelError> {
         Ok(Catalog {

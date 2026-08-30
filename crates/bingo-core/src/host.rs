@@ -813,6 +813,19 @@ impl HostApi for Host {
         Ok(())
     }
 
+    async fn signal(
+        &self,
+        session: &SessionId,
+        plugin: &str,
+        kind: &str,
+        payload: Value,
+    ) -> Result<(), KernelError> {
+        self.mailbox_of(session)
+            .await?
+            .signal(plugin.to_string(), kind.to_string(), payload);
+        Ok(())
+    }
+
     async fn catalog(&self, kind: CatalogKind) -> Result<Catalog, KernelError> {
         Ok(Catalog {
             kind,

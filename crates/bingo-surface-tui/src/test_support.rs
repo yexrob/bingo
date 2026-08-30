@@ -5,10 +5,10 @@
 use std::time::Instant;
 
 use bingo_sdk::{
-    Answer, AnswerSpec, ContentPart, Delivery, Display, Event, Frame, Interaction, InteractionId,
+    Answer, AnswerSpec, ContentPart, Delivery, Event, Frame, Interaction, InteractionId,
     InteractionKind, Item, ItemBody, ItemId, ItemStatus, Level, LoginFlow, Origin, ParentLink,
     Preview, QuestionOption, Seq, SessionId, SessionState, SessionSummary, ToolOutput, TurnId,
-    Usage,
+    Usage, View,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use jiff::Timestamp;
@@ -229,7 +229,7 @@ pub fn diff_output() -> ToolOutput {
     ToolOutput {
         parts: vec![ContentPart::text("wrote src/lib.rs")],
         is_error: false,
-        display: Some(Display::Diff {
+        display: Some(View::Diff {
             unified: "@@ -1,2 +1,2 @@\n-let a = 1;\n+let a = 2;\n ok\n".into(),
         }),
     }
@@ -668,6 +668,16 @@ impl HostApi for TestHost {
         _payload: serde_json::Value,
     ) -> Result<(), KernelError> {
         unreachable!("this double extends nothing")
+    }
+
+    async fn signal(
+        &self,
+        _session: &SessionId,
+        _plugin: &str,
+        _kind: &str,
+        _payload: serde_json::Value,
+    ) -> Result<(), KernelError> {
+        unreachable!("this double signals nothing")
     }
 
     async fn catalog(&self, kind: CatalogKind) -> Result<Catalog, KernelError> {

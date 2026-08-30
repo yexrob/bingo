@@ -235,6 +235,24 @@ impl HostApi for Fleet {
         Ok(())
     }
 
+    async fn signal(
+        &self,
+        session: &SessionId,
+        plugin: &str,
+        kind: &str,
+        payload: Value,
+    ) -> Result<(), KernelError> {
+        self.remember(
+            session,
+            Event::Signal {
+                plugin: plugin.to_string(),
+                kind: kind.to_string(),
+                payload,
+            },
+        );
+        Ok(())
+    }
+
     async fn catalog(&self, _kind: CatalogKind) -> Result<Catalog, KernelError> {
         unreachable!("this plugin reads no catalogue")
     }

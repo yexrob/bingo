@@ -315,6 +315,16 @@ pub trait HostApi: Send + Sync {
         payload: Value,
     ) -> Result<(), KernelError>;
 
+    /// Publish a plugin's live state onto a session's stream (ADR-0013 §2):
+    /// an ephemeral `Event::Signal`, never journaled; `Null` removes `kind`.
+    async fn signal(
+        &self,
+        session: &SessionId,
+        plugin: &str,
+        kind: &str,
+        payload: Value,
+    ) -> Result<(), KernelError>;
+
     async fn catalog(&self, kind: CatalogKind) -> Result<Catalog, KernelError>;
 
     fn gateway_events(&self) -> GatewayStream;

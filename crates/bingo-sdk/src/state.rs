@@ -45,6 +45,10 @@ pub struct SessionState {
     /// payload is the whole of that kind (ADR-0011 §2).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub extensions: BTreeMap<String, BTreeMap<String, Value>>,
+    /// Plugin-owned live state, by plugin then kind: the latest `Signal`
+    /// payload, gone on `Null` and after a resume (ADR-0013 §2).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub signals: BTreeMap<String, BTreeMap<String, Value>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -86,6 +90,7 @@ pub enum Applied {
     History,
     Notice,
     Extension,
+    Signal,
     Lagged,
 }
 
@@ -105,6 +110,7 @@ impl SessionState {
             unread: false,
             closed: false,
             extensions: BTreeMap::new(),
+            signals: BTreeMap::new(),
         }
     }
 
@@ -156,13 +162,7 @@ impl SessionState {
                 max,
                 dropped,
                 ..
-            } => self.turn_retrying(
-                Retry {
-                    attempt: *attempt,
-                    max: *max,
-                },
-                dropped,
-            ),
+            } => self.turn_retrying(*attempt, *max, dropped),
             Event::TurnUsage { usage, context, .. } => self.turn_usage(*usage, *context),
             Event::TurnCompleted { status, .. } => self.turn_completed(status),
             Event::ItemStarted { item }
@@ -191,6 +191,11 @@ impl SessionState {
                 kind,
                 payload,
             } => self.extended(plugin, kind, payload),
+            Event::Signal {
+                plugin,
+                kind,
+                payload,
+            } => self.signalled(plugin, kind, payload),
             Event::Lagged { .. } => Applied::Lagged,
         }
     }
@@ -201,6 +206,23 @@ impl SessionState {
             .or_default()
             .insert(kind.to_string(), payload.clone());
         Applied::Extension
+    }
+
+    fn signalled(&mut self, plugin: &str, kind: &str, payload: &Value) -> Applied {
+        if payload.is_null() {
+            if let Some(kinds) = self.signals.get_mut(plugin) {
+                kinds.remove(kind);
+                if kinds.is_empty() {
+                    self.signals.remove(plugin);
+                }
+            }
+        } else {
+            self.signals
+                .entry(plugin.to_string())
+                .or_default()
+                .insert(kind.to_string(), payload.clone());
+        }
+        Applied::Signal
     }
 
     fn session_updated(&mut self, summary: &SessionSummary) -> Applied {
@@ -233,10 +255,10 @@ impl SessionState {
         Applied::Turn
     }
 
-    fn turn_retrying(&mut self, retry: Retry, dropped: &[ItemId]) -> Applied {
+    fn turn_retrying(&mut self, attempt: u32, max: u32, dropped: &[ItemId]) -> Applied {
         self.items.retain(|i| !dropped.contains(&i.id));
         if let Some(t) = self.turn.as_mut() {
-            t.retrying = Some(retry);
+            t.retrying = Some(Retry { attempt, max });
         }
         Applied::Turn
     }
@@ -554,5 +576,39 @@ mod tests {
         ));
         assert_eq!(st.items.len(), 1);
         assert_eq!(st.history_generation, 1);
+    }
+
+    fn signal(seq: u64, kind: &str, payload: Value) -> Frame {
+        frame(
+            seq,
+            Event::Signal {
+                plugin: "bingo.demo.ui".into(),
+                kind: kind.into(),
+                payload,
+            },
+        )
+    }
+
+    #[test]
+    fn a_signal_keeps_the_latest_per_kind_and_null_removes_it() {
+        let mut st = SessionState::new(summary());
+        assert_eq!(
+            st.apply(&signal(1, "progress", serde_json::json!({"value": 1}))),
+            Applied::Signal
+        );
+        st.apply(&signal(2, "progress", serde_json::json!({"value": 2})));
+        st.apply(&signal(3, "board", serde_json::json!({"rows": 0})));
+        let demo = &st.signals["bingo.demo.ui"];
+        assert_eq!(demo["progress"], serde_json::json!({"value": 2}));
+        assert_eq!(demo.len(), 2);
+
+        st.apply(&signal(4, "progress", Value::Null));
+        assert_eq!(st.signals["bingo.demo.ui"].len(), 1);
+        st.apply(&signal(5, "board", Value::Null));
+        assert!(st.signals.is_empty(), "an empty plugin entry goes too");
+        assert!(
+            st.extensions.is_empty(),
+            "a signal never touches the journal's fold"
+        );
     }
 }

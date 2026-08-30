@@ -246,6 +246,16 @@ impl HostApi for Unreachable {
     ) -> Result<(), KernelError> {
         unreachable!("never constructed")
     }
+
+    async fn signal(
+        &self,
+        _session: &SessionId,
+        _plugin: &str,
+        _kind: &str,
+        _payload: serde_json::Value,
+    ) -> Result<(), KernelError> {
+        unreachable!("never constructed")
+    }
     async fn catalog(&self, _: CatalogKind) -> Result<Catalog, KernelError> {
         unreachable!("never constructed")
     }

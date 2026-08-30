@@ -67,6 +67,10 @@ impl HostApi for NoHost {
         Self::absent()
     }
 
+    async fn signal(&self, _: &SessionId, _: &str, _: &str, _: Value) -> Result<(), KernelError> {
+        Self::absent()
+    }
+
     async fn catalog(&self, _: CatalogKind) -> Result<Catalog, KernelError> {
         Self::absent()
     }

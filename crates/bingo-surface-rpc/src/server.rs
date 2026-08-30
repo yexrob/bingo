@@ -27,7 +27,7 @@ use crate::codec::{
 use crate::methods::{
     AnswerParams, CatalogParams, DeliverParams, Empty, EventParams, EventsParams, ExtendParams,
     HistoryParams, InitializeParams, InitializeResult, InterruptParams, ListParams, ListResult,
-    OpenParams, OpenResult, SessionParams, SubmitParams, name,
+    OpenParams, OpenResult, SessionParams, SignalParams, SubmitParams, name,
 };
 use crate::session::{Forwarder, Pump};
 
@@ -218,6 +218,7 @@ impl Server {
             name::SESSION_DELETE => self.delete(params).await,
             name::SESSION_DELIVER => self.deliver(params).await,
             name::SESSION_EXTEND => self.extend(params).await,
+            name::SESSION_SIGNAL => self.signal(params).await,
             name::SESSION_HISTORY => self.history(params).await,
             name::SESSION_EVENTS => self.events(params).await,
             name::SESSION_SUBMIT => self.submit(params),
@@ -307,6 +308,19 @@ impl Server {
         let params: ExtendParams = parse(params)?;
         self.host
             .extend(
+                &params.session,
+                &params.plugin,
+                &params.kind,
+                params.payload,
+            )
+            .await?;
+        Reply::empty()
+    }
+
+    async fn signal(&mut self, params: Value) -> Result<Reply, RpcError> {
+        let params: SignalParams = parse(params)?;
+        self.host
+            .signal(
                 &params.session,
                 &params.plugin,
                 &params.kind,

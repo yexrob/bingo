@@ -1,0 +1,133 @@
+---
+source: crates/bingo-sdk/src/view.rs
+expression: views
+---
+[
+  {
+    "kind": "text",
+    "text": "plain"
+  },
+  {
+    "kind": "markdown",
+    "text": "# Title\n\nbody"
+  },
+  {
+    "kind": "code",
+    "lang": "rust",
+    "text": "fn main() {}"
+  },
+  {
+    "kind": "diff",
+    "unified": "@@ -1 +1 @@\n-a\n+b\n"
+  },
+  {
+    "kind": "list",
+    "items": [
+      "one",
+      "two"
+    ]
+  },
+  {
+    "kind": "table",
+    "headers": [
+      "name",
+      "state"
+    ],
+    "rows": [
+      [
+        "reviewer",
+        "running"
+      ]
+    ]
+  },
+  {
+    "kind": "keyValue",
+    "rows": [
+      [
+        "model",
+        "gpt-5.4"
+      ]
+    ]
+  },
+  {
+    "kind": "progress",
+    "value": 24,
+    "total": 30,
+    "label": "cargo test"
+  },
+  {
+    "kind": "badge",
+    "text": "needs you",
+    "tone": "attention"
+  },
+  {
+    "kind": "tree",
+    "nodes": [
+      {
+        "label": "project",
+        "tone": "neutral",
+        "children": [
+          {
+            "label": "reviewer",
+            "badge": "waiting",
+            "tone": "attention"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "kind": "stack",
+    "children": [
+      {
+        "kind": "text",
+        "text": "a"
+      },
+      {
+        "kind": "text",
+        "text": "b"
+      }
+    ]
+  },
+  {
+    "kind": "columns",
+    "children": [
+      {
+        "kind": "text",
+        "text": "left"
+      },
+      {
+        "kind": "text",
+        "text": "right"
+      }
+    ]
+  },
+  {
+    "kind": "panel",
+    "title": "Board",
+    "child": {
+      "kind": "text",
+      "text": "empty"
+    }
+  },
+  {
+    "kind": "actions",
+    "items": [
+      {
+        "label": "Approve",
+        "action": {
+          "name": "board.tick",
+          "args": null
+        },
+        "key": "1"
+      },
+      {
+        "label": "Next",
+        "action": {
+          "name": "board.next",
+          "args": null
+        }
+      }
+    ]
+  }
+]

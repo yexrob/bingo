@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 use bingo_sdk::{
-    Display, Preview, Subject, Tool, ToolContext, ToolError, ToolOutput, ToolSpec, ToolTraits,
+    Preview, Subject, Tool, ToolContext, ToolError, ToolOutput, ToolSpec, ToolTraits, View,
     input_schema,
 };
 use schemars::JsonSchema;
@@ -112,7 +112,7 @@ impl Tool for WriteTool {
             path.display()
         ));
         if let Some(old) = old {
-            out.display = Some(Display::Diff {
+            out.display = Some(View::Diff {
                 unified: diff::unified(&path, &old, &args.content),
             });
         }
@@ -182,7 +182,7 @@ mod tests {
         let preview = WriteTool.preview(&input, dir.path()).expect("a preview");
 
         let out = WriteTool.call(input, &cx).await.expect("write");
-        let Some(Display::Diff { unified }) = out.display else {
+        let Some(View::Diff { unified }) = out.display else {
             panic!("expected a diff, got {:?}", out.display);
         };
         assert_eq!(

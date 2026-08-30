@@ -50,6 +50,16 @@ impl HostApi for Unavailable {
     ) -> Result<(), KernelError> {
         Err(unavailable())
     }
+
+    async fn signal(
+        &self,
+        _: &SessionId,
+        _: &str,
+        _: &str,
+        _: serde_json::Value,
+    ) -> Result<(), KernelError> {
+        Err(unavailable())
+    }
     async fn catalog(&self, kind: CatalogKind) -> Result<Catalog, KernelError> {
         Ok(Catalog {
             kind,

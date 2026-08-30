@@ -445,6 +445,16 @@ impl HostApi for NoApi {
     ) -> Result<(), KernelError> {
         unreachable!("this double extends nothing")
     }
+
+    async fn signal(
+        &self,
+        _session: &SessionId,
+        _plugin: &str,
+        _kind: &str,
+        _payload: serde_json::Value,
+    ) -> Result<(), KernelError> {
+        unreachable!("this double signals nothing")
+    }
     async fn catalog(&self, kind: CatalogKind) -> Result<Catalog, KernelError> {
         Ok(Catalog {
             kind,

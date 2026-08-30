@@ -107,6 +107,18 @@ impl HostApi for RoutingHost {
             .extend(plugin.to_string(), kind.to_string(), payload);
         Ok(())
     }
+
+    async fn signal(
+        &self,
+        session: &SessionId,
+        plugin: &str,
+        kind: &str,
+        payload: Value,
+    ) -> Result<(), KernelError> {
+        self.target(session)?
+            .signal(plugin.to_string(), kind.to_string(), payload);
+        Ok(())
+    }
     async fn catalog(&self, _: CatalogKind) -> Result<Catalog, KernelError> {
         Self::only_routes()
     }

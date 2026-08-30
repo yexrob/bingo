@@ -13,6 +13,7 @@ use crate::error::KernelError;
 use crate::event::ItemBody;
 use crate::host::HostHandle;
 use crate::ids::SessionId;
+use crate::view::View;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -83,21 +84,6 @@ pub enum CommandOutcome {
     /// line's output, a login's receipt); the ack carries its id.
     Record {
         body: ItemBody,
-    },
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "kind", rename_all = "camelCase")]
-pub enum View {
-    Text {
-        text: String,
-    },
-    List {
-        items: Vec<String>,
-    },
-    Table {
-        headers: Vec<String>,
-        rows: Vec<Vec<String>>,
     },
 }
 

@@ -13,6 +13,7 @@ use serde_json::Value;
 use crate::error::KernelError;
 use crate::ids::{IntentId, InteractionId, ItemId, Seq, SessionId, TurnId};
 use crate::model::{ContentPart, ProviderMetadata, Usage};
+use crate::view::View;
 
 fn is_false(b: &bool) -> bool {
     !*b
@@ -149,6 +150,13 @@ pub enum Event {
         kind: String,
         payload: Value,
     },
+    /// Ephemeral. A plugin's live state (ADR-0013 §2): the latest payload per
+    /// `(plugin, kind)` is the whole of it; `Null` removes it; none survives a resume.
+    Signal {
+        plugin: String,
+        kind: String,
+        payload: Value,
+    },
 
     /// Ephemeral, transport only: this subscriber missed `from..=to`; re-read the journal.
     Lagged {
@@ -162,7 +170,10 @@ impl Event {
     pub fn is_durable(&self) -> bool {
         !matches!(
             self,
-            Event::ItemDelta { .. } | Event::Notice { .. } | Event::Lagged { .. }
+            Event::ItemDelta { .. }
+                | Event::Notice { .. }
+                | Event::Signal { .. }
+                | Event::Lagged { .. }
         )
     }
 }
@@ -397,7 +408,8 @@ pub enum DecisionKind {
     Deny,
 }
 
-/// What a tool returned: the parts the model sees, plus an optional display hint.
+/// What a tool returned: the parts the model sees, plus what a person sees
+/// instead when the tool has something better than the text (ADR-0013 §2).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolOutput {
@@ -405,7 +417,7 @@ pub struct ToolOutput {
     #[serde(default, skip_serializing_if = "is_false")]
     pub is_error: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub display: Option<Display>,
+    pub display: Option<View>,
 }
 
 impl ToolOutput {
@@ -424,13 +436,6 @@ impl ToolOutput {
             display: None,
         }
     }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "kind", rename_all = "camelCase")]
-pub enum Display {
-    Diff { unified: String },
-    Summary { text: String },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -971,6 +976,14 @@ mod tests {
                 Event::Lagged {
                     from: Seq(3),
                     to: Seq(9),
+                },
+            ),
+            frame(
+                25,
+                Event::Signal {
+                    plugin: "bingo.demo.ui".into(),
+                    kind: "progress".into(),
+                    payload: serde_json::json!({"kind": "progress", "value": 3, "total": 10}),
                 },
             ),
             frame(

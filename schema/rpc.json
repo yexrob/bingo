@@ -18,6 +18,31 @@
       ],
       "description": "A typed action a client asks for (GUI buttons, hosts); the kernel dispatches it to a command."
     },
+    "ActionItem": {
+      "type": "object",
+      "properties": {
+        "label": {
+          "type": "string"
+        },
+        "action": {
+          "$ref": "#/$defs/Action"
+        },
+        "key": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1,
+          "maxLength": 1,
+          "description": "A single-key hint; the surface may use another key."
+        }
+      },
+      "required": [
+        "label",
+        "action"
+      ],
+      "description": "A button: the surface fires `Input::Action` with `action` (ADR-0008 §1)."
+    },
     "Activation": {
       "type": "string",
       "enum": [
@@ -565,42 +590,6 @@
         }
       ]
     },
-    "Display": {
-      "oneOf": [
-        {
-          "type": "object",
-          "properties": {
-            "unified": {
-              "type": "string"
-            },
-            "kind": {
-              "type": "string",
-              "const": "diff"
-            }
-          },
-          "required": [
-            "kind",
-            "unified"
-          ]
-        },
-        {
-          "type": "object",
-          "properties": {
-            "text": {
-              "type": "string"
-            },
-            "kind": {
-              "type": "string",
-              "const": "summary"
-            }
-          },
-          "required": [
-            "kind",
-            "text"
-          ]
-        }
-      ]
-    },
     "Driver": {
       "oneOf": [
         {
@@ -1141,6 +1130,29 @@
             "payload"
           ],
           "description": "A plugin-owned resource changed (roster, room, task…). The kernel does not enumerate these."
+        },
+        {
+          "type": "object",
+          "properties": {
+            "plugin": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string"
+            },
+            "payload": true,
+            "type": {
+              "type": "string",
+              "const": "signal"
+            }
+          },
+          "required": [
+            "type",
+            "plugin",
+            "kind",
+            "payload"
+          ],
+          "description": "Ephemeral. A plugin's live state (ADR-0013 §2): the latest payload per\n`(plugin, kind)` is the whole of it; `Null` removes it; none survives a resume."
         },
         {
           "type": "object",
@@ -2847,6 +2859,14 @@
             "additionalProperties": true
           },
           "description": "Plugin-owned state, by plugin then kind: the latest `Extension`\npayload is the whole of that kind (ADR-0011 §2)."
+        },
+        "signals": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "description": "Plugin-owned live state, by plugin then kind: the latest `Signal`\npayload, gone on `Null` and after a resume (ADR-0013 §2)."
         }
       },
       "required": [
@@ -2946,6 +2966,28 @@
         "updatedAt"
       ]
     },
+    "SignalParams": {
+      "type": "object",
+      "properties": {
+        "session": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "plugin": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "payload": true
+      },
+      "required": [
+        "session",
+        "plugin",
+        "kind",
+        "payload"
+      ],
+      "description": "`HostApi::signal` (ADR-0013 §2): a plugin's live state onto a session's stream."
+    },
     "SubmitParams": {
       "type": "object",
       "properties": {
@@ -2966,6 +3008,24 @@
         "input"
       ]
     },
+    "Tone": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "neutral",
+            "good",
+            "bad"
+          ]
+        },
+        {
+          "type": "string",
+          "const": "attention",
+          "description": "Wants a person: a surface makes it move."
+        }
+      ],
+      "description": "The one styling hook a plugin has; the surface owns the colour."
+    },
     "ToolOutput": {
       "type": "object",
       "properties": {
@@ -2981,7 +3041,7 @@
         "display": {
           "anyOf": [
             {
-              "$ref": "#/$defs/Display"
+              "$ref": "#/$defs/View"
             },
             {
               "type": "null"
@@ -2992,7 +3052,34 @@
       "required": [
         "parts"
       ],
-      "description": "What a tool returned: the parts the model sees, plus an optional display hint."
+      "description": "What a tool returned: the parts the model sees, plus what a person sees\ninstead when the tool has something better than the text (ADR-0013 §2)."
+    },
+    "TreeNode": {
+      "type": "object",
+      "properties": {
+        "label": {
+          "type": "string"
+        },
+        "badge": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tone": {
+          "$ref": "#/$defs/Tone",
+          "default": "neutral"
+        },
+        "children": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/TreeNode"
+          }
+        }
+      },
+      "required": [
+        "label"
+      ]
     },
     "TurnId": {
       "type": "string",
@@ -3107,6 +3194,306 @@
         "outputTokens"
       ],
       "description": "Token counts as the provider reports them, the three input counts kept\napart: `input_tokens` is what the model read fresh, the cache counts are\nwhat it read from or wrote to a cached prefix. The whole input side is\n`input_total()`."
+    },
+    "View": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "text": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "text"
+            }
+          },
+          "required": [
+            "kind",
+            "text"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "text": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "markdown"
+            }
+          },
+          "required": [
+            "kind",
+            "text"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "lang": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "text": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "code"
+            }
+          },
+          "required": [
+            "kind",
+            "text"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "unified": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "diff"
+            }
+          },
+          "required": [
+            "kind",
+            "unified"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "items": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "kind": {
+              "type": "string",
+              "const": "list"
+            }
+          },
+          "required": [
+            "kind",
+            "items"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "headers": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "rows": {
+              "type": "array",
+              "items": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "kind": {
+              "type": "string",
+              "const": "table"
+            }
+          },
+          "required": [
+            "kind",
+            "headers",
+            "rows"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "rows": {
+              "type": "array",
+              "items": {
+                "type": "array",
+                "prefixItems": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "string"
+                  }
+                ],
+                "minItems": 2,
+                "maxItems": 2
+              }
+            },
+            "kind": {
+              "type": "string",
+              "const": "keyValue"
+            }
+          },
+          "required": [
+            "kind",
+            "rows"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "total": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0,
+              "description": "Unbounded when absent: the surface shows activity, not a fraction."
+            },
+            "label": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "kind": {
+              "type": "string",
+              "const": "progress"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "text": {
+              "type": "string"
+            },
+            "tone": {
+              "$ref": "#/$defs/Tone",
+              "default": "neutral"
+            },
+            "kind": {
+              "type": "string",
+              "const": "badge"
+            }
+          },
+          "required": [
+            "kind",
+            "text"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "nodes": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/TreeNode"
+              }
+            },
+            "kind": {
+              "type": "string",
+              "const": "tree"
+            }
+          },
+          "required": [
+            "kind",
+            "nodes"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "children": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/View"
+              }
+            },
+            "kind": {
+              "type": "string",
+              "const": "stack"
+            }
+          },
+          "required": [
+            "kind",
+            "children"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "children": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/View"
+              }
+            },
+            "kind": {
+              "type": "string",
+              "const": "columns"
+            }
+          },
+          "required": [
+            "kind",
+            "children"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "title": {
+              "type": "string"
+            },
+            "child": {
+              "$ref": "#/$defs/View"
+            },
+            "kind": {
+              "type": "string",
+              "const": "panel"
+            }
+          },
+          "required": [
+            "kind",
+            "title",
+            "child"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "items": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/ActionItem"
+              }
+            },
+            "kind": {
+              "type": "string",
+              "const": "actions"
+            }
+          },
+          "required": [
+            "kind",
+            "items"
+          ]
+        }
+      ]
     }
   },
   "methods": {
@@ -3169,6 +3556,14 @@
     "session/extend": {
       "params": {
         "$ref": "#/$defs/ExtendParams"
+      },
+      "result": {
+        "$ref": "#/$defs/Empty"
+      }
+    },
+    "session/signal": {
+      "params": {
+        "$ref": "#/$defs/SignalParams"
       },
       "result": {
         "$ref": "#/$defs/Empty"

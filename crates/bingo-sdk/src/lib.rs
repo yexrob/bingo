@@ -25,10 +25,9 @@ pub mod surface;
 pub mod testing;
 pub mod tokens;
 pub mod tool;
+pub mod view;
 
-pub use command::{
-    ArgSpec, Command, CommandContext, CommandOutcome, CommandSpec, Completion, View,
-};
+pub use command::{ArgSpec, Command, CommandContext, CommandOutcome, CommandSpec, Completion};
 pub use compactor::{CompactContext, CompactReason, Compaction, Compactor};
 pub use contributor::{ContextContributor, ContextError, ContextPiece, ContextQuery, Placement};
 pub use error::{ErrorCode, KernelError};
@@ -50,6 +49,7 @@ pub use tool::{
     Env, Interrupt, ResultLimit, Subject, Tool, ToolCall, ToolContext, ToolError, ToolHost,
     ToolTraits, input_schema,
 };
+pub use view::{ActionItem, Tone, TreeNode, View};
 
 /// Re-exported so plugins share one cancellation type without naming tokio-util.
 pub use tokio_util::sync::CancellationToken;

@@ -28,6 +28,12 @@ pub(crate) enum Msg {
         kind: String,
         payload: Value,
     },
+    /// A plugin's live state onto the stream, never the journal (ADR-0013 §2).
+    Signal {
+        plugin: String,
+        kind: String,
+        payload: Value,
+    },
     Interrupt {
         intent: IntentId,
         scope: InterruptScope,
@@ -174,6 +180,14 @@ impl Mailbox {
 
     pub fn extend(&self, plugin: String, kind: String, payload: Value) {
         self.send(Msg::Extend {
+            plugin,
+            kind,
+            payload,
+        });
+    }
+
+    pub fn signal(&self, plugin: String, kind: String, payload: Value) {
+        self.send(Msg::Signal {
             plugin,
             kind,
             payload,

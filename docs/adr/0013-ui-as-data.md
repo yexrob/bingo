@@ -15,7 +15,7 @@ A command answers `View::{Text, List, Table}` and the TUI's `ctrl+t` panel draws
 
 ## Consequences
 
-- sdk touched once: `View` gains nodes (additive), `ToolOutput.display` changes type (touches `bingo-tool-fs` for its diff and summary, `bingo-surface-print`, `bingo-surface-tui`), `Event::Signal` and `SessionState.signals` are new, `HostApi::signal` is new; `schema/rpc.json` regenerated.
+- sdk touched once (2026-08-30): `View` moves to `bingo_sdk::view` and gains its nodes with `Tone`, `TreeNode` and `ActionItem`; `View::fold()` is the one degrade; `ToolOutput.display: Option<View>` replaces `Display` (touched `bingo-tool-fs`, `bingo-surface-print`, `bingo-surface-tui`); `Event::Signal` (not durable), `SessionState.signals`, `Applied::Signal`, `HostApi::signal` and wire `session/signal` are new; `schema/rpc.json` regenerated; every `HostApi` double gained `signal`.
 - `View::text()` is the one degrade rule: `--print` prints it, an IM channel sends it, a GUI ignores it. A node added later ships with its fold or it does not ship.
 - A plugin's UI is portable and testable without a terminal: a `View` value is asserted with `assert_eq!`, and a snapshot of the TUI proves the drawing once per node, not once per plugin.
 - The `Widget` extension point and `bingo-teams-tui` in the plan are withdrawn; avatars, if ever, are a `Tree` with badges.

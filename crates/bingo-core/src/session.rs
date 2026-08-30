@@ -131,6 +131,11 @@ impl Actor {
                 kind,
                 payload,
             } => self.extend(plugin, kind, payload).await,
+            Msg::Signal {
+                plugin,
+                kind,
+                payload,
+            } => self.signal(plugin, kind, payload).await,
             Msg::Interrupt { intent, scope } => self.interrupt(intent, scope).await,
             Msg::Answer(answered) => self.answer(answered).await,
             Msg::Attach { reply } => {
@@ -179,6 +184,17 @@ impl Actor {
     /// A plugin's state, whole, as a durable frame (ADR-0011 §2).
     async fn extend(&mut self, plugin: String, kind: String, payload: Value) {
         let event = Event::Extension {
+            plugin,
+            kind,
+            payload,
+        };
+        self.publish(event, None).await;
+    }
+
+    /// A plugin's live state as an ephemeral frame (ADR-0013 §2): `publish`
+    /// keeps it off the journal because `Event::Signal` is not durable.
+    async fn signal(&mut self, plugin: String, kind: String, payload: Value) {
+        let event = Event::Signal {
             plugin,
             kind,
             payload,

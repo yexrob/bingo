@@ -379,6 +379,21 @@ expression: frames
     }
   },
   {
+    "seq": 25,
+    "ts": "2023-11-14T22:13:20Z",
+    "session": "ses_1",
+    "event": {
+      "type": "signal",
+      "plugin": "bingo.demo.ui",
+      "kind": "progress",
+      "payload": {
+        "kind": "progress",
+        "value": 3,
+        "total": 10
+      }
+    }
+  },
+  {
     "seq": 23,
     "ts": "2023-11-14T22:13:20Z",
     "session": "ses_1",

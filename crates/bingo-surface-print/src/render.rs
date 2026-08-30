@@ -207,6 +207,7 @@ impl Renderer {
             | Event::ConfigChanged { .. }
             | Event::CatalogChanged { .. }
             | Event::Extension { .. }
+            | Event::Signal { .. }
             | Event::Lagged { .. } => {}
         }
         Ok(())

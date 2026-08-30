@@ -146,6 +146,7 @@ pub struct TestSession {
     /// What reached this session through the host rather than its port.
     pub delivered: Mutex<Vec<(IntentId, Input, Delivery)>>,
     pub extended: Mutex<Vec<(String, String, Value)>>,
+    pub signalled: Mutex<Vec<(String, String, Value)>>,
 }
 
 impl TestSession {
@@ -297,6 +298,21 @@ impl HostApi for TestHost {
     ) -> Result<(), KernelError> {
         self.session
             .extended
+            .lock()
+            .expect("the recorder is not poisoned")
+            .push((plugin.to_string(), kind.to_string(), payload));
+        Ok(())
+    }
+
+    async fn signal(
+        &self,
+        _session: &SessionId,
+        plugin: &str,
+        kind: &str,
+        payload: Value,
+    ) -> Result<(), KernelError> {
+        self.session
+            .signalled
             .lock()
             .expect("the recorder is not poisoned")
             .push((plugin.to_string(), kind.to_string(), payload));

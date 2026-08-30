@@ -28,7 +28,7 @@ use crate::codec::{self, Id, Message, Notification, Outcome, Request, Response};
 use crate::methods::{
     AnswerParams, CatalogParams, DeliverParams, Empty, EventParams, EventsParams, ExtendParams,
     HistoryParams, InitializeParams, InitializeResult, InterruptParams, ListParams, ListResult,
-    OpenParams, OpenResult, PROTOCOL, SessionParams, SubmitParams, name,
+    OpenParams, OpenResult, PROTOCOL, SessionParams, SignalParams, SubmitParams, name,
 };
 
 type Waiting = oneshot::Sender<Result<Value, KernelError>>;
@@ -455,6 +455,23 @@ impl HostApi for RemoteKernel {
             payload,
         };
         let Empty {} = self.connection.call(name::SESSION_EXTEND, &params).await?;
+        Ok(())
+    }
+
+    async fn signal(
+        &self,
+        session: &SessionId,
+        plugin: &str,
+        kind: &str,
+        payload: Value,
+    ) -> Result<(), KernelError> {
+        let params = SignalParams {
+            session: session.clone(),
+            plugin: plugin.to_string(),
+            kind: kind.to_string(),
+            payload,
+        };
+        let Empty {} = self.connection.call(name::SESSION_SIGNAL, &params).await?;
         Ok(())
     }
 

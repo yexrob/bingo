@@ -3,8 +3,8 @@
 //! second one.
 
 use bingo_sdk::{
-    ContentPart, DecisionKind, Display, Item, ItemBody, ItemStatus, SessionState, ToolOutput,
-    TurnStatus,
+    ContentPart, DecisionKind, Item, ItemBody, ItemStatus, SessionState, ToolOutput, TurnStatus,
+    View,
 };
 use ratatui::text::{Line, Span};
 use serde_json::Value;
@@ -222,8 +222,8 @@ fn summarize(input: &Value) -> String {
 
 fn output_lines(output: &ToolOutput) -> Vec<Line<'static>> {
     let (rows, limit) = match &output.display {
-        Some(Display::Diff { unified }) => (preview::diff(unified), DIFF_ROWS),
-        Some(Display::Summary { text }) => (plain(text), OUTPUT_ROWS),
+        Some(View::Diff { unified }) => (preview::diff(unified), DIFF_ROWS),
+        Some(view) => (plain(&view.fold()), OUTPUT_ROWS),
         None => (plain(&text_of(output)), OUTPUT_ROWS),
     };
     fold(rows, limit)
