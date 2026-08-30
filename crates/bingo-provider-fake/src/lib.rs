@@ -33,6 +33,12 @@ pub const FAKE_MODEL: &str = "fake-1";
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
 pub struct Script {
     pub responses: Vec<Response>,
+    /// What a side question — a plugin's, asked beside the conversation and
+    /// marked `provider_options.bingo.purpose` — is answered with, in order;
+    /// past the end of this list, with nothing. The conversation's responses
+    /// are never spent on one.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub side: Vec<Response>,
 }
 
 /// One provider response: what a single `stream()` call yields.
@@ -85,6 +91,7 @@ impl Script {
                 steps: vec![Step::Text("Hello from the fake provider.".into())],
                 finish: Some(UnifiedFinish::Stop),
             }],
+            side: Vec::new(),
         }
     }
 
@@ -107,6 +114,7 @@ impl Script {
                     finish: Some(UnifiedFinish::Stop),
                 },
             ],
+            side: Vec::new(),
         }
     }
 
@@ -138,6 +146,8 @@ pub struct FakeProvider {
     script: Script,
     /// The next response to hand out; also the number of `stream()` calls served.
     cursor: AtomicUsize,
+    /// Where the side answers are up to; the two lists move independently.
+    side_cursor: AtomicUsize,
     requests: Mutex<Vec<ModelRequest>>,
 }
 
@@ -146,6 +156,7 @@ impl FakeProvider {
         Self {
             script,
             cursor: AtomicUsize::new(0),
+            side_cursor: AtomicUsize::new(0),
             requests: Mutex::new(Vec::new()),
         }
     }
@@ -258,6 +269,53 @@ enum Beat {
 /// Expand one response into the beats its steps describe. `index` is the
 /// response's position in the script; block ids are derived from it, so the
 /// same script always yields the same ids.
+/// A request a plugin asks beside the conversation — a memory extractor's,
+/// say — carries `provider_options.bingo.purpose`. The script's responses
+/// are the conversation's, so a scenario's responses land on the turns that
+/// asked for them; a side question is answered from `side`, or with nothing.
+fn side_question(request: &ModelRequest) -> bool {
+    request
+        .provider_options
+        .get("bingo")
+        .and_then(|about| about.get("purpose"))
+        .is_some()
+}
+
+/// The empty answer a side question gets: a stream that opens and finishes.
+fn nothing_to_say(input_chars: usize) -> Vec<Result<ModelEvent, ProviderError>> {
+    vec![
+        Ok(ModelEvent::StreamStart {
+            warnings: Vec::new(),
+        }),
+        Ok(ModelEvent::Finish {
+            usage: Usage {
+                input_tokens: estimate_tokens(input_chars),
+                ..Default::default()
+            },
+            finish_reason: FinishReason::unified(UnifiedFinish::Stop),
+        }),
+    ]
+}
+
+impl FakeProvider {
+    /// The next side answer, or nothing to say.
+    fn side_answer(&self, input_chars: usize) -> ModelStream {
+        let index = self.side_cursor.fetch_add(1, Ordering::SeqCst);
+        let events: Vec<Result<ModelEvent, ProviderError>> = match self.script.side.get(index) {
+            Some(response) => beats(response, index, input_chars)
+                .into_iter()
+                .filter_map(|beat| match beat {
+                    Beat::Event(event) => Some(Ok(event)),
+                    Beat::Fail(error) => Some(Err(error)),
+                    Beat::Sleep(_) => None,
+                })
+                .collect(),
+            None => nothing_to_say(input_chars),
+        };
+        Box::pin(futures::stream::iter(events))
+    }
+}
+
 fn beats(response: &Response, index: usize, input_chars: usize) -> Vec<Beat> {
     let mut out = vec![
         Beat::Event(ModelEvent::StreamStart {
@@ -403,8 +461,12 @@ impl Provider for FakeProvider {
         // Recorded before it is judged: a rejected request is the one a test
         // most wants to read back.
         let verdict = validate(&request);
+        let side = side_question(&request);
         self.lock_requests().push(request);
         verdict?;
+        if side {
+            return Ok(self.side_answer(input_chars));
+        }
         let index = self.cursor.fetch_add(1, Ordering::SeqCst);
         let Some(response) = self.script.responses.get(index) else {
             return Err(request_error("script exhausted"));
@@ -487,6 +549,68 @@ impl Plugin for FakePlugin {
 }
 
 #[cfg(test)]
+mod side_tests {
+    use super::*;
+    use bingo_sdk::{Message, ProviderMetadata, Role};
+    use futures::StreamExt;
+
+    /// A memory extractor's question is not the conversation's next turn:
+    /// it is answered with nothing and the script's cursor does not move.
+    #[tokio::test]
+    async fn a_side_question_is_answered_with_nothing_and_takes_no_response() {
+        let provider = FakeProvider::new(Script {
+            responses: vec![Response {
+                steps: vec![Step::Text("the turn's answer".into())],
+                finish: None,
+            }],
+
+            side: Vec::new(),
+        });
+        let mut side = ModelRequest {
+            model: FAKE_MODEL.into(),
+            max_tokens: 16,
+            system: Vec::new(),
+            messages: vec![Message::text(Role::User, "what did we learn?")],
+            tools: Vec::new(),
+            reasoning: None,
+            provider_options: ProviderMetadata::new(),
+        };
+        let mut about = serde_json::Map::new();
+        about.insert("purpose".into(), serde_json::Value::String("memory".into()));
+        side.provider_options.insert("bingo".into(), about);
+        let mut conversation = side.clone();
+        conversation.provider_options.clear();
+
+        let mut answered = provider
+            .stream(side, CancellationToken::new())
+            .await
+            .expect("a side question streams");
+        let mut text = String::new();
+        while let Some(event) = answered.next().await {
+            if let Ok(ModelEvent::TextDelta { delta, .. }) = event {
+                text.push_str(&delta);
+            }
+        }
+        assert_eq!(text, "", "nothing to say");
+
+        let mut turn = provider
+            .stream(conversation, CancellationToken::new())
+            .await
+            .expect("the conversation streams");
+        let mut text = String::new();
+        while let Some(event) = turn.next().await {
+            if let Ok(ModelEvent::TextDelta { delta, .. }) = event {
+                text.push_str(&delta);
+            }
+        }
+        assert_eq!(
+            text, "the turn's answer",
+            "the script's first response is still the turn's"
+        );
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use bingo_sdk::{Contribution, Message};
@@ -523,6 +647,8 @@ mod tests {
                 steps: vec![Step::Text("0123456789".into())],
                 finish: None,
             }],
+
+            side: Vec::new(),
         });
         assert_eq!(
             events(drain(&provider, "hi").await),
@@ -605,6 +731,8 @@ mod tests {
                 }],
                 finish: None,
             }],
+
+            side: Vec::new(),
         });
         let last = events(drain(&provider, "hi").await).pop().expect("finish");
         assert!(matches!(
@@ -633,6 +761,8 @@ mod tests {
                 ],
                 finish: None,
             }],
+
+            side: Vec::new(),
         });
         let items = drain(&provider, "hi").await;
         let last = items.last().expect("an item");
@@ -658,6 +788,8 @@ mod tests {
                 steps: vec![Step::Reasoning("think".into())],
                 finish: None,
             }],
+
+            side: Vec::new(),
         });
         let kinds = events(drain(&provider, "hi").await);
         assert!(matches!(kinds[2], ModelEvent::ReasoningStart { .. }));
@@ -693,6 +825,8 @@ mod tests {
                 steps: vec![Step::Delay { ms: 5_000 }, Step::Text("late".into())],
                 finish: None,
             }],
+
+            side: Vec::new(),
         });
         let started = tokio::time::Instant::now();
         drain(&provider, "hi").await;
@@ -706,6 +840,8 @@ mod tests {
                 steps: vec![Step::Text("0123456789abcdefgh".into())],
                 finish: None,
             }],
+
+            side: Vec::new(),
         });
         let cancel = CancellationToken::new();
         let mut stream = provider
@@ -834,6 +970,8 @@ mod tests {
                 },
                 Response::default(),
             ],
+
+            side: Vec::new(),
         };
         let json = serde_json::to_string(&script).expect("serialize");
         assert_eq!(Script::from_json(&json).expect("parse"), script);

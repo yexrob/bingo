@@ -115,8 +115,17 @@ fn request(model: &str, items: &[Item]) -> ModelRequest {
         messages: vec![Message::text(Role::User, body(items))],
         tools: Vec::new(),
         reasoning: None,
-        provider_options: ProviderMetadata::new(),
+        provider_options: side_question("memory"),
     }
+}
+
+/// A request that is a question about the conversation, not the
+/// conversation: named as such, so a provider that answers from a script
+/// can tell the two apart. A real provider ignores it.
+fn side_question(purpose: &str) -> ProviderMetadata {
+    let mut about = serde_json::Map::new();
+    about.insert("purpose".into(), serde_json::Value::String(purpose.into()));
+    ProviderMetadata::from([("bingo".to_string(), about)])
 }
 
 /// The turn as the extractor reads it: a long turn's whole transcript would

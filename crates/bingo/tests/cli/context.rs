@@ -128,11 +128,13 @@ fn an_overflow_after_many_rounds_is_summarised_and_the_turn_goes_on() {
 fn a_working_turn_leaves_facts_in_the_project_memory() {
     let home = tempfile::tempdir().unwrap();
     std::fs::write(home.path().join("notes.txt"), "alpha\n").unwrap();
-    // A tool round, the answer, then what the extractor is told at turn end.
+    // A tool round and the answer; what the extractor is told at turn end is
+    // a side answer, never one of the conversation's.
     let first = script(
         r#"{"responses":[
             {"steps":[{"toolCall":{"name":"Read","input":{"file_path":"notes.txt"}}}]},
-            {"steps":[{"text":"One line."}]},
+            {"steps":[{"text":"One line."}]}
+        ],"side":[
             {"steps":[{"text":"notes.txt holds the alpha list\nthe project has no build step"}]}
         ]}"#,
     );
