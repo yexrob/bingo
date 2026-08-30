@@ -262,15 +262,7 @@ impl Renderer {
                 output,
                 duration_ms,
                 ..
-            } => {
-                let verdict = if tool_failed(item, output.as_ref()) {
-                    "error"
-                } else {
-                    "ok"
-                };
-                let ms = duration_ms.unwrap_or(0);
-                self.diagnostic(&format!("[tool] {name} {verdict} ({ms}ms)"), err)?;
-            }
+            } => self.tool_done(item, name, output.as_ref(), *duration_ms, err)?,
             ItemBody::Notice { code, text, .. } => {
                 self.diagnostic(&format!("[notice] {code} {text}"), err)?;
             }
@@ -284,6 +276,31 @@ impl Renderer {
             | ItemBody::QuestionAnswer { .. }
             | ItemBody::PermissionReceipt { .. }
             | ItemBody::Asset { .. } => {}
+        }
+        Ok(())
+    }
+
+    /// The verdict line, then what a person would have seen (ADR-0013 §2):
+    /// the display's fold, indented under it.
+    fn tool_done(
+        &mut self,
+        item: &Item,
+        name: &str,
+        output: Option<&ToolOutput>,
+        duration_ms: Option<u64>,
+        err: &mut (impl Write + ?Sized),
+    ) -> io::Result<()> {
+        let verdict = if tool_failed(item, output) {
+            "error"
+        } else {
+            "ok"
+        };
+        let ms = duration_ms.unwrap_or(0);
+        self.diagnostic(&format!("[tool] {name} {verdict} ({ms}ms)"), err)?;
+        if let Some(view) = output.and_then(|o| o.display.as_ref()) {
+            for line in view.fold().lines() {
+                self.diagnostic(&format!("  {line}"), err)?;
+            }
         }
         Ok(())
     }
@@ -533,6 +550,26 @@ pub(crate) mod tests {
                 "[retry] attempt 1/10 in 500ms: server error 503\n",
                 "[tool] Read ok (12ms)\n",
             )
+        );
+    }
+
+    #[test]
+    fn a_display_view_is_printed_as_its_fold_under_the_verdict() {
+        let output = ToolOutput {
+            display: Some(bingo_sdk::View::Diff {
+                unified: "@@ -1 +1 @@\n-alpha\n+beta\n".into(),
+            }),
+            ..ToolOutput::text("edited greeting.txt")
+        };
+        let frames = vec![frame(
+            1,
+            Event::ItemCompleted {
+                item: tool_call("itm_2", "Edit", Some(output), ItemStatus::Completed),
+            },
+        )];
+        assert_eq!(
+            play(Mode::Text, &frames).err(),
+            "[tool] Edit ok (12ms)\n  @@ -1 +1 @@\n  -alpha\n  +beta\n"
         );
     }
 

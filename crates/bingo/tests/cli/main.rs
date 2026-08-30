@@ -569,6 +569,7 @@ mod sessions;
 mod skills;
 mod stream_json;
 mod tasks;
+mod views;
 
 /// `--mcp-config` names a file whose `mcpServers` join the settings for this
 /// run; a file that is not there, or has none, stops the run before a turn.

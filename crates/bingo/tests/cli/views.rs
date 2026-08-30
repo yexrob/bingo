@@ -1,0 +1,69 @@
+//! ADR-0013 §2 on the headless surfaces: a tool's display view rides the
+//! json frames verbatim and prints as its fold under the verdict in text mode.
+
+use bingo_sdk::{Event, ItemBody, View};
+
+use super::*;
+
+const EDIT: &str = r#"{"responses":[
+    {"steps":[{"toolCall":{"name":"Edit","input":{"file_path":"greeting.txt","old_string":"alpha","new_string":"beta"}}}]},
+    {"steps":[{"text":"Done."}]}
+]}"#;
+
+fn edited_run(dir: &std::path::Path, format: &[&str]) -> Output {
+    std::fs::write(dir.join("greeting.txt"), "alpha\n").unwrap();
+    let script = script(EDIT);
+    let out = run(bingo()
+        .env("BINGO_FAKE_SCRIPT", script.path())
+        .args(["--print", "--permission-mode", "acceptEdits", "--cwd"])
+        .arg(dir)
+        .args(format)
+        .arg("change it"));
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    assert_eq!(
+        std::fs::read_to_string(dir.join("greeting.txt")).unwrap(),
+        "beta\n"
+    );
+    out
+}
+
+#[test]
+fn an_edit_carries_its_diff_view_in_the_json_frames() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = edited_run(dir.path(), &["--output-format", "json"]);
+    let display = frames_of(&out).into_iter().find_map(|f| match f.event {
+        Event::ItemCompleted {
+            item:
+                bingo_sdk::Item {
+                    body:
+                        ItemBody::ToolCall {
+                            output: Some(output),
+                            ..
+                        },
+                    ..
+                },
+        } => output.display,
+        _ => None,
+    });
+    match display {
+        Some(View::Diff { unified }) => {
+            assert!(
+                unified.contains("-alpha") && unified.contains("+beta"),
+                "{unified}"
+            );
+        }
+        other => panic!("the edit's display is its diff, not {other:?}"),
+    }
+}
+
+#[test]
+fn an_edit_prints_its_diff_under_the_verdict_in_text_mode() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = edited_run(dir.path(), &[]);
+    let err = stderr(&out);
+    let verdict = err
+        .find("[tool] Edit ok")
+        .unwrap_or_else(|| panic!("no verdict in: {err}"));
+    let after = &err[verdict..];
+    assert!(after.contains("\n  -alpha\n  +beta\n"), "{err}");
+}

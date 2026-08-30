@@ -11,6 +11,7 @@ mod commands;
 mod login;
 mod policy;
 mod tree;
+mod views;
 
 /// A plugin assembled from parts, so tests can shape manifests freely.
 struct TestPlugin {
