@@ -366,6 +366,77 @@ mod tests {
         assert!(!text(&solo(&state()), &ui, 80).contains("estimating"));
     }
 
+    /// Every slot filled: the mode the child's policy published, three
+    /// notices, and where the person is with the model that answers there.
+    fn every_slot() -> (Tree, Ui) {
+        let mut tree = folded_tree(vec![
+            // The root is at work, and it is not the session in view.
+            frame(1, started("trn_1")),
+            child_frame(1, announced("reviewer")),
+            child_frame(2, permission_view("acceptEdits")),
+            child_frame(
+                3,
+                Event::TurnUsage {
+                    turn: TurnId::from_raw("trn_9"),
+                    usage: Default::default(),
+                    context: ContextUsage {
+                        used: 150_000,
+                        window: 200_000,
+                        trigger: 180_000,
+                    },
+                },
+            ),
+            // A room wants a person, somewhere else in the tree.
+            log_frame(1, log_announced("#design")),
+            log_frame(2, opened(room_question())),
+        ]);
+        tree.show(&child_id());
+        let (mut ui, now) = scene();
+        ui.notify(bingo_sdk::Level::Info, "estimating", now.instant);
+        (tree, ui)
+    }
+
+    /// A room asking something, so a session other than the one in view
+    /// wants a person.
+    fn room_question() -> bingo_sdk::Interaction {
+        bingo_sdk::Interaction {
+            id: bingo_sdk::InteractionId::from_raw("int_3"),
+            session: log_id(),
+            ..confirm()
+        }
+    }
+
+    #[test]
+    fn every_slot_filled_and_every_slot_empty() {
+        let (tree, ui) = every_slot();
+        let filled: Vec<String> = [80usize, 120]
+            .iter()
+            .map(|width| text(&tree, &ui, *width))
+            .collect();
+        assert_eq!(filled[0].width(), 80);
+        assert_eq!(filled[1].width(), 120);
+        insta::assert_snapshot!("every_slot_filled", filled.join("\n"));
+
+        // Nothing published, nothing running, nothing to say, and something
+        // half-typed — so even the hint is untrue.
+        let bare = solo(&state_without_a_model());
+        let (mut ui, now) = scene();
+        write(&mut ui, bare.viewed(), "half a thought", now);
+        let empty: Vec<String> = [80usize, 120]
+            .iter()
+            .map(|width| text(&bare, &ui, *width))
+            .collect();
+        assert_eq!(empty[0], " ".repeat(80));
+        assert_eq!(empty[1], " ".repeat(120));
+        insta::assert_snapshot!("every_slot_empty", empty.join("\n"));
+    }
+
+    fn state_without_a_model() -> bingo_sdk::SessionState {
+        let mut state = state();
+        state.summary.model = None;
+        state
+    }
+
     #[test]
     fn the_middle_is_the_slot_that_gives_way() {
         let tree = solo(&with_permission_mode("bypassPermissions"));
