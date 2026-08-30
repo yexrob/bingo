@@ -6,8 +6,9 @@ use std::time::Instant;
 
 use bingo_sdk::{
     Answer, AnswerSpec, ContentPart, Delivery, Display, Event, Frame, Interaction, InteractionId,
-    InteractionKind, Item, ItemBody, ItemId, ItemStatus, Level, Origin, ParentLink, Preview,
-    QuestionOption, Seq, SessionId, SessionState, SessionSummary, ToolOutput, TurnId, Usage,
+    InteractionKind, Item, ItemBody, ItemId, ItemStatus, Level, LoginFlow, Origin, ParentLink,
+    Preview, QuestionOption, Seq, SessionId, SessionState, SessionSummary, ToolOutput, TurnId,
+    Usage,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use jiff::Timestamp;
@@ -322,6 +323,26 @@ pub fn confirm() -> Interaction {
         },
         vec![AnswerSpec::Confirm, AnswerSpec::Cancel],
     )
+}
+
+/// A provider's sign-in, asked by a holding command rather than a turn
+/// (ADR-0012 §5): a paste flow takes words, the others only a way out.
+pub fn login(flow: LoginFlow) -> Interaction {
+    let answers = match flow {
+        LoginFlow::Paste => vec![AnswerSpec::Text, AnswerSpec::Cancel],
+        _ => vec![AnswerSpec::Cancel],
+    };
+    Interaction {
+        turn: None,
+        item: None,
+        ..interaction(
+            InteractionKind::Login {
+                provider: "codex".into(),
+                flow,
+            },
+            answers,
+        )
+    }
 }
 
 pub fn opened(interaction: Interaction) -> Event {

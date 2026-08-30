@@ -15,6 +15,26 @@ fn ack_of(frames: &[Frame], intent: &IntentId) -> Option<IntentOutcome> {
     })
 }
 
+/// Only a turn or a holding command can ask (ADR-0012 §5); an idle session
+/// has nobody to ask for.
+#[tokio::test]
+async fn an_idle_session_refuses_to_ask() {
+    let provider = ScriptedProvider::new(vec![]);
+    let mailbox = with_commands(provider, vec![]);
+    let refused = mailbox
+        .ask(
+            None,
+            InteractionKind::Confirm {
+                title: "t".into(),
+                detail: "d".into(),
+            },
+            vec![AnswerSpec::Confirm],
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(refused.code, ErrorCode::NotReady);
+}
+
 #[tokio::test]
 async fn an_instant_command_runs_during_a_turn_and_is_applied() {
     let provider = ScriptedProvider::new(vec![Script::Hang(vec![ModelEvent::TextStart {

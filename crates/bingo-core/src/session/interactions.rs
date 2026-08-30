@@ -26,18 +26,24 @@ impl Actor {
         answers: Vec<AnswerSpec>,
         reply: oneshot::Sender<Result<Answer, KernelError>>,
     ) {
-        let Some(running) = &self.running else {
-            let _ = reply.send(Err(KernelError::new(
-                ErrorCode::NotReady,
-                "no turn is running",
-            )));
-            return;
+        // A turn's call asks under the turn; a holding command asks under
+        // none (ADR-0012 §5). Nothing else can be running to ask.
+        let turn = match (&self.running, self.commands.busy()) {
+            (Some(running), _) => Some(running.turn.clone()),
+            (None, true) => None,
+            (None, false) => {
+                let _ = reply.send(Err(KernelError::new(
+                    ErrorCode::NotReady,
+                    "no turn or command is running",
+                )));
+                return;
+            }
         };
         let now = Timestamp::now();
         let interaction = Interaction {
             id: InteractionId::mint(),
             session: self.id.clone(),
-            turn: Some(running.turn.clone()),
+            turn,
             item,
             opened_at: now,
             guard_until: now
@@ -121,6 +127,26 @@ impl Actor {
 
     pub(super) async fn cancel_interactions(&mut self, reason: CancelReason) {
         let pending: Vec<_> = self.pending.drain().collect();
+        self.cancel_each(pending, reason).await;
+    }
+
+    /// The holding command that asked is done: what it left open closes,
+    /// and a turn's own questions (there is no turn) are not touched.
+    pub(super) async fn cancel_command_interactions(&mut self) {
+        let ids: Vec<InteractionId> = self
+            .pending
+            .iter()
+            .filter(|(_, p)| p.interaction.turn.is_none())
+            .map(|(id, _)| id.clone())
+            .collect();
+        let pending: Vec<_> = ids
+            .into_iter()
+            .filter_map(|id| self.pending.remove(&id).map(|p| (id, p)))
+            .collect();
+        self.cancel_each(pending, CancelReason::CommandEnded).await;
+    }
+
+    async fn cancel_each(&mut self, pending: Vec<(InteractionId, Pending)>, reason: CancelReason) {
         for (id, pending) in pending {
             let _ = pending.reply.send(Err(KernelError::new(
                 ErrorCode::InteractionClosed,

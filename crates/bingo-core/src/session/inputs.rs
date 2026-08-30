@@ -78,10 +78,13 @@ impl Actor {
         intent: IntentId,
         outcome: Result<CommandOutcome, KernelError>,
     ) {
-        let Some(origin) = self.commands.finish(&intent) else {
+        let Some((origin, held)) = self.commands.finish(&intent) else {
             tracing::warn!(session = %self.id, %intent, "completion from a command that is not running");
             return;
         };
+        if held {
+            self.cancel_command_interactions().await;
+        }
         match outcome {
             Ok(CommandOutcome::Applied { message }) => {
                 let result = match message {

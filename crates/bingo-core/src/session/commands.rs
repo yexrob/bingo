@@ -183,12 +183,14 @@ impl Commands {
         Ok(())
     }
 
-    /// The run is over; its origin comes back for a `Prompt` outcome.
-    pub(super) fn finish(&mut self, intent: &IntentId) -> Option<Origin> {
-        if self.holding.as_ref() == Some(intent) {
+    /// The run is over; its origin comes back for a `Prompt` outcome, with
+    /// whether it was the run holding the queue.
+    pub(super) fn finish(&mut self, intent: &IntentId) -> Option<(Origin, bool)> {
+        let held = self.holding.as_ref() == Some(intent);
+        if held {
             self.holding = None;
         }
-        self.inflight.remove(intent)
+        self.inflight.remove(intent).map(|origin| (origin, held))
     }
 }
 

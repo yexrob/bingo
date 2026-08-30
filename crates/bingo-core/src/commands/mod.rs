@@ -1,8 +1,10 @@
-//! The kernel's own commands (ADR-0008 §4): what changes the next turn's
-//! model or thinking, and what makes room. They are registered like any
-//! plugin's and listed in the same catalogue.
+//! The kernel's own commands (ADR-0008 §4, ADR-0012 §5): what changes the
+//! next turn's model or thinking, what makes room, and a provider's
+//! credential. They are registered like any plugin's and listed in the same
+//! catalogue.
 
 mod compact;
+mod login;
 mod model;
 mod think;
 
@@ -16,7 +18,9 @@ pub(crate) fn builtins(host: Weak<Host>) -> Vec<Arc<dyn Command>> {
     vec![
         Arc::new(model::ModelCommand { host: host.clone() }),
         Arc::new(think::ThinkCommand { host: host.clone() }),
-        Arc::new(compact::CompactCommand { host }),
+        Arc::new(compact::CompactCommand { host: host.clone() }),
+        Arc::new(login::LoginCommand { host: host.clone() }),
+        Arc::new(login::LogoutCommand { host }),
     ]
 }
 

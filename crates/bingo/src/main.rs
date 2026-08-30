@@ -1,6 +1,8 @@
 //! The binary: parse the command line, compose the plugins, build the host,
 //! run one surface, exit with its code. Nothing here knows how a turn works.
 
+mod login;
+
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -17,7 +19,8 @@ use bingo_provider_fake::{FakePlugin, FakeProvider, Script};
 use bingo_provider_openai::OpenAiPlugin;
 use bingo_rooms::RoomsPlugin;
 use bingo_sdk::{
-    Env, ErrorCode, KernelError, Plugin, SessionId, SessionSelector, SessionSpec, SurfaceOptions,
+    Env, ErrorCode, KernelError, LoginMethod, Plugin, SessionId, SessionSelector, SessionSpec,
+    SurfaceOptions,
 };
 use bingo_skills::SkillsPlugin;
 use bingo_store_jsonl::JsonlStorePlugin;
@@ -115,6 +118,54 @@ enum Command {
         #[arg(long)]
         stdio: bool,
     },
+    /// Sign in to a provider; the browser opens unless told otherwise (ADR-0012).
+    Login {
+        /// The provider id, e.g. `codex`.
+        provider: String,
+        /// Show a code to enter in a browser anywhere, instead of opening one here.
+        #[arg(long, conflicts_with = "paste")]
+        device: bool,
+        /// Read a credential minted elsewhere from stdin.
+        #[arg(long)]
+        paste: bool,
+    },
+    /// Forget a provider's stored credential.
+    Logout {
+        /// The provider id, e.g. `codex`.
+        provider: String,
+    },
+}
+
+impl Command {
+    /// The sign-in or sign-out a subcommand asks for, if it is one.
+    fn credential(&self) -> Option<Credential<'_>> {
+        match self {
+            Command::Login {
+                provider,
+                device,
+                paste,
+            } => Some(Credential::Login {
+                provider,
+                method: match (device, paste) {
+                    (true, _) => Some(LoginMethod::Device),
+                    (_, true) => Some(LoginMethod::Paste),
+                    _ => None,
+                },
+            }),
+            Command::Logout { provider } => Some(Credential::Logout { provider }),
+            Command::Serve { .. } => None,
+        }
+    }
+}
+
+enum Credential<'a> {
+    Login {
+        provider: &'a str,
+        method: Option<LoginMethod>,
+    },
+    Logout {
+        provider: &'a str,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -180,7 +231,10 @@ async fn main() -> ExitCode {
 }
 
 async fn run(cli: Cli) -> Result<i32, KernelError> {
-    let serve = cli.command.as_ref().map(|Command::Serve { stdio }| *stdio);
+    let serve = match &cli.command {
+        Some(Command::Serve { stdio }) => Some(*stdio),
+        _ => None,
+    };
     check_input(&cli)?;
     let interactive = interactive(&cli);
     let cwd = working_dir(cli.cwd.as_deref())?;
@@ -191,6 +245,15 @@ async fn run(cli: Cli) -> Result<i32, KernelError> {
     for (code, text) in host.notices() {
         let human = std::io::IsTerminal::is_terminal(&std::io::stderr());
         eprintln!("{}", notice_report(&code, &text, human));
+    }
+    if let Some(credential) = cli.command.as_ref().and_then(Command::credential) {
+        let receipt = match credential {
+            Credential::Login { provider, method } => login::login(&host, provider, method).await,
+            Credential::Logout { provider } => login::logout(&host, provider).await,
+        };
+        host.shutdown().await;
+        println!("{}", receipt?);
+        return Ok(0);
     }
     let env = Arc::new(environment(&cwd));
     let (id, options) = match serve {

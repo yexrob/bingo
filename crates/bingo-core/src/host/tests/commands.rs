@@ -41,14 +41,14 @@ async fn host_for(
     (Host::build(plugins, config).await.unwrap(), provider)
 }
 
-struct Client {
-    state: SessionState,
-    events: FrameStream,
-    handle: SessionHandle,
+pub(super) struct Client {
+    pub(super) state: SessionState,
+    pub(super) events: FrameStream,
+    pub(super) handle: SessionHandle,
 }
 
 impl Client {
-    async fn open(host: &Host) -> Self {
+    pub(super) async fn open(host: &Host) -> Self {
         let attachment = host
             .open(
                 SessionSelector::Create {
@@ -68,7 +68,7 @@ impl Client {
 
     /// Submit a line and fold frames until its ack; returns the ack and the
     /// frames before it.
-    async fn ack(&mut self, line: &str) -> (IntentOutcome, Vec<Frame>) {
+    pub(super) async fn ack(&mut self, line: &str) -> (IntentOutcome, Vec<Frame>) {
         let intent = IntentId::mint();
         self.handle
             .submit(intent.clone(), Input::text(line, Origin::surface("test")));

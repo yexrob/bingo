@@ -34,6 +34,8 @@ bingo-tasks.workspace = true
 clap.workspace = true
 tokio.workspace = true
 serde_json.workspace = true
+# The terminal prompter behind `bingo login` implements the sdk's `Prompter`.
+async-trait.workspace = true
 
 [dev-dependencies]
 bingo-sdk = { workspace = true, features = ["testing"] }

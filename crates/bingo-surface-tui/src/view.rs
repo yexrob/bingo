@@ -696,6 +696,43 @@ mod tests {
     }
 
     #[test]
+    fn login_browser_dialog() {
+        let state = folded(vec![frame(
+            1,
+            opened(login(bingo_sdk::LoginFlow::Browser {
+                url: "https://auth.openai.com/oauth/authorize?client_id=app_x&state=s1".into(),
+            })),
+        )]);
+        let (mut ui, now) = scene();
+        ui.dialog.focus_on(state.interactions.first());
+        insta::assert_snapshot!(render(&state, &ui, now));
+    }
+
+    #[test]
+    fn login_device_dialog() {
+        let state = folded(vec![frame(
+            1,
+            opened(login(bingo_sdk::LoginFlow::Device {
+                url: "https://auth.openai.com/codex/device".into(),
+                code: "ABCD-EFGH".into(),
+            })),
+        )]);
+        let (mut ui, now) = scene();
+        ui.dialog.focus_on(state.interactions.first());
+        insta::assert_snapshot!(render(&state, &ui, now));
+    }
+
+    #[test]
+    fn login_paste_dialog_with_the_words_row_open() {
+        let state = folded(vec![frame(1, opened(login(bingo_sdk::LoginFlow::Paste)))]);
+        let (mut ui, now) = scene();
+        ui.dialog.focus_on(state.interactions.first());
+        crate::input::on_key(&mut ui, &solo(&state), typed('1'), now);
+        write(&mut ui, &state, "sk-pasted-elsewhere", now);
+        insta::assert_snapshot!(render(&state, &ui, now));
+    }
+
+    #[test]
     fn help_panel() {
         let state = state();
         let (mut ui, now) = scene();

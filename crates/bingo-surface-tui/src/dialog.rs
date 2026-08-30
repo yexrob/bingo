@@ -253,8 +253,21 @@ pub fn options(interaction: &Interaction) -> Vec<Opt> {
                 _ => None,
             })
             .collect(),
-        InteractionKind::Login { .. } => Vec::new(),
+        InteractionKind::Login { flow, .. } => login_options(interaction, flow),
     }
+}
+
+/// A browser or device flow finishes on its own; the one row is the way
+/// out. A paste flow opens the words row for the credential.
+fn login_options(interaction: &Interaction, flow: &LoginFlow) -> Vec<Opt> {
+    let mut out = Vec::new();
+    if matches!(flow, LoginFlow::Paste) && interaction.answers.contains(&AnswerSpec::Text) {
+        out.push(plain("Paste it here", Choice::Words));
+    }
+    if interaction.answers.contains(&AnswerSpec::Cancel) {
+        out.push(plain("Cancel", Choice::Send(Answer::Cancel)));
+    }
+    out
 }
 
 fn permission_options(interaction: &Interaction, scope: Option<&str>) -> Vec<Opt> {
@@ -386,9 +399,16 @@ fn body(dialog: &Dialog, interaction: &Interaction) -> Vec<Line<'static>> {
 
 fn login_lines(flow: &LoginFlow) -> Vec<Line<'static>> {
     match flow {
-        LoginFlow::Browser { url } => vec![indented(url)],
-        LoginFlow::Device { url, code } => vec![indented(url), indented(&format!("code: {code}"))],
-        LoginFlow::Paste => vec![indented("paste the credential")],
+        LoginFlow::Browser { url } => vec![
+            indented("Finish in the browser. If it did not open, go to:"),
+            indented(url),
+        ],
+        LoginFlow::Device { url, code } => vec![
+            indented("Open this address and enter the code:"),
+            indented(url),
+            indented(&format!("code: {code}")),
+        ],
+        LoginFlow::Paste => vec![indented("A credential minted elsewhere.")],
     }
 }
 

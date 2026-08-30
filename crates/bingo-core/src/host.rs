@@ -360,7 +360,16 @@ impl Host {
         depth
     }
 
-    fn provider(&self, id: Option<&str>) -> Result<Arc<dyn Provider>, KernelError> {
+    /// A session's own way of asking a person (ADR-0012 §5): what a command
+    /// hands a provider's `login`.
+    pub fn prompter(&self, session: &SessionId) -> Result<Arc<dyn Prompter>, KernelError> {
+        let mailbox = self.live(session)?.mailbox;
+        Ok(Arc::new(SessionToolHost { mailbox }))
+    }
+
+    /// The provider `id` names; with none, the settings' provider, else the
+    /// first registered.
+    pub fn provider(&self, id: Option<&str>) -> Result<Arc<dyn Provider>, KernelError> {
         let wanted = id
             .map(str::to_string)
             .or_else(|| self.settings.kernel.provider.clone())
