@@ -586,6 +586,8 @@ pub(crate) mod tests {
 
     fn summary() -> SessionSummary {
         SessionSummary {
+            tools: None,
+            system_extra: None,
             driver: Default::default(),
             id: SessionId::from_raw("ses_1"),
             key: None,

@@ -283,6 +283,8 @@ impl Asked {
 
 fn summary(id: &SessionId) -> SessionSummary {
     SessionSummary {
+        tools: None,
+        system_extra: None,
         id: id.clone(),
         key: None,
         title: None,

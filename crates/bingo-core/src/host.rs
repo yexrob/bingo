@@ -503,6 +503,8 @@ impl Host {
             parent: spec.parent.clone(),
             model: choice.map(|c| c.id.clone()),
             provider: choice.map(|c| c.provider.id().to_string()),
+            system_extra: spec.system_extra.clone(),
+            tools: spec.tools.clone(),
             created_at: now,
             updated_at: now,
             usage: Usage::default(),
@@ -665,12 +667,15 @@ impl Host {
                 .values()
                 .find(|l| l.key.as_deref() == Some(key.as_str()))
                 .map(|l| l.mailbox.clone()),
+            // A person's own session, never one of its children: a role or a
+            // room under it is newer, and is not what `--continue` means.
             SessionSelector::Latest { cwd } => {
                 let cwd = cwd.display().to_string();
-                sessions
-                    .values()
-                    .filter(|l| l.cwd == cwd)
-                    .max_by_key(|l| l.created_at)
+                let here: Vec<&Live> = sessions.values().filter(|l| l.cwd == cwd).collect();
+                here.iter()
+                    .filter(|l| l.parent.is_none())
+                    .chain(here.iter())
+                    .max_by_key(|l| (l.parent.is_none(), l.created_at))
                     .map(|l| l.mailbox.clone())
             }
         }

@@ -42,6 +42,9 @@ use crate::turn::{TurnConfig, TurnKind, TurnOutcome, TurnRun, run_turn};
 /// (ADR-0008 §7) before it lets go.
 pub const AFTER_TURN_DEADLINE: Duration = Duration::from_secs(30);
 
+/// The start hooks, still running.
+type Starting = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
+
 struct Running {
     turn: TurnId,
     cancel: CancellationToken,
@@ -85,11 +88,20 @@ struct Actor {
 
 impl Actor {
     async fn run(mut self) {
-        self.open().await;
-        while let Some(msg) = self.rx.recv().await {
+        let starting = self.open().await;
+        let held = self.serve_start(starting).await;
+        let mut flow = Flow::Continue;
+        for msg in held {
             if self.handle(msg).await == Flow::Stop {
+                flow = Flow::Stop;
                 break;
             }
+        }
+        while flow == Flow::Continue {
+            let Some(msg) = self.rx.recv().await else {
+                break;
+            };
+            flow = self.handle(msg).await;
         }
         if let Some(running) = self.running.take() {
             running.cancel.cancel();
@@ -185,7 +197,8 @@ impl Actor {
     }
 
     /// The head of this segment of the journal: what the session is now.
-    async fn open(&mut self) {
+    /// The start hooks it hands back run while the session opens for reads.
+    async fn open(&mut self) -> Starting {
         let summary = SessionSummary {
             busy: false,
             updated_at: Timestamp::now(),
@@ -196,7 +209,28 @@ impl Actor {
         self.restate_extensions().await;
         self.refresh_config().await;
         self.recover().await;
-        self.session_hooks(Phase::Start);
+        let cx = self.hook_context();
+        Box::pin(run_session_hooks(self.session_hook_set(), Phase::Start, cx))
+    }
+
+    /// While the start hooks run the session answers its summary and holds
+    /// everything else: a hook may list the tree it is seating — the host
+    /// asks every live actor for its summary, this one included — and what
+    /// it seats is there before the first message is read.
+    async fn serve_start(&mut self, mut hooks: Starting) -> Vec<Msg> {
+        let mut held = Vec::new();
+        loop {
+            tokio::select! {
+                () = &mut hooks => return held,
+                msg = self.rx.recv() => match msg {
+                    Some(msg) if msg.reads() => {
+                        self.handle(msg).await;
+                    }
+                    Some(msg) => held.push(msg),
+                    None => return held,
+                },
+            }
+        }
     }
 
     /// The head of a segment restates the plugin state the journal already
@@ -237,24 +271,23 @@ impl Actor {
         }
     }
 
-    /// The session-lifecycle hooks, off the actor's path.
-    fn session_hooks(&self, phase: Phase) {
-        let hooks: Vec<Arc<dyn Hook>> = self
-            .config
+    fn session_hook_set(&self) -> Vec<Arc<dyn Hook>> {
+        self.config
             .hooks
             .iter()
             .filter(|h| hook_applies(&h.matcher(), HookPoint::Session, None))
             .cloned()
-            .collect();
+            .collect()
+    }
+
+    /// The end-of-session hooks, off the stopping actor's path.
+    fn session_hooks(&self, phase: Phase) {
+        let hooks = self.session_hook_set();
         if hooks.is_empty() {
             return;
         }
         let cx = self.hook_context();
-        self.tracker.spawn(async move {
-            for hook in hooks {
-                hook.on_session(phase, &cx).await;
-            }
-        });
+        self.tracker.spawn(run_session_hooks(hooks, phase, cx));
     }
 
     /// One ordered task feeds every frame but the deltas to the hooks that
@@ -709,6 +742,12 @@ impl Actor {
         self.subscribers.clear();
         self.session_hooks(Phase::End);
         Flow::Stop
+    }
+}
+
+async fn run_session_hooks(hooks: Vec<Arc<dyn Hook>>, phase: Phase, cx: HookContext) {
+    for hook in hooks {
+        hook.on_session(phase, &cx).await;
     }
 }
 

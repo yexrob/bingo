@@ -609,3 +609,57 @@ async fn a_journal_that_ends_closed_resumes_open() {
         Some("turnCompleted:Completed")
     );
 }
+
+/// A start hook that takes its time, and says when it was done.
+struct Slow(std::sync::Mutex<Option<std::time::Instant>>);
+
+#[async_trait::async_trait]
+impl Hook for Slow {
+    fn id(&self) -> &str {
+        "slow"
+    }
+    fn matcher(&self) -> HookMatcher {
+        HookMatcher {
+            points: vec![HookPoint::Session],
+            tool: None,
+        }
+    }
+    async fn on_session(&self, phase: Phase, _: &HookContext) {
+        if phase == Phase::Start {
+            tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+            *self.0.lock().unwrap() = Some(std::time::Instant::now());
+        }
+    }
+}
+
+/// What a start hook seats or injects is there before the first message is
+/// read: the hook is awaited, not spawned beside the session.
+#[tokio::test]
+async fn a_start_hook_finishes_before_the_first_turn_opens() {
+    let provider = ScriptedProvider::new(vec![Script::Events(text("hello"))]);
+    let slow = Arc::new(Slow(std::sync::Mutex::new(None)));
+    let hook = slow.clone();
+    let mailbox = spawn(summary("ses_1"), None, Services::none(), move |_| {
+        let mut cfg = config(provider, vec![], Arc::new(NoHost));
+        cfg.hooks = vec![hook as Arc<dyn Hook>];
+        Arc::new(cfg)
+    });
+    mailbox.submit(IntentId::mint(), Input::text("hi", Origin::surface("test")));
+    let (mut state, mut events) = mailbox.attach().await.unwrap();
+    let opened_at = std::time::Instant::now();
+    if state.turn.is_none() {
+        frames_until(&mut events, &mut state, |f| {
+            matches!(f.event, Event::TurnStarted { .. })
+        })
+        .await;
+    }
+    let done = slow
+        .0
+        .lock()
+        .unwrap()
+        .expect("the hook ran to its end first");
+    assert!(
+        done <= opened_at || state.turn.is_some(),
+        "the turn waited for the hook"
+    );
+}

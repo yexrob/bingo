@@ -755,3 +755,183 @@ async fn a_delivery_reaches_a_stored_session_that_is_not_live() {
     );
     assert_eq!(b.snapshot.extensions["bingo.test"]["things"], json!([1]));
 }
+
+/// `--continue` means the person's session: `Latest` prefers a root over a
+/// child under it, live or in the store, though the child is newer.
+#[tokio::test]
+async fn latest_prefers_a_root_over_the_newer_child_under_it() {
+    let store = Arc::new(crate::journal::MemoryStore::new());
+    let host_a = host_on(store.clone(), ScriptedProvider::new(vec![])).await;
+    let root = host_a
+        .open(
+            SessionSelector::Create {
+                spec: spec("/work"),
+            },
+            who(),
+            OpenOptions::default(),
+        )
+        .await
+        .unwrap()
+        .session;
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    let child = SessionSpec {
+        parent: Some(ParentLink {
+            session: root.clone(),
+            item: None,
+        }),
+        title: Some("reviewer".into()),
+        ..spec("/work")
+    };
+    host_a
+        .open(
+            SessionSelector::Create { spec: child },
+            who(),
+            OpenOptions::default(),
+        )
+        .await
+        .unwrap();
+    let latest = SessionSelector::Latest {
+        cwd: "/work".into(),
+    };
+    let live = host_a
+        .open(latest.clone(), who(), OpenOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(live.session, root, "live: the root, not its newer child");
+
+    let host_b = host_on(store, ScriptedProvider::new(vec![])).await;
+    let stored = host_b
+        .open(latest, who(), OpenOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        stored.session, root,
+        "stored: the root, not its newer child"
+    );
+}
+
+/// What a session was opened with comes back with it: its extra system
+/// prompt and its tool set are in its summary, so a resume gives them back.
+#[tokio::test]
+async fn a_resumed_session_keeps_its_system_prompt_and_tool_set() {
+    let store = Arc::new(crate::journal::MemoryStore::new());
+    let host_a = host_on(store.clone(), ScriptedProvider::new(vec![])).await;
+    let opened = SessionSpec {
+        system_extra: Some("Be brief.".into()),
+        tools: Some(vec!["Echo".into()]),
+        ..spec("/work")
+    };
+    let id = host_a
+        .open(
+            SessionSelector::Create { spec: opened },
+            who(),
+            OpenOptions::default(),
+        )
+        .await
+        .unwrap()
+        .session;
+
+    let second = ScriptedProvider::new(vec![Script::Events(text("ok"))]);
+    let plugins = vec![
+        TestPlugin::boxed(&PROVIDER, vec![Contribution::Provider(second.clone())]),
+        TestPlugin::boxed(&STORE, vec![Contribution::Store(store)]),
+        TestPlugin::boxed(
+            &TOOLS,
+            vec![Contribution::Tool(Arc::new(EchoTool { read_only: true }))],
+        ),
+    ];
+    let config = HostConfig::new(env()).with_layer("cli", json!({"model": "m"}));
+    let host_b = Host::build(plugins, config).await.unwrap();
+    let mut b = host_b
+        .open(SessionSelector::ById { id }, who(), OpenOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        b.snapshot.summary.system_extra.as_deref(),
+        Some("Be brief.")
+    );
+    assert_eq!(b.snapshot.summary.tools, Some(vec!["Echo".to_string()]));
+    one_turn(&mut b, "hello").await;
+    let request = &second.requests()[0];
+    assert!(
+        request
+            .system
+            .iter()
+            .any(|block| block.text.contains("Be brief.")),
+        "the resumed turn's system prompt carries it"
+    );
+    assert_eq!(
+        request
+            .tools
+            .iter()
+            .map(|t| t.name.as_str())
+            .collect::<Vec<_>>(),
+        ["Echo"],
+        "the resumed turn is held to the tool set"
+    );
+}
+
+static HOOKS: PluginManifest = PluginManifest {
+    id: "test.hooks",
+    version: "0",
+    sdk: "^0.1",
+    provides: &["hook:lister"],
+    requires: &[],
+    config: None,
+};
+
+/// A start hook that reads the session tree, as one that seats a team does.
+struct Lister(std::sync::Mutex<Option<usize>>);
+
+#[async_trait::async_trait]
+impl Hook for Lister {
+    fn id(&self) -> &str {
+        "lister"
+    }
+    fn matcher(&self) -> HookMatcher {
+        HookMatcher {
+            points: vec![HookPoint::Session],
+            tool: None,
+        }
+    }
+    async fn on_session(&self, phase: Phase, cx: &HookContext) {
+        if phase == Phase::Start {
+            let listed = cx.host.sessions(SessionFilter::default()).await;
+            *self.0.lock().unwrap() = Some(listed.map(|l| l.len()).unwrap_or(0));
+        }
+    }
+}
+
+/// A start hook may read the tree it starts in: the host asks every live
+/// actor for its summary, and the one still starting answers reads while
+/// its start hooks run, holding the first submit until they are done.
+#[tokio::test]
+async fn a_start_hook_may_read_the_session_tree_and_the_first_turn_waits_for_it() {
+    let lister = Arc::new(Lister(std::sync::Mutex::new(None)));
+    let provider = ScriptedProvider::new(vec![Script::Events(text("hello"))]);
+    let plugins = vec![
+        TestPlugin::boxed(&PROVIDER, vec![Contribution::Provider(provider)]),
+        TestPlugin::boxed(
+            &HOOKS,
+            vec![Contribution::Hook(lister.clone() as Arc<dyn Hook>)],
+        ),
+    ];
+    let config = HostConfig::new(env()).with_layer("cli", json!({"model": "m"}));
+    let host = Host::build(plugins, config).await.unwrap();
+    let mut a = host
+        .open(
+            SessionSelector::Create {
+                spec: spec("/work"),
+            },
+            who(),
+            OpenOptions::default(),
+        )
+        .await
+        .unwrap();
+    one_turn(&mut a, "hello").await;
+    assert_eq!(
+        *lister.0.lock().unwrap(),
+        Some(1),
+        "the hook listed the tree — its own session in it — before the turn ran"
+    );
+}

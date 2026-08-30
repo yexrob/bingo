@@ -646,6 +646,12 @@ pub struct SessionSummary {
     pub driver: Driver,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// What the session was opened with and a resume must give it back:
+    /// the prompt appended to the kernel's own, and the tool set it is held to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_extra: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tools: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
     #[schemars(with = "String")]
@@ -734,6 +740,8 @@ mod tests {
             parent: None,
             driver: Driver::Model,
             model: Some("fake-1".into()),
+            system_extra: None,
+            tools: None,
             provider: Some("fake".into()),
             created_at: ts(),
             updated_at: ts(),

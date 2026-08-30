@@ -326,6 +326,8 @@ mod tests {
             parent: None,
             driver: Driver::Model,
             model: None,
+            system_extra: None,
+            tools: None,
             provider: None,
             created_at: ts(),
             updated_at: ts(),

@@ -265,26 +265,20 @@ fn a_project_s_roles_are_seated_before_the_root_s_first_turn() {
     );
 }
 
-/// Reopened by id, not with `--continue`: `SessionSelector::Latest` takes the
-/// most recently updated session in the directory, and a role's journal is
-/// written after its root's — the seating, and the close at shutdown — so
-/// `--continue` in a project with a team lands on a role. That is the
-/// kernel's selector to fix; what this asserts is the plugin's part, that
-/// reopening the root brings the same two roles back rather than seating two
-/// more.
+/// `--continue` lands on the person's session, not on the role whose journal
+/// was written last (`Latest` prefers a root), and reopening the root brings
+/// the same two roles back rather than seating two more.
 #[test]
-fn the_same_roles_come_back_when_the_root_is_reopened() {
+fn the_same_roles_come_back_on_continue() {
     let home = tempfile::tempdir().unwrap();
     with_a_team(home.path());
     let first = scripted_run(home.path(), &script(ROSTER), &[], "who is here?");
     assert_eq!(first.status.code(), Some(0), "stderr: {}", stderr(&first));
     let before = tool_output(&first, "ListAgents");
-    let root = frames_of(&first)[0].session.to_string();
-
     let second = scripted_run(
         home.path(),
         &script(ROSTER),
-        &["--resume", &root],
+        &["--continue"],
         "who is here now?",
     );
     assert_eq!(second.status.code(), Some(0), "stderr: {}", stderr(&second));

@@ -29,6 +29,8 @@ pub fn session_id() -> SessionId {
 
 pub fn summary() -> SessionSummary {
     SessionSummary {
+        tools: None,
+        system_extra: None,
         driver: Default::default(),
         id: session_id(),
         key: None,

@@ -177,6 +177,8 @@ pub(crate) mod tests {
 
     pub(crate) fn summary() -> SessionSummary {
         SessionSummary {
+            tools: None,
+            system_extra: None,
             driver: Default::default(),
             id: session(),
             key: None,

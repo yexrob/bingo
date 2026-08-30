@@ -80,6 +80,8 @@ impl TurnHost for RecordingHost {
 fn summary() -> SessionSummary {
     let ts = Timestamp::from_second(0).unwrap();
     SessionSummary {
+        tools: None,
+        system_extra: None,
         driver: Default::default(),
         id: SessionId::from_raw("ses_1"),
         key: None,

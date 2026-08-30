@@ -26,6 +26,8 @@ pub fn ts() -> Timestamp {
 
 pub fn summary() -> SessionSummary {
     SessionSummary {
+        tools: None,
+        system_extra: None,
         driver: Default::default(),
         id: SessionId::from_raw("ses_1"),
         key: None,

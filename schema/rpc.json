@@ -2887,6 +2887,22 @@
             "null"
           ]
         },
+        "systemExtra": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "What the session was opened with and a resume must give it back:\nthe prompt appended to the kernel's own, and the tool set it is held to."
+        },
+        "tools": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
         "provider": {
           "type": [
             "string",

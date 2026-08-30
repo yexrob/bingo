@@ -233,6 +233,8 @@ pub fn capabilities() -> ModelCapabilities {
 pub fn summary(id: &str) -> SessionSummary {
     let ts = jiff::Timestamp::from_second(0).unwrap();
     SessionSummary {
+        tools: None,
+        system_extra: None,
         driver: Default::default(),
         id: SessionId::from_raw(id),
         key: None,

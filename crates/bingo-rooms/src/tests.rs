@@ -302,6 +302,8 @@ pub(crate) fn hook_context(session: &SessionId, fleet: &Fleet, cwd: &Path) -> Ho
 
 pub(crate) fn summary(id: &str, title: Option<&str>, parent: Option<SessionId>) -> SessionSummary {
     SessionSummary {
+        tools: None,
+        system_extra: None,
         id: SessionId::from_raw(id),
         key: None,
         title: title.map(str::to_string),

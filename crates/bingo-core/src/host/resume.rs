@@ -45,12 +45,16 @@ impl Host {
                 .filter(|s| s.key.as_deref() == Some(key.as_str()))
                 .map(|s| s.id)
                 .collect(),
-            SessionSelector::Latest { cwd } => store
-                .list(&filter(Some(cwd)))
-                .await?
-                .into_iter()
-                .map(|s| s.id)
-                .collect(),
+            // Roots first: a child under the latest root is newer than it,
+            // and is not what `--continue` means.
+            SessionSelector::Latest { cwd } => {
+                let (roots, children): (Vec<_>, Vec<_>) = store
+                    .list(&filter(Some(cwd)))
+                    .await?
+                    .into_iter()
+                    .partition(|s| s.parent.is_none());
+                roots.into_iter().chain(children).map(|s| s.id).collect()
+            }
         })
     }
 
@@ -101,7 +105,7 @@ fn spec_of(summary: &SessionSummary) -> SessionSpec {
         title: summary.title.clone(),
         provider: summary.provider.clone(),
         model: summary.model.clone(),
-        system_extra: None,
-        tools: None,
+        system_extra: summary.system_extra.clone(),
+        tools: summary.tools.clone(),
     }
 }

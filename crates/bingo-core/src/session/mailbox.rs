@@ -91,6 +91,16 @@ pub(crate) enum Msg {
     },
 }
 
+impl Msg {
+    /// The one message answered while the session is still starting: the
+    /// host reads every live actor's summary to list the tree, and a start
+    /// hook may list the tree. Everything else — attachments included, so a
+    /// snapshot never runs ahead of a write sent before it — waits.
+    pub(crate) fn reads(&self) -> bool {
+        matches!(self, Msg::Summary { .. })
+    }
+}
+
 /// A client's answer to an open interaction, with who gave it.
 pub(crate) struct Answered {
     pub intent: IntentId,
