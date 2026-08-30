@@ -116,7 +116,7 @@ tui-smoke ok
 cargo fmt --all -- --check                                    0
 cargo check --workspace --all-targets --locked                0
 cargo clippy --workspace --all-targets --locked -- -D warnings 0
-cargo test --workspace --locked                               0   (1 678 passed, 54 binaries)
+cargo test --workspace --locked                               0   (1 679 passed, 54 binaries)
 scripts/check_discipline.sh                                   0
 scripts/budget.sh                                             0   (268 unique normal deps, max 268)
 cargo deny check                                              0
