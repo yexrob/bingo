@@ -47,9 +47,10 @@ step() { printf '  %s\n' "$1"; }
 
 # Start bingo on a scripted provider. The script's own text never appears in
 # the command line, so `await` matches the output and not the echo of itself.
+# `$2` is any extra environment the step wants.
 start() {
   printf '%s' "$1" >"$WORK/script.json"
-  keys "HOME=$WORK/home BINGO_FAKE_SCRIPT=$WORK/script.json $BIN --cwd $WORK/cwd" Enter
+  keys "HOME=$WORK/home ${2:-} BINGO_FAKE_SCRIPT=$WORK/script.json $BIN --cwd $WORK/cwd" Enter
   await '? for shortcuts'
 }
 
@@ -110,6 +111,17 @@ await 'Do you want to '
 press_until 'y' 'Wrote it.'
 [ -f "$WORK/cwd/note.txt" ] || { echo "tui-smoke: the approved Write wrote nothing" >&2; exit 1; }
 grep -q 'written by the smoke test' "$WORK/cwd/note.txt"
+finish
+
+step 'BINGO_ASCII=1 and NO_COLOR leave a terminal nothing it cannot draw'
+start '{"responses":[{"steps":[{"text":"Hello in ascii."}]}]}' 'BINGO_ASCII=1 NO_COLOR=1'
+keys 'say hello' Enter
+await '* Hello in ascii.'
+if pane | grep -q '⏺'; then
+  echo 'tui-smoke: a glyph outside the ascii table survived BINGO_ASCII=1' >&2
+  pane >&2
+  exit 1
+fi
 finish
 
 echo 'tui-smoke ok'
