@@ -4,122 +4,21 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use std::io::Write;
-use std::process::Stdio;
 use std::time::Duration;
 
 use bingo_sdk::{
-    Activation, Answer, Attachment, CatalogKind, ClientIdentity, ErrorCode, Event, Frame,
-    HistoryPage, HostApi, Input, IntentId, InterruptScope, OpenOptions, Origin, SessionFilter,
-    SessionId, SessionSelector, SessionSpec, SessionState, TurnStatus,
+    Activation, Answer, CatalogKind, ErrorCode, Event, Frame, HistoryPage, HostApi, Input,
+    IntentId, InterruptScope, OpenOptions, Origin, SessionFilter, SessionId, SessionSelector,
+    SessionState, TurnStatus,
 };
-use bingo_surface_rpc::RemoteKernel;
 use futures::StreamExt;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, Command};
+use tokio::io::{AsyncBufReadExt, BufReader};
+
+mod support;
+
+use support::{Server, ack_for, create, ready, send, until_completed, who};
 
 const TEXT_TURN: &str = r#"{"responses":[{"steps":[{"text":"Hello over the wire."}]}]}"#;
-
-struct Server {
-    child: Child,
-    home: tempfile::TempDir,
-}
-
-impl Server {
-    /// `bingo serve --stdio` in a fresh home, the fake provider on `script`.
-    fn spawn(script: &str) -> Server {
-        Server::spawn_with(script, &[])
-    }
-
-    /// The same, with extra command-line arguments after `--cwd`.
-    fn spawn_with(script: &str, extra: &[&str]) -> Server {
-        let home = tempfile::tempdir().unwrap();
-        let path = home.path().join("script.json");
-        std::fs::File::create(&path)
-            .unwrap()
-            .write_all(script.as_bytes())
-            .unwrap();
-        let child = Command::new(env!("CARGO_BIN_EXE_bingo"))
-            .args(["serve", "--stdio", "--cwd"])
-            .arg(home.path())
-            .args(extra)
-            .env("BINGO_FAKE_SCRIPT", &path)
-            .env("HOME", home.path())
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()
-            .unwrap();
-        Server { child, home }
-    }
-
-    fn kernel(&mut self) -> RemoteKernel {
-        RemoteKernel::connect(
-            self.child.stdout.take().unwrap(),
-            self.child.stdin.take().unwrap(),
-        )
-    }
-
-    fn cwd(&self) -> std::path::PathBuf {
-        self.home.path().to_path_buf()
-    }
-
-    fn sessions_dir(&self) -> std::path::PathBuf {
-        self.home.path().join(".bingo/data/sessions")
-    }
-}
-
-async fn send(stdin: &mut tokio::process::ChildStdin, line: &str) {
-    stdin
-        .write_all(format!("{line}\n").as_bytes())
-        .await
-        .unwrap();
-}
-
-fn who() -> ClientIdentity {
-    ClientIdentity {
-        name: "harness".into(),
-        surface: "test".into(),
-    }
-}
-
-fn create(cwd: std::path::PathBuf) -> SessionSelector {
-    SessionSelector::Create {
-        spec: SessionSpec {
-            cwd,
-            ..SessionSpec::default()
-        },
-    }
-}
-
-/// Fold frames into `state` until the turn completes; the frames seen.
-async fn until_completed(attachment: &mut Attachment) -> Vec<Frame> {
-    let mut seen = Vec::new();
-    let deadline = tokio::time::sleep(Duration::from_secs(20));
-    tokio::pin!(deadline);
-    loop {
-        tokio::select! {
-            frame = attachment.events.next() => {
-                let frame = frame.expect("the stream stays open");
-                attachment.snapshot.apply(&frame);
-                let done = matches!(frame.event, Event::TurnCompleted { .. });
-                seen.push(frame);
-                if done {
-                    return seen;
-                }
-            }
-            _ = &mut deadline => panic!("the turn never completed: {:?}", seen.iter().map(|f| &f.event).collect::<Vec<_>>()),
-        }
-    }
-}
-
-async fn ready(server: &mut Server) -> RemoteKernel {
-    let kernel = server.kernel();
-    let hello = kernel.initialize(who()).await.unwrap();
-    assert_eq!(hello.protocol, 1);
-    kernel
-}
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_method_before_initialize_is_refused() {
@@ -442,26 +341,6 @@ async fn delete_removes_the_session_from_disk_and_shutdown_exits_zero() {
     assert!(!dir.exists(), "the directory is gone");
     kernel.shutdown().await.unwrap();
     assert!(server.child.wait().await.unwrap().success());
-}
-
-/// Fold frames until the ack for `intent`; the outcome.
-async fn ack_for(attachment: &mut Attachment, intent: &IntentId) -> bingo_sdk::IntentOutcome {
-    let deadline = tokio::time::sleep(Duration::from_secs(20));
-    tokio::pin!(deadline);
-    loop {
-        tokio::select! {
-            frame = attachment.events.next() => {
-                let frame = frame.expect("the stream stays open");
-                attachment.snapshot.apply(&frame);
-                if let Event::IntentAck { intent: i, outcome } = frame.event
-                    && &i == intent
-                {
-                    return outcome;
-                }
-            }
-            _ = &mut deadline => panic!("no ack for {intent}"),
-        }
-    }
 }
 
 /// A shell line is an action in the transcript; `/permission` changes what the
