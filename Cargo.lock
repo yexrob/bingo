@@ -385,6 +385,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
+ "bingo-auth-oauth",
  "bingo-sdk",
  "futures",
  "insta",
@@ -393,6 +394,7 @@ dependencies = [
  "schemars",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "wiremock",
 ]
