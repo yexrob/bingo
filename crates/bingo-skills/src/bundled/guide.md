@@ -59,6 +59,10 @@ own.
 - `/compact [instructions]` — summarise the conversation so far and keep going.
   It waits for a running turn.
 - `/permission [mode]` — read or set this session's permission mode.
+- `/login <provider> [browser|device|paste]` and `/logout <provider>` — a
+  provider's credential, for providers that sign in rather than take a key
+  (`codex`, the ChatGPT subscription). `bingo login codex` does the same from
+  the shell; the token lives in `~/.bingo/data/auth.json`, never in settings.
 - `/help`, `/clear`, `/resume`, `/exit` — the surface's own; they never reach
   the kernel.
 - `!<line>` — run a shell line under the session's directory, now, with the

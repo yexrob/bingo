@@ -2,6 +2,8 @@
 //! §6) and the dropdown that merges them with the kernel's catalogue. Every
 //! other `/name` and every `!line` is submitted verbatim — the actor parses it.
 
+use std::collections::BTreeMap;
+
 use bingo_sdk::{ArgSpec, Catalog, CommandSpec};
 
 /// A command the surface owns. Nothing here reaches the kernel.
@@ -85,15 +87,19 @@ pub struct Suggestion {
 
 /// The dropdown for the line being typed: command names while the caret is
 /// still in the name, catalogue values once the command is known.
-pub fn suggestions(line: &str, specs: &[CommandSpec], models: &[String]) -> Vec<Suggestion> {
+pub fn suggestions(line: &str, specs: &[CommandSpec], catalogues: &Catalogues) -> Vec<Suggestion> {
     let Some(rest) = line.strip_prefix('/') else {
         return Vec::new();
     };
     match rest.split_once(char::is_whitespace) {
         None => rank(rest, specs),
-        Some((name, partial)) => arguments(name, partial.trim_start(), specs, models),
+        Some((name, partial)) => arguments(name, partial.trim_start(), specs, catalogues),
     }
 }
+
+/// The ids of each catalogue a command's argument may name, by the source
+/// its `ArgSpec::Catalog` gives (`models`, `providers`), read once at start.
+pub type Catalogues = BTreeMap<String, Vec<String>>;
 
 /// Prefix matches first, then substring matches, each in catalogue order.
 fn rank(partial: &str, specs: &[CommandSpec]) -> Vec<Suggestion> {
@@ -129,7 +135,7 @@ fn arguments(
     name: &str,
     partial: &str,
     specs: &[CommandSpec],
-    models: &[String],
+    catalogues: &Catalogues,
 ) -> Vec<Suggestion> {
     let Some(spec) = specs.iter().find(|s| s.name == name) else {
         return Vec::new();
@@ -137,11 +143,10 @@ fn arguments(
     let ArgSpec::Catalog { source } = &spec.args else {
         return Vec::new();
     };
-    if source != "models" {
+    let Some(ids) = catalogues.get(source) else {
         return Vec::new();
-    }
-    models
-        .iter()
+    };
+    ids.iter()
         .filter(|id| id.to_lowercase().contains(&partial.to_lowercase()))
         .map(|id| Suggestion {
             value: format!("/{name} {id}"),
@@ -186,12 +191,12 @@ mod tests {
     #[test]
     fn the_dropdown_ranks_prefixes_before_substrings() {
         let specs = vec![spec("compact", ArgSpec::None), spec("model", ArgSpec::None)];
-        let rows = suggestions("/co", &specs, &[]);
+        let rows = suggestions("/co", &specs, &Catalogues::new());
         assert_eq!(
             rows.iter().map(|r| r.label.clone()).collect::<Vec<_>>(),
             vec!["/compact"]
         );
-        let rows = suggestions("/o", &specs, &[]);
+        let rows = suggestions("/o", &specs, &Catalogues::new());
         assert_eq!(
             rows.iter().map(|r| r.label.clone()).collect::<Vec<_>>(),
             vec!["/compact", "/model"],
@@ -208,7 +213,8 @@ mod tests {
             },
         )];
         let models = vec!["fake/fake-1".to_string(), "openai/gpt-5".to_string()];
-        let rows = suggestions("/model fak", &specs, &models);
+        let catalogues = Catalogues::from([("models".to_string(), models)]);
+        let rows = suggestions("/model fak", &specs, &catalogues);
         assert_eq!(
             rows,
             vec![Suggestion {
@@ -227,13 +233,13 @@ mod tests {
                 hint: "[why]".into(),
             },
         )];
-        assert!(suggestions("/compact any", &specs, &[]).is_empty());
+        assert!(suggestions("/compact any", &specs, &Catalogues::new()).is_empty());
     }
 
     #[test]
     fn a_line_that_is_not_a_command_has_no_dropdown() {
-        assert!(suggestions("hello", &local_specs(), &[]).is_empty());
-        assert!(suggestions("!ls", &local_specs(), &[]).is_empty());
+        assert!(suggestions("hello", &local_specs(), &Catalogues::new()).is_empty());
+        assert!(suggestions("!ls", &local_specs(), &Catalogues::new()).is_empty());
     }
 
     #[test]

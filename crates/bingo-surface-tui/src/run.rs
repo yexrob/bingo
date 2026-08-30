@@ -49,7 +49,8 @@ enum Reply {
     Handle(SessionId, SessionHandle),
     Sessions(Vec<SessionSummary>),
     Commands(Vec<CommandSpec>),
-    Models(Vec<String>),
+    /// One catalogue's ids, by the source name a command's argument gives.
+    Catalogue(String, Vec<String>),
     Failed(KernelError),
 }
 
@@ -366,7 +367,7 @@ impl Run {
         self.spawn(async move { host.sessions(filter).await.map(Reply::Sessions) });
     }
 
-    /// Both catalogues are read once: the dropdown ranks them, it does not
+    /// The catalogues are read once: the dropdown ranks them, it does not
     /// watch them.
     fn fetch_catalogs(&mut self) {
         let host = self.host.clone();
@@ -375,12 +376,20 @@ impl Run {
                 .await
                 .map(|c| Reply::Commands(commands::specs_from(&c)))
         });
-        let host = self.host.clone();
-        self.spawn(async move {
-            host.catalog(CatalogKind::Models)
-                .await
-                .map(|c| Reply::Models(c.entries.into_iter().map(|e| e.id).collect()))
-        });
+        for (source, kind) in [
+            ("models", CatalogKind::Models),
+            ("providers", CatalogKind::Providers),
+        ] {
+            let host = self.host.clone();
+            self.spawn(async move {
+                host.catalog(kind).await.map(|c| {
+                    Reply::Catalogue(
+                        source.to_string(),
+                        c.entries.into_iter().map(|e| e.id).collect(),
+                    )
+                })
+            });
+        }
     }
 
     fn spawn(&self, call: impl Future<Output = Result<Reply, KernelError>> + Send + 'static) {
@@ -405,7 +414,9 @@ impl Run {
                 })
             }
             Reply::Commands(specs) => self.ui.catalog = specs,
-            Reply::Models(ids) => self.ui.models = ids,
+            Reply::Catalogue(source, ids) => {
+                self.ui.catalogues.insert(source, ids);
+            }
             Reply::Failed(error) => {
                 self.ui.opening = false;
                 self.ui.notify(Level::Error, error.message, Instant::now());

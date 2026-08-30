@@ -73,7 +73,7 @@ pub struct Ui {
     pub armed: Option<Instant>,
     /// The kernel's command catalogue, read once at start.
     pub catalog: Vec<CommandSpec>,
-    pub models: Vec<String>,
+    pub catalogues: commands::Catalogues,
     /// An `open` is in flight; the swap happens when it lands.
     pub opening: bool,
     /// When this surface started, which is what the spinner turns on.
@@ -96,7 +96,7 @@ impl Ui {
             block: None,
             armed: None,
             catalog: Vec::new(),
-            models: Vec::new(),
+            catalogues: commands::Catalogues::new(),
             opening: false,
             started,
         }
@@ -129,7 +129,7 @@ impl Ui {
         if self.menu.dismissed {
             return Vec::new();
         }
-        commands::suggestions(self.composer.text(), &self.commands(), &self.models)
+        commands::suggestions(self.composer.text(), &self.commands(), &self.catalogues)
     }
 
     pub fn selected_suggestion(&self) -> Option<Suggestion> {
