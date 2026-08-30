@@ -8,7 +8,9 @@
 use std::cell::RefCell;
 use std::time::{Duration, Instant};
 
-use bingo_sdk::{CommandSpec, Level, SessionSummary, View};
+use std::collections::BTreeSet;
+
+use bingo_sdk::{CommandSpec, ItemId, Level, SessionSummary, View};
 
 use crate::blocks::Blocks;
 use crate::commands::{self, Suggestion};
@@ -212,6 +214,8 @@ pub struct Ui {
     pub notices: Vec<Notice>,
     /// A command's `View`, shown until the next key.
     pub block: Option<View>,
+    /// The results `ctrl+o` opened whole; everything else folds (§4).
+    pub expanded: BTreeSet<ItemId>,
     /// When ctrl+c was pressed on an empty composer.
     pub armed: Option<Instant>,
     /// What the kernel offers the dropdown, read once at start.
@@ -237,6 +241,7 @@ impl Ui {
             select: Select::default(),
             notices: Vec::new(),
             block: None,
+            expanded: BTreeSet::new(),
             armed: None,
             catalogs: Catalogs::default(),
             opening: false,

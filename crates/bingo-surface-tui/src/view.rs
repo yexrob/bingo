@@ -120,18 +120,20 @@ fn layer(
     reveal: layers::Reveal,
     width: usize,
 ) {
-    layers::dim(frame);
     match &ui.layer.open {
         Open::Nothing => {}
-        Open::Help => layers::sheet(frame, above, help(ui, width), reveal),
-        Open::Panel => layers::sheet(frame, above, panel::lines(tree.viewed()), reveal),
-        Open::Picker(picker) => layers::sheet(frame, above, picker_lines(picker), reveal),
-        Open::Switcher(switcher) => {
-            let lines = switcher_lines(tree, switcher);
-            let at = layers::under(above, None, rows_of(&lines, above));
-            layers::card(frame, at, lines, reveal)
-        }
+        // A dropdown above the input box, like the `/` menu: nothing dims.
+        Open::Switcher(switcher) => over(frame, above, switcher_lines(tree, switcher)),
+        Open::Help => sheet(frame, above, help(ui, width), reveal),
+        Open::Panel => sheet(frame, above, panel::lines(tree.viewed()), reveal),
+        Open::Picker(picker) => sheet(frame, above, picker_lines(picker), reveal),
     }
+}
+
+/// A sheet over a dimmed frame.
+fn sheet(frame: &mut Frame, above: Rect, lines: Vec<Line<'static>>, reveal: layers::Reveal) {
+    layers::dim(frame);
+    layers::sheet(frame, above, lines, reveal);
 }
 
 /// The open interaction, as a bordered box under the `⎿` of the row that
@@ -144,8 +146,8 @@ fn card(tree: &Tree, ui: &Ui, frame: &mut Frame, regions: Regions, now: Now) {
     let asked_elsewhere = owner.summary.id != *tree.view();
     let agent = asked_elsewhere.then(|| tree::name(owner));
     // Each row keeps the option it belongs to through the wrap, so a click
-    // lands on what the eye is on.
-    let width = regions.transcript.width.saturating_sub(2) as usize;
+    // lands on what the eye is on. Two border cells and two of padding.
+    let width = regions.transcript.width.saturating_sub(4) as usize;
     let rows: Vec<(Line<'static>, Option<usize>)> = dialog::rows(
         &ui.dialog,
         interaction,
@@ -161,11 +163,12 @@ fn card(tree: &Tree, ui: &Ui, frame: &mut Frame, regions: Regions, now: Now) {
     .collect();
     let lines: Vec<Line<'static>> = rows.iter().map(|(line, _)| line.clone()).collect();
     let above = regions.above();
-    let at = layers::under(
-        above,
-        asking_row(ui, interaction, regions),
-        rows_of(&lines, above),
-    );
+    // Only a row of the transcript on screen can anchor it: a child's item
+    // ids are its own, and would name the wrong row here.
+    let anchor = (!asked_elsewhere)
+        .then(|| asking_row(ui, interaction, regions))
+        .flatten();
+    let at = layers::under(above, anchor, rows_of(&lines, above));
     ui.painted.borrow_mut().card = Some(Card {
         area: at,
         options: rows.iter().map(|(_, option)| *option).collect(),
@@ -234,9 +237,12 @@ fn render_transcript(tree: &Tree, ui: &Ui, frame: &mut Frame, area: Rect, now: N
     }
     let rows = area.height as usize;
     let mut painted = ui.painted.borrow_mut();
-    painted.height = painted
-        .blocks
-        .sync(tree.viewed(), &tree.agents(), area.width as usize);
+    painted.height = painted.blocks.sync(
+        tree.viewed(),
+        &tree.agents(),
+        area.width as usize,
+        &ui.expanded,
+    );
     painted.top = ui.scroll.top(painted.height, rows, now.instant);
     let mut shown = painted.blocks.window(painted.top, rows);
     // A short transcript hangs from the composer, not from the top of the screen.
@@ -1285,5 +1291,34 @@ mod tests {
         let scrolled = render(&state, &ui, settled);
         assert_ne!(bottom, scrolled, "page up must move the window");
         insta::assert_snapshot!(scrolled);
+    }
+
+    #[test]
+    fn ctrl_o_opens_the_latest_result_whole_and_again_folds_it() {
+        let output = ToolOutput {
+            parts: vec![ContentPart::text(
+                (1..=9).map(|i| format!("line {i}\n")).collect::<String>(),
+            )],
+            is_error: false,
+            display: None,
+        };
+        let state = folded(vec![item_frame(
+            1,
+            tool(
+                "itm_1",
+                "Read",
+                json!({"file_path": "src/lib.rs"}),
+                Some(output),
+                ItemStatus::Completed,
+            ),
+        )]);
+        let (mut ui, now) = scene();
+        assert!(render(&state, &ui, now).contains("+4 lines (ctrl+o to expand)"));
+        crate::input::on_key(&mut ui, &solo(&state), ctrl('o'), now);
+        let opened = render(&state, &ui, now);
+        assert!(opened.contains("line 9"), "{opened}");
+        assert!(!opened.contains("+4 lines"), "{opened}");
+        crate::input::on_key(&mut ui, &solo(&state), ctrl('o'), now);
+        assert!(render(&state, &ui, now).contains("+4 lines (ctrl+o to expand)"));
     }
 }

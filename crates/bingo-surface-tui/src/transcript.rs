@@ -3,14 +3,16 @@
 //! raised bar for what you said. The reducer is the only history: nothing here
 //! remembers a thing, and [`crate::blocks`] stacks and memoises what it draws.
 
+use std::collections::BTreeSet;
+
 use bingo_sdk::{
-    ContentPart, DecisionKind, Item, ItemBody, ItemStatus, SessionState, ToolOutput, TurnStatus,
-    View,
+    ContentPart, DecisionKind, Item, ItemBody, ItemId, ItemStatus, SessionState, ToolOutput,
+    TurnStatus, View,
 };
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use serde_json::Value;
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::tree::{self, Agents};
 use crate::{markdown, paths, preview, theme, wrap};
@@ -29,6 +31,8 @@ const EXPAND: &str = "ctrl+o to expand";
 pub struct Rows<'a> {
     pub cwd: &'a str,
     pub width: usize,
+    /// The results a person opened whole with `ctrl+o`.
+    pub expanded: &'a BTreeSet<ItemId>,
 }
 
 impl Rows<'_> {
@@ -119,6 +123,7 @@ fn called(item: &Item, agents: &Agents<'_>, rows: &Rows<'_>) -> Vec<Line<'static
                 input,
                 output: output.as_ref(),
                 progress: progress.as_deref(),
+                expanded: rows.expanded.contains(&item.id),
             },
             rows,
         ),
@@ -256,6 +261,8 @@ struct Call<'a> {
     input: &'a Value,
     output: Option<&'a ToolOutput>,
     progress: Option<&'a str>,
+    /// Opened whole with `ctrl+o`: nothing under it folds.
+    expanded: bool,
 }
 
 fn tool_call(call: Call<'_>, rows: &Rows<'_>) -> Vec<Line<'static>> {
@@ -304,7 +311,7 @@ fn result(call: &Call<'_>, rows: &Rows<'_>) -> Vec<Line<'static>> {
     let Some(output) = call.output else {
         return Vec::new();
     };
-    returns(folded(output), rows)
+    returns(folded(output, call.expanded), rows)
 }
 
 /// The last rows of what a running tool has printed so far.
@@ -313,20 +320,41 @@ fn tail(progress: &str) -> Vec<Line<'static>> {
     plain(&all[all.len().saturating_sub(TAIL_ROWS)..].join("\n"))
 }
 
-fn folded(output: &ToolOutput) -> Vec<Line<'static>> {
+fn folded(output: &ToolOutput, expanded: bool) -> Vec<Line<'static>> {
     let (rows, limit) = match &output.display {
         Some(View::Diff { unified }) => (preview::diff(unified), DIFF_ROWS),
         Some(view) => (plain(&view.fold()), OUTPUT_ROWS),
         None => (plain(&text_of(output)), OUTPUT_ROWS),
     };
-    fold(rows, limit)
+    match expanded {
+        true => rows,
+        false => fold(rows, limit),
+    }
 }
 
 fn plain(text: &str) -> Vec<Line<'static>> {
     text.trim_end()
         .lines()
-        .map(|line| Line::from(Span::styled(line.to_string(), theme::dim())))
+        .map(|line| Line::from(Span::styled(expand_tabs(line), theme::dim())))
         .collect()
+}
+
+/// A terminal cell has no tab in it: each one runs to the next stop of eight,
+/// as the shell would have shown it.
+fn expand_tabs(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut column = 0;
+    for c in line.chars() {
+        if c == '\t' {
+            let stop = 8 - column % 8;
+            out.extend(std::iter::repeat_n(' ', stop));
+            column += stop;
+        } else {
+            out.push(c);
+            column += UnicodeWidthChar::width(c).unwrap_or(0);
+        }
+    }
+    out
 }
 
 fn text_of(output: &ToolOutput) -> String {
@@ -510,9 +538,13 @@ mod tests {
     /// The transcript without the welcome box, which `welcome.rs` pins on its
     /// own: these tests are about the grammar under it.
     fn rendered(state: &SessionState) -> Vec<String> {
+        rendered_with(state, &BTreeSet::new())
+    }
+
+    fn rendered_with(state: &SessionState, expanded: &BTreeSet<ItemId>) -> Vec<String> {
         let welcomed = crate::welcome::lines(state, 60).len();
         let mut blocks = crate::blocks::Blocks::default();
-        let height = blocks.sync(state, &Agents::new(), 60);
+        let height = blocks.sync(state, &Agents::new(), 60, expanded);
         let mut rows: Vec<String> = blocks
             .window(0, height)
             .iter()
@@ -707,7 +739,7 @@ mod tests {
         )]);
         let welcomed = crate::welcome::lines(&state, 160).len();
         let mut blocks = crate::blocks::Blocks::default();
-        let height = blocks.sync(&state, &Agents::new(), 160);
+        let height = blocks.sync(&state, &Agents::new(), 160, &BTreeSet::new());
         let widest = blocks
             .window(0, height)
             .iter()
@@ -717,5 +749,34 @@ mod tests {
             .unwrap_or(0);
         assert!(widest <= wrap::MEASURE, "{widest} cells");
         assert!(widest > 80, "and it uses the measure it has: {widest}");
+    }
+
+    #[test]
+    fn an_opened_result_shows_every_line() {
+        let output = ToolOutput::text((1..=9).map(|i| format!("line {i}\n")).collect::<String>());
+        let items = vec![tool(
+            "itm_1",
+            "Read",
+            serde_json::json!({"file_path": "src/lib.rs"}),
+            Some(output),
+            ItemStatus::Completed,
+        )];
+        let frames = items
+            .into_iter()
+            .enumerate()
+            .map(|(i, item)| frame(i as u64 + 1, Event::ItemCompleted { item }))
+            .collect();
+        let state = folded(frames);
+        let opened: BTreeSet<ItemId> = [ItemId::from_raw("itm_1")].into_iter().collect();
+        let rows = rendered_with(&state, &opened).join("\n");
+        assert!(rows.contains("line 9"), "{rows}");
+        assert!(!rows.contains("+4 lines"), "{rows}");
+    }
+
+    #[test]
+    fn a_tab_in_a_result_runs_to_the_next_stop_of_eight() {
+        assert_eq!(expand_tabs("     1\t[package]"), "     1  [package]");
+        assert_eq!(expand_tabs("a\tb\tc"), "a       b       c");
+        assert_eq!(expand_tabs("no tabs"), "no tabs");
     }
 }

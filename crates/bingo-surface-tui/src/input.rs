@@ -62,6 +62,10 @@ pub fn on_key(ui: &mut Ui, tree: &Tree, key: KeyEvent, now: Now) -> Vec<Effect> 
         ui.layer.toggle(Open::Panel, now.instant);
         return Vec::new();
     }
+    if chord(key, 'o') {
+        toggle_expanded(ui, tree.viewed());
+        return Vec::new();
+    }
     if ui.layer.captures() {
         return switcher(ui, tree, key, now);
     }
@@ -166,6 +170,31 @@ fn transcript_cell(ui: &Ui, mouse: MouseEvent) -> Option<Cell> {
         line: painted.top + row.checked_sub(padding)?,
         column: usize::from(mouse.column - region.x),
     })
+}
+
+/// `ctrl+o`: the focused block's result opens whole, else the latest one; a
+/// second press folds it again (§4's `ctrl+o to expand`).
+fn toggle_expanded(ui: &mut Ui, state: &SessionState) {
+    let focused = ui.select.block.as_ref();
+    let target = state
+        .items
+        .iter()
+        .rev()
+        .filter(|item| focused.is_none_or(|id| id == &item.id))
+        .find(|item| has_result(item))
+        .map(|item| item.id.clone());
+    if let Some(id) = target
+        && !ui.expanded.remove(&id)
+    {
+        ui.expanded.insert(id);
+    }
+}
+
+fn has_result(item: &bingo_sdk::Item) -> bool {
+    match &item.body {
+        bingo_sdk::ItemBody::ToolCall { output, .. } => output.is_some(),
+        _ => false,
+    }
 }
 
 fn chord(key: KeyEvent, c: char) -> bool {

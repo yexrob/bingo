@@ -368,7 +368,7 @@ fn a_child_row_that_wants_a_person() {
     let mut frames = busy_child("reviewer");
     frames.push(child_frame(6, opened(child_permission())));
     let tree = spawned_tree(frames);
-    let (mut ui, now) = scene();
+    let (mut ui, now) = settled();
     ui.dialog
         .focus_on(tree.open_interaction().map(|(_, open)| open));
     both("child_needs_you", &tree, &ui, now);
@@ -509,7 +509,7 @@ fn without_colour() {
     );
     crate::theme::with(no_colour(), || {
         let painted = painted(80, 24, &card, &ui, now);
-        for row in ["Do you want to", "1. Yes", "+line 0", "Edit"] {
+        for row in ["Do you want to", "1. Yes", "+line 1", "Edit"] {
             assert!(
                 painted.coloured(row).is_empty(),
                 "NO_COLOR spends none on {row:?}"
@@ -580,7 +580,7 @@ fn a_card_spends_its_colour_on_the_row_the_keyboard_is_on() {
     // a card has the only bright border on the screen).
     assert_eq!(
         painted.coloured("1. Yes"),
-        vec!["│❯".to_string(), "│".to_string()]
+        vec!["│".to_string(), "❯".to_string(), "│".to_string()]
     );
     assert_eq!(
         painted.coloured("2. Yes, allow"),
@@ -588,7 +588,7 @@ fn a_card_spends_its_colour_on_the_row_the_keyboard_is_on() {
         "the rows it is not on carry the border and nothing else"
     );
     // Inside the border the question runs to the box's edge, in `text`.
-    let question = format!("{:<78}", "Do you want to edit src/lib.rs?");
+    let question = format!(" {:<77}", "Do you want to edit src/lib.rs?");
     assert_row_styled(
         &painted,
         "Do you want to",

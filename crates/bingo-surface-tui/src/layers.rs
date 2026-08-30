@@ -110,10 +110,11 @@ pub fn card(frame: &mut Frame, at: Rect, lines: Vec<Line<'static>>, reveal: Reve
             .border_style(theme::presence()),
         area,
     );
+    // One cell of padding inside the border, as every box has (§4).
     let inner = Rect {
-        x: at.x + 1,
+        x: at.x + 2,
         y: at.y + 1,
-        width: at.width.saturating_sub(2),
+        width: at.width.saturating_sub(4),
         height: full.saturating_sub(2),
     };
     let rows = inner.height.min(area.bottom().saturating_sub(inner.y));
@@ -121,7 +122,7 @@ pub fn card(frame: &mut Frame, at: Rect, lines: Vec<Line<'static>>, reveal: Reve
         return;
     }
     frame.render_widget(
-        Paragraph::new(lines),
+        Paragraph::new(fitted(lines, inner.height as usize)),
         Rect {
             height: rows,
             ..inner
@@ -129,9 +130,23 @@ pub fn card(frame: &mut Frame, at: Rect, lines: Vec<Line<'static>>, reveal: Reve
     );
 }
 
+/// What a card taller than its room shows: its title, then its newest rows —
+/// the question and its answers are what was asked for, so the preview is
+/// what gives way.
+fn fitted(lines: Vec<Line<'static>>, rows: usize) -> Vec<Line<'static>> {
+    if lines.len() <= rows {
+        return lines;
+    }
+    if rows < 2 {
+        return lines.into_iter().take(rows).collect();
+    }
+    let mut out = vec![lines[0].clone()];
+    out.extend(lines[lines.len() - (rows - 1)..].iter().cloned());
+    out
+}
+
 /// The height a card wants: its lines and two borders, capped by the room it
-/// has. What does not fit is cut from the top — the newest rows are the ones
-/// that were asked for.
+/// has.
 fn box_height(lines: &[Line<'static>], at: Rect) -> u16 {
     u16::try_from(lines.len())
         .unwrap_or(u16::MAX)

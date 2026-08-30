@@ -13,6 +13,8 @@
 //! rather than the flat transcript: a window is walked in blocks and cut to
 //! the row, so what it hands back is always an exact slice of the whole.
 
+use std::collections::BTreeSet;
+
 use bingo_sdk::{Item, ItemBody, ItemId, ItemStatus, Seq, SessionState};
 use ratatui::text::Line;
 
@@ -31,13 +33,16 @@ struct Revision {
     /// Where the child this call spawned is, when it spawned one: its row is
     /// read from the child's state, so the child's seq is the row's revision.
     agent: Option<Seq>,
+    /// Opened whole with `ctrl+o`.
+    expanded: bool,
 }
 
-fn revision(item: &Item, agent: Option<&SessionState>) -> Revision {
+fn revision(item: &Item, agent: Option<&SessionState>, expanded: bool) -> Revision {
     Revision {
         status: item.status,
         size: size(&item.body),
         agent: agent.map(|child| child.seq),
+        expanded,
     }
 }
 
@@ -95,7 +100,13 @@ pub struct Blocks {
 impl Blocks {
     /// Bring the cache up to date with the state and answer with the height of
     /// the whole transcript, in wrapped lines.
-    pub fn sync(&mut self, state: &SessionState, agents: &Agents<'_>, width: usize) -> usize {
+    pub fn sync(
+        &mut self,
+        state: &SessionState,
+        agents: &Agents<'_>,
+        width: usize,
+        expanded: &BTreeSet<ItemId>,
+    ) -> usize {
         if self.width != width {
             self.blocks.clear();
             self.width = width;
@@ -103,6 +114,7 @@ impl Blocks {
         let rows = Rows {
             cwd: &state.summary.cwd,
             width,
+            expanded,
         };
         self.head = welcome::lines(state, width);
         let mut kept = 0;
@@ -130,7 +142,7 @@ impl Blocks {
         rows: &Rows<'_>,
     ) -> usize {
         let agent = agents.get(&item.id).copied();
-        let revision = revision(item, agent);
+        let revision = revision(item, agent, rows.expanded.contains(&item.id));
         let same = self
             .blocks
             .get(at)
@@ -314,7 +326,7 @@ mod tests {
     }
 
     fn sync(blocks: &mut Blocks, state: &SessionState, width: usize) -> usize {
-        blocks.sync(state, &Agents::new(), width)
+        blocks.sync(state, &Agents::new(), width, &BTreeSet::new())
     }
 
     /// The rows the welcome box takes at the top, plus the blank under it.

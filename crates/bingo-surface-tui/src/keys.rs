@@ -79,6 +79,10 @@ pub const BINDINGS: &[Binding] = &[
         description: "expand the dialog's preview",
     },
     Binding {
+        keys: "ctrl+o",
+        description: "expand the latest result · again to fold",
+    },
+    Binding {
         keys: "/ · !",
         description: "run a command · run a shell line",
     },
