@@ -14,7 +14,7 @@ use crate::clock::Now;
 use crate::painted::{ascii, assert_row_styled, in_look, no_colour, painted, truecolor};
 use crate::test_support::*;
 use crate::tree::Tree;
-use crate::ui::{Switcher, Ui};
+use crate::ui::{Open, Switcher, Ui};
 
 /// One scene, at the two sizes every layout rule is written for.
 fn both(name: &str, tree: &Tree, ui: &Ui, now: Now) {
@@ -44,7 +44,7 @@ fn answered() -> Vec<bingo_sdk::Frame> {
 /// A card of `kind`, open and focused, as a person meets it.
 fn asked(interaction: bingo_sdk::Interaction) -> (Tree, Ui, Now) {
     let state = folded(vec![frame(1, opened(interaction))]);
-    let (mut ui, now) = scene();
+    let (mut ui, now) = settled();
     ui.dialog.focus_on(state.interactions.first());
     (solo(&state), ui, now)
 }
@@ -401,7 +401,7 @@ fn the_switcher_dropdown() {
     frames.push(log_frame(9, log_announced("#design")));
     let tree = spawned_tree(frames);
     let (mut ui, now) = scene();
-    ui.switcher = Some(Switcher { selected: 2 });
+    shown(&mut ui, Open::Switcher(Switcher { selected: 2 }), now);
     both("switcher", &tree, &ui, now);
 }
 
@@ -409,7 +409,7 @@ fn the_switcher_dropdown() {
 fn the_command_dropdown() {
     let state = folded(answered());
     let (mut ui, now) = scene();
-    ui.catalog = vec![bingo_sdk::CommandSpec {
+    ui.catalogs.commands = vec![bingo_sdk::CommandSpec {
         name: "model".into(),
         aliases: vec![],
         hint: "[provider/]model".into(),
@@ -440,7 +440,7 @@ fn the_panel_sheet() {
         ),
     ]);
     let (mut ui, now) = scene();
-    ui.panel = true;
+    shown(&mut ui, Open::Panel, now);
     both("panel_sheet", &tree, &ui, now);
 }
 
@@ -448,7 +448,7 @@ fn the_panel_sheet() {
 fn the_help_sheet() {
     let state = folded(answered());
     let (mut ui, now) = scene();
-    ui.help = true;
+    shown(&mut ui, Open::Help, now);
     insta::assert_snapshot!("help_80x30", draw_sized(80, 30, &state, &ui, now));
     insta::assert_snapshot!("help_100x30", draw_sized(100, 30, &state, &ui, now));
 }
@@ -496,7 +496,7 @@ fn a_view_a_command_answered() {
 
 #[test]
 fn without_colour() {
-    let (ui, now) = scene();
+    let (ui, now) = settled();
     let tree = solo(&folded(answered()));
     insta::assert_snapshot!(
         "no_colour_idle",
@@ -576,15 +576,27 @@ fn a_tool_rows_bullet_is_the_only_cell_a_colour_is_spent_on() {
 fn a_card_spends_its_colour_on_the_row_the_keyboard_is_on() {
     let (tree, ui, now) = asked(permission(Some("Edit(src/)"), None));
     let painted = painted(80, 24, &tree, &ui, now);
-    assert_eq!(painted.coloured("1. Yes"), vec!["❯".to_string()]);
-    assert!(
-        painted.coloured("2. Yes, allow").is_empty(),
-        "the rows it is not on are dim"
+    // The cursor, and the card's own border on either side of the row (§4:
+    // a card has the only bright border on the screen).
+    assert_eq!(
+        painted.coloured("1. Yes"),
+        vec!["│❯".to_string(), "│".to_string()]
     );
+    assert_eq!(
+        painted.coloured("2. Yes, allow"),
+        vec!["│".to_string(), "│".to_string()],
+        "the rows it is not on carry the border and nothing else"
+    );
+    // Inside the border the question runs to the box's edge, in `text`.
+    let question = format!("{:<78}", "Do you want to edit src/lib.rs?");
     assert_row_styled(
         &painted,
         "Do you want to",
-        &[("Do you want to edit src/lib.rs?", crate::theme::text())],
+        &[
+            ("│", crate::theme::presence()),
+            (question.as_str(), crate::theme::text()),
+            ("│", crate::theme::presence()),
+        ],
     );
 }
 
@@ -613,7 +625,7 @@ fn the_status_line_spends_no_colour_but_the_mode() {
     let painted = painted(80, 24, &solo(&state), &ui, now);
     assert_eq!(
         painted.coloured("? for shortcuts"),
-        vec!["acceptEdits".to_string()],
+        vec!["⏵⏵ acceptEdits".to_string()],
         "the mode is the one thing the line is allowed to colour"
     );
 }

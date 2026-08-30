@@ -10,7 +10,7 @@ use bingo_sdk::{
     Preview, QuestionOption, Seq, SessionId, SessionState, SessionSummary, ToolOutput, TurnId,
     Usage, View,
 };
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent};
 use jiff::Timestamp;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
@@ -402,6 +402,15 @@ pub fn notice(level: Level, text: &str) -> Event {
     }
 }
 
+/// A transcript with more lines than any test screen has rows.
+pub fn long_transcript(items: usize) -> SessionState {
+    let mut state = state();
+    state.items = (0..items)
+        .map(|i| user(&format!("itm_{i}"), &format!("line {i}")))
+        .collect();
+    state
+}
+
 /// A `Ui` and the instant it was born, so a test can move time by hand.
 pub fn scene() -> (Ui, Now) {
     let instant = Instant::now();
@@ -412,6 +421,60 @@ pub fn scene() -> (Ui, Now) {
             wall: ts(),
         },
     )
+}
+
+/// A scene whose wall clock is far enough past [`ts`] for a card the kernel
+/// opened at `ts` to have finished arriving: the settled screen.
+pub fn settled() -> (Ui, Now) {
+    let (ui, now) = scene();
+    (
+        ui,
+        Now {
+            wall: now.wall + jiff::SignedDuration::from_millis(200),
+            ..now
+        },
+    )
+}
+
+/// Open a layer that has finished arriving: what a settled sheet or switcher
+/// looks like, rather than the first frame of its slide.
+pub fn shown(ui: &mut Ui, open: crate::ui::Open, now: Now) {
+    ui.layer
+        .show(open, now.instant - std::time::Duration::from_millis(500));
+}
+
+/// A synthetic mouse event at a cell of the screen.
+pub fn mouse(kind: crossterm::event::MouseEventKind, column: u16, row: u16) -> MouseEvent {
+    MouseEvent {
+        kind,
+        column,
+        row,
+        modifiers: KeyModifiers::NONE,
+    }
+}
+
+pub fn click(column: u16, row: u16) -> MouseEvent {
+    mouse(
+        crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+        column,
+        row,
+    )
+}
+
+pub fn dragged(column: u16, row: u16) -> MouseEvent {
+    mouse(
+        crossterm::event::MouseEventKind::Drag(crossterm::event::MouseButton::Left),
+        column,
+        row,
+    )
+}
+
+pub fn wheel(up: bool, column: u16, row: u16) -> MouseEvent {
+    let kind = match up {
+        true => crossterm::event::MouseEventKind::ScrollUp,
+        false => crossterm::event::MouseEventKind::ScrollDown,
+    };
+    mouse(kind, column, row)
 }
 
 pub fn key(code: KeyCode) -> KeyEvent {
@@ -472,11 +535,25 @@ pub fn render_tree(tree: &Tree, ui: &Ui, now: Now) -> String {
 }
 
 pub fn draw_tree(width: u16, height: u16, tree: &Tree, ui: &Ui, now: Now) -> String {
+    drawn(width, height, tree, ui, now).to_string()
+}
+
+/// The terminal one draw leaves, for a test that asks where a style landed.
+pub fn drawn(width: u16, height: u16, tree: &Tree, ui: &Ui, now: Now) -> TestBackend {
     let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("a test terminal");
     terminal
         .draw(|frame| view::draw(tree, ui, frame, now))
         .expect("a drawn frame");
-    terminal.backend().to_string()
+    terminal.backend().clone()
+}
+
+/// The same instant, `ms` further along the wall clock: how far a card the
+/// kernel opened has come.
+pub fn later(now: Now, ms: i64) -> Now {
+    Now {
+        wall: now.wall + jiff::SignedDuration::from_millis(ms),
+        ..now
+    }
 }
 
 // ---- the doubles the loop test drives -----------------------------------
@@ -721,6 +798,8 @@ pub struct Recorder {
     pub frames: Vec<String>,
     pub titles: Vec<String>,
     pub bells: usize,
+    /// The bytes handed to the terminal's clipboard, verbatim.
+    pub copies: Vec<Vec<u8>>,
 }
 
 impl Recorder {
@@ -746,6 +825,15 @@ impl Screen for Recorder {
         self.bells += 1;
         Ok(())
     }
+
+    fn copy(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+        self.copies.push(bytes.to_vec());
+        Ok(())
+    }
+
+    fn rows(&self) -> u16 {
+        24
+    }
 }
 
 /// The options a surface is handed, pointed at a scratch directory.
@@ -765,12 +853,25 @@ pub fn options(prompt: Option<&str>, home: &std::path::Path) -> bingo_sdk::Surfa
 /// terminal does. Each press is held back a moment so the frames already on
 /// the stream are folded first, which is the order a person would see.
 pub fn keys(script: Vec<crossterm::event::KeyEvent>) -> crate::run::Keys {
+    pressed(script, std::time::Duration::from_millis(5))
+}
+
+/// The same, with a wait before every press: under `tokio::time::pause` it
+/// is time the loop must sit through with nothing to do.
+pub fn keys_after(
+    wait: std::time::Duration,
+    script: Vec<crossterm::event::KeyEvent>,
+) -> crate::run::Keys {
+    pressed(script, wait)
+}
+
+fn pressed(script: Vec<crossterm::event::KeyEvent>, wait: std::time::Duration) -> crate::run::Keys {
     use futures::StreamExt;
-    let typed = futures::stream::iter(script).then(|key| async move {
-        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    let keys = futures::stream::iter(script).then(move |key| async move {
+        tokio::time::sleep(wait).await;
         crossterm::event::Event::Key(key)
     });
-    Box::pin(typed.chain(futures::stream::pending()))
+    Box::pin(keys.chain(futures::stream::pending()))
 }
 
 // ---- M11b: the fixtures the screens are built from --------------------

@@ -45,6 +45,34 @@ await() {
 
 step() { printf '  %s\n' "$1"; }
 
+# Wait for `$1` to leave the pane. Motion takes frames, so this polls like
+# `await` rather than looking once.
+vanish() {
+  local needle="$1" i=0
+  while [ "$i" -lt "$TRIES" ]; do
+    if ! pane | grep -qF -- "$needle"; then return 0; fi
+    sleep 0.05
+    i=$((i + 1))
+  done
+  echo "tui-smoke: it never left: $needle" >&2
+  echo "--- pane ---" >&2
+  pane >&2
+  return 1
+}
+
+# A reply of eighty numbered rows: more transcript than the screen holds.
+# They are list items, so markdown keeps them one to a row.
+long_reply() {
+  local text i
+  for i in $(seq 1 80); do text="$text- line $i\\n"; done
+  printf '{"responses":[{"steps":[{"text":"%s"}]}]}' "$text"
+}
+
+# One SGR mouse report: button, column, row (1-based, as a terminal sends it).
+mouse() {
+  tmux -L "$SOCKET" send-keys -t "$SESSION" -l "$(printf '\033[<%s;%s;%sM' "$1" "$2" "$3")"
+}
+
 # Start bingo on a scripted provider. The script's own text never appears in
 # the command line, so `await` matches the output and not the echo of itself.
 # `$2` is any extra environment the step wants.
@@ -102,12 +130,55 @@ keys Escape
 await '[Request interrupted by user]'
 finish
 
+step 'a page up releases the tail, and the foot takes it back'
+start "$(long_reply)"
+keys 'say a lot' Enter
+await ' line 80'
+keys PPage
+await ' line 20'
+vanish ' line 80'
+keys NPage
+await ' line 80'
+finish
+
+step 'the wheel scrolls the transcript'
+start "$(long_reply)"
+keys 'say a lot' Enter
+await ' line 80'
+for _ in 1 2 3 4 5 6 7 8 9 10; do mouse 64 10 5; done
+vanish ' line 80'
+finish
+
+step 'ctrl+f searches the transcript and esc gives the status line back'
+start "$(long_reply)"
+keys 'say a lot' Enter
+await ' line 80'
+keys C-f
+keys 'line 42'
+await '/line 42'
+keys Enter
+await '1/1 · n/N · esc'
+keys Escape
+await '? for shortcuts'
+finish
+
+step 'the help sheet opens on ? and closes on esc'
+start '{"responses":[{"steps":[{"text":"nothing to do"}]}]}'
+keys '?'
+await 'shift+tab'
+keys Escape
+await '? for shortcuts'
+vanish 'shift+tab'
+finish
+
 step 'a permission dialog answered y runs the tool'
 start '{"responses":[
   {"steps":[{"toolCall":{"name":"Write","input":{"file_path":"note.txt","content":"written by the smoke test\n"}}}]},
   {"steps":[{"text":"Wrote it."}]}]}'
 keys 'write the note' Enter
 await 'Do you want to '
+# The dialog is a card: a bordered box, not rows in the transcript.
+await '│'
 press_until 'y' 'Wrote it.'
 [ -f "$WORK/cwd/note.txt" ] || { echo "tui-smoke: the approved Write wrote nothing" >&2; exit 1; }
 grep -q 'written by the smoke test' "$WORK/cwd/note.txt"

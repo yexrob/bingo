@@ -47,3 +47,7 @@ base64.workspace = true
 tokio.workspace = true
 # The JSON-RPC harness drives a spawned `bingo serve --stdio` through RemoteKernel.
 futures.workspace = true
+# The terminal surface through a real pty (M11a): what the shell is left with
+# after `exit` is a terminal question, not a unit-test one.
+portable-pty.workspace = true
+vt100.workspace = true

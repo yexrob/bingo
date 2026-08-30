@@ -1,8 +1,7 @@
-//! Items to styled lines, in Claude Code's grammar (`docs/design/tui.md` §4):
-//! `⏺` for what the model says and does, `⎿` for what came back, `>` on a
-//! raised bar for what you said. The whole transcript is rebuilt every frame
-//! from `state.items`: the reducer is the only history, and a cache would be a
-//! second one.
+//! One item to styled lines, in Claude Code's grammar (`docs/design/tui.md`
+//! §4): `⏺` for what the model says and does, `⎿` for what came back, `>` on a
+//! raised bar for what you said. The reducer is the only history: nothing here
+//! remembers a thing, and [`crate::blocks`] stacks and memoises what it draws.
 
 use bingo_sdk::{
     ContentPart, DecisionKind, Item, ItemBody, ItemStatus, SessionState, ToolOutput, TurnStatus,
@@ -14,7 +13,7 @@ use serde_json::Value;
 use unicode_width::UnicodeWidthStr;
 
 use crate::tree::{self, Agents};
-use crate::{markdown, paths, preview, theme, welcome, wrap};
+use crate::{markdown, paths, preview, theme, wrap};
 
 /// Output rows kept under a finished tool row before the rest folds away.
 const OUTPUT_ROWS: usize = 5;
@@ -26,34 +25,10 @@ const DIFF_ROWS: usize = 12;
 /// because this is what is folded.
 const EXPAND: &str = "ctrl+o to expand";
 
-/// The transcript, wrapped to `width`. `agents` are the sub-sessions this
-/// transcript's tool calls spawned; the caller owns the tree.
-pub fn lines(state: &SessionState, agents: &Agents<'_>, width: usize) -> Vec<Line<'static>> {
-    let rows = Rows {
-        cwd: &state.summary.cwd,
-        width,
-    };
-    let mut out = welcome::lines(state, width);
-    let mut previous: Option<&Item> = None;
-    for item in &state.items {
-        let block = item_lines(item, previous, agents, &rows);
-        previous = Some(item);
-        if block.is_empty() {
-            continue;
-        }
-        if !out.is_empty() && !joins_the_row_above(item) {
-            out.push(Line::default());
-        }
-        out.extend(block);
-    }
-    out.extend(failure(state, &rows));
-    out
-}
-
 /// What every row of one transcript needs to know about where it is.
-struct Rows<'a> {
-    cwd: &'a str,
-    width: usize,
+pub struct Rows<'a> {
+    pub cwd: &'a str,
+    pub width: usize,
 }
 
 impl Rows<'_> {
@@ -70,11 +45,13 @@ impl Rows<'_> {
 
 /// A receipt is the answer to the row above it, so it opens no block of its
 /// own (design §4: the receipt joins the result).
-fn joins_the_row_above(item: &Item) -> bool {
+pub fn joins_the_row_above(item: &Item) -> bool {
     matches!(item.body, ItemBody::PermissionReceipt { .. })
 }
 
-fn item_lines(
+/// One item's block. `previous` is the item before it, which a receipt joins;
+/// `agents` the sub-sessions this transcript's calls spawned.
+pub fn item_lines(
     item: &Item,
     previous: Option<&Item>,
     agents: &Agents<'_>,
@@ -485,22 +462,21 @@ fn calls(item: &Item, tool: &str) -> bool {
 }
 
 /// A turn that failed says why on a `⏺` of its own, derived from `last_turn`
-/// rather than kept as a line of the surface's own.
-fn failure(state: &SessionState, rows: &Rows<'_>) -> Vec<Line<'static>> {
+/// rather than kept as a line of the surface's own. It belongs to no item, so
+/// it is the transcript's last block rather than one of them.
+pub fn failure(state: &SessionState, rows: &Rows<'_>) -> Vec<Line<'static>> {
     let Some(TurnStatus::Failed { error }) = state.last_turn.as_ref().filter(|_| !state.busy())
     else {
         return Vec::new();
     };
-    let mut out = vec![Line::default()];
-    out.extend(speaks(
+    speaks(
         theme::bad(),
         vec![Line::from(Span::styled(
             error.message.clone(),
             theme::bad(),
         ))],
         rows,
-    ));
-    out
+    )
 }
 
 /// A full-width divider with its reason in the middle of the left run.
@@ -534,8 +510,11 @@ mod tests {
     /// The transcript without the welcome box, which `welcome.rs` pins on its
     /// own: these tests are about the grammar under it.
     fn rendered(state: &SessionState) -> Vec<String> {
-        let welcomed = welcome::lines(state, 60).len();
-        let mut rows: Vec<String> = lines(state, &Agents::new(), 60)
+        let welcomed = crate::welcome::lines(state, 60).len();
+        let mut blocks = crate::blocks::Blocks::default();
+        let height = blocks.sync(state, &Agents::new(), 60);
+        let mut rows: Vec<String> = blocks
+            .window(0, height)
             .iter()
             .skip(welcomed)
             .map(|line| line.to_string().trim_end().to_string())
@@ -726,8 +705,11 @@ mod tests {
                 item: assistant("itm_1", &"word ".repeat(60), ItemStatus::Completed),
             },
         )]);
-        let welcomed = welcome::lines(&state, 160).len();
-        let widest = lines(&state, &Agents::new(), 160)
+        let welcomed = crate::welcome::lines(&state, 160).len();
+        let mut blocks = crate::blocks::Blocks::default();
+        let height = blocks.sync(&state, &Agents::new(), 160);
+        let widest = blocks
+            .window(0, height)
             .iter()
             .skip(welcomed)
             .map(|line| line.to_string().trim_end().width())

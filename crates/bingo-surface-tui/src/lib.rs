@@ -14,8 +14,9 @@
 //!   tick, and the results of the handful of host calls it spawns.
 //! - [`input::on_key`] is pure: it mutates [`ui::Ui`] and returns
 //!   [`effect::Effect`]s, so every binding is a test with no runtime in it.
-//! - [`view::draw`] is pure of everything but the frame it paints; the
-//!   transcript is what is left once the chrome below it has been measured.
+//! - [`frame::regions`] cuts the screen into its regions and [`view::draw`]
+//!   fills them; the transcript is what is left once the input box and the
+//!   status line have taken theirs, so nothing below the transcript moves.
 //! - [`tree::Tree`] holds one reducer state per session the attachment
 //!   carries — the root and its sub-sessions (ADR-0010 §3) — and which of
 //!   them is on screen.
@@ -31,20 +32,27 @@
 //! session actor parses commands, not the client.
 
 mod block;
+mod blocks;
 mod clock;
 mod commands;
 mod composer;
 mod dialog;
 mod effect;
+mod frame;
 mod history;
 mod input;
 mod keys;
+mod layers;
 mod markdown;
 mod panel;
 mod paths;
 mod permission;
 mod preview;
 mod run;
+mod scroll;
+mod search;
+mod select;
+mod status;
 mod terminal;
 mod theme;
 mod transcript;
@@ -79,12 +87,29 @@ impl Surface for TuiSurface {
     }
 
     async fn run(&self, host: HostHandle, opts: SurfaceOptions) -> Result<Exit, KernelError> {
+        let print = print_on_exit(&opts);
         let mut screen = terminal::Tui::enter().map_err(entering)?;
-        let exit = run::drive(&host, opts, &mut screen, run::terminal_keys()).await;
+        let ended = run::drive(&host, opts, &mut screen, run::terminal_keys()).await;
         // The terminal goes back whether the loop ended or failed.
         let _ = screen.leave();
-        exit
+        let ended = ended?;
+        if print {
+            // The alternate screen took the conversation with it; this puts
+            // the last screenful of it back where the shell can see it.
+            for line in ended.screen {
+                println!("{line}");
+            }
+        }
+        Ok(ended.exit)
     }
+}
+
+/// `--no-print-on-exit` is the one thing the bin says about this surface.
+fn print_on_exit(opts: &SurfaceOptions) -> bool {
+    opts.args
+        .get("noPrintOnExit")
+        .and_then(serde_json::Value::as_bool)
+        != Some(true)
 }
 
 fn entering(e: std::io::Error) -> KernelError {

@@ -1,0 +1,5 @@
+---
+source: crates/bingo-surface-tui/src/status.rs
+expression: "empty.join(\"\\n\")"
+---
+

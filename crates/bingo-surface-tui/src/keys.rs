@@ -89,30 +89,35 @@ pub const BINDINGS: &[Binding] = &[
 ];
 
 pub const FOOTER_HINT: &str = "? for shortcuts";
-pub const FOOTER_MODES: &str = "/ commands · ! shell";
 pub const PLACEHOLDER: &str = "ask anything · / for commands · ! for shell";
 
-/// The panel, two columns wide when both fit with a gutter, else one.
+/// From this width the table pairs its rows; below it one column reads better
+/// than two cut-off ones.
+pub const TWO_COLUMNS: usize = 100;
+/// Cells between the two columns.
+const GUTTER: usize = 2;
+
+/// The panel: two columns from [`TWO_COLUMNS`], else one. A cell that does not
+/// fit its column is elided — a row that spilled would move every row below it.
 pub fn help_lines(width: usize) -> Vec<Line<'static>> {
     let cells: Vec<String> = BINDINGS.iter().map(|b| cell(b, key_column())).collect();
-    let cell_width = cells.iter().map(|c| c.width()).max().unwrap_or(0);
-    let columns = if width >= cell_width * 2 + 6 { 2 } else { 1 };
+    let columns = if width >= TWO_COLUMNS { 2 } else { 1 };
+    let cell_width = (width - GUTTER * (columns - 1)) / columns;
     let rows = cells.len().div_ceil(columns);
     (0..rows)
         .map(|row| {
-            let mut text = String::new();
-            for column in 0..columns {
-                let Some(cell) = cells.get(row + column * rows) else {
-                    continue;
-                };
-                if column > 0 {
-                    text.push_str(&" ".repeat(cell_width + 2 - text.width()));
-                }
-                text.push_str(cell);
-            }
-            Line::from(Span::styled(truncate(&text, width), theme::dim()))
+            let text = (0..columns)
+                .filter_map(|column| cells.get(row + column * rows))
+                .map(|cell| pad(&truncate(cell, cell_width), cell_width))
+                .collect::<Vec<_>>()
+                .join(&" ".repeat(GUTTER));
+            Line::from(Span::styled(text.trim_end().to_string(), theme::dim()))
         })
         .collect()
+}
+
+fn pad(text: &str, width: usize) -> String {
+    format!("{text}{}", " ".repeat(width.saturating_sub(text.width())))
 }
 
 /// Rows never wrap: a panel row that spilled would move every row below it.
@@ -171,6 +176,16 @@ mod tests {
     #[test]
     fn a_wide_terminal_pairs_the_rows() {
         assert_eq!(help_lines(160).len(), BINDINGS.len().div_ceil(2));
+    }
+
+    #[test]
+    fn a_hundred_columns_is_where_the_second_column_starts() {
+        assert_eq!(help_lines(TWO_COLUMNS - 1).len(), BINDINGS.len());
+        assert_eq!(
+            help_lines(TWO_COLUMNS).len(),
+            BINDINGS.len().div_ceil(2),
+            "the sheet pairs its rows at 100 columns"
+        );
     }
 
     #[test]

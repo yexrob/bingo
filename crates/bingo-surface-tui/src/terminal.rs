@@ -15,8 +15,8 @@ use std::sync::Once;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crossterm::event::{
-    DisableBracketedPaste, EnableBracketedPaste, KeyboardEnhancementFlags,
-    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -38,6 +38,9 @@ const RESTORE_TITLE: &[u8] = b"\x1b[23;2t";
 /// Whether the enhancement flags are pushed right now, so [`restore`] can be
 /// called blind from every teardown path and pop exactly once.
 static PUSHED: AtomicBool = AtomicBool::new(false);
+/// Whether the mouse is ours. Capturing it takes the terminal's own selection
+/// away, so `BINGO_MOUSE=off` gives that back and costs only the wheel.
+static MOUSE: AtomicBool = AtomicBool::new(false);
 /// Whether the terminal is ours to give back.
 static ENTERED: AtomicBool = AtomicBool::new(false);
 static HOOK: Once = Once::new();
@@ -50,6 +53,12 @@ pub(crate) trait Screen: Send {
     fn title(&mut self, text: &str) -> io::Result<()>;
 
     fn bell(&mut self) -> io::Result<()>;
+
+    /// Hand the terminal a selection for its own clipboard.
+    fn copy(&mut self, bytes: &[u8]) -> io::Result<()>;
+
+    /// How many rows it has, for the screenful printed back on the way out.
+    fn rows(&self) -> u16;
 }
 
 pub struct Tui {
@@ -66,6 +75,7 @@ impl Tui {
         ENTERED.store(true, Ordering::SeqCst);
         install_hook();
         crossterm::execute!(out, EnterAlternateScreen, EnableBracketedPaste)?;
+        take_mouse(&mut out);
         push_enhancement(&mut out);
         let terminal = Terminal::with_options(
             CrosstermBackend::new(io::stdout()),
@@ -103,6 +113,14 @@ impl Screen for Tui {
     fn bell(&mut self) -> io::Result<()> {
         out_of_band(crate::theme::BELL)
     }
+
+    fn copy(&mut self, bytes: &[u8]) -> io::Result<()> {
+        out_of_band(bytes)
+    }
+
+    fn rows(&self) -> u16 {
+        self.terminal.size().map(|size| size.height).unwrap_or(0)
+    }
 }
 
 /// `OSC 2 ; text BEL`. A stray control byte in a path would end the sequence
@@ -131,6 +149,24 @@ fn install_hook() {
     });
 }
 
+/// The wheel, the drag and the click, unless a person asked for the
+/// terminal's own selection back.
+fn take_mouse(out: &mut Stdout) {
+    if !wanted() {
+        return;
+    }
+    if crossterm::execute!(out, EnableMouseCapture).is_ok() {
+        MOUSE.store(true, Ordering::SeqCst);
+    }
+}
+
+/// Whether this run takes the mouse at all.
+pub fn wanted() -> bool {
+    std::env::var("BINGO_MOUSE")
+        .map(|v| v != "off")
+        .unwrap_or(true)
+}
+
 fn push_enhancement(out: &mut Stdout) {
     if !supports_keyboard_enhancement().unwrap_or(false) {
         return;
@@ -153,6 +189,9 @@ pub fn restore() {
     let mut out = io::stdout();
     if PUSHED.swap(false, Ordering::SeqCst) {
         let _ = crossterm::execute!(out, PopKeyboardEnhancementFlags);
+    }
+    if MOUSE.swap(false, Ordering::SeqCst) {
+        let _ = crossterm::execute!(out, DisableMouseCapture);
     }
     let _ = crossterm::execute!(
         out,

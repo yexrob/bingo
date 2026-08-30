@@ -55,18 +55,6 @@ impl Status {
     }
 }
 
-/// The ` · running` a name is followed by, and nothing for a session nothing
-/// answers: one place decides it, so no view has to ask about the driver.
-pub fn suffix(status: Option<Status>) -> String {
-    status
-        .map(|status| format!(" · {}", status.label()))
-        .unwrap_or_default()
-}
-
-pub fn status_suffix(state: &SessionState) -> String {
-    suffix(Status::of(state))
-}
-
 /// One row of the switcher, derived from a session in the tree.
 pub struct Row<'a> {
     pub session: &'a SessionId,
@@ -183,26 +171,6 @@ impl Tree {
             .find_map(|state| state.interactions.first().map(|open| (state, open)))
     }
 
-    /// What is true of the tree now and nothing else (design §4): `2 running`
-    /// and `1 needs you`, in that order, and nothing when neither is true. A
-    /// session nothing answers is doing no work, so it is nobody's count.
-    pub fn tally(&self) -> Option<String> {
-        let running = self
-            .children
-            .values()
-            .filter(|child| Status::of(child) == Some(Status::Running))
-            .count();
-        let waiting = self.children.values().filter(|c| asking(c)).count();
-        let mut parts = Vec::new();
-        if running > 0 {
-            parts.push(format!("{running} running"));
-        }
-        if waiting > 0 {
-            parts.push(format!("{waiting} needs you"));
-        }
-        (!parts.is_empty()).then(|| parts.join(" · "))
-    }
-
     /// The children the viewed session spawned, by the tool call that did it;
     /// a child no call spawned hangs under no row.
     pub fn agents(&self) -> Agents<'_> {
@@ -214,6 +182,12 @@ impl Tree {
                 (&parent.session == self.view()).then_some((item, child))
             })
             .collect()
+    }
+
+    /// The session a tool call of the viewed transcript spawned: what `⏎` or
+    /// a click on its row steps into.
+    pub fn spawned_by(&self, item: &ItemId) -> Option<&SessionId> {
+        self.agents().get(item).map(|child| &child.summary.id)
     }
 
     /// The switcher's rows, in the order it lists them.
@@ -245,13 +219,6 @@ pub fn directory(cwd: &str) -> String {
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| cwd.to_string())
-}
-
-/// The session a transcript row steps into: pure, so the key that does it
-/// (`⏎` on a child's row, M11a's routing) is a lookup and not a search.
-#[allow(dead_code, reason = "the key that routes through it is M11a's")]
-pub fn steps_into<'a>(agents: &Agents<'a>, item: &ItemId) -> Option<&'a SessionId> {
-    agents.get(item).map(|child| &child.summary.id)
 }
 
 /// A session with a question open wants a person now. One that finished while
@@ -377,7 +344,6 @@ mod tests {
 
         tree.apply(&child_frame(1, announced("reviewer")));
         tree.apply(&child_frame(2, started("trn_9")));
-        assert_eq!(tree.tally().as_deref(), Some("1 running"));
         let rows = tree.rows();
         assert_eq!(rows[1].name, "reviewer");
         assert_eq!(rows[1].status, Some(Status::Running));
@@ -398,7 +364,7 @@ mod tests {
             "a closed child gives the view back"
         );
         assert_eq!(tree.view(), tree.root_id());
-        assert!(tree.tally().is_none());
+        assert_eq!(tree.rows().len(), 1, "and the tree is the root alone");
     }
 
     #[test]
@@ -413,7 +379,7 @@ mod tests {
         let mut tree = Tree::new(state());
         tree.apply(&child_frame(1, announced("reviewer")));
         tree.apply(&child_frame(2, opened(child_permission())));
-        assert_eq!(tree.tally().as_deref(), Some("1 needs you"));
+        assert_eq!(tree.rows().iter().filter(|row| row.attention).count(), 1);
         assert!(tree.attention());
         let (owner, _) = tree.open_interaction().expect("the child's prompt");
         assert_eq!(owner.summary.id, child_id());
@@ -437,7 +403,7 @@ mod tests {
             agents.get(&spawned).map(|child| name(child)),
             Some("reviewer".to_string())
         );
-        assert_eq!(steps_into(&agents, &spawned), Some(&child_id()));
+        assert_eq!(tree.spawned_by(&spawned), Some(&child_id()));
         assert_eq!(
             agents.get(&spawned).and_then(|child| activity(child)),
             Some("Starting…".to_string())
@@ -463,8 +429,7 @@ mod tests {
         let room = tree.rows().pop().expect("the room's row");
         assert_eq!(room.name, "#design");
         assert_eq!(room.status, None);
-        assert_eq!(status_suffix(tree.sessions().last().expect("the room")), "");
-        assert!(tree.tally().is_none(), "a room is not an agent at work");
+        assert!(Status::of(tree.sessions().last().expect("the room")).is_none());
     }
 
     #[test]

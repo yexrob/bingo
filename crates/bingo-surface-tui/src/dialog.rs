@@ -333,26 +333,40 @@ fn plain(label: &str, choice: Choice) -> Opt {
 /// `width` bounds nothing here; the caller wraps. `agent` names the
 /// sub-session that asked, when it was not the one on screen (ADR-0010 §3);
 /// `cwd` is that session's directory, which is what makes a path short.
-pub fn lines(
+///
+/// Every row comes with the option it belongs to, so one walk lays the card
+/// out and a click lands where the eye is.
+pub fn rows(
     dialog: &Dialog,
     interaction: &Interaction,
     agent: Option<&str>,
     cwd: &str,
-) -> Vec<Line<'static>> {
-    let mut out = vec![title(interaction, agent)];
-    out.extend(body(dialog, interaction));
+) -> Vec<(Line<'static>, Option<usize>)> {
+    let mut out = vec![(title(interaction, agent), None)];
+    out.extend(
+        body(dialog, interaction)
+            .into_iter()
+            .map(|line| (line, None)),
+    );
     if let Some(question) = question(interaction, cwd) {
-        out.push(Line::default());
-        out.push(question);
+        out.push((Line::default(), None));
+        out.push((question, None));
     }
     for (index, option) in options(interaction).iter().enumerate() {
-        out.extend(option_lines(dialog, index, option));
+        out.extend(
+            option_lines(dialog, index, option)
+                .into_iter()
+                .map(|line| (line, Some(index))),
+        );
     }
     if dialog.answered {
-        out.push(Line::from(Span::styled(
-            format!("  {} waiting for the kernel", theme::ellipsis()),
-            theme::dim(),
-        )));
+        out.push((
+            Line::from(Span::styled(
+                format!("  {} waiting for the kernel", theme::ellipsis()),
+                theme::dim(),
+            )),
+            None,
+        ));
     }
     out
 }

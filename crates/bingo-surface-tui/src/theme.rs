@@ -448,6 +448,7 @@ mod tests {
                     "markdown.rs",
                     "panel.rs",
                     "preview.rs",
+                    "search.rs",
                     "transcript.rs",
                     "tree.rs",
                     "view.rs",
@@ -461,22 +462,33 @@ mod tests {
                     "composer.rs",
                     "dialog.rs",
                     "keys.rs",
+                    "layers.rs",
                     "markdown.rs",
                     "panel.rs",
                     "preview.rs",
+                    "search.rs",
+                    "status.rs",
                     "transcript.rs",
                     "tree.rs",
                     "view.rs",
                     "welcome.rs",
                 ],
             ),
-            // the bar behind a `>` line, and nothing else yet
-            ("raised", &["transcript.rs"]),
-            // a live bullet, the focus cursor, a session that is asking
+            // the bar behind a `>` line, a sheet's surface, a selection, a search hit
+            (
+                "raised",
+                &["layers.rs", "search.rs", "select.rs", "transcript.rs"],
+            ),
+            // a live bullet, the focus cursor, a card's border, a session that
+            // is asking, the current search hit, the selected run
             (
                 "presence",
                 &[
                     "dialog.rs",
+                    "layers.rs",
+                    "search.rs",
+                    "select.rs",
+                    "status.rs",
                     "transcript.rs",
                     "tree.rs",
                     "view.rs",
@@ -488,9 +500,9 @@ mod tests {
             // a finished bullet
             ("good", &["transcript.rs", "tree.rs"]),
             // a failed bullet, a failed turn, the gate turned off, a full window
-            ("bad", &["transcript.rs", "view.rs"]),
+            ("bad", &["status.rs", "transcript.rs"]),
             // the mode on the status line; links reach it through `link`
-            ("mode", &["view.rs"]),
+            ("mode", &["status.rs"]),
         ];
         for (token, files) in allowed {
             let mut seen: Vec<String> = sources()

@@ -27,16 +27,21 @@ use crate::clock::Now;
 use crate::effect::Effect;
 use crate::terminal::Screen;
 use crate::tree::{self, Tree};
-use crate::ui::{Picker, Ui};
+use crate::ui::{Open, Picker, Ui};
 use crate::{SURFACE_ID, commands, history, input};
 
-/// How often the spinner and the elapsed counter move.
+/// How often a frame is redrawn *while something is moving*. Nothing moves
+/// when nothing is happening, and then there is no tick at all: an idle
+/// surface draws zero frames (§6).
 const TICK: Duration = Duration::from_millis(100);
 /// Sessions the `/resume` picker lists.
 const RECENT: usize = 20;
 /// What a write says while the mailbox of the session in view is still on its
 /// way: it is refused, never held.
 pub const NOT_YET: &str = "still opening that session — try again";
+/// Rows of the screen kept back when the transcript is printed on the way
+/// out: the shell's own prompt needs somewhere to land.
+const KEPT_BACK: u16 = 2;
 
 pub(crate) type Keys = Pin<Box<dyn Stream<Item = Term> + Send>>;
 
@@ -89,6 +94,8 @@ struct Run {
     /// not reported here.
     mine: HashSet<IntentId>,
     replies: mpsc::Sender<Reply>,
+    /// A selection a key asked for, handed to the terminal between frames.
+    clipboard: Option<String>,
     exit: Option<Exit>,
 }
 
@@ -99,12 +106,19 @@ pub(crate) fn identity() -> ClientIdentity {
     }
 }
 
+/// How a run ended: the code, and the screenful of transcript the shell gets
+/// back once the alternate screen is gone (design §3).
+pub(crate) struct Farewell {
+    pub exit: Exit,
+    pub screen: Vec<String>,
+}
+
 pub(crate) async fn drive(
     host: &HostHandle,
     opts: SurfaceOptions,
     screen: &mut dyn Screen,
     mut keys: Keys,
-) -> Result<Exit, KernelError> {
+) -> Result<Farewell, KernelError> {
     let attachment = host
         .open(opts.selector, identity(), OpenOptions::with_children())
         .await?;
@@ -117,6 +131,7 @@ pub(crate) async fn drive(
         ui: Ui::new(history::load(&opts.env.data_dir), Instant::now()),
         mine: HashSet::new(),
         replies: tx,
+        clipboard: None,
         exit: None,
     };
     run.fetch_catalogs();
@@ -126,7 +141,6 @@ pub(crate) async fn drive(
             bingo_sdk::Origin::surface(SURFACE_ID),
         )));
     }
-    let mut tick = tokio::time::interval(TICK);
     loop {
         tokio::select! {
             frame = next_frame(&mut events) => match frame {
@@ -138,13 +152,16 @@ pub(crate) async fn drive(
                 None => run.exit = Some(Exit { code: 0 }),
             },
             Some(reply) = replies.recv() => run.reply(reply, &mut events),
-            _ = tick.tick() => {}
+            () = tick(run.animating(Instant::now())) => {}
         }
         run.ui.expire(Instant::now());
         if let Some(exit) = run.exit.take() {
             let root = run.session.tree.root_id().clone();
             let _ = run.host.close(&root, CloseReason::Client).await;
-            return Ok(exit);
+            return Ok(Farewell {
+                exit,
+                screen: run.farewell(screen.rows()),
+            });
         }
         run.paint(screen)?;
     }
@@ -158,12 +175,57 @@ async fn next_frame(events: &mut Option<FrameStream>) -> Option<bingo_sdk::Frame
     }
 }
 
+/// The animation clock: a tick while something moves, and nothing at all
+/// while nothing does — the one place a redraw can happen without an event.
+async fn tick(animating: bool) {
+    match animating {
+        true => tokio::time::sleep(TICK).await,
+        false => std::future::pending().await,
+    }
+}
+
 impl Run {
+    /// Whether the next frame would differ from this one on its own: a turn
+    /// spins, the transcript eases where a key sent it, a notice is holding
+    /// the status line until its time is up.
+    fn animating(&self, now: Instant) -> bool {
+        self.session.tree.sessions().any(SessionState::busy)
+            || self.ui.scroll.moving(now)
+            || self.ui.layer_moving(now)
+            || !self.ui.notices.is_empty()
+    }
+
+    /// The last screenful of the transcript, as plain text, through the block
+    /// cache's own degrade: what the alternate screen would otherwise take
+    /// away with it.
+    fn farewell(&self, rows: u16) -> Vec<String> {
+        let rows = usize::from(rows.saturating_sub(KEPT_BACK));
+        self.ui.painted.borrow().blocks.tail(rows)
+    }
+
     fn paint(&mut self, screen: &mut dyn Screen) -> Result<(), KernelError> {
+        self.hand_over(screen)?;
         screen.title(&title(&self.session.tree)).map_err(stdio)?;
         screen
             .draw(&self.session.tree, &self.ui, Now::real())
             .map_err(stdio)
+    }
+
+    /// The selection goes to the terminal's own clipboard between frames, as
+    /// the bell and the title do. A terminal that will not take one is told
+    /// about, not worked around.
+    fn hand_over(&mut self, screen: &mut dyn Screen) -> Result<(), KernelError> {
+        let Some(text) = self.clipboard.take() else {
+            return Ok(());
+        };
+        match crate::select::osc52(&text) {
+            Some(bytes) => screen.copy(&bytes).map_err(stdio),
+            None => {
+                let refused = crate::select::refused(text.len());
+                self.ui.notify(Level::Warn, refused, Instant::now());
+                Ok(())
+            }
+        }
     }
 
     fn frame(
@@ -243,6 +305,10 @@ impl Run {
                 let effects = input::on_key(&mut self.ui, &self.session.tree, key, Now::real());
                 self.apply(effects);
             }
+            Term::Mouse(mouse) => {
+                let effects = input::on_mouse(&mut self.ui, &self.session.tree, mouse, Now::real());
+                self.apply(effects);
+            }
             Term::Paste(text) => input::on_paste(&mut self.ui, &text),
             _ => {}
         }
@@ -266,6 +332,7 @@ impl Run {
             Effect::View(session) => self.show(session),
             Effect::Open(selector) => self.open(selector),
             Effect::ListSessions => self.list_sessions(),
+            Effect::Copy(text) => self.clipboard = Some(text),
             Effect::Exit => self.exit = Some(Exit { code: 0 }),
         }
     }
@@ -407,15 +474,16 @@ impl Run {
             Reply::Handle(session, handle) => {
                 self.session.handles.insert(session, handle);
             }
-            Reply::Sessions(sessions) => {
-                self.ui.picker = Some(Picker {
+            Reply::Sessions(sessions) => self.ui.layer.show(
+                Open::Picker(Picker {
                     sessions,
                     selected: 0,
-                })
-            }
-            Reply::Commands(specs) => self.ui.catalog = specs,
+                }),
+                Instant::now(),
+            ),
+            Reply::Commands(specs) => self.ui.catalogs.commands = specs,
             Reply::Catalogue(source, ids) => {
-                self.ui.catalogues.insert(source, ids);
+                self.ui.catalogs.values.insert(source, ids);
             }
             Reply::Failed(error) => {
                 self.ui.opening = false;
@@ -434,8 +502,7 @@ impl Run {
         *events = Some(attachment.events);
         self.ui.opening = false;
         self.ui.scroll = Default::default();
-        self.ui.picker = None;
-        self.ui.switcher = None;
+        self.ui.layer.close(Instant::now());
         self.refocus();
     }
 }
@@ -500,7 +567,7 @@ mod tests {
             )
             .await
             .expect("the loop ran");
-            (exit, session)
+            (exit.exit, session)
         }
     }
 
@@ -734,7 +801,7 @@ mod tests {
             key(KeyCode::Enter),
             ctrl('d'),
         ];
-        let exit = drive(
+        let ended = drive(
             &host,
             options(None, harness.home.path()),
             &mut harness.recorder,
@@ -742,7 +809,7 @@ mod tests {
         )
         .await
         .expect("the loop ran");
-        assert_eq!(exit, Exit { code: 0 });
+        assert_eq!(ended.exit, Exit { code: 0 });
         assert_eq!(
             child.submitted(),
             vec![Input::text("hi", bingo_sdk::Origin::surface("tui"))]
@@ -774,6 +841,138 @@ mod tests {
         let screen = harness.recorder.last();
         assert!(screen.contains("still here"), "{screen}");
         assert!(!screen.contains("agent"), "the child is gone: {screen}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_idle_surface_draws_nothing_at_all() {
+        let mut harness = Harness::new();
+        let (host, _) = TestHost::with(vec![]);
+        // Two seconds pass before each key, on the runtime's virtual clock.
+        let script = vec![key(KeyCode::Right), ctrl('d')];
+        drive(
+            &host,
+            options(None, harness.home.path()),
+            &mut harness.recorder,
+            keys_after(Duration::from_secs(2), script),
+        )
+        .await
+        .expect("the loop ran");
+        assert_eq!(
+            harness.recorder.frames.len(),
+            5,
+            "one frame for each of the four things that happened at the start \
+             and one for the keystroke — and none at all for the four seconds \
+             of waiting between them"
+        );
+    }
+
+    #[tokio::test]
+    async fn leaving_hands_the_last_screenful_of_the_transcript_back() {
+        let mut harness = Harness::new();
+        let frames: Vec<_> = (1..=30)
+            .map(|i| {
+                frame(
+                    i,
+                    Event::ItemCompleted {
+                        item: assistant(
+                            &format!("itm_{i}"),
+                            &format!("answer {i}"),
+                            ItemStatus::Completed,
+                        ),
+                    },
+                )
+            })
+            .collect();
+        let (host, _) = TestHost::with(frames);
+        let ended = drive(
+            &host,
+            options(None, harness.home.path()),
+            &mut harness.recorder,
+            keys(vec![ctrl('d')]),
+        )
+        .await
+        .expect("the loop ran");
+        assert_eq!(
+            ended.screen.len(),
+            22,
+            "a 24-row terminal, less the two the shell wants back"
+        );
+        assert_eq!(
+            ended.screen.last().map(String::as_str),
+            Some("⏺ answer 30"),
+            "{:?}",
+            ended.screen
+        );
+        assert!(
+            ended.screen.iter().all(|line| !line.contains('\u{1b}')),
+            "plain text, through the block cache's own degrade"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_copied_selection_reaches_the_terminals_own_clipboard() {
+        let mut harness = Harness::new();
+        // Enough transcript to scroll back through.
+        let frames: Vec<_> = (1..=30)
+            .map(|i| {
+                frame(
+                    i,
+                    Event::ItemCompleted {
+                        item: assistant(&format!("itm_{i}"), "All green.", ItemStatus::Completed),
+                    },
+                )
+            })
+            .collect();
+        // Read back, take the first line, copy it.
+        let script = vec![
+            key(KeyCode::PageUp),
+            typed('v'),
+            key(KeyCode::Down),
+            typed('y'),
+            ctrl('d'),
+        ];
+        harness.go(frames, script, None).await;
+        // What is inside the run is `select`'s to say; what the loop owes is
+        // one OSC 52 sequence, out of band, carrying it as base64.
+        let [copied] = harness.recorder.copies.as_slice() else {
+            panic!("one sequence: {:?}", harness.recorder.copies)
+        };
+        assert!(copied.starts_with(b"\x1b]52;c;"), "{copied:?}");
+        assert!(copied.ends_with(b"\x07"), "{copied:?}");
+        let payload = &copied[7..copied.len() - 1];
+        assert!(
+            !payload.is_empty()
+                && payload
+                    .iter()
+                    .all(|b| b.is_ascii_alphanumeric() || *b == b'+' || *b == b'/' || *b == b'='),
+            "base64: {payload:?}"
+        );
+    }
+
+    #[test]
+    fn a_selection_the_terminal_will_not_take_is_said_out_loud() {
+        let mut run = Run {
+            host: TestHost::with(vec![]).0,
+            data_dir: std::path::PathBuf::new(),
+            session: Attached::new(
+                state(),
+                SessionHandle(std::sync::Arc::new(TestSession::default())),
+            ),
+            ui: Ui::new(Vec::new(), Instant::now()),
+            mine: HashSet::new(),
+            replies: mpsc::channel(1).0,
+            clipboard: Some("x".repeat(crate::select::LIMIT)),
+            exit: None,
+        };
+        let mut recorder = Recorder::default();
+        run.hand_over(&mut recorder)
+            .expect("the notice is not an error");
+        assert!(recorder.copies.is_empty(), "nothing was handed over");
+        assert!(
+            run.ui.notices.iter().any(|n| n.text.contains("100 KiB")),
+            "the refusal names the size: {:?}",
+            run.ui.notices
+        );
     }
 
     #[tokio::test]
