@@ -210,7 +210,6 @@ impl Blocks {
 
     /// The last `rows` lines as plain text: what is printed back into the
     /// shell's own screen when the surface leaves (design §3).
-    #[cfg(test)]
     pub fn tail(&self, rows: usize) -> Vec<String> {
         let from = self.height().saturating_sub(rows);
         self.window(from, rows)

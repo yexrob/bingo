@@ -108,6 +108,11 @@ struct Cli {
     /// Stop the turn after this many model rounds.
     #[arg(long, value_name = "N", global = true)]
     max_turns: Option<u32>,
+
+    /// Leave the terminal as it was: the full-screen surface prints the last
+    /// screenful of the conversation on the way out unless this is given.
+    #[arg(long)]
+    no_print_on_exit: bool,
 }
 
 #[derive(Subcommand, Debug)]
@@ -381,6 +386,7 @@ fn surface_options(cli: Cli, cwd: PathBuf, env: Arc<Env>) -> SurfaceOptions {
             "outputFormat": cli.output_format.as_str(),
             "inputFormat": cli.input_format.as_str(),
             "permissionPromptTool": cli.permission_prompt_tool.map(PromptTool::as_str),
+            "noPrintOnExit": cli.no_print_on_exit,
         }),
         env,
     }

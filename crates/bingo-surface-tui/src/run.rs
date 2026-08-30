@@ -39,6 +39,9 @@ const RECENT: usize = 20;
 /// What a write says while the mailbox of the session in view is still on its
 /// way: it is refused, never held.
 pub const NOT_YET: &str = "still opening that session — try again";
+/// Rows of the screen kept back when the transcript is printed on the way
+/// out: the shell's own prompt needs somewhere to land.
+const KEPT_BACK: u16 = 2;
 
 pub(crate) type Keys = Pin<Box<dyn Stream<Item = Term> + Send>>;
 
@@ -103,12 +106,19 @@ pub(crate) fn identity() -> ClientIdentity {
     }
 }
 
+/// How a run ended: the code, and the screenful of transcript the shell gets
+/// back once the alternate screen is gone (design §3).
+pub(crate) struct Farewell {
+    pub exit: Exit,
+    pub screen: Vec<String>,
+}
+
 pub(crate) async fn drive(
     host: &HostHandle,
     opts: SurfaceOptions,
     screen: &mut dyn Screen,
     mut keys: Keys,
-) -> Result<Exit, KernelError> {
+) -> Result<Farewell, KernelError> {
     let attachment = host
         .open(opts.selector, identity(), OpenOptions::with_children())
         .await?;
@@ -148,7 +158,10 @@ pub(crate) async fn drive(
         if let Some(exit) = run.exit.take() {
             let root = run.session.tree.root_id().clone();
             let _ = run.host.close(&root, CloseReason::Client).await;
-            return Ok(exit);
+            return Ok(Farewell {
+                exit,
+                screen: run.farewell(screen.rows()),
+            });
         }
         run.paint(screen)?;
     }
@@ -180,6 +193,14 @@ impl Run {
             || self.ui.scroll.moving(now)
             || self.ui.layer_moving(now)
             || !self.ui.notices.is_empty()
+    }
+
+    /// The last screenful of the transcript, as plain text, through the block
+    /// cache's own degrade: what the alternate screen would otherwise take
+    /// away with it.
+    fn farewell(&self, rows: u16) -> Vec<String> {
+        let rows = usize::from(rows.saturating_sub(KEPT_BACK));
+        self.ui.painted.borrow().blocks.tail(rows)
     }
 
     fn paint(&mut self, screen: &mut dyn Screen) -> Result<(), KernelError> {
@@ -547,7 +568,7 @@ mod tests {
             )
             .await
             .expect("the loop ran");
-            (exit, session)
+            (exit.exit, session)
         }
     }
 
@@ -781,7 +802,7 @@ mod tests {
             key(KeyCode::Enter),
             ctrl('d'),
         ];
-        let exit = drive(
+        let ended = drive(
             &host,
             options(None, harness.home.path()),
             &mut harness.recorder,
@@ -789,7 +810,7 @@ mod tests {
         )
         .await
         .expect("the loop ran");
-        assert_eq!(exit, Exit { code: 0 });
+        assert_eq!(ended.exit, Exit { code: 0 });
         assert_eq!(
             child.submitted(),
             vec![Input::text("hi", bingo_sdk::Origin::surface("tui"))]
@@ -847,6 +868,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn leaving_hands_the_last_screenful_of_the_transcript_back() {
+        let mut harness = Harness::new();
+        let frames: Vec<_> = (1..=30)
+            .map(|i| {
+                frame(
+                    i,
+                    Event::ItemCompleted {
+                        item: assistant(
+                            &format!("itm_{i}"),
+                            &format!("answer {i}"),
+                            ItemStatus::Completed,
+                        ),
+                    },
+                )
+            })
+            .collect();
+        let (host, _) = TestHost::with(frames);
+        let ended = drive(
+            &host,
+            options(None, harness.home.path()),
+            &mut harness.recorder,
+            keys(vec![ctrl('d')]),
+        )
+        .await
+        .expect("the loop ran");
+        assert_eq!(
+            ended.screen.len(),
+            22,
+            "a 24-row terminal, less the two the shell wants back"
+        );
+        assert_eq!(
+            ended.screen.last().map(String::as_str),
+            Some("answer 30"),
+            "{:?}",
+            ended.screen
+        );
+        assert!(
+            ended.screen.iter().all(|line| !line.contains('\u{1b}')),
+            "plain text, through the block cache's own degrade"
+        );
+    }
+
+    #[tokio::test]
     async fn a_copied_selection_reaches_the_terminals_own_clipboard() {
         let mut harness = Harness::new();
         // Enough transcript to scroll back through.
@@ -869,10 +933,20 @@ mod tests {
             ctrl('d'),
         ];
         harness.go(frames, script, None).await;
-        assert_eq!(
-            harness.recorder.copies,
-            vec![b"\x1b]52;c;QWxsIGdyZWVuLgo=\x07".to_vec()],
-            "OSC 52 with `All green.\\n` as base64"
+        // What is inside the run is `select`'s to say; what the loop owes is
+        // one OSC 52 sequence, out of band, carrying it as base64.
+        let [copied] = harness.recorder.copies.as_slice() else {
+            panic!("one sequence: {:?}", harness.recorder.copies)
+        };
+        assert!(copied.starts_with(b"\x1b]52;c;"), "{copied:?}");
+        assert!(copied.ends_with(b"\x07"), "{copied:?}");
+        let payload = &copied[7..copied.len() - 1];
+        assert!(
+            !payload.is_empty()
+                && payload
+                    .iter()
+                    .all(|b| b.is_ascii_alphanumeric() || *b == b'+' || *b == b'/' || *b == b'='),
+            "base64: {payload:?}"
         );
     }
 

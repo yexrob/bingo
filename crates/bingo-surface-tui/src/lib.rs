@@ -84,12 +84,29 @@ impl Surface for TuiSurface {
     }
 
     async fn run(&self, host: HostHandle, opts: SurfaceOptions) -> Result<Exit, KernelError> {
+        let print = print_on_exit(&opts);
         let mut screen = terminal::Tui::enter().map_err(entering)?;
-        let exit = run::drive(&host, opts, &mut screen, run::terminal_keys()).await;
+        let ended = run::drive(&host, opts, &mut screen, run::terminal_keys()).await;
         // The terminal goes back whether the loop ended or failed.
         let _ = screen.leave();
-        exit
+        let ended = ended?;
+        if print {
+            // The alternate screen took the conversation with it; this puts
+            // the last screenful of it back where the shell can see it.
+            for line in ended.screen {
+                println!("{line}");
+            }
+        }
+        Ok(ended.exit)
     }
+}
+
+/// `--no-print-on-exit` is the one thing the bin says about this surface.
+fn print_on_exit(opts: &SurfaceOptions) -> bool {
+    opts.args
+        .get("noPrintOnExit")
+        .and_then(serde_json::Value::as_bool)
+        != Some(true)
 }
 
 fn entering(e: std::io::Error) -> KernelError {

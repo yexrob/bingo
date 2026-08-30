@@ -56,6 +56,9 @@ pub(crate) trait Screen: Send {
 
     /// Hand the terminal a selection for its own clipboard.
     fn copy(&mut self, bytes: &[u8]) -> io::Result<()>;
+
+    /// How many rows it has, for the screenful printed back on the way out.
+    fn rows(&self) -> u16;
 }
 
 pub struct Tui {
@@ -113,6 +116,10 @@ impl Screen for Tui {
 
     fn copy(&mut self, bytes: &[u8]) -> io::Result<()> {
         out_of_band(bytes)
+    }
+
+    fn rows(&self) -> u16 {
+        self.terminal.size().map(|size| size.height).unwrap_or(0)
     }
 }
 

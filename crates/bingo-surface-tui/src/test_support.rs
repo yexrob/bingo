@@ -830,6 +830,10 @@ impl Screen for Recorder {
         self.copies.push(bytes.to_vec());
         Ok(())
     }
+
+    fn rows(&self) -> u16 {
+        24
+    }
 }
 
 /// The options a surface is handed, pointed at a scratch directory.
