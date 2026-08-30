@@ -4,7 +4,8 @@
 use std::path::{Path, PathBuf};
 
 use bingo_sdk::{
-    ContextQuery, ContextUsage, Item, ModelCapabilities, SessionId, SessionSummary, TurnId, Usage,
+    ContextQuery, ContextUsage, HostHandle, Item, ModelCapabilities, SessionId, SessionSummary,
+    TurnId, Usage,
 };
 use jiff::Timestamp;
 
@@ -15,6 +16,7 @@ pub struct Asked {
     usage: ContextUsage,
     capabilities: ModelCapabilities,
     cwd: PathBuf,
+    host: HostHandle,
 }
 
 impl Asked {
@@ -50,6 +52,7 @@ impl Asked {
                 caching: false,
             },
             cwd: cwd.to_path_buf(),
+            host: bingo_sdk::testing::NoHost::handle(),
         }
     }
 
@@ -62,6 +65,7 @@ impl Asked {
             usage: &self.usage,
             capabilities: &self.capabilities,
             cwd: &self.cwd,
+            host: &self.host,
         }
     }
 }

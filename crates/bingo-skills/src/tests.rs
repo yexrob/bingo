@@ -183,6 +183,7 @@ pub(crate) struct Asked {
     usage: ContextUsage,
     capabilities: ModelCapabilities,
     cwd: PathBuf,
+    host: HostHandle,
 }
 
 pub(crate) fn asked(cwd: &Path) -> Asked {
@@ -217,6 +218,7 @@ pub(crate) fn asked(cwd: &Path) -> Asked {
             caching: false,
         },
         cwd: cwd.to_path_buf(),
+        host: bingo_sdk::testing::NoHost::handle(),
     }
 }
 
@@ -230,6 +232,7 @@ impl Asked {
             usage: &self.usage,
             capabilities: &self.capabilities,
             cwd: &self.cwd,
+            host: &self.host,
         }
     }
 }

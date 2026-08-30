@@ -7,6 +7,7 @@ use std::path::Path;
 use async_trait::async_trait;
 
 use crate::event::{ContextUsage, Item, SessionSummary};
+use crate::host::HostHandle;
 use crate::ids::TurnId;
 use crate::model::{ContentPart, ModelCapabilities, SystemBlock};
 
@@ -23,6 +24,9 @@ pub enum Placement {
 #[derive(Clone, Copy, Debug)]
 pub struct ContextQuery<'a> {
     pub session: &'a SessionSummary,
+    /// The whole host (ADR-0011 §3): a contributor that reads a session's
+    /// extensions, or another session, reaches it here.
+    pub host: &'a HostHandle,
     pub turn: &'a TurnId,
     pub round: u32,
     pub items: &'a [Item],

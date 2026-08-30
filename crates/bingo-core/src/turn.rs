@@ -271,6 +271,7 @@ impl Turn<'_> {
     ) -> Vec<SystemBlock> {
         let query = ContextQuery {
             session: &self.cfg.session,
+            host: &self.cfg.host,
             turn: &self.id,
             round: self.round,
             items: &self.items,
