@@ -116,6 +116,45 @@ fn a_childs_permission_is_refused_off_a_tty_in_every_output_format() {
     }
 }
 
+/// A child whose turn fails has not answered: the root's call is an error
+/// result that says so, never a reply that happens to be empty.
+#[test]
+fn a_child_that_failed_is_an_error_result_for_the_root() {
+    let home = tempfile::tempdir().unwrap();
+    let script = script(
+        r#"{"responses":[
+            {"steps":[{"toolCall":{"name":"SpawnAgent","input":{"prompt":"run it","background":false}}}]},
+            {"steps":[{"error":{"kind":"auth","message":"no key for the child"}}]},
+            {"steps":[{"text":"root done"}]}
+        ]}"#,
+    );
+    let out = scripted_run(home.path(), &script, &[], "spawn one");
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    let spawn = frames_of(&out)
+        .into_iter()
+        .filter_map(|f| match f.event {
+            Event::ItemCompleted { item } => match item.body {
+                bingo_sdk::ItemBody::ToolCall { name, output, .. } if name == "SpawnAgent" => {
+                    output
+                }
+                _ => None,
+            },
+            _ => None,
+        })
+        .next_back()
+        .expect("the SpawnAgent call completed");
+    assert!(spawn.is_error, "{spawn:?}");
+    let text: String = spawn
+        .parts
+        .iter()
+        .filter_map(bingo_sdk::ContentPart::as_text)
+        .collect();
+    assert!(
+        text.contains("failed:") && text.contains("no key for the child"),
+        "{text}"
+    );
+}
+
 /// A definition names the persona; the sub-agent note is the kernel's own
 /// business, but the name a definition carries is the plugin's.
 #[test]

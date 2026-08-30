@@ -6,8 +6,8 @@ use std::sync::Arc;
 
 use bingo_sdk::{
     Attachment, CancellationToken, ClientIdentity, Delivery, Event, HostHandle, Input, IntentId,
-    ItemBody, KernelError, OpenOptions, SessionId, SessionSelector, SessionState, ToolError,
-    ToolHost, TurnId,
+    InterruptReason, ItemBody, KernelError, OpenOptions, SessionId, SessionSelector, SessionState,
+    ToolError, ToolHost, ToolOutput, TurnId, TurnStatus,
 };
 use futures::StreamExt;
 
@@ -32,12 +32,28 @@ pub async fn follow(host: &HostHandle, child: &SessionId) -> Result<Attachment, 
     .await
 }
 
-/// The child's reply to the turn it is running: its assistant text, once that
-/// turn ends. Cancelling the waiting call stops the wait, never the child.
+/// What a child's turn came to: how it ended, and the assistant text it
+/// wrote on the way. A turn that failed or was cut short is not an answer,
+/// whatever it managed to say first.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Reply {
+    pub status: TurnStatus,
+    pub text: String,
+}
+
+impl Reply {
+    /// Whether the caller reads this as a failure of the call it made.
+    pub fn is_error(&self) -> bool {
+        !matches!(self.status, TurnStatus::Completed)
+    }
+}
+
+/// The child's reply to the turn it is running, once that turn ends.
+/// Cancelling the waiting call stops the wait, never the child.
 pub async fn next_reply(
     attachment: &mut Attachment,
     cancel: &CancellationToken,
-) -> Result<String, ToolError> {
+) -> Result<Reply, ToolError> {
     loop {
         let frame = tokio::select! {
             () = cancel.cancelled() => return Err(ToolError::Cancelled),
@@ -47,13 +63,16 @@ pub async fn next_reply(
             return Err(ToolError::Failed("the agent's session ended".into()));
         };
         attachment.snapshot.apply(&frame);
-        if let Event::TurnCompleted { turn, .. } = &frame.event {
-            return Ok(reply_to(&attachment.snapshot, turn));
+        if let Event::TurnCompleted { turn, status, .. } = &frame.event {
+            return Ok(Reply {
+                status: status.clone(),
+                text: reply_to(&attachment.snapshot, turn),
+            });
         }
     }
 }
 
-/// The reply a turn produced: its assistant items, in the order it wrote them.
+/// The text a turn produced: its assistant items, in the order it wrote them.
 fn reply_to(state: &SessionState, turn: &TurnId) -> String {
     let texts: Vec<&str> = state
         .items
@@ -67,27 +86,20 @@ fn reply_to(state: &SessionState, turn: &TurnId) -> String {
     texts.join("\n")
 }
 
-/// The reply to the last turn that said anything, for a child that is already
-/// idle when it is asked.
-pub fn last_reply(state: &SessionState) -> String {
-    let last = state
+/// The reply to the last turn, for a child that is already idle when it is
+/// asked: the folded state knows how that turn ended, and its last item
+/// which turn it was.
+pub fn last_reply(state: &SessionState) -> Reply {
+    let text = state
         .items
         .iter()
         .rev()
-        .find(|item| matches!(item.body, ItemBody::Assistant { .. }));
-    match last {
-        Some(item) => match &item.turn {
-            Some(turn) => reply_to(state, turn),
-            None => text_of(&item.body).to_string(),
-        },
-        None => String::new(),
-    }
-}
-
-fn text_of(body: &ItemBody) -> &str {
-    match body {
-        ItemBody::Assistant { text } => text,
-        _ => "",
+        .find_map(|item| item.turn.as_ref())
+        .map(|turn| reply_to(state, turn))
+        .unwrap_or_default();
+    Reply {
+        status: state.last_turn.clone().unwrap_or(TurnStatus::Completed),
+        text,
     }
 }
 
@@ -113,26 +125,85 @@ pub async fn report(
     }
 }
 
-/// What a caller reads when it waited for the agent itself: who answered,
-/// which session it was, and what it said.
-pub fn replied(name: &str, session: &SessionId, reply: &str) -> String {
-    match reply.trim() {
-        "" => format!("{name} ({session}) finished without saying anything."),
-        reply => format!("{name} ({session}) replied:\n{reply}"),
+/// What a caller gets back from a call that waited for the agent itself: an
+/// error result when the turn was not completed, so the model does not read a
+/// crash as an answer.
+pub fn output(name: &str, session: &SessionId, reply: &Reply) -> ToolOutput {
+    let text = replied(name, session, reply);
+    if reply.is_error() {
+        ToolOutput::error(text)
+    } else {
+        ToolOutput::text(text)
     }
 }
 
-fn finished(reply: &str) -> String {
-    match reply.trim() {
+/// Who answered, which session it was, and what came of it.
+pub fn replied(name: &str, session: &SessionId, reply: &Reply) -> String {
+    let who = format!("{name} ({session})");
+    if let Some(cut) = cut_short(reply) {
+        return format!("{who} {cut}");
+    }
+    match reply.text.trim() {
+        "" => format!("{who} finished without saying anything."),
+        text => format!("{who} replied:\n{text}"),
+    }
+}
+
+/// The message a background agent's end sends its parent.
+fn finished(reply: &Reply) -> String {
+    if let Some(cut) = cut_short(reply) {
+        return cut;
+    }
+    match reply.text.trim() {
         "" => "finished, with nothing to say.".to_string(),
-        reply => format!("finished.\n\n{reply}"),
+        text => format!("finished.\n\n{text}"),
+    }
+}
+
+/// A turn that did not complete, as either reader hears of it — the verdict,
+/// then whatever the agent had said before it. `None` for one that did.
+fn cut_short(reply: &Reply) -> Option<String> {
+    let verdict = match &reply.status {
+        TurnStatus::Completed => return None,
+        TurnStatus::Failed { error } => format!("failed: {}", error.message),
+        TurnStatus::Interrupted { reason } => format!("was interrupted: {}", interrupted(*reason)),
+    };
+    Some(match reply.text.trim() {
+        "" => verdict,
+        text => format!("{verdict}\n\nIt had said:\n{text}"),
+    })
+}
+
+fn interrupted(reason: InterruptReason) -> &'static str {
+    match reason {
+        InterruptReason::UserCancel => "a person stopped it",
+        InterruptReason::NewInput => "new input took over its turn",
+        InterruptReason::Shutdown => "the host shut down",
+        InterruptReason::Budget => "it ran out of budget",
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tests::{Fleet, Recorder, assistant, turn_completed};
+    use crate::tests::{Fleet, Recorder, assistant, turn_completed, turn_failed};
+    use bingo_sdk::{ErrorCode, KernelError};
+
+    fn completed(text: &str) -> Reply {
+        Reply {
+            status: TurnStatus::Completed,
+            text: text.into(),
+        }
+    }
+
+    fn failed(text: &str) -> Reply {
+        Reply {
+            status: TurnStatus::Failed {
+                error: KernelError::new(ErrorCode::AuthRequired, "no key"),
+            },
+            text: text.into(),
+        }
+    }
 
     #[tokio::test]
     async fn the_reply_is_the_assistant_text_of_the_turn_that_ended() {
@@ -145,7 +216,7 @@ mod tests {
         let reply = next_reply(&mut attachment, &CancellationToken::new())
             .await
             .unwrap();
-        assert_eq!(reply, "one\ntwo");
+        assert_eq!(reply, completed("one\ntwo"));
     }
 
     #[tokio::test]
@@ -195,6 +266,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_background_agent_that_failed_tells_its_parent_so() {
+        let fleet = Fleet::default();
+        let root = fleet.root();
+        let child = fleet.child(&root, "reviewer");
+        fleet.script([assistant("half a review"), turn_failed("no key")]);
+        let host = Recorder::new(&fleet);
+
+        let attachment = follow(&fleet.handle(), &child).await.unwrap();
+        report(attachment, host.clone(), root, "reviewer".to_string()).await;
+
+        let Input::Text { text, .. } = &host.delivered()[0].1 else {
+            panic!("a peer delivers text");
+        };
+        assert_eq!(text, "failed: no key\n\nIt had said:\nhalf a review");
+    }
+
+    #[tokio::test]
     async fn a_child_whose_stream_ends_reports_nothing() {
         let fleet = Fleet::default();
         let root = fleet.root();
@@ -216,16 +304,60 @@ mod tests {
 
         let attachment = follow(&fleet.handle(), &child).await.unwrap();
         assert!(attachment.snapshot.turn.is_none(), "the turn ended");
-        assert_eq!(last_reply(&attachment.snapshot), "the diff is fine");
+        assert_eq!(
+            last_reply(&attachment.snapshot),
+            completed("the diff is fine")
+        );
+    }
+
+    #[tokio::test]
+    async fn an_idle_child_whose_last_turn_failed_remembers_that() {
+        let fleet = Fleet::default();
+        let root = fleet.root();
+        let child = fleet.child(&root, "reviewer");
+        fleet.failed(&child, "no key");
+
+        let attachment = follow(&fleet.handle(), &child).await.unwrap();
+        let reply = last_reply(&attachment.snapshot);
+        assert!(reply.is_error());
+        assert_eq!(reply.text, "");
     }
 
     #[test]
     fn a_reply_that_says_nothing_still_reads_as_finished() {
-        assert!(finished("  ").contains("nothing to say"));
+        assert!(finished(&completed("  ")).contains("nothing to say"));
         let session = SessionId::from_raw("ses_child");
         assert_eq!(
-            replied("reviewer", &session, "done"),
+            replied("reviewer", &session, &completed("done")),
             "reviewer (ses_child) replied:\ndone"
+        );
+        assert!(!output("reviewer", &session, &completed("done")).is_error);
+    }
+
+    #[test]
+    fn a_turn_that_did_not_complete_is_never_read_as_an_answer() {
+        let session = SessionId::from_raw("ses_child");
+        assert_eq!(
+            replied("reviewer", &session, &failed("")),
+            "reviewer (ses_child) failed: no key"
+        );
+        assert_eq!(
+            finished(&failed("half")),
+            "failed: no key\n\nIt had said:\nhalf"
+        );
+        let stopped = Reply {
+            status: TurnStatus::Interrupted {
+                reason: InterruptReason::UserCancel,
+            },
+            text: String::new(),
+        };
+        assert_eq!(finished(&stopped), "was interrupted: a person stopped it");
+        let out = output("reviewer", &session, &failed("half"));
+        assert!(out.is_error, "a failure is an error result for the caller");
+        let text = out.parts[0].as_text().unwrap_or_default();
+        assert!(
+            text.starts_with("reviewer (ses_child) failed: no key"),
+            "{text}"
         );
     }
 }

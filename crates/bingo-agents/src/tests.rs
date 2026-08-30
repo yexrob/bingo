@@ -156,11 +156,20 @@ impl Fleet {
 
     /// A session that has already answered, and is idle.
     pub(crate) fn said(&self, session: &SessionId, text: &str) {
+        self.remember(session, [assistant(text), turn_completed()]);
+    }
+
+    /// A session whose last turn failed before it said anything.
+    pub(crate) fn failed(&self, session: &SessionId, message: &str) {
+        self.remember(session, [turn_started(), turn_failed(message)]);
+    }
+
+    fn remember(&self, session: &SessionId, events: impl IntoIterator<Item = Event>) {
         let mut sessions = self.sessions();
         let Some(live) = sessions.iter_mut().find(|l| &l.summary.id == session) else {
             return;
         };
-        live.history.extend([assistant(text), turn_completed()]);
+        live.history.extend(events);
     }
 
     /// What every attachment yields after its snapshot. The stream then stays
@@ -511,6 +520,16 @@ pub(crate) fn turn_completed() -> Event {
     Event::TurnCompleted {
         turn: TurnId::from_raw(TURN),
         status: TurnStatus::Completed,
+        usage: Usage::default(),
+    }
+}
+
+pub(crate) fn turn_failed(message: &str) -> Event {
+    Event::TurnCompleted {
+        turn: TurnId::from_raw(TURN),
+        status: TurnStatus::Failed {
+            error: KernelError::new(ErrorCode::AuthRequired, message),
+        },
         usage: Usage::default(),
     }
 }

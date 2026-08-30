@@ -273,7 +273,7 @@ impl Tool for SpawnAgentTool {
         };
         if !args.background() {
             let reply = watch::next_reply(&mut attachment, &cx.cancel).await?;
-            return Ok(ToolOutput::text(watch::replied(&name, &session, &reply)));
+            return Ok(watch::output(&name, &session, &reply));
         }
         let host = Arc::clone(&cx.host);
         let parent = cx.session.clone();
@@ -287,7 +287,7 @@ impl Tool for SpawnAgentTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tests::{Fleet, Recorder, assistant, tool_context, turn_completed};
+    use crate::tests::{Fleet, Recorder, assistant, tool_context, turn_completed, turn_failed};
 
     fn definition(name: &str, body: &str) -> Definition {
         Definition {
@@ -323,6 +323,24 @@ mod tests {
         let delivered = host.delivered();
         assert_eq!(delivered.len(), 1, "the prompt, and nothing back to itself");
         assert_eq!(delivered[0].2, Delivery::Wake);
+    }
+
+    #[tokio::test]
+    async fn a_foreground_spawn_reports_a_child_that_failed_as_an_error() {
+        let fleet = Fleet::default();
+        fleet.script([turn_failed("no key")]);
+        let root = fleet.root();
+        let host = Recorder::new(&fleet);
+        let out = SpawnAgentTool::new(fleet.late())
+            .call(
+                json!({ "prompt": "go", "background": false }),
+                &tool_context(&root, host),
+            )
+            .await
+            .expect("a spawn");
+        assert!(out.is_error, "a crash is not an answer");
+        let text = out.parts[0].as_text().unwrap_or_default();
+        assert!(text.contains("failed: no key"), "{text}");
     }
 
     #[tokio::test]

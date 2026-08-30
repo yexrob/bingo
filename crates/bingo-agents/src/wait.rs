@@ -51,7 +51,7 @@ async fn wait_for(
     attachment: &mut Attachment,
     cx: &ToolContext,
     args: &WaitArgs,
-) -> Result<String, ToolError> {
+) -> Result<watch::Reply, ToolError> {
     let Some(seconds) = args.timeout_s else {
         return watch::next_reply(attachment, &cx.cancel).await;
     };
@@ -106,9 +106,7 @@ impl Tool for WaitAgentTool {
             None => watch::last_reply(&attachment.snapshot),
             Some(_) => wait_for(&mut attachment, cx, &args).await?,
         };
-        Ok(ToolOutput::text(watch::replied(
-            &args.name, &session, &reply,
-        )))
+        Ok(watch::output(&args.name, &session, &reply))
     }
 }
 
@@ -149,6 +147,19 @@ mod tests {
         let out = waited(&fleet, &root, json!({ "name": "reviewer" })).await;
         let text = out.parts[0].as_text().unwrap_or_default();
         assert!(text.contains("the diff is fine"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn an_idle_agent_whose_last_turn_failed_says_so() {
+        let fleet = Fleet::default();
+        let root = fleet.root();
+        let child = fleet.child(&root, "reviewer");
+        fleet.failed(&child, "no key");
+
+        let out = waited(&fleet, &root, json!({ "name": "reviewer" })).await;
+        assert!(out.is_error, "what it last did was fail");
+        let text = out.parts[0].as_text().unwrap_or_default();
+        assert!(text.contains("failed: no key"), "{text}");
     }
 
     #[tokio::test]
