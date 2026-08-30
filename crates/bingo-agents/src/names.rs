@@ -126,7 +126,8 @@ async fn room(
     named(&known, name).ok_or_else(|| unknown(name, &known))
 }
 
-fn named(sessions: &[SessionSummary], name: &str) -> Option<SessionSummary> {
+/// The one of these sessions that answers to `name`.
+pub fn named(sessions: &[SessionSummary], name: &str) -> Option<SessionSummary> {
     sessions.iter().find(|s| name_of(s) == name).cloned()
 }
 

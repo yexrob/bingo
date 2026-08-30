@@ -39,7 +39,8 @@ pub fn rows(children: &[SessionSummary]) -> Vec<Vec<String>> {
     children.iter().map(row).collect()
 }
 
-fn state(child: &SessionSummary) -> &'static str {
+/// What a session is doing, in the one word every roster shows.
+pub fn state(child: &SessionSummary) -> &'static str {
     if child.busy { "busy" } else { "idle" }
 }
 

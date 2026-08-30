@@ -4,15 +4,18 @@
 //! a roster is `sessions{parent}`, and `@name` is a submit hook that
 //! redirects.
 //!
-//! Five tools, one hook, one command:
+//! Five tools, two hooks, two commands:
 //!
 //! - `SpawnAgent` mints a child under the calling tool item and delivers the
 //!   prompt. In the foreground it waits for the child's final text; in the
 //!   background it returns the name and leaves a watcher to wake the parent.
-//! - `SendMessage` posts into an agent's queue, `FollowupTask` starts a turn
-//!   on it, `WaitAgent` holds until it is idle, `ListAgents` reads the tree.
+//! - `SendMessage` posts into an agent's queue or a room's journal,
+//!   `FollowupTask` starts a turn on an agent, `WaitAgent` holds until one is
+//!   idle, `ListAgents` reads the tree.
 //! - `@name rest` in the composer reaches the child of that name.
-//! - `/agents` shows the same roster a person needs.
+//! - A root session opening in a project with a `.bingo/team.json` seats the
+//!   roles it declares, as children of itself.
+//! - `/agents` shows the roster a person needs; `/team` what was declared.
 //!
 //! Every tool is declared read-only and trusted: none of them reads or writes
 //! anything outside the process, and what a child then does is gated in the
@@ -28,6 +31,7 @@ mod message;
 mod names;
 mod note;
 mod spawn;
+mod team;
 mod wait;
 mod watch;
 
@@ -46,6 +50,7 @@ pub use list::ListAgentsTool;
 pub use message::{Kind, MessageTool};
 pub use note::NOTE;
 pub use spawn::SpawnAgentTool;
+pub use team::{SeatHook, TeamCommand};
 pub use wait::WaitAgentTool;
 
 static MANIFEST: PluginManifest = PluginManifest {
@@ -59,7 +64,9 @@ static MANIFEST: PluginManifest = PluginManifest {
         "tool:WaitAgent",
         "tool:ListAgents",
         "hook:agents",
+        "hook:team",
         "command:agents",
+        "command:team",
     ],
     requires: &[],
     // Definitions are files, not settings, and the limits on a session tree
@@ -100,8 +107,14 @@ impl Plugin for AgentsPlugin {
         registrar.tool(Arc::new(WaitAgentTool) as Arc<dyn Tool>);
         registrar.tool(Arc::new(ListAgentsTool) as Arc<dyn Tool>);
         registrar.add(Contribution::Hook(Arc::new(AtNameHook) as Arc<dyn Hook>));
+        registrar.add(Contribution::Hook(
+            Arc::new(SeatHook::new(registrar.env().clone())) as Arc<dyn Hook>,
+        ));
         registrar.add(Contribution::Command(
             Arc::new(AgentsCommand) as Arc<dyn Command>
+        ));
+        registrar.add(Contribution::Command(
+            Arc::new(TeamCommand) as Arc<dyn Command>
         ));
         Ok(())
     }
@@ -131,7 +144,9 @@ mod plugin_tests {
                 "tool:WaitAgent",
                 "tool:ListAgents",
                 "hook:agents",
+                "hook:team",
                 "command:agents",
+                "command:team",
             ]
         );
         assert!(MANIFEST.requires.is_empty());
@@ -161,8 +176,22 @@ mod plugin_tests {
                 "ListAgents"
             ]
         );
-        assert!(matches!(contributions[5], Contribution::Hook(_)));
-        assert!(matches!(contributions[6], Contribution::Command(_)));
+        let hooks: Vec<String> = contributions
+            .iter()
+            .filter_map(|c| match c {
+                Contribution::Hook(hook) => Some(hook.id().to_string()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(hooks, ["agents.at-name", "agents.team"]);
+        let commands: Vec<String> = contributions
+            .iter()
+            .filter_map(|c| match c {
+                Contribution::Command(command) => Some(command.spec().name),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(commands, ["agents", "team"]);
     }
 
     #[test]

@@ -69,6 +69,13 @@ impl Tree {
         self.write(&self.user_layer().join(format!("{name}.md")), source);
     }
 
+    /// A team file in `<home>/<at>`, returning that working directory.
+    pub(crate) fn team(&self, at: &str, source: &str) -> PathBuf {
+        let cwd = self.dir(at);
+        self.write(&cwd.join(".bingo").join("team.json"), source);
+        cwd
+    }
+
     /// A definition in the project layer of `<home>/<at>`, returning that
     /// working directory.
     pub(crate) fn project_agent(&self, at: &str, name: &str, source: &str) -> PathBuf {
@@ -150,6 +157,11 @@ impl Fleet {
     /// The sessions a caller asked the host to create.
     pub(crate) fn spawned(&self) -> Vec<SessionSpec> {
         locked(&self.0.spawned).clone()
+    }
+
+    /// The sessions a caller reopened by id.
+    pub(crate) fn opened(&self) -> Vec<SessionId> {
+        locked(&self.0.opened).clone()
     }
 
     pub(crate) fn delivered(&self) -> Vec<(SessionId, Input, Delivery)> {

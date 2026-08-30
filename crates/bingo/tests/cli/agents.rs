@@ -1,8 +1,43 @@
 //! A sub-agent is a child session (ADR-0010): `SpawnAgent` in the foreground
 //! hands the child's own text back as the call's result, and the run's stdout
-//! stays the root's prose.
+//! stays the root's prose. A team is the roles `.bingo/team.json` declares,
+//! seated as children of the root when it opens (ADR-0011).
 
 use super::*;
+
+/// The text a completed call to `tool` returned, as the model read it.
+fn tool_output(out: &Output, tool: &str) -> String {
+    frames_of(out)
+        .into_iter()
+        .filter_map(|f| match f.event {
+            Event::ItemCompleted { item } => match item.body {
+                bingo_sdk::ItemBody::ToolCall { name, output, .. } if name == tool => output,
+                _ => None,
+            },
+            _ => None,
+        })
+        .next_back()
+        .unwrap_or_else(|| panic!("no {tool} call completed: {}", stdout(out)))
+        .parts
+        .iter()
+        .filter_map(bingo_sdk::ContentPart::as_text)
+        .collect()
+}
+
+/// The last thing the run's session said.
+fn final_text(out: &Output) -> String {
+    frames_of(out)
+        .into_iter()
+        .filter_map(|f| match f.event {
+            Event::ItemCompleted { item } => match item.body {
+                bingo_sdk::ItemBody::Assistant { text } => Some(text),
+                _ => None,
+            },
+            _ => None,
+        })
+        .next_back()
+        .unwrap_or_default()
+}
 
 /// The root calls `SpawnAgent`, the child answers, the root reports. One
 /// script serves both sessions: the fake provider hands its responses out in
@@ -182,6 +217,93 @@ fn a_project_definition_names_the_agent_it_starts() {
         .arg("ask the reviewer"));
     assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
     assert_eq!(stdout(&out), "the reviewer approves\n");
+}
+
+/// Two roles, and a script of exactly two responses: one for the round the
+/// root spends on `ListAgents`, one for what it says after. A role that had
+/// opened a turn would have eaten the second, and the run would end on the
+/// tool call instead of the text.
+const ROSTER: &str = r#"{"responses":[
+    {"steps":[{"toolCall":{"name":"ListAgents","input":{}}}]},
+    {"steps":[{"text":"two are seated"}]}
+]}"#;
+
+/// A project whose team is a reviewer and a scout, neither with a definition.
+fn with_a_team(home: &std::path::Path) {
+    let bingo = home.join(".bingo");
+    std::fs::create_dir_all(&bingo).unwrap();
+    std::fs::write(
+        bingo.join("team.json"),
+        r#"{"roles":[{"name":"reviewer"},{"name":"scout"}]}"#,
+    )
+    .unwrap();
+}
+
+/// The sessions a `ListAgents` listing names, in the order it listed them.
+fn listed(text: &str) -> Vec<String> {
+    text.split_whitespace()
+        .filter(|word| word.starts_with("ses_"))
+        .map(str::to_string)
+        .collect()
+}
+
+#[test]
+fn a_project_s_roles_are_seated_before_the_root_s_first_turn() {
+    let home = tempfile::tempdir().unwrap();
+    with_a_team(home.path());
+    let out = scripted_run(home.path(), &script(ROSTER), &[], "who is here?");
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+
+    let roster = tool_output(&out, "ListAgents");
+    assert!(roster.contains("reviewer"), "{roster}");
+    assert!(roster.contains("scout"), "{roster}");
+    assert_eq!(listed(&roster).len(), 2, "{roster}");
+    assert_eq!(
+        final_text(&out),
+        "two are seated",
+        "a role that had answered would have taken this response"
+    );
+}
+
+/// Reopened by id, not with `--continue`: `SessionSelector::Latest` takes the
+/// most recently updated session in the directory, and a role's journal is
+/// written after its root's — the seating, and the close at shutdown — so
+/// `--continue` in a project with a team lands on a role. That is the
+/// kernel's selector to fix; what this asserts is the plugin's part, that
+/// reopening the root brings the same two roles back rather than seating two
+/// more.
+#[test]
+fn the_same_roles_come_back_when_the_root_is_reopened() {
+    let home = tempfile::tempdir().unwrap();
+    with_a_team(home.path());
+    let first = scripted_run(home.path(), &script(ROSTER), &[], "who is here?");
+    assert_eq!(first.status.code(), Some(0), "stderr: {}", stderr(&first));
+    let before = tool_output(&first, "ListAgents");
+    let root = frames_of(&first)[0].session.to_string();
+
+    let second = scripted_run(
+        home.path(),
+        &script(ROSTER),
+        &["--resume", &root],
+        "who is here now?",
+    );
+    assert_eq!(second.status.code(), Some(0), "stderr: {}", stderr(&second));
+    assert_eq!(
+        frames_of(&second)[0].session,
+        frames_of(&first)[0].session,
+        "the same root"
+    );
+    let after = tool_output(&second, "ListAgents");
+    assert!(
+        after.contains("reviewer") && after.contains("scout"),
+        "{after}"
+    );
+    assert_eq!(
+        listed(&after),
+        listed(&before),
+        "the roles were reopened, not seated again"
+    );
+    assert_eq!(final_text(&second), "two are seated");
 }
 
 /// The kernel's depth limit is one, so a child is not offered `SpawnAgent`:
