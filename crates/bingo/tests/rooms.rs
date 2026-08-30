@@ -6,9 +6,9 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use bingo_sdk::{
-    Attachment, Driver, Event, Frame, HostApi, Input, IntentId, IntentOutcome, ItemBody, ItemId,
-    OpenOptions, Origin, SessionFilter, SessionId, SessionSelector, SessionState, TurnId,
-    TurnOrigin,
+    Activation, Answer, Attachment, Driver, Event, Frame, HostApi, Input, IntentId, IntentOutcome,
+    Interaction, ItemBody, ItemId, OpenOptions, Origin, SessionFilter, SessionId, SessionSelector,
+    SessionState, TurnId, TurnOrigin,
 };
 use futures::StreamExt;
 
@@ -65,25 +65,7 @@ async fn a_post_in_a_room_wakes_its_member_and_is_not_fanned_back() {
     );
     until_reported(&mut tree, &root).await;
 
-    let children = kernel
-        .sessions(SessionFilter {
-            parent: Some(root.clone()),
-            ..SessionFilter::default()
-        })
-        .await
-        .unwrap();
-    let room = children
-        .iter()
-        .find(|child| child.driver == Driver::Log)
-        .expect("the room is a session nobody answers")
-        .id
-        .clone();
-    let member = children
-        .iter()
-        .find(|child| child.title.as_deref() == Some(MEMBER))
-        .expect("the agent that holds the name")
-        .id
-        .clone();
+    let (room, member) = seats(&kernel, &root).await;
 
     // A post: a `Log` session records it at once and opens no turn of its own.
     let mut posted = kernel
@@ -151,6 +133,162 @@ async fn a_post_in_a_room_wakes_its_member_and_is_not_fanned_back() {
     assert_eq!(posts, 1, "nothing was fanned back into the room");
 
     kernel.shutdown().await.unwrap();
+}
+
+/// The same opening, and then the member needs a person: the sixth response
+/// is a shell command the default policy asks about.
+const ASKING: &str = r#"{"responses":[
+    {"steps":[{"toolCall":{"name":"SpawnAgent","input":{"name":"reviewer","prompt":"wait for the room","background":true}}}]},
+    {"steps":[{"text":"ready"}]},
+    {"steps":[{"text":"ready"}]},
+    {"steps":[{"text":"noted"}]},
+    {"steps":[{"toolCall":{"name":"Bash","input":{"command":"echo hi"}}}]},
+    {"steps":[{"text":"it was not allowed"}]}
+]}"#;
+
+/// A room member that needs a person reaches the person (ADR-0010 §3, and
+/// M8's rule for every surface): the prompt a woken member raises arrives on
+/// the root's tree attachment and is answered through the root's handle. A
+/// room adds only the way the member was woken.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_room_member_that_asks_a_person_is_answered_through_the_root() {
+    let mut server = Server::spawn(ASKING);
+    let kernel = ready(&mut server).await;
+    let mut tree = kernel
+        .open(create(server.cwd()), who(), OpenOptions::with_children())
+        .await
+        .unwrap();
+    let root = tree.session.clone();
+    let opened = IntentId::mint();
+    tree.handle.submit(
+        opened.clone(),
+        Input::text("/room design reviewer", Origin::surface("test")),
+    );
+    ack_on_root(&mut tree, &root, &opened).await;
+    tree.handle.submit(
+        IntentId::mint(),
+        Input::text("spawn one", Origin::surface("test")),
+    );
+    until_reported(&mut tree, &root).await;
+    let (room, member) = seats(&kernel, &root).await;
+
+    let mut posted = kernel
+        .open(
+            SessionSelector::ById { id: room },
+            who(),
+            OpenOptions::default(),
+        )
+        .await
+        .unwrap();
+    let post = IntentId::mint();
+    posted.handle.submit(
+        post.clone(),
+        Input::text("run the tests", Origin::surface("test")),
+    );
+    ack_for(&mut posted, &post).await;
+
+    let asked = until_asked(&mut tree, &member).await;
+    assert_eq!(asked.session, member, "the prompt is the member's own");
+    tree.handle.answer(
+        IntentId::mint(),
+        asked.id.clone(),
+        Answer::Deny {
+            feedback: Some("not now".into()),
+        },
+        Activation::Programmatic,
+    );
+    let frames = until_member_completed(&mut tree, &member).await;
+    assert!(
+        frames.iter().any(|frame| matches!(
+            &frame.event,
+            Event::InteractionResolved { id, .. } if id == &asked.id
+        )),
+        "the answer through the root resolved the member's prompt"
+    );
+    let refused = frames.iter().any(|frame| match &frame.event {
+        Event::ItemCompleted { item } => match &item.body {
+            ItemBody::ToolCall { name, output, .. } if name == "Bash" => {
+                output.as_ref().is_some_and(|o| o.is_error)
+            }
+            _ => false,
+        },
+        _ => false,
+    });
+    assert!(
+        refused,
+        "the member's shell command was refused, and its turn went on"
+    );
+
+    kernel.shutdown().await.unwrap();
+}
+
+/// The room and the agent under `root`, once both are seated.
+async fn seats(
+    kernel: &bingo_surface_rpc::RemoteKernel,
+    root: &SessionId,
+) -> (SessionId, SessionId) {
+    let children = kernel
+        .sessions(SessionFilter {
+            parent: Some(root.clone()),
+            ..SessionFilter::default()
+        })
+        .await
+        .unwrap();
+    let room = children
+        .iter()
+        .find(|child| child.driver == Driver::Log)
+        .expect("the room is a session nobody answers")
+        .id
+        .clone();
+    let member = children
+        .iter()
+        .find(|child| child.title.as_deref() == Some(MEMBER))
+        .expect("the agent that holds the name")
+        .id
+        .clone();
+    (room, member)
+}
+
+/// The interaction `member` opens, as the root's tree carries it.
+async fn until_asked(tree: &mut Attachment, member: &SessionId) -> Interaction {
+    let deadline = tokio::time::sleep(LIMIT);
+    tokio::pin!(deadline);
+    loop {
+        tokio::select! {
+            frame = tree.events.next() => {
+                let frame = frame.expect("the stream stays open");
+                if &frame.session == member
+                    && let Event::InteractionOpened { interaction } = frame.event
+                {
+                    return interaction;
+                }
+            }
+            _ = &mut deadline => panic!("{member} never asked"),
+        }
+    }
+}
+
+/// Every frame of `member` until its turn completes.
+async fn until_member_completed(tree: &mut Attachment, member: &SessionId) -> Vec<Frame> {
+    let mut seen = Vec::new();
+    let deadline = tokio::time::sleep(LIMIT);
+    tokio::pin!(deadline);
+    loop {
+        tokio::select! {
+            frame = tree.events.next() => {
+                let frame = frame.expect("the stream stays open");
+                if &frame.session != member {
+                    continue;
+                }
+                let done = matches!(frame.event, Event::TurnCompleted { .. });
+                seen.push(frame);
+                if done {
+                    return seen;
+                }
+            }
+            _ = &mut deadline => panic!("{member}'s turn never completed"),
+        }
+    }
 }
 
 /// The root's own ack for `intent`. A tree attachment carries every live
