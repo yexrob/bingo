@@ -326,24 +326,38 @@ fn plain(label: &str, choice: Choice) -> Opt {
 /// The dialog as lines. `width` bounds nothing here; the caller wraps.
 /// `agent` names the sub-session that asked, when it was not the one on
 /// screen (ADR-0010 §3).
-pub fn lines(
+/// Every row of the card, each with the option it belongs to. One walk lays
+/// the card out, so a click lands where the eye is and nothing is described
+/// twice.
+pub fn rows(
     dialog: &Dialog,
     interaction: &Interaction,
     agent: Option<&str>,
-) -> Vec<Line<'static>> {
-    let mut out = vec![title(interaction, agent)];
-    out.extend(body(dialog, interaction));
+) -> Vec<(Line<'static>, Option<usize>)> {
+    let mut out = vec![(title(interaction, agent), None)];
+    out.extend(
+        body(dialog, interaction)
+            .into_iter()
+            .map(|line| (line, None)),
+    );
     let options = options(interaction);
     if !options.is_empty() {
-        out.push(Line::default());
+        out.push((Line::default(), None));
     }
     for (index, option) in options.iter().enumerate() {
-        out.extend(option_lines(dialog, index, option));
+        out.extend(
+            option_lines(dialog, index, option)
+                .into_iter()
+                .map(|line| (line, Some(index))),
+        );
     }
-    out.push(Line::from(Span::styled(
-        format!("  {}", hint(dialog, interaction)),
-        theme::dim(),
-    )));
+    out.push((
+        Line::from(Span::styled(
+            format!("  {}", hint(dialog, interaction)),
+            theme::dim(),
+        )),
+        None,
+    ));
     out
 }
 

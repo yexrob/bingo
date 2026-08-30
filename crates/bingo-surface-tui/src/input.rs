@@ -8,7 +8,10 @@
 use std::path::PathBuf;
 
 use bingo_sdk::{Input, Level, Origin, SessionSelector, SessionSpec, SessionState};
-use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
+use ratatui::layout::Position;
 
 use crate::SURFACE_ID;
 use crate::clock::Now;
@@ -16,6 +19,7 @@ use crate::commands::{self, Local};
 use crate::effect::Effect;
 use crate::permission;
 use crate::search::Search;
+use crate::select::Cell;
 use crate::tree::Tree;
 use crate::ui::{Open, Switcher, Ui};
 
@@ -25,6 +29,8 @@ pub const ARM_HINT: &str = "press ctrl+c again to exit";
 pub const UNKNOWN_MODE: &str = "permission mode unknown — /permission <mode>";
 /// What ctrl+g says when the session has spawned nobody to switch to.
 pub const NO_AGENTS: &str = "no sub-agents in this session";
+/// Lines one notch of the wheel moves the transcript.
+const WHEEL: isize = 3;
 
 pub fn on_key(ui: &mut Ui, tree: &Tree, key: KeyEvent, now: Now) -> Vec<Effect> {
     if key.kind == KeyEventKind::Release {
@@ -34,6 +40,9 @@ pub fn on_key(ui: &mut Ui, tree: &Tree, key: KeyEvent, now: Now) -> Vec<Effect> 
     let state = tree.viewed();
     if let Some(effects) = leaving(ui, state, key, now) {
         return effects;
+    }
+    if ui.select.run.is_some() {
+        return selecting(ui, tree, key, now);
     }
     if ui.search.is_some() {
         return searching(ui, key, now);
@@ -68,6 +77,95 @@ pub fn on_key(ui: &mut Ui, tree: &Tree, key: KeyEvent, now: Now) -> Vec<Effect> 
         return effects;
     }
     editing(ui, tree, key, now)
+}
+
+/// One pure function from a mouse event to a list of effects, against the
+/// frame the last draw left behind: the wheel scrolls, a drag takes a run of
+/// cells, a click lands on a block, on a child's row, or on a card's option.
+pub fn on_mouse(ui: &mut Ui, tree: &Tree, mouse: MouseEvent, now: Now) -> Vec<Effect> {
+    match mouse.kind {
+        MouseEventKind::ScrollUp => scroll(ui, WHEEL, now),
+        MouseEventKind::ScrollDown => scroll(ui, -WHEEL, now),
+        MouseEventKind::Down(MouseButton::Left) => return pressed(ui, tree, mouse, now),
+        MouseEventKind::Drag(MouseButton::Left) => drag(ui, mouse),
+        _ => {}
+    }
+    Vec::new()
+}
+
+/// A press lands on whatever is under it: a card's option answers, a block
+/// takes the focus and starts a run.
+fn pressed(ui: &mut Ui, tree: &Tree, mouse: MouseEvent, now: Now) -> Vec<Effect> {
+    if let Some(index) = card_option(ui, mouse) {
+        return answer(ui, tree, index, now);
+    }
+    let Some(cell) = transcript_cell(ui, mouse) else {
+        return Vec::new();
+    };
+    let block = ui.painted.borrow().blocks.at(cell.line);
+    // A row that spawned a session is that session's row: `⏎` steps in, and
+    // so does a click.
+    if let Some(session) = block.as_ref().and_then(|item| tree.spawned_by(item)) {
+        return vec![Effect::View(session.clone())];
+    }
+    ui.select.block = block;
+    ui.select.start(cell);
+    Vec::new()
+}
+
+/// A drag takes the far end of the run with it.
+fn drag(ui: &mut Ui, mouse: MouseEvent) {
+    if let Some(cell) = transcript_cell(ui, mouse) {
+        ui.select.extend(cell);
+    }
+}
+
+/// Which option of the open card the pointer is on.
+fn card_option(ui: &Ui, mouse: MouseEvent) -> Option<usize> {
+    let painted = ui.painted.borrow();
+    let card = painted.card.as_ref()?;
+    let inside = card.area.contains(Position {
+        x: mouse.column,
+        y: mouse.row,
+    });
+    let row = usize::from(mouse.row.checked_sub(card.area.y + 1)?);
+    inside
+        .then(|| card.options.get(row).copied().flatten())
+        .flatten()
+}
+
+/// Answer the open interaction on the option a click landed on.
+fn answer(ui: &mut Ui, tree: &Tree, index: usize, now: Now) -> Vec<Effect> {
+    let Some((_, interaction)) = tree.open_interaction() else {
+        return Vec::new();
+    };
+    ui.dialog.focus = index;
+    ui.dialog.on_key(interaction, mouse_enter(), now)
+}
+
+/// What a click on a card row means: the row it landed on, chosen.
+fn mouse_enter() -> KeyEvent {
+    KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)
+}
+
+/// The transcript cell under the pointer, when it is over the transcript.
+fn transcript_cell(ui: &Ui, mouse: MouseEvent) -> Option<Cell> {
+    let painted = ui.painted.borrow();
+    let region = painted.regions.transcript;
+    if !region.contains(Position {
+        x: mouse.column,
+        y: mouse.row,
+    }) {
+        return None;
+    }
+    let row = usize::from(mouse.row - region.y);
+    // A short transcript hangs from the foot of its region: the rows above it
+    // are padding and belong to no line.
+    let padding = region.height as usize - painted.height.min(region.height as usize);
+    Some(Cell {
+        line: painted.top + row.checked_sub(padding)?,
+        column: usize::from(mouse.column - region.x),
+    })
 }
 
 fn chord(key: KeyEvent, c: char) -> bool {
@@ -150,6 +248,66 @@ fn picker(ui: &mut Ui, key: KeyEvent, now: Now) -> Vec<Effect> {
         _ => {}
     }
     Vec::new()
+}
+
+/// A run owns the keyboard while it is being drawn: the arrows take its far
+/// end, `y` and `ctrl+c` copy it, anything else lets it go and is typed.
+fn selecting(ui: &mut Ui, tree: &Tree, key: KeyEvent, now: Now) -> Vec<Effect> {
+    let height = ui.transcript().0;
+    match key.code {
+        KeyCode::Up => ui.select.walk(-1, 0, height),
+        KeyCode::Down => ui.select.walk(1, 0, height),
+        KeyCode::Left => ui.select.walk(0, -1, height),
+        KeyCode::Right => ui.select.walk(0, 1, height),
+        KeyCode::Char('y') | KeyCode::Char('c') => return copy(ui),
+        KeyCode::Esc => ui.select.clear(),
+        _ => {
+            ui.select.clear();
+            return on_key(ui, tree, key, now);
+        }
+    }
+    Vec::new()
+}
+
+/// Take what is inside the run, and let it go: a selection is answered once.
+fn copy(ui: &mut Ui) -> Vec<Effect> {
+    let text = ui
+        .select
+        .run
+        .map(|run| run.text(&ui.transcript_text()))
+        .unwrap_or_default();
+    ui.select.clear();
+    match text.is_empty() {
+        true => Vec::new(),
+        false => vec![Effect::Copy(text)],
+    }
+}
+
+/// Whether the transcript, rather than the composer, is what the keys are
+/// for: nothing is being typed, and the person has either scrolled back or
+/// put the pointer on a block. `v` is a letter the rest of the time — a
+/// message that starts with one is worth more than a chord that never waits.
+fn reading(ui: &Ui) -> bool {
+    ui.composer.is_empty() && (!ui.scroll.following() || ui.select.block.is_some())
+}
+
+/// Start a run at the top of the block the transcript is holding, or at the
+/// first line on the screen when it is holding none.
+fn start_selection(ui: &mut Ui) {
+    let at = crate::select::Cell {
+        line: focused_line(ui),
+        column: 0,
+    };
+    ui.select.start(at);
+}
+
+fn focused_line(ui: &Ui) -> usize {
+    let painted = ui.painted.borrow();
+    ui.select
+        .block
+        .as_ref()
+        .and_then(|item| painted.blocks.span(item).map(|(first, _)| first))
+        .unwrap_or(painted.top)
 }
 
 /// The search row owns the keyboard while it is up: typing edits the query,
@@ -323,6 +481,7 @@ fn plain(ui: &mut Ui, tree: &Tree, key: KeyEvent, now: Now) -> Vec<Effect> {
         KeyCode::Backspace => edit(ui, |c| c.backspace()),
         KeyCode::Delete => edit(ui, |c| c.delete()),
         KeyCode::Char('?') if ui.composer.is_empty() => ui.layer.toggle(Open::Help, now.instant),
+        KeyCode::Char('v') if reading(ui) => start_selection(ui),
         KeyCode::Char(c) => edit(ui, |composer| composer.insert(&c.to_string())),
         _ => {}
     }
@@ -1066,6 +1225,170 @@ mod tests {
                     ..SessionSpec::default()
                 }
             })]
+        );
+    }
+
+    // ---- selection and the clipboard ------------------------------------
+
+    #[test]
+    fn v_starts_a_run_the_arrows_extend_and_y_copies_it() {
+        let state = long_transcript(60);
+        let (mut ui, now) = scene();
+        render(&state, &ui, now);
+        press(&mut ui, &state, key(KeyCode::PageUp), now);
+        render(&state, &ui, now);
+        press(&mut ui, &state, typed('v'), now);
+        assert!(ui.select.run.is_some(), "v starts one while reading back");
+
+        press(&mut ui, &state, key(KeyCode::Down), now);
+        press(&mut ui, &state, key(KeyCode::Right), now);
+        let copied = press(&mut ui, &state, typed('y'), now);
+        let [Effect::Copy(text)] = copied.as_slice() else {
+            panic!("y copies: {copied:?}")
+        };
+        assert_eq!(
+            text.lines().count(),
+            2,
+            "a run of two lines, cut where the far end is: {text:?}"
+        );
+        assert!(ui.select.run.is_none(), "copying lets it go");
+    }
+
+    #[test]
+    fn a_letter_ends_a_run_and_is_typed() {
+        let state = long_transcript(60);
+        let (mut ui, now) = scene();
+        render(&state, &ui, now);
+        press(&mut ui, &state, key(KeyCode::PageUp), now);
+        render(&state, &ui, now);
+        press(&mut ui, &state, typed('v'), now);
+        press(&mut ui, &state, typed('h'), now);
+        assert!(ui.select.run.is_none());
+        assert_eq!(ui.composer.text(), "h");
+    }
+
+    #[test]
+    fn v_is_a_letter_while_the_transcript_is_at_its_foot() {
+        let (mut ui, now) = scene();
+        write(&mut ui, &state(), "ver", now);
+        assert!(ui.select.run.is_none(), "a message may start with one");
+        assert_eq!(ui.composer.text(), "ver");
+    }
+
+    #[test]
+    fn esc_lets_a_run_go() {
+        let state = long_transcript(60);
+        let (mut ui, now) = scene();
+        render(&state, &ui, now);
+        press(&mut ui, &state, key(KeyCode::PageUp), now);
+        render(&state, &ui, now);
+        press(&mut ui, &state, typed('v'), now);
+        assert!(press(&mut ui, &state, key(KeyCode::Esc), now).is_empty());
+        assert!(ui.select.run.is_none());
+    }
+
+    // ---- the mouse ------------------------------------------------------
+
+    #[test]
+    fn the_wheel_scrolls_the_transcript_and_the_foot_takes_it_back() {
+        let state = long_transcript(60);
+        let (mut ui, now) = scene();
+        render(&state, &ui, now);
+        on_mouse(&mut ui, &solo(&state), wheel(true, 10, 5), now);
+        let (total, rows) = ui.transcript();
+        assert_eq!(
+            ui.scroll
+                .top(total, rows, now.instant + crate::scroll::EASE),
+            total - rows - WHEEL as usize
+        );
+        for _ in 0..3 {
+            on_mouse(&mut ui, &solo(&state), wheel(false, 10, 5), now);
+        }
+        assert_eq!(ui.scroll, crate::scroll::Scroll::Tail);
+    }
+
+    #[test]
+    fn a_click_in_the_transcript_focuses_the_block_it_landed_on() {
+        let state = long_transcript(60);
+        let (mut ui, now) = scene();
+        render(&state, &ui, now);
+        on_mouse(&mut ui, &solo(&state), click(4, 19), now);
+        assert_eq!(
+            ui.select.block,
+            Some(bingo_sdk::ItemId::from_raw("itm_59")),
+            "the last row is the last item"
+        );
+        assert!(ui.select.run.is_some(), "and a run starts there");
+    }
+
+    #[test]
+    fn a_drag_takes_the_far_end_of_the_run_with_it() {
+        let state = long_transcript(60);
+        let (mut ui, now) = scene();
+        render(&state, &ui, now);
+        on_mouse(&mut ui, &solo(&state), click(2, 17), now);
+        on_mouse(&mut ui, &solo(&state), dragged(6, 19), now);
+        let run = ui.select.run.expect("a run");
+        assert_eq!(run.anchor.column, 2);
+        assert_eq!(run.head.column, 6);
+        assert_eq!(run.head.line, run.anchor.line + 2);
+    }
+
+    #[test]
+    fn a_click_on_a_child_row_steps_into_it() {
+        let tree = folded_tree(vec![
+            frame(
+                1,
+                bingo_sdk::Event::ItemCompleted {
+                    item: tool(
+                        "itm_1",
+                        "SpawnAgent",
+                        serde_json::json!({"prompt": "review it"}),
+                        None,
+                        bingo_sdk::ItemStatus::Completed,
+                    ),
+                },
+            ),
+            child_frame(1, announced("reviewer")),
+        ]);
+        let (mut ui, now) = scene();
+        render_tree(&tree, &ui, now);
+        let row = ui.painted.borrow().regions.transcript.bottom() - 1;
+        assert_eq!(
+            on_mouse(&mut ui, &tree, click(4, row), now),
+            vec![Effect::View(child_id())],
+            "the `↳` row belongs to the call that spawned it"
+        );
+        assert!(ui.select.run.is_none(), "stepping in is not selecting");
+    }
+
+    #[test]
+    fn a_click_on_a_card_row_answers_it() {
+        let state = folded(vec![frame(1, opened(permission(Some("Edit(src/)"), None)))]);
+        let (mut ui, now) = settled();
+        ui.dialog.focus_on(state.interactions.first());
+        render(&state, &ui, now);
+        let card = ui.painted.borrow().card.clone().expect("a card on screen");
+        let row = card
+            .options
+            .iter()
+            .position(|option| option == &Some(1))
+            .expect("the second option has a row");
+        let effects = on_mouse(
+            &mut ui,
+            &solo(&state),
+            click(4, card.area.y + 1 + row as u16),
+            now,
+        );
+        assert_eq!(
+            effects,
+            vec![Effect::Answer {
+                interaction: state.interactions[0].id.clone(),
+                answer: Answer::AllowSession {
+                    scope: "Edit(src/)".into()
+                },
+                activation: Activation::Keyboard,
+            }]
         );
     }
 

@@ -138,16 +138,33 @@ impl Blocks {
         self.blocks.retain(|id, _| live.contains(id));
     }
 
-    /// The transcript line just after this item's block — where a card that
-    /// the item asked for hangs from. `None` when the item has no block.
-    pub fn after(&self, item: &ItemId) -> Option<usize> {
+    /// Where an item's block sits in the transcript: its first line, and the
+    /// line just after it — where a card the item asked for hangs from.
+    /// `None` when the item has no block.
+    pub fn span(&self, item: &ItemId) -> Option<(usize, usize)> {
         let mut y = 0;
         for (index, id) in self.order.iter().enumerate() {
             let lines = self.blocks.get(id).map(|e| e.lines.len()).unwrap_or(0);
-            y += usize::from(index > 0) + lines;
+            y += usize::from(index > 0);
             if id == item {
-                return Some(y);
+                return Some((y, y + lines));
             }
+            y += lines;
+        }
+        None
+    }
+
+    /// The item whose block holds a transcript line, which is what a click in
+    /// the transcript lands on.
+    pub fn at(&self, line: usize) -> Option<ItemId> {
+        let mut y = 0;
+        for (index, id) in self.order.iter().enumerate() {
+            let lines = self.blocks.get(id).map(|e| e.lines.len()).unwrap_or(0);
+            y += usize::from(index > 0);
+            if (y..y + lines).contains(&line) {
+                return Some(id.clone());
+            }
+            y += lines;
         }
         None
     }
@@ -328,6 +345,21 @@ mod tests {
             let want = &whole[from..(from + rows).min(height)];
             assert_eq!(window, want, "window from {from}");
         }
+    }
+
+    #[test]
+    fn a_block_knows_which_lines_are_its_own() {
+        let state = many(3);
+        let mut blocks = cache();
+        sync(&mut blocks, &state, 60);
+        let first = ItemId::from_raw("itm_0");
+        let second = ItemId::from_raw("itm_1");
+        assert_eq!(blocks.span(&first), Some((0, 1)));
+        assert_eq!(blocks.span(&second), Some((2, 3)), "past the blank row");
+        assert_eq!(blocks.at(0), Some(first));
+        assert_eq!(blocks.at(1), None, "the blank row is nobody's");
+        assert_eq!(blocks.at(2), Some(second));
+        assert_eq!(blocks.at(99), None);
     }
 
     #[test]

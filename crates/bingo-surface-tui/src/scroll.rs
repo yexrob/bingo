@@ -37,6 +37,12 @@ impl Scroll {
         }
     }
 
+    /// Whether what arrives is shown as it arrives — the transcript is at its
+    /// foot and the person is writing, not reading back.
+    pub fn following(&self) -> bool {
+        matches!(self, Scroll::Tail)
+    }
+
     /// Whether the frame after this one would draw it somewhere else.
     pub fn moving(&self, now: Instant) -> bool {
         match self {

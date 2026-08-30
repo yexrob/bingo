@@ -23,6 +23,9 @@ crossterm.workspace = true
 pulldown-cmark.workspace = true
 unicode-width.workspace = true
 unicode-segmentation.workspace = true
+# OSC 52 puts a selection on the terminal's clipboard, which is base64 on the
+# wire (M11a). Already in the workspace tree for the fs tool's image parts.
+base64.workspace = true
 
 [dev-dependencies]
 bingo-sdk = { workspace = true, features = ["testing"] }

@@ -10,7 +10,7 @@ use bingo_sdk::{
     Preview, QuestionOption, Seq, SessionId, SessionState, SessionSummary, ToolOutput, TurnId,
     Usage, View,
 };
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent};
 use jiff::Timestamp;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
@@ -443,6 +443,40 @@ pub fn shown(ui: &mut Ui, open: crate::ui::Open, now: Now) {
         .show(open, now.instant - std::time::Duration::from_millis(500));
 }
 
+/// A synthetic mouse event at a cell of the screen.
+pub fn mouse(kind: crossterm::event::MouseEventKind, column: u16, row: u16) -> MouseEvent {
+    MouseEvent {
+        kind,
+        column,
+        row,
+        modifiers: KeyModifiers::NONE,
+    }
+}
+
+pub fn click(column: u16, row: u16) -> MouseEvent {
+    mouse(
+        crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+        column,
+        row,
+    )
+}
+
+pub fn dragged(column: u16, row: u16) -> MouseEvent {
+    mouse(
+        crossterm::event::MouseEventKind::Drag(crossterm::event::MouseButton::Left),
+        column,
+        row,
+    )
+}
+
+pub fn wheel(up: bool, column: u16, row: u16) -> MouseEvent {
+    let kind = match up {
+        true => crossterm::event::MouseEventKind::ScrollUp,
+        false => crossterm::event::MouseEventKind::ScrollDown,
+    };
+    mouse(kind, column, row)
+}
+
 pub fn key(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::NONE)
 }
@@ -764,6 +798,8 @@ pub struct Recorder {
     pub frames: Vec<String>,
     pub titles: Vec<String>,
     pub bells: usize,
+    /// The bytes handed to the terminal's clipboard, verbatim.
+    pub copies: Vec<Vec<u8>>,
 }
 
 impl Recorder {
@@ -787,6 +823,11 @@ impl Screen for Recorder {
 
     fn bell(&mut self) -> std::io::Result<()> {
         self.bells += 1;
+        Ok(())
+    }
+
+    fn copy(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+        self.copies.push(bytes.to_vec());
         Ok(())
     }
 }

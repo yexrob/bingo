@@ -190,6 +190,15 @@ impl Tree {
             .collect()
     }
 
+    /// The session a tool call spawned, which is what a click on its row
+    /// steps into.
+    pub fn spawned_by(&self, item: &ItemId) -> Option<&SessionId> {
+        self.children
+            .values()
+            .find(|child| child.summary.parent.as_ref().and_then(|p| p.item.as_ref()) == Some(item))
+            .map(|child| &child.summary.id)
+    }
+
     /// The switcher's rows, in the order it lists them.
     pub fn rows(&self) -> Vec<Row<'_>> {
         self.sessions()

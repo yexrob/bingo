@@ -19,6 +19,7 @@ use crate::history::PromptHistory;
 use crate::layers::{self, Reveal};
 use crate::scroll::Scroll;
 use crate::search::Search;
+use crate::select::Select;
 
 /// How long a transient notice holds the status line's middle slot (§3).
 pub const NOTICE: Duration = Duration::from_secs(4);
@@ -64,6 +65,16 @@ pub struct Painted {
     pub height: usize,
     /// The first transcript line the frame showed.
     pub top: usize,
+    /// The card on the screen, when one is open.
+    pub card: Option<Card>,
+}
+
+/// A card as it was drawn: where its box is, and which option each of its
+/// rows belongs to — what a click on it needs to know.
+#[derive(Clone, Debug, Default)]
+pub struct Card {
+    pub area: ratatui::layout::Rect,
+    pub options: Vec<Option<usize>>,
 }
 
 /// What the kernel told this surface it can offer: the commands a session
@@ -196,6 +207,8 @@ pub struct Ui {
     pub menu: Menu,
     /// `ctrl+f`: the query in the status line's row, while it is there.
     pub search: Option<Search>,
+    /// What the transcript is holding: a focused block, a run of cells.
+    pub select: Select,
     pub notices: Vec<Notice>,
     /// A command's `View`, shown until the next key.
     pub block: Option<View>,
@@ -221,6 +234,7 @@ impl Ui {
             layer: Layer::shut(started),
             menu: Menu::default(),
             search: None,
+            select: Select::default(),
             notices: Vec::new(),
             block: None,
             armed: None,

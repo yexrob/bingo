@@ -91,6 +91,8 @@ struct Run {
     /// not reported here.
     mine: HashSet<IntentId>,
     replies: mpsc::Sender<Reply>,
+    /// A selection a key asked for, handed to the terminal between frames.
+    clipboard: Option<String>,
     exit: Option<Exit>,
 }
 
@@ -119,6 +121,7 @@ pub(crate) async fn drive(
         ui: Ui::new(history::load(&opts.env.data_dir), Instant::now()),
         mine: HashSet::new(),
         replies: tx,
+        clipboard: None,
         exit: None,
     };
     run.fetch_catalogs();
@@ -180,10 +183,28 @@ impl Run {
     }
 
     fn paint(&mut self, screen: &mut dyn Screen) -> Result<(), KernelError> {
+        self.hand_over(screen)?;
         screen.title(&title(&self.session.tree)).map_err(stdio)?;
         screen
             .draw(&self.session.tree, &self.ui, Now::real())
             .map_err(stdio)
+    }
+
+    /// The selection goes to the terminal's own clipboard between frames, as
+    /// the bell and the title do. A terminal that will not take one is told
+    /// about, not worked around.
+    fn hand_over(&mut self, screen: &mut dyn Screen) -> Result<(), KernelError> {
+        let Some(text) = self.clipboard.take() else {
+            return Ok(());
+        };
+        match crate::select::osc52(&text) {
+            Some(bytes) => screen.copy(&bytes).map_err(stdio),
+            None => {
+                let refused = crate::select::refused(text.len());
+                self.ui.notify(Level::Warn, refused, Instant::now());
+                Ok(())
+            }
+        }
     }
 
     fn frame(
@@ -263,6 +284,10 @@ impl Run {
                 let effects = input::on_key(&mut self.ui, &self.session.tree, key, Now::real());
                 self.apply(effects);
             }
+            Term::Mouse(mouse) => {
+                let effects = input::on_mouse(&mut self.ui, &self.session.tree, mouse, Now::real());
+                self.apply(effects);
+            }
             Term::Paste(text) => input::on_paste(&mut self.ui, &text),
             _ => {}
         }
@@ -286,6 +311,7 @@ impl Run {
             Effect::View(session) => self.show(session),
             Effect::Open(selector) => self.open(selector),
             Effect::ListSessions => self.list_sessions(),
+            Effect::Copy(text) => self.clipboard = Some(text),
             Effect::Exit => self.exit = Some(Exit { code: 0 }),
         }
     }
@@ -817,6 +843,62 @@ mod tests {
             "one frame for each of the four things that happened at the start \
              and one for the keystroke — and none at all for the four seconds \
              of waiting between them"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_copied_selection_reaches_the_terminals_own_clipboard() {
+        let mut harness = Harness::new();
+        // Enough transcript to scroll back through.
+        let frames: Vec<_> = (1..=30)
+            .map(|i| {
+                frame(
+                    i,
+                    Event::ItemCompleted {
+                        item: assistant(&format!("itm_{i}"), "All green.", ItemStatus::Completed),
+                    },
+                )
+            })
+            .collect();
+        // Read back, take the first line, copy it.
+        let script = vec![
+            key(KeyCode::PageUp),
+            typed('v'),
+            key(KeyCode::Down),
+            typed('y'),
+            ctrl('d'),
+        ];
+        harness.go(frames, script, None).await;
+        assert_eq!(
+            harness.recorder.copies,
+            vec![b"\x1b]52;c;QWxsIGdyZWVuLgo=\x07".to_vec()],
+            "OSC 52 with `All green.\\n` as base64"
+        );
+    }
+
+    #[test]
+    fn a_selection_the_terminal_will_not_take_is_said_out_loud() {
+        let mut run = Run {
+            host: TestHost::with(vec![]).0,
+            data_dir: std::path::PathBuf::new(),
+            session: Attached::new(
+                state(),
+                SessionHandle(std::sync::Arc::new(TestSession::default())),
+            ),
+            ui: Ui::new(Vec::new(), Instant::now()),
+            mine: HashSet::new(),
+            replies: mpsc::channel(1).0,
+            clipboard: Some("x".repeat(crate::select::LIMIT)),
+            exit: None,
+        };
+        let mut recorder = Recorder::default();
+        run.hand_over(&mut recorder)
+            .expect("the notice is not an error");
+        assert!(recorder.copies.is_empty(), "nothing was handed over");
+        assert!(
+            run.ui.notices.iter().any(|n| n.text.contains("100 KiB")),
+            "the refusal names the size: {:?}",
+            run.ui.notices
         );
     }
 

@@ -49,6 +49,7 @@ mod preview;
 mod run;
 mod scroll;
 mod search;
+mod select;
 mod status;
 mod terminal;
 mod theme;

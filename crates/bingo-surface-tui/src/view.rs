@@ -16,8 +16,8 @@ use unicode_width::UnicodeWidthStr;
 use crate::clock::Now;
 use crate::frame::{self, Demand, Regions};
 use crate::tree::{self, Tree};
-use crate::ui::{Open, Picker, Switcher, Ui};
-use crate::{block, dialog, keys, layers, panel, search, status, theme, wrap};
+use crate::ui::{Card, Open, Picker, Switcher, Ui};
+use crate::{block, dialog, keys, layers, panel, search, select, status, theme, wrap};
 
 /// How tall the composer box may grow before it scrolls internally.
 const COMPOSER_ROWS: usize = 10;
@@ -98,6 +98,7 @@ fn layers(tree: &Tree, ui: &Ui, frame: &mut Frame, regions: Regions, now: Now) {
         ]
         .concat(),
     );
+    ui.painted.borrow_mut().card = None;
     match ui.layer.drawn(now.instant) {
         Some(reveal) => layer(tree, ui, frame, above, reveal, width),
         None => card(tree, ui, frame, regions, now),
@@ -137,16 +138,29 @@ fn card(tree: &Tree, ui: &Ui, frame: &mut Frame, regions: Regions, now: Now) {
     };
     let asked_elsewhere = owner.summary.id != *tree.view();
     let agent = asked_elsewhere.then(|| tree::name(owner));
-    let lines = wrap::wrap_all(
-        &dialog::lines(&ui.dialog, interaction, agent.as_deref()),
-        regions.transcript.width.saturating_sub(2) as usize,
-    );
+    // Each row keeps the option it belongs to through the wrap, so a click
+    // lands on what the eye is on.
+    let width = regions.transcript.width.saturating_sub(2) as usize;
+    let rows: Vec<(Line<'static>, Option<usize>)> =
+        dialog::rows(&ui.dialog, interaction, agent.as_deref())
+            .into_iter()
+            .flat_map(|(line, option)| {
+                wrap::wrap_all(std::slice::from_ref(&line), width)
+                    .into_iter()
+                    .map(move |wrapped| (wrapped, option))
+            })
+            .collect();
+    let lines: Vec<Line<'static>> = rows.iter().map(|(line, _)| line.clone()).collect();
     let above = regions.above();
     let at = layers::under(
         above,
         asking_row(ui, interaction, regions),
         rows_of(&lines, above),
     );
+    ui.painted.borrow_mut().card = Some(Card {
+        area: at,
+        options: rows.iter().map(|(_, option)| *option).collect(),
+    });
     layers::dim(frame);
     layers::card(frame, at, lines, opening(interaction, now));
 }
@@ -154,7 +168,7 @@ fn card(tree: &Tree, ui: &Ui, frame: &mut Frame, regions: Regions, now: Now) {
 /// Where the row that asked ends, in screen rows, when it is on the screen.
 fn asking_row(ui: &Ui, interaction: &bingo_sdk::Interaction, regions: Regions) -> Option<u16> {
     let painted = ui.painted.borrow();
-    let line = painted.blocks.after(interaction.item.as_ref()?)?;
+    let line = painted.blocks.span(interaction.item.as_ref()?)?.1;
     let row = u16::try_from(line.checked_sub(painted.top)?).ok()?;
     (row < regions.transcript.height).then(|| regions.transcript.y + row)
 }
@@ -218,8 +232,12 @@ fn render_transcript(tree: &Tree, ui: &Ui, frame: &mut Frame, area: Rect, now: N
     let padding = rows - shown.len();
     shown.splice(..0, std::iter::repeat_n(Line::default(), padding));
     frame.render_widget(Paragraph::new(shown), area);
+    let top = painted.top.saturating_sub(padding);
     if let Some(search) = ui.search.as_ref() {
-        search::mark(frame, area, painted.top.saturating_sub(padding), search);
+        search::mark(frame, area, top, search);
+    }
+    if let Some(run) = ui.select.run.as_ref() {
+        select::mark(frame, area, top, run);
     }
 }
 
