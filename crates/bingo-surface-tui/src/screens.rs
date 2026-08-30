@@ -8,9 +8,10 @@ use bingo_sdk::{
     LoginFlow, Preview, ToolOutput, TurnId, TurnStatus, View,
 };
 use serde_json::json;
+use unicode_width::UnicodeWidthStr;
 
 use crate::clock::Now;
-use crate::painted::{ascii, assert_row_styled, in_look, no_colour, painted};
+use crate::painted::{ascii, assert_row_styled, in_look, no_colour, painted, truecolor};
 use crate::test_support::*;
 use crate::tree::Tree;
 use crate::ui::{Switcher, Ui};
@@ -585,6 +586,24 @@ fn a_card_spends_its_colour_on_the_row_the_keyboard_is_on() {
         "Do you want to",
         &[("Do you want to edit src/lib.rs?", crate::theme::text())],
     );
+}
+
+/// The one place `raised` is spent, and the only rule 24 bits can carry that
+/// the eight cannot: what you said is a band, not a sentence.
+#[test]
+fn your_own_line_sits_on_a_bar_the_width_of_the_transcript() {
+    let (ui, now) = scene();
+    let tree = solo(&folded(answered()));
+    crate::theme::with(truecolor(), || {
+        let row = painted(80, 24, &tree, &ui, now).row("run the tests");
+        let width: usize = row.iter().map(|(text, _)| text.width()).sum();
+        assert_eq!(width, 80, "the bar runs to the edge: {row:#?}");
+        let ground = crate::theme::as_drawn(crate::theme::raised()).bg;
+        assert!(
+            row.iter().all(|(_, style)| style.bg == ground),
+            "every cell of it is on the raised ground: {row:#?}"
+        );
+    });
 }
 
 #[test]

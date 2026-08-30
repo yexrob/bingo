@@ -31,6 +31,14 @@ pub fn ascii() -> Theme {
     }
 }
 
+/// The native look, which is the only one with a ground to raise.
+pub fn truecolor() -> Theme {
+    Theme {
+        colors: Colors::True(theme::DARK),
+        glyphs: &theme::UNICODE,
+    }
+}
+
 /// One drawn frame, kept cell by cell.
 pub struct Painted(ratatui::buffer::Buffer);
 
@@ -58,11 +66,17 @@ impl Painted {
                 _ => runs.push((cell.symbol().to_string(), cell.style())),
             }
         }
-        // The padding a row ends in is the terminal's, not the view's.
-        if let Some((text, _)) = runs.last_mut() {
+        // Blank cells nothing was spent on are the terminal's padding; blank
+        // cells that carry a colour are a bar, and a bar is the view's.
+        if let Some((text, style)) = runs.last_mut()
+            && !spends_colour(*style)
+        {
             *text = text.trim_end().to_string();
         }
-        while runs.last().is_some_and(|(text, _)| text.is_empty()) {
+        while runs
+            .last()
+            .is_some_and(|(text, style)| text.is_empty() && !spends_colour(*style))
+        {
             runs.pop();
         }
         runs
