@@ -59,6 +59,10 @@ pub const BINDINGS: &[Binding] = &[
         description: "switch to a sub-agent's view",
     },
     Binding {
+        keys: "ctrl+t",
+        description: "plugin state (tasks, rooms)",
+    },
+    Binding {
         keys: "tab",
         description: "complete the command under the caret",
     },

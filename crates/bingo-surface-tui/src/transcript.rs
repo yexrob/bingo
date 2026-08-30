@@ -74,7 +74,7 @@ fn child_line(agent: &str) -> Line<'static> {
 
 fn item_lines(item: &Item, width: usize, spinner: &str) -> Vec<Line<'static>> {
     match &item.body {
-        ItemBody::User { parts, .. } => user(parts),
+        ItemBody::User { parts, origin } => user(parts, origin.principal.as_deref()),
         ItemBody::Assistant { text } => markdown::render(text, width),
         ItemBody::Reasoning { .. } => vec![Line::from(Span::styled(
             format!("{}thinking…", theme::THINKING),
@@ -130,7 +130,11 @@ fn item_lines(item: &Item, width: usize, spinner: &str) -> Vec<Line<'static>> {
     }
 }
 
-fn user(parts: &[ContentPart]) -> Vec<Line<'static>> {
+/// A person's own line, and a post somebody else wrote. An origin that names
+/// a principal is somebody speaking — a room's member, a parent talking to its
+/// child — so the transcript says who, as a chat does. Where they said it is
+/// the view one is looking at; saying it again would be noise.
+fn user(parts: &[ContentPart], principal: Option<&str>) -> Vec<Line<'static>> {
     let text = parts
         .iter()
         .filter_map(ContentPart::as_text)
@@ -142,10 +146,17 @@ fn user(parts: &[ContentPart]) -> Vec<Line<'static>> {
     text.lines()
         .enumerate()
         .map(|(i, line)| {
-            Line::from(vec![
-                Span::styled(if i == 0 { theme::USER } else { "  " }, theme::dim()),
-                Span::raw(line.to_string()),
-            ])
+            let mut spans = vec![Span::styled(
+                if i == 0 { theme::USER } else { "  " },
+                theme::dim(),
+            )];
+            if i == 0
+                && let Some(name) = principal
+            {
+                spans.push(Span::styled(format!("{name}: "), theme::accent()));
+            }
+            spans.push(Span::raw(line.to_string()));
+            Line::from(spans)
         })
         .collect()
 }
@@ -304,4 +315,52 @@ fn rule(text: &str, width: usize) -> Line<'static> {
         format!("{head}{}", "─".repeat(tail)),
         theme::dim(),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::{folded, frame, post, user as person};
+    use bingo_sdk::Event;
+
+    fn drawn(items: Vec<Item>) -> Vec<String> {
+        let frames = items
+            .into_iter()
+            .enumerate()
+            .map(|(i, item)| frame(i as u64 + 1, Event::ItemCompleted { item }))
+            .collect();
+        lines(&folded(frames), &Agents::new(), 60, "⠋")
+            .iter()
+            .map(ToString::to_string)
+            .collect()
+    }
+
+    #[test]
+    fn a_post_says_who_wrote_it_and_a_persons_own_line_does_not() {
+        assert_eq!(
+            drawn(vec![
+                post("itm_1", "reviewer", "two nits, otherwise fine"),
+                person("itm_2", "thanks"),
+            ]),
+            vec![
+                "❯ reviewer: two nits, otherwise fine".to_string(),
+                String::new(),
+                "❯ thanks".to_string(),
+            ],
+        );
+    }
+
+    #[test]
+    fn the_room_a_post_came_from_is_the_view_it_is_read_in() {
+        let drawn = drawn(vec![post("itm_1", "scout", "found it")]).join("\n");
+        assert!(!drawn.contains("#design"), "{drawn}");
+    }
+
+    #[test]
+    fn only_the_first_line_of_a_post_carries_the_name() {
+        assert_eq!(
+            drawn(vec![post("itm_1", "scout", "one\ntwo")]),
+            vec!["❯ scout: one".to_string(), "  two".to_string()],
+        );
+    }
 }

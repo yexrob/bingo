@@ -19,8 +19,9 @@
 //! - [`tree::Tree`] holds one reducer state per session the attachment
 //!   carries — the root and its sub-sessions (ADR-0010 §3) — and which of
 //!   them is on screen.
-//! - [`transcript`], [`markdown`], [`dialog`], [`composer`], [`commands`],
-//!   [`keys`], [`permission`] and [`wrap`] are the bricks those two stand on.
+//! - [`transcript`], [`markdown`], [`block`], [`panel`], [`dialog`],
+//!   [`composer`], [`commands`], [`keys`], [`permission`] and [`wrap`] are the
+//!   bricks those two stand on.
 //!
 //! # What a person types
 //!
@@ -28,6 +29,7 @@
 //! §6). Every other `/name` and every `!line` is submitted verbatim: the
 //! session actor parses commands, not the client.
 
+mod block;
 mod clock;
 mod commands;
 mod composer;
@@ -37,6 +39,7 @@ mod history;
 mod input;
 mod keys;
 mod markdown;
+mod panel;
 mod permission;
 mod preview;
 mod run;

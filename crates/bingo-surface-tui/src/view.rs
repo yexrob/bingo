@@ -1,11 +1,12 @@
-//! The frame, top to bottom: transcript, status, notices, dialog, help,
-//! composer, dropdown, footer. Everything below the transcript is measured —
-//! each section is built, its rows counted, and whatever is left over goes to
-//! the transcript. There is no second height formula to drift out of step.
+//! The frame, top to bottom: transcript, status, notices, dialog, help, plugin
+//! state, composer, dropdown, footer. Everything below the transcript is
+//! measured — each section is built, its rows counted, and whatever is left
+//! over goes to the transcript. There is no second height formula to drift out
+//! of step.
 //!
 //! `draw` is pure of everything but the frame it paints.
 
-use bingo_sdk::{LiveTurn, SessionState, View};
+use bingo_sdk::{Driver, LiveTurn, SessionState};
 use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Paragraph};
@@ -13,9 +14,9 @@ use ratatui::{Frame, style::Style};
 use unicode_width::UnicodeWidthStr;
 
 use crate::clock::Now;
-use crate::tree::{self, Status, Tree};
+use crate::tree::{self, Tree};
 use crate::ui::{Picker, Switcher, Ui};
-use crate::{dialog, keys, permission, theme, transcript, wrap};
+use crate::{block, dialog, keys, panel, permission, theme, transcript, wrap};
 
 /// How tall the composer box may grow before it scrolls internally.
 const COMPOSER_ROWS: usize = 10;
@@ -77,10 +78,11 @@ fn chrome(tree: &Tree, ui: &Ui, now: Now, width: usize) -> Vec<Section> {
         Section::lines(band(tree)),
         Section::lines(status(state, ui, now)),
         Section::lines(notices(ui)),
-        Section::lines(ui.block.as_ref().map(block).unwrap_or_default()),
+        Section::lines(ui.block.as_ref().map(block::lines).unwrap_or_default()),
         Section::lines(wrap::wrap_all(&dialog_lines(tree, ui), width)),
         Section::lines(help(ui, width)),
-        composer(ui, width),
+        Section::lines(plugin_state(state, ui)),
+        composer(state, ui, width),
         Section::lines(menu(ui)),
         Section::lines(vec![footer(state, width)]),
     ];
@@ -141,10 +143,7 @@ fn band(tree: &Tree) -> Vec<Line<'static>> {
             format!("{} {}", theme::CHILD, tree::name(child)),
             theme::accent(),
         ));
-        spans.push(Span::styled(
-            format!(" · {}", Status::of(child).label()),
-            theme::dim(),
-        ));
+        spans.push(Span::styled(tree::status_suffix(child), theme::dim()));
     }
     if let Some(tally) = tree.tally() {
         if !spans.is_empty() {
@@ -242,6 +241,14 @@ fn help(ui: &Ui, width: usize) -> Vec<Line<'static>> {
     out
 }
 
+/// The `ctrl+t` panel: whatever the plugins wrote into the session in view.
+fn plugin_state(state: &SessionState, ui: &Ui) -> Vec<Line<'static>> {
+    if !ui.panel {
+        return Vec::new();
+    }
+    panel::lines(state)
+}
+
 fn notices(ui: &Ui) -> Vec<Line<'static>> {
     let mut out: Vec<Line<'static>> = ui
         .notices
@@ -260,52 +267,6 @@ fn notices(ui: &Ui) -> Vec<Line<'static>> {
         )));
     }
     out
-}
-
-/// A command's `View`, shown until the next key.
-fn block(view: &View) -> Vec<Line<'static>> {
-    match view {
-        View::Text { text } => text.lines().map(plain).collect(),
-        View::List { items } => items.iter().map(|i| plain(&format!("• {i}"))).collect(),
-        View::Table { headers, rows } => table(headers, rows),
-    }
-}
-
-fn table(headers: &[String], rows: &[Vec<String>]) -> Vec<Line<'static>> {
-    let widths: Vec<usize> = headers
-        .iter()
-        .enumerate()
-        .map(|(i, header)| {
-            rows.iter()
-                .filter_map(|row| row.get(i))
-                .map(|cell| cell.width())
-                .chain(std::iter::once(header.width()))
-                .max()
-                .unwrap_or(0)
-        })
-        .collect();
-    let mut out = vec![Line::from(Span::styled(
-        row(headers, &widths),
-        theme::bold(),
-    ))];
-    out.extend(rows.iter().map(|cells| plain(&row(cells, &widths))));
-    out
-}
-
-fn row(cells: &[String], widths: &[usize]) -> String {
-    cells
-        .iter()
-        .enumerate()
-        .map(|(i, cell)| {
-            format!(
-                "{cell:<width$}",
-                width = widths.get(i).copied().unwrap_or(0)
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("  ")
-        .trim_end()
-        .to_string()
 }
 
 /// The dialog slot: a picker, the switcher, or the open interaction — the
@@ -341,10 +302,10 @@ fn switcher_lines(tree: &Tree, switcher: &Switcher) -> Vec<Line<'static>> {
         let mark = if row.attention { theme::THINKING } else { "" };
         out.push(Line::from(Span::styled(
             format!(
-                "{} {mark}{} · {}",
+                "{} {mark}{}{}",
                 if selected { "❯" } else { " " },
                 row.name,
-                row.status.label()
+                tree::suffix(row.status)
             ),
             style,
         )));
@@ -387,19 +348,20 @@ fn picker_lines(picker: &Picker) -> Vec<Line<'static>> {
 }
 
 /// The prompt box: the caret lives here and nowhere else.
-fn composer(ui: &Ui, width: usize) -> Section {
+fn composer(state: &SessionState, ui: &Ui, width: usize) -> Section {
     // Two border columns, then the `❯ ` prompt.
     let inner = width.saturating_sub(2 + theme::USER.width()).max(1);
     let layout = ui.composer.layout(inner);
     // Scroll only as far as the caret needs: it must stay in the box.
     let start = layout.cursor.0.saturating_sub(COMPOSER_ROWS - 1);
+    let placeholder = placeholder(state);
     let lines: Vec<Line<'static>> = layout
         .lines
         .iter()
         .enumerate()
         .skip(start)
         .take(COMPOSER_ROWS)
-        .map(|(i, text)| prompt_line(i, text, ui))
+        .map(|(i, text)| prompt_line(i, text, ui, &placeholder))
         .collect();
     Section {
         lines,
@@ -411,12 +373,21 @@ fn composer(ui: &Ui, width: usize) -> Section {
     }
 }
 
-fn prompt_line(index: usize, text: &str, ui: &Ui) -> Line<'static> {
+/// What the empty composer offers. Nothing answers a `Log` session, so it is
+/// posted into rather than asked (ADR-0011 §1).
+fn placeholder(state: &SessionState) -> String {
+    match state.summary.driver {
+        Driver::Log => format!("post to {}", tree::name(state)),
+        Driver::Model => keys::PLACEHOLDER.to_string(),
+    }
+}
+
+fn prompt_line(index: usize, text: &str, ui: &Ui, placeholder: &str) -> Line<'static> {
     let lead = if index == 0 { theme::USER } else { "  " };
     if index == 0 && ui.composer.is_empty() {
         return Line::from(vec![
             Span::styled(lead, theme::accent()),
-            Span::styled(keys::PLACEHOLDER, theme::dim()),
+            Span::styled(placeholder.to_string(), theme::dim()),
         ]);
     }
     Line::from(vec![
@@ -516,10 +487,6 @@ fn context_badge(state: &SessionState) -> (String, Style) {
     (format!("ctx {}%", context.percent()), style)
 }
 
-fn plain(text: &str) -> Line<'static> {
-    Line::from(Span::raw(text.to_string()))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -527,7 +494,7 @@ mod tests {
     use crate::ui::Picker;
     use bingo_sdk::{
         ContentPart, ContextUsage, Event, InterruptReason, ItemBody, ItemStatus, KernelError,
-        Level, Preview, QueueEntry, SessionSummary, ToolOutput, TurnId, TurnStatus,
+        Level, Preview, QueueEntry, SessionSummary, ToolOutput, TurnId, TurnStatus, View,
     };
     use serde_json::json;
 
@@ -1006,6 +973,116 @@ mod tests {
         let (mut ui, now) = scene();
         ui.switcher = Some(Switcher { selected: 1 });
         insta::assert_snapshot!(render_tree(&tree, &ui, now));
+    }
+
+    // ---- a session nothing answers --------------------------------------
+
+    /// A room under the root, with the room in view: what a member of it sees.
+    fn room(frames: Vec<bingo_sdk::Frame>) -> crate::tree::Tree {
+        let mut all = vec![log_frame(1, log_announced("#design"))];
+        all.extend(frames);
+        let mut tree = folded_tree(all);
+        tree.show(&log_id());
+        tree
+    }
+
+    fn posted(seq: u64, id: &str, principal: &str, text: &str) -> bingo_sdk::Frame {
+        log_frame(
+            seq,
+            Event::ItemCompleted {
+                item: post(id, principal, text),
+            },
+        )
+    }
+
+    #[test]
+    fn a_room_transcript_reads_as_a_chat() {
+        let tree = room(vec![
+            posted(2, "itm_1", "reviewer", "the plan is thin on tests"),
+            posted(3, "itm_2", "scout", "M9's exit criteria cover them"),
+            log_frame(
+                4,
+                Event::ItemCompleted {
+                    item: user("itm_3", "then let us ship it"),
+                },
+            ),
+        ]);
+        let (ui, now) = scene();
+        let screen = render_tree(&tree, &ui, now);
+        assert!(screen.contains("reviewer: the plan"), "{screen}");
+        assert!(screen.contains("scout: M9's"), "{screen}");
+        assert!(
+            !screen.contains("running") && !screen.contains("idle"),
+            "nothing answers a room: {screen}"
+        );
+        insta::assert_snapshot!(screen);
+    }
+
+    #[test]
+    fn the_composer_of_a_room_offers_to_post_to_it() {
+        let (ui, now) = scene();
+        let screen = render_tree(&room(vec![]), &ui, now);
+        assert!(screen.contains("post to #design"), "{screen}");
+        insta::assert_snapshot!(screen);
+    }
+
+    #[test]
+    fn a_room_sits_in_the_switcher_with_no_status() {
+        let mut tree = room(vec![child_frame(1, announced("reviewer"))]);
+        let root = tree.root_id().clone();
+        tree.show(&root);
+        let (mut ui, now) = scene();
+        ui.switcher = Some(Switcher { selected: 1 });
+        insta::assert_snapshot!(render_tree(&tree, &ui, now));
+    }
+
+    // ---- the plugin-state panel -----------------------------------------
+
+    fn tasks() -> Event {
+        extended(
+            "bingo.tasks",
+            "tasks",
+            json!([
+                {"id": 1, "status": "pending", "subject": "write the plan"},
+                {"id": 2, "status": "in_progress", "subject": "ship it", "owner": "reviewer"},
+            ]),
+        )
+    }
+
+    fn members() -> Event {
+        extended(
+            "bingo.rooms",
+            "members",
+            json!({"members": ["reviewer", "scout"]}),
+        )
+    }
+
+    #[test]
+    fn ctrl_t_shows_what_the_plugins_wrote_into_the_session() {
+        let tree = room(vec![
+            posted(2, "itm_1", "reviewer", "what is left?"),
+            log_frame(3, tasks()),
+            log_frame(4, members()),
+        ]);
+        let (mut ui, now) = scene();
+        ui.panel = true;
+        let screen = render_tree(&tree, &ui, now);
+        assert!(screen.contains("bingo.tasks · tasks"), "{screen}");
+        insta::assert_snapshot!(screen);
+    }
+
+    #[test]
+    fn the_panel_shows_the_session_in_view_and_says_when_it_is_empty() {
+        let mut tree = room(vec![log_frame(2, tasks())]);
+        let (mut ui, now) = scene();
+        ui.panel = true;
+        assert!(render_tree(&tree, &ui, now).contains("write the plan"));
+
+        let root = tree.root_id().clone();
+        tree.show(&root);
+        let screen = render_tree(&tree, &ui, now);
+        assert!(screen.contains(crate::panel::NOTHING), "{screen}");
+        assert!(!screen.contains("write the plan"), "{screen}");
     }
 
     #[test]
