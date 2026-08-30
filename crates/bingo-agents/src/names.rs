@@ -26,7 +26,8 @@ pub fn free(base: &str, taken: &[String]) -> Option<String> {
 
 /// A name that can be a title and a key segment both. Whitespace and `/`
 /// would make `agent/<parent>/<name>` ambiguous, so they are refused here
-/// rather than mangled into something the caller never asked for.
+/// rather than mangled into something the caller never asked for; `parent`
+/// is refused because `resolve` would read it as the address it already is.
 pub fn check(name: &str) -> Result<&str, KernelError> {
     let name = name.trim();
     let bad = name.is_empty() || name.contains('/') || name.chars().any(char::is_whitespace);
@@ -34,6 +35,12 @@ pub fn check(name: &str) -> Result<&str, KernelError> {
         return Err(KernelError::new(
             ErrorCode::InvalidInput,
             format!("{name:?} is not a name: one word, no slashes"),
+        ));
+    }
+    if name == PARENT {
+        return Err(KernelError::new(
+            ErrorCode::InvalidInput,
+            format!("{PARENT:?} is what a child calls whoever spawned it; pick another name"),
         ));
     }
     Ok(name)
@@ -154,11 +161,13 @@ mod tests {
     }
 
     #[test]
-    fn a_name_that_would_break_the_key_is_refused() {
+    fn a_name_that_would_break_the_key_or_the_address_is_refused() {
         assert_eq!(check(" reviewer "), Ok("reviewer"));
-        for bad in ["", "  ", "a/b", "two words"] {
+        for bad in ["", "  ", "a/b", "two words", PARENT] {
             assert!(check(bad).is_err(), "{bad:?} was accepted");
         }
+        let error = check(PARENT).expect_err("a child named parent could never be written to");
+        assert!(error.message.contains("pick another name"), "{error}");
     }
 
     #[tokio::test]
