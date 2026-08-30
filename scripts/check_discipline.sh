@@ -70,6 +70,31 @@ if [ -n "$mirrors" ]; then
   say "event mirror enum in a surface crate (surfaces fold bingo_sdk::Event, they do not redefine it):"; say "$mirrors" | head; fail=1
 fi
 
+# 4c. The kernel knows no tool by name: a plugin's tool named in kernel or sdk code — a prompt line,
+#     a match arm — is a leak, and only a test fixture may spell one. Test modules are cut off at
+#     `#[cfg(test)]`, as the cohesion check cuts them.
+python3 - <<'PY' || fail=1
+import re, sys, pathlib
+# Names that are only ever a tool's, anywhere; names that are also words (Read, Write, Edit)
+# only quoted or backticked as a whole token.
+names = r"\b(SpawnAgent|SendMessage|FollowupTask|WaitAgent|ListAgents|TaskCreate|TaskUpdate|TaskGet|TaskList|AskUserQuestion|WebFetch|WebSearch|Bash|Glob|Grep|Skill)\b|[`\"](Read|Write|Edit)[`\"]"
+bad = []
+for f in list(pathlib.Path("crates/bingo-sdk/src").rglob("*.rs")) + list(pathlib.Path("crates/bingo-core/src").rglob("*.rs")):
+    if "test" in f.name or "tests" in f.parts:
+        continue
+    src = f.read_text(encoding="utf-8").split("#[cfg(test)]")[0]
+    for n, line in enumerate(src.splitlines(), 1):
+        if line.lstrip().startswith("//"):
+            continue
+        if re.search(names, line):
+            bad.append(f"{f}:{n}: {line.strip()}")
+if bad:
+    print("a tool named in kernel/sdk code:")
+    for b in bad: print("  " + b)
+    sys.exit(1)
+print("kernel names no tool")
+PY
+
 # 5. Struct field count ≤ 16 and inherent impl spread ≤ 3 files per type (best effort, grep-based;
 #    the third file is ADR-0011 §4: the session actor is its loop, its interactions and its inputs).
 python3 - <<'PY' || fail=1

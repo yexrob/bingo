@@ -81,7 +81,9 @@ fn description() -> String {
          its exit code. stdout and stderr come back interleaved, under a `$ <command>` header \
          and above an `[Exited with code N]` line. Long output keeps its beginning and its end, \
          and says how much was dropped between them; redirect to a file and `Read` it when you \
-         need all of it.\n\n\
+         need all of it. Reading, listing and searching files is the file tools' job, not this \
+         one's: a shell `cat`, `ls`, `find` or `grep` costs a permission and answers with less \
+         than they do. Use this for building, testing and running programs.\n\n\
          The call waits for the command to exit, for {default} milliseconds unless `timeout` \
          says otherwise ({max} milliseconds at most). stdin is closed, so nothing can prompt: \
          a command that needs a terminal (a full-screen monitor, an editor, a pager, `sudo` \

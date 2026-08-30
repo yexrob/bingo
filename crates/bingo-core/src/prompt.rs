@@ -65,8 +65,8 @@ what they said, including failures.
 - Never commit, push, delete or overwrite work unless the user asked for that.
 
 # Tool use
-- Use Read, Glob and Grep to look at files; do not use Bash for reading or \
-searching. Use Bash for building, testing and running programs.
+- Each tool says what it is for; use the one made for the job, not a shell \
+command that imitates it.
 - Call independent tools in the same turn so they run together.
 - Paths are relative to the working directory unless absolute; quote paths \
 with spaces in shell commands.
