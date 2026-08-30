@@ -24,13 +24,13 @@
 
 ## Exit criteria
 
-- [ ] `cargo fmt --all -- --check`, `cargo check --workspace --all-targets --locked`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, `cargo test --workspace --locked`, `scripts/check_discipline.sh`, `scripts/budget.sh`, `cargo deny check`, `scripts/tui-smoke.sh`
-- [ ] Library: every brick in 2 has its test; the loopback flow rejects a wrong `state`; the device poll stops at the cap and on `Cancel`; a permanent refresh failure clears the entry and `status()` reads `Expired`; eight concurrent callers refresh once; `auth.json` is 0600 after a write and after a rewrite
-- [ ] Provider: `codex_request_params_isolation` (M2) still passes; the 401 → refresh → retry path; `models()` dynamic and fallback; both providers registered from one plugin
-- [ ] Kernel: a holding command may open an interaction with `turn: None`; it is cancelled `CommandEnded` when the command finishes; `/login` on an unknown provider is `PROVIDER_UNAVAILABLE`; `/login fake` is `UNSUPPORTED`… the fake provider says so
-- [ ] Surfaces: the TUI shows the URL and code and Esc cancels; `bingo login codex --device` on a terminal prints them on stderr and nothing on stdout; the RPC `Login{Paste}` round trip
-- [ ] Black-box: every scenario in 7
-- [ ] sdk changed once; ADR-0012 lists what it touched; `check_discipline.sh` accepts `provider-openai → auth-oauth` and would reject `auth-oauth → provider-openai`
+- [x] `cargo fmt --all -- --check`, `cargo check --workspace --all-targets --locked`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, `cargo test --workspace --locked`, `scripts/check_discipline.sh`, `scripts/budget.sh`, `cargo deny check`, `scripts/tui-smoke.sh`
+- [x] Library: every brick in 2 has its test; the loopback flow rejects a wrong `state`; the device poll stops at the cap and on `Cancel`; a permanent refresh failure clears the entry and `status()` reads `Expired`; eight concurrent callers refresh once; `auth.json` is 0600 after a write and after a rewrite
+- [x] Provider: `codex_request_params_isolation` (M2) still passes; the 401 → refresh → retry path; `models()` dynamic and fallback; both providers registered from one plugin
+- [x] Kernel: a holding command may open an interaction with `turn: None`; it is cancelled `CommandEnded` when the command finishes; `/login` on an unknown provider is `PROVIDER_UNAVAILABLE`; `/login` on a provider that takes a key is `INVALID_INPUT` and says `login` (the sdk maps `Unsupported` there)
+- [x] Surfaces: the TUI shows the URL and code and Esc cancels; `bingo login codex --device` on a terminal prints them on stderr and nothing on stdout; the RPC `Login{Paste}` round trip
+- [x] Black-box: every scenario in 7
+- [x] sdk changed once; ADR-0012 lists what it touched; `check_discipline.sh` accepts `provider-openai → auth-oauth` and would reject `auth-oauth → provider-openai`
 
 ## Non-goals
 
@@ -39,3 +39,47 @@ A keyring backend. Reading opencode's or codex's own `auth.json`. Anthropic subs
 ## Risks touched
 
 R1 sdk churn — one change, three additions, made first. R4 provider quirks — the Codex endpoint has never been exercised live in this project; the fake issuer proves the flows, the user's own subscription proves the endpoint (a live smoke is the last exit criterion and needs the user). Security — the callback binds loopback only, `state` is random per attempt, the verifier never leaves the process, the store is 0600; nothing is logged. `aws-lc-rs` as a direct dependency — if reqwest's TLS backend moves, the edge is a one-line swap to `sha2`.
+
+## Verified (2026-08-30, commit c972901; live subscription smoke pending)
+
+```
+$ cargo fmt --all -- --check                                        exit 0
+$ cargo check --workspace --all-targets --locked                    exit 0
+$ cargo clippy --workspace --all-targets --locked -- -D warnings    exit 0
+$ cargo test --workspace --locked                                   exit 0 — 1598 passed, 0 failed
+  new: bingo-auth-oauth 52 · provider-openai 84 + codex_subscription 5 (responses_api 15 unchanged)
+  core +5 (host/tests/login.rs 4, an idle session refuses to ask) · tui +3 snapshots · bin cli +6 · bin login (rpc) 1
+$ scripts/check_discipline.sh                                       exit 0 (size warnings: core/session.rs 779, core/host.rs 832,
+                                                                    core/host/tests.rs 937, core/turn.rs 775, tests/rpc.rs 793, tui/test_support.rs 743)
+  a library importing a plugin, injected by hand:                   exit 1 — "bingo-auth-oauth -> bingo-tool-web (a library depends on bingo-sdk only)"
+$ scripts/budget.sh                                                 dependencies 268 (max 268, was 267: one workspace crate; aws-lc-rs added none)
+$ cargo deny check                                                  advisories ok, bans ok, licenses ok, sources ok
+$ scripts/tui-smoke.sh                                              tui-smoke ok
+$ ~/.claude/jobs/8d3a7fd6/tmp/live-m10.sh (tmux, the real binary)   /login codex paste → the dialog, the words row, `login codex ⎿ Signed in to codex.`
+                                                                    in the transcript, auth.json 0600 {"type":"api"}; /login codex device against a dead
+                                                                    issuer → "transport: error sending request for url (…/deviceauth/usercode)";
+                                                                    /logout codex → `Signed out of codex.`, the entry gone
+```
+
+Exit criteria, item by item: the library's bricks are each tested alone (RFC 7636 B vector, the JWT claim order, the callback parser, `is_fresh` at the 300 s lead, `permanent`, the authorize URL literal) and each flow end to end against wiremock (device with a pending poll, browser with a real loopback socket hit by reqwest — right state 200, wrong state 400, refresh rotation, a permanent failure clearing the entry and `status()` reading `Expired`, eight concurrent callers → `expect(1)` refresh, `Cancel` stopping a poll, `Paste` storing an `Api` entry, 0600 after write and rewrite, a corrupt file an error). The provider: M2's isolation test unchanged, the 401 → refresh → retry against wiremock, the dynamic catalogue on the fixture and the fallback on a 404, one plugin registering `openai` and `codex`, `login` on `openai` `Unsupported`. The kernel: the four host tests in `host/tests/login.rs` plus the idle-session refusal. Surfaces: three `TestBackend` snapshots, the tmux drive above, `bingo login codex --device` with the code and the address on stderr and one line on stdout, the RPC `Login{Paste}` round trip followed by `/model codex/gpt-5.4` in the same process. Black-box: every scenario in brick 7. The sdk changed once (`aec4a72`); ADR-0012 lists what it touched.
+
+Found while integrating:
+
+- The TUI dialog's 400 ms keystroke guard dropped a `1` my tmux script sent the instant the dialog appeared — the guard working as ADR-0002 meant it; a scripted drive waits half a second before answering a dialog.
+- `pkce::verifier()`/`state()` are fallible: `aws_lc_rs` `SecureRandom::fill` can fail and `expect` is a lint error; the failure is `AuthError::Invalid`, never a weaker random.
+- Percent-encoding and the form body are four hand-written lines (`percent.rs`): `url` is not a dependency of the library and reqwest's `form` feature would have pulled `serde_urlencoded` against the budget.
+- `Credential::Key(Option<String>)`, so `status()` can say `Missing` for an unconfigured key with the provider's own hint; `Credential::status` takes the hint as a closure because only the provider knows the settings file to name.
+- The 401 retry keys on `ProviderError::Auth`, which `classify` produces for 401 and 403 alike; both mean the credential.
+- `Tokens` and `TokenSource` have redacting `Debug` impls, with a test that no secret appears; `OpenAiProvider`'s derived `Debug` prints them.
+- The dropdown's argument completion was hard-wired to `models`; it now reads any catalogue a command's `ArgSpec::Catalog{source}` names, so `/login <tab>` lists providers.
+- Three crates now carry their own `Prompter` test double (`Signing` in core, `Person` in auth-oauth, `NoPrompter` in provider-openai).
+
+Open, carried forward:
+
+- [ ] **Live smoke with a ChatGPT subscription** (needs the user): `bingo login codex` in a terminal (the browser flow), then `bingo --print --provider codex --model gpt-5.4 "list the crates in this workspace"`. Two facts only a live run settles: the `/codex/models` response shape (the fixture is codex-rs's documented shape, not a recording — a mismatch reads as the nine-model fallback, silently) and the refresh body being JSON (the old project live-tested it; opencode sends a form; the swap is one line in `exchange::refresh` and the crate test that pins JSON would fail loudly).
+- A `Prompter` double in `bingo_sdk::testing` (`ScriptedPrompter`), replacing the three local ones.
+- The catalogue's `Models` for a provider whose list is dynamic (`/model codex/<tab>` completes nothing; typing the id works).
+- Anthropic subscription login: the library is ready, the issuer is not known.
+- API keys into `auth.json`: `{"type":"api"}` is read and written by `paste`; nothing moves a settings key there.
+- `browser::open` runs only on macOS here; the Linux and Windows arms are compile-checked.
+- `core/host/tests.rs` is 937 lines against the 1000 fail: split by subject at the next kernel milestone.
