@@ -16,7 +16,7 @@ use crate::commands::{self, Local};
 use crate::effect::Effect;
 use crate::permission;
 use crate::tree::Tree;
-use crate::ui::{Switcher, Ui};
+use crate::ui::{Open, Switcher, Ui};
 
 /// What the first ctrl+c on an empty composer says.
 pub const ARM_HINT: &str = "press ctrl+c again to exit";
@@ -34,19 +34,19 @@ pub fn on_key(ui: &mut Ui, tree: &Tree, key: KeyEvent, now: Now) -> Vec<Effect> 
     if let Some(effects) = leaving(ui, state, key, now) {
         return effects;
     }
-    if ui.picker.is_some() {
-        return picker(ui, key);
+    if ui.layer.captures() && matches!(ui.layer.open, Open::Picker(_)) {
+        return picker(ui, key, now);
     }
     if chord(key, 'g') {
         toggle_switcher(ui, tree, now);
         return Vec::new();
     }
     if chord(key, 't') {
-        ui.panel = !ui.panel;
+        ui.layer.toggle(Open::Panel, now.instant);
         return Vec::new();
     }
-    if ui.switcher.is_some() {
-        return switcher(ui, tree, key);
+    if ui.layer.captures() {
+        return switcher(ui, tree, key, now);
     }
     // A prompt raised anywhere in the tree is answered from wherever the
     // person is looking; the handle routes the answer back to who asked.
@@ -54,7 +54,7 @@ pub fn on_key(ui: &mut Ui, tree: &Tree, key: KeyEvent, now: Now) -> Vec<Effect> 
         return ui.dialog.on_key(interaction, key, now);
     }
     if key.code == KeyCode::Esc {
-        return escape(ui, state);
+        return escape(ui, state, now);
     }
     if let Some(effects) = menu(ui, key) {
         return effects;
@@ -102,14 +102,11 @@ fn interrupt_or_exit(ui: &mut Ui, state: &SessionState, now: Now) -> Vec<Effect>
     Vec::new()
 }
 
-/// Esc closes the innermost thing that is open, then interrupts.
-fn escape(ui: &mut Ui, state: &SessionState) -> Vec<Effect> {
-    if ui.panel {
-        ui.panel = false;
-        return Vec::new();
-    }
-    if ui.help {
-        ui.help = false;
+/// Esc closes the innermost thing that is open, then interrupts: sheet, card,
+/// dropdown, turn (§7). The card is answered before this, by the dialog.
+fn escape(ui: &mut Ui, state: &SessionState, now: Now) -> Vec<Effect> {
+    if ui.layer.showing() {
+        ui.layer.close(now.instant);
         return Vec::new();
     }
     if !ui.suggestions().is_empty() {
@@ -122,8 +119,8 @@ fn escape(ui: &mut Ui, state: &SessionState) -> Vec<Effect> {
     Vec::new()
 }
 
-fn picker(ui: &mut Ui, key: KeyEvent) -> Vec<Effect> {
-    let Some(picker) = ui.picker.as_mut() else {
+fn picker(ui: &mut Ui, key: KeyEvent, now: Now) -> Vec<Effect> {
+    let Open::Picker(picker) = &mut ui.layer.open else {
         return Vec::new();
     };
     match key.code {
@@ -134,10 +131,10 @@ fn picker(ui: &mut Ui, key: KeyEvent) -> Vec<Effect> {
         KeyCode::Char(c @ '1'..='9') => {
             picker.selected = (c as usize) - ('1' as usize);
         }
-        KeyCode::Esc => ui.picker = None,
+        KeyCode::Esc => ui.layer.close(now.instant),
         KeyCode::Enter => {
             let chosen = picker.sessions.get(picker.selected).map(|s| s.id.clone());
-            ui.picker = None;
+            ui.layer.close(now.instant);
             if let Some(id) = chosen {
                 return vec![Effect::Open(SessionSelector::ById { id })];
             }
@@ -150,7 +147,8 @@ fn picker(ui: &mut Ui, key: KeyEvent) -> Vec<Effect> {
 /// Open the switcher on the session in view, or close it again. There is
 /// nothing to switch between until the session has spawned somebody.
 fn toggle_switcher(ui: &mut Ui, tree: &Tree, now: Now) {
-    if ui.switcher.take().is_some() {
+    if ui.layer.showing() {
+        ui.layer.close(now.instant);
         return;
     }
     let rows = tree.rows();
@@ -162,31 +160,28 @@ fn toggle_switcher(ui: &mut Ui, tree: &Tree, now: Now) {
         .iter()
         .position(|row| row.session == tree.view())
         .unwrap_or(0);
-    ui.switcher = Some(Switcher { selected });
+    ui.layer
+        .show(Open::Switcher(Switcher { selected }), now.instant);
 }
 
-fn switcher(ui: &mut Ui, tree: &Tree, key: KeyEvent) -> Vec<Effect> {
+fn switcher(ui: &mut Ui, tree: &Tree, key: KeyEvent, now: Now) -> Vec<Effect> {
     let rows = tree.rows();
-    let Some(mut selected) = ui.switcher.map(|s| s.selected) else {
+    let Open::Switcher(switcher) = &mut ui.layer.open else {
         return Vec::new();
     };
     match key.code {
-        KeyCode::Up => selected = selected.saturating_sub(1),
-        KeyCode::Down => selected = (selected + 1).min(rows.len().saturating_sub(1)),
-        KeyCode::Esc => {
-            ui.switcher = None;
-            return Vec::new();
+        KeyCode::Up => switcher.selected = switcher.selected.saturating_sub(1),
+        KeyCode::Down => {
+            switcher.selected = (switcher.selected + 1).min(rows.len().saturating_sub(1))
         }
+        KeyCode::Esc => ui.layer.close(now.instant),
         KeyCode::Enter => {
-            ui.switcher = None;
-            return rows
-                .get(selected)
-                .map(|row| vec![Effect::View(row.session.clone())])
-                .unwrap_or_default();
+            let chosen = rows.get(switcher.selected).map(|row| row.session.clone());
+            ui.layer.close(now.instant);
+            return chosen.map(|id| vec![Effect::View(id)]).unwrap_or_default();
         }
         _ => {}
     }
-    ui.switcher = Some(Switcher { selected });
     Vec::new()
 }
 
@@ -261,7 +256,7 @@ fn alt(ui: &mut Ui, key: KeyEvent) -> Vec<Effect> {
 fn plain(ui: &mut Ui, tree: &Tree, key: KeyEvent, now: Now) -> Vec<Effect> {
     match key.code {
         KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => newline(ui),
-        KeyCode::Enter => return enter(ui, tree),
+        KeyCode::Enter => return enter(ui, tree, now),
         KeyCode::BackTab => return cycle_mode(ui, tree.viewed(), now),
         KeyCode::Up => history_or_line(ui, Step::Up),
         KeyCode::Down => history_or_line(ui, Step::Down),
@@ -278,7 +273,7 @@ fn plain(ui: &mut Ui, tree: &Tree, key: KeyEvent, now: Now) -> Vec<Effect> {
         KeyCode::End => ui.composer.end(),
         KeyCode::Backspace => edit(ui, |c| c.backspace()),
         KeyCode::Delete => edit(ui, |c| c.delete()),
-        KeyCode::Char('?') if ui.composer.is_empty() => ui.help = !ui.help,
+        KeyCode::Char('?') if ui.composer.is_empty() => ui.layer.toggle(Open::Help, now.instant),
         KeyCode::Char(c) => edit(ui, |composer| composer.insert(&c.to_string())),
         _ => {}
     }
@@ -301,7 +296,7 @@ fn cycle_mode(ui: &mut Ui, state: &SessionState, now: Now) -> Vec<Effect> {
 
 /// Enter sends, unless the line ends in a backslash — the newline chord for
 /// terminals that cannot tell shift+enter from enter.
-fn enter(ui: &mut Ui, tree: &Tree) -> Vec<Effect> {
+fn enter(ui: &mut Ui, tree: &Tree, now: Now) -> Vec<Effect> {
     if ui.composer.text().ends_with('\\') {
         ui.composer.backspace();
         newline(ui);
@@ -310,19 +305,19 @@ fn enter(ui: &mut Ui, tree: &Tree) -> Vec<Effect> {
     if ui.composer.text().trim().is_empty() {
         return Vec::new();
     }
-    submit(ui, tree)
+    submit(ui, tree, now)
 }
 
 /// What a line does. `/clear` starts a fresh session beside the root's, not
 /// beside whichever child is on screen.
-fn submit(ui: &mut Ui, tree: &Tree) -> Vec<Effect> {
+fn submit(ui: &mut Ui, tree: &Tree, now: Now) -> Vec<Effect> {
     let text = ui.composer.take();
     ui.history.remember(&text);
     ui.edited();
     ui.scroll.end();
     match commands::local(&text) {
         Some(Local::Help) => {
-            ui.help = !ui.help;
+            ui.layer.toggle(Open::Help, now.instant);
             Vec::new()
         }
         Some(Local::Clear) => vec![Effect::Open(SessionSelector::Create {
@@ -388,6 +383,14 @@ mod tests {
     use crate::test_support::*;
     use bingo_sdk::{Activation, Answer, SessionId, TurnStatus};
     use crossterm::event::KeyCode;
+
+    /// The row the switcher's cursor is on, when it is the layer that is open.
+    fn selected(ui: &Ui) -> Option<usize> {
+        match &ui.layer.open {
+            Open::Switcher(switcher) => Some(switcher.selected),
+            _ => None,
+        }
+    }
 
     fn press(
         ui: &mut Ui,
@@ -479,7 +482,7 @@ mod tests {
     fn help_is_the_surfaces_own_and_reaches_nobody() {
         let (mut ui, now) = scene();
         assert!(line(&mut ui, &state(), "/help", now).is_empty());
-        assert!(ui.help);
+        assert!(ui.layer.is(&Open::Help));
     }
 
     // ---- the permission mode --------------------------------------------
@@ -614,7 +617,7 @@ mod tests {
         ]);
         let (mut ui, now) = scene();
         ui.dialog.focus_on(state.interactions.first());
-        ui.help = true;
+        ui.layer.show(Open::Help, now.instant);
 
         assert_eq!(
             press(&mut ui, &state, key(KeyCode::Esc), now),
@@ -628,7 +631,7 @@ mod tests {
 
         let busy = busy();
         assert!(press(&mut ui, &busy, key(KeyCode::Esc), now).is_empty());
-        assert!(!ui.help, "then the help panel");
+        assert!(!ui.layer.showing(), "then the help sheet");
 
         write(&mut ui, &busy, "/he", now);
         assert!(press(&mut ui, &busy, key(KeyCode::Esc), now).is_empty());
@@ -890,13 +893,13 @@ mod tests {
     fn the_question_mark_only_opens_the_panel_on_an_empty_composer() {
         let (mut ui, now) = scene();
         press(&mut ui, &state(), typed('?'), now);
-        assert!(ui.help);
+        assert!(ui.layer.is(&Open::Help));
         press(&mut ui, &state(), typed('?'), now);
-        assert!(!ui.help);
+        assert!(!ui.layer.is(&Open::Help));
         write(&mut ui, &state(), "why", now);
         press(&mut ui, &state(), typed('?'), now);
         assert_eq!(ui.composer.text(), "why?");
-        assert!(!ui.help);
+        assert!(!ui.layer.is(&Open::Help));
     }
 
     #[test]
@@ -911,16 +914,19 @@ mod tests {
     #[test]
     fn the_picker_opens_the_session_it_lands_on() {
         let (mut ui, now) = scene();
-        ui.picker = Some(crate::ui::Picker {
-            sessions: vec![
-                summary(),
-                bingo_sdk::SessionSummary {
-                    id: SessionId::from_raw("ses_2"),
-                    ..summary()
-                },
-            ],
-            selected: 0,
-        });
+        ui.layer.show(
+            Open::Picker(crate::ui::Picker {
+                sessions: vec![
+                    summary(),
+                    bingo_sdk::SessionSummary {
+                        id: SessionId::from_raw("ses_2"),
+                        ..summary()
+                    },
+                ],
+                selected: 0,
+            }),
+            now.instant,
+        );
         press(&mut ui, &state(), key(KeyCode::Down), now);
         assert_eq!(
             press(&mut ui, &state(), key(KeyCode::Enter), now),
@@ -928,7 +934,7 @@ mod tests {
                 id: SessionId::from_raw("ses_2")
             })]
         );
-        assert!(ui.picker.is_none());
+        assert!(!ui.layer.showing());
     }
 
     // ---- the switcher ---------------------------------------------------
@@ -938,17 +944,13 @@ mod tests {
         let tree = with_child(vec![]);
         let (mut ui, now) = scene();
         assert!(press_tree(&mut ui, &tree, ctrl('g'), now).is_empty());
-        assert_eq!(
-            ui.switcher.map(|s| s.selected),
-            Some(0),
-            "it opens on the session in view"
-        );
+        assert_eq!(selected(&ui), Some(0), "it opens on the session in view");
         press_tree(&mut ui, &tree, key(KeyCode::Down), now);
         assert_eq!(
             press_tree(&mut ui, &tree, key(KeyCode::Enter), now),
             vec![Effect::View(child_id())]
         );
-        assert!(ui.switcher.is_none());
+        assert!(!ui.layer.showing());
     }
 
     #[test]
@@ -957,17 +959,17 @@ mod tests {
         let (mut ui, now) = scene();
         press_tree(&mut ui, &tree, ctrl('g'), now);
         press_tree(&mut ui, &tree, ctrl('g'), now);
-        assert!(ui.switcher.is_none(), "the same chord closes it");
+        assert!(!ui.layer.showing(), "the same chord closes it");
         press_tree(&mut ui, &tree, ctrl('g'), now);
         press_tree(&mut ui, &tree, key(KeyCode::Esc), now);
-        assert!(ui.switcher.is_none());
+        assert!(!ui.layer.showing());
     }
 
     #[test]
     fn ctrl_g_says_so_when_there_is_nobody_to_switch_to() {
         let (mut ui, now) = scene();
         assert!(press(&mut ui, &state(), ctrl('g'), now).is_empty());
-        assert!(ui.switcher.is_none());
+        assert!(!ui.layer.showing());
         assert!(ui.notices.iter().any(|n| n.text == NO_AGENTS));
     }
 
@@ -977,7 +979,7 @@ mod tests {
         tree.show(&child_id());
         let (mut ui, now) = scene();
         press_tree(&mut ui, &tree, ctrl('g'), now);
-        assert_eq!(ui.switcher.map(|s| s.selected), Some(1));
+        assert_eq!(selected(&ui), Some(1));
         assert_eq!(
             press_tree(&mut ui, &tree, key(KeyCode::Enter), now),
             vec![Effect::View(child_id())]
@@ -1024,15 +1026,36 @@ mod tests {
     fn ctrl_t_toggles_the_plugin_state_panel_and_esc_closes_it() {
         let (mut ui, now) = scene();
         assert!(press(&mut ui, &state(), ctrl('t'), now).is_empty());
-        assert!(ui.panel);
+        assert!(ui.layer.is(&Open::Panel));
         press(&mut ui, &state(), ctrl('t'), now);
-        assert!(!ui.panel, "the same chord closes it");
+        assert!(!ui.layer.is(&Open::Panel), "the same chord closes it");
 
         press(&mut ui, &state(), ctrl('t'), now);
-        ui.help = true;
         assert!(press(&mut ui, &state(), key(KeyCode::Esc), now).is_empty());
-        assert!(!ui.panel, "esc takes the innermost panel first");
-        assert!(ui.help);
+        assert!(!ui.layer.showing(), "and so does esc");
+    }
+
+    #[test]
+    fn one_layer_at_a_time_replaces_the_last() {
+        let (mut ui, now) = scene();
+        press(&mut ui, &state(), typed('?'), now);
+        assert!(ui.layer.is(&Open::Help));
+        press(&mut ui, &state(), ctrl('t'), now);
+        assert!(ui.layer.is(&Open::Panel), "focus moves, never sideways");
+    }
+
+    #[test]
+    fn what_is_closing_stays_on_screen_until_it_has_gone() {
+        let (mut ui, now) = scene();
+        press(&mut ui, &state(), typed('?'), now);
+        press(&mut ui, &state(), key(KeyCode::Esc), now);
+        assert!(!ui.layer.showing(), "it is on its way out");
+        assert!(
+            !ui.layer.reveal(now.instant).gone(),
+            "and still drawn while it goes"
+        );
+        ui.expire(now.instant + crate::layers::PER_FRAME * 4);
+        assert_eq!(ui.layer.open, Open::Nothing);
     }
 
     #[test]

@@ -1,0 +1,228 @@
+//! The two things that come over the frame, and how they arrive.
+//!
+//! A **card** is the dialog form — a permission, a question, the switcher: a
+//! bordered box under the row that asked, with the only bright border on the
+//! screen, revealed top-down over three frames. A **sheet** is the whole frame
+//! for a moment — help, the panel, the resume picker — sliding up from the
+//! composer over four. Behind either, the world dims.
+//!
+//! Where a layer is in its arrival is a pure function of the clock, so every
+//! frame of it is a test rather than something to watch for.
+
+use std::time::{Duration, Instant};
+
+use ratatui::layout::Rect;
+use ratatui::text::Line;
+use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
+use ratatui::{Frame, style::Modifier, style::Style};
+
+use crate::theme;
+
+/// A card comes down over this many frames (§6).
+pub const CARD_FRAMES: u16 = 3;
+/// A sheet slides up over this many.
+pub const SHEET_FRAMES: u16 = 4;
+/// How long one frame of an arrival lasts: 30 a second.
+pub const PER_FRAME: Duration = Duration::from_millis(33);
+
+/// How far a layer has come in. `frame` counts from 0 (not yet on screen) to
+/// `of` (all of it).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Reveal {
+    pub frame: u16,
+    pub of: u16,
+}
+
+impl Reveal {
+    /// Where an arrival that started at `since` is now. Closing runs the same
+    /// frames backwards, which is what `esc` shows.
+    pub fn at(of: u16, since: Instant, now: Instant, closing: bool) -> Self {
+        let elapsed = now.saturating_duration_since(since).as_nanos();
+        let step = u16::try_from(elapsed / PER_FRAME.as_nanos()).unwrap_or(u16::MAX);
+        let frame = match closing {
+            false => step.saturating_add(1).min(of),
+            true => of.saturating_sub(step),
+        };
+        Self { frame, of }
+    }
+
+    /// Whether the next frame would draw it differently.
+    pub fn moving(&self) -> bool {
+        self.frame > 0 && self.frame < self.of
+    }
+
+    pub fn gone(&self) -> bool {
+        self.frame == 0
+    }
+
+    /// The rows of `total` this frame shows.
+    fn rows(&self, total: u16) -> u16 {
+        if self.frame >= self.of {
+            return total;
+        }
+        (u32::from(total) * u32::from(self.frame) / u32::from(self.of.max(1))) as u16
+    }
+}
+
+/// Everything on the screen goes dim. What is behind a layer is behind it
+/// (§3): a style pass over what is already painted, so no view has to know
+/// whether something is open above it.
+pub fn dim(frame: &mut Frame) {
+    let area = frame.area();
+    let buffer = frame.buffer_mut();
+    for y in area.top()..area.bottom() {
+        for x in area.left()..area.right() {
+            buffer[(x, y)].set_style(Style::default().add_modifier(Modifier::DIM));
+        }
+    }
+}
+
+/// A bordered box at `at`, revealed top-down. Its top edge lands first, so it
+/// grows downwards into the transcript and nothing under it moves.
+pub fn card(frame: &mut Frame, at: Rect, lines: Vec<Line<'static>>, reveal: Reveal) {
+    let full = box_height(&lines, at);
+    let shown = reveal.rows(full);
+    if shown == 0 {
+        return;
+    }
+    let area = Rect {
+        height: shown,
+        ..at
+    };
+    frame.render_widget(Clear, area);
+    // While it is still coming down the box has no foot: the bottom border
+    // belongs to the last frame, not to every one of them.
+    let sides = match shown == full {
+        true => Borders::ALL,
+        false => Borders::TOP | Borders::LEFT | Borders::RIGHT,
+    };
+    frame.render_widget(
+        Block::new()
+            .borders(sides)
+            .border_type(BorderType::Rounded)
+            .border_style(theme::accent()),
+        area,
+    );
+    let inner = Rect {
+        x: at.x + 1,
+        y: at.y + 1,
+        width: at.width.saturating_sub(2),
+        height: full.saturating_sub(2),
+    };
+    let rows = inner.height.min(area.bottom().saturating_sub(inner.y));
+    if rows == 0 || inner.width == 0 {
+        return;
+    }
+    frame.render_widget(
+        Paragraph::new(lines),
+        Rect {
+            height: rows,
+            ..inner
+        },
+    );
+}
+
+/// The height a card wants: its lines and two borders, capped by the room it
+/// has. What does not fit is cut from the top — the newest rows are the ones
+/// that were asked for.
+fn box_height(lines: &[Line<'static>], at: Rect) -> u16 {
+    u16::try_from(lines.len())
+        .unwrap_or(u16::MAX)
+        .saturating_add(2)
+        .min(at.height)
+}
+
+/// A sheet fills `at` from its foot upwards: it comes out of the composer.
+pub fn sheet(frame: &mut Frame, at: Rect, lines: Vec<Line<'static>>, reveal: Reveal) {
+    let shown = reveal.rows(at.height);
+    if shown == 0 {
+        return;
+    }
+    let area = Rect {
+        y: at.bottom() - shown,
+        height: shown,
+        ..at
+    };
+    frame.render_widget(Clear, area);
+    frame.render_widget(Paragraph::new(lines).style(theme::raised()), area);
+}
+
+/// Where a card sits: under the row that asked, and against the foot of the
+/// region when that row is not on the screen or the box would hang off it.
+pub fn under(region: Rect, row: Option<u16>, height: u16) -> Rect {
+    let height = height.min(region.height);
+    let top = match row {
+        Some(row) if row + height <= region.bottom() => row,
+        _ => region.bottom().saturating_sub(height),
+    };
+    Rect {
+        y: top.max(region.y),
+        height,
+        ..region
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn now() -> Instant {
+        Instant::now()
+    }
+
+    #[test]
+    fn a_card_comes_down_over_three_frames() {
+        let start = now();
+        let frames: Vec<u16> = (0..5)
+            .map(|i| Reveal::at(CARD_FRAMES, start, start + PER_FRAME * i, false).frame)
+            .collect();
+        assert_eq!(frames, vec![1, 2, 3, 3, 3], "it is on screen at once");
+        assert!(Reveal::at(CARD_FRAMES, start, start, false).moving());
+        assert!(!Reveal::at(CARD_FRAMES, start, start + PER_FRAME * 3, false).moving());
+    }
+
+    #[test]
+    fn esc_runs_the_same_frames_backwards() {
+        let start = now();
+        let frames: Vec<u16> = (0..5)
+            .map(|i| Reveal::at(CARD_FRAMES, start, start + PER_FRAME * i, true).frame)
+            .collect();
+        assert_eq!(frames, vec![3, 2, 1, 0, 0]);
+        assert!(Reveal::at(CARD_FRAMES, start, start + PER_FRAME * 3, true).gone());
+    }
+
+    #[test]
+    fn each_frame_shows_its_share_of_the_rows() {
+        let of = CARD_FRAMES;
+        let rows = |frame| Reveal { frame, of }.rows(9);
+        assert_eq!(rows(0), 0);
+        assert_eq!(rows(1), 3);
+        assert_eq!(rows(2), 6);
+        assert_eq!(rows(3), 9);
+    }
+
+    #[test]
+    fn a_sheet_takes_four_frames_to_fill_its_region() {
+        let of = SHEET_FRAMES;
+        let rows = |frame| Reveal { frame, of }.rows(20);
+        assert_eq!([rows(1), rows(2), rows(3), rows(4)], [5, 10, 15, 20]);
+    }
+
+    #[test]
+    fn a_card_hangs_under_the_row_that_asked() {
+        let region = Rect::new(0, 0, 80, 20);
+        assert_eq!(under(region, Some(4), 6), Rect::new(0, 4, 80, 6));
+    }
+
+    #[test]
+    fn a_card_with_no_room_under_that_row_sits_at_the_foot() {
+        let region = Rect::new(0, 0, 80, 20);
+        assert_eq!(under(region, Some(18), 6), Rect::new(0, 14, 80, 6));
+        assert_eq!(under(region, None, 6), Rect::new(0, 14, 80, 6));
+        assert_eq!(
+            under(region, Some(2), 40),
+            region,
+            "a card taller than the region is the region"
+        );
+    }
+}

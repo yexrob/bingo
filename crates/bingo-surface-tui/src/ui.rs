@@ -16,6 +16,7 @@ use crate::composer::Composer;
 use crate::dialog::Dialog;
 use crate::frame::Regions;
 use crate::history::PromptHistory;
+use crate::layers::{self, Reveal};
 use crate::scroll::Scroll;
 
 /// How long a transient notice holds the status line's middle slot (§3).
@@ -40,7 +41,7 @@ pub struct Menu {
 }
 
 /// The `/resume` picker, filled by the host and answered by Enter.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Picker {
     pub sessions: Vec<SessionSummary>,
     pub selected: usize,
@@ -75,9 +76,112 @@ pub struct Catalogs {
 
 /// The `ctrl+g` switcher over the sessions in the tree. Its rows are derived
 /// from the tree at render time; only the cursor is the surface's own.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Switcher {
     pub selected: usize,
+}
+
+/// What is over the frame. One at a time: focus moves into a layer and back
+/// out, never sideways (§7).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum Open {
+    #[default]
+    Nothing,
+    /// The binding table and the commands, as a sheet.
+    Help,
+    /// What the plugins wrote into the session in view, as a sheet.
+    Panel,
+    /// The `/resume` list, as a sheet.
+    Picker(Picker),
+    /// The tree, as a card above the input box.
+    Switcher(Switcher),
+}
+
+impl Open {
+    /// Whether the keyboard belongs to it while it is open. The two lists do
+    /// answer keys; the two panels are read while a person goes on typing.
+    pub fn captures(&self) -> bool {
+        matches!(self, Open::Picker(_) | Open::Switcher(_))
+    }
+
+    /// How many frames its arrival takes: a card comes down, a sheet rises.
+    fn frames(&self) -> u16 {
+        match self {
+            Open::Switcher(_) => layers::CARD_FRAMES,
+            _ => layers::SHEET_FRAMES,
+        }
+    }
+}
+
+/// What is open and how far in it is. Closing runs the arrival backwards, so
+/// what is going stays on the screen until it has gone.
+#[derive(Clone, Debug)]
+pub struct Layer {
+    pub open: Open,
+    since: Instant,
+    closing: bool,
+}
+
+impl Layer {
+    fn shut(now: Instant) -> Self {
+        Self {
+            open: Open::Nothing,
+            since: now,
+            closing: false,
+        }
+    }
+
+    /// How far in it is at this instant.
+    pub fn reveal(&self, now: Instant) -> Reveal {
+        Reveal::at(self.open.frames(), self.since, now, self.closing)
+    }
+
+    /// How far in it is, or nothing at all when there is nothing over the
+    /// frame — including the moment after the last frame of a leaving.
+    pub fn drawn(&self, now: Instant) -> Option<Reveal> {
+        let reveal = self.reveal(now);
+        (self.open != Open::Nothing && !reveal.gone()).then_some(reveal)
+    }
+
+    /// Open this one, from the first frame.
+    pub fn show(&mut self, open: Open, now: Instant) {
+        self.open = open;
+        self.since = now;
+        self.closing = false;
+    }
+
+    /// Start closing whatever is open; [`Ui::expire`] takes it away once the
+    /// last frame of its leaving has been drawn.
+    pub fn close(&mut self, now: Instant) {
+        if self.open == Open::Nothing || self.closing {
+            return;
+        }
+        self.since = now;
+        self.closing = true;
+    }
+
+    /// Open this one, or close it when it already is: what a toggle chord does.
+    pub fn toggle(&mut self, open: Open, now: Instant) {
+        match self.open == open && !self.closing {
+            true => self.close(now),
+            false => self.show(open, now),
+        }
+    }
+
+    #[cfg(test)]
+    pub fn is(&self, open: &Open) -> bool {
+        &self.open == open && !self.closing
+    }
+
+    pub fn showing(&self) -> bool {
+        self.open != Open::Nothing && !self.closing
+    }
+
+    /// Whether the keyboard belongs to it. One on its way out has already
+    /// given the keys back.
+    pub fn captures(&self) -> bool {
+        self.showing() && self.open.captures()
+    }
 }
 
 #[derive(Debug)]
@@ -86,13 +190,9 @@ pub struct Ui {
     pub history: PromptHistory,
     pub dialog: Dialog,
     pub scroll: Scroll,
-    pub help: bool,
-    /// The `ctrl+t` panel over the viewed session's plugin state. What it
-    /// draws is the reducer's; open is all this surface remembers.
-    pub panel: bool,
+    /// The one layer over the frame, and how far it has come in.
+    pub layer: Layer,
     pub menu: Menu,
-    pub picker: Option<Picker>,
-    pub switcher: Option<Switcher>,
     pub notices: Vec<Notice>,
     /// A command's `View`, shown until the next key.
     pub block: Option<View>,
@@ -115,11 +215,8 @@ impl Ui {
             history: PromptHistory::new(history),
             dialog: Dialog::default(),
             scroll: Scroll::default(),
-            help: false,
-            panel: false,
+            layer: Layer::shut(started),
             menu: Menu::default(),
-            picker: None,
-            switcher: None,
             notices: Vec::new(),
             block: None,
             armed: None,
@@ -138,11 +235,20 @@ impl Ui {
         });
     }
 
-    /// Drop the notices whose time is up. Drawing never mutates, so the loop
-    /// calls this.
+    /// Drop what has run out: a notice past its window, a layer that has
+    /// finished leaving. Drawing never mutates, so the loop calls this.
     pub fn expire(&mut self, now: Instant) {
         self.notices.retain(|n| n.until > now);
+        if self.layer.closing && self.layer.reveal(now).gone() {
+            self.layer = Layer::shut(now);
+        }
     }
+
+    /// Whether the next frame would draw a layer differently.
+    pub fn layer_moving(&self, now: Instant) -> bool {
+        self.layer.open != Open::Nothing && self.layer.reveal(now).moving()
+    }
+
 
     /// Every command the dropdown may offer: the surface's own and the
     /// kernel's, in that order.

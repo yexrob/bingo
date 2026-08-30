@@ -423,6 +423,26 @@ pub fn scene() -> (Ui, Now) {
     )
 }
 
+/// A scene whose wall clock is far enough past [`ts`] for a card the kernel
+/// opened at `ts` to have finished arriving: the settled screen.
+pub fn settled() -> (Ui, Now) {
+    let (ui, now) = scene();
+    (
+        ui,
+        Now {
+            wall: now.wall + jiff::SignedDuration::from_millis(200),
+            ..now
+        },
+    )
+}
+
+/// Open a layer that has finished arriving: what a settled sheet or switcher
+/// looks like, rather than the first frame of its slide.
+pub fn shown(ui: &mut Ui, open: crate::ui::Open, now: Now) {
+    ui.layer
+        .show(open, now.instant - std::time::Duration::from_millis(500));
+}
+
 pub fn key(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::NONE)
 }
@@ -481,11 +501,25 @@ pub fn render_tree(tree: &Tree, ui: &Ui, now: Now) -> String {
 }
 
 pub fn draw_tree(width: u16, height: u16, tree: &Tree, ui: &Ui, now: Now) -> String {
+    drawn(width, height, tree, ui, now).to_string()
+}
+
+/// The terminal one draw leaves, for a test that asks where a style landed.
+pub fn drawn(width: u16, height: u16, tree: &Tree, ui: &Ui, now: Now) -> TestBackend {
     let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("a test terminal");
     terminal
         .draw(|frame| view::draw(tree, ui, frame, now))
         .expect("a drawn frame");
-    terminal.backend().to_string()
+    terminal.backend().clone()
+}
+
+/// The same instant, `ms` further along the wall clock: how far a card the
+/// kernel opened has come.
+pub fn later(now: Now, ms: i64) -> Now {
+    Now {
+        wall: now.wall + jiff::SignedDuration::from_millis(ms),
+        ..now
+    }
 }
 
 // ---- the doubles the loop test drives -----------------------------------

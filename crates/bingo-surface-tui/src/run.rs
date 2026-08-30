@@ -27,7 +27,7 @@ use crate::clock::Now;
 use crate::effect::Effect;
 use crate::terminal::Screen;
 use crate::tree::{self, Tree};
-use crate::ui::{Picker, Ui};
+use crate::ui::{Open, Picker, Ui};
 use crate::{SURFACE_ID, commands, history, input};
 
 /// How often a frame is redrawn *while something is moving*. Nothing moves
@@ -175,6 +175,7 @@ impl Run {
     fn animating(&self, now: Instant) -> bool {
         self.session.tree.sessions().any(SessionState::busy)
             || self.ui.scroll.moving(now)
+            || self.ui.layer_moving(now)
             || !self.ui.notices.is_empty()
     }
 
@@ -426,12 +427,13 @@ impl Run {
             Reply::Handle(session, handle) => {
                 self.session.handles.insert(session, handle);
             }
-            Reply::Sessions(sessions) => {
-                self.ui.picker = Some(Picker {
+            Reply::Sessions(sessions) => self.ui.layer.show(
+                Open::Picker(Picker {
                     sessions,
                     selected: 0,
-                })
-            }
+                }),
+                Instant::now(),
+            ),
             Reply::Commands(specs) => self.ui.catalogs.commands = specs,
             Reply::Catalogue(source, ids) => {
                 self.ui.catalogs.values.insert(source, ids);
@@ -453,8 +455,7 @@ impl Run {
         *events = Some(attachment.events);
         self.ui.opening = false;
         self.ui.scroll = Default::default();
-        self.ui.picker = None;
-        self.ui.switcher = None;
+        self.ui.layer.close(Instant::now());
         self.refocus();
     }
 }

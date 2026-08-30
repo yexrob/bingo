@@ -85,3 +85,11 @@ pub const MODE: &str = "⏵⏵";
 pub fn mode() -> Style {
     Style::default().fg(Color::Blue)
 }
+
+/// One step up from the terminal's own background: the surface a sheet, a
+/// card or a rail card sits on, and the tint a selection is drawn in. Never a
+/// foreground. The light palette and the ANSI fallback come with M11e's
+/// background detection.
+pub fn raised() -> Style {
+    Style::default().bg(Color::Rgb(0x21, 0x1d, 0x17))
+}

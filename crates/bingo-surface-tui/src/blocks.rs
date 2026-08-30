@@ -138,6 +138,20 @@ impl Blocks {
         self.blocks.retain(|id, _| live.contains(id));
     }
 
+    /// The transcript line just after this item's block — where a card that
+    /// the item asked for hangs from. `None` when the item has no block.
+    pub fn after(&self, item: &ItemId) -> Option<usize> {
+        let mut y = 0;
+        for (index, id) in self.order.iter().enumerate() {
+            let lines = self.blocks.get(id).map(|e| e.lines.len()).unwrap_or(0);
+            y += usize::from(index > 0) + lines;
+            if id == item {
+                return Some(y);
+            }
+        }
+        None
+    }
+
     /// The whole transcript's height in wrapped lines.
     pub fn height(&self) -> usize {
         self.segments()

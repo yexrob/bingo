@@ -16,8 +16,8 @@ use unicode_width::UnicodeWidthStr;
 use crate::clock::Now;
 use crate::frame::{self, Demand, Regions};
 use crate::tree::{self, Tree};
-use crate::ui::{Picker, Switcher, Ui};
-use crate::{block, dialog, keys, panel, status, theme, wrap};
+use crate::ui::{Open, Picker, Switcher, Ui};
+use crate::{block, dialog, keys, layers, panel, status, theme, wrap};
 
 /// How tall the composer box may grow before it scrolls internally.
 const COMPOSER_ROWS: usize = 10;
@@ -35,7 +35,7 @@ pub fn draw(tree: &Tree, ui: &Ui, frame: &mut Frame, now: Now) {
     render_activity(tree.viewed(), ui, frame, regions.activity, now);
     render_composer(tree.viewed(), ui, frame, regions.composer);
     render_status(tree, ui, frame, regions.status);
-    layers(tree, ui, frame, regions);
+    layers(tree, ui, frame, regions, now);
 }
 
 /// What the frame must make room for before the transcript is given the rest.
@@ -78,35 +78,117 @@ fn render_activity(state: &SessionState, ui: &Ui, frame: &mut Frame, area: Rect,
     frame.render_widget(Paragraph::new(activity(state, ui, now)), area);
 }
 
-/// The transient things that float over the frame. They are layers, not rows:
-/// the input box never moves to make room for one.
-fn layers(tree: &Tree, ui: &Ui, frame: &mut Frame, regions: Regions) {
+/// What floats over the frame, in the order it is stacked: the dropdown and a
+/// command's block ride just above the input box; a card or a sheet dims the
+/// world and takes the screen. Every one of them is a layer, not a row — the
+/// input box never moves to make room.
+fn layers(tree: &Tree, ui: &Ui, frame: &mut Frame, regions: Regions, now: Now) {
     let width = regions.transcript.width as usize;
-    let lines: Vec<Line<'static>> = [
-        ui.block.as_ref().map(block::lines).unwrap_or_default(),
-        wrap::wrap_all(&dialog_lines(tree, ui), width),
-        help(ui, width),
-        plugin_state(tree.viewed(), ui),
-        menu(ui),
-    ]
-    .concat();
+    let above = regions.above();
+    over(
+        frame,
+        above,
+        [
+            ui.block.as_ref().map(block::lines).unwrap_or_default(),
+            menu(ui),
+        ]
+        .concat(),
+    );
+    match ui.layer.drawn(now.instant) {
+        Some(reveal) => layer(tree, ui, frame, above, reveal, width),
+        None => card(tree, ui, frame, regions, now),
+    }
+}
+
+/// The layer a person opened: a sheet over the whole of the frame, or the
+/// switcher's card above the input box.
+fn layer(
+    tree: &Tree,
+    ui: &Ui,
+    frame: &mut Frame,
+    above: Rect,
+    reveal: layers::Reveal,
+    width: usize,
+) {
+    layers::dim(frame);
+    match &ui.layer.open {
+        Open::Nothing => {}
+        Open::Help => layers::sheet(frame, above, help(ui, width), reveal),
+        Open::Panel => layers::sheet(frame, above, panel::lines(tree.viewed()), reveal),
+        Open::Picker(picker) => layers::sheet(frame, above, picker_lines(picker), reveal),
+        Open::Switcher(switcher) => {
+            let lines = switcher_lines(tree, switcher);
+            let at = layers::under(above, None, rows_of(&lines, above));
+            layers::card(frame, at, lines, reveal)
+        }
+    }
+}
+
+/// The open interaction, as a bordered box under the `⎿` of the row that
+/// asked. Its arrival is measured from when the kernel opened it, so a card
+/// that was already up when this client attached is simply there.
+fn card(tree: &Tree, ui: &Ui, frame: &mut Frame, regions: Regions, now: Now) {
+    let Some((owner, interaction)) = tree.open_interaction() else {
+        return;
+    };
+    let asked_elsewhere = owner.summary.id != *tree.view();
+    let agent = asked_elsewhere.then(|| tree::name(owner));
+    let lines = wrap::wrap_all(
+        &dialog::lines(&ui.dialog, interaction, agent.as_deref()),
+        regions.transcript.width.saturating_sub(2) as usize,
+    );
+    let above = regions.above();
+    let at = layers::under(
+        above,
+        asking_row(ui, interaction, regions),
+        rows_of(&lines, above),
+    );
+    layers::dim(frame);
+    layers::card(frame, at, lines, opening(interaction, now));
+}
+
+/// Where the row that asked ends, in screen rows, when it is on the screen.
+fn asking_row(ui: &Ui, interaction: &bingo_sdk::Interaction, regions: Regions) -> Option<u16> {
+    let painted = ui.painted.borrow();
+    let line = painted.blocks.after(interaction.item.as_ref()?)?;
+    let row = u16::try_from(line.checked_sub(painted.top)?).ok()?;
+    (row < regions.transcript.height).then(|| regions.transcript.y + row)
+}
+
+/// How far into its arrival a card the kernel opened is.
+fn opening(interaction: &bingo_sdk::Interaction, now: Now) -> layers::Reveal {
+    let elapsed = now
+        .wall
+        .duration_since(interaction.opened_at)
+        .unsigned_abs();
+    let since = now.instant.checked_sub(elapsed).unwrap_or(now.instant);
+    layers::Reveal::at(layers::CARD_FRAMES, since, now.instant, false)
+}
+
+fn rows_of(lines: &[Line<'static>], region: Rect) -> u16 {
+    u16::try_from(lines.len())
+        .unwrap_or(u16::MAX)
+        .saturating_add(2)
+        .min(region.height)
+}
+
+/// Rows that ride just above the input box, trimmed from the top when the
+/// region cannot hold them all.
+fn over(frame: &mut Frame, region: Rect, lines: Vec<Line<'static>>) {
     if lines.is_empty() {
         return;
     }
-    let over = regions.above();
     let height = u16::try_from(lines.len())
         .unwrap_or(u16::MAX)
-        .min(over.height);
+        .min(region.height);
     if height == 0 {
         return;
     }
-    // What does not fit is trimmed from the top: the newest rows are the ones
-    // that were opened.
     let dropped = lines.len() - height as usize;
     let area = Rect {
-        y: over.bottom() - height,
+        y: region.bottom() - height,
         height,
-        ..over
+        ..region
     };
     frame.render_widget(Clear, area);
     frame.render_widget(Paragraph::new(lines[dropped..].to_vec()), area);
@@ -181,9 +263,6 @@ fn verb(state: &SessionState, turn: &LiveTurn) -> String {
 /// run — the surface's own and the kernel's, from the same list the dropdown
 /// ranks.
 fn help(ui: &Ui, width: usize) -> Vec<Line<'static>> {
-    if !ui.help {
-        return Vec::new();
-    }
     let commands = ui.commands();
     let column = commands.iter().map(|c| c.name.width()).max().unwrap_or(0);
     let mut out = keys::help_lines(width);
@@ -195,31 +274,6 @@ fn help(ui: &Ui, width: usize) -> Vec<Line<'static>> {
         ))
     }));
     out
-}
-
-/// The `ctrl+t` panel: whatever the plugins wrote into the session in view.
-fn plugin_state(state: &SessionState, ui: &Ui) -> Vec<Line<'static>> {
-    if !ui.panel {
-        return Vec::new();
-    }
-    panel::lines(state)
-}
-
-/// The dialog slot: a picker, the switcher, or the open interaction — the
-/// tree's first, which may be a child's.
-fn dialog_lines(tree: &Tree, ui: &Ui) -> Vec<Line<'static>> {
-    if let Some(picker) = ui.picker.as_ref() {
-        return picker_lines(picker);
-    }
-    if let Some(switcher) = ui.switcher.as_ref() {
-        return switcher_lines(tree, switcher);
-    }
-    let Some((owner, interaction)) = tree.open_interaction() else {
-        return Vec::new();
-    };
-    let asked_elsewhere = owner.summary.id != *tree.view();
-    let agent = asked_elsewhere.then(|| tree::name(owner));
-    dialog::lines(&ui.dialog, interaction, agent.as_deref())
 }
 
 /// The `ctrl+g` list: the root and its agents, with what each is doing.
@@ -511,7 +565,7 @@ mod tests {
             1,
             opened(permission(Some("Edit(src/)"), Some(long_diff()))),
         )]);
-        let (mut ui, now) = scene();
+        let (mut ui, now) = settled();
         ui.dialog.focus_on(state.interactions.first());
         insta::assert_snapshot!(render(&state, &ui, now));
     }
@@ -522,7 +576,7 @@ mod tests {
             1,
             opened(permission(Some("Edit(src/)"), Some(long_diff()))),
         )]);
-        let (mut ui, now) = scene();
+        let (mut ui, now) = settled();
         ui.dialog.focus_on(state.interactions.first());
         crate::input::on_key(&mut ui, &solo(&state), ctrl('e'), now);
         insta::assert_snapshot!(draw_sized(80, 34, &state, &ui, now));
@@ -540,7 +594,7 @@ mod tests {
                 }),
             )),
         )]);
-        let (mut ui, now) = scene();
+        let (mut ui, now) = settled();
         ui.dialog.focus_on(state.interactions.first());
         crate::input::on_key(&mut ui, &solo(&state), typed('n'), now);
         write(&mut ui, &state, "use cargo clean", now);
@@ -548,9 +602,59 @@ mod tests {
     }
 
     #[test]
+    fn a_card_comes_down_from_its_top_edge() {
+        let asked = folded(vec![frame(1, opened(permission(Some("Edit(src/)"), None)))]);
+        let (mut ui, now) = scene();
+        ui.dialog.focus_on(asked.interactions.first());
+        // Frame 0 is the screen before the kernel opened it; then one frame
+        // every 33 ms until the card is whole.
+        let mut screens = vec![render(&state(), &ui, now)];
+        screens.extend((0..3).map(|f| render(&asked, &ui, later(now, f * 33))));
+        assert_eq!(
+            screens[3],
+            render(&asked, &ui, later(now, 500)),
+            "by the third frame it has arrived"
+        );
+        insta::assert_snapshot!(screens.join("\n"));
+    }
+
+    #[test]
+    fn everything_behind_a_card_is_dim() {
+        let state = folded(vec![
+            item_frame(1, user("itm_1", "edit it")),
+            frame(2, opened(permission(Some("Edit(src/)"), None))),
+        ]);
+        let (mut ui, now) = settled();
+        ui.dialog.focus_on(state.interactions.first());
+        let screen = drawn(80, 24, &solo(&state), &ui, now);
+        let card: Vec<usize> = screen
+            .buffer()
+            .content()
+            .chunks(80)
+            .enumerate()
+            .filter(|(_, row)| row.iter().any(|cell| cell.symbol() == "\u{256d}"))
+            .map(|(y, _)| y)
+            .collect();
+        let top = *card.first().expect("a card on the screen");
+        for (y, row) in screen.buffer().content().chunks(80).enumerate() {
+            if y >= top {
+                continue;
+            }
+            for cell in row {
+                assert!(
+                    cell.style()
+                        .add_modifier
+                        .contains(ratatui::style::Modifier::DIM),
+                    "row {y} is behind the card and not dim"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn question_single() {
         let state = folded(vec![frame(1, opened(question(false, false)))]);
-        let (mut ui, now) = scene();
+        let (mut ui, now) = settled();
         ui.dialog.focus_on(state.interactions.first());
         insta::assert_snapshot!(render(&state, &ui, now));
     }
@@ -558,7 +662,7 @@ mod tests {
     #[test]
     fn question_multi() {
         let state = folded(vec![frame(1, opened(question(true, true)))]);
-        let (mut ui, now) = scene();
+        let (mut ui, now) = settled();
         ui.dialog.focus_on(state.interactions.first());
         crate::input::on_key(&mut ui, &solo(&state), typed(' '), now);
         insta::assert_snapshot!(render(&state, &ui, now));
@@ -567,7 +671,7 @@ mod tests {
     #[test]
     fn confirm_dialog() {
         let state = folded(vec![frame(1, opened(confirm()))]);
-        let (mut ui, now) = scene();
+        let (mut ui, now) = settled();
         ui.dialog.focus_on(state.interactions.first());
         insta::assert_snapshot!(render(&state, &ui, now));
     }
@@ -580,7 +684,7 @@ mod tests {
                 url: "https://auth.openai.com/oauth/authorize?client_id=app_x&state=s1".into(),
             })),
         )]);
-        let (mut ui, now) = scene();
+        let (mut ui, now) = settled();
         ui.dialog.focus_on(state.interactions.first());
         insta::assert_snapshot!(render(&state, &ui, now));
     }
@@ -594,7 +698,7 @@ mod tests {
                 code: "ABCD-EFGH".into(),
             })),
         )]);
-        let (mut ui, now) = scene();
+        let (mut ui, now) = settled();
         ui.dialog.focus_on(state.interactions.first());
         insta::assert_snapshot!(render(&state, &ui, now));
     }
@@ -602,7 +706,7 @@ mod tests {
     #[test]
     fn login_paste_dialog_with_the_words_row_open() {
         let state = folded(vec![frame(1, opened(login(bingo_sdk::LoginFlow::Paste)))]);
-        let (mut ui, now) = scene();
+        let (mut ui, now) = settled();
         ui.dialog.focus_on(state.interactions.first());
         crate::input::on_key(&mut ui, &solo(&state), typed('1'), now);
         write(&mut ui, &state, "sk-pasted-elsewhere", now);
@@ -613,7 +717,7 @@ mod tests {
     fn help_panel() {
         let state = state();
         let (mut ui, now) = scene();
-        ui.help = true;
+        shown(&mut ui, Open::Help, now);
         insta::assert_snapshot!(draw_sized(100, 28, &state, &ui, now));
     }
 
@@ -771,20 +875,24 @@ mod tests {
     fn the_session_picker_lists_what_can_be_resumed() {
         let state = state();
         let (mut ui, now) = scene();
-        ui.picker = Some(Picker {
-            sessions: vec![
-                SessionSummary {
-                    title: Some("fix the parser".into()),
-                    ..summary()
-                },
-                SessionSummary {
-                    id: bingo_sdk::SessionId::from_raw("ses_2"),
-                    title: None,
-                    ..summary()
-                },
-            ],
-            selected: 0,
-        });
+        shown(
+            &mut ui,
+            Open::Picker(Picker {
+                sessions: vec![
+                    SessionSummary {
+                        title: Some("fix the parser".into()),
+                        ..summary()
+                    },
+                    SessionSummary {
+                        id: bingo_sdk::SessionId::from_raw("ses_2"),
+                        title: None,
+                        ..summary()
+                    },
+                ],
+                selected: 0,
+            }),
+            now,
+        );
         insta::assert_snapshot!(render(&state, &ui, now));
     }
 
@@ -827,7 +935,7 @@ mod tests {
     #[test]
     fn a_child_that_needs_a_person_is_counted_on_the_status_line() {
         let tree = spawned(vec![child_frame(2, opened(child_permission()))]);
-        let (mut ui, now) = scene();
+        let (mut ui, now) = settled();
         ui.dialog
             .focus_on(tree.open_interaction().map(|(_, open)| open));
         let screen = render_tree(&tree, &ui, now);
@@ -864,7 +972,7 @@ mod tests {
     fn the_switcher_lists_the_root_and_its_agents() {
         let tree = spawned(vec![child_frame(2, opened(child_permission()))]);
         let (mut ui, now) = scene();
-        ui.switcher = Some(Switcher { selected: 1 });
+        shown(&mut ui, Open::Switcher(Switcher { selected: 1 }), now);
         insta::assert_snapshot!(render_tree(&tree, &ui, now));
     }
 
@@ -925,7 +1033,7 @@ mod tests {
         let root = tree.root_id().clone();
         tree.show(&root);
         let (mut ui, now) = scene();
-        ui.switcher = Some(Switcher { selected: 1 });
+        shown(&mut ui, Open::Switcher(Switcher { selected: 1 }), now);
         insta::assert_snapshot!(render_tree(&tree, &ui, now));
     }
 
@@ -958,7 +1066,7 @@ mod tests {
             log_frame(4, members()),
         ]);
         let (mut ui, now) = scene();
-        ui.panel = true;
+        shown(&mut ui, Open::Panel, now);
         let screen = render_tree(&tree, &ui, now);
         assert!(screen.contains("bingo.tasks · tasks"), "{screen}");
         insta::assert_snapshot!(screen);
@@ -968,7 +1076,7 @@ mod tests {
     fn the_panel_shows_the_session_in_view_and_says_when_it_is_empty() {
         let mut tree = room(vec![log_frame(2, tasks())]);
         let (mut ui, now) = scene();
-        ui.panel = true;
+        shown(&mut ui, Open::Panel, now);
         assert!(render_tree(&tree, &ui, now).contains("write the plan"));
 
         let root = tree.root_id().clone();
@@ -985,7 +1093,7 @@ mod tests {
             opened(permission(Some("E(s/)"), Some(long_diff()))),
         )]);
         let (mut ui, now) = scene();
-        ui.help = true;
+        shown(&mut ui, Open::Help, now);
         ui.dialog.focus_on(state.interactions.first());
         let screen = draw_sized(60, 12, &state, &ui, now);
         let rows: Vec<&str> = screen.lines().collect();
