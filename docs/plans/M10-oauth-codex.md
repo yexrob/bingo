@@ -40,7 +40,7 @@ A keyring backend. Reading opencode's or codex's own `auth.json`. Anthropic subs
 
 R1 sdk churn — one change, three additions, made first. R4 provider quirks — the Codex endpoint has never been exercised live in this project; the fake issuer proves the flows, the user's own subscription proves the endpoint (a live smoke is the last exit criterion and needs the user). Security — the callback binds loopback only, `state` is random per attempt, the verifier never leaves the process, the store is 0600; nothing is logged. `aws-lc-rs` as a direct dependency — if reqwest's TLS backend moves, the edge is a one-line swap to `sha2`.
 
-## Verified (2026-08-30, commit c972901; live subscription smoke pending)
+## Verified (2026-08-30, commit c972901; live subscription smoke confirmed by the user)
 
 ```
 $ cargo fmt --all -- --check                                        exit 0
@@ -76,7 +76,7 @@ Found while integrating:
 
 Open, carried forward:
 
-- [ ] **Live smoke with a ChatGPT subscription** (needs the user): `bingo login codex` in a terminal (the browser flow), then `bingo --print --provider codex --model gpt-5.4 "list the crates in this workspace"`. Two facts only a live run settles: the `/codex/models` response shape (the fixture is codex-rs's documented shape, not a recording — a mismatch reads as the nine-model fallback, silently) and the refresh body being JSON (the old project live-tested it; opencode sends a form; the swap is one line in `exchange::refresh` and the crate test that pins JSON would fail loudly).
+- [x] **Live smoke with a ChatGPT subscription** — the user ran `bingo login codex` and a `--provider codex` turn on their own account and reported it working (2026-08-30; output not pasted here). Still only a documented shape rather than a recording: `fixtures/codex_models.json`; record a live `/codex/models` body when one is at hand. The refresh body stays JSON until a live refresh says otherwise.
 - A `Prompter` double in `bingo_sdk::testing` (`ScriptedPrompter`), replacing the three local ones.
 - The catalogue's `Models` for a provider whose list is dynamic (`/model codex/<tab>` completes nothing; typing the id works).
 - Anthropic subscription login: the library is ready, the issuer is not known.
