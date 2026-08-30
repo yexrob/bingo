@@ -30,6 +30,7 @@ bingo-hooks-shell = { path = "crates/bingo-hooks-shell", version = "0.1.0" }
 bingo-agents = { path = "crates/bingo-agents", version = "0.1.0" }
 bingo-rooms = { path = "crates/bingo-rooms", version = "0.1.0" }
 bingo-tasks = { path = "crates/bingo-tasks", version = "0.1.0" }
+bingo-auth-oauth = { path = "crates/bingo-auth-oauth", version = "0.1.0" }
 
 tokio = { version = "1.53", default-features = false, features = ["rt-multi-thread", "macros", "sync", "time", "io-util", "io-std", "fs", "process", "signal"] }
 tokio-util = { version = "0.7.19", features = ["codec", "rt"] }
@@ -86,6 +87,9 @@ unicode-segmentation = "1.13"
 serde-saphyr = { version = "1.1", default-features = false, features = ["deserialize"] }
 # M7 (docs/plans/M7-hooks-skills-mcp.md)
 rmcp = { version = "3.1", default-features = false }
+# M10 (docs/plans/M10-oauth-codex.md). SHA-256 and the system random source
+# for PKCE; already resolved under rustls, so this is an edge, not a crate.
+aws-lc-rs = "1"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
