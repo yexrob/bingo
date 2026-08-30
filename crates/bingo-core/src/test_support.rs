@@ -257,14 +257,14 @@ pub fn config(
     crate::turn::TurnConfig {
         session: summary("ses_1"),
         cwd: "/tmp".into(),
-        model: crate::turn::ModelChoice {
+        model: Some(crate::turn::ModelChoice {
             provider,
             id: "m".into(),
             capabilities: capabilities(),
             max_tokens: 1000,
             reasoning: None,
             learned: Arc::new(crate::models::Learned::default()),
-        },
+        }),
         system: vec![SystemBlock {
             text: "You are bingo.".into(),
             cache: false,

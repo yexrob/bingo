@@ -99,14 +99,14 @@ fn config(provider: Arc<ScriptedProvider>, tools: Vec<Arc<dyn Tool>>) -> TurnCon
     TurnConfig {
         session: summary(),
         cwd: "/tmp".into(),
-        model: ModelChoice {
+        model: Some(ModelChoice {
             provider,
             id: "m".into(),
             capabilities: capabilities(),
             max_tokens: 1000,
             reasoning: None,
             learned: Arc::new(crate::models::Learned::default()),
-        },
+        }),
         system: vec![SystemBlock {
             text: "You are bingo.".into(),
             cache: false,
@@ -471,7 +471,14 @@ async fn an_overflow_teaches_the_window_the_server_named() {
         "{:?}",
         host.kinds()
     );
-    assert_eq!(cfg.model.learned.window("scripted", "m"), Some(150_000));
+    assert_eq!(
+        cfg.model
+            .as_ref()
+            .expect("a model")
+            .learned
+            .window("scripted", "m"),
+        Some(150_000)
+    );
     assert!(
         host.events().iter().any(|e| matches!(
             e,
@@ -487,7 +494,7 @@ async fn a_model_without_vision_gets_a_note_where_the_image_was() {
     let provider = ScriptedProvider::new(vec![Script::Events(text("seen"))]);
     let cfg = config(provider.clone(), vec![]);
     assert!(
-        !cfg.model.capabilities.images,
+        !cfg.model.as_ref().expect("a model").capabilities.images,
         "the scripted model is blind"
     );
     let host = RecordingHost::new();

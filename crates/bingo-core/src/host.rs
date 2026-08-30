@@ -449,6 +449,19 @@ impl Host {
         Ok(())
     }
 
+    /// The model a spec runs on: none for a `Log` session (ADR-0011 §1),
+    /// which resolves no provider and calls none.
+    async fn model_for(
+        &self,
+        spec: &SessionSpec,
+        thinking: Option<Effort>,
+    ) -> Result<Option<ModelChoice>, KernelError> {
+        match spec.driver {
+            Driver::Model => Ok(Some(self.choose_model(spec, thinking).await?)),
+            Driver::Log => Ok(None),
+        }
+    }
+
     async fn choose_model(
         &self,
         spec: &SessionSpec,
@@ -479,17 +492,17 @@ impl Host {
         )
     }
 
-    fn summarize(&self, spec: &SessionSpec, choice: &ModelChoice) -> SessionSummary {
+    fn summarize(&self, spec: &SessionSpec, choice: Option<&ModelChoice>) -> SessionSummary {
         let now = Timestamp::now();
         SessionSummary {
-            driver: Default::default(),
+            driver: spec.driver,
             id: SessionId::mint(),
             key: spec.key.clone(),
             title: spec.title.clone(),
             cwd: spec.cwd.display().to_string(),
             parent: spec.parent.clone(),
-            model: Some(choice.id.clone()),
-            provider: Some(choice.provider.id().to_string()),
+            model: choice.map(|c| c.id.clone()),
+            provider: choice.map(|c| c.provider.id().to_string()),
             created_at: now,
             updated_at: now,
             usage: Usage::default(),
@@ -531,10 +544,13 @@ impl Host {
         &self,
         spec: &SessionSpec,
         summary: &SessionSummary,
-        choice: ModelChoice,
+        choice: Option<ModelChoice>,
         mailbox: &Mailbox,
     ) -> TurnConfig {
-        let system = self.system_blocks(spec, &choice);
+        let system = choice
+            .as_ref()
+            .map(|choice| self.system_blocks(spec, choice))
+            .unwrap_or_default();
         TurnConfig {
             session: summary.clone(),
             cwd: spec.cwd.clone(),
@@ -569,8 +585,8 @@ impl Host {
         }
         self.check_key_free(spec.key.as_deref())?;
         let thinking = self.settings.kernel.thinking;
-        let choice = self.choose_model(&spec, thinking).await?;
-        let summary = self.summarize(&spec, &choice);
+        let choice = self.model_for(&spec, thinking).await?;
+        let summary = self.summarize(&spec, choice.as_ref());
         if let Some(store) = &self.registry.store {
             store.create(&summary).await?;
             store.acquire(&summary.id).await?;
@@ -597,13 +613,19 @@ impl Host {
         change: Change,
     ) -> Result<SessionSummary, KernelError> {
         let live = self.live(id)?;
+        if live.spec.driver == Driver::Log {
+            return Err(KernelError::new(
+                ErrorCode::InvalidInput,
+                "a log session has no model",
+            ));
+        }
         let (mut spec, mut thinking) = (live.spec.clone(), live.thinking);
         change.apply(&mut spec, &mut thinking);
         let choice = self.choose_model(&spec, thinking).await?;
         let mut summary = live.mailbox.summary().await?;
         summary.model = Some(choice.id.clone());
         summary.provider = Some(choice.provider.id().to_string());
-        let config = Arc::new(self.turn_config(&spec, &summary, choice, &live.mailbox));
+        let config = Arc::new(self.turn_config(&spec, &summary, Some(choice), &live.mailbox));
         if let Some(entry) = self.lock().get_mut(id) {
             entry.spec = spec;
             entry.thinking = thinking;

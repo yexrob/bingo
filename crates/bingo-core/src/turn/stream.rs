@@ -24,7 +24,6 @@ pub(super) enum Streamed {
 impl Turn<'_> {
     pub(super) async fn stream(&mut self, request: ModelRequest) -> Streamed {
         let mut stream = match self
-            .cfg
             .model
             .provider
             .stream(request, self.cancel.child_token())
@@ -105,19 +104,14 @@ impl Turn<'_> {
         let Some(window) = window_from_overflow(message) else {
             return;
         };
-        let provider = self.cfg.model.provider.id();
-        if self
-            .cfg
-            .model
-            .learned
-            .record(provider, &self.cfg.model.id, window)
-        {
+        let provider = self.model.provider.id();
+        if self.model.learned.record(provider, &self.model.id, window) {
             self.host.emit(Event::Notice {
                 level: Level::Info,
                 code: "WINDOW_LEARNED".into(),
                 text: format!(
                     "{provider}/{} takes {window} tokens of context; later sessions measure against it",
-                    self.cfg.model.id
+                    self.model.id
                 ),
             });
         }

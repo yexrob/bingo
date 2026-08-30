@@ -646,3 +646,112 @@ async fn latest_in_a_directory_comes_from_the_store_when_nothing_is_live() {
         .unwrap();
     assert_eq!(unknown.code, ErrorCode::SessionNotFound);
 }
+
+/// A `Log` session (ADR-0011 §1) resolves no model: a host with no provider
+/// at all opens one, records what it is told, and refuses a model change.
+#[tokio::test]
+async fn a_log_session_needs_no_provider_and_answers_nothing() {
+    let host = Host::build(vec![], HostConfig::new(env())).await.unwrap();
+    let spec = SessionSpec {
+        driver: Driver::Log,
+        title: Some("#design".into()),
+        ..spec("/work")
+    };
+    let mut journal = host
+        .open(
+            SessionSelector::Create { spec },
+            who(),
+            OpenOptions::default(),
+        )
+        .await
+        .expect("no provider is needed");
+    assert_eq!(journal.snapshot.summary.driver, Driver::Log);
+    assert!(journal.snapshot.summary.model.is_none());
+
+    journal.handle.submit(
+        IntentId::mint(),
+        Input::text("hello", Origin::surface("test")),
+    );
+    let mut recorded = false;
+    while let Some(frame) = journal.events.next().await {
+        match &frame.event {
+            Event::ItemCompleted { .. } => recorded = true,
+            Event::IntentAck {
+                outcome: IntentOutcome::Applied { .. },
+                ..
+            } => break,
+            Event::TurnStarted { .. } => panic!("a log opens no turn"),
+            _ => {}
+        }
+    }
+    assert!(recorded, "the input is the journal's");
+
+    let err = host
+        .reconfigure(
+            &journal.session,
+            Change::Model {
+                provider: None,
+                model: "m".into(),
+            },
+        )
+        .await
+        .expect_err("there is no model to change");
+    assert_eq!(err.code, ErrorCode::InvalidInput);
+}
+
+/// `deliver` and `extend` reopen a session that is persisted but not live
+/// (ADR-0011 §3), so a roster read from the store can be written to.
+#[tokio::test]
+async fn a_delivery_reaches_a_stored_session_that_is_not_live() {
+    let store = Arc::new(crate::journal::MemoryStore::new());
+    let first = ScriptedProvider::new(vec![Script::Events(text("first answer"))]);
+    let host_a = host_on(store.clone(), first).await;
+    let mut a = host_a
+        .open(
+            SessionSelector::Create {
+                spec: spec("/work"),
+            },
+            who(),
+            OpenOptions::default(),
+        )
+        .await
+        .unwrap();
+    one_turn(&mut a, "hello").await;
+    let id = a.session.clone();
+    drop(a);
+
+    let host_b = host_on(store.clone(), ScriptedProvider::new(vec![])).await;
+    assert!(host_b.live(&id).is_err(), "nothing of it is live here yet");
+    let from_peer = Input::text(
+        "are you there",
+        Origin {
+            surface: "agent".into(),
+            principal: Some("scout".into()),
+            conversation: None,
+        },
+    );
+    host_b
+        .deliver(&id, IntentId::mint(), from_peer, Delivery::Hold)
+        .await
+        .expect("reopened and delivered");
+    assert!(host_b.live(&id).is_ok(), "the delivery reopened it");
+    host_b
+        .extend(&id, "bingo.test", "things", json!([1]))
+        .await
+        .expect("extended in place");
+
+    let b = host_b
+        .open(
+            SessionSelector::ById { id: id.clone() },
+            who(),
+            OpenOptions::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        b.snapshot.queue.len(),
+        1,
+        "held in the queue of an idle session"
+    );
+    assert_eq!(b.snapshot.extensions["bingo.test"]["things"], json!([1]));
+}

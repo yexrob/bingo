@@ -75,8 +75,12 @@ fn elided_results(request: &ModelRequest) -> (usize, usize) {
 async fn past_the_micro_line_stale_results_leave_the_wire_only() {
     let provider = ScriptedProvider::new(vec![Script::Events(text("ok"))]);
     let mut cfg = config(provider.clone(), vec![]);
-    cfg.model.capabilities.context_window = 10_000;
-    cfg.model.max_tokens = 1_000; // effective 9 000, micro 4 500
+    cfg.model
+        .as_mut()
+        .expect("a model")
+        .capabilities
+        .context_window = 10_000;
+    cfg.model.as_mut().expect("a model").max_tokens = 1_000; // effective 9 000, micro 4 500
     let host = RecordingHost::new();
     let out = run_on(&cfg, &host, frames_with_results(12, 2_000)).await;
     assert_eq!(out.status, TurnStatus::Completed);
@@ -146,8 +150,12 @@ async fn the_person_is_warned_once_near_the_line() {
         Script::Events(text("done")),
     ]);
     let mut cfg = config(provider, vec![Arc::new(EchoTool { read_only: true })]);
-    cfg.model.capabilities.context_window = 30_000;
-    cfg.model.max_tokens = 1_000; // effective 29 000, warn 6 100, trigger 26 100
+    cfg.model
+        .as_mut()
+        .expect("a model")
+        .capabilities
+        .context_window = 30_000;
+    cfg.model.as_mut().expect("a model").max_tokens = 1_000; // effective 29 000, warn 6 100, trigger 26 100
     let host = RecordingHost::new();
     let out = run_on(&cfg, &host, frames_with_results(16, 2_000)).await;
     assert_eq!(out.status, TurnStatus::Completed);
@@ -165,8 +173,12 @@ async fn a_summary_that_shrinks_nothing_is_discarded_billed_and_counted() {
     let compactor = ScriptedCompactor::new(vec![ScriptedCompactor::cut("itm_t2", 8_000, 9_000)]);
     let mut cfg = config(provider.clone(), vec![]);
     cfg.compactor = Some(compactor.clone());
-    cfg.model.capabilities.context_window = 10_000;
-    cfg.model.max_tokens = 1_000; // trigger 8 100
+    cfg.model
+        .as_mut()
+        .expect("a model")
+        .capabilities
+        .context_window = 10_000;
+    cfg.model.as_mut().expect("a model").max_tokens = 1_000; // trigger 8 100
     let host = RecordingHost::new();
     let out = run_on(&cfg, &host, frames_with_results(10, 4_000)).await;
     assert_eq!(out.status, TurnStatus::Completed);
@@ -212,8 +224,12 @@ async fn three_useless_summaries_trip_the_breaker_and_one_good_one_resets_it() {
     ]);
     let mut cfg = config(provider, vec![]);
     cfg.compactor = Some(compactor.clone());
-    cfg.model.capabilities.context_window = 10_000;
-    cfg.model.max_tokens = 1_000;
+    cfg.model
+        .as_mut()
+        .expect("a model")
+        .capabilities
+        .context_window = 10_000;
+    cfg.model.as_mut().expect("a model").max_tokens = 1_000;
     let breaker = cfg.compaction.clone();
     for _ in 0..3 {
         let out = run_on(&cfg, &RecordingHost::new(), frames_with_results(10, 4_000)).await;

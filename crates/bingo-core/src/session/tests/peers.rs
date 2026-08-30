@@ -3,53 +3,6 @@
 
 use super::*;
 
-fn peer(text: &str, from: &str) -> Input {
-    Input::text(
-        text,
-        Origin {
-            surface: "agent".into(),
-            principal: Some(from.into()),
-            conversation: None,
-        },
-    )
-}
-
-/// Fold frames until `stop` says so; returns the frames seen.
-async fn frames_until(
-    events: &mut FrameStream,
-    state: &mut SessionState,
-    mut stop: impl FnMut(&Frame) -> bool,
-) -> Vec<Frame> {
-    let mut frames = Vec::new();
-    while let Some(frame) = events.next().await {
-        state.apply(&frame);
-        let done = stop(&frame);
-        frames.push(frame);
-        if done {
-            break;
-        }
-    }
-    frames
-}
-
-fn turn_origin(frames: &[Frame]) -> Option<TurnOrigin> {
-    frames.iter().find_map(|f| match &f.event {
-        Event::TurnStarted { origin, .. } => Some(*origin),
-        _ => None,
-    })
-}
-
-fn user_texts(state: &SessionState) -> Vec<String> {
-    state
-        .items
-        .iter()
-        .filter_map(|i| match &i.body {
-            ItemBody::User { parts, .. } => parts[0].as_text().map(str::to_string),
-            _ => None,
-        })
-        .collect()
-}
-
 #[tokio::test]
 async fn a_wake_delivery_to_an_idle_session_opens_a_peer_turn_that_says_who_spoke() {
     let provider = ScriptedProvider::new(vec![Script::Events(text("ok"))]);

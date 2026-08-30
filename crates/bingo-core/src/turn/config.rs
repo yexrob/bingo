@@ -26,6 +26,7 @@ impl Default for TurnBudget {
 
 /// The model the host resolved for one session (ADR-0004): who serves it,
 /// what it may assume, how much output it asks for.
+#[derive(Clone)]
 pub struct ModelChoice {
     pub provider: Arc<dyn Provider>,
     pub id: String,
@@ -120,7 +121,8 @@ impl ToolSet {
 pub struct TurnConfig {
     pub session: SessionSummary,
     pub cwd: PathBuf,
-    pub model: ModelChoice,
+    /// `None` for a session nothing answers (ADR-0011 §1): it opens no turn.
+    pub model: Option<ModelChoice>,
     pub compaction: Arc<Breaker>,
     pub system: Vec<SystemBlock>,
     pub tools: ToolSet,
@@ -140,7 +142,7 @@ impl std::fmt::Debug for TurnConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TurnConfig")
             .field("session", &self.session.id)
-            .field("model", &self.model.id)
+            .field("model", &self.model.as_ref().map(|m| &m.id))
             .finish_non_exhaustive()
     }
 }

@@ -12,7 +12,7 @@ bingo (bin)                     composes Vec<Box<dyn Plugin>>, picks a Surface
 │   tools       bingo-tool-fs · bingo-tool-bash · bingo-tool-web · bingo-mcp · bingo-agents
 │   policy      bingo-permissions · bingo-hooks-shell
 │   session     bingo-store-jsonl (journal + index) · bingo-context (compactor + memory)
-│   features    bingo-skills · bingo-teams · bingo-rooms · bingo-tasks · bingo-experience
+│   features    bingo-skills · bingo-rooms · bingo-tasks · bingo-experience   (a team is resident agents: bingo-agents)
 │   surfaces    bingo-surface-print · bingo-surface-rpc · bingo-surface-tui · bingo-acp · bingo-channels
 └── bingo-sdk                   stable API: ids · Message/ContentPart · Frame/Event/Item · SessionState + apply
                                 · traits (Plugin, Provider, Tool, PermissionPolicy, Hook, ContextContributor,

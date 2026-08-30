@@ -75,6 +75,8 @@ pub struct TurnOutcome {
 
 struct Turn<'a> {
     cfg: &'a TurnConfig,
+    /// The model this turn runs on, resolved once.
+    model: ModelChoice,
     host: &'a dyn TurnHost,
     id: TurnId,
     cancel: CancellationToken,
@@ -107,15 +109,30 @@ enum Assembled {
     Compacted,
 }
 
+/// The actor opens no turn on a session nothing answers (ADR-0011 §1); this
+/// is the guard, not a path.
+fn unanswered(items: Vec<Item>) -> TurnOutcome {
+    TurnOutcome {
+        status: TurnStatus::Failed {
+            error: KernelError::new(ErrorCode::InvalidInput, "this session answers nothing"),
+        },
+        usage: Usage::default(),
+        items,
+    }
+}
+
 pub async fn run_turn(cfg: &TurnConfig, run: TurnRun, host: &dyn TurnHost) -> TurnOutcome {
     let items = ContextView::items(&run.history);
+    let Some(model) = cfg.model.clone() else {
+        return unanswered(items);
+    };
     let hook_cx = HookContext {
         host: cfg.host.clone(),
         session: cfg.session.id.clone(),
         turn: Some(run.turn.clone()),
         cwd: cfg.cwd.clone(),
-        provider: Some(cfg.model.provider.clone()),
-        model: Some(cfg.model.id.clone()),
+        provider: Some(model.provider.clone()),
+        model: Some(model.id.clone()),
     };
     let (tools, shadowed) = cfg.tools.gather().await;
     for name in shadowed {
@@ -127,6 +144,8 @@ pub async fn run_turn(cfg: &TurnConfig, run: TurnRun, host: &dyn TurnHost) -> Tu
     }
     let mut turn = Turn {
         cfg,
+        ruler: Ruler::new(model.capabilities.context_window, model.max_tokens),
+        model,
         host,
         id: run.turn,
         cancel: run.cancel,
@@ -137,7 +156,6 @@ pub async fn run_turn(cfg: &TurnConfig, run: TurnRun, host: &dyn TurnHost) -> Tu
         recoveries: 0,
         empty_retry_used: false,
         overflow_compacted: false,
-        ruler: Ruler::new(cfg.model.capabilities.context_window, cfg.model.max_tokens),
         generation: run.generation,
         usage: Usage::default(),
         hook_cx,
@@ -257,7 +275,7 @@ impl Turn<'_> {
             round: self.round,
             items: &self.items,
             usage,
-            capabilities: &self.cfg.model.capabilities,
+            capabilities: &self.model.capabilities,
             cwd: &self.cfg.cwd,
         };
         let gathered = contributors::gather(&self.cfg.contributors, want, query).await;
@@ -300,10 +318,10 @@ impl Turn<'_> {
     /// An exact count when the endpoint offers one and the estimate has
     /// drifted far enough from the last truth to be worth a request.
     async fn recount(&mut self, request: &ModelRequest) {
-        if !self.cfg.model.capabilities.count_tokens || !self.ruler.recount_due() {
+        if !self.model.capabilities.count_tokens || !self.ruler.recount_due() {
             return;
         }
-        match self.cfg.model.provider.count_tokens(request).await {
+        match self.model.provider.count_tokens(request).await {
             Ok(counted) => self.ruler.counted(counted),
             Err(e) => tracing::debug!(error = %e, "count_tokens unavailable; the estimate stands"),
         }
@@ -368,12 +386,12 @@ impl Turn<'_> {
         let messages = self.microcompact(full, &usage);
         let usage = self.measure(&system, &messages);
         let request = ModelRequest {
-            model: self.cfg.model.id.clone(),
-            max_tokens: self.cfg.model.max_tokens,
+            model: self.model.id.clone(),
+            max_tokens: self.model.max_tokens,
             system,
             messages,
             tools: self.tool_specs(),
-            reasoning: self.cfg.model.reasoning,
+            reasoning: self.model.reasoning,
             provider_options: ProviderMetadata::new(),
         };
         self.recount(&request).await;
@@ -411,10 +429,10 @@ impl Turn<'_> {
     /// A model without vision never sees an image part; the note stands in on
     /// the wire only, and the items keep the image.
     fn without_images(&self, messages: Vec<Message>) -> Vec<Message> {
-        if self.cfg.model.capabilities.images {
+        if self.model.capabilities.images {
             return messages;
         }
-        vision::project_images_out(&messages, &vision::omitted_note(&self.cfg.model.id))
+        vision::project_images_out(&messages, &vision::omitted_note(&self.model.id))
             .unwrap_or(messages)
     }
 
@@ -530,9 +548,9 @@ impl Turn<'_> {
         let cx = CompactContext {
             items: &self.items,
             usage,
-            capabilities: &self.cfg.model.capabilities,
-            provider: self.cfg.model.provider.clone(),
-            model: &self.cfg.model.id,
+            capabilities: &self.model.capabilities,
+            provider: self.model.provider.clone(),
+            model: &self.model.id,
             cancel: self.cancel.child_token(),
             failures: self.cfg.compaction.failures(),
             keep_budget: self.ruler.lines.keep,

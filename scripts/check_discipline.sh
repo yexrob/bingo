@@ -70,7 +70,8 @@ if [ -n "$mirrors" ]; then
   say "event mirror enum in a surface crate (surfaces fold bingo_sdk::Event, they do not redefine it):"; say "$mirrors" | head; fail=1
 fi
 
-# 5. Struct field count ≤ 16 and inherent impl spread ≤ 2 files per type (best effort, grep-based).
+# 5. Struct field count ≤ 16 and inherent impl spread ≤ 3 files per type (best effort, grep-based;
+#    the third file is ADR-0011 §4: the session actor is its loop, its interactions and its inputs).
 python3 - <<'PY' || fail=1
 import re, sys, pathlib
 bad = []
@@ -85,7 +86,7 @@ for f in pathlib.Path("crates").rglob("*.rs"):
     for m in re.finditer(r"^\s*impl(?:<[^>]*>)?\s+(\w+)(?:<[^>]*>)?\s*\{", src, re.M):
         impls.setdefault((f.parts[1], m.group(1)), set()).add(str(f))
 for (crate, ty), files in impls.items():
-    if len(files) > 2:
+    if len(files) > 3:
         bad.append(f"{crate}: inherent impl of {ty} spread over {len(files)} files: {sorted(files)}")
 if bad:
     print("cohesion violations:")

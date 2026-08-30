@@ -77,7 +77,7 @@ impl Host {
         let spec = spec_of(&head);
         self.check_key_free(spec.key.as_deref())?;
         let thinking = self.settings.kernel.thinking;
-        let choice = self.choose_model(&spec, thinking).await?;
+        let choice = self.model_for(&spec, thinking).await?;
         let mailbox = session::resume(frames, Some(store), self.services(), |mailbox| {
             Arc::new(self.turn_config(&spec, &head, choice, mailbox))
         })?;
@@ -94,7 +94,7 @@ impl Host {
 /// provider and model; the tools and the policy are the running host's.
 fn spec_of(summary: &SessionSummary) -> SessionSpec {
     SessionSpec {
-        driver: Default::default(),
+        driver: summary.driver,
         cwd: std::path::PathBuf::from(&summary.cwd),
         key: summary.key.clone(),
         parent: summary.parent.clone(),

@@ -246,17 +246,31 @@ fn plain(value: &Value) -> String {
     }
 }
 
-/// A user item that names who spoke carries that name to the model
-/// (ADR-0010 §5): an agent's message, or a person's in a group, must not read
-/// as the one the session works for.
+/// A user item that names who spoke, or where, carries that to the model
+/// (ADR-0010 §5, ADR-0011): an agent's message, or a post in a group, must
+/// not read as the one the session works for, and a reply goes back where
+/// the post came from.
 fn spoken(parts: &[ContentPart], origin: &Origin) -> Vec<ContentPart> {
-    let Some(principal) = origin.principal.as_deref().filter(|p| !p.is_empty()) else {
+    let Some(label) = speaker(origin) else {
         return parts.to_vec();
     };
     let mut out = Vec::with_capacity(parts.len() + 1);
-    out.push(ContentPart::text(format!("[from {principal}]")));
+    out.push(ContentPart::text(format!("[{label}]")));
     out.extend(parts.iter().cloned());
     out
+}
+
+/// `from <principal>`, `from <principal> in <conversation>`, or
+/// `in <conversation>`; nothing for the person the session works for.
+fn speaker(origin: &Origin) -> Option<String> {
+    let principal = origin.principal.as_deref().filter(|s| !s.is_empty());
+    let conversation = origin.conversation.as_deref().filter(|s| !s.is_empty());
+    match (principal, conversation) {
+        (Some(who), Some(place)) => Some(format!("from {who} in {place}")),
+        (Some(who), None) => Some(format!("from {who}")),
+        (None, Some(place)) => Some(format!("in {place}")),
+        (None, None) => None,
+    }
 }
 
 #[cfg(test)]
@@ -347,6 +361,30 @@ mod tests {
             texts,
             [Some("[from reviewer]"), Some("ship it"), Some("ok")],
             "a person's own line carries no prefix"
+        );
+    }
+
+    #[test]
+    fn a_user_item_from_a_room_says_where_it_came_from() {
+        let mut posted = user("i1", "ship it");
+        if let ItemBody::User { origin, .. } = &mut posted.body {
+            origin.principal = Some("reviewer".into());
+            origin.conversation = Some("#design".into());
+        }
+        let mut anonymous = user("i2", "anyone?");
+        if let ItemBody::User { origin, .. } = &mut anonymous.body {
+            origin.conversation = Some("#design".into());
+        }
+        let msgs = ContextView::fold_items(&[posted, anonymous]);
+        let texts: Vec<Option<&str>> = msgs[0].parts.iter().map(|p| p.as_text()).collect();
+        assert_eq!(
+            texts,
+            [
+                Some("[from reviewer in #design]"),
+                Some("ship it"),
+                Some("[in #design]"),
+                Some("anyone?"),
+            ]
         );
     }
 
