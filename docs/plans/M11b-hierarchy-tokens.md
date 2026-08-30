@@ -55,7 +55,7 @@ $ cargo fmt --all -- --check                                  # exit 0
 $ cargo check --workspace --all-targets --locked              # exit 0
 $ cargo clippy --workspace --all-targets --locked -- -D warnings   # exit 0
 $ cargo test --workspace --locked
-test result: ok. 228 passed; 0 failed  (bingo-surface-tui)
+test result: ok. 229 passed; 0 failed  (bingo-surface-tui)
 53 suites, 0 failures                                          # exit 0
 $ scripts/check_discipline.sh
 dependency direction ok / kernel names no tool / cohesion ok / discipline ok
@@ -67,6 +67,7 @@ $ cargo build && scripts/tui-smoke.sh
   a reply reaches the transcript
   esc interrupts a turn that is still waiting
   a permission dialog answered y runs the tool
+  BINGO_ASCII=1 and NO_COLOR leave a terminal nothing it cannot draw
 tui-smoke ok
 ```
 
