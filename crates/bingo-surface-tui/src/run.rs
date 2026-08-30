@@ -30,7 +30,9 @@ use crate::tree::{self, Tree};
 use crate::ui::{Picker, Ui};
 use crate::{SURFACE_ID, commands, history, input};
 
-/// How often the spinner and the elapsed counter move.
+/// How often a frame is redrawn *while something is moving*. Nothing moves
+/// when nothing is happening, and then there is no tick at all: an idle
+/// surface draws zero frames (§6).
 const TICK: Duration = Duration::from_millis(100);
 /// Sessions the `/resume` picker lists.
 const RECENT: usize = 20;
@@ -126,7 +128,6 @@ pub(crate) async fn drive(
             bingo_sdk::Origin::surface(SURFACE_ID),
         )));
     }
-    let mut tick = tokio::time::interval(TICK);
     loop {
         tokio::select! {
             frame = next_frame(&mut events) => match frame {
@@ -138,7 +139,7 @@ pub(crate) async fn drive(
                 None => run.exit = Some(Exit { code: 0 }),
             },
             Some(reply) = replies.recv() => run.reply(reply, &mut events),
-            _ = tick.tick() => {}
+            () = tick(run.animating(Instant::now())) => {}
         }
         run.ui.expire(Instant::now());
         if let Some(exit) = run.exit.take() {
@@ -158,7 +159,25 @@ async fn next_frame(events: &mut Option<FrameStream>) -> Option<bingo_sdk::Frame
     }
 }
 
+/// The animation clock: a tick while something moves, and nothing at all
+/// while nothing does — the one place a redraw can happen without an event.
+async fn tick(animating: bool) {
+    match animating {
+        true => tokio::time::sleep(TICK).await,
+        false => std::future::pending().await,
+    }
+}
+
 impl Run {
+    /// Whether the next frame would differ from this one on its own: a turn
+    /// spins, the transcript eases where a key sent it, a notice is holding
+    /// the status line until its time is up.
+    fn animating(&self, now: Instant) -> bool {
+        self.session.tree.sessions().any(SessionState::busy)
+            || self.ui.scroll.moving(now)
+            || !self.ui.notices.is_empty()
+    }
+
     fn paint(&mut self, screen: &mut dyn Screen) -> Result<(), KernelError> {
         screen.title(&title(&self.session.tree)).map_err(stdio)?;
         screen
@@ -775,6 +794,29 @@ mod tests {
         let screen = harness.recorder.last();
         assert!(screen.contains("still here"), "{screen}");
         assert!(!screen.contains("agent"), "the child is gone: {screen}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_idle_surface_draws_nothing_at_all() {
+        let mut harness = Harness::new();
+        let (host, _) = TestHost::with(vec![]);
+        // Two seconds pass before each key, on the runtime's virtual clock.
+        let script = vec![key(KeyCode::Right), ctrl('d')];
+        drive(
+            &host,
+            options(None, harness.home.path()),
+            &mut harness.recorder,
+            keys_after(Duration::from_secs(2), script),
+        )
+        .await
+        .expect("the loop ran");
+        assert_eq!(
+            harness.recorder.frames.len(),
+            5,
+            "one frame for each of the four things that happened at the start \
+             and one for the keystroke — and none at all for the four seconds \
+             of waiting between them"
+        );
     }
 
     #[tokio::test]

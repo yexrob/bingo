@@ -14,7 +14,9 @@ use crate::blocks::Blocks;
 use crate::commands::{self, Suggestion};
 use crate::composer::Composer;
 use crate::dialog::Dialog;
+use crate::frame::Regions;
 use crate::history::PromptHistory;
+use crate::scroll::Scroll;
 
 /// How long a transient notice holds the status line's middle slot (§3).
 pub const NOTICE: Duration = Duration::from_secs(4);
@@ -29,10 +31,6 @@ pub struct Notice {
     pub until: Instant,
 }
 
-/// How far the transcript is scrolled back, in wrapped lines from the bottom.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct Scroll(pub usize);
-
 /// The command dropdown's own state; its rows are derived from the composer.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Menu {
@@ -46,6 +44,24 @@ pub struct Menu {
 pub struct Picker {
     pub sessions: Vec<SessionSummary>,
     pub selected: usize,
+}
+
+/// What the last frame put on the screen: the blocks it rendered, where it
+/// cut the regions, how tall the transcript came out and which of its lines
+/// was at the top. A key or a click is answered against this — nothing else
+/// knows how many lines there are to scroll through.
+///
+/// It is a memo of the draw, not state of its own: every field is what the
+/// reducer and the terminal's size already imply, which is why drawing may
+/// fill it from behind a shared borrow.
+#[derive(Debug, Default)]
+pub struct Painted {
+    pub blocks: Blocks,
+    pub regions: Regions,
+    /// The transcript's height in wrapped lines.
+    pub height: usize,
+    /// The first transcript line the frame showed.
+    pub top: usize,
 }
 
 /// What the kernel told this surface it can offer: the commands a session
@@ -64,7 +80,7 @@ pub struct Switcher {
     pub selected: usize,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct Ui {
     pub composer: Composer,
     pub history: PromptHistory,
@@ -88,9 +104,8 @@ pub struct Ui {
     pub opening: bool,
     /// When this surface started, which is what the spinner turns on.
     pub started: Instant,
-    /// The rendered transcript, kept between frames. It is a memo of what the
-    /// reducer already says, so drawing may fill it behind a shared borrow.
-    pub blocks: RefCell<Blocks>,
+    /// The frame as the last draw left it.
+    pub painted: RefCell<Painted>,
 }
 
 impl Ui {
@@ -111,7 +126,7 @@ impl Ui {
             catalogs: Catalogs::default(),
             opening: false,
             started,
-            blocks: RefCell::default(),
+            painted: RefCell::default(),
         }
     }
 
@@ -165,6 +180,18 @@ impl Ui {
     pub fn exit_armed(&self, now: Instant) -> bool {
         self.armed
             .is_some_and(|at| now.duration_since(at) < EXIT_WINDOW)
+    }
+
+    /// How tall the transcript came out last frame and how many rows it had
+    /// to show it in — what a scroll is measured against.
+    pub fn transcript(&self) -> (usize, usize) {
+        let painted = self.painted.borrow();
+        (painted.height, painted.regions.transcript.height as usize)
+    }
+
+    /// The rows a page key moves by: the screenful a person is looking at.
+    pub fn page(&self) -> usize {
+        self.transcript().1.max(1)
     }
 
     /// The spinner frame for this instant.

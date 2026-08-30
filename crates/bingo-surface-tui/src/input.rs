@@ -16,10 +16,8 @@ use crate::commands::{self, Local};
 use crate::effect::Effect;
 use crate::permission;
 use crate::tree::Tree;
-use crate::ui::{Scroll, Switcher, Ui};
+use crate::ui::{Switcher, Ui};
 
-/// Lines the transcript moves by on one page key.
-const PAGE: usize = 10;
 /// What the first ctrl+c on an empty composer says.
 pub const ARM_HINT: &str = "press ctrl+c again to exit";
 /// What shift+tab says when no policy published a mode it can walk.
@@ -267,10 +265,15 @@ fn plain(ui: &mut Ui, tree: &Tree, key: KeyEvent, now: Now) -> Vec<Effect> {
         KeyCode::BackTab => return cycle_mode(ui, tree.viewed(), now),
         KeyCode::Up => history_or_line(ui, Step::Up),
         KeyCode::Down => history_or_line(ui, Step::Down),
-        KeyCode::PageUp => ui.scroll = Scroll(ui.scroll.0 + PAGE),
-        KeyCode::PageDown => ui.scroll = Scroll(ui.scroll.0.saturating_sub(PAGE)),
+        KeyCode::PageUp => scroll(ui, ui.page() as isize, now),
+        KeyCode::PageDown => scroll(ui, -(ui.page() as isize), now),
         KeyCode::Left => ui.composer.left(),
         KeyCode::Right => ui.composer.right(),
+        KeyCode::Home if ui.composer.is_empty() => {
+            let (total, rows) = ui.transcript();
+            ui.scroll.home(total, rows, now.instant)
+        }
+        KeyCode::End if ui.composer.is_empty() => ui.scroll.end(),
         KeyCode::Home => ui.composer.home(),
         KeyCode::End => ui.composer.end(),
         KeyCode::Backspace => edit(ui, |c| c.backspace()),
@@ -316,7 +319,7 @@ fn submit(ui: &mut Ui, tree: &Tree) -> Vec<Effect> {
     let text = ui.composer.take();
     ui.history.remember(&text);
     ui.edited();
-    ui.scroll = Scroll::default();
+    ui.scroll.end();
     match commands::local(&text) {
         Some(Local::Help) => {
             ui.help = !ui.help;
@@ -362,6 +365,12 @@ fn history_or_line(ui: &mut Ui, step: Step) {
         ui.composer.set(&text);
         ui.menu = Default::default();
     }
+}
+
+/// Move the transcript, against the frame the last draw measured.
+pub fn scroll(ui: &mut Ui, lines: isize, now: Now) {
+    let (total, rows) = ui.transcript();
+    ui.scroll.by(lines, total, rows, now.instant);
 }
 
 fn newline(ui: &mut Ui) {
@@ -1053,12 +1062,59 @@ mod tests {
     }
 
     #[test]
-    fn the_page_keys_scroll_and_come_back_to_the_bottom() {
+    fn the_page_keys_scroll_a_screenful_and_come_back_to_the_tail() {
+        let state = long_transcript(60);
         let (mut ui, now) = scene();
-        press(&mut ui, &state(), key(KeyCode::PageUp), now);
-        assert_eq!(ui.scroll.0, PAGE);
-        press(&mut ui, &state(), key(KeyCode::PageDown), now);
-        assert_eq!(ui.scroll, Scroll::default());
+        render(&state, &ui, now);
+        let (total, rows) = ui.transcript();
+        assert!(total > rows, "a transcript worth scrolling");
+
+        press(&mut ui, &state, key(KeyCode::PageUp), now);
+        let settled = Now {
+            instant: now.instant + crate::scroll::EASE,
+            ..now
+        };
+        assert_eq!(
+            ui.scroll.top(total, rows, settled.instant),
+            total - rows - rows,
+            "a page is the screenful being read"
+        );
+        assert_ne!(
+            ui.scroll,
+            crate::scroll::Scroll::Tail,
+            "pgup releases the tail"
+        );
+
+        press(&mut ui, &state, key(KeyCode::PageDown), settled);
+        assert_eq!(
+            ui.scroll,
+            crate::scroll::Scroll::Tail,
+            "and pgdn at the foot takes it back"
+        );
+    }
+
+    #[test]
+    fn home_and_end_walk_the_transcript_while_nothing_is_typed() {
+        let state = long_transcript(60);
+        let (mut ui, now) = scene();
+        render(&state, &ui, now);
+        let (total, rows) = ui.transcript();
+        press(&mut ui, &state, key(KeyCode::Home), now);
+        assert_eq!(
+            ui.scroll
+                .top(total, rows, now.instant + crate::scroll::EASE),
+            0
+        );
+        press(&mut ui, &state, key(KeyCode::End), now);
+        assert_eq!(ui.scroll, crate::scroll::Scroll::Tail);
+
+        write(&mut ui, &state, "a line", now);
+        press(&mut ui, &state, key(KeyCode::Home), now);
+        assert_eq!(
+            ui.scroll,
+            crate::scroll::Scroll::Tail,
+            "a draft keeps home for the caret"
+        );
     }
 
     #[test]
@@ -1080,7 +1136,7 @@ mod tests {
         let (mut ui, now) = scene();
         press(&mut ui, &state(), key(KeyCode::PageUp), now);
         line(&mut ui, &state(), "hello", now);
-        assert_eq!(ui.scroll, Scroll::default());
+        assert_eq!(ui.scroll, crate::scroll::Scroll::Tail);
     }
 
     #[test]

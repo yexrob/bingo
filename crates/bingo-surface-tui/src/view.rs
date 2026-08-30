@@ -30,6 +30,7 @@ const MENU_ROWS: usize = 8;
 pub fn draw(tree: &Tree, ui: &Ui, frame: &mut Frame, now: Now) {
     let area = frame.area();
     let regions = frame::regions(area, demand(tree, ui, area.width, now));
+    ui.painted.borrow_mut().regions = regions;
     render_transcript(tree, ui, frame, regions.transcript, now);
     render_activity(tree.viewed(), ui, frame, regions.activity, now);
     render_composer(tree.viewed(), ui, frame, regions.composer);
@@ -111,23 +112,24 @@ fn layers(tree: &Tree, ui: &Ui, frame: &mut Frame, regions: Regions) {
     frame.render_widget(Paragraph::new(lines[dropped..].to_vec()), area);
 }
 
-/// The tail of the transcript, or the window the scroll keys parked on.
+/// The tail of the transcript, or the window the scroll keys parked on. What
+/// it drew is left in [`crate::ui::Painted`] for the next key to read.
 fn render_transcript(tree: &Tree, ui: &Ui, frame: &mut Frame, area: Rect, now: Now) {
     if area.height == 0 {
         return;
     }
-    let mut blocks = ui.blocks.borrow_mut();
-    let total = blocks.sync(
+    let rows = area.height as usize;
+    let mut painted = ui.painted.borrow_mut();
+    painted.height = painted.blocks.sync(
         tree.viewed(),
         &tree.agents(),
         area.width as usize,
         ui.spinner(now.instant),
     );
-    let height = area.height as usize;
-    let hidden = total.saturating_sub(height);
-    let mut shown = blocks.window(hidden.saturating_sub(ui.scroll.0), height);
+    painted.top = ui.scroll.top(painted.height, rows, now.instant);
+    let mut shown = painted.blocks.window(painted.top, rows);
     // A short transcript hangs from the composer, not from the top of the screen.
-    let padding = height - shown.len();
+    let padding = rows - shown.len();
     shown.splice(..0, std::iter::repeat_n(Line::default(), padding));
     frame.render_widget(Paragraph::new(shown), area);
 }
@@ -1016,7 +1018,12 @@ mod tests {
             key(crossterm::event::KeyCode::PageUp),
             now,
         );
-        let scrolled = render(&state, &ui, now);
+        // The move eases over 100 ms; this is the screen it settles on.
+        let settled = Now {
+            instant: now.instant + crate::scroll::EASE,
+            ..now
+        };
+        let scrolled = render(&state, &ui, settled);
         assert_ne!(bottom, scrolled, "page up must move the window");
         insta::assert_snapshot!(scrolled);
     }

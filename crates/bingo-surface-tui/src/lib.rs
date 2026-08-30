@@ -46,6 +46,7 @@ mod panel;
 mod permission;
 mod preview;
 mod run;
+mod scroll;
 mod status;
 mod terminal;
 mod theme;

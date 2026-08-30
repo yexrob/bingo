@@ -28,3 +28,6 @@ unicode-segmentation.workspace = true
 bingo-sdk = { workspace = true, features = ["testing"] }
 insta.workspace = true
 tempfile.workspace = true
+# Virtual time, so "an idle surface draws nothing in two seconds" is a test
+# that takes no time at all (M11a).
+tokio = { workspace = true, features = ["test-util"] }

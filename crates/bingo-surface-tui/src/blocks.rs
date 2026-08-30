@@ -217,14 +217,6 @@ impl std::fmt::Debug for Blocks {
     }
 }
 
-impl Clone for Blocks {
-    /// A clone starts cold: a memo is worth nothing to a second reader and
-    /// copying five thousand blocks would cost more than drawing them.
-    fn clone(&self) -> Self {
-        Self::default()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -402,6 +402,15 @@ pub fn notice(level: Level, text: &str) -> Event {
     }
 }
 
+/// A transcript with more lines than any test screen has rows.
+pub fn long_transcript(items: usize) -> SessionState {
+    let mut state = state();
+    state.items = (0..items)
+        .map(|i| user(&format!("itm_{i}"), &format!("line {i}")))
+        .collect();
+    state
+}
+
 /// A `Ui` and the instant it was born, so a test can move time by hand.
 pub fn scene() -> (Ui, Now) {
     let instant = Instant::now();
@@ -765,10 +774,23 @@ pub fn options(prompt: Option<&str>, home: &std::path::Path) -> bingo_sdk::Surfa
 /// terminal does. Each press is held back a moment so the frames already on
 /// the stream are folded first, which is the order a person would see.
 pub fn keys(script: Vec<crossterm::event::KeyEvent>) -> crate::run::Keys {
+    pressed(script, std::time::Duration::from_millis(5))
+}
+
+/// The same, with a wait before every press: under `tokio::time::pause` it
+/// is time the loop must sit through with nothing to do.
+pub fn keys_after(
+    wait: std::time::Duration,
+    script: Vec<crossterm::event::KeyEvent>,
+) -> crate::run::Keys {
+    pressed(script, wait)
+}
+
+fn pressed(script: Vec<crossterm::event::KeyEvent>, wait: std::time::Duration) -> crate::run::Keys {
     use futures::StreamExt;
-    let typed = futures::stream::iter(script).then(|key| async move {
-        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    let keys = futures::stream::iter(script).then(move |key| async move {
+        tokio::time::sleep(wait).await;
         crossterm::event::Event::Key(key)
     });
-    Box::pin(typed.chain(futures::stream::pending()))
+    Box::pin(keys.chain(futures::stream::pending()))
 }
