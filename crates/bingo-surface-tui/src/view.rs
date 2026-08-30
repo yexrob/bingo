@@ -17,7 +17,7 @@ use crate::clock::Now;
 use crate::frame::{self, Demand, Regions};
 use crate::tree::{self, Tree};
 use crate::ui::{Picker, Switcher, Ui};
-use crate::{block, dialog, keys, panel, status, theme, transcript, wrap};
+use crate::{block, dialog, keys, panel, status, theme, wrap};
 
 /// How tall the composer box may grow before it scrolls internally.
 const COMPOSER_ROWS: usize = 10;
@@ -116,16 +116,16 @@ fn render_transcript(tree: &Tree, ui: &Ui, frame: &mut Frame, area: Rect, now: N
     if area.height == 0 {
         return;
     }
-    let all = transcript::lines(
+    let mut blocks = ui.blocks.borrow_mut();
+    let total = blocks.sync(
         tree.viewed(),
         &tree.agents(),
         area.width as usize,
         ui.spinner(now.instant),
     );
     let height = area.height as usize;
-    let hidden = all.len().saturating_sub(height);
-    let start = hidden.saturating_sub(ui.scroll.0);
-    let mut shown: Vec<Line<'static>> = all.into_iter().skip(start).take(height).collect();
+    let hidden = total.saturating_sub(height);
+    let mut shown = blocks.window(hidden.saturating_sub(ui.scroll.0), height);
     // A short transcript hangs from the composer, not from the top of the screen.
     let padding = height - shown.len();
     shown.splice(..0, std::iter::repeat_n(Line::default(), padding));
@@ -619,7 +619,7 @@ mod tests {
     fn dropdown() {
         let state = state();
         let (mut ui, now) = scene();
-        ui.catalog = vec![bingo_sdk::CommandSpec {
+        ui.catalogs.commands = vec![bingo_sdk::CommandSpec {
             name: "model".into(),
             aliases: vec![],
             hint: "[provider/]model".into(),

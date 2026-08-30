@@ -413,9 +413,9 @@ impl Run {
                     selected: 0,
                 })
             }
-            Reply::Commands(specs) => self.ui.catalog = specs,
+            Reply::Commands(specs) => self.ui.catalogs.commands = specs,
             Reply::Catalogue(source, ids) => {
-                self.ui.catalogues.insert(source, ids);
+                self.ui.catalogs.values.insert(source, ids);
             }
             Reply::Failed(error) => {
                 self.ui.opening = false;

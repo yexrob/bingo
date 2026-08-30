@@ -5,10 +5,12 @@
 //!
 //! Every time-dependent decision takes `now`, so a test never sleeps.
 
+use std::cell::RefCell;
 use std::time::{Duration, Instant};
 
 use bingo_sdk::{CommandSpec, Level, SessionSummary, View};
 
+use crate::blocks::Blocks;
 use crate::commands::{self, Suggestion};
 use crate::composer::Composer;
 use crate::dialog::Dialog;
@@ -46,6 +48,15 @@ pub struct Picker {
     pub selected: usize,
 }
 
+/// What the kernel told this surface it can offer: the commands a session
+/// runs, and the ids each of their catalogued arguments may take. Read once
+/// at start — the dropdown ranks them, it does not watch them.
+#[derive(Clone, Debug, Default)]
+pub struct Catalogs {
+    pub commands: Vec<CommandSpec>,
+    pub values: commands::Catalogues,
+}
+
 /// The `ctrl+g` switcher over the sessions in the tree. Its rows are derived
 /// from the tree at render time; only the cursor is the surface's own.
 #[derive(Clone, Copy, Debug, Default)]
@@ -71,13 +82,15 @@ pub struct Ui {
     pub block: Option<View>,
     /// When ctrl+c was pressed on an empty composer.
     pub armed: Option<Instant>,
-    /// The kernel's command catalogue, read once at start.
-    pub catalog: Vec<CommandSpec>,
-    pub catalogues: commands::Catalogues,
+    /// What the kernel offers the dropdown, read once at start.
+    pub catalogs: Catalogs,
     /// An `open` is in flight; the swap happens when it lands.
     pub opening: bool,
     /// When this surface started, which is what the spinner turns on.
     pub started: Instant,
+    /// The rendered transcript, kept between frames. It is a memo of what the
+    /// reducer already says, so drawing may fill it behind a shared borrow.
+    pub blocks: RefCell<Blocks>,
 }
 
 impl Ui {
@@ -95,10 +108,10 @@ impl Ui {
             notices: Vec::new(),
             block: None,
             armed: None,
-            catalog: Vec::new(),
-            catalogues: commands::Catalogues::new(),
+            catalogs: Catalogs::default(),
             opening: false,
             started,
+            blocks: RefCell::default(),
         }
     }
 
@@ -120,7 +133,7 @@ impl Ui {
     /// kernel's, in that order.
     pub fn commands(&self) -> Vec<CommandSpec> {
         let mut all = commands::local_specs();
-        all.extend(self.catalog.iter().cloned());
+        all.extend(self.catalogs.commands.iter().cloned());
         all
     }
 
@@ -129,7 +142,11 @@ impl Ui {
         if self.menu.dismissed {
             return Vec::new();
         }
-        commands::suggestions(self.composer.text(), &self.commands(), &self.catalogues)
+        commands::suggestions(
+            self.composer.text(),
+            &self.commands(),
+            &self.catalogs.values,
+        )
     }
 
     pub fn selected_suggestion(&self) -> Option<Suggestion> {

@@ -1,6 +1,5 @@
-//! Items to styled lines. The whole transcript is rebuilt every frame from
-//! `state.items`: the reducer is the only history, and a cache would be a
-//! second one.
+//! One item to styled lines. The reducer is the only history: nothing here
+//! remembers a thing, and [`crate::blocks`] memoises what it draws.
 
 use bingo_sdk::{
     ContentPart, DecisionKind, Item, ItemBody, ItemStatus, SessionState, ToolOutput, TurnStatus,
@@ -9,8 +8,7 @@ use bingo_sdk::{
 use ratatui::text::{Line, Span};
 use serde_json::Value;
 
-use crate::tree::Agents;
-use crate::{markdown, preview, theme, wrap};
+use crate::{markdown, preview, theme};
 
 /// Output lines shown under a tool row before it is folded.
 const OUTPUT_ROWS: usize = 5;
@@ -20,59 +18,32 @@ const DIFF_ROWS: usize = 12;
 const CONNECTOR: &str = "  ⎿  ";
 const INDENT: &str = "     ";
 
-/// The transcript, wrapped to `width`. `spinner` is the frame a running tool
-/// shows and `agents` the sub-sessions this transcript's tool calls spawned;
-/// the caller owns the clock and the tree.
-pub fn lines(
-    state: &SessionState,
-    agents: &Agents,
-    width: usize,
-    spinner: &str,
-) -> Vec<Line<'static>> {
-    let mut out: Vec<Line<'static>> = Vec::new();
-    for item in &state.items {
-        let mut block = item_lines(item, width, spinner);
-        if block.is_empty() {
-            continue;
-        }
-        if let Some(agent) = agents.get(&item.id) {
-            block.push(child_line(agent));
-        }
-        if !out.is_empty() {
-            out.push(Line::default());
-        }
-        out.extend(wrap::wrap_all(&block, width));
-    }
-    out.extend(failure(state));
-    out
-}
-
 /// A turn that failed says why, derived from `last_turn` rather than kept as a
-/// line of the surface's own.
-fn failure(state: &SessionState) -> Vec<Line<'static>> {
+/// line of the surface's own. It belongs to no item, so it is the transcript's
+/// last block rather than one of them.
+pub fn failure(state: &SessionState) -> Vec<Line<'static>> {
     let Some(TurnStatus::Failed { error }) = state.last_turn.as_ref().filter(|_| !state.busy())
     else {
         return Vec::new();
     };
-    vec![
-        Line::default(),
-        Line::from(Span::styled(
-            format!("{} {}", theme::FAILED, error.message),
-            theme::danger(),
-        )),
-    ]
+    vec![Line::from(Span::styled(
+        format!("{} {}", theme::FAILED, error.message),
+        theme::danger(),
+    ))]
 }
 
 /// The tool call that spawned a sub-session says so under its own row; what
 /// the child is doing is read from its state, never copied into this one.
-fn child_line(agent: &str) -> Line<'static> {
+pub fn child_line(agent: &str) -> Line<'static> {
     Line::from(Span::styled(
         format!("  {} {agent}", theme::CHILD),
         theme::dim(),
     ))
 }
 
-fn item_lines(item: &Item, width: usize, spinner: &str) -> Vec<Line<'static>> {
+/// One item's block, unwrapped. `spinner` is the frame a running tool shows;
+/// the caller owns the clock.
+pub fn item_lines(item: &Item, width: usize, spinner: &str) -> Vec<Line<'static>> {
     match &item.body {
         ItemBody::User { parts, origin } => user(parts, origin.principal.as_deref()),
         ItemBody::Assistant { text } => markdown::render(text, width),
@@ -320,16 +291,22 @@ fn rule(text: &str, width: usize) -> Line<'static> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::blocks::Blocks;
     use crate::test_support::{folded, frame, post, user as person};
+    use crate::tree::Agents;
     use bingo_sdk::Event;
 
+    /// The blocks these items make, in the order the transcript stacks them.
     fn drawn(items: Vec<Item>) -> Vec<String> {
         let frames = items
             .into_iter()
             .enumerate()
             .map(|(i, item)| frame(i as u64 + 1, Event::ItemCompleted { item }))
             .collect();
-        lines(&folded(frames), &Agents::new(), 60, "⠋")
+        let mut blocks = Blocks::default();
+        let height = blocks.sync(&folded(frames), &Agents::new(), 60, "⠋");
+        blocks
+            .window(0, height)
             .iter()
             .map(ToString::to_string)
             .collect()

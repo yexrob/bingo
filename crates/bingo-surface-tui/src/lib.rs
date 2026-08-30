@@ -31,6 +31,7 @@
 //! session actor parses commands, not the client.
 
 mod block;
+mod blocks;
 mod clock;
 mod commands;
 mod composer;
