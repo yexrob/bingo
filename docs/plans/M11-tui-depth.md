@@ -2,14 +2,14 @@
 
 ## Goal
 
-The terminal surface described in `docs/design/tui.md`: a full-screen application that owns every cell — header, virtualised transcript, rail, cards and sheets as layers, a fixed composer — and feels alive: every motion reports a state; the eye lands on the answer or on what wants you; content is rich — highlighted code, column diffs, tables, progress, images — and a plugin puts live, interactive things on screen by publishing a `View` (ADR-0013), never by touching the TUI. Motion is rhythm: nothing still flickers, nothing fast flashes, everything that waits has a clock.
+The terminal surface described in `docs/design/tui.md`: a full-screen application that owns every cell — a virtualised transcript from the top edge, a rail, cards and sheets as layers, a fixed composer, one status line under it — and feels alive: every motion reports a state; the eye lands on the answer or on what wants you; content is rich — highlighted code, column diffs, tables, progress, images — and a plugin puts live, interactive things on screen by publishing a `View` (ADR-0013), never by touching the TUI. Motion is rhythm: nothing still flickers, nothing fast flashes, everything that waits has a clock.
 
 ## Five plans, and their order
 
 | plan | owner | content | starts |
 |---|---|---|---|
-| **M11a** `M11a-frame.md` | worker | the frame: regions, a block cache, smooth scrolling, search, selection and OSC 52 copy, mouse, cards and sheets as layers, print-on-exit, header and footer | now |
-| **M11b** `M11b-hierarchy-tokens.md` | worker | §2 and §4 of the design: gutter, indents, receipts folded, thinking decay, paths, footer, borderless composer, tabs, measure, the raised tint; every snapshot redone | now, in parallel with M11a (different files) |
+| **M11a** `M11a-frame.md` | worker | the frame: regions, a block cache, smooth scrolling, search, selection and OSC 52 copy, mouse, cards and sheets as layers, print-on-exit, the status line | now |
+| **M11b** `M11b-hierarchy-tokens.md` | worker | §2 and §4 of the design: the `⏺ ⎿ >` grammar, receipts folded, thinking decay, paths, the input box and status line, child rows and the switcher, cards, measure, the raised tint; every snapshot redone | now, in parallel with M11a (different files) |
 | **M11c** `M11c-motion-notices.md` | worker | §6 and §7: the animation clock, breath, comet tail, flips and rises, reveals, toasts, pulse, meter, activity delay, idle no-redraw, focus + OSC 9/777, reduced motion | after M11a and M11b |
 | **M11d** `M11d-views-extensions.md` | kernel (sdk + reducer + wire), then worker (rendering) | ADR-0013: the `View` vocabulary, `ToolOutput.display`, `Signal`, actions; rendering in the TUI, print and RPC; a demo plugin | sdk now; rendering after M11b |
 | **M11e** `M11e-content-kinds.md` | worker | §5: markdown tables, syntax highlighting, word-level diffs, images, `@` completion, the pager sheet, background detection and the truecolor palettes, rewind picker, reasoning sheet | after M11a and M11d |
@@ -32,7 +32,7 @@ Two workers run at once at most: M11a and M11b touch different files and run tog
 
 ## Non-goals
 
-A mouse-only path (the mouse scrolls, clicks and selects; it is never required). Themes beyond terminal / light / dark truecolor. A GUI. Per-plugin widget crates (ADR-0013 §6 keeps the hatch shut). Forms as an interaction kind (own ADR when a plugin needs one). Inline mode or the terminal's own scrollback (set aside 2026-08-30 for full control). Panes the user resizes; tabs the user reorders.
+A mouse-only path (the mouse scrolls, clicks and selects; it is never required). Themes beyond terminal / light / dark truecolor. A GUI. Per-plugin widget crates (ADR-0013 §6 keeps the hatch shut). Forms as an interaction kind (own ADR when a plugin needs one). Inline mode or the terminal's own scrollback (set aside 2026-08-30 for full control). Panes the user resizes.
 
 ## Risks
 
