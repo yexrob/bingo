@@ -23,6 +23,7 @@ use bingo_store_jsonl::JsonlStorePlugin;
 use bingo_surface_print::{PrintPlugin, error_report, notice_report};
 use bingo_surface_rpc::RpcPlugin;
 use bingo_surface_tui::TuiPlugin;
+use bingo_tasks::TasksPlugin;
 use bingo_tool_bash::BashPlugin;
 use bingo_tool_fs::FsPlugin;
 use bingo_tool_web::WebPlugin;
@@ -283,6 +284,7 @@ fn plugins() -> Result<Vec<Box<dyn Plugin>>, KernelError> {
         Box::new(SkillsPlugin),
         Box::new(McpPlugin::default()),
         Box::new(AgentsPlugin::default()),
+        Box::new(TasksPlugin),
         Box::new(PrintPlugin),
         Box::new(RpcPlugin),
         Box::new(TuiPlugin),

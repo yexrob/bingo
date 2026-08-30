@@ -204,6 +204,7 @@ dependencies = [
  "bingo-surface-print",
  "bingo-surface-rpc",
  "bingo-surface-tui",
+ "bingo-tasks",
  "bingo-tool-bash",
  "bingo-tool-fs",
  "bingo-tool-web",
