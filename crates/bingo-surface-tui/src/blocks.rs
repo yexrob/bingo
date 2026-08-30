@@ -12,8 +12,6 @@
 //! rather than the flat transcript: a window is walked in blocks and cut to
 //! the row, so what it hands back is always an exact slice of the whole.
 
-use std::collections::HashMap;
-
 use bingo_sdk::{Item, ItemBody, ItemId, ItemStatus, SessionState};
 use ratatui::text::Line;
 
@@ -56,17 +54,21 @@ fn size(body: &ItemBody) -> usize {
 }
 
 struct Entry {
+    id: ItemId,
     revision: Revision,
     lines: Vec<Line<'static>>,
 }
 
-/// The rendered transcript of one session at one width.
+/// The rendered transcript of one session at one width. The blocks are kept
+/// in transcript order and matched to the items by position, so a frame that
+/// changed nothing costs one comparison per item and not one allocation.
 #[derive(Default)]
 pub struct Blocks {
     width: usize,
-    /// The items that have a block, in transcript order.
-    order: Vec<ItemId>,
-    blocks: HashMap<ItemId, Entry>,
+    blocks: Vec<Entry>,
+    /// The transcript's height in wrapped lines, counted while the blocks are
+    /// brought up to date rather than walked for again.
+    height: usize,
     /// The failed turn's line, which belongs to no item.
     tail: Vec<Line<'static>>,
     /// How many blocks have been drawn since this cache was made. A test
@@ -88,33 +90,47 @@ impl Blocks {
             self.blocks.clear();
             self.width = width;
         }
-        self.order.clear();
+        let mut kept = 0;
         for item in &state.items {
-            self.block(item, agents.get(&item.id), spinner);
+            kept += self.block(kept, item, agents.get(&item.id), spinner);
         }
-        self.forget_the_dropped();
+        // Whatever is left behind the last item was rewound away.
+        self.blocks.truncate(kept);
         self.tail = transcript::failure(state);
-        self.height()
+        self.height = self.measure();
+        self.height
     }
 
-    /// Render one item, or keep the block that is already right.
-    fn block(&mut self, item: &Item, agent: Option<&String>, spinner: &str) {
+    /// Keep the block at `at` when it is still this item's, else draw it.
+    /// Answers with how many blocks the item now occupies: one, or none when
+    /// it has nothing to say.
+    fn block(&mut self, at: usize, item: &Item, agent: Option<&String>, spinner: &str) -> usize {
         let revision = revision(item, agent);
-        let known = self.blocks.get(&item.id).map(|e| e.revision);
-        if item.is_terminal() && known == Some(revision) {
-            self.order.push(item.id.clone());
-            return;
+        let same = self
+            .blocks
+            .get(at)
+            .is_some_and(|entry| entry.id == item.id && entry.revision == revision);
+        if same && item.is_terminal() {
+            return 1;
         }
         let lines = self.render(item, agent, spinner);
         if lines.is_empty() {
-            // An item with nothing to say is not a block, and caching it would
-            // make the cache larger than the transcript for ever.
-            self.blocks.remove(&item.id);
-            return;
+            // An item with nothing to say is not a block at all.
+            if same {
+                self.blocks.remove(at);
+            }
+            return 0;
         }
-        self.blocks
-            .insert(item.id.clone(), Entry { revision, lines });
-        self.order.push(item.id.clone());
+        let entry = Entry {
+            id: item.id.clone(),
+            revision,
+            lines,
+        };
+        match self.blocks.get_mut(at) {
+            Some(slot) if slot.id == item.id => *slot = entry,
+            _ => self.blocks.insert(at, entry),
+        }
+        1
     }
 
     fn render(&mut self, item: &Item, agent: Option<&String>, spinner: &str) -> Vec<Line<'static>> {
@@ -129,27 +145,17 @@ impl Blocks {
         wrap::wrap_all(&block, self.width)
     }
 
-    /// A rewind or a compaction takes items away; their blocks go with them.
-    fn forget_the_dropped(&mut self) {
-        if self.blocks.len() <= self.order.len() {
-            return;
-        }
-        let live: std::collections::HashSet<&ItemId> = self.order.iter().collect();
-        self.blocks.retain(|id, _| live.contains(id));
-    }
-
     /// Where an item's block sits in the transcript: its first line, and the
     /// line just after it — where a card the item asked for hangs from.
     /// `None` when the item has no block.
     pub fn span(&self, item: &ItemId) -> Option<(usize, usize)> {
         let mut y = 0;
-        for (index, id) in self.order.iter().enumerate() {
-            let lines = self.blocks.get(id).map(|e| e.lines.len()).unwrap_or(0);
+        for (index, entry) in self.blocks.iter().enumerate() {
             y += usize::from(index > 0);
-            if id == item {
-                return Some((y, y + lines));
+            if &entry.id == item {
+                return Some((y, y + entry.lines.len()));
             }
-            y += lines;
+            y += entry.lines.len();
         }
         None
     }
@@ -158,19 +164,25 @@ impl Blocks {
     /// the transcript lands on.
     pub fn at(&self, line: usize) -> Option<ItemId> {
         let mut y = 0;
-        for (index, id) in self.order.iter().enumerate() {
-            let lines = self.blocks.get(id).map(|e| e.lines.len()).unwrap_or(0);
+        for (index, entry) in self.blocks.iter().enumerate() {
             y += usize::from(index > 0);
-            if (y..y + lines).contains(&line) {
-                return Some(id.clone());
+            if (y..y + entry.lines.len()).contains(&line) {
+                return Some(entry.id.clone());
             }
-            y += lines;
+            y += entry.lines.len();
         }
         None
     }
 
-    /// The whole transcript's height in wrapped lines.
+    /// The whole transcript's height in wrapped lines, as the last [`sync`]
+    /// counted it.
+    ///
+    /// [`sync`]: Blocks::sync
     pub fn height(&self) -> usize {
+        self.height
+    }
+
+    fn measure(&self) -> usize {
         self.segments()
             .map(|(gap, lines)| usize::from(gap) + lines.len())
             .sum()
@@ -227,12 +239,12 @@ impl Blocks {
     /// before it. A block is separated from the one above it, never from the
     /// top of the transcript.
     fn segments(&self) -> impl Iterator<Item = (bool, &[Line<'static>])> {
-        self.order
+        self.blocks
             .iter()
             .enumerate()
-            .filter_map(|(i, id)| self.blocks.get(id).map(|e| (i > 0, e.lines.as_slice())))
+            .map(|(i, entry)| (i > 0, entry.lines.as_slice()))
             .chain(
-                (!self.tail.is_empty()).then_some((!self.order.is_empty(), self.tail.as_slice())),
+                (!self.tail.is_empty()).then_some((!self.blocks.is_empty(), self.tail.as_slice())),
             )
     }
 }
@@ -241,7 +253,7 @@ impl std::fmt::Debug for Blocks {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Blocks")
             .field("width", &self.width)
-            .field("blocks", &self.order.len())
+            .field("blocks", &self.blocks.len())
             .field("renders", &self.renders)
             .finish()
     }
