@@ -25,12 +25,12 @@ None.
 
 ## Exit criteria
 
-- [ ] the token table in the design doc and `theme.rs` list the same names; a test asserts no `Color::`/`Modifier::` literal outside `theme.rs`
-- [ ] snapshots: idle, streaming, tool running, tool done with output, permission (collapsed, expanded, feedback row), question (single, multi), confirm, login (three flows), error turn, interrupted, room transcript, child row (running, done, needs you), child transcript, switcher dropdown, help at 80 and 100, dropdown, the panel sheet — at 80×24 and 120×40, each read and accepted, not just regenerated
-- [ ] `assert_row_styled` cases from brick 8 pass; `NO_COLOR` and `BINGO_ASCII=1` snapshots exist for idle and permission
-- [ ] no hint text appears twice on a screen; `1 running` is on the status line, not in the transcript
-- [ ] paths in dialogs and summaries fit one row at 80 columns for a path 120 cells long
-- [ ] `scripts/tui-smoke.sh` green; the M9 and M10 tmux drives green with their needles updated
+- [x] the token table in the design doc and `theme.rs` list the same names; a test asserts no `Color::`/`Modifier::` literal outside `theme.rs`
+- [x] snapshots: idle, streaming, tool running, tool done with output, permission (collapsed, expanded, feedback row), question (single, multi), confirm, login (three flows), error turn, interrupted, room transcript, child row (running, done, needs you), child transcript, switcher dropdown, help at 80 and 100, dropdown, the panel sheet — at 80×24 and 120×40, each read and accepted, not just regenerated
+- [ ] `assert_row_styled` cases from brick 8 pass; `NO_COLOR` and `BINGO_ASCII=1` snapshots exist for idle and permission — three of the four cases pass and both looks are snapshotted; the fourth (a card's border is `presence`) has nothing to assert until M11a draws the box
+- [ ] no hint text appears twice on a screen; `1 running` is on the status line, not in the transcript — the transcript half holds and the words are `1 running`, but the line that carries them is M11a's status line, not this plan's
+- [x] paths in dialogs and summaries fit one row at 80 columns for a path 120 cells long
+- [ ] `scripts/tui-smoke.sh` green; the M9 and M10 tmux drives green with their needles updated — the smoke is green with its needle updated; the M9 and M10 drives are not in the repository
 
 ## Non-goals
 
@@ -39,3 +39,44 @@ The frame's scrolling, layers and mouse (M11a). Motion (M11c). New content kinds
 ## Risks
 
 Taste drift between a worker's eye and the design doc — the review of this plan is done on rendered screens at 80 and 100 columns, and §10 of the design doc gets a line for every choice the doc did not already make.
+
+## Verified — 2026-08-31
+
+Built beside M11a, on its own files. `theme.rs` is the table of §4 (`text dim
+raised presence glow good bad mode bold`, plus `added`/`removed` for a diff's
+tints and `link`); `accent`, `caution`, `selected` and REVERSED are gone.
+`transcript.rs` speaks the grammar; `paths.rs`, `welcome.rs`, `screens.rs` and
+`painted.rs` are new; `dialog.rs` holds the card's lines, `composer.rs` the
+input box's rows, `tree.rs` the child rows and the switcher's. `view.rs`,
+`run.rs` and `ui.rs` were touched only where a call site had to move.
+
+```
+$ cargo fmt --all -- --check                                  # exit 0
+$ cargo check --workspace --all-targets --locked              # exit 0
+$ cargo clippy --workspace --all-targets --locked -- -D warnings   # exit 0
+$ cargo test --workspace --locked
+test result: ok. 228 passed; 0 failed  (bingo-surface-tui)
+53 suites, 0 failures                                          # exit 0
+$ scripts/check_discipline.sh
+dependency direction ok / kernel names no tool / cohesion ok / discipline ok
+$ scripts/budget.sh
+dependencies (unique, normal): 268 (max  268) … budget ok
+$ cargo deny check
+advisories ok, bans ok, licenses ok, sources ok
+$ cargo build && scripts/tui-smoke.sh
+  a reply reaches the transcript
+  esc interrupts a turn that is still waiting
+  a permission dialog answered y runs the tool
+tui-smoke ok
+```
+
+100 snapshots, every screen of the list at 80×24 and 120×40 plus `NO_COLOR`
+and `BINGO_ASCII=1` for idle and permission, each read as a screen; a check
+over all of them proves no row is ragged and no hint text appears twice.
+
+Left for the merge, and why: a card's border is `presence` cannot be asserted
+until M11a draws the box (the other three `assert_row_styled` cases pass);
+`1 running` reads correctly but still sits in the old band, because the status
+line that should carry it is M11a's; the help sheet's two-column layout at 100
+columns is M11a's `keys.rs`; `ctrl+o` names the key that expands a folded
+result, which neither plan binds yet.
