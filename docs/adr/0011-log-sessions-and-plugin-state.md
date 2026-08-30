@@ -1,0 +1,23 @@
+# 0011 — Log sessions, plugin state in the journal, the host in hand
+
+## Context
+
+Group collaboration needs three things the kernel does not have. A room is a conversation nobody answers: a journal every member can post into and read back, with no model behind it — today every session resolves a provider at creation and opens a turn on every submit. A task list, a room's membership, any resource a plugin owns must reach clients and survive a resume; `Event::Extension` exists for it, but the reducer drops the payload and no plugin can publish one. And a plugin that posts into other sessions — a room fanning a post out, a tool spawning a child, a hook redirecting a line — reaches the host only through workarounds: `bingo-agents` keeps the `HostHandle` from `start` in a `OnceLock` because tools and hooks are handed none, `ToolHost` grew `spawn_session` and `deliver` that are not a call's business, `deliver` reaches live sessions only so a roster read from the store names sessions one cannot write to (M8's review), and `ParentLink.item` insists every child was spawned by a tool call.
+
+## Decision
+
+1. **Log sessions.** `SessionSpec.driver: Driver` and `SessionSummary.driver`, `Driver::Model` (the default, serde default) or `Driver::Log`. A `Log` session has a journal and no model: `Host::create` resolves no provider for it and its `TurnConfig.model` is `None`. Every prose submit — after the command parser and the submit hooks, as for any session — and every `deliver`, `Wake` or `Hold` alike, records the input as a `User` item with `turn: None` at once and acks `Applied{"item"}`; it never opens a turn, never compacts, `busy` is always false, `interrupt` acks `Applied` with nothing stopped, and `/model`, `/think` and `/compact` are `Rejected{INVALID_INPUT}`. Commands run; hooks observe it like any session.
+2. **Plugin state lives in the journal.** `HostApi::extend(session, plugin, kind, payload)` publishes a durable `Event::Extension` into a session. `SessionState.extensions: BTreeMap<plugin, BTreeMap<kind, Value>>` keeps the latest payload per kind; a payload is the whole of that kind's state, so a client renders it, a plugin reads it back from a snapshot, and nothing keeps a file or a map beside it. A surface that shows extensions shows them generically — an array of flat objects is a table, an object a key/value list, anything else text — and no surface knows a kind.
+3. **The host in hand.** `ToolContext { host: HostHandle, call: Arc<dyn ToolHost> }` and `HookContext.host: HostHandle`. `ToolHost` keeps what is the call's own — `ask`, `progress`, `record` — and loses `spawn_session`, `deliver` and `service_any`: a child is `HostApi::open(Create{spec})` (its attachment is what a spawner watches), a peer message is `HostApi::deliver(to, intent, input, delivery)`, a service is `HostHandle::service`. `deliver` and `extend` are async and reopen a target that is persisted but not live, so whatever `sessions` lists can be written to. The actor's `Redirect` takes the same path. `ParentLink.item: Option<ItemId>`: a child needs a parent, not a tool call.
+4. **The actor's inherent impl may span three files** (the loop, its interactions, its inputs); `check_discipline.sh` says 3.
+
+## Consequences
+
+- sdk touched once: `Driver`, `SessionSpec.driver`, `SessionSummary.driver`, `ParentLink.item`, `HostApi::{deliver, extend}`, `ToolHost` shrunk, `ToolContext.host/call`, `HookContext.host`, `SessionState.extensions`. Every `HostApi`, `ToolHost` and `ToolContext` double changes; `bingo-agents` drops `LateHost`; `schema/rpc.json` regenerated.
+- The fold reads a user item's `origin.conversation` too: `[from <principal> in <conversation>]`, so a member can tell a room's post from a direct message and answer where it came from.
+- A room is a `Log` session under the person's root, titled `#name`, its members an extension; a post is a `User` item in it, fanned out by an `Event` hook as `deliver(member, text, Wake)`. A team is the resident agents `.bingo/team.json` names, spawned as children of every root session opened in that project; it is a module of `bingo-agents`, not a crate — the noun adds no mechanism. A task list is an extension of the session that owns it. `room`, `team`, `task`, `agent` stay out of the kernel and the sdk.
+- The kernel's noun for what these plugins share is `Log`, `extend`, `conversation` — nothing else was added for them.
+
+## Supersedes
+
+ADR-0010 §1's `ToolHost::deliver` (now `HostApi::deliver`) and its `ParentLink.item` as the sole link (still the link when there is a call; a child without one is legal).
