@@ -6,6 +6,7 @@
 mod compact;
 mod login;
 mod model;
+mod status;
 mod think;
 
 use std::sync::{Arc, Weak};
@@ -20,7 +21,8 @@ pub(crate) fn builtins(host: Weak<Host>) -> Vec<Arc<dyn Command>> {
         Arc::new(think::ThinkCommand { host: host.clone() }),
         Arc::new(compact::CompactCommand { host: host.clone() }),
         Arc::new(login::LoginCommand { host: host.clone() }),
-        Arc::new(login::LogoutCommand { host }),
+        Arc::new(login::LogoutCommand { host: host.clone() }),
+        Arc::new(status::StatusCommand { host }),
     ]
 }
 

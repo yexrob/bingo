@@ -270,3 +270,30 @@ async fn the_catalogue_reads_the_sources_too() {
         "the built-ins are there too"
     );
 }
+
+/// `/status` is the sheet of facts the surface keeps off its screen: it
+/// answers at once, as a key-value view, whether or not a turn has run.
+#[tokio::test]
+async fn status_answers_with_the_session_s_facts() {
+    let (host, _) = host_for(vec![Script::Events(text("hi"))], None).await;
+    let mut client = Client::open(&host).await;
+    let (ack, _) = client.ack("/status").await;
+    let IntentOutcome::Applied { result } = ack else {
+        panic!("a view, got {ack:?}");
+    };
+    let view: View = serde_json::from_value(result["view"].clone()).unwrap();
+    let View::KeyValue { rows } = view else {
+        panic!("key-value rows, got {view:?}");
+    };
+    let row = |key: &str| {
+        rows.iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.as_str())
+            .unwrap_or_else(|| panic!("no {key} row in {rows:?}"))
+    };
+    assert_eq!(row("session"), client.state.summary.id.to_string());
+    assert_eq!(row("mode"), "default");
+    assert_eq!(row("context"), "not measured yet");
+    assert_eq!(row("provider"), "scripted");
+    assert_eq!(row("tokens"), "0 in · 0 out");
+}

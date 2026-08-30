@@ -59,6 +59,8 @@ own.
 - `/compact [instructions]` — summarise the conversation so far and keep going.
   It waits for a running turn.
 - `/permission [mode]` — read or set this session's permission mode.
+- `/status` — the session's facts in one view: cwd, provider and model, mode,
+  context used against the window and the compaction trigger, tokens.
 - `/login <provider> [browser|device|paste]` and `/logout <provider>` — a
   provider's credential, for providers that sign in rather than take a key
   (`codex`, the ChatGPT subscription). `bingo login codex` does the same from

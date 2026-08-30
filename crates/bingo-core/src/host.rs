@@ -662,6 +662,13 @@ impl Host {
         self.live(id)?.mailbox.summary().await
     }
 
+    /// The session's state as a client would see it on attaching; the
+    /// stream that comes with it is not wanted here.
+    pub async fn session_state(&self, id: &SessionId) -> Result<SessionState, KernelError> {
+        let (state, _stream) = self.live(id)?.mailbox.attach().await?;
+        Ok(state)
+    }
+
     pub fn has_provider(&self, id: &str) -> bool {
         self.registry.providers.iter().any(|p| p.id() == id)
     }
