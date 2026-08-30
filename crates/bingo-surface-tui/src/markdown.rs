@@ -49,7 +49,7 @@ impl Writer {
             width,
             lines: Vec::new(),
             spans: Vec::new(),
-            styles: vec![theme::plain()],
+            styles: vec![theme::text()],
             margin: Margin::default(),
             lists: Vec::new(),
             code: false,
@@ -71,12 +71,12 @@ impl Writer {
             Md::End(tag) => self.close(tag),
             Md::Text(text) if self.code => self.code_text(&text),
             Md::Text(text) => self.push(&text, self.style()),
-            Md::Code(code) => self.push(&format!("`{code}`"), theme::accent()),
+            Md::Code(code) => self.push(&format!("`{code}`"), self.style()),
             Md::Html(html) | Md::InlineHtml(html) => self.push(html.trim_end(), theme::dim()),
             Md::SoftBreak => self.push(" ", self.style()),
             Md::HardBreak => self.flush(),
             Md::Rule => self.rule(),
-            Md::TaskListMarker(done) => self.push(if done { "[x] " } else { "[ ] " }, theme::dim()),
+            Md::TaskListMarker(done) => self.push(&format!("{} ", theme::todo(done)), theme::dim()),
             _ => {}
         }
     }
@@ -90,13 +90,16 @@ impl Writer {
             Tag::Heading { .. } => self.styles.push(theme::bold()),
             Tag::Emphasis => self.styles.push(theme::italic()),
             Tag::Strong => self.styles.push(theme::bold()),
-            Tag::Strikethrough => self.styles.push(crossed()),
+            Tag::Strikethrough => self.styles.push(theme::struck()),
             Tag::Link { dest_url, .. } => {
-                self.styles.push(theme::accent());
+                self.styles.push(theme::link());
                 self.link = Some(CowStr::from(dest_url.into_string()));
             }
             Tag::CodeBlock(kind) => self.open_code(&kind),
-            Tag::BlockQuote(_) => self.margin.0.push(Span::styled("│ ", theme::dim())),
+            Tag::BlockQuote(_) => self
+                .margin
+                .0
+                .push(Span::styled(format!("{} ", theme::wall()), theme::dim())),
             Tag::List(start) => self.lists.push(start),
             Tag::Item => self.marker(),
             _ => {}
@@ -169,7 +172,7 @@ impl Writer {
                 *n += 1;
                 marker
             }
-            _ => "• ".to_string(),
+            _ => format!("{} ", theme::point()),
         };
         let indent = " ".repeat(marker.chars().count());
         self.spans = self.margin.spans();
@@ -180,7 +183,7 @@ impl Writer {
     fn rule(&mut self) {
         self.flush();
         self.line(vec![Span::styled(
-            "─".repeat(self.width.max(1)),
+            theme::rule().repeat(self.width.max(1)),
             theme::dim(),
         )]);
     }
@@ -220,10 +223,6 @@ impl Writer {
 
 fn is_blank(line: &Line<'static>) -> bool {
     line.spans.iter().all(|s| s.content.trim().is_empty())
-}
-
-fn crossed() -> Style {
-    Style::default().add_modifier(ratatui::style::Modifier::CROSSED_OUT)
 }
 
 #[cfg(test)]
@@ -270,10 +269,10 @@ mod tests {
     }
 
     #[test]
-    fn an_inline_code_span_keeps_its_backticks_and_takes_the_accent() {
+    fn an_inline_code_span_keeps_its_backticks_and_spends_no_colour() {
         let lines = render("call `run()` now", 40);
         assert_eq!(text(&lines), vec!["call `run()` now"]);
-        assert_eq!(lines[0].spans[1].style, theme::accent());
+        assert_eq!(lines[0].spans[1].style, theme::text());
     }
 
     #[test]

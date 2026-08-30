@@ -445,13 +445,12 @@ impl Run {
 /// back to.
 fn title(tree: &Tree) -> String {
     let cwd = tree::directory(&tree.root().summary.cwd);
-    let mark = if tree.attention() {
-        crate::theme::THINKING
-    } else {
-        ""
+    let mark = match tree.attention() {
+        true => format!("{} ", crate::theme::spark()),
+        false => String::new(),
     };
     let child = match tree.viewing() {
-        Some(child) => format!(" {} {}", crate::theme::CHILD, tree::name(child)),
+        Some(child) => format!(" — in {}", tree::name(child)),
         None => String::new(),
     };
     format!("{mark}bingo — {cwd}{child}")
@@ -691,8 +690,8 @@ mod tests {
         let (exit, _) = harness.go(frames, vec![], None).await;
         assert_eq!(exit, Exit { code: 0 });
         let screen = harness.recorder.last();
-        assert!(screen.contains("1 agent"), "{screen}");
-        assert!(screen.contains("↳ reviewer · running"), "{screen}");
+        assert!(screen.contains("1 running"), "{screen}");
+        assert!(screen.contains("⏺ reviewer(review it)"), "{screen}");
     }
 
     #[tokio::test]
@@ -713,7 +712,7 @@ mod tests {
             "the tree's handle routes an answer to whoever asked"
         );
         assert!(
-            harness.recorder.last().contains("↳ reviewer"),
+            harness.recorder.last().contains("Edit · reviewer"),
             "the dialog names the child: {}",
             harness.recorder.last()
         );

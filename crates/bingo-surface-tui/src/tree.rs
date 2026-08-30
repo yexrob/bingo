@@ -9,10 +9,16 @@
 
 use std::collections::BTreeMap;
 
-use bingo_sdk::{Applied, Driver, Event, Frame, Interaction, ItemId, SessionId, SessionState};
+use bingo_sdk::{
+    Applied, Driver, Event, Frame, Interaction, ItemBody, ItemId, SessionId, SessionState,
+};
+use ratatui::text::{Line, Span};
 
-/// The `↳` label of the child a tool call spawned, by the item that called it.
-pub type Agents = BTreeMap<ItemId, String>;
+use crate::theme;
+
+/// The child a tool call spawned, by the item that called it. The child's own
+/// state is the whole of the row, so nothing about it is stored twice.
+pub type Agents<'a> = BTreeMap<ItemId, &'a SessionState>;
 
 /// What a session is doing, as a person reads it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -177,35 +183,35 @@ impl Tree {
             .find_map(|state| state.interactions.first().map(|open| (state, open)))
     }
 
-    /// `2 agents · 1 needs you`, and nothing while the tree is only the root.
-    /// A session nothing answers is doing no work, so it is nobody's count.
+    /// What is true of the tree now and nothing else (design §4): `2 running`
+    /// and `1 needs you`, in that order, and nothing when neither is true. A
+    /// session nothing answers is doing no work, so it is nobody's count.
     pub fn tally(&self) -> Option<String> {
-        let agents = self
+        let running = self
             .children
             .values()
-            .filter(|child| Status::of(child).is_some())
+            .filter(|child| Status::of(child) == Some(Status::Running))
             .count();
-        if agents == 0 {
-            return None;
+        let waiting = self.children.values().filter(|c| asking(c)).count();
+        let mut parts = Vec::new();
+        if running > 0 {
+            parts.push(format!("{running} running"));
         }
-        let noun = if agents == 1 { "agent" } else { "agents" };
-        let waiting = self.children.values().filter(|c| c.attention()).count();
-        let mut out = format!("{agents} {noun}");
         if waiting > 0 {
-            out.push_str(&format!(" · {waiting} needs you"));
+            parts.push(format!("{waiting} needs you"));
         }
-        Some(out)
+        (!parts.is_empty()).then(|| parts.join(" · "))
     }
 
     /// The children the viewed session spawned, by the tool call that did it;
     /// a child no call spawned hangs under no row.
-    pub fn agents(&self) -> Agents {
+    pub fn agents(&self) -> Agents<'_> {
         self.children
             .values()
             .filter_map(|child| {
                 let parent = child.summary.parent.as_ref()?;
                 let item = parent.item.clone()?;
-                (&parent.session == self.view()).then(|| (item, label(child)))
+                (&parent.session == self.view()).then_some((item, child))
             })
             .collect()
     }
@@ -217,7 +223,7 @@ impl Tree {
                 session: &state.summary.id,
                 name: name(state),
                 status: Status::of(state),
-                attention: state.attention(),
+                attention: asking(state),
             })
             .collect()
     }
@@ -241,8 +247,117 @@ pub fn directory(cwd: &str) -> String {
         .unwrap_or_else(|| cwd.to_string())
 }
 
-fn label(state: &SessionState) -> String {
-    format!("{}{}", name(state), status_suffix(state))
+/// The session a transcript row steps into: pure, so the key that does it
+/// (`⏎` on a child's row, M11a's routing) is a lookup and not a search.
+#[allow(dead_code, reason = "the key that routes through it is M11a's")]
+pub fn steps_into<'a>(agents: &Agents<'a>, item: &ItemId) -> Option<&'a SessionId> {
+    agents.get(item).map(|child| &child.summary.id)
+}
+
+/// A session with a question open wants a person now. One that finished while
+/// you were looking elsewhere is unread, which is not the same thing —
+/// `SessionState::attention` counts both, and the window title wants that
+/// wider sense, while a row that says `Needs you` means this one.
+pub fn asking(state: &SessionState) -> bool {
+    !state.interactions.is_empty()
+}
+
+/// What a child's row says under it (design §4): what it is doing and what it
+/// has spent doing it. Nothing for a session nothing answers — a room is not
+/// at work, so it reports no work.
+pub fn activity(state: &SessionState) -> Option<String> {
+    if asking(state) {
+        return Some("Needs you".to_string());
+    }
+    let spent = spent(state);
+    match Status::of(state)? {
+        Status::Running => Some(format!("Running{} {spent}", theme::ellipsis())),
+        Status::Done => Some(format!("Done ({spent} · {}s)", seconds(state))),
+        Status::Idle => Some(format!("Starting{}", theme::ellipsis())),
+    }
+}
+
+/// `3 tools · 1.2k tokens`.
+fn spent(state: &SessionState) -> String {
+    let tools = state
+        .items
+        .iter()
+        .filter(|item| matches!(item.body, ItemBody::ToolCall { .. }))
+        .count();
+    let usage = &state.summary.usage;
+    format!(
+        "{tools} tool{} · {} tokens",
+        if tools == 1 { "" } else { "s" },
+        thousands(usage.input_total() + usage.output_tokens)
+    )
+}
+
+/// How long it has been at it: the first item it started to the last it
+/// finished, which is the only clock a client has for somebody else's work.
+fn seconds(state: &SessionState) -> i64 {
+    let first = state.items.first().map(|item| item.started_at);
+    let last = state
+        .items
+        .iter()
+        .filter_map(|item| item.completed_at)
+        .max();
+    match (first, last) {
+        (Some(first), Some(last)) => last.duration_since(first).as_secs().max(0),
+        _ => 0,
+    }
+}
+
+fn thousands(n: u64) -> String {
+    match n < 1_000 {
+        true => n.to_string(),
+        false => format!("{:.1}k", n as f64 / 1000.0),
+    }
+}
+
+/// The `ctrl+g` dropdown: one row per session in the tree, the one the
+/// keyboard is on marked by the cursor. Which rows exist is the tree's; where
+/// the dropdown is drawn is the frame's.
+pub fn switcher_lines(rows: &[Row<'_>], selected: usize) -> Vec<Line<'static>> {
+    rows.iter()
+        .enumerate()
+        .map(|(index, row)| switcher_line(row, index == selected))
+        .collect()
+}
+
+fn switcher_line(row: &Row<'_>, selected: bool) -> Line<'static> {
+    let name = if selected {
+        theme::text()
+    } else {
+        theme::dim()
+    };
+    let mut spans = vec![
+        theme::cursor_span(selected),
+        Span::styled(row.name.clone(), name),
+    ];
+    if let Some(status) = row.status {
+        spans.push(Span::styled(
+            format!(" {}", theme::bullet()),
+            bullet_style(row.status, row.attention),
+        ));
+        spans.push(Span::styled(format!(" {}", status.label()), theme::dim()));
+    }
+    if row.attention {
+        spans.push(Span::styled(" · needs you".to_string(), theme::presence()));
+    }
+    Line::from(spans)
+}
+
+/// A session's bullet takes the colour a tool row in the same state takes, and
+/// one that wants a person takes bingo's own colour wherever it is drawn.
+pub fn bullet_style(status: Option<Status>, attention: bool) -> ratatui::style::Style {
+    if attention {
+        return theme::presence();
+    }
+    match status {
+        Some(Status::Running) => theme::presence(),
+        Some(Status::Done) => theme::good(),
+        Some(Status::Idle) | None => theme::dim(),
+    }
 }
 
 #[cfg(test)]
@@ -262,7 +377,7 @@ mod tests {
 
         tree.apply(&child_frame(1, announced("reviewer")));
         tree.apply(&child_frame(2, started("trn_9")));
-        assert_eq!(tree.tally().as_deref(), Some("1 agent"));
+        assert_eq!(tree.tally().as_deref(), Some("1 running"));
         let rows = tree.rows();
         assert_eq!(rows[1].name, "reviewer");
         assert_eq!(rows[1].status, Some(Status::Running));
@@ -298,7 +413,7 @@ mod tests {
         let mut tree = Tree::new(state());
         tree.apply(&child_frame(1, announced("reviewer")));
         tree.apply(&child_frame(2, opened(child_permission())));
-        assert_eq!(tree.tally().as_deref(), Some("1 agent · 1 needs you"));
+        assert_eq!(tree.tally().as_deref(), Some("1 needs you"));
         assert!(tree.attention());
         let (owner, _) = tree.open_interaction().expect("the child's prompt");
         assert_eq!(owner.summary.id, child_id());
@@ -317,11 +432,15 @@ mod tests {
         let mut tree = Tree::new(state());
         tree.apply(&child_frame(1, announced("reviewer")));
         let agents = tree.agents();
+        let spawned = ItemId::from_raw("itm_1");
         assert_eq!(
-            agents
-                .get(&bingo_sdk::ItemId::from_raw("itm_1"))
-                .map(String::as_str),
-            Some("reviewer · idle")
+            agents.get(&spawned).map(|child| name(child)),
+            Some("reviewer".to_string())
+        );
+        assert_eq!(steps_into(&agents, &spawned), Some(&child_id()));
+        assert_eq!(
+            agents.get(&spawned).and_then(|child| activity(child)),
+            Some("Starting…".to_string())
         );
 
         tree.show(&child_id());
@@ -357,28 +476,74 @@ mod tests {
             item: Some(ItemId::from_raw("itm_1")),
         });
         tree.apply(&log_frame(1, Event::SessionUpdated { summary }));
+        let agents = tree.agents();
+        let opened = ItemId::from_raw("itm_1");
         assert_eq!(
-            tree.agents()
-                .get(&ItemId::from_raw("itm_1"))
-                .map(String::as_str),
-            Some("#design")
+            agents.get(&opened).map(|room| name(room)),
+            Some("#design".to_string())
+        );
+        assert_eq!(
+            agents.get(&opened).and_then(|room| activity(room)),
+            None,
+            "a room is not at work, so its row reports none"
         );
     }
 
     #[test]
-    fn a_finished_child_says_done() {
+    fn a_child_row_says_what_it_is_doing_and_what_it_has_spent() {
         let mut tree = Tree::new(state());
-        tree.apply(&child_frame(1, announced("reviewer")));
-        tree.apply(&child_frame(2, started("trn_9")));
+        for frame in busy_child("reviewer") {
+            tree.apply(&frame);
+        }
+        let running = tree.children.values().next().expect("the child");
+        assert_eq!(
+            activity(running).as_deref(),
+            Some("Running… 3 tools · 1.2k tokens")
+        );
+
         tree.apply(&child_frame(
-            3,
+            6,
             completed("trn_9", bingo_sdk::TurnStatus::Completed),
         ));
+        let done = tree.children.values().next().expect("the child");
         assert_eq!(
-            tree.agents()
-                .get(&bingo_sdk::ItemId::from_raw("itm_1"))
-                .map(String::as_str),
-            Some("reviewer · done")
+            activity(done).as_deref(),
+            Some("Done (3 tools · 1.2k tokens · 0s)")
         );
+
+        tree.apply(&child_frame(7, opened(child_permission())));
+        let asking = tree.children.values().next().expect("the child");
+        assert_eq!(activity(asking).as_deref(), Some("Needs you"));
+    }
+
+    #[test]
+    fn the_switcher_lists_one_session_a_row_and_marks_the_one_it_is_on() {
+        let mut tree = Tree::new(state());
+        for frame in busy_child("reviewer") {
+            tree.apply(&frame);
+        }
+        tree.apply(&log_frame(9, log_announced("#design")));
+        let drawn: Vec<String> = switcher_lines(&tree.rows(), 1)
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        assert_eq!(
+            drawn,
+            vec![
+                "  project ⏺ idle".to_string(),
+                "❯ #design".to_string(),
+                "  reviewer ⏺ running".to_string(),
+            ],
+            "the root first, then the rest in id order"
+        );
+    }
+
+    #[test]
+    fn a_switcher_row_that_wants_a_person_says_so_in_words() {
+        let mut tree = Tree::new(state());
+        tree.apply(&child_frame(1, announced("reviewer")));
+        tree.apply(&child_frame(2, opened(child_permission())));
+        let drawn = switcher_lines(&tree.rows(), 0);
+        assert_eq!(drawn[1].to_string(), "  reviewer ⏺ idle · needs you");
     }
 }

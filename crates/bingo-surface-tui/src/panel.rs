@@ -35,7 +35,7 @@ pub fn lines(state: &SessionState) -> Vec<Line<'static>> {
 fn heading(plugin: &str, kind: &str) -> Line<'static> {
     Line::from(Span::styled(
         format!("{plugin} · {kind}"),
-        theme::accent().patch(theme::bold()),
+        theme::text().patch(theme::bold()),
     ))
 }
 

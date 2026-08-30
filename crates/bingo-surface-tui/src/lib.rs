@@ -20,8 +20,9 @@
 //!   carries — the root and its sub-sessions (ADR-0010 §3) — and which of
 //!   them is on screen.
 //! - [`transcript`], [`markdown`], [`block`], [`panel`], [`dialog`],
-//!   [`composer`], [`commands`], [`keys`], [`permission`] and [`wrap`] are the
-//!   bricks those two stand on.
+//!   [`composer`], [`commands`], [`keys`], [`permission`], [`paths`],
+//!   [`welcome`] and [`wrap`] are the bricks those two stand on, and
+//!   [`theme`] is the one table of tokens and glyphs they draw with.
 //!
 //! # What a person types
 //!
@@ -40,6 +41,7 @@ mod input;
 mod keys;
 mod markdown;
 mod panel;
+mod paths;
 mod permission;
 mod preview;
 mod run;
@@ -49,6 +51,7 @@ mod transcript;
 mod tree;
 mod ui;
 mod view;
+mod welcome;
 mod wrap;
 
 use std::sync::Arc;
@@ -115,5 +118,9 @@ impl Plugin for TuiPlugin {
     }
 }
 
+#[cfg(test)]
+mod painted;
+#[cfg(test)]
+mod screens;
 #[cfg(test)]
 mod test_support;

@@ -11,7 +11,10 @@ use crate::theme;
 pub fn lines(view: &View) -> Vec<Line<'static>> {
     match view {
         View::Text { text } => text.lines().map(plain).collect(),
-        View::List { items } => items.iter().map(|i| plain(&format!("• {i}"))).collect(),
+        View::List { items } => items
+            .iter()
+            .map(|i| plain(&format!("{} {i}", theme::point())))
+            .collect(),
         View::Table { headers, rows } => table(headers, rows),
         // The rest draw as their fold until M11d gives each its renderer.
         other => other.fold().lines().map(plain).collect(),

@@ -1,9 +1,15 @@
 //! The prompt editor: a `String`, a grapheme-aligned cursor, and the motions a
 //! readline user expects. It owns no terminal, so every one of its rules is
-//! testable as a function of text and offset.
+//! testable as a function of text and offset — and, at the end of the file,
+//! the rows of the box it is drawn in (design §4: `╭─╮ │ > ▌ │ ╰─╯`, one to
+//! ten rows, the border dim). Where that box sits is the frame's.
 
+use bingo_sdk::{Driver, SessionState};
+use ratatui::text::{Line, Span};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
+
+use crate::{theme, tree};
 
 /// Where the editor's text sits on screen once it is folded into a box.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -233,6 +239,49 @@ fn seek(text: &str, start: usize, end: usize, column: usize) -> usize {
         .grapheme_indices(true)
         .nth(column)
         .map_or(end, |(i, _)| start + i)
+}
+
+// ---- the box ------------------------------------------------------------
+
+/// The prompt a session answers to: `> `, and `#design > ` in a room, which
+/// is posted into rather than asked (ADR-0011 §1).
+pub fn prompt(state: &SessionState) -> String {
+    match state.summary.driver {
+        Driver::Log => format!("{} {} ", tree::name(state), theme::user()),
+        Driver::Model => format!("{} ", theme::user()),
+    }
+}
+
+/// The rows inside the box: the prompt on the first, the rest of the text
+/// under it, and a dim placeholder in place of an empty first row. `window`
+/// is the first row drawn and how many rows the box has.
+pub fn box_lines(
+    layout: &Layout,
+    prompt: &str,
+    window: (usize, usize),
+    placeholder: Option<&str>,
+) -> Vec<Line<'static>> {
+    let (start, rows) = window;
+    layout
+        .lines
+        .iter()
+        .enumerate()
+        .skip(start)
+        .take(rows)
+        .map(|(index, text)| row(index, text, prompt, placeholder))
+        .collect()
+}
+
+fn row(index: usize, text: &str, prompt: &str, placeholder: Option<&str>) -> Line<'static> {
+    let lead = match index {
+        0 => Span::styled(prompt.to_string(), theme::dim()),
+        _ => Span::raw(" ".repeat(prompt.width())),
+    };
+    let body = match placeholder.filter(|_| index == 0) {
+        Some(hint) => Span::styled(hint.to_string(), theme::dim()),
+        None => Span::styled(text.to_string(), theme::text()),
+    };
+    Line::from(vec![lead, body])
 }
 
 #[cfg(test)]

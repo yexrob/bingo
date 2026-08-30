@@ -5,6 +5,15 @@ use ratatui::text::{Line, Span};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
+/// Prose is read, not scanned: however wide the terminal is, a line of it
+/// stops here (design §7).
+pub const MEASURE: usize = 100;
+
+/// The width prose is wrapped to inside a region `width` columns wide.
+pub fn measure(width: usize) -> usize {
+    width.min(MEASURE)
+}
+
 /// Wrap one styled line to `width` columns, keeping each span's style. An empty
 /// line stays one empty line, so blank separators survive.
 pub fn wrap(line: &Line<'static>, width: usize) -> Vec<Line<'static>> {

@@ -150,9 +150,9 @@ impl Ui {
             .is_some_and(|at| now.duration_since(at) < EXIT_WINDOW)
     }
 
-    /// The spinner frame for this instant.
+    /// The sparkle's frame for this instant.
     pub fn spinner(&self, now: Instant) -> &'static str {
-        crate::theme::spinner(now.duration_since(self.started))
+        crate::theme::sparkle(now.duration_since(self.started))
     }
 }
 
