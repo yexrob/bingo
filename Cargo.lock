@@ -204,6 +204,7 @@ dependencies = [
  "bingo-surface-print",
  "bingo-surface-rpc",
  "bingo-surface-tui",
+ "bingo-tasks",
  "bingo-tool-bash",
  "bingo-tool-fs",
  "bingo-tool-web",
@@ -470,6 +471,21 @@ dependencies = [
  "tracing",
  "unicode-segmentation",
  "unicode-width",
+]
+
+[[package]]
+name = "bingo-tasks"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bingo-sdk",
+ "futures",
+ "jiff",
+ "schemars",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
