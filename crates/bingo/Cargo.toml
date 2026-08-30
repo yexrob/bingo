@@ -42,6 +42,8 @@ bingo-sdk = { workspace = true, features = ["testing"] }
 tempfile.workspace = true
 # Black-box turns against a scripted HTTP endpoint (`--provider openai`, WebFetch).
 wiremock.workspace = true
+# The fake issuer's tokens are JWTs whose claims the codex provider reads.
+base64.workspace = true
 tokio.workspace = true
 # The JSON-RPC harness drives a spawned `bingo serve --stdio` through RemoteKernel.
 futures.workspace = true
