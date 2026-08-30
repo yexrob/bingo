@@ -31,6 +31,9 @@ pub const PER_FRAME: Duration = Duration::from_millis(33);
 pub struct Reveal {
     pub frame: u16,
     pub of: u16,
+    /// Which way it is going, which is what "there is another frame after
+    /// this one" depends on.
+    closing: bool,
 }
 
 impl Reveal {
@@ -43,12 +46,16 @@ impl Reveal {
             false => step.saturating_add(1).min(of),
             true => of.saturating_sub(step),
         };
-        Self { frame, of }
+        Self { frame, of, closing }
     }
 
-    /// Whether the next frame would draw it differently.
+    /// Whether the next frame would draw it differently: on its way in until
+    /// it is whole, on its way out until it has gone.
     pub fn moving(&self) -> bool {
-        self.frame > 0 && self.frame < self.of
+        match self.closing {
+            false => self.frame < self.of,
+            true => self.frame > 0,
+        }
     }
 
     pub fn gone(&self) -> bool {
@@ -188,13 +195,25 @@ mod tests {
             .map(|i| Reveal::at(CARD_FRAMES, start, start + PER_FRAME * i, true).frame)
             .collect();
         assert_eq!(frames, vec![3, 2, 1, 0, 0]);
+        assert!(
+            Reveal::at(CARD_FRAMES, start, start, true).moving(),
+            "a layer on its way out has frames left to draw"
+        );
         assert!(Reveal::at(CARD_FRAMES, start, start + PER_FRAME * 3, true).gone());
+        assert!(!Reveal::at(CARD_FRAMES, start, start + PER_FRAME * 3, true).moving());
     }
 
     #[test]
     fn each_frame_shows_its_share_of_the_rows() {
         let of = CARD_FRAMES;
-        let rows = |frame| Reveal { frame, of }.rows(9);
+        let rows = |frame| {
+            Reveal {
+                frame,
+                of,
+                closing: false,
+            }
+            .rows(9)
+        };
         assert_eq!(rows(0), 0);
         assert_eq!(rows(1), 3);
         assert_eq!(rows(2), 6);
@@ -204,7 +223,14 @@ mod tests {
     #[test]
     fn a_sheet_takes_four_frames_to_fill_its_region() {
         let of = SHEET_FRAMES;
-        let rows = |frame| Reveal { frame, of }.rows(20);
+        let rows = |frame| {
+            Reveal {
+                frame,
+                of,
+                closing: false,
+            }
+            .rows(20)
+        };
         assert_eq!([rows(1), rows(2), rows(3), rows(4)], [5, 10, 15, 20]);
     }
 
