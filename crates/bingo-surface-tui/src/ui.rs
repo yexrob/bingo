@@ -60,6 +60,9 @@ pub struct Ui {
     pub dialog: Dialog,
     pub scroll: Scroll,
     pub help: bool,
+    /// The `ctrl+t` panel over the viewed session's plugin state. What it
+    /// draws is the reducer's; open is all this surface remembers.
+    pub panel: bool,
     pub menu: Menu,
     pub picker: Option<Picker>,
     pub switcher: Option<Switcher>,
@@ -85,6 +88,7 @@ impl Ui {
             dialog: Dialog::default(),
             scroll: Scroll::default(),
             help: false,
+            panel: false,
             menu: Menu::default(),
             picker: None,
             switcher: None,

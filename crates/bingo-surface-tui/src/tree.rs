@@ -9,7 +9,7 @@
 
 use std::collections::BTreeMap;
 
-use bingo_sdk::{Applied, Event, Frame, Interaction, ItemId, SessionId, SessionState};
+use bingo_sdk::{Applied, Driver, Event, Frame, Interaction, ItemId, SessionId, SessionState};
 
 /// The `↳` label of the child a tool call spawned, by the item that called it.
 pub type Agents = BTreeMap<ItemId, String>;
@@ -25,13 +25,18 @@ pub enum Status {
 }
 
 impl Status {
-    pub fn of(state: &SessionState) -> Self {
+    /// What the session is doing, or nothing at all: a `Log` session has no
+    /// model behind it, so there is no work to report (ADR-0011 §1).
+    pub fn of(state: &SessionState) -> Option<Self> {
+        if state.summary.driver == Driver::Log {
+            return None;
+        }
         if state.busy() {
-            Status::Running
+            Some(Status::Running)
         } else if state.last_turn.is_some() {
-            Status::Done
+            Some(Status::Done)
         } else {
-            Status::Idle
+            Some(Status::Idle)
         }
     }
 
@@ -44,11 +49,24 @@ impl Status {
     }
 }
 
+/// The ` · running` a name is followed by, and nothing for a session nothing
+/// answers: one place decides it, so no view has to ask about the driver.
+pub fn suffix(status: Option<Status>) -> String {
+    status
+        .map(|status| format!(" · {}", status.label()))
+        .unwrap_or_default()
+}
+
+pub fn status_suffix(state: &SessionState) -> String {
+    suffix(Status::of(state))
+}
+
 /// One row of the switcher, derived from a session in the tree.
 pub struct Row<'a> {
     pub session: &'a SessionId,
     pub name: String,
-    pub status: Status,
+    /// Absent for a session nothing answers.
+    pub status: Option<Status>,
     pub attention: bool,
 }
 
@@ -160,8 +178,13 @@ impl Tree {
     }
 
     /// `2 agents · 1 needs you`, and nothing while the tree is only the root.
+    /// A session nothing answers is doing no work, so it is nobody's count.
     pub fn tally(&self) -> Option<String> {
-        let agents = self.children.len();
+        let agents = self
+            .children
+            .values()
+            .filter(|child| Status::of(child).is_some())
+            .count();
         if agents == 0 {
             return None;
         }
@@ -219,7 +242,7 @@ pub fn directory(cwd: &str) -> String {
 }
 
 fn label(state: &SessionState) -> String {
-    format!("{} · {}", name(state), Status::of(state).label())
+    format!("{}{}", name(state), status_suffix(state))
 }
 
 #[cfg(test)]
@@ -242,7 +265,7 @@ mod tests {
         assert_eq!(tree.tally().as_deref(), Some("1 agent"));
         let rows = tree.rows();
         assert_eq!(rows[1].name, "reviewer");
-        assert_eq!(rows[1].status, Status::Running);
+        assert_eq!(rows[1].status, Some(Status::Running));
         assert_eq!(rows[0].name, "project", "the root is named by its cwd");
     }
 
@@ -305,6 +328,40 @@ mod tests {
         assert!(
             tree.agents().is_empty(),
             "the rows belong to the transcript that spawned them"
+        );
+    }
+
+    #[test]
+    fn a_session_nothing_answers_reports_no_status_at_all() {
+        let mut tree = Tree::new(state());
+        tree.apply(&log_frame(1, log_announced("#design")));
+        tree.apply(&log_frame(
+            2,
+            Event::ItemCompleted {
+                item: post("itm_5", "reviewer", "shipped"),
+            },
+        ));
+        let room = tree.rows().pop().expect("the room's row");
+        assert_eq!(room.name, "#design");
+        assert_eq!(room.status, None);
+        assert_eq!(status_suffix(tree.sessions().last().expect("the room")), "");
+        assert!(tree.tally().is_none(), "a room is not an agent at work");
+    }
+
+    #[test]
+    fn the_row_under_a_call_that_opened_a_room_is_its_name_alone() {
+        let mut tree = Tree::new(state());
+        let mut summary = log_summary("#design");
+        summary.parent = Some(bingo_sdk::ParentLink {
+            session: tree.root_id().clone(),
+            item: Some(ItemId::from_raw("itm_1")),
+        });
+        tree.apply(&log_frame(1, Event::SessionUpdated { summary }));
+        assert_eq!(
+            tree.agents()
+                .get(&ItemId::from_raw("itm_1"))
+                .map(String::as_str),
+            Some("#design")
         );
     }
 

@@ -43,6 +43,10 @@ pub fn on_key(ui: &mut Ui, tree: &Tree, key: KeyEvent, now: Now) -> Vec<Effect> 
         toggle_switcher(ui, tree, now);
         return Vec::new();
     }
+    if chord(key, 't') {
+        ui.panel = !ui.panel;
+        return Vec::new();
+    }
     if ui.switcher.is_some() {
         return switcher(ui, tree, key);
     }
@@ -102,6 +106,10 @@ fn interrupt_or_exit(ui: &mut Ui, state: &SessionState, now: Now) -> Vec<Effect>
 
 /// Esc closes the innermost thing that is open, then interrupts.
 fn escape(ui: &mut Ui, state: &SessionState) -> Vec<Effect> {
+    if ui.panel {
+        ui.panel = false;
+        return Vec::new();
+    }
     if ui.help {
         ui.help = false;
         return Vec::new();
@@ -999,6 +1007,23 @@ mod tests {
                 }
             })]
         );
+    }
+
+    // ---- the plugin-state panel -----------------------------------------
+
+    #[test]
+    fn ctrl_t_toggles_the_plugin_state_panel_and_esc_closes_it() {
+        let (mut ui, now) = scene();
+        assert!(press(&mut ui, &state(), ctrl('t'), now).is_empty());
+        assert!(ui.panel);
+        press(&mut ui, &state(), ctrl('t'), now);
+        assert!(!ui.panel, "the same chord closes it");
+
+        press(&mut ui, &state(), ctrl('t'), now);
+        ui.help = true;
+        assert!(press(&mut ui, &state(), key(KeyCode::Esc), now).is_empty());
+        assert!(!ui.panel, "esc takes the innermost panel first");
+        assert!(ui.help);
     }
 
     #[test]

@@ -86,6 +86,42 @@ pub fn child_frame(seq: u64, event: Event) -> Frame {
     }
 }
 
+/// A room under the same root: a session nothing answers, whose journal is
+/// the point (ADR-0011 §1). Its id sorts before the sub-agent's, so a switcher
+/// can show it between two model rows.
+pub fn log_id() -> SessionId {
+    SessionId::from_raw("ses_10")
+}
+
+pub fn log_summary(title: &str) -> SessionSummary {
+    SessionSummary {
+        id: log_id(),
+        title: Some(title.into()),
+        driver: bingo_sdk::Driver::Log,
+        model: None,
+        provider: None,
+        parent: Some(ParentLink {
+            session: SessionId::from_raw("ses_1"),
+            item: None,
+        }),
+        ..summary()
+    }
+}
+
+/// The frame at the head of a room's stream.
+pub fn log_announced(title: &str) -> Event {
+    Event::SessionUpdated {
+        summary: log_summary(title),
+    }
+}
+
+pub fn log_frame(seq: u64, event: Event) -> Frame {
+    Frame {
+        session: log_id(),
+        ..frame(seq, event)
+    }
+}
+
 /// A permission the child raised; the root's handle answers it.
 pub fn child_permission() -> Interaction {
     Interaction {
@@ -125,6 +161,23 @@ pub fn user(id: &str, text: &str) -> Item {
         ItemBody::User {
             parts: vec![ContentPart::text(text)],
             origin: Origin::surface("tui"),
+        },
+    )
+}
+
+/// What a member posted into a room: a user item that names who wrote it and
+/// where, as the room plugin's fan-out stamps it.
+pub fn post(id: &str, principal: &str, text: &str) -> Item {
+    item(
+        id,
+        ItemStatus::Completed,
+        ItemBody::User {
+            parts: vec![ContentPart::text(text)],
+            origin: Origin {
+                surface: "room".into(),
+                principal: Some(principal.into()),
+                conversation: Some("#design".into()),
+            },
         },
     )
 }
@@ -278,6 +331,15 @@ pub fn resolved() -> Event {
         id: InteractionId::from_raw("int_1"),
         answer: Answer::AllowOnce,
         by: bingo_sdk::ResolvedBy::Kernel,
+    }
+}
+
+/// A plugin publishing the whole of one kind of its state (ADR-0011 §2).
+pub fn extended(plugin: &str, kind: &str, payload: Value) -> Event {
+    Event::Extension {
+        plugin: plugin.into(),
+        kind: kind.into(),
+        payload,
     }
 }
 
