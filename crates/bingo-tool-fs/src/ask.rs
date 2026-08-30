@@ -203,7 +203,7 @@ impl Tool for AskUserQuestionTool {
             let kind = interaction(question);
             let specs = answer_specs(&kind);
             let answer = cx
-                .host
+                .call
                 .ask(kind, specs)
                 .await
                 .map_err(|e| ToolError::Failed(format!("the question was not put: {e}")))?;

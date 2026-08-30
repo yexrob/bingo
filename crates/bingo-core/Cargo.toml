@@ -24,6 +24,7 @@ jsonc-parser.workspace = true
 async-trait.workspace = true
 
 [dev-dependencies]
+bingo-sdk = { workspace = true, features = ["testing"] }
 tokio = { workspace = true, features = ["test-util"] }
 tempfile.workspace = true
 insta.workspace = true

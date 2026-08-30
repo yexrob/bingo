@@ -610,11 +610,25 @@ pub enum IntentOutcome {
     Rejected { error: KernelError },
 }
 
+/// Where a child hangs in the tree: its parent, and the tool call that
+/// spawned it when one did (ADR-0011 §3).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ParentLink {
     pub session: SessionId,
-    pub item: ItemId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item: Option<ItemId>,
+}
+
+/// What a session does with what it is told (ADR-0011 §1).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum Driver {
+    /// A model answers: every prose input opens a turn.
+    #[default]
+    Model,
+    /// Nothing answers: every input is recorded, and the journal is the point.
+    Log,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -628,6 +642,8 @@ pub struct SessionSummary {
     pub cwd: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent: Option<ParentLink>,
+    #[serde(default)]
+    pub driver: Driver,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -716,6 +732,7 @@ mod tests {
             title: Some("hello".into()),
             cwd: "/tmp/p".into(),
             parent: None,
+            driver: Driver::Model,
             model: Some("fake-1".into()),
             provider: Some("fake".into()),
             created_at: ts(),

@@ -807,7 +807,8 @@ async fn a_foreground_agent_is_a_child_session_on_the_root_s_attachment() {
         .expect("a child's own frames arrive on a tree attachment");
     assert_eq!(child.1.session.as_str(), root);
     assert_eq!(
-        child.1.item, call,
+        child.1.item.as_ref(),
+        Some(&call),
         "the child hangs under the call that made it"
     );
 

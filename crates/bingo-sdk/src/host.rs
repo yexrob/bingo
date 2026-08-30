@@ -39,6 +39,9 @@ pub struct SessionSpec {
     pub parent: Option<ParentLink>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    /// `Log` needs no provider or model: nothing answers (ADR-0011 §1).
+    #[serde(default)]
+    pub driver: Driver,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -265,6 +268,16 @@ impl std::fmt::Debug for Attachment {
     }
 }
 
+/// How a peer message reaches a session's queue (ADR-0010 §1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum Delivery {
+    /// An idle target opens a turn on it; a busy one absorbs it at the next barrier.
+    Wake,
+    /// It waits in the queue for whatever opens the next turn.
+    Hold,
+}
+
 #[async_trait]
 pub trait HostApi: Send + Sync {
     async fn sessions(&self, filter: SessionFilter) -> Result<Vec<SessionSummary>, KernelError>;
@@ -280,6 +293,27 @@ pub trait HostApi: Send + Sync {
     async fn close(&self, session: &SessionId, reason: CloseReason) -> Result<(), KernelError>;
 
     async fn delete(&self, session: &SessionId) -> Result<(), KernelError>;
+
+    /// The peer-messaging primitive (ADR-0010 §1, ADR-0011 §3): the target's
+    /// queue is its inbox. A target that is persisted but not live is
+    /// reopened first; the outcome is the target's ack.
+    async fn deliver(
+        &self,
+        to: &SessionId,
+        intent: IntentId,
+        input: Input,
+        delivery: Delivery,
+    ) -> Result<(), KernelError>;
+
+    /// Publish a plugin's state into a session's journal (ADR-0011 §2): a
+    /// durable `Event::Extension` whose payload is the whole of `kind`.
+    async fn extend(
+        &self,
+        session: &SessionId,
+        plugin: &str,
+        kind: &str,
+        payload: Value,
+    ) -> Result<(), KernelError>;
 
     async fn catalog(&self, kind: CatalogKind) -> Result<Catalog, KernelError>;
 

@@ -11,7 +11,7 @@ use bingo_sdk::{
     CloseReason, CommandContext, ContextQuery, ContextUsage, Delivery, Env, GatewayStream, HostApi,
     HostHandle, Input, IntentId, InteractionKind, Item, ItemBody, ItemId, KernelError,
     ModelCapabilities, OpenOptions, Prompter, SessionFilter, SessionId, SessionSelector,
-    SessionSpec, SessionSummary, ToolContext, ToolHost, TurnId, Usage,
+    SessionSummary, ToolContext, ToolHost, TurnId, Usage,
 };
 use jiff::Timestamp;
 
@@ -96,6 +96,26 @@ impl HostApi for UnusedHost {
         unreachable!("a skill deletes no session")
     }
 
+    async fn deliver(
+        &self,
+        _to: &SessionId,
+        _intent: IntentId,
+        _input: Input,
+        _delivery: Delivery,
+    ) -> Result<(), KernelError> {
+        unreachable!("this double delivers nothing")
+    }
+
+    async fn extend(
+        &self,
+        _session: &SessionId,
+        _plugin: &str,
+        _kind: &str,
+        _payload: serde_json::Value,
+    ) -> Result<(), KernelError> {
+        unreachable!("this double extends nothing")
+    }
+
     async fn catalog(&self, _kind: CatalogKind) -> Result<Catalog, KernelError> {
         unreachable!("a skill reads no catalog")
     }
@@ -138,24 +158,6 @@ impl ToolHost for NullHost {
     async fn record(&self, _body: ItemBody) -> Result<ItemId, KernelError> {
         unreachable!("a skill records nothing of its own")
     }
-
-    async fn spawn_session(&self, _spec: SessionSpec) -> Result<SessionId, KernelError> {
-        unreachable!("a skill spawns nothing")
-    }
-
-    fn deliver(
-        &self,
-        _: &SessionId,
-        _: IntentId,
-        _: Input,
-        _: Delivery,
-    ) -> Result<(), KernelError> {
-        Ok(())
-    }
-
-    fn service_any(&self, _key: &str) -> Option<Arc<dyn Any + Send + Sync>> {
-        None
-    }
 }
 
 pub(crate) fn tool_context(cwd: &Path) -> ToolContext {
@@ -167,7 +169,8 @@ pub(crate) fn tool_context(cwd: &Path) -> ToolContext {
         cwd: cwd.to_path_buf(),
         cancel: CancellationToken::new(),
         env: Arc::new(Env::rooted("/nowhere")),
-        host: Arc::new(NullHost),
+        host: bingo_sdk::testing::NoHost::handle(),
+        call: Arc::new(NullHost),
     }
 }
 
@@ -185,6 +188,7 @@ pub(crate) struct Asked {
 pub(crate) fn asked(cwd: &Path) -> Asked {
     Asked {
         session: SessionSummary {
+            driver: Default::default(),
             id: SessionId::from_raw("ses_test"),
             key: None,
             title: None,

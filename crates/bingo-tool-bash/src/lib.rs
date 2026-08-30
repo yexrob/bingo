@@ -177,14 +177,13 @@ impl Plugin for BashPlugin {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use std::any::Any;
+
     use std::path::PathBuf;
     use std::sync::Mutex;
 
     use bingo_sdk::{
-        Answer, AnswerSpec, CancellationToken, Contribution, Delivery, Env, Input, IntentId,
-        InteractionKind, ItemBody, ItemId, KernelError, Prompter, SessionId, SessionSpec, ToolHost,
-        TurnId,
+        Answer, AnswerSpec, CancellationToken, Contribution, Env, InteractionKind, ItemBody,
+        ItemId, KernelError, Prompter, SessionId, ToolHost, TurnId,
     };
 
     /// A tool host that keeps every progress tail it is handed, which is all a
@@ -220,24 +219,6 @@ pub(crate) mod tests {
         async fn record(&self, _body: ItemBody) -> Result<ItemId, KernelError> {
             Ok(ItemId::from_raw("itm_test"))
         }
-
-        async fn spawn_session(&self, _spec: SessionSpec) -> Result<SessionId, KernelError> {
-            Ok(SessionId::from_raw("ses_test"))
-        }
-
-        fn deliver(
-            &self,
-            _: &SessionId,
-            _: IntentId,
-            _: Input,
-            _: Delivery,
-        ) -> Result<(), KernelError> {
-            Ok(())
-        }
-
-        fn service_any(&self, _key: &str) -> Option<Arc<dyn Any + Send + Sync>> {
-            None
-        }
     }
 
     /// A call context in a scratch directory, and the host recording it.
@@ -259,7 +240,8 @@ pub(crate) mod tests {
                 config_dir: PathBuf::from("/tmp"),
                 data_dir: PathBuf::from("/tmp"),
             }),
-            host: host.clone(),
+            host: bingo_sdk::testing::NoHost::handle(),
+            call: host.clone(),
         };
         (host, cx)
     }

@@ -31,6 +31,25 @@ impl HostApi for Unavailable {
     async fn delete(&self, _: &SessionId) -> Result<(), KernelError> {
         Err(unavailable())
     }
+
+    async fn deliver(
+        &self,
+        _: &SessionId,
+        _: IntentId,
+        _: Input,
+        _: Delivery,
+    ) -> Result<(), KernelError> {
+        Err(unavailable())
+    }
+    async fn extend(
+        &self,
+        _: &SessionId,
+        _: &str,
+        _: &str,
+        _: serde_json::Value,
+    ) -> Result<(), KernelError> {
+        Err(unavailable())
+    }
     async fn catalog(&self, kind: CatalogKind) -> Result<Catalog, KernelError> {
         Ok(Catalog {
             kind,

@@ -54,7 +54,7 @@ fn create(cwd: &str, parent: Option<ParentLink>) -> SessionSelector {
 fn under(root: &SessionId) -> ParentLink {
     ParentLink {
         session: root.clone(),
-        item: ItemId::mint(),
+        item: Some(ItemId::mint()),
     }
 }
 

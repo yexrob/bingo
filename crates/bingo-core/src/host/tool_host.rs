@@ -1,26 +1,13 @@
-//! What a running tool can reach: its own session by mail, everything else
-//! through the host that owns it.
-
-use std::any::Any;
-use std::sync::{Arc, Weak};
+//! What is a running call's own: its session, by mail (ADR-0011 §3). The
+//! host it reaches everything else through is in its context.
 
 use async_trait::async_trait;
 use bingo_sdk::*;
 
-use super::Host;
 use crate::session::Mailbox;
 
 pub(super) struct SessionToolHost {
     pub(super) mailbox: Mailbox,
-    pub(super) host: Weak<Host>,
-}
-
-impl SessionToolHost {
-    fn host(&self) -> Result<Arc<Host>, KernelError> {
-        self.host
-            .upgrade()
-            .ok_or_else(|| KernelError::new(ErrorCode::SessionClosed, "the host is gone"))
-    }
 }
 
 #[async_trait]
@@ -42,29 +29,5 @@ impl ToolHost for SessionToolHost {
 
     async fn record(&self, body: ItemBody) -> Result<ItemId, KernelError> {
         self.mailbox.record(body).await
-    }
-
-    async fn spawn_session(&self, spec: SessionSpec) -> Result<SessionId, KernelError> {
-        let host = self.host()?;
-        let mailbox = host.create(spec).await?;
-        Ok(mailbox.id().clone())
-    }
-
-    fn deliver(
-        &self,
-        to: &SessionId,
-        intent: IntentId,
-        input: Input,
-        delivery: Delivery,
-    ) -> Result<(), KernelError> {
-        self.host()?
-            .live(to)?
-            .mailbox
-            .deliver(intent, input, delivery);
-        Ok(())
-    }
-
-    fn service_any(&self, key: &str) -> Option<Arc<dyn Any + Send + Sync>> {
-        self.host.upgrade()?.registry.services.get(key).cloned()
     }
 }

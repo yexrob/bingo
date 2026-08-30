@@ -34,6 +34,7 @@ tokio.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
+bingo-sdk = { workspace = true, features = ["testing"] }
 tempfile.workspace = true
 # Black-box turns against a scripted HTTP endpoint (`--provider openai`, WebFetch).
 wiremock.workspace = true

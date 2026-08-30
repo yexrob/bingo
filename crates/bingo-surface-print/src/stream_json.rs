@@ -66,7 +66,8 @@ impl Scope<'_> {
             .summary
             .parent
             .as_ref()
-            .and_then(|link| self.root.item(&link.item))
+            .and_then(|link| link.item.as_ref())
+            .and_then(|item| self.root.item(item))
             .and_then(|item| match &item.body {
                 ItemBody::ToolCall { call_id, .. } => Some(call_id.clone()),
                 _ => None,
@@ -743,7 +744,7 @@ mod tests {
         child_summary.id = SessionId::from_raw("ses_2");
         child_summary.parent = Some(bingo_sdk::ParentLink {
             session: root.summary.id.clone(),
-            item: ItemId::from_raw("i1"),
+            item: Some(ItemId::from_raw("i1")),
         });
         (root, SessionState::new(child_summary))
     }

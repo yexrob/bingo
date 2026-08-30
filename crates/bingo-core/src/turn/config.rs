@@ -130,6 +130,9 @@ pub struct TurnConfig {
     pub compactor: Option<Arc<dyn Compactor>>,
     pub budget: TurnBudget,
     pub env: Arc<Env>,
+    /// The whole host, for a tool, a hook and a redirect (ADR-0011 §3).
+    pub host: HostHandle,
+    /// What a call may do to its own session.
     pub tool_host: Arc<dyn ToolHost>,
 }
 

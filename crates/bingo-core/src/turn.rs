@@ -110,6 +110,7 @@ enum Assembled {
 pub async fn run_turn(cfg: &TurnConfig, run: TurnRun, host: &dyn TurnHost) -> TurnOutcome {
     let items = ContextView::items(&run.history);
     let hook_cx = HookContext {
+        host: cfg.host.clone(),
         session: cfg.session.id.clone(),
         turn: Some(run.turn.clone()),
         cwd: cfg.cwd.clone(),
@@ -668,7 +669,8 @@ impl Turn<'_> {
                 cwd: cfg.cwd.clone(),
                 cancel: cancel.child_token(),
                 env: cfg.env.clone(),
-                host: cfg.tool_host.clone(),
+                host: cfg.host.clone(),
+                call: cfg.tool_host.clone(),
             },
             |o| {
                 if let Some(mut item) = self.items.iter().find(|i| i.id == o.item).cloned() {

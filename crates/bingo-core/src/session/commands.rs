@@ -224,6 +224,26 @@ impl HostApi for Unreachable {
     async fn delete(&self, _: &SessionId) -> Result<(), KernelError> {
         unreachable!("never constructed")
     }
+
+    async fn deliver(
+        &self,
+        _to: &SessionId,
+        _intent: IntentId,
+        _input: Input,
+        _delivery: Delivery,
+    ) -> Result<(), KernelError> {
+        unreachable!("never constructed")
+    }
+
+    async fn extend(
+        &self,
+        _session: &SessionId,
+        _plugin: &str,
+        _kind: &str,
+        _payload: serde_json::Value,
+    ) -> Result<(), KernelError> {
+        unreachable!("never constructed")
+    }
     async fn catalog(&self, _: CatalogKind) -> Result<Catalog, KernelError> {
         unreachable!("never constructed")
     }

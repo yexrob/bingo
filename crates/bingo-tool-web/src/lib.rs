@@ -163,13 +163,12 @@ fn resolve(from_env: Option<String>, from_settings: Option<String>) -> Option<St
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use std::any::Any;
+
     use std::path::PathBuf;
 
     use bingo_sdk::{
-        Answer, AnswerSpec, CancellationToken, Contribution, Delivery, Env, Input, IntentId,
-        InteractionKind, ItemBody, ItemId, KernelError, Prompter, SessionId, SessionSpec,
-        ToolContext, ToolHost, TurnId,
+        Answer, AnswerSpec, CancellationToken, Contribution, Env, InteractionKind, ItemBody,
+        ItemId, KernelError, Prompter, SessionId, ToolContext, ToolHost, TurnId,
     };
 
     /// A tool host that answers nothing: neither web tool reaches any of it.
@@ -194,24 +193,6 @@ pub(crate) mod tests {
         async fn record(&self, _body: ItemBody) -> Result<ItemId, KernelError> {
             Ok(ItemId::from_raw("itm_test"))
         }
-
-        async fn spawn_session(&self, _spec: SessionSpec) -> Result<SessionId, KernelError> {
-            Ok(SessionId::from_raw("ses_test"))
-        }
-
-        fn deliver(
-            &self,
-            _: &SessionId,
-            _: IntentId,
-            _: Input,
-            _: Delivery,
-        ) -> Result<(), KernelError> {
-            Ok(())
-        }
-
-        fn service_any(&self, _key: &str) -> Option<Arc<dyn Any + Send + Sync>> {
-            None
-        }
     }
 
     pub(crate) fn context() -> ToolContext {
@@ -223,7 +204,8 @@ pub(crate) mod tests {
             cwd: PathBuf::from("/tmp"),
             cancel: CancellationToken::new(),
             env: Arc::new(Env::rooted("/tmp")),
-            host: Arc::new(NullHost),
+            host: bingo_sdk::testing::NoHost::handle(),
+            call: Arc::new(NullHost),
         }
     }
 

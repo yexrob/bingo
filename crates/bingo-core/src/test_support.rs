@@ -142,21 +142,6 @@ impl ToolHost for NoHost {
     async fn record(&self, _: ItemBody) -> Result<ItemId, KernelError> {
         Ok(ItemId::mint())
     }
-    async fn spawn_session(&self, _: SessionSpec) -> Result<SessionId, KernelError> {
-        Err(KernelError::new(ErrorCode::Internal, "no"))
-    }
-    fn deliver(
-        &self,
-        _: &SessionId,
-        _: IntentId,
-        _: Input,
-        _: Delivery,
-    ) -> Result<(), KernelError> {
-        Ok(())
-    }
-    fn service_any(&self, _: &str) -> Option<Arc<dyn std::any::Any + Send + Sync>> {
-        None
-    }
 }
 
 pub fn kind(item: &Item) -> String {
@@ -248,6 +233,7 @@ pub fn capabilities() -> ModelCapabilities {
 pub fn summary(id: &str) -> SessionSummary {
     let ts = jiff::Timestamp::from_second(0).unwrap();
     SessionSummary {
+        driver: Default::default(),
         id: SessionId::from_raw(id),
         key: None,
         title: None,
@@ -295,6 +281,7 @@ pub fn config(
             config_dir: "/tmp".into(),
             data_dir: "/tmp".into(),
         }),
+        host: bingo_sdk::testing::NoHost::handle(),
         tool_host,
     }
 }
@@ -435,6 +422,26 @@ impl HostApi for NoApi {
     }
     async fn delete(&self, _: &SessionId) -> Result<(), KernelError> {
         Ok(())
+    }
+
+    async fn deliver(
+        &self,
+        _to: &SessionId,
+        _intent: IntentId,
+        _input: Input,
+        _delivery: Delivery,
+    ) -> Result<(), KernelError> {
+        unreachable!("this double delivers nothing")
+    }
+
+    async fn extend(
+        &self,
+        _session: &SessionId,
+        _plugin: &str,
+        _kind: &str,
+        _payload: serde_json::Value,
+    ) -> Result<(), KernelError> {
+        unreachable!("this double extends nothing")
     }
     async fn catalog(&self, kind: CatalogKind) -> Result<Catalog, KernelError> {
         Ok(Catalog {

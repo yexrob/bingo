@@ -5,7 +5,7 @@
 use std::time::Instant;
 
 use bingo_sdk::{
-    Answer, AnswerSpec, ContentPart, Display, Event, Frame, Interaction, InteractionId,
+    Answer, AnswerSpec, ContentPart, Delivery, Display, Event, Frame, Interaction, InteractionId,
     InteractionKind, Item, ItemBody, ItemId, ItemStatus, Level, Origin, ParentLink, Preview,
     QuestionOption, Seq, SessionId, SessionState, SessionSummary, ToolOutput, TurnId, Usage,
 };
@@ -26,6 +26,7 @@ pub fn ts() -> Timestamp {
 
 pub fn summary() -> SessionSummary {
     SessionSummary {
+        driver: Default::default(),
         id: SessionId::from_raw("ses_1"),
         key: None,
         title: None,
@@ -65,7 +66,7 @@ pub fn child_summary(title: &str) -> SessionSummary {
         title: Some(title.into()),
         parent: Some(ParentLink {
             session: SessionId::from_raw("ses_1"),
-            item: ItemId::from_raw("itm_1"),
+            item: Some(ItemId::from_raw("itm_1")),
         }),
         ..summary()
     }
@@ -562,6 +563,26 @@ impl HostApi for TestHost {
 
     async fn delete(&self, _session: &SessionId) -> Result<(), KernelError> {
         Ok(())
+    }
+
+    async fn deliver(
+        &self,
+        _to: &SessionId,
+        _intent: IntentId,
+        _input: Input,
+        _delivery: Delivery,
+    ) -> Result<(), KernelError> {
+        unreachable!("this double delivers nothing")
+    }
+
+    async fn extend(
+        &self,
+        _session: &SessionId,
+        _plugin: &str,
+        _kind: &str,
+        _payload: serde_json::Value,
+    ) -> Result<(), KernelError> {
+        unreachable!("this double extends nothing")
     }
 
     async fn catalog(&self, kind: CatalogKind) -> Result<Catalog, KernelError> {

@@ -2,9 +2,12 @@
 //! folds frames with it. A client's view is always `apply(snapshot, frames
 //! since snapshot.seq)`, so no surface needs rules of its own.
 
+use std::collections::BTreeMap;
+
 use jiff::Timestamp;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::event::*;
 use crate::ids::{IntentId, InteractionId, ItemId, Seq, TurnId};
@@ -38,6 +41,10 @@ pub struct SessionState {
     pub unread: bool,
     #[serde(default)]
     pub closed: bool,
+    /// Plugin-owned state, by plugin then kind: the latest `Extension`
+    /// payload is the whole of that kind (ADR-0011 §2).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extensions: BTreeMap<String, BTreeMap<String, Value>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -97,6 +104,7 @@ impl SessionState {
             last_turn: None,
             unread: false,
             closed: false,
+            extensions: BTreeMap::new(),
         }
     }
 
@@ -178,9 +186,21 @@ impl SessionState {
             Event::ConfigChanged { config } => self.config_changed(config),
             Event::CatalogChanged { .. } => Applied::Nothing,
             Event::Notice { .. } => Applied::Notice,
-            Event::Extension { .. } => Applied::Extension,
+            Event::Extension {
+                plugin,
+                kind,
+                payload,
+            } => self.extended(plugin, kind, payload),
             Event::Lagged { .. } => Applied::Lagged,
         }
+    }
+
+    fn extended(&mut self, plugin: &str, kind: &str, payload: &Value) -> Applied {
+        self.extensions
+            .entry(plugin.to_string())
+            .or_default()
+            .insert(kind.to_string(), payload.clone());
+        Applied::Extension
     }
 
     fn session_updated(&mut self, summary: &SessionSummary) -> Applied {
@@ -304,6 +324,7 @@ mod tests {
             title: None,
             cwd: "/tmp".into(),
             parent: None,
+            driver: Driver::Model,
             model: None,
             provider: None,
             created_at: ts(),

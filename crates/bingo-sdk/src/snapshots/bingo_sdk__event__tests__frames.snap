@@ -13,6 +13,7 @@ expression: frames
         "id": "ses_1",
         "title": "hello",
         "cwd": "/tmp/p",
+        "driver": "model",
         "model": "fake-1",
         "provider": "fake",
         "createdAt": "2023-11-14T22:13:20Z",

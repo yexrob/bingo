@@ -20,6 +20,7 @@ serde_json.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+bingo-sdk = { workspace = true, features = ["testing"] }
 tempfile.workspace = true
 # `tokio::time::pause`, so a scripted delay costs a test no wall time.
 tokio = { workspace = true, features = ["test-util"] }

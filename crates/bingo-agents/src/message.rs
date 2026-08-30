@@ -143,6 +143,7 @@ impl Tool for MessageTool {
         let input = Input::text(args.text, origin(Some(from)));
         cx.host
             .deliver(&to, IntentId::mint(), input, self.kind.delivery())
+            .await
             .map_err(|e| ToolError::Failed(e.message))?;
         Ok(ToolOutput::text(self.kind.receipt(args.to.trim())))
     }

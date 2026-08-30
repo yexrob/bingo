@@ -13,8 +13,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::error::KernelError;
 use crate::event::{ItemBody, Preview, ToolOutput};
-use crate::host::{Input, Prompter, SessionSpec};
-use crate::ids::{IntentId, ItemId, SessionId, TurnId};
+use crate::host::{HostHandle, Prompter};
+use crate::ids::{ItemId, SessionId, TurnId};
 use crate::model::ToolSpec;
 
 /// What the gate and the executor may assume about a call. Every default is
@@ -141,7 +141,7 @@ impl Env {
     }
 }
 
-/// What a tool may reach while it runs. Everything else is a service.
+/// What a tool may reach while it runs: the host, and its own call.
 pub struct ToolContext {
     pub call_id: String,
     pub session: SessionId,
@@ -151,7 +151,10 @@ pub struct ToolContext {
     /// Child of the turn's token; honoured per `ToolTraits::interrupt`.
     pub cancel: CancellationToken,
     pub env: Arc<Env>,
-    pub host: Arc<dyn ToolHost>,
+    /// The whole host (ADR-0011 §3): sessions, delivery, services.
+    pub host: HostHandle,
+    /// What is this call's own: a question, its progress line, a record.
+    pub call: Arc<dyn ToolHost>,
 }
 
 impl std::fmt::Debug for ToolContext {
@@ -169,44 +172,22 @@ impl std::fmt::Debug for ToolContext {
 impl ToolContext {
     /// Replace the running call's progress tail (the live output line).
     pub fn progress(&self, tail: impl Into<String>) {
-        self.host.progress(&self.item, tail.into());
+        self.call.progress(&self.item, tail.into());
     }
 
     /// A service another plugin registered, by key.
     pub fn service<T: Any + Send + Sync>(&self, key: &str) -> Option<Arc<T>> {
-        self.host
-            .service_any(key)
-            .and_then(|v| v.downcast::<T>().ok())
+        self.host.service(key)
     }
 }
 
-/// How a peer message reaches a session's queue (ADR-0010 §1).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Delivery {
-    /// An idle target opens a turn on it; a busy one absorbs it at the next barrier.
-    Wake,
-    /// It waits in the queue for whatever opens the next turn.
-    Hold,
-}
-
-/// The kernel-side capabilities a tool context delegates to.
+/// What is a call's own on the kernel side; everything else is the host's
+/// (ADR-0011 §3).
 #[async_trait]
 pub trait ToolHost: Prompter {
     fn progress(&self, item: &ItemId, tail: String);
     /// Record an item outside the call (a background completion, a notice).
     async fn record(&self, body: ItemBody) -> Result<ItemId, KernelError>;
-    /// The sub-agent primitive: a child session sharing this registry.
-    async fn spawn_session(&self, spec: SessionSpec) -> Result<SessionId, KernelError>;
-    /// The peer-messaging primitive: the target's queue is its inbox. Fails
-    /// only for a session that is not live; the outcome is the target's ack.
-    fn deliver(
-        &self,
-        to: &SessionId,
-        intent: IntentId,
-        input: Input,
-        delivery: Delivery,
-    ) -> Result<(), KernelError>;
-    fn service_any(&self, key: &str) -> Option<Arc<dyn Any + Send + Sync>>;
 }
 
 #[async_trait]

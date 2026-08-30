@@ -21,6 +21,7 @@ impl Asked {
     pub fn at(cwd: &Path) -> Self {
         Self {
             session: SessionSummary {
+                driver: Default::default(),
                 id: SessionId::from_raw("ses_test"),
                 key: None,
                 title: None,

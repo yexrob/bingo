@@ -116,6 +116,7 @@ mod tests {
     fn summary(id: &str, cwd: &str, second: i64) -> SessionSummary {
         let ts = Timestamp::from_second(second).unwrap();
         SessionSummary {
+            driver: Default::default(),
             id: SessionId::from_raw(id),
             key: None,
             title: None,

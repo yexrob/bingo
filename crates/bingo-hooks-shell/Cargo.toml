@@ -25,6 +25,7 @@ tokio.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+bingo-sdk = { workspace = true, features = ["testing"] }
 insta.workspace = true
 # A test that hands `on_event` a frame has to stamp it: the sdk's `Frame.ts` is a
 # `jiff::Timestamp` and the sdk re-exports no constructor for one.

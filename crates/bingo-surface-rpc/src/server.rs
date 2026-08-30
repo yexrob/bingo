@@ -25,9 +25,9 @@ use crate::codec::{
     PARSE_ERROR, Request, Response, RpcError,
 };
 use crate::methods::{
-    AnswerParams, CatalogParams, Empty, EventParams, EventsParams, HistoryParams, InitializeParams,
-    InitializeResult, InterruptParams, ListParams, ListResult, OpenParams, OpenResult,
-    SessionParams, SubmitParams, name,
+    AnswerParams, CatalogParams, DeliverParams, Empty, EventParams, EventsParams, ExtendParams,
+    HistoryParams, InitializeParams, InitializeResult, InterruptParams, ListParams, ListResult,
+    OpenParams, OpenResult, SessionParams, SubmitParams, name,
 };
 use crate::session::{Forwarder, Pump};
 
@@ -216,6 +216,8 @@ impl Server {
             name::SESSION_OPEN => self.open(params).await,
             name::SESSION_CLOSE => self.close(params).await,
             name::SESSION_DELETE => self.delete(params).await,
+            name::SESSION_DELIVER => self.deliver(params).await,
+            name::SESSION_EXTEND => self.extend(params).await,
             name::SESSION_HISTORY => self.history(params).await,
             name::SESSION_EVENTS => self.events(params).await,
             name::SESSION_SUBMIT => self.submit(params),
@@ -285,6 +287,32 @@ impl Server {
         let params: SessionParams = parse(params)?;
         self.open.remove(&params.session);
         self.host.delete(&params.session).await?;
+        Reply::empty()
+    }
+
+    async fn deliver(&mut self, params: Value) -> Result<Reply, RpcError> {
+        let params: DeliverParams = parse(params)?;
+        self.host
+            .deliver(
+                &params.session,
+                params.intent,
+                params.input,
+                params.delivery,
+            )
+            .await?;
+        Reply::empty()
+    }
+
+    async fn extend(&mut self, params: Value) -> Result<Reply, RpcError> {
+        let params: ExtendParams = parse(params)?;
+        self.host
+            .extend(
+                &params.session,
+                &params.plugin,
+                &params.kind,
+                params.payload,
+            )
+            .await?;
         Reply::empty()
     }
 

@@ -2,19 +2,17 @@
 //! turn ends. Nothing here keeps a view of its own — a child's reply is
 //! derived from its journal at the moment it is asked for (ADR-0002).
 
-use std::sync::Arc;
-
 use bingo_sdk::{
     Attachment, CancellationToken, ClientIdentity, Delivery, Event, HostHandle, Input, IntentId,
     InterruptReason, ItemBody, KernelError, OpenOptions, SessionId, SessionSelector, SessionState,
-    ToolError, ToolHost, ToolOutput, TurnId, TurnStatus,
+    ToolError, ToolOutput, TurnId, TurnStatus,
 };
 use futures::StreamExt;
 
 use crate::message;
 
-/// How this plugin identifies itself when it attaches to a child.
-fn identity() -> ClientIdentity {
+/// How this plugin identifies itself when it opens a child.
+pub(crate) fn identity() -> ClientIdentity {
     ClientIdentity {
         name: "agents".into(),
         surface: message::SURFACE.into(),
@@ -106,12 +104,7 @@ pub fn last_reply(state: &SessionState) -> Reply {
 /// The background watcher: when the turn this spawn started ends, the child's
 /// reply wakes the parent as a peer message. The kernel's fold puts `[from
 /// <name>]` above it, so the text says only what happened.
-pub async fn report(
-    mut attachment: Attachment,
-    host: Arc<dyn ToolHost>,
-    parent: SessionId,
-    name: String,
-) {
+pub async fn report(mut attachment: Attachment, host: HostHandle, parent: SessionId, name: String) {
     let text = match next_reply(&mut attachment, &CancellationToken::new()).await {
         Ok(reply) => finished(&reply),
         Err(error) => {
@@ -120,7 +113,10 @@ pub async fn report(
         }
     };
     let input = Input::text(text, message::origin(Some(name.clone())));
-    if let Err(error) = host.deliver(&parent, IntentId::mint(), input, Delivery::Wake) {
+    let sent = host
+        .deliver(&parent, IntentId::mint(), input, Delivery::Wake)
+        .await;
+    if let Err(error) = sent {
         tracing::warn!(agent = %name, %error, "an agent finished and its parent was gone");
     }
 }
@@ -246,7 +242,7 @@ mod tests {
         let attachment = follow(&fleet.handle(), &child).await.unwrap();
         report(
             attachment,
-            host.clone(),
+            fleet.handle(),
             root.clone(),
             "reviewer".to_string(),
         )
@@ -274,7 +270,7 @@ mod tests {
         let host = Recorder::new(&fleet);
 
         let attachment = follow(&fleet.handle(), &child).await.unwrap();
-        report(attachment, host.clone(), root, "reviewer".to_string()).await;
+        report(attachment, fleet.handle(), root, "reviewer".to_string()).await;
 
         let Input::Text { text, .. } = &host.delivered()[0].1 else {
             panic!("a peer delivers text");
@@ -291,7 +287,7 @@ mod tests {
         let host = Recorder::new(&fleet);
 
         let attachment = follow(&fleet.handle(), &child).await.unwrap();
-        report(attachment, host.clone(), root, "reviewer".to_string()).await;
+        report(attachment, fleet.handle(), root, "reviewer".to_string()).await;
         assert!(host.delivered().is_empty());
     }
 

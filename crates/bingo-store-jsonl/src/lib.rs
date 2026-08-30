@@ -177,6 +177,7 @@ pub(crate) mod tests {
 
     pub(crate) fn summary() -> SessionSummary {
         SessionSummary {
+            driver: Default::default(),
             id: session(),
             key: None,
             title: Some("the first name".into()),
@@ -400,7 +401,7 @@ pub(crate) mod tests {
         child.id = SessionId::from_raw("ses_child");
         child.parent = Some(ParentLink {
             session: SessionId::from_raw("ses_here"),
-            item: bingo_sdk::ItemId::from_raw("itm_1"),
+            item: Some(bingo_sdk::ItemId::from_raw("itm_1")),
         });
         store.create(&child).await.expect("create");
 

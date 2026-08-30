@@ -80,6 +80,7 @@ impl TurnHost for RecordingHost {
 fn summary() -> SessionSummary {
     let ts = Timestamp::from_second(0).unwrap();
     SessionSummary {
+        driver: Default::default(),
         id: SessionId::from_raw("ses_1"),
         key: None,
         title: None,
@@ -122,6 +123,7 @@ fn config(provider: Arc<ScriptedProvider>, tools: Vec<Arc<dyn Tool>>) -> TurnCon
             config_dir: "/tmp".into(),
             data_dir: "/tmp".into(),
         }),
+        host: bingo_sdk::testing::NoHost::handle(),
         tool_host: Arc::new(NoHost),
     }
 }

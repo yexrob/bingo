@@ -137,6 +137,26 @@ mod tests {
             unreachable!("/permission deletes no session")
         }
 
+        async fn deliver(
+            &self,
+            _to: &SessionId,
+            _intent: bingo_sdk::IntentId,
+            _input: bingo_sdk::Input,
+            _delivery: bingo_sdk::Delivery,
+        ) -> Result<(), KernelError> {
+            unreachable!("this double delivers nothing")
+        }
+
+        async fn extend(
+            &self,
+            _session: &SessionId,
+            _plugin: &str,
+            _kind: &str,
+            _payload: serde_json::Value,
+        ) -> Result<(), KernelError> {
+            unreachable!("this double extends nothing")
+        }
+
         async fn catalog(&self, _kind: CatalogKind) -> Result<Catalog, KernelError> {
             unreachable!("/permission reads no catalog")
         }

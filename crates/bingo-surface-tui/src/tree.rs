@@ -174,13 +174,15 @@ impl Tree {
         Some(out)
     }
 
-    /// The children the viewed session spawned, by the tool call that did it.
+    /// The children the viewed session spawned, by the tool call that did it;
+    /// a child no call spawned hangs under no row.
     pub fn agents(&self) -> Agents {
         self.children
             .values()
             .filter_map(|child| {
                 let parent = child.summary.parent.as_ref()?;
-                (&parent.session == self.view()).then(|| (parent.item.clone(), label(child)))
+                let item = parent.item.clone()?;
+                (&parent.session == self.view()).then(|| (item, label(child)))
             })
             .collect()
     }

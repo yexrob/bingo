@@ -21,6 +21,7 @@ tokio.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+bingo-sdk = { workspace = true, features = ["testing"] }
 # M4: the summary prompt is a wire the model reads, so a wording change is a
 # deliberate diff.
 insta.workspace = true

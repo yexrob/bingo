@@ -94,6 +94,7 @@ impl Host {
 /// provider and model; the tools and the policy are the running host's.
 fn spec_of(summary: &SessionSummary) -> SessionSpec {
     SessionSpec {
+        driver: Default::default(),
         cwd: std::path::PathBuf::from(&summary.cwd),
         key: summary.key.clone(),
         parent: summary.parent.clone(),

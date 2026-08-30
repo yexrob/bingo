@@ -61,15 +61,14 @@ impl Plugin for FsPlugin {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use std::any::Any;
+
     use std::collections::VecDeque;
     use std::path::{Path, PathBuf};
     use std::sync::Mutex;
 
     use bingo_sdk::{
-        Answer, AnswerSpec, CancellationToken, Contribution, Delivery, Env, ErrorCode, Input,
-        IntentId, InteractionKind, ItemBody, ItemId, KernelError, Prompter, SessionId, SessionSpec,
-        ToolContext, ToolHost, TurnId,
+        Answer, AnswerSpec, CancellationToken, Contribution, Env, ErrorCode, InteractionKind,
+        ItemBody, ItemId, KernelError, Prompter, SessionId, ToolContext, ToolHost, TurnId,
     };
 
     /// A tool host that answers nothing: every tool but `AskUserQuestion`
@@ -94,24 +93,6 @@ pub(crate) mod tests {
 
         async fn record(&self, _body: ItemBody) -> Result<ItemId, KernelError> {
             Ok(ItemId::from_raw("itm_test"))
-        }
-
-        async fn spawn_session(&self, _spec: SessionSpec) -> Result<SessionId, KernelError> {
-            Ok(SessionId::from_raw("ses_test"))
-        }
-
-        fn deliver(
-            &self,
-            _: &SessionId,
-            _: IntentId,
-            _: Input,
-            _: Delivery,
-        ) -> Result<(), KernelError> {
-            Ok(())
-        }
-
-        fn service_any(&self, _key: &str) -> Option<Arc<dyn Any + Send + Sync>> {
-            None
         }
     }
 
@@ -159,31 +140,13 @@ pub(crate) mod tests {
         async fn record(&self, _body: ItemBody) -> Result<ItemId, KernelError> {
             Ok(ItemId::from_raw("itm_test"))
         }
-
-        async fn spawn_session(&self, _spec: SessionSpec) -> Result<SessionId, KernelError> {
-            Ok(SessionId::from_raw("ses_test"))
-        }
-
-        fn deliver(
-            &self,
-            _: &SessionId,
-            _: IntentId,
-            _: Input,
-            _: Delivery,
-        ) -> Result<(), KernelError> {
-            Ok(())
-        }
-
-        fn service_any(&self, _key: &str) -> Option<Arc<dyn Any + Send + Sync>> {
-            None
-        }
     }
 
     pub(crate) fn context(cwd: &Path) -> ToolContext {
         context_with(cwd, Arc::new(NullHost))
     }
 
-    pub(crate) fn context_with(cwd: &Path, host: Arc<dyn ToolHost>) -> ToolContext {
+    pub(crate) fn context_with(cwd: &Path, call: Arc<dyn ToolHost>) -> ToolContext {
         ToolContext {
             call_id: "call_test".into(),
             session: SessionId::from_raw("ses_test"),
@@ -196,7 +159,8 @@ pub(crate) mod tests {
                 config_dir: PathBuf::from("/tmp"),
                 data_dir: PathBuf::from("/tmp"),
             }),
-            host,
+            host: bingo_sdk::testing::NoHost::handle(),
+            call,
         }
     }
 

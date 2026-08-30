@@ -18,8 +18,8 @@ use bingo_sdk::{
     Answer, AnswerSpec, Attachment, CancellationToken, Catalog, CatalogKind, ClientIdentity,
     CloseReason, Command, CommandContext, CommandOutcome, Delivery, Env, GatewayStream, HostApi,
     HostHandle, Input, IntentId, InteractionKind, ItemBody, ItemId, KernelError, OpenOptions,
-    Prompter, SessionFilter, SessionId, SessionSelector, SessionSpec, SessionSummary, Tool,
-    ToolContext, ToolHost, ToolOutput, ToolSource, TurnId, View,
+    Prompter, SessionFilter, SessionId, SessionSelector, SessionSummary, Tool, ToolContext,
+    ToolHost, ToolOutput, ToolSource, TurnId, View,
 };
 use proptest::prelude::*;
 use proptest::test_runner::{Config, TestRunner};
@@ -141,24 +141,6 @@ impl ToolHost for NullHost {
     async fn record(&self, _body: ItemBody) -> Result<ItemId, KernelError> {
         Ok(ItemId::from_raw("itm_test"))
     }
-
-    async fn spawn_session(&self, _spec: SessionSpec) -> Result<SessionId, KernelError> {
-        Ok(SessionId::from_raw("ses_test"))
-    }
-
-    fn deliver(
-        &self,
-        _: &SessionId,
-        _: IntentId,
-        _: Input,
-        _: Delivery,
-    ) -> Result<(), KernelError> {
-        Ok(())
-    }
-
-    fn service_any(&self, _key: &str) -> Option<Arc<dyn Any + Send + Sync>> {
-        None
-    }
 }
 
 /// `/mcp` asks the host nothing, so every answer here would be a bug.
@@ -187,6 +169,26 @@ impl HostApi for UnusedHost {
         unreachable!("/mcp deletes no session")
     }
 
+    async fn deliver(
+        &self,
+        _to: &SessionId,
+        _intent: IntentId,
+        _input: Input,
+        _delivery: Delivery,
+    ) -> Result<(), KernelError> {
+        unreachable!("this double delivers nothing")
+    }
+
+    async fn extend(
+        &self,
+        _session: &SessionId,
+        _plugin: &str,
+        _kind: &str,
+        _payload: serde_json::Value,
+    ) -> Result<(), KernelError> {
+        unreachable!("this double extends nothing")
+    }
+
     async fn catalog(&self, _kind: CatalogKind) -> Result<Catalog, KernelError> {
         unreachable!("/mcp reads no catalog")
     }
@@ -209,7 +211,8 @@ fn tool_context(cancel: CancellationToken) -> ToolContext {
         cwd: PathBuf::from("/work"),
         cancel,
         env: Arc::new(Env::rooted("/tmp")),
-        host: Arc::new(NullHost),
+        host: bingo_sdk::testing::NoHost::handle(),
+        call: Arc::new(NullHost),
     }
 }
 

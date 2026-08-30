@@ -569,7 +569,7 @@ pub(crate) mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use bingo_sdk::{
-        Catalog, CatalogEntry, ContentPart, DeltaKind, Frame, FrameStream, GatewayStream,
+        Catalog, CatalogEntry, ContentPart, Delivery, DeltaKind, Frame, FrameStream, GatewayStream,
         HistoryChunk, HistoryPage, HostApi, InteractionId, InterruptReason, InterruptScope, Item,
         ItemBody, ItemId, ItemStatus, QuestionOption, Seq, SessionFilter, SessionHandle, SessionId,
         SessionPort, SessionSelector, SessionState, SessionSummary, ToolOutput, TurnId, TurnOrigin,
@@ -586,6 +586,7 @@ pub(crate) mod tests {
 
     fn summary() -> SessionSummary {
         SessionSummary {
+            driver: Default::default(),
             id: SessionId::from_raw("ses_1"),
             key: None,
             title: None,
@@ -937,6 +938,26 @@ pub(crate) mod tests {
             Ok(())
         }
 
+        async fn deliver(
+            &self,
+            _to: &SessionId,
+            _intent: IntentId,
+            _input: Input,
+            _delivery: Delivery,
+        ) -> Result<(), KernelError> {
+            unreachable!("this double delivers nothing")
+        }
+
+        async fn extend(
+            &self,
+            _session: &SessionId,
+            _plugin: &str,
+            _kind: &str,
+            _payload: serde_json::Value,
+        ) -> Result<(), KernelError> {
+            unreachable!("this double extends nothing")
+        }
+
         async fn catalog(&self, kind: CatalogKind) -> Result<Catalog, KernelError> {
             Ok(Catalog {
                 kind,
@@ -1254,7 +1275,7 @@ pub(crate) mod tests {
         child_summary.id = SessionId::from_raw("ses_2");
         child_summary.parent = Some(bingo_sdk::ParentLink {
             session: SessionId::from_raw("ses_1"),
-            item: ItemId::from_raw("itm_1"),
+            item: Some(ItemId::from_raw("itm_1")),
         });
         let asked = Interaction {
             session: SessionId::from_raw("ses_2"),

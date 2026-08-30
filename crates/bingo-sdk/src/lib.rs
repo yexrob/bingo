@@ -20,6 +20,9 @@ pub mod provider;
 pub mod state;
 pub mod store;
 pub mod surface;
+/// Doubles for a plugin's tests; `features = ["testing"]` in dev-dependencies.
+#[cfg(feature = "testing")]
+pub mod testing;
 pub mod tokens;
 pub mod tool;
 
@@ -44,8 +47,8 @@ pub use state::{Applied, LiveTurn, Retry, SessionState};
 pub use store::SessionStore;
 pub use surface::{Exit, Surface, SurfaceKind, SurfaceOptions};
 pub use tool::{
-    Delivery, Env, Interrupt, ResultLimit, Subject, Tool, ToolCall, ToolContext, ToolError,
-    ToolHost, ToolTraits, input_schema,
+    Env, Interrupt, ResultLimit, Subject, Tool, ToolCall, ToolContext, ToolError, ToolHost,
+    ToolTraits, input_schema,
 };
 
 /// Re-exported so plugins share one cancellation type without naming tokio-util.

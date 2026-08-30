@@ -6,7 +6,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use crate::event::{Frame, Item, ToolOutput};
-use crate::host::Input;
+use crate::host::{HostHandle, Input};
 use crate::ids::{SessionId, TurnId};
 use crate::provider::Provider;
 use crate::tool::ToolCall;
@@ -62,9 +62,13 @@ pub struct HookContext {
     pub turn: Option<TurnId>,
     pub cwd: PathBuf,
     /// The session's provider and model, for a hook that asks the model
-    /// (memory extraction at turn end). Absent outside a session.
+    /// (memory extraction at turn end). Absent outside a session, and for a
+    /// session nothing answers.
     pub provider: Option<Arc<dyn Provider>>,
     pub model: Option<String>,
+    /// The whole host (ADR-0011 §3), for a hook that reads the session tree
+    /// or writes into another session.
+    pub host: HostHandle,
 }
 
 impl std::fmt::Debug for HookContext {

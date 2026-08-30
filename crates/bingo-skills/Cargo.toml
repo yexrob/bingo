@@ -19,6 +19,7 @@ serde_json.workspace = true
 serde-saphyr.workspace = true
 
 [dev-dependencies]
+bingo-sdk = { workspace = true, features = ["testing"] }
 # M7: the prompt block is a wire the model reads, so a wording change is a
 # deliberate diff.
 insta.workspace = true

@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use bingo_sdk::*;
+use serde_json::Value;
 use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::turn::{TurnConfig, TurnHost, TurnOutcome};
@@ -20,6 +21,12 @@ pub(crate) enum Msg {
         intent: IntentId,
         input: Input,
         delivery: Delivery,
+    },
+    /// A plugin's state, whole, into the journal (ADR-0011 §2).
+    Extend {
+        plugin: String,
+        kind: String,
+        payload: Value,
     },
     Interrupt {
         intent: IntentId,
@@ -152,6 +159,14 @@ impl Mailbox {
             intent,
             input,
             delivery,
+        });
+    }
+
+    pub fn extend(&self, plugin: String, kind: String, payload: Value) {
+        self.send(Msg::Extend {
+            plugin,
+            kind,
+            payload,
         });
     }
 

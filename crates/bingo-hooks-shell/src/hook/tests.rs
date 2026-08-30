@@ -30,6 +30,7 @@ impl Fixture {
         Self {
             hooks: ShellHooks::new(&hooks, dir.path()),
             cx: HookContext {
+                host: bingo_sdk::testing::NoHost::handle(),
                 session: SessionId::from_raw("ses_test"),
                 turn: None,
                 cwd: dir.path().to_path_buf(),

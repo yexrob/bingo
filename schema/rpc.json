@@ -498,6 +498,45 @@
         "deny"
       ]
     },
+    "DeliverParams": {
+      "type": "object",
+      "properties": {
+        "session": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "intent": {
+          "$ref": "#/$defs/IntentId"
+        },
+        "input": {
+          "$ref": "#/$defs/Input"
+        },
+        "delivery": {
+          "$ref": "#/$defs/Delivery"
+        }
+      },
+      "required": [
+        "session",
+        "intent",
+        "input",
+        "delivery"
+      ],
+      "description": "`HostApi::deliver` (ADR-0011 §3): a peer's prose into a session's queue."
+    },
+    "Delivery": {
+      "oneOf": [
+        {
+          "type": "string",
+          "const": "wake",
+          "description": "An idle target opens a turn on it; a busy one absorbs it at the next barrier."
+        },
+        {
+          "type": "string",
+          "const": "hold",
+          "description": "It waits in the queue for whatever opens the next turn."
+        }
+      ],
+      "description": "How a peer message reaches a session's queue (ADR-0010 §1)."
+    },
     "DeltaKind": {
       "oneOf": [
         {
@@ -552,6 +591,21 @@
           ]
         }
       ]
+    },
+    "Driver": {
+      "oneOf": [
+        {
+          "type": "string",
+          "const": "model",
+          "description": "A model answers: every prose input opens a turn."
+        },
+        {
+          "type": "string",
+          "const": "log",
+          "description": "Nothing answers: every input is recorded, and the journal is the point."
+        }
+      ],
+      "description": "What a session does with what it is told (ADR-0011 §1)."
     },
     "Empty": {
       "type": "object",
@@ -1162,6 +1216,28 @@
       "required": [
         "session"
       ]
+    },
+    "ExtendParams": {
+      "type": "object",
+      "properties": {
+        "session": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "plugin": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "payload": true
+      },
+      "required": [
+        "session",
+        "plugin",
+        "kind",
+        "payload"
+      ],
+      "description": "`HostApi::extend` (ADR-0011 §2): a plugin's state into a session's journal."
     },
     "GatewayEvent": {
       "oneOf": [
@@ -2296,13 +2372,20 @@
           "$ref": "#/$defs/SessionId"
         },
         "item": {
-          "$ref": "#/$defs/ItemId"
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ItemId"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
-        "session",
-        "item"
-      ]
+        "session"
+      ],
+      "description": "Where a child hangs in the tree: its parent, and the tool call that\nspawned it when one did (ADR-0011 §3)."
     },
     "Preview": {
       "oneOf": [
@@ -2626,6 +2709,11 @@
             "null"
           ]
         },
+        "driver": {
+          "$ref": "#/$defs/Driver",
+          "description": "`Log` needs no provider or model: nothing answers (ADR-0011 §1).",
+          "default": "model"
+        },
         "provider": {
           "type": [
             "string",
@@ -2742,6 +2830,14 @@
         "closed": {
           "type": "boolean",
           "default": false
+        },
+        "extensions": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "description": "Plugin-owned state, by plugin then kind: the latest `Extension`\npayload is the whole of that kind (ADR-0011 §2)."
         }
       },
       "required": [
@@ -2780,6 +2876,10 @@
               "type": "null"
             }
           ]
+        },
+        "driver": {
+          "$ref": "#/$defs/Driver",
+          "default": "model"
         },
         "model": {
           "type": [
@@ -3028,6 +3128,22 @@
     "session/delete": {
       "params": {
         "$ref": "#/$defs/SessionParams"
+      },
+      "result": {
+        "$ref": "#/$defs/Empty"
+      }
+    },
+    "session/deliver": {
+      "params": {
+        "$ref": "#/$defs/DeliverParams"
+      },
+      "result": {
+        "$ref": "#/$defs/Empty"
+      }
+    },
+    "session/extend": {
+      "params": {
+        "$ref": "#/$defs/ExtendParams"
       },
       "result": {
         "$ref": "#/$defs/Empty"

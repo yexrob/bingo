@@ -26,6 +26,7 @@ tokio.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+bingo-sdk = { workspace = true, features = ["testing"] }
 # M8: a `SessionSummary` a double writes down is stamped with a
 # `jiff::Timestamp`, so writing one needs one.
 jiff.workspace = true

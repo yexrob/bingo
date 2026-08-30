@@ -311,7 +311,7 @@ async fn sub_sessions_are_sessions_with_a_parent_and_a_depth_limit() {
         .unwrap();
     let link = ParentLink {
         session: root.session.clone(),
-        item: ItemId::mint(),
+        item: Some(ItemId::mint()),
     };
     let child = host
         .open(
@@ -344,7 +344,7 @@ async fn sub_sessions_are_sessions_with_a_parent_and_a_depth_limit() {
                 spec: SessionSpec {
                     parent: Some(ParentLink {
                         session: child.session.clone(),
-                        item: ItemId::mint(),
+                        item: Some(ItemId::mint()),
                     }),
                     ..spec("/work")
                 },

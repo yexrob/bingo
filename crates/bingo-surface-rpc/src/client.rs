@@ -9,8 +9,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use async_trait::async_trait;
 use bingo_sdk::{
-    Activation, Answer, Attachment, Catalog, CatalogKind, ClientIdentity, CloseReason, ErrorCode,
-    Frame, FrameStream, GatewayEvent, GatewayStream, HistoryChunk, HistoryPage, HostApi,
+    Activation, Answer, Attachment, Catalog, CatalogKind, ClientIdentity, CloseReason, Delivery,
+    ErrorCode, Frame, FrameStream, GatewayEvent, GatewayStream, HistoryChunk, HistoryPage, HostApi,
     HostHandle, Input, IntentId, InteractionId, InterruptScope, KernelError, OpenOptions, Seq,
     SessionFilter, SessionHandle, SessionId, SessionPort, SessionSelector, SessionSummary,
 };
@@ -26,9 +26,9 @@ use tokio_util::codec::{FramedRead, FramedWrite};
 
 use crate::codec::{self, Id, Message, Notification, Outcome, Request, Response};
 use crate::methods::{
-    AnswerParams, CatalogParams, Empty, EventParams, EventsParams, HistoryParams, InitializeParams,
-    InitializeResult, InterruptParams, ListParams, ListResult, OpenParams, OpenResult, PROTOCOL,
-    SessionParams, SubmitParams, name,
+    AnswerParams, CatalogParams, DeliverParams, Empty, EventParams, EventsParams, ExtendParams,
+    HistoryParams, InitializeParams, InitializeResult, InterruptParams, ListParams, ListResult,
+    OpenParams, OpenResult, PROTOCOL, SessionParams, SubmitParams, name,
 };
 
 type Waiting = oneshot::Sender<Result<Value, KernelError>>;
@@ -421,6 +421,40 @@ impl HostApi for RemoteKernel {
         };
         let Empty {} = self.connection.call(name::SESSION_DELETE, &params).await?;
         self.connection.router.forget(session);
+        Ok(())
+    }
+
+    async fn deliver(
+        &self,
+        to: &SessionId,
+        intent: IntentId,
+        input: Input,
+        delivery: Delivery,
+    ) -> Result<(), KernelError> {
+        let params = DeliverParams {
+            session: to.clone(),
+            intent,
+            input,
+            delivery,
+        };
+        let Empty {} = self.connection.call(name::SESSION_DELIVER, &params).await?;
+        Ok(())
+    }
+
+    async fn extend(
+        &self,
+        session: &SessionId,
+        plugin: &str,
+        kind: &str,
+        payload: Value,
+    ) -> Result<(), KernelError> {
+        let params = ExtendParams {
+            session: session.clone(),
+            plugin: plugin.to_string(),
+            kind: kind.to_string(),
+            payload,
+        };
+        let Empty {} = self.connection.call(name::SESSION_EXTEND, &params).await?;
         Ok(())
     }
 

@@ -225,21 +225,6 @@ mod tests {
         async fn record(&self, _: ItemBody) -> Result<ItemId, KernelError> {
             Ok(ItemId::mint())
         }
-        async fn spawn_session(&self, _: SessionSpec) -> Result<SessionId, KernelError> {
-            Err(KernelError::new(ErrorCode::Internal, "no"))
-        }
-        fn deliver(
-            &self,
-            _: &SessionId,
-            _: IntentId,
-            _: Input,
-            _: Delivery,
-        ) -> Result<(), KernelError> {
-            Ok(())
-        }
-        fn service_any(&self, _: &str) -> Option<Arc<dyn std::any::Any + Send + Sync>> {
-            None
-        }
     }
 
     fn cx(cancel: &CancellationToken) -> ToolContext {
@@ -255,7 +240,8 @@ mod tests {
                 config_dir: "/tmp".into(),
                 data_dir: "/tmp".into(),
             }),
-            host: Arc::new(NoHost),
+            host: bingo_sdk::testing::NoHost::handle(),
+            call: Arc::new(NoHost),
         }
     }
 

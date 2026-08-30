@@ -298,6 +298,20 @@ impl Host {
             .ok_or_else(|| KernelError::new(ErrorCode::SessionNotFound, format!("no session {id}")))
     }
 
+    /// The session a selector means: live, or reopened from the store
+    /// (ADR-0011 §3), so whatever `sessions` lists can be written to.
+    async fn mailbox_for(&self, selector: SessionSelector) -> Result<Mailbox, KernelError> {
+        match self.resolve(&selector) {
+            Some(mailbox) => Ok(mailbox),
+            None => self.reopen(selector).await,
+        }
+    }
+
+    async fn mailbox_of(&self, id: &SessionId) -> Result<Mailbox, KernelError> {
+        self.mailbox_for(SessionSelector::ById { id: id.clone() })
+            .await
+    }
+
     /// Every live session under `root`, parents before their children.
     fn descendants(&self, root: &SessionId) -> Vec<(SessionId, Mailbox)> {
         let sessions = self.lock();
@@ -468,6 +482,7 @@ impl Host {
     fn summarize(&self, spec: &SessionSpec, choice: &ModelChoice) -> SessionSummary {
         let now = Timestamp::now();
         SessionSummary {
+            driver: Default::default(),
             id: SessionId::mint(),
             key: spec.key.clone(),
             title: spec.title.clone(),
@@ -541,9 +556,9 @@ impl Host {
             compactor: self.registry.compactor.clone(),
             budget: self.config.budget,
             env: Arc::new(self.config.env.clone()),
+            host: self.handle(),
             tool_host: Arc::new(SessionToolHost {
                 mailbox: mailbox.clone(),
-                host: self.weak.clone(),
             }),
         }
     }
@@ -705,10 +720,7 @@ impl HostApi for Host {
     ) -> Result<Attachment, KernelError> {
         let mailbox = match selector {
             SessionSelector::Create { spec } => self.create(spec).await?,
-            other => match self.resolve(&other) {
-                Some(mailbox) => mailbox,
-                None => self.reopen(other).await?,
-            },
+            other => self.mailbox_for(other).await?,
         };
         if options.children {
             return tree::attach(self.weak.clone(), &self.gateway, mailbox, who).await;
@@ -739,6 +751,30 @@ impl HostApi for Host {
             self.delete_one(id).await?;
         }
         self.delete_one(session).await
+    }
+
+    async fn deliver(
+        &self,
+        to: &SessionId,
+        intent: IntentId,
+        input: Input,
+        delivery: Delivery,
+    ) -> Result<(), KernelError> {
+        self.mailbox_of(to).await?.deliver(intent, input, delivery);
+        Ok(())
+    }
+
+    async fn extend(
+        &self,
+        session: &SessionId,
+        plugin: &str,
+        kind: &str,
+        payload: Value,
+    ) -> Result<(), KernelError> {
+        self.mailbox_of(session)
+            .await?
+            .extend(plugin.to_string(), kind.to_string(), payload);
+        Ok(())
     }
 
     async fn catalog(&self, kind: CatalogKind) -> Result<Catalog, KernelError> {

@@ -9,11 +9,11 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use async_trait::async_trait;
 use bingo_sdk::{
     Activation, Answer, Attachment, Catalog, CatalogEntry, CatalogKind, ClientIdentity,
-    CloseReason, Event, Frame, FrameStream, GatewayEvent, GatewayStream, HistoryChunk, HistoryPage,
-    HostApi, HostHandle, Input, IntentId, InteractionId, InterruptScope, Item, ItemBody, ItemId,
-    ItemStatus, KernelError, OpenOptions, Seq, SessionFilter, SessionHandle, SessionId,
-    SessionPort, SessionSelector, SessionState, SessionSummary, TurnId, TurnOrigin, TurnStatus,
-    Usage,
+    CloseReason, Delivery, Event, Frame, FrameStream, GatewayEvent, GatewayStream, HistoryChunk,
+    HistoryPage, HostApi, HostHandle, Input, IntentId, InteractionId, InterruptScope, Item,
+    ItemBody, ItemId, ItemStatus, KernelError, OpenOptions, Seq, SessionFilter, SessionHandle,
+    SessionId, SessionPort, SessionSelector, SessionState, SessionSummary, TurnId, TurnOrigin,
+    TurnStatus, Usage,
 };
 use futures::StreamExt;
 use jiff::Timestamp;
@@ -29,6 +29,7 @@ pub fn session_id() -> SessionId {
 
 pub fn summary() -> SessionSummary {
     SessionSummary {
+        driver: Default::default(),
         id: session_id(),
         key: None,
         title: None,
@@ -54,7 +55,7 @@ pub fn child_head() -> Frame {
     summary.id = child_id();
     summary.parent = Some(bingo_sdk::ParentLink {
         session: session_id(),
-        item: ItemId::from_raw("itm_1"),
+        item: Some(ItemId::from_raw("itm_1")),
     });
     Frame {
         seq: Seq(1),
@@ -140,6 +141,9 @@ pub struct TestSession {
     pub interrupts: Mutex<Vec<(IntentId, InterruptScope)>>,
     pub answers: Mutex<Vec<(IntentId, InteractionId, Answer, Activation)>>,
     pub pages: Mutex<Vec<HistoryPage>>,
+    /// What reached this session through the host rather than its port.
+    pub delivered: Mutex<Vec<(IntentId, Input, Delivery)>>,
+    pub extended: Mutex<Vec<(String, String, Value)>>,
 }
 
 impl TestSession {
@@ -264,6 +268,36 @@ impl HostApi for TestHost {
     }
 
     async fn delete(&self, _session: &SessionId) -> Result<(), KernelError> {
+        Ok(())
+    }
+
+    async fn deliver(
+        &self,
+        _to: &SessionId,
+        intent: IntentId,
+        input: Input,
+        delivery: Delivery,
+    ) -> Result<(), KernelError> {
+        self.session
+            .delivered
+            .lock()
+            .expect("the recorder is not poisoned")
+            .push((intent, input, delivery));
+        Ok(())
+    }
+
+    async fn extend(
+        &self,
+        _session: &SessionId,
+        plugin: &str,
+        kind: &str,
+        payload: Value,
+    ) -> Result<(), KernelError> {
+        self.session
+            .extended
+            .lock()
+            .expect("the recorder is not poisoned")
+            .push((plugin.to_string(), kind.to_string(), payload));
         Ok(())
     }
 

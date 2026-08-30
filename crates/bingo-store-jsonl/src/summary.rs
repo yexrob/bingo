@@ -156,7 +156,7 @@ mod tests {
         let mut child = summary();
         child.parent = Some(ParentLink {
             session: SessionId::from_raw("ses_parent"),
-            item: bingo_sdk::ItemId::from_raw("itm_1"),
+            item: Some(bingo_sdk::ItemId::from_raw("itm_1")),
         });
         let filter = |cwd: Option<&str>, parent: Option<&str>| SessionFilter {
             cwd: cwd.map(Into::into),

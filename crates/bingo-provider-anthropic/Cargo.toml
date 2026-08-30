@@ -23,6 +23,7 @@ tokio.workspace = true
 jiff.workspace = true
 
 [dev-dependencies]
+bingo-sdk = { workspace = true, features = ["testing"] }
 insta.workspace = true
 wiremock.workspace = true
 # `tokio::time::pause`, so the 60s idle guard costs a test no wall time.

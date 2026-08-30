@@ -174,6 +174,7 @@ mod tests {
 
         fn context(&self, provider: Option<Arc<dyn Provider>>) -> HookContext {
             HookContext {
+                host: bingo_sdk::testing::NoHost::handle(),
                 session: SessionId::from_raw("ses_test"),
                 turn: Some(TurnId::from_raw("trn_1")),
                 cwd: self.cwd.path().to_path_buf(),

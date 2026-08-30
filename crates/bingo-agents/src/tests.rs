@@ -96,6 +96,15 @@ struct Inner {
     /// What every attachment yields after its snapshot, and whether the
     /// stream then ends rather than staying open.
     script: Mutex<(Vec<Event>, bool)>,
+    /// The sessions a tool asked for, the messages it sent, and the keys the
+    /// kernel would report as held.
+    spawned: Mutex<Vec<SessionSpec>>,
+    delivered: Mutex<Vec<(SessionId, Input, Delivery)>>,
+    locked: Mutex<Vec<String>>,
+}
+
+fn locked<T>(slot: &Mutex<T>) -> MutexGuard<'_, T> {
+    slot.lock().unwrap_or_else(|held| held.into_inner())
 }
 
 /// A host whose sessions are written down rather than run.
@@ -242,14 +251,30 @@ impl HostApi for Fleet {
             .collect())
     }
 
+    /// A child by id, or a new one from its spec — refused, as the kernel
+    /// would, when the key is held.
     async fn open(
         &self,
         selector: SessionSelector,
         _who: ClientIdentity,
         _options: OpenOptions,
     ) -> Result<Attachment, KernelError> {
-        let SessionSelector::ById { id } = selector else {
-            unreachable!("this plugin opens a child by id and nothing else")
+        let id = match selector {
+            SessionSelector::ById { id } => id,
+            SessionSelector::Create { spec } => {
+                locked(&self.0.spawned).push(spec.clone());
+                let held = locked(&self.0.locked)
+                    .iter()
+                    .any(|key| Some(key.as_str()) == spec.key.as_deref());
+                if held {
+                    return Err(KernelError::new(
+                        ErrorCode::SessionLocked,
+                        "session key is in use",
+                    ));
+                }
+                self.spawn(&spec)
+            }
+            _ => unreachable!("this plugin opens a child by id or by spec"),
         };
         let sessions = self.sessions();
         let live = sessions
@@ -272,6 +297,27 @@ impl HostApi for Fleet {
 
     async fn delete(&self, _session: &SessionId) -> Result<(), KernelError> {
         unreachable!("this plugin deletes no session")
+    }
+
+    async fn deliver(
+        &self,
+        to: &SessionId,
+        _intent: IntentId,
+        input: Input,
+        delivery: Delivery,
+    ) -> Result<(), KernelError> {
+        locked(&self.0.delivered).push((to.clone(), input, delivery));
+        Ok(())
+    }
+
+    async fn extend(
+        &self,
+        _session: &SessionId,
+        _plugin: &str,
+        _kind: &str,
+        _payload: serde_json::Value,
+    ) -> Result<(), KernelError> {
+        unreachable!("this plugin extends no session")
     }
 
     /// Three tools, one of them the one a child may never have.
@@ -332,45 +378,31 @@ impl SessionPort for Deaf {
     }
 }
 
-/// The tool host a tool is handed: it records the sessions a tool started and
-/// the messages it sent, and the fleet grows with them.
+/// What a tool is handed as its call's own — nothing here asks or records —
+/// and the window a test reads the fleet's ledger through: the sessions a
+/// tool started, the messages it sent.
 pub(crate) struct Recorder {
     fleet: Fleet,
-    spawned: Mutex<Vec<SessionSpec>>,
-    delivered: Mutex<Vec<(SessionId, Input, Delivery)>>,
-    locked: Mutex<Vec<String>>,
 }
 
 impl Recorder {
     pub(crate) fn new(fleet: &Fleet) -> Arc<Recorder> {
         Arc::new(Recorder {
             fleet: fleet.clone(),
-            spawned: Mutex::new(Vec::new()),
-            delivered: Mutex::new(Vec::new()),
-            locked: Mutex::new(Vec::new()),
         })
     }
 
     /// A key another session already holds, as the kernel reports it.
     pub(crate) fn lock(&self, key: &str) {
-        self.locked
-            .lock()
-            .unwrap_or_else(|held| held.into_inner())
-            .push(key.to_string());
+        locked(&self.fleet.0.locked).push(key.to_string());
     }
 
     pub(crate) fn spawned(&self) -> Vec<SessionSpec> {
-        self.spawned
-            .lock()
-            .unwrap_or_else(|held| held.into_inner())
-            .clone()
+        locked(&self.fleet.0.spawned).clone()
     }
 
     pub(crate) fn delivered(&self) -> Vec<(SessionId, Input, Delivery)> {
-        self.delivered
-            .lock()
-            .unwrap_or_else(|held| held.into_inner())
-            .clone()
+        locked(&self.fleet.0.delivered).clone()
     }
 }
 
@@ -392,47 +424,9 @@ impl ToolHost for Recorder {
     async fn record(&self, _body: ItemBody) -> Result<ItemId, KernelError> {
         unreachable!("an agents tool records nothing of its own")
     }
-
-    async fn spawn_session(&self, spec: SessionSpec) -> Result<SessionId, KernelError> {
-        self.spawned
-            .lock()
-            .unwrap_or_else(|held| held.into_inner())
-            .push(spec.clone());
-        let held = self
-            .locked
-            .lock()
-            .unwrap_or_else(|held| held.into_inner())
-            .iter()
-            .any(|key| Some(key.as_str()) == spec.key.as_deref());
-        if held {
-            return Err(KernelError::new(
-                ErrorCode::SessionLocked,
-                "session key is in use",
-            ));
-        }
-        Ok(self.fleet.spawn(&spec))
-    }
-
-    fn deliver(
-        &self,
-        to: &SessionId,
-        _intent: IntentId,
-        input: Input,
-        delivery: Delivery,
-    ) -> Result<(), KernelError> {
-        self.delivered
-            .lock()
-            .unwrap_or_else(|held| held.into_inner())
-            .push((to.clone(), input, delivery));
-        Ok(())
-    }
-
-    fn service_any(&self, _key: &str) -> Option<Arc<dyn Any + Send + Sync>> {
-        None
-    }
 }
 
-pub(crate) fn tool_context(session: &SessionId, host: Arc<Recorder>) -> ToolContext {
+pub(crate) fn tool_context(session: &SessionId, call: Arc<Recorder>) -> ToolContext {
     ToolContext {
         call_id: "call_test".into(),
         session: session.clone(),
@@ -441,7 +435,8 @@ pub(crate) fn tool_context(session: &SessionId, host: Arc<Recorder>) -> ToolCont
         cwd: PathBuf::from("/work/project"),
         cancel: CancellationToken::new(),
         env: Arc::new(Env::rooted("/nowhere")),
-        host,
+        host: call.fleet.handle(),
+        call,
     }
 }
 
@@ -455,6 +450,7 @@ pub(crate) fn command_context(session: &SessionId, fleet: &Fleet) -> CommandCont
 
 pub(crate) fn hook_context(session: &SessionId) -> HookContext {
     HookContext {
+        host: bingo_sdk::testing::NoHost::handle(),
         session: session.clone(),
         turn: None,
         cwd: PathBuf::from("/work/project"),
@@ -465,13 +461,14 @@ pub(crate) fn hook_context(session: &SessionId) -> HookContext {
 
 pub(crate) fn summary(id: &str, title: Option<&str>, parent: Option<SessionId>) -> SessionSummary {
     SessionSummary {
+        driver: Default::default(),
         id: SessionId::from_raw(id),
         key: None,
         title: title.map(str::to_string),
         cwd: "/work/project".into(),
         parent: parent.map(|session| ParentLink {
             session,
-            item: ItemId::from_raw("itm_call"),
+            item: Some(ItemId::from_raw("itm_call")),
         }),
         model: None,
         provider: None,

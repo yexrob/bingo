@@ -31,6 +31,7 @@ rmcp = { workspace = true, features = [
 reqwest.workspace = true
 
 [dev-dependencies]
+bingo-sdk = { workspace = true, features = ["testing"] }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt", "test-util"] }
 proptest.workspace = true

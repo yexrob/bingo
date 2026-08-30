@@ -11,8 +11,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use bingo_sdk::{
     Attachment, CatalogKind, Delivery, ErrorCode, HostHandle, Input, IntentId, Interrupt,
-    KernelError, ParentLink, SessionId, SessionSpec, Subject, Tool, ToolContext, ToolError,
-    ToolOutput, ToolSpec, ToolTraits, input_schema,
+    KernelError, OpenOptions, ParentLink, SessionId, SessionSelector, SessionSpec, Subject, Tool,
+    ToolContext, ToolError, ToolOutput, ToolSpec, ToolTraits, input_schema,
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -119,11 +119,12 @@ impl Plan {
 
     fn spec(&self, name: &str, cx: &ToolContext) -> SessionSpec {
         SessionSpec {
+            driver: Default::default(),
             cwd: cx.cwd.clone(),
             key: Some(format!("agent/{}/{name}", cx.session)),
             parent: Some(ParentLink {
                 session: cx.session.clone(),
-                item: cx.item.clone(),
+                item: Some(cx.item.clone()),
             }),
             title: Some(name.to_string()),
             provider: self.provider.clone(),
@@ -157,17 +158,26 @@ async fn registered(host: &HostHandle) -> Option<Vec<String>> {
     Some(catalog.entries.into_iter().map(|entry| entry.id).collect())
 }
 
-/// The child, under the first free name. A sibling's title and a live
-/// session's key are two ways for a name to be taken, and the loop treats
-/// them alike: the lock tells it what the list did not.
+/// The child, under the first free name, with the attachment its creation
+/// hands back — opened before anything is delivered, so no frame of the turn
+/// that follows can be missed. A sibling's title and a live session's key are
+/// two ways for a name to be taken, and the loop treats them alike: the lock
+/// tells it what the list did not.
 async fn start(
     plan: &Plan,
     mut taken: Vec<String>,
     cx: &ToolContext,
-) -> Result<(String, SessionId), KernelError> {
+) -> Result<(String, Attachment), KernelError> {
     while let Some(name) = names::free(&plan.base, &taken) {
-        match cx.host.spawn_session(plan.spec(&name, cx)).await {
-            Ok(session) => return Ok((name, session)),
+        let selector = SessionSelector::Create {
+            spec: plan.spec(&name, cx),
+        };
+        let created = cx
+            .host
+            .open(selector, watch::identity(), OpenOptions::default())
+            .await;
+        match created {
+            Ok(attachment) => return Ok((name, attachment)),
             Err(e) if e.code == ErrorCode::SessionLocked => taken.push(name),
             Err(e) => return Err(e),
         }
@@ -210,8 +220,7 @@ impl SpawnAgentTool {
         Self { host }
     }
 
-    /// The child, running, with the prompt already on its way and an
-    /// attachment opened before the delivery so no frame of the turn is lost.
+    /// The child, running, with the prompt already on its way.
     async fn open(
         &self,
         args: &SpawnArgs,
@@ -222,11 +231,12 @@ impl SpawnAgentTool {
         let definition = pick(args.agent.as_deref(), &definitions).map_err(ToolError::Failed)?;
         let plan = Plan::of(args, definition, host).await.map_err(failed)?;
         let taken = names::names_of(&names::children(host, &cx.session).await.map_err(failed)?);
-        let (name, session) = start(&plan, taken, cx).await.map_err(failed)?;
-        let attachment = watch::follow(host, &session).await.map_err(failed)?;
+        let (name, attachment) = start(&plan, taken, cx).await.map_err(failed)?;
+        let session = attachment.session.clone();
         let prompt = Input::text(args.prompt.clone(), message::origin(None));
         cx.host
             .deliver(&session, IntentId::mint(), prompt, Delivery::Wake)
+            .await
             .map_err(failed)?;
         Ok((name, session, attachment))
     }
@@ -275,7 +285,7 @@ impl Tool for SpawnAgentTool {
             let reply = watch::next_reply(&mut attachment, &cx.cancel).await?;
             return Ok(watch::output(&name, &session, &reply));
         }
-        let host = Arc::clone(&cx.host);
+        let host = cx.host.clone();
         let parent = cx.session.clone();
         tokio::spawn(watch::report(attachment, host, parent, name.clone()));
         Ok(ToolOutput::text(
@@ -375,8 +385,8 @@ mod tests {
         assert_eq!(spec.key.as_deref(), Some(key.as_str()));
         assert_eq!(spec.parent.as_ref().map(|p| &p.session), Some(&root));
         assert_eq!(
-            spec.parent.as_ref().map(|p| p.item.as_str()),
-            Some("itm_call")
+            spec.parent.as_ref().and_then(|p| p.item.as_ref()),
+            Some(&bingo_sdk::ItemId::from_raw("itm_call"))
         );
         assert_eq!(spec.cwd, cx.cwd);
         let extra = spec.system_extra.as_deref().unwrap_or_default();

@@ -22,5 +22,6 @@ tokio-util.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+bingo-sdk = { workspace = true, features = ["testing"] }
 # Frame timestamps in the fixtures; the surface mints none.
 jiff.workspace = true

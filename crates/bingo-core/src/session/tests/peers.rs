@@ -168,7 +168,11 @@ fn pair() -> (Mailbox, Mailbox, Arc<ScriptedProvider>) {
     let b = spawn(summary("ses_b"), None, Services::none(), {
         let provider = provider.clone();
         let routes = routes.clone();
-        move |_| Arc::new(config(provider, vec![], routes))
+        move |_| {
+            let mut cfg = config(provider, vec![], routes.clone());
+            cfg.host = routes.handle();
+            Arc::new(cfg)
+        }
     });
     routes.route(b.clone());
     let a = spawn(summary("ses_a"), None, Services::none(), {
@@ -176,7 +180,8 @@ fn pair() -> (Mailbox, Mailbox, Arc<ScriptedProvider>) {
         let routes = routes.clone();
         let to = b.id().clone();
         move |_| {
-            let mut cfg = config(provider, vec![], routes);
+            let mut cfg = config(provider, vec![], routes.clone());
+            cfg.host = routes.handle();
             cfg.hooks = vec![Arc::new(RedirectHook {
                 name: "b".into(),
                 to,
@@ -226,7 +231,8 @@ async fn a_redirect_to_a_session_that_is_gone_is_rejected() {
     let provider = ScriptedProvider::new(vec![]);
     let routes = RoutingHost::new();
     let a = spawn(summary("ses_a"), None, Services::none(), move |_| {
-        let mut cfg = config(provider, vec![], routes);
+        let mut cfg = config(provider, vec![], routes.clone());
+        cfg.host = routes.handle();
         cfg.hooks = vec![Arc::new(RedirectHook {
             name: "ghost".into(),
             to: SessionId::from_raw("ses_ghost"),

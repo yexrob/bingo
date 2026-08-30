@@ -1,4 +1,4 @@
-//! The thirteen methods and the two notifications (ADR-0007): their names and
+//! The fifteen methods and the two notifications (ADR-0007): their names and
 //! the shape of what goes in and comes back. Every params and result type is an
 //! sdk type or a struct of sdk types.
 //!
@@ -7,12 +7,13 @@
 //! it as the server's capabilities.
 
 use bingo_sdk::{
-    Activation, Answer, Catalog, CatalogKind, ClientIdentity, Frame, GatewayEvent, HistoryChunk,
-    HistoryPage, Input, IntentId, InteractionId, InterruptScope, OpenOptions, Seq, SessionFilter,
-    SessionId, SessionSelector, SessionState, SessionSummary,
+    Activation, Answer, Catalog, CatalogKind, ClientIdentity, Delivery, Frame, GatewayEvent,
+    HistoryChunk, HistoryPage, Input, IntentId, InteractionId, InterruptScope, OpenOptions, Seq,
+    SessionFilter, SessionId, SessionSelector, SessionState, SessionSummary,
 };
 use schemars::{JsonSchema, Schema, SchemaGenerator};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 /// The wire version a client checks against its own before it speaks.
 pub const PROTOCOL: u32 = 1;
@@ -33,6 +34,8 @@ pub mod name {
     pub const SESSION_SUBMIT: &str = "session/submit";
     pub const SESSION_INTERRUPT: &str = "session/interrupt";
     pub const SESSION_ANSWER: &str = "session/answer";
+    pub const SESSION_DELIVER: &str = "session/deliver";
+    pub const SESSION_EXTEND: &str = "session/extend";
     pub const CATALOG_READ: &str = "catalog/read";
     pub const GATEWAY_SUBSCRIBE: &str = "gateway/subscribe";
 
@@ -121,6 +124,26 @@ pub struct OpenResult {
 #[serde(rename_all = "camelCase")]
 pub struct SessionParams {
     pub session: SessionId,
+}
+
+/// `HostApi::deliver` (ADR-0011 §3): a peer's prose into a session's queue.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct DeliverParams {
+    pub session: SessionId,
+    pub intent: IntentId,
+    pub input: Input,
+    pub delivery: Delivery,
+}
+
+/// `HostApi::extend` (ADR-0011 §2): a plugin's state into a session's journal.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ExtendParams {
+    pub session: SessionId,
+    pub plugin: String,
+    pub kind: String,
+    pub payload: Value,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -233,6 +256,16 @@ pub static METHODS: &[Method] = &[
         schema_of::<Empty>,
     ),
     (
+        name::SESSION_DELIVER,
+        schema_of::<DeliverParams>,
+        schema_of::<Empty>,
+    ),
+    (
+        name::SESSION_EXTEND,
+        schema_of::<ExtendParams>,
+        schema_of::<Empty>,
+    ),
+    (
         name::SESSION_HISTORY,
         schema_of::<HistoryParams>,
         schema_of::<HistoryChunk>,
@@ -280,7 +313,7 @@ mod tests {
 
     #[test]
     fn the_wire_has_thirteen_methods_and_two_notifications() {
-        assert_eq!(METHODS.len(), 13, "ADR-0007 fixes the method count");
+        assert_eq!(METHODS.len(), 15, "ADR-0007 fixes the method count");
         assert_eq!(NOTIFICATIONS.len(), 2);
     }
 

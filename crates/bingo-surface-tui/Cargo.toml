@@ -25,5 +25,6 @@ unicode-width.workspace = true
 unicode-segmentation.workspace = true
 
 [dev-dependencies]
+bingo-sdk = { workspace = true, features = ["testing"] }
 insta.workspace = true
 tempfile.workspace = true

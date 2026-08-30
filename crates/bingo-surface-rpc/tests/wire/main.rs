@@ -11,8 +11,8 @@ mod host;
 use std::time::Duration;
 
 use bingo_sdk::{
-    Activation, Answer, Attachment, CatalogKind, ErrorCode, Exit, HostApi, HostHandle, Input,
-    IntentId, InteractionId, InterruptScope, KernelError, OpenOptions, Origin,
+    Activation, Answer, Attachment, CatalogKind, Delivery, ErrorCode, Exit, HostApi, HostHandle,
+    Input, IntentId, InteractionId, InterruptScope, KernelError, OpenOptions, Origin,
 };
 use bingo_surface_rpc::codec::{
     self, INVALID_PARAMS, INVALID_REQUEST, Id, KERNEL_ERROR, METHOD_NOT_FOUND, Message,
@@ -236,9 +236,54 @@ fn params_for(method: &str) -> Value {
             "answer": Answer::AllowOnce,
             "activation": Activation::Programmatic,
         }),
+        name::SESSION_DELIVER => json!({
+            "session": session,
+            "intent": intent,
+            "input": Input::text("from a peer", Origin::surface("test")),
+            "delivery": "wake",
+        }),
+        name::SESSION_EXTEND => json!({
+            "session": session,
+            "plugin": "bingo.test",
+            "kind": "things",
+            "payload": [1, 2, 3],
+        }),
         name::CATALOG_READ => json!({ "kind": CatalogKind::Providers }),
         _ => json!({}),
     }
+}
+
+/// `session/deliver` and `session/extend` are `HostApi` one-to-one
+/// (ADR-0011): what a client sends is what the kernel is handed.
+#[tokio::test]
+async fn a_delivery_and_an_extension_reach_the_kernel_verbatim() {
+    let (host, session) = TestHost::with(script());
+    let mut wire = Wire::opened(host).await;
+    let result = wire
+        .call(name::SESSION_DELIVER, params_for(name::SESSION_DELIVER))
+        .await
+        .expect("a delivery is accepted");
+    assert_eq!(result, json!({}));
+    wire.call(name::SESSION_EXTEND, params_for(name::SESSION_EXTEND))
+        .await
+        .expect("an extension is accepted");
+    assert_eq!(wire.finish().await, Exit { code: 0 });
+
+    let delivered = session.delivered.lock().unwrap();
+    assert_eq!(delivered.len(), 1);
+    let (intent, input, delivery) = &delivered[0];
+    assert_eq!(intent, &IntentId::from_raw("req_1"));
+    assert_eq!(*delivery, Delivery::Wake);
+    assert!(matches!(input, Input::Text { text, .. } if text == "from a peer"));
+    let extended = session.extended.lock().unwrap();
+    assert_eq!(
+        extended.as_slice(),
+        [(
+            "bingo.test".to_string(),
+            "things".to_string(),
+            json!([1, 2, 3])
+        )]
+    );
 }
 
 #[tokio::test]

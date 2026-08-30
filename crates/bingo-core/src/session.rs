@@ -113,6 +113,18 @@ impl Actor {
                 input,
                 delivery,
             } => self.deliver(intent, input, delivery).await,
+            Msg::Extend {
+                plugin,
+                kind,
+                payload,
+            } => {
+                let event = Event::Extension {
+                    plugin,
+                    kind,
+                    payload,
+                };
+                self.publish(event, None).await;
+            }
             Msg::Interrupt { intent, scope } => self.interrupt(intent, scope).await,
             Msg::Answer(answered) => self.answer(answered).await,
             Msg::Attach { reply } => {
@@ -271,6 +283,7 @@ impl Actor {
 
     fn hook_context(&self) -> HookContext {
         HookContext {
+            host: self.config.host.clone(),
             session: self.id.clone(),
             turn: self.running.as_ref().map(|r| r.turn.clone()),
             cwd: self.config.cwd.clone(),
@@ -602,8 +615,9 @@ impl Actor {
     async fn redirect(&mut self, intent: IntentId, to: SessionId, input: Input) {
         let sent = self
             .config
-            .tool_host
-            .deliver(&to, IntentId::mint(), input, Delivery::Wake);
+            .host
+            .deliver(&to, IntentId::mint(), input, Delivery::Wake)
+            .await;
         match sent {
             Ok(()) => self.applied(intent, json!({ "redirected": to })).await,
             Err(e) => self.reject(intent, e.code, e.message).await,
