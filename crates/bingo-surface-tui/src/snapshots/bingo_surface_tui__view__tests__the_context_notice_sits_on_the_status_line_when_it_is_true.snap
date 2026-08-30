@@ -1,6 +1,6 @@
 ---
 source: crates/bingo-surface-tui/src/view.rs
-expression: "render(&with_mode(\"acceptEdits\"), &ui, now)"
+expression: "render(&with_context(170_000), &ui, now)"
 ---
 "                                                                                "
 "                                                                                "
@@ -25,4 +25,4 @@ expression: "render(&with_mode(\"acceptEdits\"), &ui, now)"
 "╭──────────────────────────────────────────────────────────────────────────────╮"
 "│❯ ask anything · / for commands · ! for shell                                 │"
 "╰──────────────────────────────────────────────────────────────────────────────╯"
-"acceptEdits · ? for shortcuts · / commands · ! shell                      fake-1"
+"context 85% · /compact                                                    fake-1"

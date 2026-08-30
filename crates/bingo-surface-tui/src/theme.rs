@@ -73,3 +73,15 @@ pub fn level(level: bingo_sdk::Level) -> Style {
         bingo_sdk::Level::Error => danger(),
     }
 }
+
+// ---- the tokens the frame asked for (design §4) --------------------------
+// Added by M11a where the table names a token the palette had not grown yet;
+// M11b owns the table and will fold them into it.
+
+/// The `⏵⏵` the status line's mode slot opens with.
+pub const MODE: &str = "⏵⏵";
+
+/// The one cool colour: the mode on the status line, and links.
+pub fn mode() -> Style {
+    Style::default().fg(Color::Blue)
+}

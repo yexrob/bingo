@@ -14,8 +14,8 @@ use crate::composer::Composer;
 use crate::dialog::Dialog;
 use crate::history::PromptHistory;
 
-/// How long a transient notice stays up.
-const NOTICE: Duration = Duration::from_secs(5);
+/// How long a transient notice holds the status line's middle slot (§3).
+pub const NOTICE: Duration = Duration::from_secs(4);
 /// A second ctrl+c within this window leaves.
 pub const EXIT_WINDOW: Duration = Duration::from_secs(2);
 

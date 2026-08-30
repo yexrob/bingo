@@ -14,8 +14,9 @@
 //!   tick, and the results of the handful of host calls it spawns.
 //! - [`input::on_key`] is pure: it mutates [`ui::Ui`] and returns
 //!   [`effect::Effect`]s, so every binding is a test with no runtime in it.
-//! - [`view::draw`] is pure of everything but the frame it paints; the
-//!   transcript is what is left once the chrome below it has been measured.
+//! - [`frame::regions`] cuts the screen into its regions and [`view::draw`]
+//!   fills them; the transcript is what is left once the input box and the
+//!   status line have taken theirs, so nothing below the transcript moves.
 //! - [`tree::Tree`] holds one reducer state per session the attachment
 //!   carries — the root and its sub-sessions (ADR-0010 §3) — and which of
 //!   them is on screen.
@@ -35,6 +36,7 @@ mod commands;
 mod composer;
 mod dialog;
 mod effect;
+mod frame;
 mod history;
 mod input;
 mod keys;
@@ -43,6 +45,7 @@ mod panel;
 mod permission;
 mod preview;
 mod run;
+mod status;
 mod terminal;
 mod theme;
 mod transcript;

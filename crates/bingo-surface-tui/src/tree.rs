@@ -177,26 +177,6 @@ impl Tree {
             .find_map(|state| state.interactions.first().map(|open| (state, open)))
     }
 
-    /// `2 agents · 1 needs you`, and nothing while the tree is only the root.
-    /// A session nothing answers is doing no work, so it is nobody's count.
-    pub fn tally(&self) -> Option<String> {
-        let agents = self
-            .children
-            .values()
-            .filter(|child| Status::of(child).is_some())
-            .count();
-        if agents == 0 {
-            return None;
-        }
-        let noun = if agents == 1 { "agent" } else { "agents" };
-        let waiting = self.children.values().filter(|c| c.attention()).count();
-        let mut out = format!("{agents} {noun}");
-        if waiting > 0 {
-            out.push_str(&format!(" · {waiting} needs you"));
-        }
-        Some(out)
-    }
-
     /// The children the viewed session spawned, by the tool call that did it;
     /// a child no call spawned hangs under no row.
     pub fn agents(&self) -> Agents {
@@ -262,7 +242,6 @@ mod tests {
 
         tree.apply(&child_frame(1, announced("reviewer")));
         tree.apply(&child_frame(2, started("trn_9")));
-        assert_eq!(tree.tally().as_deref(), Some("1 agent"));
         let rows = tree.rows();
         assert_eq!(rows[1].name, "reviewer");
         assert_eq!(rows[1].status, Some(Status::Running));
@@ -283,7 +262,7 @@ mod tests {
             "a closed child gives the view back"
         );
         assert_eq!(tree.view(), tree.root_id());
-        assert!(tree.tally().is_none());
+        assert_eq!(tree.rows().len(), 1, "and the tree is the root alone");
     }
 
     #[test]
@@ -294,11 +273,11 @@ mod tests {
     }
 
     #[test]
-    fn the_tally_counts_who_is_waiting_and_the_dialog_takes_the_root_first() {
+    fn a_child_that_waits_is_marked_and_the_dialog_takes_the_root_first() {
         let mut tree = Tree::new(state());
         tree.apply(&child_frame(1, announced("reviewer")));
         tree.apply(&child_frame(2, opened(child_permission())));
-        assert_eq!(tree.tally().as_deref(), Some("1 agent · 1 needs you"));
+        assert!(tree.rows().iter().filter(|row| row.attention).count() == 1);
         assert!(tree.attention());
         let (owner, _) = tree.open_interaction().expect("the child's prompt");
         assert_eq!(owner.summary.id, child_id());
@@ -345,7 +324,6 @@ mod tests {
         assert_eq!(room.name, "#design");
         assert_eq!(room.status, None);
         assert_eq!(status_suffix(tree.sessions().last().expect("the room")), "");
-        assert!(tree.tally().is_none(), "a room is not an agent at work");
     }
 
     #[test]

@@ -691,7 +691,7 @@ mod tests {
         let (exit, _) = harness.go(frames, vec![], None).await;
         assert_eq!(exit, Exit { code: 0 });
         let screen = harness.recorder.last();
-        assert!(screen.contains("1 agent"), "{screen}");
+        assert!(screen.contains("1 running"), "{screen}");
         assert!(screen.contains("↳ reviewer · running"), "{screen}");
     }
 
