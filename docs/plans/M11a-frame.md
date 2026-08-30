@@ -14,7 +14,7 @@
 6. **Mouse** (worker) — crossterm mouse capture on; wheel scrolls; a click on a child's row steps into it; a click on a card row answers; a click in the transcript focuses a block; nothing needs the mouse.
 7. **Layers** (worker) — `layers.rs`: `Card` and `Sheet` as the two layer kinds with their reveal state (frame 0..3) on the clock; the dim backdrop is a style pass over the regions beneath; the reveal frames are pure functions of `now`; the M6 dialog and the switcher become cards, help and the picker become sheets.
 8. **Leaving** (worker) — on exit, after leaving the alternate screen, print the last `rows - 2` lines of the transcript as plain text through the block cache's degrade; `--no-print-on-exit` skips it.
-9. **Status line** (worker) — `status.rs`: the three slots of §4 — mode left; notices middle (`N needs you (ctrl+t)`, `N running`, `context N%` from 70 % of the trigger, the latest notice, else `? for shortcuts` while the composer is empty); place right (`in <session> · <model>`); the middle truncates first; a notice queue `push(text)` holding each 4 s on the clock (its fade is M11c's); the context sparkline over the last eight turns' `ContextUsage` draws in the `/status` sheet.
+9. **Status line** (worker) — `status.rs`: the three slots of §4 — mode left; notices middle (`N needs you (ctrl+g)`, `N running`, `context N%` from 70 % of the trigger, the latest notice, else `? for shortcuts` while the composer is empty); place right (`in <session> · <model>`); the middle truncates first; a notice queue `push(text)` holding each 4 s on the clock (its fade is M11c's); the context sparkline over the last eight turns' `ContextUsage` draws in the `/status` sheet.
 
 ## Files
 
