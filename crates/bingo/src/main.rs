@@ -284,7 +284,7 @@ fn plugins() -> Result<Vec<Box<dyn Plugin>>, KernelError> {
         Box::new(WebPlugin),
         Box::new(SkillsPlugin),
         Box::new(McpPlugin::default()),
-        Box::new(AgentsPlugin::default()),
+        Box::new(AgentsPlugin),
         Box::new(RoomsPlugin),
         Box::new(TasksPlugin),
         Box::new(PrintPlugin),

@@ -6,7 +6,6 @@
 //! watcher to bring it back.
 
 use std::path::Path;
-use std::sync::Arc;
 
 use async_trait::async_trait;
 use bingo_sdk::{
@@ -19,7 +18,6 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::definition::Definition;
-use crate::handle::LateHost;
 use crate::{library, message, names, note, watch};
 
 /// What a spawn is called when the call names neither a definition nor an
@@ -210,23 +208,17 @@ fn pick<'a>(
 
 /// Starting a session and posting a prompt into it: this session's transcript
 /// is untouched, and every call the child then makes is gated in the child.
-#[derive(Debug)]
-pub struct SpawnAgentTool {
-    host: Arc<LateHost>,
-}
+#[derive(Debug, Default, Clone, Copy)]
+pub struct SpawnAgentTool;
 
 impl SpawnAgentTool {
-    pub fn new(host: Arc<LateHost>) -> Self {
-        Self { host }
-    }
-
     /// The child, running, with the prompt already on its way.
     async fn open(
         &self,
         args: &SpawnArgs,
         cx: &ToolContext,
     ) -> Result<(String, SessionId, Attachment), ToolError> {
-        let host = self.host.require().map_err(failed)?;
+        let host = &cx.host;
         let definitions = library::load(&cx.env, &cx.cwd);
         let definition = pick(args.agent.as_deref(), &definitions).map_err(ToolError::Failed)?;
         let plan = Plan::of(args, definition, host).await.map_err(failed)?;
@@ -298,6 +290,7 @@ impl Tool for SpawnAgentTool {
 mod tests {
     use super::*;
     use crate::tests::{Fleet, Recorder, assistant, tool_context, turn_completed, turn_failed};
+    use std::sync::Arc;
 
     fn definition(name: &str, body: &str) -> Definition {
         Definition {
@@ -315,7 +308,7 @@ mod tests {
         fleet.script([assistant("hi from the child"), turn_completed()]);
         let root = fleet.root();
         let host = Recorder::new(&fleet);
-        let tool = SpawnAgentTool::new(fleet.late());
+        let tool = SpawnAgentTool;
         let out = tool
             .call(input, &tool_context(&root, host.clone()))
             .await
@@ -341,7 +334,7 @@ mod tests {
         fleet.script([turn_failed("no key")]);
         let root = fleet.root();
         let host = Recorder::new(&fleet);
-        let out = SpawnAgentTool::new(fleet.late())
+        let out = SpawnAgentTool
             .call(
                 json!({ "prompt": "go", "background": false }),
                 &tool_context(&root, host),
@@ -374,7 +367,7 @@ mod tests {
         let root = fleet.root();
         let host = Recorder::new(&fleet);
         let cx = tool_context(&root, host.clone());
-        SpawnAgentTool::new(fleet.late())
+        SpawnAgentTool
             .call(json!({ "prompt": "go", "name": "reviewer" }), &cx)
             .await
             .expect("a spawn");
@@ -399,7 +392,7 @@ mod tests {
         fleet.script([turn_completed()]);
         let root = fleet.root();
         let host = Recorder::new(&fleet);
-        SpawnAgentTool::new(fleet.late())
+        SpawnAgentTool
             .call(
                 json!({ "prompt": "go" }),
                 &tool_context(&root, host.clone()),
@@ -420,7 +413,7 @@ mod tests {
         let root = fleet.root();
         fleet.child(&root, "reviewer");
         let host = Recorder::new(&fleet);
-        let out = SpawnAgentTool::new(fleet.late())
+        let out = SpawnAgentTool
             .call(
                 json!({ "prompt": "go", "name": "reviewer" }),
                 &tool_context(&root, host.clone()),
@@ -439,7 +432,7 @@ mod tests {
         let root = fleet.root();
         let host = Recorder::new(&fleet);
         host.lock(&format!("agent/{root}/reviewer"));
-        SpawnAgentTool::new(fleet.late())
+        SpawnAgentTool
             .call(
                 json!({ "prompt": "go", "name": "reviewer" }),
                 &tool_context(&root, host.clone()),
@@ -473,7 +466,7 @@ mod tests {
 
     #[test]
     fn it_reads_and_a_rule_may_name_the_agent_it_starts() {
-        let tool = SpawnAgentTool::new(Arc::new(LateHost::default()));
+        let tool = SpawnAgentTool;
         let spec = tool.spec();
         assert_eq!(spec.name, "SpawnAgent");
         assert!(spec.input_schema.get("$schema").is_none());

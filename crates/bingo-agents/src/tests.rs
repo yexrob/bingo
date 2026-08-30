@@ -10,17 +10,15 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use async_trait::async_trait;
 use bingo_sdk::{
     Activation, Answer, AnswerSpec, Attachment, CancellationToken, Catalog, CatalogEntry,
-    CatalogKind, ClientIdentity, CloseReason, CommandContext, Delivery, Env, ErrorCode, Event,
-    Frame, FrameStream, GatewayStream, HistoryChunk, HistoryPage, HookContext, HostApi, HostHandle,
-    Input, IntentId, InteractionId, InteractionKind, InterruptScope, Item, ItemBody, ItemId,
-    ItemStatus, KernelError, OpenOptions, ParentLink, Prompter, Seq, SessionFilter, SessionHandle,
-    SessionId, SessionPort, SessionSelector, SessionSpec, SessionState, SessionSummary,
-    ToolContext, ToolHost, TurnId, TurnOrigin, TurnStatus, Usage,
+    CatalogKind, ClientIdentity, CloseReason, CommandContext, Delivery, Driver, Env, ErrorCode,
+    Event, Frame, FrameStream, GatewayStream, HistoryChunk, HistoryPage, HookContext, HostApi,
+    HostHandle, Input, IntentId, InteractionId, InteractionKind, InterruptScope, Item, ItemBody,
+    ItemId, ItemStatus, KernelError, OpenOptions, ParentLink, Prompter, Seq, SessionFilter,
+    SessionHandle, SessionId, SessionPort, SessionSelector, SessionSpec, SessionState,
+    SessionSummary, ToolContext, ToolHost, TurnId, TurnOrigin, TurnStatus, Usage,
 };
 use futures::StreamExt;
 use jiff::Timestamp;
-
-use crate::handle::LateHost;
 
 /// The turn every scripted frame belongs to.
 const TURN: &str = "trn_1";
@@ -71,6 +69,13 @@ impl Tree {
         self.write(&self.user_layer().join(format!("{name}.md")), source);
     }
 
+    /// A team file in `<home>/<at>`, returning that working directory.
+    pub(crate) fn team(&self, at: &str, source: &str) -> PathBuf {
+        let cwd = self.dir(at);
+        self.write(&cwd.join(".bingo").join("team.json"), source);
+        cwd
+    }
+
     /// A definition in the project layer of `<home>/<at>`, returning that
     /// working directory.
     pub(crate) fn project_agent(&self, at: &str, name: &str, source: &str) -> PathBuf {
@@ -96,9 +101,10 @@ struct Inner {
     /// What every attachment yields after its snapshot, and whether the
     /// stream then ends rather than staying open.
     script: Mutex<(Vec<Event>, bool)>,
-    /// The sessions a tool asked for, the messages it sent, and the keys the
-    /// kernel would report as held.
+    /// The sessions a caller asked for, the ones it reopened, the messages it
+    /// sent, and the keys the kernel would report as held.
     spawned: Mutex<Vec<SessionSpec>>,
+    opened: Mutex<Vec<SessionId>>,
     delivered: Mutex<Vec<(SessionId, Input, Delivery)>>,
     locked: Mutex<Vec<String>>,
 }
@@ -123,13 +129,6 @@ impl Fleet {
         HostHandle(Arc::new(self.clone()))
     }
 
-    /// The plugin's shared host, already started.
-    pub(crate) fn late(&self) -> Arc<LateHost> {
-        let late = Arc::new(LateHost::default());
-        late.set(self.handle());
-        late
-    }
-
     /// A session with no parent, as a surface opens one.
     pub(crate) fn root(&self) -> SessionId {
         let id = SessionId::mint();
@@ -142,6 +141,36 @@ impl Fleet {
         let id = SessionId::mint();
         self.add(summary(id.as_str(), Some(name), Some(parent.clone())));
         id
+    }
+
+    /// A room under `parent`: a child nothing answers for (ADR-0011 §1), as
+    /// another plugin opens one.
+    pub(crate) fn room(&self, parent: &SessionId, name: &str) -> SessionId {
+        let id = self.child(parent, name);
+        let mut sessions = self.sessions();
+        if let Some(live) = sessions.iter_mut().find(|l| l.summary.id == id) {
+            live.summary.driver = Driver::Log;
+        }
+        id
+    }
+
+    /// The sessions a caller asked the host to create.
+    pub(crate) fn spawned(&self) -> Vec<SessionSpec> {
+        locked(&self.0.spawned).clone()
+    }
+
+    /// The sessions a caller reopened by id.
+    pub(crate) fn opened(&self) -> Vec<SessionId> {
+        locked(&self.0.opened).clone()
+    }
+
+    pub(crate) fn delivered(&self) -> Vec<(SessionId, Input, Delivery)> {
+        locked(&self.0.delivered).clone()
+    }
+
+    /// A key another session already holds, as the kernel reports it.
+    pub(crate) fn lock(&self, key: &str) {
+        locked(&self.0.locked).push(key.to_string());
     }
 
     fn add(&self, summary: SessionSummary) {
@@ -260,7 +289,10 @@ impl HostApi for Fleet {
         _options: OpenOptions,
     ) -> Result<Attachment, KernelError> {
         let id = match selector {
-            SessionSelector::ById { id } => id,
+            SessionSelector::ById { id } => {
+                locked(&self.0.opened).push(id.clone());
+                id
+            }
             SessionSelector::Create { spec } => {
                 locked(&self.0.spawned).push(spec.clone());
                 let held = locked(&self.0.locked)
@@ -394,15 +426,15 @@ impl Recorder {
 
     /// A key another session already holds, as the kernel reports it.
     pub(crate) fn lock(&self, key: &str) {
-        locked(&self.fleet.0.locked).push(key.to_string());
+        self.fleet.lock(key);
     }
 
     pub(crate) fn spawned(&self) -> Vec<SessionSpec> {
-        locked(&self.fleet.0.spawned).clone()
+        self.fleet.spawned()
     }
 
     pub(crate) fn delivered(&self) -> Vec<(SessionId, Input, Delivery)> {
-        locked(&self.fleet.0.delivered).clone()
+        self.fleet.delivered()
     }
 }
 
@@ -448,9 +480,9 @@ pub(crate) fn command_context(session: &SessionId, fleet: &Fleet) -> CommandCont
     }
 }
 
-pub(crate) fn hook_context(session: &SessionId) -> HookContext {
+pub(crate) fn hook_context(session: &SessionId, host: HostHandle) -> HookContext {
     HookContext {
-        host: bingo_sdk::testing::NoHost::handle(),
+        host,
         session: session.clone(),
         turn: None,
         cwd: PathBuf::from("/work/project"),
