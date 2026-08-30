@@ -18,6 +18,7 @@ use crate::frame::Regions;
 use crate::history::PromptHistory;
 use crate::layers::{self, Reveal};
 use crate::scroll::Scroll;
+use crate::search::Search;
 
 /// How long a transient notice holds the status line's middle slot (§3).
 pub const NOTICE: Duration = Duration::from_secs(4);
@@ -193,6 +194,8 @@ pub struct Ui {
     /// The one layer over the frame, and how far it has come in.
     pub layer: Layer,
     pub menu: Menu,
+    /// `ctrl+f`: the query in the status line's row, while it is there.
+    pub search: Option<Search>,
     pub notices: Vec<Notice>,
     /// A command's `View`, shown until the next key.
     pub block: Option<View>,
@@ -217,6 +220,7 @@ impl Ui {
             scroll: Scroll::default(),
             layer: Layer::shut(started),
             menu: Menu::default(),
+            search: None,
             notices: Vec::new(),
             block: None,
             armed: None,
@@ -248,7 +252,6 @@ impl Ui {
     pub fn layer_moving(&self, now: Instant) -> bool {
         self.layer.open != Open::Nothing && self.layer.reveal(now).moving()
     }
-
 
     /// Every command the dropdown may offer: the surface's own and the
     /// kernel's, in that order.
@@ -293,6 +296,18 @@ impl Ui {
     pub fn transcript(&self) -> (usize, usize) {
         let painted = self.painted.borrow();
         (painted.height, painted.regions.transcript.height as usize)
+    }
+
+    /// The whole transcript as the last frame rendered it, one string a line:
+    /// what a search looks through.
+    pub fn transcript_text(&self) -> Vec<String> {
+        let painted = self.painted.borrow();
+        painted
+            .blocks
+            .window(0, painted.height)
+            .iter()
+            .map(ToString::to_string)
+            .collect()
     }
 
     /// The rows a page key moves by: the screenful a person is looking at.

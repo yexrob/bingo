@@ -1,0 +1,28 @@
+---
+source: crates/bingo-surface-tui/src/view.rs
+expression: found
+---
+"❯ line 1                                                                        "
+"                                                                                "
+"❯ line 2                                                                        "
+"                                                                                "
+"❯ line 3                                                                        "
+"                                                                                "
+"❯ line 4                                                                        "
+"                                                                                "
+"❯ line 5                                                                        "
+"                                                                                "
+"❯ line 6                                                                        "
+"                                                                                "
+"❯ line 7                                                                        "
+"                                                                                "
+"❯ line 8                                                                        "
+"                                                                                "
+"❯ line 9                                                                        "
+"                                                                                "
+"❯ line 10                                                                       "
+"                                                                                "
+"╭──────────────────────────────────────────────────────────────────────────────╮"
+"│❯ ask anything · / for commands · ! for shell                                 │"
+"╰──────────────────────────────────────────────────────────────────────────────╯"
+"/line 4  1/11 · n/N · esc                                                       "

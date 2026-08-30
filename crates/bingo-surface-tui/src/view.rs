@@ -17,7 +17,7 @@ use crate::clock::Now;
 use crate::frame::{self, Demand, Regions};
 use crate::tree::{self, Tree};
 use crate::ui::{Open, Picker, Switcher, Ui};
-use crate::{block, dialog, keys, layers, panel, status, theme, wrap};
+use crate::{block, dialog, keys, layers, panel, search, status, theme, wrap};
 
 /// How tall the composer box may grow before it scrolls internally.
 const COMPOSER_ROWS: usize = 10;
@@ -62,11 +62,15 @@ fn inner_width(width: usize) -> usize {
     width.saturating_sub(2 + theme::USER.width()).max(1)
 }
 
+/// The status line, or the search row in its place while one is open.
 fn render_status(tree: &Tree, ui: &Ui, frame: &mut Frame, area: Rect) {
     if area.height == 0 {
         return;
     }
-    let line = status::line(tree, ui, area.width as usize);
+    let line = match ui.search.as_ref() {
+        Some(search) => search::row(search),
+        None => status::line(tree, ui, area.width as usize),
+    };
     frame.render_widget(Paragraph::new(vec![line]), area);
 }
 
@@ -214,6 +218,9 @@ fn render_transcript(tree: &Tree, ui: &Ui, frame: &mut Frame, area: Rect, now: N
     let padding = rows - shown.len();
     shown.splice(..0, std::iter::repeat_n(Line::default(), padding));
     frame.render_widget(Paragraph::new(shown), area);
+    if let Some(search) = ui.search.as_ref() {
+        search::mark(frame, area, painted.top.saturating_sub(padding), search);
+    }
 }
 
 /// Only while a turn runs: what it is doing, how long, and how to stop it.
@@ -1109,6 +1116,87 @@ mod tests {
         for (width, height) in [(1u16, 1u16), (4, 2), (10, 3), (20, 5)] {
             draw_sized(width, height, &state(), &ui, now);
         }
+    }
+
+    #[test]
+    fn ctrl_f_searches_the_transcript_and_esc_gives_the_status_line_back() {
+        let state = long_transcript(60);
+        let (mut ui, now) = scene();
+        render(&state, &ui, now);
+        let press = |ui: &mut Ui, key| {
+            crate::input::on_key(ui, &solo(&state), key, now);
+        };
+        press(&mut ui, ctrl('f'));
+        for c in "line 4".chars() {
+            press(&mut ui, typed(c));
+        }
+        let typing = render(&state, &ui, now);
+        assert!(typing.contains("/line 4▌"), "{typing}");
+
+        press(&mut ui, key(crossterm::event::KeyCode::Enter));
+        // The transcript eases to the hit; this is where it lands.
+        let there = Now {
+            instant: now.instant + crate::scroll::EASE,
+            ..now
+        };
+        let found = render(&state, &ui, there);
+        assert!(found.contains("1/11 · n/N · esc"), "{found}");
+        assert!(found.contains("line 4"), "it scrolled to the hit: {found}");
+        insta::assert_snapshot!(found);
+
+        press(&mut ui, typed('n'));
+        let stepped = render(&state, &ui, there);
+        assert!(stepped.contains("2/11"), "{stepped}");
+
+        press(&mut ui, key(crossterm::event::KeyCode::Esc));
+        assert!(
+            render(&state, &ui, there).contains("? for shortcuts"),
+            "esc gives the status line back"
+        );
+    }
+
+    #[test]
+    fn a_hit_on_the_screen_is_marked_where_it_sits() {
+        let state = long_transcript(60);
+        let (mut ui, now) = scene();
+        render(&state, &ui, now);
+        crate::input::on_key(&mut ui, &solo(&state), ctrl('f'), now);
+        for c in "line 59".chars() {
+            crate::input::on_key(&mut ui, &solo(&state), typed(c), now);
+        }
+        crate::input::on_key(
+            &mut ui,
+            &solo(&state),
+            key(crossterm::event::KeyCode::Enter),
+            now,
+        );
+        let screen = drawn(
+            80,
+            24,
+            &solo(&state),
+            &ui,
+            Now {
+                instant: now.instant + crate::scroll::EASE,
+                ..now
+            },
+        );
+        let marked: Vec<(u16, u16)> = screen
+            .buffer()
+            .content()
+            .iter()
+            .enumerate()
+            .filter(|(_, cell)| {
+                cell.style()
+                    .add_modifier
+                    .contains(ratatui::style::Modifier::REVERSED)
+            })
+            .map(|(i, _)| ((i % 80) as u16, (i / 80) as u16))
+            .collect();
+        assert_eq!(marked.len(), 7, "seven cells of `line 59`: {marked:?}");
+        assert!(
+            marked.iter().all(|(x, _)| (2..9).contains(x)),
+            "after the `❯ `: {marked:?}"
+        );
     }
 
     #[test]

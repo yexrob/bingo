@@ -15,6 +15,7 @@ use crate::clock::Now;
 use crate::commands::{self, Local};
 use crate::effect::Effect;
 use crate::permission;
+use crate::search::Search;
 use crate::tree::Tree;
 use crate::ui::{Open, Switcher, Ui};
 
@@ -34,8 +35,15 @@ pub fn on_key(ui: &mut Ui, tree: &Tree, key: KeyEvent, now: Now) -> Vec<Effect> 
     if let Some(effects) = leaving(ui, state, key, now) {
         return effects;
     }
+    if ui.search.is_some() {
+        return searching(ui, key, now);
+    }
     if ui.layer.captures() && matches!(ui.layer.open, Open::Picker(_)) {
         return picker(ui, key, now);
+    }
+    if chord(key, 'f') {
+        ui.search = Some(Search::open());
+        return Vec::new();
     }
     if chord(key, 'g') {
         toggle_switcher(ui, tree, now);
@@ -142,6 +150,47 @@ fn picker(ui: &mut Ui, key: KeyEvent, now: Now) -> Vec<Effect> {
         _ => {}
     }
     Vec::new()
+}
+
+/// The search row owns the keyboard while it is up: typing edits the query,
+/// `enter` commits it and then steps, `n`/`N` walk the hits and `esc` gives
+/// the status line back.
+fn searching(ui: &mut Ui, key: KeyEvent, now: Now) -> Vec<Effect> {
+    let Some(search) = ui.search.as_mut() else {
+        return Vec::new();
+    };
+    match (search.typing, key.code) {
+        (_, KeyCode::Esc) => ui.search = None,
+        (true, KeyCode::Char(c)) => search.typed(c),
+        (true, KeyCode::Backspace) => search.backspace(),
+        (true, KeyCode::Enter) => commit(ui, now),
+        (false, KeyCode::Char('n') | KeyCode::Enter) => step(ui, 1, now),
+        (false, KeyCode::Char('N')) => step(ui, -1, now),
+        _ => {}
+    }
+    Vec::new()
+}
+
+/// Look through what the last frame rendered — the blocks are the transcript
+/// a person is reading — and go to the first hit.
+fn commit(ui: &mut Ui, now: Now) {
+    let lines = ui.transcript_text();
+    if let Some(search) = ui.search.as_mut() {
+        search.find(&lines);
+    }
+    step(ui, 0, now);
+}
+
+fn step(ui: &mut Ui, by: isize, now: Now) {
+    let Some(search) = ui.search.as_mut() else {
+        return;
+    };
+    search.step(by);
+    let Some(hit) = search.current() else {
+        return;
+    };
+    let (total, rows) = ui.transcript();
+    ui.scroll.show(hit.line, total, rows, now.instant);
 }
 
 /// Open the switcher on the session in view, or close it again. There is

@@ -59,6 +59,12 @@ impl Scroll {
         self.hold(here, 0, total, rows, now);
     }
 
+    /// Bring a line into view, a third of the way down, and hold it there.
+    pub fn show(&mut self, line: usize, total: usize, rows: usize, now: Instant) {
+        let here = self.top(total, rows, now);
+        self.hold(here, line.saturating_sub(rows / 3), total, rows, now);
+    }
+
     /// The foot of it, following again.
     pub fn end(&mut self) {
         *self = Scroll::Tail;
@@ -184,6 +190,20 @@ mod tests {
         scroll.by(10, 5, ROWS, now);
         assert_eq!(scroll, Scroll::Tail);
         assert_eq!(scroll.top(5, ROWS, now), 0);
+    }
+
+    #[test]
+    fn showing_a_line_puts_it_a_third_down_the_region() {
+        let now = Instant::now();
+        let mut scroll = Scroll::default();
+        scroll.show(50, TOTAL, ROWS, now);
+        assert_eq!(at(&scroll, now + EASE), 50 - ROWS / 3);
+        scroll.show(2, TOTAL, ROWS, now);
+        assert_eq!(
+            at(&scroll, now + EASE),
+            0,
+            "a line near the head is the head"
+        );
     }
 
     #[test]
