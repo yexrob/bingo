@@ -1,0 +1,39 @@
+[package]
+name = "bingo-auth-oauth"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "OAuth flows and the credential store shared by bingo providers"
+
+# A library (ADR-0012 §1): registers nothing, any plugin may depend on it.
+[package.metadata.bingo]
+tier = "library"
+
+[lints]
+workspace = true
+
+[dependencies]
+bingo-sdk.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+# `net` for the loopback callback listener; the workspace default omits it.
+tokio = { workspace = true, features = ["net"] }
+# JWT claims and PKCE values are base64url without padding.
+base64.workspace = true
+# SHA-256 for the PKCE challenge and the system random source for the
+# verifier and the `state` nonce; already resolved under rustls (ADR-0012 §7).
+aws-lc-rs.workspace = true
+# A credential store that cannot be read is not an error a person can act on;
+# it is reported as signed out and left in the log.
+tracing.workspace = true
+
+[dev-dependencies]
+bingo-sdk = { workspace = true, features = ["testing"] }
+# The prompter double the login tests answer with.
+async-trait.workspace = true
+wiremock.workspace = true
+tempfile.workspace = true
