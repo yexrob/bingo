@@ -772,3 +772,105 @@ pub fn keys(script: Vec<crossterm::event::KeyEvent>) -> crate::run::Keys {
     });
     Box::pin(typed.chain(futures::stream::pending()))
 }
+
+// ---- M11b: the fixtures the screens are built from --------------------
+
+/// A tool call whose gate a person answered.
+pub fn receipt_item(
+    id: &str,
+    tool: &str,
+    decision: bingo_sdk::DecisionKind,
+    feedback: Option<&str>,
+) -> Item {
+    item(
+        id,
+        ItemStatus::Completed,
+        ItemBody::PermissionReceipt {
+            interaction: InteractionId::from_raw("int_1"),
+            tool: tool.into(),
+            decision,
+            feedback: feedback.map(str::to_owned),
+        },
+    )
+}
+
+/// The frame that puts a tool on screen while it is still running.
+pub fn started_tool(seq: u64, item: Item) -> Frame {
+    frame(seq, Event::ItemStarted { item })
+}
+
+/// A transcript whose tool call spawned a sub-session, and that child's own
+/// frames after it, in the order one stream delivers them.
+pub fn spawned_tree(child: Vec<Frame>) -> Tree {
+    let mut frames = vec![
+        frame(
+            1,
+            Event::ItemCompleted {
+                item: user("itm_0", "have it reviewed"),
+            },
+        ),
+        frame(
+            2,
+            Event::ItemCompleted {
+                item: tool(
+                    "itm_1",
+                    "SpawnAgent",
+                    json!({"prompt": "review the diff"}),
+                    Some(ToolOutput::text("reviewer started")),
+                    ItemStatus::Completed,
+                ),
+            },
+        ),
+    ];
+    frames.extend(child);
+    folded_tree(frames)
+}
+
+/// A room under the root, with the room in view: what a member of it sees.
+pub fn room_tree(frames: Vec<Frame>) -> Tree {
+    let mut all = vec![log_frame(1, log_announced("#design"))];
+    all.extend(frames);
+    let mut tree = folded_tree(all);
+    tree.show(&log_id());
+    tree
+}
+
+/// What a member posted into a room, as a frame of its stream.
+pub fn posted(seq: u64, id: &str, principal: &str, text: &str) -> Frame {
+    log_frame(
+        seq,
+        Event::ItemCompleted {
+            item: post(id, principal, text),
+        },
+    )
+}
+
+/// A sub-session that has run a while: three tool calls and some tokens
+/// spent, which is what its row in the parent's transcript reports.
+pub fn busy_child(title: &str) -> Vec<Frame> {
+    let mut summary = child_summary(title);
+    summary.usage = Usage {
+        input_tokens: 1_100,
+        output_tokens: 140,
+        ..Usage::default()
+    };
+    let mut frames = vec![
+        child_frame(1, Event::SessionUpdated { summary }),
+        child_frame(2, started("trn_9")),
+    ];
+    for i in 1..=3 {
+        frames.push(child_frame(
+            2 + i,
+            Event::ItemCompleted {
+                item: tool(
+                    &format!("itm_{i}"),
+                    "Read",
+                    json!({ "file_path": "src/lib.rs" }),
+                    Some(ToolOutput::text("Read 3 lines")),
+                    ItemStatus::Completed,
+                ),
+            },
+        ));
+    }
+    frames
+}

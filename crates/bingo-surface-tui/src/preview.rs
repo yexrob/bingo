@@ -22,7 +22,7 @@ pub fn lines(preview: &Preview, expanded: bool) -> (Vec<Line<'static>>, usize) {
             bound(rows, COMMAND_ROWS + 1, expanded)
         }
         Preview::Url { url } => (
-            vec![Line::from(Span::styled(url.clone(), theme::accent()))],
+            vec![Line::from(Span::styled(url.clone(), theme::link()))],
             0,
         ),
     }
@@ -35,10 +35,11 @@ pub fn diff(unified: &str) -> Vec<Line<'static>> {
 
 fn diff_line(line: &str) -> Line<'static> {
     let style = match line.as_bytes().first() {
-        _ if line.starts_with("@@") => theme::accent(),
-        _ if line.starts_with("+++") || line.starts_with("---") => theme::dim(),
-        Some(b'+') => theme::good(),
-        Some(b'-') => theme::danger(),
+        _ if line.starts_with("+++") || line.starts_with("---") || line.starts_with("@@") => {
+            theme::dim()
+        }
+        Some(b'+') => theme::added(),
+        Some(b'-') => theme::removed(),
         _ => theme::dim(),
     };
     Line::from(Span::styled(line.to_string(), style))
@@ -47,7 +48,7 @@ fn diff_line(line: &str) -> Line<'static> {
 fn command_line(line: &str) -> Line<'static> {
     Line::from(vec![
         Span::styled("$ ", theme::dim()),
-        Span::raw(line.to_string()),
+        Span::styled(line.to_string(), theme::text()),
     ])
 }
 
@@ -86,12 +87,7 @@ mod tests {
         let styles: Vec<_> = rows.iter().map(|r| r.spans[0].style).collect();
         assert_eq!(
             styles,
-            vec![
-                theme::accent(),
-                theme::danger(),
-                theme::good(),
-                theme::dim()
-            ]
+            vec![theme::dim(), theme::removed(), theme::added(), theme::dim()]
         );
     }
 

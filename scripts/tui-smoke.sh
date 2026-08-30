@@ -106,7 +106,7 @@ start '{"responses":[
   {"steps":[{"toolCall":{"name":"Write","input":{"file_path":"note.txt","content":"written by the smoke test\n"}}}]},
   {"steps":[{"text":"Wrote it."}]}]}'
 keys 'write the note' Enter
-await 'Permission '
+await 'Do you want to '
 press_until 'y' 'Wrote it.'
 [ -f "$WORK/cwd/note.txt" ] || { echo "tui-smoke: the approved Write wrote nothing" >&2; exit 1; }
 grep -q 'written by the smoke test' "$WORK/cwd/note.txt"

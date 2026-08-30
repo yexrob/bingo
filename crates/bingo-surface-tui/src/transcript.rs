@@ -1,106 +1,102 @@
-//! Items to styled lines. The whole transcript is rebuilt every frame from
-//! `state.items`: the reducer is the only history, and a cache would be a
+//! Items to styled lines, in Claude Code's grammar (`docs/design/tui.md` §4):
+//! `⏺` for what the model says and does, `⎿` for what came back, `>` on a
+//! raised bar for what you said. The whole transcript is rebuilt every frame
+//! from `state.items`: the reducer is the only history, and a cache would be a
 //! second one.
 
 use bingo_sdk::{
     ContentPart, DecisionKind, Item, ItemBody, ItemStatus, SessionState, ToolOutput, TurnStatus,
     View,
 };
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use serde_json::Value;
+use unicode_width::UnicodeWidthStr;
 
-use crate::tree::Agents;
-use crate::{markdown, preview, theme, wrap};
+use crate::tree::{self, Agents};
+use crate::{markdown, paths, preview, theme, welcome, wrap};
 
-/// Output lines shown under a tool row before it is folded.
+/// Output rows kept under a finished tool row before the rest folds away.
 const OUTPUT_ROWS: usize = 5;
-/// Diff rows shown under a tool row.
+/// A running tool's tail: enough to see it move, few enough to look past.
+const TAIL_ROWS: usize = 3;
+/// Diff rows kept under a tool row.
 const DIFF_ROWS: usize = 12;
-/// The gutter that ties a result to the call above it.
-const CONNECTOR: &str = "  ⎿  ";
-const INDENT: &str = "     ";
+/// What opens a folded result. The key is the frame's; the words are here
+/// because this is what is folded.
+const EXPAND: &str = "ctrl+o to expand";
 
-/// The transcript, wrapped to `width`. `spinner` is the frame a running tool
-/// shows and `agents` the sub-sessions this transcript's tool calls spawned;
-/// the caller owns the clock and the tree.
-pub fn lines(
-    state: &SessionState,
-    agents: &Agents,
-    width: usize,
-    spinner: &str,
-) -> Vec<Line<'static>> {
-    let mut out: Vec<Line<'static>> = Vec::new();
+/// The transcript, wrapped to `width`. `agents` are the sub-sessions this
+/// transcript's tool calls spawned; the caller owns the tree.
+pub fn lines(state: &SessionState, agents: &Agents<'_>, width: usize) -> Vec<Line<'static>> {
+    let rows = Rows {
+        cwd: &state.summary.cwd,
+        width,
+    };
+    let mut out = welcome::lines(state, width);
+    let mut previous: Option<&Item> = None;
     for item in &state.items {
-        let mut block = item_lines(item, width, spinner);
+        let block = item_lines(item, previous, agents, &rows);
+        previous = Some(item);
         if block.is_empty() {
             continue;
         }
-        if let Some(agent) = agents.get(&item.id) {
-            block.push(child_line(agent));
-        }
-        if !out.is_empty() {
+        if !out.is_empty() && !joins_the_row_above(item) {
             out.push(Line::default());
         }
-        out.extend(wrap::wrap_all(&block, width));
+        out.extend(block);
     }
-    out.extend(failure(state));
+    out.extend(failure(state, &rows));
     out
 }
 
-/// A turn that failed says why, derived from `last_turn` rather than kept as a
-/// line of the surface's own.
-fn failure(state: &SessionState) -> Vec<Line<'static>> {
-    let Some(TurnStatus::Failed { error }) = state.last_turn.as_ref().filter(|_| !state.busy())
-    else {
-        return Vec::new();
-    };
-    vec![
-        Line::default(),
-        Line::from(Span::styled(
-            format!("{} {}", theme::FAILED, error.message),
-            theme::danger(),
-        )),
-    ]
+/// What every row of one transcript needs to know about where it is.
+struct Rows<'a> {
+    cwd: &'a str,
+    width: usize,
 }
 
-/// The tool call that spawned a sub-session says so under its own row; what
-/// the child is doing is read from its state, never copied into this one.
-fn child_line(agent: &str) -> Line<'static> {
-    Line::from(Span::styled(
-        format!("  {} {agent}", theme::CHILD),
-        theme::dim(),
-    ))
+impl Rows<'_> {
+    /// Prose is read, not scanned: it stops at the measure (design §7).
+    fn measure(&self) -> usize {
+        wrap::measure(self.width)
+    }
+
+    /// A path as a person reads it, from this session's own directory.
+    fn shorten(&self, text: &str) -> String {
+        paths::shorten_in(text, self.cwd, paths::home())
+    }
 }
 
-fn item_lines(item: &Item, width: usize, spinner: &str) -> Vec<Line<'static>> {
+/// A receipt is the answer to the row above it, so it opens no block of its
+/// own (design §4: the receipt joins the result).
+fn joins_the_row_above(item: &Item) -> bool {
+    matches!(item.body, ItemBody::PermissionReceipt { .. })
+}
+
+fn item_lines(
+    item: &Item,
+    previous: Option<&Item>,
+    agents: &Agents<'_>,
+    rows: &Rows<'_>,
+) -> Vec<Line<'static>> {
     match &item.body {
-        ItemBody::User { parts, origin } => user(parts, origin.principal.as_deref()),
-        ItemBody::Assistant { text } => markdown::render(text, width),
-        ItemBody::Reasoning { .. } => vec![Line::from(Span::styled(
-            format!("{}thinking…", theme::THINKING),
-            theme::dim(),
-        ))],
-        ItemBody::ToolCall {
-            name,
-            input,
-            output,
-            progress,
-            ..
-        } => tool_call(
-            item.status,
-            name,
-            input,
-            output.as_ref(),
-            progress.as_deref(),
-            spinner,
-        ),
-        ItemBody::Action { name, args, result } => action(name, args, result.as_ref()),
+        ItemBody::User { parts, origin } => user(parts, origin.principal.as_deref(), rows),
+        ItemBody::Assistant { text } => assistant(text, rows),
+        ItemBody::Reasoning { .. } => thinking(item),
+        ItemBody::ToolCall { .. } => called(item, agents, rows),
+        ItemBody::Action { name, args, result } => {
+            action(item.status, name, args, result.as_ref(), rows)
+        }
         ItemBody::Compaction { before, after, .. } => vec![rule(
             &format!("context compacted ({before} → {after} tokens)"),
-            width,
+            rows.width,
         )],
         ItemBody::Rewind { dropped, .. } => {
-            vec![rule(&format!("rewound, {dropped} items dropped"), width)]
+            vec![rule(
+                &format!("rewound, {dropped} items dropped"),
+                rows.width,
+            )]
         }
         ItemBody::Interruption { marker } => {
             vec![Line::from(Span::styled(marker.clone(), theme::dim()))]
@@ -110,19 +106,13 @@ fn item_lines(item: &Item, width: usize, spinner: &str) -> Vec<Line<'static>> {
         }
         ItemBody::QuestionAnswer {
             question, answer, ..
-        } => vec![
-            Line::from(Span::styled(format!("Q {question}"), theme::dim())),
-            Line::from(Span::styled(format!("A {answer}"), theme::dim())),
-        ],
+        } => answered(question, answer, rows),
         ItemBody::PermissionReceipt {
             tool,
             decision,
             feedback,
             ..
-        } => vec![Line::from(Span::styled(
-            receipt(tool, *decision, feedback.as_deref()),
-            theme::dim(),
-        ))],
+        } => receipt(tool, *decision, feedback.as_deref(), previous, rows),
         ItemBody::Asset { asset, label } => vec![Line::from(Span::styled(
             format!("[{}]", label.clone().unwrap_or_else(|| asset.clone())),
             theme::dim(),
@@ -130,11 +120,93 @@ fn item_lines(item: &Item, width: usize, spinner: &str) -> Vec<Line<'static>> {
     }
 }
 
-/// A person's own line, and a post somebody else wrote. An origin that names
-/// a principal is somebody speaking — a room's member, a parent talking to its
-/// child — so the transcript says who, as a chat does. Where they said it is
-/// the view one is looking at; saying it again would be noise.
-fn user(parts: &[ContentPart], principal: Option<&str>) -> Vec<Line<'static>> {
+/// A call that started a session is that session's row; every other call is
+/// its own (design §3: a child is a row where it began).
+fn called(item: &Item, agents: &Agents<'_>, rows: &Rows<'_>) -> Vec<Line<'static>> {
+    let ItemBody::ToolCall {
+        name,
+        input,
+        output,
+        progress,
+        ..
+    } = &item.body
+    else {
+        return Vec::new();
+    };
+    match agents.get(&item.id) {
+        Some(child) => child_row(child, input, rows),
+        None => tool_call(
+            Call {
+                status: item.status,
+                name,
+                input,
+                output: output.as_ref(),
+                progress: progress.as_deref(),
+            },
+            rows,
+        ),
+    }
+}
+
+// ---- the two marks ------------------------------------------------------
+
+/// Where the text under a `⏺` starts: column 2 (design §4).
+fn speaks_indent() -> usize {
+    theme::bullet().width() + 1
+}
+
+/// The `  ⎿  ` a result hangs from, and where its text starts: column 5.
+fn connector() -> String {
+    format!("  {}  ", theme::connector())
+}
+
+/// A block under a mark: the mark on its first row, its text at `indent` on
+/// every row under it, wrapped so nothing overflows the measure.
+fn under(
+    mark: Span<'static>,
+    body: Vec<Line<'static>>,
+    indent: usize,
+    width: usize,
+) -> Vec<Line<'static>> {
+    let inner = width.saturating_sub(indent).max(1);
+    let mut out: Vec<Line<'static>> = Vec::new();
+    for line in wrap::wrap_all(&body, inner) {
+        let lead = match out.is_empty() {
+            true => mark.clone(),
+            false => Span::raw(" ".repeat(indent)),
+        };
+        let mut spans = vec![lead];
+        spans.extend(line.spans);
+        out.push(Line::from(spans));
+    }
+    out
+}
+
+/// What the model says and does.
+fn speaks(style: Style, body: Vec<Line<'static>>, rows: &Rows<'_>) -> Vec<Line<'static>> {
+    let mark = Span::styled(format!("{} ", theme::bullet()), style);
+    under(mark, body, speaks_indent(), rows.measure())
+}
+
+/// What came back.
+fn returns(body: Vec<Line<'static>>, rows: &Rows<'_>) -> Vec<Line<'static>> {
+    let mark = connector();
+    let indent = mark.width();
+    under(
+        Span::styled(mark, theme::dim()),
+        body,
+        indent,
+        rows.measure(),
+    )
+}
+
+// ---- the kinds ----------------------------------------------------------
+
+/// A person's own line, on a bar the width of the transcript. An origin that
+/// names a principal is somebody else speaking — a room's member, a parent
+/// talking to its child — so the line says who, as a chat does. Where they
+/// said it is the view one is looking at; saying it again would be noise.
+fn user(parts: &[ContentPart], principal: Option<&str>, rows: &Rows<'_>) -> Vec<Line<'static>> {
     let text = parts
         .iter()
         .filter_map(ContentPart::as_text)
@@ -143,84 +215,128 @@ fn user(parts: &[ContentPart], principal: Option<&str>) -> Vec<Line<'static>> {
     if text.trim().is_empty() {
         return Vec::new();
     }
-    text.lines()
-        .enumerate()
-        .map(|(i, line)| {
-            let mut spans = vec![Span::styled(
-                if i == 0 { theme::USER } else { "  " },
-                theme::dim(),
-            )];
-            if i == 0
-                && let Some(name) = principal
-            {
-                spans.push(Span::styled(format!("{name}: "), theme::accent()));
-            }
-            spans.push(Span::raw(line.to_string()));
-            Line::from(spans)
-        })
+    let mut body: Vec<Line<'static>> = text
+        .lines()
+        .map(|line| Line::from(Span::styled(line.to_string(), theme::text())))
+        .collect();
+    if let Some(name) = principal
+        && let Some(first) = body.first_mut()
+    {
+        first.spans.insert(
+            0,
+            Span::styled(format!("{name}: "), theme::text().patch(theme::bold())),
+        );
+    }
+    let mark = Span::styled(format!("{} ", theme::user()), theme::dim());
+    under(mark, body, speaks_indent(), rows.measure())
+        .into_iter()
+        .map(|line| bar(line, rows.width))
         .collect()
 }
 
-fn tool_call(
+/// The raised bar behind a `>` line: it runs to the edge of the transcript,
+/// so what you said is a band and not a sentence.
+fn bar(line: Line<'static>, width: usize) -> Line<'static> {
+    let mut spans = line.spans;
+    let used: usize = spans.iter().map(|s| s.content.width()).sum();
+    spans.push(Span::raw(" ".repeat(width.saturating_sub(used))));
+    let mut line = Line::from(spans);
+    line.style = theme::raised();
+    line
+}
+
+/// The answer: the brightest text on the screen, after a white `⏺`.
+fn assistant(text: &str, rows: &Rows<'_>) -> Vec<Line<'static>> {
+    let body = markdown::render(text, rows.measure().saturating_sub(speaks_indent()));
+    speaks(theme::text().patch(theme::bold()), body, rows)
+}
+
+/// `✻ Thinking…` while it lasts, `✻ Thought for 2s` once it is over.
+fn thinking(item: &Item) -> Vec<Line<'static>> {
+    let (text, style) = match item.completed_at {
+        Some(end) => (
+            format!(
+                "Thought for {}s",
+                end.duration_since(item.started_at).as_secs().max(0)
+            ),
+            theme::dim(),
+        ),
+        None => (
+            format!("Thinking{}", theme::ellipsis()),
+            theme::dim().patch(theme::italic()),
+        ),
+    };
+    vec![Line::from(vec![
+        Span::styled(format!("{} ", theme::spark()), theme::dim()),
+        Span::styled(text, style),
+    ])]
+}
+
+/// One tool call, as much of it as there is yet.
+struct Call<'a> {
     status: ItemStatus,
-    name: &str,
-    input: &Value,
-    output: Option<&ToolOutput>,
-    progress: Option<&str>,
-    spinner: &str,
-) -> Vec<Line<'static>> {
-    let failed = status == ItemStatus::Failed || output.is_some_and(|o| o.is_error);
-    let (glyph, style) = marker(status, failed, spinner);
-    let mut header = vec![
-        Span::styled(format!("{glyph} "), style),
-        Span::raw(name.to_string()),
-    ];
-    let summary = summarize(input);
-    if !summary.is_empty() {
-        header.push(Span::styled(format!(" {summary}"), theme::dim()));
-    }
-    let mut out = vec![Line::from(header)];
-    if status == ItemStatus::Running
-        && let Some(progress) = progress
-    {
-        out.push(gutter(0, Span::styled(progress.to_string(), theme::dim())));
-    }
-    out.extend(output.map(output_lines).unwrap_or_default());
+    name: &'a str,
+    input: &'a Value,
+    output: Option<&'a ToolOutput>,
+    progress: Option<&'a str>,
+}
+
+fn tool_call(call: Call<'_>, rows: &Rows<'_>) -> Vec<Line<'static>> {
+    let failed = call.status == ItemStatus::Failed || call.output.is_some_and(|o| o.is_error);
+    let mut out = speaks(
+        bullet_style(call.status, failed),
+        vec![signature(call.name, &summarize(call.input), rows)],
+        rows,
+    );
+    out.extend(result(&call, rows));
     out
 }
 
-fn marker(status: ItemStatus, failed: bool, spinner: &str) -> (String, ratatui::style::Style) {
+/// `Read(Cargo.toml)`: the name bold, what it is about plain.
+fn signature(name: &str, about: &str, rows: &Rows<'_>) -> Line<'static> {
+    let mut spans = vec![Span::styled(name.to_string(), theme::bold())];
+    let about = rows.shorten(about);
+    if !about.is_empty() {
+        spans.push(Span::styled(format!("({about})"), theme::text()));
+    }
+    Line::from(spans)
+}
+
+/// The bullet carries the state, and nothing else has to.
+fn bullet_style(status: ItemStatus, failed: bool) -> Style {
     if failed {
-        return (theme::FAILED.into(), theme::danger());
+        return theme::bad();
     }
     match status {
-        ItemStatus::Pending => (theme::TOOL.trim_end().into(), theme::dim()),
-        ItemStatus::Running => (spinner.into(), theme::accent()),
-        ItemStatus::Completed => (theme::DONE.into(), theme::good()),
-        ItemStatus::Failed => (theme::FAILED.into(), theme::danger()),
-        ItemStatus::Interrupted => (theme::STOPPED.into(), theme::caution()),
+        ItemStatus::Running => theme::presence(),
+        ItemStatus::Completed => theme::good(),
+        ItemStatus::Failed => theme::bad(),
+        ItemStatus::Pending | ItemStatus::Interrupted => theme::dim(),
     }
 }
 
-/// What the call is about, from the field a person would recognise.
-fn summarize(input: &Value) -> String {
-    for key in ["file_path", "command", "pattern", "url", "query"] {
-        if let Some(Value::String(value)) = input.get(key) {
-            return value.clone();
-        }
+/// What is under a tool row: its tail while it runs, its output once it is
+/// done, folded to a line that says how much was left out.
+fn result(call: &Call<'_>, rows: &Rows<'_>) -> Vec<Line<'static>> {
+    if call.status == ItemStatus::Running {
+        let Some(progress) = call.progress else {
+            return Vec::new();
+        };
+        return returns(tail(progress), rows);
     }
-    match input {
-        Value::Object(map) => map
-            .iter()
-            .find_map(|(_, v)| v.as_str())
-            .unwrap_or_default()
-            .to_string(),
-        Value::Null => String::new(),
-        other => other.to_string(),
-    }
+    let Some(output) = call.output else {
+        return Vec::new();
+    };
+    returns(folded(output), rows)
 }
 
-fn output_lines(output: &ToolOutput) -> Vec<Line<'static>> {
+/// The last rows of what a running tool has printed so far.
+fn tail(progress: &str) -> Vec<Line<'static>> {
+    let all: Vec<&str> = progress.trim_end().lines().collect();
+    plain(&all[all.len().saturating_sub(TAIL_ROWS)..].join("\n"))
+}
+
+fn folded(output: &ToolOutput) -> Vec<Line<'static>> {
     let (rows, limit) = match &output.display {
         Some(View::Diff { unified }) => (preview::diff(unified), DIFF_ROWS),
         Some(view) => (plain(&view.fold()), OUTPUT_ROWS),
@@ -245,43 +361,70 @@ fn text_of(output: &ToolOutput) -> String {
         .join("\n")
 }
 
-/// The first rows under the gutter, plus how many were left out.
+/// The first rows, then how many were left out and what opens them.
 fn fold(rows: Vec<Line<'static>>, limit: usize) -> Vec<Line<'static>> {
     let hidden = rows.len().saturating_sub(limit);
-    let mut out: Vec<Line<'static>> = rows
-        .into_iter()
-        .take(limit)
-        .enumerate()
-        .map(|(i, line)| gutter_line(i, line))
-        .collect();
+    let mut out: Vec<Line<'static>> = rows.into_iter().take(limit).collect();
     if hidden > 0 {
-        out.push(gutter(
-            out.len(),
-            Span::styled(format!("… +{hidden} lines"), theme::dim()),
+        out.push(Line::from(Span::styled(
+            format!("{} +{hidden} lines ({EXPAND})", theme::ellipsis()),
+            theme::dim(),
+        )));
+    }
+    out
+}
+
+/// A sub-session is a row where it began: what it is, what it was asked, and
+/// what it is doing — read from its own state, never copied into this one.
+fn child_row(child: &SessionState, input: &Value, rows: &Rows<'_>) -> Vec<Line<'static>> {
+    let mut out = speaks(
+        tree::bullet_style(tree::Status::of(child), tree::asking(child)),
+        vec![signature(&tree::name(child), &summarize(input), rows)],
+        rows,
+    );
+    if let Some(activity) = tree::activity(child) {
+        out.extend(returns(
+            vec![Line::from(Span::styled(activity, theme::dim()))],
+            rows,
         ));
     }
     out
 }
 
-fn gutter(index: usize, span: Span<'static>) -> Line<'static> {
-    gutter_line(index, Line::from(span))
+/// What the call is about, from the field a person would recognise.
+fn summarize(input: &Value) -> String {
+    for key in ["file_path", "command", "pattern", "url", "query", "prompt"] {
+        if let Some(Value::String(value)) = input.get(key) {
+            return value.clone();
+        }
+    }
+    match input {
+        Value::Object(map) => map
+            .iter()
+            .find_map(|(_, v)| v.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        Value::Null => String::new(),
+        other => other.to_string(),
+    }
 }
 
-fn gutter_line(index: usize, line: Line<'static>) -> Line<'static> {
-    let lead = if index == 0 { CONNECTOR } else { INDENT };
-    let mut spans = vec![Span::styled(lead, theme::dim())];
-    spans.extend(line.spans);
-    Line::from(spans)
-}
-
-/// A command's record: `!` and the line it ran, then what it printed.
-fn action(name: &str, args: &Value, result: Option<&Value>) -> Vec<Line<'static>> {
-    let mut out = vec![Line::from(vec![
-        Span::styled(format!("{name} "), theme::accent()),
-        Span::raw(as_text(args)),
-    ])];
+/// A long-running operation of the surface's own: login, reconnect, a team
+/// starting. It reads as a tool row because that is what it is.
+fn action(
+    status: ItemStatus,
+    name: &str,
+    args: &Value,
+    result: Option<&Value>,
+    rows: &Rows<'_>,
+) -> Vec<Line<'static>> {
+    let mut out = speaks(
+        bullet_style(status, false),
+        vec![signature(name, &as_text(args), rows)],
+        rows,
+    );
     if let Some(result) = result {
-        out.extend(fold(plain(&as_text(result)), OUTPUT_ROWS));
+        out.extend(returns(fold(plain(&as_text(result)), OUTPUT_ROWS), rows));
     }
     out
 }
@@ -295,24 +438,77 @@ fn as_text(value: &Value) -> String {
     }
 }
 
-fn receipt(tool: &str, decision: DecisionKind, feedback: Option<&str>) -> String {
+/// A question the model asked and the answer it was given.
+fn answered(question: &str, answer: &str, rows: &Rows<'_>) -> Vec<Line<'static>> {
+    let mut out = speaks(
+        theme::text().patch(theme::bold()),
+        vec![Line::from(Span::styled(
+            question.to_string(),
+            theme::text(),
+        ))],
+        rows,
+    );
+    out.extend(returns(
+        vec![Line::from(Span::styled(answer.to_string(), theme::dim()))],
+        rows,
+    ));
+    out
+}
+
+/// The gate's answer, joined to the row that asked for it. The tool is named
+/// only when the row above did not already name it.
+fn receipt(
+    tool: &str,
+    decision: DecisionKind,
+    feedback: Option<&str>,
+    previous: Option<&Item>,
+    rows: &Rows<'_>,
+) -> Vec<Line<'static>> {
     let verdict = match decision {
         DecisionKind::Allow => "allowed",
         DecisionKind::AllowSession => "allowed for this session",
         DecisionKind::Deny => "denied",
     };
-    match feedback {
-        Some(feedback) => format!("{tool} {verdict} — {feedback}"),
-        None => format!("{tool} {verdict}"),
-    }
+    let said = match previous.is_some_and(|item| calls(item, tool)) {
+        true => verdict.to_string(),
+        false => format!("{tool} {verdict}"),
+    };
+    let text = match feedback {
+        Some(feedback) => format!("{said} — {}", rows.shorten(feedback)),
+        None => said,
+    };
+    returns(vec![Line::from(Span::styled(text, theme::dim()))], rows)
+}
+
+fn calls(item: &Item, tool: &str) -> bool {
+    matches!(&item.body, ItemBody::ToolCall { name, .. } if name == tool)
+}
+
+/// A turn that failed says why on a `⏺` of its own, derived from `last_turn`
+/// rather than kept as a line of the surface's own.
+fn failure(state: &SessionState, rows: &Rows<'_>) -> Vec<Line<'static>> {
+    let Some(TurnStatus::Failed { error }) = state.last_turn.as_ref().filter(|_| !state.busy())
+    else {
+        return Vec::new();
+    };
+    let mut out = vec![Line::default()];
+    out.extend(speaks(
+        theme::bad(),
+        vec![Line::from(Span::styled(
+            error.message.clone(),
+            theme::bad(),
+        ))],
+        rows,
+    ));
+    out
 }
 
 /// A full-width divider with its reason in the middle of the left run.
 fn rule(text: &str, width: usize) -> Line<'static> {
-    let head = format!("─── {text} ");
-    let tail = width.saturating_sub(head.chars().count());
+    let head = format!("{0}{0}{0} {text} ", theme::rule());
+    let tail = width.saturating_sub(head.width());
     Line::from(Span::styled(
-        format!("{head}{}", "─".repeat(tail)),
+        format!("{head}{}", theme::rule().repeat(tail)),
         theme::dim(),
     ))
 }
@@ -320,7 +516,10 @@ fn rule(text: &str, width: usize) -> Line<'static> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{folded, frame, post, user as person};
+    use crate::test_support::{
+        assistant, completed, folded, frame, item, post, receipt_item, running_tool, started,
+        started_tool, tool, ts, user as person,
+    };
     use bingo_sdk::Event;
 
     fn drawn(items: Vec<Item>) -> Vec<String> {
@@ -329,10 +528,22 @@ mod tests {
             .enumerate()
             .map(|(i, item)| frame(i as u64 + 1, Event::ItemCompleted { item }))
             .collect();
-        lines(&folded(frames), &Agents::new(), 60, "⠋")
+        rendered(&folded(frames))
+    }
+
+    /// The transcript without the welcome box, which `welcome.rs` pins on its
+    /// own: these tests are about the grammar under it.
+    fn rendered(state: &SessionState) -> Vec<String> {
+        let welcomed = welcome::lines(state, 60).len();
+        let mut rows: Vec<String> = lines(state, &Agents::new(), 60)
             .iter()
-            .map(ToString::to_string)
-            .collect()
+            .skip(welcomed)
+            .map(|line| line.to_string().trim_end().to_string())
+            .collect();
+        if rows.first().is_some_and(String::is_empty) {
+            rows.remove(0);
+        }
+        rows
     }
 
     #[test]
@@ -343,9 +554,9 @@ mod tests {
                 person("itm_2", "thanks"),
             ]),
             vec![
-                "❯ reviewer: two nits, otherwise fine".to_string(),
+                "> reviewer: two nits, otherwise fine".to_string(),
                 String::new(),
-                "❯ thanks".to_string(),
+                "> thanks".to_string(),
             ],
         );
     }
@@ -357,10 +568,172 @@ mod tests {
     }
 
     #[test]
-    fn only_the_first_line_of_a_post_carries_the_name() {
+    fn a_second_line_of_yours_stays_on_the_bar_under_the_first() {
         assert_eq!(
             drawn(vec![post("itm_1", "scout", "one\ntwo")]),
-            vec!["❯ scout: one".to_string(), "  two".to_string()],
+            vec!["> scout: one".to_string(), "  two".to_string()],
         );
+    }
+
+    #[test]
+    fn the_model_speaks_after_a_bold_bullet_and_keeps_its_indent() {
+        assert_eq!(
+            drawn(vec![assistant(
+                "itm_1",
+                "alpha bravo charlie delta echo foxtrot golf hotel india juliet",
+                ItemStatus::Completed,
+            )]),
+            vec![
+                "⏺ alpha bravo charlie delta echo foxtrot golf hotel india".to_string(),
+                "  juliet".to_string(),
+            ],
+            "a wrapped answer hangs under its own bullet"
+        );
+    }
+
+    #[test]
+    fn a_tool_row_names_the_call_and_hangs_its_result_under_it() {
+        let output = ToolOutput::text("Read 3 lines");
+        assert_eq!(
+            drawn(vec![tool(
+                "itm_1",
+                "Read",
+                serde_json::json!({"file_path": "/tmp/project/Cargo.toml"}),
+                Some(output),
+                ItemStatus::Completed,
+            )]),
+            vec![
+                "⏺ Read(Cargo.toml)".to_string(),
+                "  ⎿  Read 3 lines".to_string(),
+            ],
+            "the path is named from the session's own directory"
+        );
+    }
+
+    #[test]
+    fn a_long_result_says_how_much_it_folded_away_and_what_opens_it() {
+        let output = ToolOutput::text((1..=9).map(|i| format!("line {i}\n")).collect::<String>());
+        let drawn = drawn(vec![tool(
+            "itm_1",
+            "Read",
+            serde_json::json!({"file_path": "src/lib.rs"}),
+            Some(output),
+            ItemStatus::Completed,
+        )]);
+        assert_eq!(drawn.len(), OUTPUT_ROWS + 2);
+        assert_eq!(
+            drawn.last().map(String::as_str),
+            Some("     … +4 lines (ctrl+o to expand)")
+        );
+    }
+
+    #[test]
+    fn a_running_tool_shows_the_last_rows_of_its_tail() {
+        let state = folded(vec![started_tool(
+            1,
+            running_tool("itm_1", "Bash", "one\ntwo\nthree\nfour"),
+        )]);
+        assert_eq!(
+            rendered(&state),
+            vec![
+                "⏺ Bash(cargo test)".to_string(),
+                "  ⎿  two".to_string(),
+                "     three".to_string(),
+                "     four".to_string(),
+            ],
+        );
+    }
+
+    #[test]
+    fn thinking_decays_into_what_it_took() {
+        let running = item(
+            "itm_1",
+            ItemStatus::Running,
+            ItemBody::Reasoning {
+                text: "…".into(),
+                provider_metadata: Default::default(),
+            },
+        );
+        let mut done = running.clone();
+        done.status = ItemStatus::Completed;
+        done.completed_at = Some(ts() + jiff::SignedDuration::from_secs(2));
+        assert_eq!(drawn(vec![running]), vec!["✻ Thinking…".to_string()]);
+        assert_eq!(drawn(vec![done]), vec!["✻ Thought for 2s".to_string()]);
+    }
+
+    #[test]
+    fn a_receipt_joins_the_row_that_asked_for_it() {
+        assert_eq!(
+            drawn(vec![
+                tool(
+                    "itm_1",
+                    "Edit",
+                    serde_json::json!({"file_path": "src/lib.rs"}),
+                    None,
+                    ItemStatus::Failed,
+                ),
+                receipt_item("itm_2", "Edit", DecisionKind::Deny, Some("use cargo clean")),
+            ]),
+            vec![
+                "⏺ Edit(src/lib.rs)".to_string(),
+                "  ⎿  denied — use cargo clean".to_string(),
+            ],
+            "no blank line, and the tool is named once"
+        );
+    }
+
+    #[test]
+    fn a_receipt_with_no_call_above_it_names_its_own_tool() {
+        assert_eq!(
+            drawn(vec![receipt_item(
+                "itm_1",
+                "Edit",
+                DecisionKind::Allow,
+                None
+            )]),
+            vec!["  ⎿  Edit allowed".to_string()],
+        );
+    }
+
+    #[test]
+    fn a_failed_turn_is_a_bullet_of_its_own() {
+        let state = folded(vec![
+            frame(1, started("trn_1")),
+            frame(
+                2,
+                completed(
+                    "trn_1",
+                    TurnStatus::Failed {
+                        error: bingo_sdk::KernelError::new(
+                            bingo_sdk::ErrorCode::ProviderUnavailable,
+                            "no route to the provider",
+                        ),
+                    },
+                ),
+            ),
+        ]);
+        assert_eq!(
+            rendered(&state).last().map(String::as_str),
+            Some("⏺ no route to the provider")
+        );
+    }
+
+    #[test]
+    fn the_measure_stops_prose_at_a_hundred_columns() {
+        let state = folded(vec![frame(
+            1,
+            Event::ItemCompleted {
+                item: assistant("itm_1", &"word ".repeat(60), ItemStatus::Completed),
+            },
+        )]);
+        let welcomed = welcome::lines(&state, 160).len();
+        let widest = lines(&state, &Agents::new(), 160)
+            .iter()
+            .skip(welcomed)
+            .map(|line| line.to_string().trim_end().width())
+            .max()
+            .unwrap_or(0);
+        assert!(widest <= wrap::MEASURE, "{widest} cells");
+        assert!(widest > 80, "and it uses the measure it has: {widest}");
     }
 }

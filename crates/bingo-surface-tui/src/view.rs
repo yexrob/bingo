@@ -9,14 +9,14 @@
 use bingo_sdk::{Driver, LiveTurn, SessionState};
 use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Paragraph};
+use ratatui::widgets::{Block, Padding, Paragraph};
 use ratatui::{Frame, style::Style};
 use unicode_width::UnicodeWidthStr;
 
 use crate::clock::Now;
 use crate::tree::{self, Tree};
 use crate::ui::{Picker, Switcher, Ui};
-use crate::{block, dialog, keys, panel, permission, theme, transcript, wrap};
+use crate::{block, composer as prompt, dialog, keys, panel, permission, theme, transcript, wrap};
 
 /// How tall the composer box may grow before it scrolls internally.
 const COMPOSER_ROWS: usize = 10;
@@ -117,8 +117,9 @@ fn fit(sections: Vec<Section>, height: u16) -> Vec<Section> {
 fn paint(section: Section, frame: &mut Frame, area: Rect) {
     let inner = if section.boxed {
         let block = Block::bordered()
-            .border_type(BorderType::Rounded)
-            .border_style(theme::dim());
+            .border_set(theme::border())
+            .border_style(theme::dim())
+            .padding(Padding::horizontal(1));
         let inner = block.inner(area);
         frame.render_widget(block, area);
         inner
@@ -140,8 +141,8 @@ fn band(tree: &Tree) -> Vec<Line<'static>> {
     let mut spans = Vec::new();
     if let Some(child) = tree.viewing() {
         spans.push(Span::styled(
-            format!("{} {}", theme::CHILD, tree::name(child)),
-            theme::accent(),
+            format!("in {}", tree::name(child)),
+            theme::dim(),
         ));
         spans.push(Span::styled(tree::status_suffix(child), theme::dim()));
     }
@@ -158,16 +159,11 @@ fn band(tree: &Tree) -> Vec<Line<'static>> {
 }
 
 /// The tail of the transcript, or the window the scroll keys parked on.
-fn render_transcript(tree: &Tree, ui: &Ui, frame: &mut Frame, area: Rect, now: Now) {
+fn render_transcript(tree: &Tree, ui: &Ui, frame: &mut Frame, area: Rect, _now: Now) {
     if area.height == 0 {
         return;
     }
-    let all = transcript::lines(
-        tree.viewed(),
-        &tree.agents(),
-        area.width as usize,
-        ui.spinner(now.instant),
-    );
+    let all = transcript::lines(tree.viewed(), &tree.agents(), area.width as usize);
     let height = area.height as usize;
     let hidden = all.len().saturating_sub(height);
     let start = hidden.saturating_sub(ui.scroll.0);
@@ -185,23 +181,23 @@ fn status(state: &SessionState, ui: &Ui, now: Now) -> Vec<Line<'static>> {
     };
     let elapsed = now.wall.duration_since(turn.started_at).as_secs().max(0);
     let mut spans = vec![
-        Span::styled(format!("{} ", ui.spinner(now.instant)), theme::accent()),
-        Span::raw(activity(state, turn)),
+        Span::styled(format!("{} ", ui.spinner(now.instant)), theme::presence()),
+        Span::styled(activity(state, turn), theme::text()),
         Span::styled(format!(" (esc to interrupt · {elapsed}s)"), theme::dim()),
     ];
     if let Some(retry) = turn.retrying {
         spans.push(Span::styled(
             format!(" retrying {}/{}", retry.attempt, retry.max),
-            theme::caution(),
+            theme::presence(),
         ));
     }
     let mut out = vec![Line::from(spans)];
-    out.extend(
-        state
-            .queue
-            .iter()
-            .map(|entry| Line::from(Span::styled(format!("> {}", entry.preview), theme::dim()))),
-    );
+    out.extend(state.queue.iter().map(|entry| {
+        Line::from(Span::styled(
+            format!("{} {}", theme::user(), entry.preview),
+            theme::dim(),
+        ))
+    }));
     out
 }
 
@@ -283,117 +279,82 @@ fn dialog_lines(tree: &Tree, ui: &Ui) -> Vec<Line<'static>> {
     };
     let asked_elsewhere = owner.summary.id != *tree.view();
     let agent = asked_elsewhere.then(|| tree::name(owner));
-    dialog::lines(&ui.dialog, interaction, agent.as_deref())
+    dialog::lines(
+        &ui.dialog,
+        interaction,
+        agent.as_deref(),
+        &owner.summary.cwd,
+    )
 }
 
 /// The `ctrl+g` list: the root and its agents, with what each is doing.
 fn switcher_lines(tree: &Tree, switcher: &Switcher) -> Vec<Line<'static>> {
-    let mut out = vec![Line::from(Span::styled(
-        "Sessions".to_string(),
-        theme::accent().patch(theme::bold()),
-    ))];
-    for (index, row) in tree.rows().iter().enumerate() {
-        let selected = index == switcher.selected;
-        let style = if selected {
-            theme::accent()
-        } else {
-            theme::dim()
-        };
-        let mark = if row.attention { theme::THINKING } else { "" };
-        out.push(Line::from(Span::styled(
-            format!(
-                "{} {mark}{}{}",
-                if selected { "❯" } else { " " },
-                row.name,
-                tree::suffix(row.status)
-            ),
-            style,
-        )));
-    }
-    out.push(Line::from(Span::styled(
-        "  enter to switch · esc to close".to_string(),
-        theme::dim(),
-    )));
-    out
+    tree::switcher_lines(&tree.rows(), switcher.selected)
 }
 
 fn picker_lines(picker: &Picker) -> Vec<Line<'static>> {
     let mut out = vec![Line::from(Span::styled(
         "Resume".to_string(),
-        theme::accent().patch(theme::bold()),
+        theme::bold(),
     ))];
     for (index, session) in picker.sessions.iter().enumerate() {
-        let style = if index == picker.selected {
-            theme::accent()
+        let selected = index == picker.selected;
+        let style = if selected {
+            theme::text()
         } else {
             theme::dim()
         };
         let title = session.title.clone().unwrap_or_else(|| "untitled".into());
-        out.push(Line::from(Span::styled(
-            format!(
-                "{} {}. {title} · {} · {}",
-                if index == picker.selected { "❯" } else { " " },
-                index + 1,
-                session.updated_at,
-                session.id
+        out.push(Line::from(vec![
+            theme::cursor_span(selected),
+            Span::styled(
+                format!(
+                    "{}. {title} · {} · {}",
+                    index + 1,
+                    session.updated_at,
+                    session.id
+                ),
+                style,
             ),
-            style,
-        )));
+        ]));
     }
-    out.push(Line::from(Span::styled(
-        "  enter to open · esc to cancel".to_string(),
-        theme::dim(),
-    )));
     out
 }
 
-/// The prompt box: the caret lives here and nowhere else.
+/// The prompt box: the caret lives here and nowhere else. What is inside it
+/// is [`crate::composer`]'s; where it sits is this frame's.
 fn composer(state: &SessionState, ui: &Ui, width: usize) -> Section {
-    // Two border columns, then the `❯ ` prompt.
-    let inner = width.saturating_sub(2 + theme::USER.width()).max(1);
+    let prompt = prompt::prompt(state);
+    // Two border columns, a cell of padding each side, then the prompt itself.
+    let inner = width.saturating_sub(4 + prompt.width()).max(1);
     let layout = ui.composer.layout(inner);
     // Scroll only as far as the caret needs: it must stay in the box.
     let start = layout.cursor.0.saturating_sub(COMPOSER_ROWS - 1);
     let placeholder = placeholder(state);
-    let lines: Vec<Line<'static>> = layout
-        .lines
-        .iter()
-        .enumerate()
-        .skip(start)
-        .take(COMPOSER_ROWS)
-        .map(|(i, text)| prompt_line(i, text, ui, &placeholder))
-        .collect();
+    let lines = prompt::box_lines(
+        &layout,
+        &prompt,
+        (start, COMPOSER_ROWS),
+        ui.composer.is_empty().then_some(placeholder.as_str()),
+    );
     Section {
         lines,
         boxed: true,
         cursor: Some((
-            u16::try_from(layout.cursor.1 + theme::USER.width()).unwrap_or(u16::MAX),
+            u16::try_from(layout.cursor.1 + prompt.width()).unwrap_or(u16::MAX),
             u16::try_from(layout.cursor.0 - start).unwrap_or(u16::MAX),
         )),
     }
 }
 
 /// What the empty composer offers. Nothing answers a `Log` session, so it is
-/// posted into rather than asked (ADR-0011 §1).
+/// posted into rather than asked (ADR-0011 §1) — and the prompt already says
+/// which room, so the placeholder does not say it twice.
 fn placeholder(state: &SessionState) -> String {
     match state.summary.driver {
-        Driver::Log => format!("post to {}", tree::name(state)),
+        Driver::Log => "post to the room".to_string(),
         Driver::Model => keys::PLACEHOLDER.to_string(),
     }
-}
-
-fn prompt_line(index: usize, text: &str, ui: &Ui, placeholder: &str) -> Line<'static> {
-    let lead = if index == 0 { theme::USER } else { "  " };
-    if index == 0 && ui.composer.is_empty() {
-        return Line::from(vec![
-            Span::styled(lead, theme::accent()),
-            Span::styled(placeholder.to_string(), theme::dim()),
-        ]);
-    }
-    Line::from(vec![
-        Span::styled(lead, theme::accent()),
-        Span::raw(text.to_string()),
-    ])
 }
 
 fn menu(ui: &Ui) -> Vec<Line<'static>> {
@@ -404,16 +365,16 @@ fn menu(ui: &Ui) -> Vec<Line<'static>> {
         .enumerate()
         .take(MENU_ROWS)
         .map(|(index, row)| {
-            let style = if index == selected {
-                theme::selected()
-            } else {
-                theme::dim()
-            };
+            let focused = index == selected;
+            let style = if focused { theme::text() } else { theme::dim() };
             let label = format!("{:<column$}", row.label, column = column);
-            Line::from(Span::styled(
-                format!("  {label}  {}", row.hint).trim_end().to_string(),
-                style,
-            ))
+            Line::from(vec![
+                theme::cursor_span(focused),
+                Span::styled(
+                    format!("{label}  {}", row.hint).trim_end().to_string(),
+                    style,
+                ),
+            ])
         })
         .collect()
 }
@@ -468,9 +429,9 @@ fn badges(state: &SessionState) -> Vec<Span<'static>> {
 fn permission_badge(state: &SessionState) -> Option<(String, Style)> {
     let mode = permission::mode(state)?;
     let style = match mode {
-        "bypassPermissions" => theme::caution(),
+        "bypassPermissions" => theme::bad(),
         "default" => theme::dim(),
-        _ => theme::accent(),
+        _ => theme::mode(),
     };
     Some((mode.to_string(), style))
 }
@@ -480,7 +441,7 @@ fn context_badge(state: &SessionState) -> (String, Style) {
         return (String::new(), theme::dim());
     };
     let style = if context.used >= context.trigger && context.trigger > 0 {
-        theme::danger()
+        theme::bad()
     } else {
         theme::dim()
     };
@@ -866,7 +827,7 @@ mod tests {
         let (ui, now) = scene();
         assert_eq!(
             permission_badge(&state).map(|(_, style)| style),
-            Some(theme::caution()),
+            Some(theme::bad()),
             "the one mode that turns the gate off is the one that is coloured"
         );
         insta::assert_snapshot!(render(&state, &ui, now));
@@ -961,7 +922,8 @@ mod tests {
         let tree = spawned(vec![child_frame(2, started("trn_9"))]);
         let (ui, now) = scene();
         let screen = render_tree(&tree, &ui, now);
-        assert!(screen.contains("↳ reviewer · running"), "{screen}");
+        assert!(screen.contains("⏺ reviewer(review the diff)"), "{screen}");
+        assert!(screen.contains("⎿  Running…"), "{screen}");
         insta::assert_snapshot!(screen);
     }
 
@@ -972,7 +934,7 @@ mod tests {
         ui.dialog
             .focus_on(tree.open_interaction().map(|(_, open)| open));
         let screen = render_tree(&tree, &ui, now);
-        assert!(screen.contains("1 agent · 1 needs you"), "{screen}");
+        assert!(screen.contains("1 needs you"), "{screen}");
         insta::assert_snapshot!(screen);
     }
 
@@ -997,7 +959,7 @@ mod tests {
         let (ui, now) = scene();
         let screen = render_tree(&tree, &ui, now);
         assert!(
-            screen.contains("↳ reviewer · running · 1 agent"),
+            screen.contains("in reviewer · running · 1 running"),
             "{screen}"
         );
         assert!(screen.contains("Two nits"), "{screen}");
@@ -1059,7 +1021,7 @@ mod tests {
     fn the_composer_of_a_room_offers_to_post_to_it() {
         let (ui, now) = scene();
         let screen = render_tree(&room(vec![]), &ui, now);
-        assert!(screen.contains("post to #design"), "{screen}");
+        assert!(screen.contains("#design > post to the room"), "{screen}");
         insta::assert_snapshot!(screen);
     }
 
@@ -1134,7 +1096,7 @@ mod tests {
         let screen = draw_sized(60, 12, &state, &ui, now);
         let rows: Vec<&str> = screen.lines().collect();
         assert!(rows[rows.len() - 4].contains('\u{256d}'), "{screen}");
-        assert!(rows[rows.len() - 3].contains('\u{276f}'), "{screen}");
+        assert!(rows[rows.len() - 3].contains("│ > "), "{screen}");
         assert!(rows[rows.len() - 2].contains('\u{256f}'), "{screen}");
         assert!(rows[rows.len() - 1].contains("? for shortcuts"), "{screen}");
     }

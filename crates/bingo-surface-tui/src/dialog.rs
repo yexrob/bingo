@@ -8,7 +8,7 @@
 
 use bingo_sdk::{
     Activation, Answer, AnswerSpec, Interaction, InteractionId, InteractionKind, LoginFlow,
-    QuestionOption,
+    Preview, QuestionOption,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::text::{Line, Span};
@@ -249,7 +249,7 @@ pub fn options(interaction: &Interaction) -> Vec<Opt> {
             .iter()
             .filter_map(|spec| match spec {
                 AnswerSpec::Confirm => Some(plain("Confirm", Choice::Send(Answer::Confirm))),
-                AnswerSpec::Cancel => Some(plain("Cancel", Choice::Send(Answer::Cancel))),
+                AnswerSpec::Cancel => Some(plain("Cancel (esc)", Choice::Send(Answer::Cancel))),
                 _ => None,
             })
             .collect(),
@@ -265,7 +265,7 @@ fn login_options(interaction: &Interaction, flow: &LoginFlow) -> Vec<Opt> {
         out.push(plain("Paste it here", Choice::Words));
     }
     if interaction.answers.contains(&AnswerSpec::Cancel) {
-        out.push(plain("Cancel", Choice::Send(Answer::Cancel)));
+        out.push(plain("Cancel (esc)", Choice::Send(Answer::Cancel)));
     }
     out
 }
@@ -278,14 +278,17 @@ fn permission_options(interaction: &Interaction, scope: Option<&str>) -> Vec<Opt
     }
     if let Some(scope) = scope.filter(|_| offers(AnswerSpec::AllowSession)) {
         out.push(plain(
-            &format!("Yes, for this session ({scope})"),
+            &format!("Yes, allow {scope} during this session"),
             Choice::Send(Answer::AllowSession {
                 scope: scope.to_string(),
             }),
         ));
     }
     if offers(AnswerSpec::Deny) {
-        out.push(plain("No, and tell it what to do instead", Choice::Words));
+        out.push(plain(
+            "No, and tell bingo what to do differently (esc)",
+            Choice::Words,
+        ));
     }
     out
 }
@@ -323,89 +326,114 @@ fn plain(label: &str, choice: Choice) -> Opt {
     }
 }
 
-/// The dialog as lines. `width` bounds nothing here; the caller wraps.
-/// `agent` names the sub-session that asked, when it was not the one on
-/// screen (ADR-0010 §3).
+/// The card, as the lines inside it (design §4): a bold title, what it is
+/// about on its own tints, the one line that asks, then the answers. The box
+/// around it, the dimming behind it and its reveal are the frame's.
+///
+/// `width` bounds nothing here; the caller wraps. `agent` names the
+/// sub-session that asked, when it was not the one on screen (ADR-0010 §3);
+/// `cwd` is that session's directory, which is what makes a path short.
 pub fn lines(
     dialog: &Dialog,
     interaction: &Interaction,
     agent: Option<&str>,
+    cwd: &str,
 ) -> Vec<Line<'static>> {
     let mut out = vec![title(interaction, agent)];
     out.extend(body(dialog, interaction));
-    let options = options(interaction);
-    if !options.is_empty() {
+    if let Some(question) = question(interaction, cwd) {
         out.push(Line::default());
+        out.push(question);
     }
-    for (index, option) in options.iter().enumerate() {
+    for (index, option) in options(interaction).iter().enumerate() {
         out.extend(option_lines(dialog, index, option));
     }
-    out.push(Line::from(Span::styled(
-        format!("  {}", hint(dialog, interaction)),
-        theme::dim(),
-    )));
+    if dialog.answered {
+        out.push(Line::from(Span::styled(
+            format!("  {} waiting for the kernel", theme::ellipsis()),
+            theme::dim(),
+        )));
+    }
     out
 }
 
+/// What kind of card this is, in one word a person reads first.
 fn title(interaction: &Interaction, agent: Option<&str>) -> Line<'static> {
-    let (kind, name) = match &interaction.kind {
-        InteractionKind::Permission { tool, .. } => ("Permission", tool.clone()),
+    let name = match &interaction.kind {
+        InteractionKind::Permission { tool, .. } => tool.clone(),
         InteractionKind::Question { header, .. } => {
-            ("Question", header.clone().unwrap_or_default())
+            header.clone().unwrap_or_else(|| "Question".to_string())
         }
-        InteractionKind::Confirm { title, .. } => ("Confirm", title.clone()),
-        InteractionKind::Login { provider, .. } => ("Sign in", provider.clone()),
+        InteractionKind::Confirm { title, .. } => title.clone(),
+        InteractionKind::Login { provider, .. } => format!("Sign in to {provider}"),
     };
-    let mut spans = vec![Span::styled(
-        kind.to_string(),
-        theme::accent().patch(theme::bold()),
-    )];
-    if !name.is_empty() {
-        spans.push(Span::styled(format!(" · {name}"), theme::bold()));
-    }
+    let mut spans = vec![Span::styled(name, theme::bold())];
     if let Some(agent) = agent {
-        spans.push(Span::styled(
-            format!(" · {} {agent}", theme::CHILD),
-            theme::accent(),
-        ));
+        spans.push(Span::styled(format!(" · {agent}"), theme::presence()));
     }
     Line::from(spans)
+}
+
+/// The one line that asks. A permission asks about the call the kernel
+/// summarised; a question and a confirmation carry their own words.
+fn question(interaction: &Interaction, cwd: &str) -> Option<Line<'static>> {
+    let text = match &interaction.kind {
+        InteractionKind::Permission { summary, .. } => {
+            format!("Do you want to {}?", opening(&shorten(summary, cwd)))
+        }
+        InteractionKind::Question { question, .. } => question.clone(),
+        InteractionKind::Confirm { detail, .. } => detail.clone(),
+        InteractionKind::Login { .. } => return None,
+    };
+    Some(Line::from(Span::styled(text, theme::text())))
+}
+
+/// The kernel's summary opens a sentence here, so its first letter joins it.
+fn opening(summary: &str) -> String {
+    let mut chars = summary.chars();
+    match chars.next() {
+        Some(first) => first.to_lowercase().chain(chars).collect(),
+        None => String::new(),
+    }
+}
+
+fn shorten(text: &str, cwd: &str) -> String {
+    crate::paths::shorten_in(text, cwd, crate::paths::home())
 }
 
 fn body(dialog: &Dialog, interaction: &Interaction) -> Vec<Line<'static>> {
     match &interaction.kind {
         InteractionKind::Permission {
-            summary, preview, ..
-        } => {
-            let mut out = vec![indented(summary)];
-            if let Some(preview) = preview {
-                let (rows, hidden) = preview::lines(preview, dialog.expanded);
-                out.push(Line::default());
-                out.extend(rows.into_iter().map(indent));
-                if hidden > 0 {
-                    out.push(Line::from(Span::styled(
-                        format!("  … {hidden} more lines"),
-                        theme::dim(),
-                    )));
-                }
-            }
-            out
-        }
-        InteractionKind::Question { question, .. } => vec![indented(question)],
-        InteractionKind::Confirm { detail, .. } => vec![indented(detail)],
+            preview: Some(preview),
+            ..
+        } => preview_lines(preview, dialog.expanded),
         InteractionKind::Login { flow, .. } => login_lines(flow),
+        _ => Vec::new(),
     }
+}
+
+/// The diff or the command, on the tints of what it does.
+fn preview_lines(preview: &Preview, expanded: bool) -> Vec<Line<'static>> {
+    let (rows, hidden) = preview::lines(preview, expanded);
+    let mut out: Vec<Line<'static>> = rows.into_iter().map(indent).collect();
+    if hidden > 0 {
+        out.push(Line::from(Span::styled(
+            format!("  {} +{hidden} lines (ctrl+e to expand)", theme::ellipsis()),
+            theme::dim(),
+        )));
+    }
+    out
 }
 
 fn login_lines(flow: &LoginFlow) -> Vec<Line<'static>> {
     match flow {
         LoginFlow::Browser { url } => vec![
             indented("Finish in the browser. If it did not open, go to:"),
-            indented(url),
+            link(url),
         ],
         LoginFlow::Device { url, code } => vec![
             indented("Open this address and enter the code:"),
-            indented(url),
+            link(url),
             indented(&format!("code: {code}")),
         ],
         LoginFlow::Paste => vec![indented("A credential minted elsewhere.")],
@@ -414,19 +442,18 @@ fn login_lines(flow: &LoginFlow) -> Vec<Line<'static>> {
 
 fn option_lines(dialog: &Dialog, index: usize, option: &Opt) -> Vec<Line<'static>> {
     let focused = index == dialog.focus;
-    let style = if focused {
-        theme::accent()
-    } else {
-        theme::dim()
-    };
-    let mark = match &option.choice {
-        Choice::Toggle(id) if dialog.chosen.iter().any(|c| c == id) => "[x] ",
-        Choice::Toggle(_) => "[ ] ",
-        _ => "",
-    };
+    let style = if focused { theme::text() } else { theme::dim() };
     let mut out = vec![Line::from(vec![
-        Span::styled(if focused { "❯ " } else { "  " }, style),
-        Span::styled(format!("{}. {mark}{}", index + 1, option.label), style),
+        theme::cursor_span(focused),
+        Span::styled(
+            format!(
+                "{}. {}{}",
+                index + 1,
+                box_mark(dialog, option),
+                option.label
+            ),
+            style,
+        ),
     ])];
     if let Some(description) = &option.description {
         out.push(Line::from(Span::styled(
@@ -436,49 +463,27 @@ fn option_lines(dialog: &Dialog, index: usize, option: &Opt) -> Vec<Line<'static
     }
     if let Some(words) = dialog.words.as_ref().filter(|_| focused) {
         out.push(Line::from(vec![
-            Span::raw("     > "),
-            Span::raw(words.text().to_string()),
+            Span::styled(format!("     {} ", theme::user()), theme::dim()),
+            Span::styled(words.text().to_string(), theme::text()),
         ]));
     }
     out
 }
 
-fn hint(dialog: &Dialog, interaction: &Interaction) -> String {
-    if dialog.answered {
-        return "… waiting for the kernel".to_string();
+/// One of a set is a box that is ticked or not; one of a choice is neither.
+fn box_mark(dialog: &Dialog, option: &Opt) -> String {
+    match &option.choice {
+        Choice::Toggle(id) => format!("{} ", theme::todo(dialog.chosen.iter().any(|c| c == id))),
+        _ => String::new(),
     }
-    let leave = match interaction.kind {
-        InteractionKind::Permission { .. } => "esc to deny",
-        _ => "esc to cancel",
-    };
-    let mut parts = if dialog.words.is_some() {
-        vec!["enter to send"]
-    } else {
-        vec!["enter to select", "↑/↓ to navigate"]
-    };
-    if has_preview(interaction) {
-        parts.push(if dialog.expanded {
-            "ctrl+e to collapse"
-        } else {
-            "ctrl+e to expand"
-        });
-    }
-    parts.push(leave);
-    parts.join(" · ")
-}
-
-fn has_preview(interaction: &Interaction) -> bool {
-    matches!(
-        &interaction.kind,
-        InteractionKind::Permission {
-            preview: Some(_),
-            ..
-        }
-    )
 }
 
 fn indented(text: &str) -> Line<'static> {
-    Line::from(Span::raw(format!("  {text}")))
+    Line::from(Span::styled(format!("  {text}"), theme::text()))
+}
+
+fn link(url: &str) -> Line<'static> {
+    Line::from(Span::styled(format!("  {url}"), theme::link()))
 }
 
 fn indent(line: Line<'static>) -> Line<'static> {
