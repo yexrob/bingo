@@ -2,7 +2,7 @@
 
 ## Goal
 
-Every row of `docs/design/tui.md` §6 exists and has a frame-by-frame test on an injected clock: the presence mark breathes while a turn runs, streaming text carries a comet tail, a finished tool flips with one bold frame, a new block rises into place, a card dims the world and reveals top-down through the kernel's guard, a sheet slides, a toast enters and fades, a waiting child pulses, the context meter warms, scrolling eases; a fast turn never flashes an activity row; an idle surface draws nothing; the window being unfocused turns a completion or a question into a system notification; `BINGO_MOTION=off` stills all of it. Esc is one ordered stack and `ctrl+c` says what it does.
+Every row of `docs/design/tui.md` §6 exists and has a frame-by-frame test on an injected clock: the presence mark sparkles and the input box glows while a turn runs, a live bullet pulses, streaming text carries a comet tail, a finished tool flips with one bold frame, a new block rises into place, a card dims the world and reveals top-down through the kernel's guard, a sheet slides, a toast enters and fades, a waiting child pulses, the context bar warms, scrolling eases; a fast turn never flashes an activity row; an idle surface draws nothing; the window being unfocused turns a completion or a question into a system notification; `BINGO_MOTION=off` stills all of it. Esc is one ordered stack and `ctrl+c` says what it does.
 
 ## Bricks, in build order (owner)
 
@@ -12,7 +12,7 @@ Every row of `docs/design/tui.md` §6 exists and has a frame-by-frame test on an
 4. **Pulse, flips and rises** (worker) — a live tool's `⏺` pulses `presence` ↔ glow at 1.2 s; its completion draws one bold frame in `good`/`bad` before settling; a new block enters offset two rows up and eases to place over three frames; all off under `motion: false`.
 5. **Layers' reveals** (worker) — a card's rows are dim until the guard lifts and brighten in one frame with the bell; its reveal (M11a `layers.rs`) is 0..3 frames top-down; a sheet slides four frames; closing reverses; frames snapshotted at each step.
 6. **Toasts** (worker) — notices enter the header's right edge over four frames, hold 4 s, dim for 1 s, leave; at most three stacked; a rejected intent's toast names the intent text in dim.
-7. **Pulse and meter** (worker) — the `needs you` badge and a waiting child's tab alternate `text`/`attention` at 1 Hz; the context meter's colour interpolates `dim → attention` across the last 20 % before the trigger.
+7. **Needs-you pulse and the context bar** (worker) — the `needs you` badge and a waiting child's tab alternate `text`/`presence` at 1 Hz; the context bar's fill interpolates `dim → bad` across the last 20 % before the trigger.
 8. **Activity row** (worker) — shown only when the turn has run 300 ms: `✻ <Verb>… (esc to interrupt · 4s · ↓ 1.2k tokens)`; the verb is drawn once per turn from bingo's list (§4), the sparkle cycles, the clock ticks once a second, the token count is the turn's output so far.
 9. **Focus and notifications** (worker) — crossterm focus events; unfocused, `InteractionOpened` and a root `TurnCompleted` emit OSC 777 (OSC 9 where 777 is unknown) `bingo · needs you` / `bingo · done`, tmux-wrapped; the bell stays; the title marks attention as today.
 10. **Esc and ctrl+c** (worker) — the stack `sheet → card → dropdown → interrupt` and the two-press exit are tables in `keys.rs` with one test each; help prints the stack.
