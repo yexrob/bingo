@@ -78,6 +78,11 @@ ratatui = { version = "0.30", default-features = false, features = ["crossterm",
 crossterm = { version = "0.29", features = ["event-stream"] }
 # M6 (docs/plans/M6-tui-mvp.md)
 pulldown-cmark = { version = "0.13", default-features = false }
+# M11a (docs/plans/M11a-frame.md, "Dependencies"): the full-screen surface
+# through a real pty, so what the shell is left with after `exit` is asserted
+# on a real terminal. Dev-only: neither reaches the shipped binary.
+portable-pty = "0.9"
+vt100 = "0.16"
 # M6 (docs/plans/M6-tui-mvp.md)
 unicode-width = "0.2"
 # M6 (docs/plans/M6-tui-mvp.md)
