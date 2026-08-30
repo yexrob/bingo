@@ -3,12 +3,9 @@
 //! this is the one hook, and a line it does not recognise is not its
 //! business.
 
-use std::sync::Arc;
-
 use async_trait::async_trait;
 use bingo_sdk::{Hook, HookContext, HookMatcher, HookOutcome, HookPoint, Input};
 
-use crate::handle::LateHost;
 use crate::names;
 
 /// `@name rest` → the name, and what follows it.
@@ -26,16 +23,8 @@ pub fn at_prefix(text: &str) -> Option<(&str, &str)> {
 
 /// Reads the first word of a submitted line and, when it names a child of
 /// this session, sends the rest there.
-#[derive(Debug)]
-pub struct AtNameHook {
-    host: Arc<LateHost>,
-}
-
-impl AtNameHook {
-    pub fn new(host: Arc<LateHost>) -> Self {
-        Self { host }
-    }
-}
+#[derive(Debug, Default, Clone, Copy)]
+pub struct AtNameHook;
 
 /// The line as the agent should read it: the address is for the router, not
 /// for the reader.
@@ -59,11 +48,6 @@ impl Hook for AtNameHook {
     }
 
     async fn on_submit(&self, input: &mut Input, cx: &HookContext) -> HookOutcome {
-        // Before `start` there is no session tree to ask, and every line is
-        // this session's own.
-        let Some(host) = self.host.get() else {
-            return HookOutcome::Continue;
-        };
         let Input::Text { text, .. } = &*input else {
             return HookOutcome::Continue;
         };
@@ -71,10 +55,10 @@ impl Hook for AtNameHook {
             return HookOutcome::Continue;
         };
         let (name, rest) = (name.to_string(), rest.to_string());
-        match names::child(host, &cx.session, &name).await {
-            Ok(session) => {
+        match names::child(&cx.host, &cx.session, &name).await {
+            Ok(child) => {
                 strip(input, rest);
-                HookOutcome::Redirect { session }
+                HookOutcome::Redirect { session: child.id }
             }
             // A name that is nobody's is a line about an `@name`, not to one.
             Err(_) => HookOutcome::Continue,
@@ -103,9 +87,9 @@ mod tests {
         let fleet = Fleet::default();
         let root = fleet.root();
         fleet.child(&root, "reviewer");
-        let hook = AtNameHook::new(fleet.late());
         let mut input = typed(line);
-        let outcome = hook.on_submit(&mut input, &hook_context(&root)).await;
+        let cx = hook_context(&root, fleet.handle());
+        let outcome = AtNameHook.on_submit(&mut input, &cx).await;
         (outcome, input)
     }
 
@@ -133,12 +117,14 @@ mod tests {
         assert_eq!(text_of(&input), "@reviewer");
     }
 
+    /// A tree that cannot be read names nobody, so the line stays this
+    /// session's own rather than failing a submit the person made.
     #[tokio::test]
-    async fn nothing_is_redirected_before_the_plugin_starts() {
-        let hook = AtNameHook::new(Arc::new(LateHost::default()));
+    async fn a_line_is_this_session_s_own_when_the_tree_cannot_be_read() {
         let mut input = typed("@reviewer hello");
         let session = bingo_sdk::SessionId::from_raw("ses_root");
-        let outcome = hook.on_submit(&mut input, &hook_context(&session)).await;
+        let cx = hook_context(&session, bingo_sdk::testing::NoHost::handle());
+        let outcome = AtNameHook.on_submit(&mut input, &cx).await;
         assert_eq!(outcome, HookOutcome::Continue);
         assert_eq!(text_of(&input), "@reviewer hello");
     }
@@ -164,7 +150,7 @@ mod tests {
 
     #[test]
     fn it_asks_for_the_submit_point_only() {
-        let hook = AtNameHook::new(Arc::new(LateHost::default()));
+        let hook = AtNameHook;
         assert_eq!(hook.id(), "agents.at-name");
         assert_eq!(hook.matcher().points, [HookPoint::Submit]);
         assert!(hook.matcher().tool.is_none());

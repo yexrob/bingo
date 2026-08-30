@@ -2,7 +2,6 @@
 //! what it said.
 
 use std::path::Path;
-use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -14,7 +13,6 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::handle::LateHost;
 use crate::{names, watch};
 
 const DESCRIPTION: &str = "\
@@ -34,16 +32,8 @@ pub struct WaitArgs {
 }
 
 /// Watching a session that is already running; it starts nothing.
-#[derive(Debug)]
-pub struct WaitAgentTool {
-    host: Arc<LateHost>,
-}
-
-impl WaitAgentTool {
-    pub fn new(host: Arc<LateHost>) -> Self {
-        Self { host }
-    }
-}
+#[derive(Debug, Default, Clone, Copy)]
+pub struct WaitAgentTool;
 
 /// The reply, or the wait cut short. A timeout is the agent's state, not a
 /// failure of this call: it says the work is still going on.
@@ -90,15 +80,11 @@ impl Tool for WaitAgentTool {
     async fn call(&self, input: Value, cx: &ToolContext) -> Result<ToolOutput, ToolError> {
         let args: WaitArgs =
             serde_json::from_value(input).map_err(|e| ToolError::InvalidInput(e.to_string()))?;
-        let host = self
-            .host
-            .require()
-            .map_err(|e| ToolError::Failed(e.message))?;
-        let session = match names::child(host, &cx.session, args.name.trim()).await {
-            Ok(session) => session,
+        let session = match names::child(&cx.host, &cx.session, args.name.trim()).await {
+            Ok(child) => child.id,
             Err(e) => return Ok(ToolOutput::error(e.message)),
         };
-        let mut attachment = watch::follow(host, &session)
+        let mut attachment = watch::follow(&cx.host, &session)
             .await
             .map_err(|e| ToolError::Failed(e.message))?;
         // An idle agent has already said everything it is going to say.
@@ -118,7 +104,7 @@ mod tests {
 
     async fn waited(fleet: &Fleet, caller: &bingo_sdk::SessionId, input: Value) -> ToolOutput {
         let host = Recorder::new(fleet);
-        WaitAgentTool::new(fleet.late())
+        WaitAgentTool
             .call(input, &tool_context(caller, host))
             .await
             .expect("a wait this crate can serve")
@@ -171,7 +157,7 @@ mod tests {
         fleet.script([assistant("still going")]);
 
         let host = Recorder::new(&fleet);
-        let error = WaitAgentTool::new(fleet.late())
+        let error = WaitAgentTool
             .call(
                 json!({ "name": "reviewer", "timeout_s": 0 }),
                 &tool_context(&root, host),
@@ -191,7 +177,7 @@ mod tests {
 
     #[test]
     fn it_reads_and_a_rule_may_name_the_agent_it_waits_for() {
-        let tool = WaitAgentTool::new(Arc::new(LateHost::default()));
+        let tool = WaitAgentTool;
         assert_eq!(tool.spec().name, "WaitAgent");
         assert!(tool.spec().input_schema.get("$schema").is_none());
         let traits = tool.traits(&Value::Null);

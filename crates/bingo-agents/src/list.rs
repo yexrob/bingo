@@ -2,8 +2,6 @@
 //! for `/agents`. The roster is the session tree read at the moment it is
 //! asked for — this plugin keeps no list of its own.
 
-use std::sync::Arc;
-
 use async_trait::async_trait;
 use bingo_sdk::{
     Interrupt, SessionSummary, Tool, ToolContext, ToolError, ToolOutput, ToolSpec, ToolTraits,
@@ -13,7 +11,6 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::handle::LateHost;
 use crate::names;
 
 /// The columns a roster has, wherever it is shown.
@@ -59,16 +56,8 @@ fn listing(children: &[SessionSummary]) -> String {
 }
 
 /// Reading the session tree; it starts nothing and changes nothing.
-#[derive(Debug)]
-pub struct ListAgentsTool {
-    host: Arc<LateHost>,
-}
-
-impl ListAgentsTool {
-    pub fn new(host: Arc<LateHost>) -> Self {
-        Self { host }
-    }
-}
+#[derive(Debug, Default, Clone, Copy)]
+pub struct ListAgentsTool;
 
 #[async_trait]
 impl Tool for ListAgentsTool {
@@ -88,11 +77,7 @@ impl Tool for ListAgentsTool {
     /// The arguments are ignored: a listing has none, and a model that sends
     /// an empty object, a null or a stray key still gets its answer.
     async fn call(&self, _input: Value, cx: &ToolContext) -> Result<ToolOutput, ToolError> {
-        let host = self
-            .host
-            .require()
-            .map_err(|e| ToolError::Failed(e.message))?;
-        let children = names::children(host, &cx.session)
+        let children = names::children(&cx.host, &cx.session)
             .await
             .map_err(|e| ToolError::Failed(e.message))?;
         Ok(ToolOutput::text(listing(&children)))
@@ -107,7 +92,7 @@ mod tests {
 
     async fn listed(fleet: &Fleet, session: &bingo_sdk::SessionId) -> String {
         let host = Recorder::new(fleet);
-        let out = ListAgentsTool::new(fleet.late())
+        let out = ListAgentsTool
             .call(json!({}), &tool_context(session, host))
             .await
             .expect("a listing");
@@ -151,7 +136,7 @@ mod tests {
     fn the_listing_and_the_table_have_the_same_columns() {
         let child = crate::tests::summary("ses_child", Some("reviewer"), None);
         assert_eq!(row(&child).len(), HEADERS.len());
-        let tool = ListAgentsTool::new(Arc::new(LateHost::default()));
+        let tool = ListAgentsTool;
         assert!(tool.spec().input_schema.get("$schema").is_none());
         assert_eq!(tool.spec().input_schema["type"], "object");
         let traits = tool.traits(&Value::Null);

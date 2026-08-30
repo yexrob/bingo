@@ -4,9 +4,9 @@
 //! of its promises do not hold in a child: that the prose of a turn is read by
 //! whoever asked, and that a question can be put to the person. Say so, rather
 //! than letting the model plan against a surface it does not have. Everything
-//! here is a fact about this product — there is one way back to the parent
-//! between turns, and permission prompts are the one interaction that still
-//! reaches a person.
+//! here is a fact about this product — the ways back are the parent and the
+//! rooms this agent is in, and permission prompts are the one interaction that
+//! still reaches a person.
 
 /// Prepended to every child's system prompt, before the definition's body.
 pub const NOTE: &str = "\
@@ -20,6 +20,10 @@ pub const NOTE: &str = "\
   *between* turns: you are blocked on a decision, or you found something that
   changes what it is doing. It is not for progress, receipts, or anything
   already in your reply.
+- A message marked `in #<room>` came from a room, and every member of it read
+  the same message. Answer there — `SendMessage(to: \"#<room>\")` — when what
+  you have is for everyone; otherwise stay quiet and let whoever it concerns
+  answer.
 - Do not put questions to the person: `AskUserQuestion` is not a sub-agent's
   tool, and a question asked instead of an answer is a turn spent on nothing.
   Permission prompts are the exception and do reach them, so a call that needs
@@ -55,11 +59,18 @@ mod tests {
     }
 
     #[test]
-    fn the_note_names_the_two_ways_back_and_the_one_that_is_gone() {
+    fn the_note_names_the_ways_back_and_the_one_that_is_gone() {
         assert!(NOTE.contains("SendMessage(to: \"parent\")"));
         assert!(NOTE.contains("returned as the result"));
         assert!(NOTE.contains("AskUserQuestion"));
-        assert!(!NOTE.contains("room"), "this product has no rooms");
+        assert!(
+            NOTE.contains("SendMessage(to: \"#<room>\")"),
+            "a room is a way back too"
+        );
+        assert!(
+            NOTE.contains("in #<room>"),
+            "how a room's message is marked"
+        );
         assert!(!NOTE.contains("colleague"), "a child has no colleagues");
     }
 }
