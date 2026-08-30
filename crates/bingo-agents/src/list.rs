@@ -78,7 +78,7 @@ impl Tool for ListAgentsTool {
     /// The arguments are ignored: a listing has none, and a model that sends
     /// an empty object, a null or a stray key still gets its answer.
     async fn call(&self, _input: Value, cx: &ToolContext) -> Result<ToolOutput, ToolError> {
-        let children = names::children(&cx.host, &cx.session)
+        let children = names::agents(&cx.host, &cx.session)
             .await
             .map_err(|e| ToolError::Failed(e.message))?;
         Ok(ToolOutput::text(listing(&children)))

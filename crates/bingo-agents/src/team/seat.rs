@@ -45,7 +45,7 @@ impl SeatHook {
             // provider with no credentials — is not the rest of the team.
             let outcome = match names::named(&seated, &role.name) {
                 Some(live) => reopen(&cx.host, &live.id).await,
-                None => create(&cx.host, spec(role, &definitions, &team, cx)).await,
+                None => create(&cx.host, spec(role, &definitions, &team, cx).await).await,
             };
             if let Err(error) = outcome {
                 tracing::warn!(role = role.name, %error, "this role was not seated");
@@ -106,9 +106,15 @@ async fn create(host: &HostHandle, spec: SessionSpec) -> Result<(), KernelError>
 }
 
 /// What a role's session is: the role's own fields over its definition's, the
-/// note and the team's norms above whichever system prompt won, and a key so
-/// a later seating knows it by more than its title.
-fn spec(role: &Role, definitions: &[Definition], team: &Team, cx: &HookContext) -> SessionSpec {
+/// note and the team's norms above whichever system prompt won, the tool set
+/// any child gets, and a key so a later seating knows it by more than its
+/// title.
+async fn spec(
+    role: &Role,
+    definitions: &[Definition],
+    team: &Team,
+    cx: &HookContext,
+) -> SessionSpec {
     let definition = definitions
         .iter()
         .find(|d| Some(&d.name) == role.agent.as_ref());
@@ -141,10 +147,13 @@ fn spec(role: &Role, definitions: &[Definition], team: &Team, cx: &HookContext) 
             .clone()
             .or_else(|| definition.and_then(|d| d.model.clone())),
         system_extra: Some(note::system_extra(&team.system(system))),
-        tools: role
-            .tools
-            .clone()
-            .or_else(|| definition.and_then(|d| d.tools.clone())),
+        tools: crate::spawn::child_tools(
+            &cx.host,
+            role.tools
+                .clone()
+                .or_else(|| definition.and_then(|d| d.tools.clone())),
+        )
+        .await,
     }
 }
 

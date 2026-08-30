@@ -493,6 +493,8 @@ pub(crate) fn hook_context(session: &SessionId, host: HostHandle) -> HookContext
 
 pub(crate) fn summary(id: &str, title: Option<&str>, parent: Option<SessionId>) -> SessionSummary {
     SessionSummary {
+        tools: None,
+        system_extra: None,
         driver: Default::default(),
         id: SessionId::from_raw(id),
         key: None,

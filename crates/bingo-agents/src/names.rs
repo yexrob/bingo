@@ -70,6 +70,17 @@ pub async fn children(
     .await
 }
 
+/// The agents among the caller's children: a room is a child too, and
+/// answers nobody, so a roster leaves it out.
+pub async fn agents(
+    host: &HostHandle,
+    session: &SessionId,
+) -> Result<Vec<SessionSummary>, KernelError> {
+    let mut children = children(host, session).await?;
+    children.retain(|child| child.driver != bingo_sdk::Driver::Log);
+    Ok(children)
+}
+
 /// The name a child answers to: its title, or its id when it has none.
 pub fn name_of(child: &SessionSummary) -> &str {
     child.title.as_deref().unwrap_or_else(|| child.id.as_str())

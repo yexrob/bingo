@@ -138,7 +138,10 @@ impl Plan {
 /// which the depth limit would refuse, and `AskUserQuestion`, which the note
 /// tells the child it does not have — a tool that cannot work, or must not,
 /// is not offered.
-async fn child_tools(host: &HostHandle, asked: Option<Vec<String>>) -> Option<Vec<String>> {
+pub(crate) async fn child_tools(
+    host: &HostHandle,
+    asked: Option<Vec<String>>,
+) -> Option<Vec<String>> {
     let mut names = match asked {
         Some(names) => names,
         None => registered(host).await?,

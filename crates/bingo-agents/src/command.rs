@@ -24,7 +24,7 @@ impl Command for AgentsCommand {
     }
 
     async fn run(&self, _args: &str, cx: &CommandContext) -> Result<CommandOutcome, KernelError> {
-        let children = names::children(&cx.host, &cx.session).await?;
+        let children = names::agents(&cx.host, &cx.session).await?;
         if children.is_empty() {
             return Ok(CommandOutcome::Applied {
                 message: Some("no agents are running in this session".into()),
