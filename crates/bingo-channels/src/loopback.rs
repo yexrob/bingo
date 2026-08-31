@@ -15,7 +15,7 @@ use bingo_sdk::{CancellationToken, InteractionId};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
 use crate::adapter::{Buttons, ChannelAdapter, Edit, Inbox, Incoming, Mode, Threads, Typing};
 use crate::conversation::{Conversation, Posted};
@@ -101,6 +101,9 @@ pub struct Loopback {
     records: Mutex<Vec<Record>>,
     /// The socket writer's end, once a peer is connected.
     lines: Mutex<Option<mpsc::UnboundedSender<String>>>,
+    /// Where events go once the surface has started this adapter. A caller
+    /// with no socket speaks through it directly.
+    inbox: watch::Sender<Option<Inbox>>,
 }
 
 impl std::fmt::Debug for Loopback {
@@ -120,6 +123,23 @@ impl Loopback {
             posted: AtomicU64::new(0),
             records: Mutex::new(Vec::new()),
             lines: Mutex::new(None),
+            inbox: watch::channel(None).0,
+        }
+    }
+
+    /// Say something to the surface, waiting for it to have started this
+    /// adapter — what the peer's socket does, without a socket.
+    pub async fn hear(&self, event: Incoming) -> Result<(), ChannelError> {
+        let mut started = self.inbox.subscribe();
+        loop {
+            let inbox = started.borrow_and_update().clone();
+            if let Some(inbox) = inbox {
+                return inbox.post(event).await;
+            }
+            started
+                .changed()
+                .await
+                .map_err(|_| ChannelError::Transport("the loopback never started".into()))?;
         }
     }
 
@@ -183,6 +203,7 @@ impl Loopback {
 
     /// Read the peer's lines until it hangs up or the surface stops.
     async fn pump(&self, inbox: Inbox, cancel: CancellationToken) -> Result<(), ChannelError> {
+        let _ = self.inbox.send(Some(inbox.clone()));
         let Some(peer) = self.config.peer.clone() else {
             cancel.cancelled().await;
             return Ok(());

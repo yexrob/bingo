@@ -4,8 +4,8 @@
 
 use bingo_sdk::{
     Answer, AnswerSpec, Event, Frame, Interaction, InteractionId, InteractionKind, Item, ItemBody,
-    ItemId, ItemStatus, Origin, QuestionOption, ResolvedBy, Seq, SessionId, SessionState,
-    SessionSummary, TurnId, TurnOrigin, TurnStatus, Usage,
+    ItemId, ItemStatus, ResolvedBy, Seq, SessionId, SessionState, SessionSummary, TurnId,
+    TurnOrigin, TurnStatus, Usage,
 };
 use jiff::Timestamp;
 
@@ -60,16 +60,6 @@ pub fn assistant(id: &str, text: &str, status: ItemStatus) -> Item {
         intent: None,
         body: ItemBody::Assistant { text: text.into() },
         meta: Default::default(),
-    }
-}
-
-pub fn user(id: &str, text: &str, origin: Origin) -> Item {
-    Item {
-        body: ItemBody::User {
-            parts: vec![bingo_sdk::ContentPart::text(text)],
-            origin,
-        },
-        ..assistant(id, "", ItemStatus::Completed)
     }
 }
 
@@ -139,27 +129,6 @@ pub fn permission(scope: Option<&str>) -> Interaction {
             AnswerSpec::AllowSession,
             AnswerSpec::Deny,
         ],
-    }
-}
-
-pub fn choice_question(options: &[(&str, &str)]) -> Interaction {
-    Interaction {
-        kind: InteractionKind::Question {
-            question: "Which file?".into(),
-            header: None,
-            options: options
-                .iter()
-                .map(|(id, label)| QuestionOption {
-                    id: (*id).into(),
-                    label: (*label).into(),
-                    description: None,
-                })
-                .collect(),
-            free_text: false,
-            multi: false,
-        },
-        answers: vec![AnswerSpec::Choice, AnswerSpec::Cancel],
-        ..permission(None)
     }
 }
 
