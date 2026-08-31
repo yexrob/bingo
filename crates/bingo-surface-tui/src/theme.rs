@@ -80,6 +80,9 @@ pub struct Glyphs {
     pub mode: &'static str,
     /// A rule between blocks, and the fill of a box's edge.
     pub rule: &'static str,
+    /// A tree node with siblings under it, and the last one.
+    pub branch: &'static str,
+    pub corner: &'static str,
     /// What is left where something was folded away or cut short.
     pub ellipsis: &'static str,
     /// What opens an item of a list.
@@ -97,6 +100,8 @@ pub const UNICODE: Glyphs = Glyphs {
     todo_done: "☒",
     mode: "⏵⏵",
     rule: "─",
+    branch: "├",
+    corner: "└",
     ellipsis: "…",
     point: "•",
     border: border::ROUNDED,
@@ -115,6 +120,8 @@ pub const ASCII: Glyphs = Glyphs {
     todo_done: "x",
     mode: ">>",
     rule: "-",
+    branch: "+",
+    corner: "+",
     ellipsis: "...",
     point: "-",
     border: border::Set {
@@ -349,6 +356,15 @@ pub fn rule() -> &'static str {
     glyphs().rule
 }
 
+/// A tree node that has siblings under it; [`corner`] is the last of them.
+pub fn branch() -> &'static str {
+    glyphs().branch
+}
+
+pub fn corner() -> &'static str {
+    glyphs().corner
+}
+
 /// What is left where something was folded away, cut short, or is still on
 /// its way: a fold's `… +12 lines`, a middle-elided path, `Thinking…`.
 pub fn ellipsis() -> &'static str {
@@ -393,28 +409,42 @@ mod tests {
         }
     }
 
-    /// Every drawing source of this crate, with its test module cut off, as
-    /// `scripts/check_discipline.sh` cuts them. This file, the fixtures and
-    /// the screen catalogue are left out: one holds the table and the others
-    /// only read it back.
+    /// Every drawing source of this crate, named as it sits under `src` and
+    /// with its test module cut off, as `scripts/check_discipline.sh` cuts
+    /// them. This file, the fixtures and the screen catalogue are left out:
+    /// one holds the table and the others only read it back.
     fn sources() -> Vec<(String, String)> {
         let mut out = Vec::new();
-        for entry in std::fs::read_dir("src").expect("the crate's own sources") {
+        read(std::path::Path::new("src"), &mut out);
+        out
+    }
+
+    fn read(dir: &std::path::Path, out: &mut Vec<(String, String)>) {
+        for entry in std::fs::read_dir(dir).expect("the crate's own sources") {
             let path = entry.expect("a readable entry").path();
-            let name = path.file_name().expect("a named file").to_string_lossy();
+            if path.is_dir() {
+                read(&path, out);
+                continue;
+            }
+            let file = path.file_name().expect("a named file").to_string_lossy();
             if path.extension().is_none_or(|e| e != "rs")
-                || name == "theme.rs"
-                || name == "test_support.rs"
-                || name == "screens.rs"
-                || name == "painted.rs"
+                || file == "theme.rs"
+                || file == "test_support.rs"
+                || file == "screens.rs"
+                || file == "painted.rs"
+                || file == "tests.rs"
             {
                 continue;
             }
             let text = std::fs::read_to_string(&path).expect("a readable source");
             let code = text.split("#[cfg(test)]").next().unwrap_or_default();
-            out.push((name.into_owned(), code.to_string()));
+            let name = path
+                .strip_prefix("src")
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .into_owned();
+            out.push((name, code.to_string()));
         }
-        out
     }
 
     #[test]
@@ -439,7 +469,8 @@ mod tests {
     #[test]
     fn every_token_is_spent_where_the_design_says() {
         let allowed: &[(&str, &[&str])] = &[
-            // answers, what you type, option labels, a command's own words
+            // answers, what you type, option labels, a command's own words,
+            // and — since M11d — everything a plugin's view says (ADR-0013)
             (
                 "text",
                 &[
@@ -448,14 +479,25 @@ mod tests {
                     "markdown.rs",
                     "panel.rs",
                     "preview.rs",
+                    "rail.rs",
                     "search.rs",
                     "transcript.rs",
                     "tree.rs",
                     "view.rs",
+                    "views/actions.rs",
+                    "views/code.rs",
+                    "views/keyvalue.rs",
+                    "views/list.rs",
+                    "views/panel.rs",
+                    "views/progress.rs",
+                    "views/table.rs",
+                    "views/text.rs",
+                    "views/tree.rs",
                     "welcome.rs",
                 ],
             ),
-            // results, hints, chrome — everything that recedes
+            // results, hints, chrome — everything that recedes: a view's
+            // gutters, rules, points, guides and brackets are chrome too
             (
                 "dim",
                 &[
@@ -466,41 +508,64 @@ mod tests {
                     "markdown.rs",
                     "panel.rs",
                     "preview.rs",
+                    "rail.rs",
                     "search.rs",
                     "status.rs",
                     "transcript.rs",
                     "tree.rs",
                     "view.rs",
+                    "views/actions.rs",
+                    "views/badge.rs",
+                    "views/code.rs",
+                    "views/keyvalue.rs",
+                    "views/list.rs",
+                    "views/progress.rs",
+                    "views/table.rs",
+                    "views/tree.rs",
                     "welcome.rs",
                 ],
             ),
-            // the bar behind a `>` line, a sheet's surface, a selection, a search hit
+            // the bar behind a `>` line, a sheet's surface, a rail card's,
+            // a selection, a search hit
             (
                 "raised",
-                &["layers.rs", "search.rs", "select.rs", "transcript.rs"],
+                &[
+                    "layers.rs",
+                    "rail.rs",
+                    "search.rs",
+                    "select.rs",
+                    "transcript.rs",
+                ],
             ),
             // a live bullet, the focus cursor, a card's border, a session that
-            // is asking, the current search hit, the selected run
+            // is asking, the current search hit, the selected run; and what
+            // wants a person in a plugin's view: a badge's `attention`, a
+            // progress fill, an action's key, a pinned row
             (
                 "presence",
                 &[
                     "dialog.rs",
                     "layers.rs",
+                    "panel.rs",
                     "search.rs",
                     "select.rs",
                     "status.rs",
                     "transcript.rs",
                     "tree.rs",
                     "view.rs",
+                    "views/actions.rs",
+                    "views/badge.rs",
+                    "views/progress.rs",
                     "welcome.rs",
                 ],
             ),
             // M11c's pulse
             ("glow", &[]),
-            // a finished bullet
-            ("good", &["transcript.rs", "tree.rs"]),
-            // a failed bullet, a failed turn, the gate turned off, a full window
-            ("bad", &["status.rs", "transcript.rs"]),
+            // a finished bullet, a badge a plugin toned `good`
+            ("good", &["transcript.rs", "tree.rs", "views/badge.rs"]),
+            // a failed bullet, a failed turn, the gate turned off, a full
+            // window, a badge a plugin toned `bad`
+            ("bad", &["status.rs", "transcript.rs", "views/badge.rs"]),
             // the mode on the status line; links reach it through `link`
             ("mode", &["status.rs"]),
         ];

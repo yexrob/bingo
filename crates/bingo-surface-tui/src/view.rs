@@ -18,7 +18,8 @@ use crate::frame::{self, Demand, Regions};
 use crate::tree::{self, Tree};
 use crate::ui::{Card, Open, Picker, Switcher, Ui};
 use crate::{
-    block, composer as prompt, dialog, keys, layers, panel, search, select, status, theme, wrap,
+    composer as prompt, dialog, keys, layers, panel, rail, search, select, status, theme, views,
+    wrap,
 };
 
 /// How tall the composer box may grow before it scrolls internally.
@@ -31,9 +32,23 @@ const MENU_ROWS: usize = 8;
 /// `↳` rows, the switcher — from their states.
 pub fn draw(tree: &Tree, ui: &Ui, frame: &mut Frame, now: Now) {
     let area = frame.area();
-    let regions = frame::regions(area, demand(tree, ui, area.width, now));
+    let cards = rail::cards(tree.viewed(), tree.view(), &ui.pinned);
+    let regions = frame::regions(area, demand(tree, ui, area.width, now, !cards.is_empty()));
     ui.painted.borrow_mut().regions = regions;
-    render_transcript(tree, ui, frame, regions.transcript, now);
+    let drawn = rail::render(
+        &cards,
+        rail::width(regions.rail, regions.transcript),
+        ui.focus.as_ref(),
+        &ui.marks(tree.viewed()),
+    );
+    // A card is in the rail, or — where there is no rail — under the running
+    // rows; never in both (design §3).
+    let live = match regions.rail {
+        Some(_) => Vec::new(),
+        None => rail::inline(&drawn),
+    };
+    render_transcript(tree, ui, frame, regions.transcript, now, live);
+    render_rail(ui, frame, regions.rail, &drawn);
     render_activity(tree.viewed(), ui, frame, regions.activity, now);
     render_composer(tree.viewed(), ui, frame, regions.composer);
     render_status(tree, ui, frame, regions.status);
@@ -41,13 +56,25 @@ pub fn draw(tree: &Tree, ui: &Ui, frame: &mut Frame, now: Now) {
 }
 
 /// What the frame must make room for before the transcript is given the rest.
-fn demand(tree: &Tree, ui: &Ui, width: u16, now: Now) -> Demand {
+fn demand(tree: &Tree, ui: &Ui, width: u16, now: Now, rail: bool) -> Demand {
     let state = tree.viewed();
     Demand {
         composer: u16::try_from(composer_rows(state, ui, width as usize)).unwrap_or(u16::MAX),
         activity: u16::try_from(activity(state, ui, now).len()).unwrap_or(u16::MAX),
-        rail: false,
+        rail,
     }
+}
+
+/// The rail: the cards on their raised tint, from the top row down. Where
+/// each landed is left in [`crate::ui::Painted`] for a click to read.
+fn render_rail(ui: &Ui, frame: &mut Frame, area: Option<Rect>, drawn: &[rail::Drawn]) {
+    let Some(area) = area.filter(|area| area.height > 0) else {
+        ui.painted.borrow_mut().rail.clear();
+        return;
+    };
+    let (lines, where_) = rail::painted(drawn, area.width as usize);
+    ui.painted.borrow_mut().rail = where_;
+    frame.render_widget(Paragraph::new(lines), area);
 }
 
 /// The rows the draft needs, at most [`COMPOSER_ROWS`].
@@ -98,7 +125,10 @@ fn layers(tree: &Tree, ui: &Ui, frame: &mut Frame, regions: Regions, now: Now) {
         frame,
         above,
         [
-            ui.block.as_ref().map(block::lines).unwrap_or_default(),
+            ui.block
+                .as_ref()
+                .map(|view| views::render(view, width))
+                .unwrap_or_default(),
             menu(ui),
         ]
         .concat(),
@@ -125,7 +155,12 @@ fn layer(
         // A dropdown above the input box, like the `/` menu: nothing dims.
         Open::Switcher(switcher) => over(frame, above, switcher_lines(tree, switcher)),
         Open::Help => sheet(frame, above, help(ui, width), reveal),
-        Open::Panel => sheet(frame, above, panel::lines(tree.viewed()), reveal),
+        Open::Panel => sheet(
+            frame,
+            above,
+            panel::lines(tree.viewed(), tree.view(), ui.panel, &ui.pinned, width),
+            reveal,
+        ),
         Open::Picker(picker) => sheet(frame, above, picker_lines(picker), reveal),
     }
 }
@@ -231,7 +266,14 @@ fn over(frame: &mut Frame, region: Rect, lines: Vec<Line<'static>>) {
 
 /// The tail of the transcript, or the window the scroll keys parked on. What
 /// it drew is left in [`crate::ui::Painted`] for the next key to read.
-fn render_transcript(tree: &Tree, ui: &Ui, frame: &mut Frame, area: Rect, now: Now) {
+fn render_transcript(
+    tree: &Tree,
+    ui: &Ui,
+    frame: &mut Frame,
+    area: Rect,
+    now: Now,
+    live: Vec<Line<'static>>,
+) {
     if area.height == 0 {
         return;
     }
@@ -242,6 +284,7 @@ fn render_transcript(tree: &Tree, ui: &Ui, frame: &mut Frame, area: Rect, now: N
         &tree.agents(),
         area.width as usize,
         &ui.expanded,
+        live,
     );
     painted.top = ui.scroll.top(painted.height, rows, now.instant);
     let mut shown = painted.blocks.window(painted.top, rows);

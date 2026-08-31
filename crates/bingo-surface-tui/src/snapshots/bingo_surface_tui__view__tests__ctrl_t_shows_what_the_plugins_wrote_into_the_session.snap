@@ -2,14 +2,14 @@
 source: crates/bingo-surface-tui/src/view.rs
 expression: screen
 ---
-"bingo.rooms · members                                                           "
-"members: ["reviewer","scout"]                                                   "
+"❯ bingo.rooms · members                                                         "
+"  members: ["reviewer","scout"]                                                 "
 "                                                                                "
-"bingo.tasks · tasks                                                             "
-"id  status       subject         owner                                          "
-"1   pending      write the plan  –                                              "
-"2   in_progress  ship it         reviewer                                       "
-"                                                                                "
+"  bingo.tasks · tasks                                                           "
+"  id  status       subject         owner                                        "
+"  ─────────────────────────────────────────                                     "
+"   1  pending      write the plan  –                                            "
+"   2  in_progress  ship it         reviewer                                     "
 "                                                                                "
 "                                                                                "
 "                                                                                "

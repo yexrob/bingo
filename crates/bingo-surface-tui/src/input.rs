@@ -7,7 +7,7 @@
 
 use std::path::PathBuf;
 
-use bingo_sdk::{Input, Level, Origin, SessionSelector, SessionSpec, SessionState};
+use bingo_sdk::{Input, Level, Origin, SessionId, SessionSelector, SessionSpec, SessionState};
 use crossterm::event::{
     KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
@@ -17,11 +17,12 @@ use crate::SURFACE_ID;
 use crate::clock::Now;
 use crate::commands::{self, Local};
 use crate::effect::Effect;
-use crate::permission;
+use crate::rail::{self, CardId, Pin};
 use crate::search::Search;
 use crate::select::Cell;
 use crate::tree::Tree;
-use crate::ui::{Open, Switcher, Ui};
+use crate::ui::{Open, Pending, Switcher, Ui};
+use crate::{panel, permission, views};
 
 /// What the first ctrl+c on an empty composer says.
 pub const ARM_HINT: &str = "press ctrl+c again to exit";
@@ -67,6 +68,9 @@ pub fn on_key(ui: &mut Ui, tree: &Tree, key: KeyEvent, now: Now) -> Vec<Effect> 
         return Vec::new();
     }
     if ui.layer.captures() {
+        if matches!(ui.layer.open, Open::Panel) {
+            return panel_keys(ui, tree, key, now);
+        }
         return switcher(ui, tree, key, now);
     }
     // A prompt raised anywhere in the tree is answered from wherever the
@@ -77,10 +81,78 @@ pub fn on_key(ui: &mut Ui, tree: &Tree, key: KeyEvent, now: Now) -> Vec<Effect> 
     if key.code == KeyCode::Esc {
         return escape(ui, state, now);
     }
+    if key.code == KeyCode::Tab && ui.suggestions().is_empty() && cycle_focus(ui, tree) {
+        return Vec::new();
+    }
     if let Some(effects) = menu(ui, key) {
         return effects;
     }
     editing(ui, tree, key, now)
+}
+
+/// `tab` walks the rail's cards and then comes back round to none, so the
+/// digits belong to what a person is typing again (design §7: focus moves by
+/// opening and closing, never by an ambient event). A rail with no cards in
+/// it leaves the key to whoever wanted it.
+fn cycle_focus(ui: &mut Ui, tree: &Tree) -> bool {
+    let cards = rail::cards(tree.viewed(), tree.view(), &ui.pinned);
+    if cards.is_empty() {
+        return false;
+    }
+    let at = ui
+        .focus
+        .as_ref()
+        .and_then(|id| cards.iter().position(|card| &card.id == id));
+    ui.focus = match at {
+        Some(at) if at + 1 == cards.len() => None,
+        Some(at) => Some(cards[at + 1].id.clone()),
+        None => Some(cards[0].id.clone()),
+    };
+    true
+}
+
+/// A key on the focused card fires the action it names (ADR-0013 §3). The
+/// button wears the mark until the session's stream moves, which is the ack.
+fn fire(ui: &mut Ui, tree: &Tree, key: char) -> Option<Vec<Effect>> {
+    let state = tree.viewed();
+    let focus = ui.focus.clone()?;
+    let cards = rail::cards(state, tree.view(), &ui.pinned);
+    let card = cards.iter().find(|card| card.id == focus)?;
+    let action = views::actions::fired(&views::actions_of(&card.body), key)?
+        .action
+        .clone();
+    ui.pending = Some(Pending {
+        action: action.clone(),
+        seq: state.seq,
+    });
+    Some(vec![Effect::Submit(Input::Action { action })])
+}
+
+/// The panel sheet answers its own keys: the cursor walks the kinds the
+/// plugins published, and `⏎` pins one into the rail or takes it back.
+fn panel_keys(ui: &mut Ui, tree: &Tree, key: KeyEvent, now: Now) -> Vec<Effect> {
+    let rows = panel::rows(tree.viewed());
+    match key.code {
+        KeyCode::Up => ui.panel = ui.panel.saturating_sub(1),
+        KeyCode::Down => ui.panel = (ui.panel + 1).min(rows.len().saturating_sub(1)),
+        KeyCode::Esc => ui.layer.close(now.instant),
+        KeyCode::Enter => pin(ui, tree.view(), rows.get(ui.panel)),
+        _ => {}
+    }
+    Vec::new()
+}
+
+fn pin(ui: &mut Ui, session: &SessionId, card: Option<&CardId>) {
+    let Some(card) = card else {
+        return;
+    };
+    let pin = Pin {
+        session: session.clone(),
+        card: card.clone(),
+    };
+    if !ui.pinned.remove(&pin) {
+        ui.pinned.insert(pin);
+    }
 }
 
 /// One pure function from a mouse event to a list of effects, against the
@@ -102,6 +174,10 @@ pub fn on_mouse(ui: &mut Ui, tree: &Tree, mouse: MouseEvent, now: Now) -> Vec<Ef
 fn pressed(ui: &mut Ui, tree: &Tree, mouse: MouseEvent, now: Now) -> Vec<Effect> {
     if let Some(index) = card_option(ui, mouse) {
         return answer(ui, tree, index, now);
+    }
+    if let Some(card) = rail_card(ui, mouse) {
+        ui.focus = Some(card);
+        return Vec::new();
     }
     let Some(cell) = transcript_cell(ui, mouse) else {
         return Vec::new();
@@ -150,6 +226,24 @@ fn answer(ui: &mut Ui, tree: &Tree, index: usize, now: Now) -> Vec<Effect> {
 /// What a click on a card row means: the row it landed on, chosen.
 fn mouse_enter() -> KeyEvent {
     KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)
+}
+
+/// The rail card under the pointer, when it is over the rail.
+fn rail_card(ui: &Ui, mouse: MouseEvent) -> Option<CardId> {
+    let painted = ui.painted.borrow();
+    let area = painted.regions.rail?;
+    if !area.contains(Position {
+        x: mouse.column,
+        y: mouse.row,
+    }) {
+        return None;
+    }
+    let row = usize::from(mouse.row - area.y);
+    painted
+        .rail
+        .iter()
+        .find(|(_, rows)| rows.contains(&row))
+        .map(|(id, _)| id.clone())
 }
 
 /// The transcript cell under the pointer, when it is over the transcript.
@@ -511,6 +605,14 @@ fn plain(ui: &mut Ui, tree: &Tree, key: KeyEvent, now: Now) -> Vec<Effect> {
         KeyCode::Delete => edit(ui, |c| c.delete()),
         KeyCode::Char('?') if ui.composer.is_empty() => ui.layer.toggle(Open::Help, now.instant),
         KeyCode::Char('v') if reading(ui) => start_selection(ui),
+        // A key belongs to the focused card's buttons while one is focused and
+        // nothing is being typed; the rest of the time it is a letter.
+        KeyCode::Char(c) if ui.composer.is_empty() && ui.focus.is_some() => {
+            if let Some(effects) = fire(ui, tree, c) {
+                return effects;
+            }
+            edit(ui, |composer| composer.insert(&c.to_string()));
+        }
         KeyCode::Char(c) => edit(ui, |composer| composer.insert(&c.to_string())),
         _ => {}
     }

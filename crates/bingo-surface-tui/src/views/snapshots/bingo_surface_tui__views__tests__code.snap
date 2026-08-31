@@ -1,0 +1,15 @@
+---
+source: crates/bingo-surface-tui/src/views/tests.rs
+expression: at_80(&view)
+---
+"    rust                                                                        "
+"   1  let line_1 = 1;                                                           "
+"   2  let line_2 = 2;                                                           "
+"   3  let line_3 = 3;                                                           "
+"   4  let line_4 = 4;                                                           "
+"   5  let line_5 = 5;                                                           "
+"   6  let line_6 = 6;                                                           "
+"   7  let line_7 = 7;                                                           "
+"   8  let line_8 = 8;                                                           "
+"   9  let line_9 = 9;                                                           "
+"  10  let line_10 = 10;                                                         "

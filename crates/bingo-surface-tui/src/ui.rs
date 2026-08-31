@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use std::collections::BTreeSet;
 
-use bingo_sdk::{CommandSpec, ItemId, Level, SessionSummary, View};
+use bingo_sdk::{Action, CommandSpec, ItemId, Level, Seq, SessionState, SessionSummary, View};
 
 use crate::blocks::Blocks;
 use crate::commands::{self, Suggestion};
@@ -19,9 +19,11 @@ use crate::dialog::Dialog;
 use crate::frame::Regions;
 use crate::history::PromptHistory;
 use crate::layers::{self, Reveal};
+use crate::rail::{CardId, Pin};
 use crate::scroll::Scroll;
 use crate::search::Search;
 use crate::select::Select;
+use crate::views::Marks;
 
 /// How long a transient notice holds the status line's middle slot (§3).
 pub const NOTICE: Duration = Duration::from_secs(4);
@@ -69,6 +71,9 @@ pub struct Painted {
     pub top: usize,
     /// The card on the screen, when one is open.
     pub card: Option<Card>,
+    /// Where each rail card landed, in the rail's own rows: what a click on
+    /// the rail is answered against.
+    pub rail: Vec<(CardId, std::ops::Range<usize>)>,
 }
 
 /// A card as it was drawn: where its box is, and which option each of its
@@ -111,11 +116,20 @@ pub enum Open {
     Switcher(Switcher),
 }
 
+/// An action a person fired, and where the session's stream was when they
+/// did. The mark on the button stays until the stream moves, which is the
+/// ack: nothing here is a second copy of what the reducer already knows.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Pending {
+    pub action: Action,
+    pub seq: Seq,
+}
+
 impl Open {
-    /// Whether the keyboard belongs to it while it is open. The two lists do
-    /// answer keys; the two panels are read while a person goes on typing.
+    /// Whether the keyboard belongs to it while it is open. The lists and the
+    /// panel answer keys; help is read while a person goes on typing.
     pub fn captures(&self) -> bool {
-        matches!(self, Open::Picker(_) | Open::Switcher(_))
+        matches!(self, Open::Picker(_) | Open::Switcher(_) | Open::Panel)
     }
 
     /// How many frames its arrival takes: a card comes down, a sheet rises.
@@ -214,6 +228,15 @@ pub struct Ui {
     pub notices: Vec<Notice>,
     /// A command's `View`, shown until the next key.
     pub block: Option<View>,
+    /// The panels a person pinned into the rail, per session (ADR-0013 §4:
+    /// where a panel sits is the surface's answer, not the plugin's).
+    pub pinned: BTreeSet<Pin>,
+    /// The rail card the keyboard talks to; `tab` cycles it, a click takes it.
+    pub focus: Option<CardId>,
+    /// The panel sheet's cursor: the row `⏎` would pin.
+    pub panel: usize,
+    /// An action fired and not yet answered.
+    pub pending: Option<Pending>,
     /// The results `ctrl+o` opened whole; everything else folds (§4).
     pub expanded: BTreeSet<ItemId>,
     /// When ctrl+c was pressed on an empty composer.
@@ -241,12 +264,30 @@ impl Ui {
             select: Select::default(),
             notices: Vec::new(),
             block: None,
+            pinned: BTreeSet::new(),
+            focus: None,
+            panel: 0,
+            pending: None,
             expanded: BTreeSet::new(),
             armed: None,
             catalogs: Catalogs::default(),
             opening: false,
             started,
             painted: RefCell::default(),
+        }
+    }
+
+    /// What the frame marks on a view it is about to draw: the action a
+    /// person fired, while the session's stream has not moved since. The next
+    /// frame from the session — the ack, or what the action changed — is the
+    /// answer, so nothing has to be remembered to put the mark away.
+    pub fn marks(&self, state: &SessionState) -> Marks {
+        Marks {
+            pending: self
+                .pending
+                .as_ref()
+                .filter(|pending| pending.seq == state.seq)
+                .map(|pending| pending.action.clone()),
         }
     }
 

@@ -1,47 +1,110 @@
-//! The `ctrl+t` panel: the viewed session's plugin-owned state, as the reducer
+//! The `ctrl+t` sheet: the viewed session's plugin-owned state, as the reducer
 //! keeps it (ADR-0011 §2). The surface knows no plugin and no kind — a payload
-//! is drawn for its shape alone, so a plugin that ships tomorrow shows up here
+//! that parses as a `View` is drawn as one (ADR-0013 §2) and any other is
+//! drawn for its shape alone, so a plugin that ships tomorrow shows up here
 //! with nothing added. It is derived from `SessionState` at render time, so it
 //! follows the view wherever it goes.
+//!
+//! It is also where a panel is pinned into the rail: `⏎` on a row pins it,
+//! `⏎` again takes it back. Where a panel sits is the surface's answer, not
+//! the plugin's (ADR-0013 §4).
 
-use bingo_sdk::{SessionState, View};
+use std::collections::BTreeSet;
+
+use bingo_sdk::{SessionId, SessionState, View};
 use ratatui::text::{Line, Span};
 use serde_json::Value;
 
-use crate::{block, theme};
+use crate::rail::{CardId, Pin};
+use crate::theme;
+use crate::views::{self, MISSING};
 
 /// What a session with no plugin state says.
 pub const NOTHING: &str = "nothing to show";
-/// A value that is not there.
-const MISSING: &str = "–";
+/// What a row that is in the rail says of itself.
+const PINNED: &str = "pinned";
+/// How far a panel's view hangs under the row that names it.
+const INDENT: usize = 2;
 
-pub fn lines(state: &SessionState) -> Vec<Line<'static>> {
-    let mut out = Vec::new();
-    for (plugin, kinds) in &state.extensions {
-        for (kind, payload) in kinds {
-            if !out.is_empty() {
-                out.push(Line::default());
-            }
-            out.push(heading(plugin, kind));
-            out.extend(block::lines(&view_of(payload)));
-        }
+/// What the sheet is showing, in the order it draws them: one row per kind a
+/// plugin published, whether or not anybody pinned it.
+pub fn rows(state: &SessionState) -> Vec<CardId> {
+    state
+        .extensions
+        .iter()
+        .flat_map(|(plugin, kinds)| {
+            kinds.keys().map(|kind| CardId {
+                plugin: plugin.clone(),
+                kind: kind.clone(),
+            })
+        })
+        .collect()
+}
+
+/// The sheet: every kind, its view under it, and the cursor on the one `⏎`
+/// would pin.
+pub fn lines(
+    state: &SessionState,
+    session: &SessionId,
+    cursor: usize,
+    pinned: &BTreeSet<Pin>,
+    width: usize,
+) -> Vec<Line<'static>> {
+    let rows = rows(state);
+    if rows.is_empty() {
+        return vec![Line::from(Span::styled(NOTHING.to_string(), theme::dim()))];
     }
-    if out.is_empty() {
-        out.push(Line::from(Span::styled(NOTHING.to_string(), theme::dim())));
+    let mut out = Vec::new();
+    for (at, id) in rows.iter().enumerate() {
+        if !out.is_empty() {
+            out.push(Line::default());
+        }
+        out.push(heading(id, at == cursor, is_pinned(pinned, session, id)));
+        out.extend(body(state, id, width));
     }
     out
 }
 
-fn heading(plugin: &str, kind: &str) -> Line<'static> {
-    Line::from(Span::styled(
-        format!("{plugin} · {kind}"),
-        theme::text().patch(theme::bold()),
-    ))
+fn body(state: &SessionState, id: &CardId, width: usize) -> Vec<Line<'static>> {
+    let payload = state
+        .extensions
+        .get(&id.plugin)
+        .and_then(|kinds| kinds.get(&id.kind));
+    let view = payload.map(view_of).unwrap_or_else(|| View::text(MISSING));
+    views::render(&view, width.saturating_sub(INDENT))
+        .into_iter()
+        .map(|line| views::indent(line, INDENT))
+        .collect()
 }
 
-/// A payload as the shape it is: a list of records is a table over the union
-/// of their keys, a record is its fields, anything else is its text.
+fn is_pinned(pinned: &BTreeSet<Pin>, session: &SessionId, card: &CardId) -> bool {
+    pinned.contains(&Pin {
+        session: session.clone(),
+        card: card.clone(),
+    })
+}
+
+fn heading(id: &CardId, focused: bool, pinned: bool) -> Line<'static> {
+    let mut spans = vec![
+        theme::cursor_span(focused),
+        Span::styled(
+            format!("{} · {}", id.plugin, id.kind),
+            theme::text().patch(theme::bold()),
+        ),
+    ];
+    if pinned {
+        spans.push(Span::styled(format!("  {PINNED}"), theme::presence()));
+    }
+    Line::from(spans)
+}
+
+/// A payload as a view: the vocabulary when it parses as one (ADR-0013 §2),
+/// else the shape it is — a list of records is a table over the union of
+/// their keys, a record is its fields, anything else is its text.
 pub fn view_of(payload: &Value) -> View {
+    if let Ok(view) = serde_json::from_value::<View>(payload.clone()) {
+        return view;
+    }
     match payload {
         Value::Array(items) if items.iter().any(Value::is_object) => table(items),
         Value::Object(fields) => View::Text {
@@ -104,11 +167,34 @@ mod tests {
     use serde_json::json;
 
     fn text_of(view: &View) -> String {
-        block::lines(view)
+        views::render(view, 60)
             .iter()
-            .map(ToString::to_string)
+            .map(|line| line.to_string().trim_end().to_string())
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    fn sheet(state: &SessionState) -> Vec<String> {
+        lines(
+            state,
+            &SessionId::from_raw("ses_1"),
+            0,
+            &BTreeSet::new(),
+            60,
+        )
+        .iter()
+        .map(|line| line.to_string().trim_end().to_string())
+        .collect()
+    }
+
+    #[test]
+    fn a_payload_that_parses_as_a_view_is_drawn_as_one() {
+        let payload = serde_json::to_value(View::Badge {
+            text: "needs you".into(),
+            tone: bingo_sdk::Tone::Attention,
+        })
+        .expect("a view");
+        assert_eq!(text_of(&view_of(&payload)), "[ needs you ]");
     }
 
     #[test]
@@ -165,7 +251,7 @@ mod tests {
         );
         assert_eq!(
             text_of(&view_of(&json!([{"id": 1, "meta": {"tags": ["a"]}}]))),
-            "id  meta\n1   {\"tags\":[\"a\"]}"
+            "id  meta\n──────────────────\n 1  {\"tags\":[\"a\"]}"
         );
     }
 
@@ -195,13 +281,12 @@ mod tests {
 
     #[test]
     fn a_session_no_plugin_has_written_to_says_so() {
-        let drawn = lines(&state());
-        assert_eq!(drawn.len(), 1);
-        assert_eq!(drawn[0].to_string(), NOTHING);
+        let drawn = sheet(&state());
+        assert_eq!(drawn, vec![NOTHING.to_string()]);
     }
 
     #[test]
-    fn every_plugin_and_kind_is_a_heading_of_its_own() {
+    fn every_plugin_and_kind_is_a_row_of_its_own() {
         let state = folded(vec![
             frame(1, extended("bingo.tasks", "tasks", json!([{"id": 1}]))),
             frame(
@@ -209,17 +294,36 @@ mod tests {
                 extended("bingo.rooms", "members", json!({"members": ["scout"]})),
             ),
         ]);
-        let drawn: Vec<String> = lines(&state).iter().map(ToString::to_string).collect();
         assert_eq!(
-            drawn,
+            sheet(&state),
             vec![
-                "bingo.rooms · members".to_string(),
-                r#"members: ["scout"]"#.to_string(),
+                "❯ bingo.rooms · members".to_string(),
+                r#"  members: ["scout"]"#.to_string(),
                 String::new(),
-                "bingo.tasks · tasks".to_string(),
-                "id".to_string(),
-                "1".to_string(),
+                "  bingo.tasks · tasks".to_string(),
+                "  id".to_string(),
+                "  ──".to_string(),
+                "   1".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn a_pinned_row_says_so_and_only_in_the_session_it_was_pinned_in() {
+        let state = folded(vec![frame(
+            1,
+            extended("bingo.tasks", "tasks", json!([{"id": 1}])),
+        )]);
+        let pinned = BTreeSet::from([Pin {
+            session: SessionId::from_raw("ses_1"),
+            card: CardId {
+                plugin: "bingo.tasks".into(),
+                kind: "tasks".into(),
+            },
+        }]);
+        let here = lines(&state, &SessionId::from_raw("ses_1"), 0, &pinned, 60);
+        assert!(here[0].to_string().contains(PINNED), "{:?}", here[0]);
+        let elsewhere = lines(&state, &child_id(), 0, &pinned, 60);
+        assert!(!elsewhere[0].to_string().contains(PINNED));
     }
 }

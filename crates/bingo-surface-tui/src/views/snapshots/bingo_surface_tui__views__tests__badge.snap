@@ -1,0 +1,5 @@
+---
+source: crates/bingo-surface-tui/src/views/tests.rs
+expression: at_80(&view)
+---
+"[ needs you ]                                                                   "
