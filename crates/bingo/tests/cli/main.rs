@@ -565,6 +565,7 @@ mod agents;
 mod context;
 mod experience;
 mod hooks;
+mod instances;
 mod login;
 mod sessions;
 mod skills;
