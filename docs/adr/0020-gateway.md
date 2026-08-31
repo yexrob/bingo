@@ -31,7 +31,8 @@ doctor`) are the settled UX for this.
    and start time; written with `create_new` (the channels claim shape), given
    back on drop. Liveness is probed with `kill -0 <pid>` as a subprocess —
    `libc` and `unsafe` stay banned. A dead pid in the file is reported, never
-   trusted.
+   trusted; `run` finding one replaces it with a log note — a supervisor's
+   respawn after a crash must not wedge on the corpse's file.
 4. **Graceful end.** `run` handles TERM: surfaces stop, `Plugin::stop` runs
    (the schedule runner and channel locks are given back), then exit 0.
 5. **`doctor`** checks, read-only: settings parse; each configured channel's
@@ -46,6 +47,22 @@ doctor`) are the settled UX for this.
    `tracing-subscriber` (`default-features = false, features = ["fmt"]`),
    measure with `scripts/budget.sh`; if it costs more than +5 unique crates,
    hand-roll a line-writing `Subscriber` instead and record that.
+7. **Installation (user-directed 2026-08-31).** `install` writes a per-user
+   service for the default data dir and loads it: macOS
+   `~/Library/LaunchAgents/com.bingo.gateway.plist` via `launchctl bootstrap
+   gui/$UID`; Linux `~/.config/systemd/user/bingo-gateway.service` via
+   `systemctl --user enable --now`. The service runs `<current exe> gateway
+   run`, keeps it alive (`KeepAlive` / `Restart=on-failure`), and carries
+   **no secrets**. `uninstall` unloads and removes it. While installed, the
+   verbs delegate to the supervisor — start = load, stop = unload, restart =
+   `launchctl kickstart -k` / `systemctl --user restart` — so launchd and a
+   hand-spawned process never fight over one pidfile; `status` and `doctor`
+   name which mode is in force.
+8. **Secrets get a disk home.** A boot-started gateway has no exported env,
+   so a channel secret may live in `auth.json` (0600, ADR-0012's store)
+   under `channels.<id>`, written by `bingo channels secret <id>` — hidden
+   paste, the M15 pattern. The env variable, when set, still wins; `doctor`
+   knows both sources and says which one the running mode actually sees.
 
 ## Consequences
 
@@ -54,13 +71,14 @@ doctor`) are the settled UX for this.
   *require* no daemon; they benefit from one that exists for channels.
 - One gateway per data dir by pidfile; per-credential channel locks still
   guard against a second listener from any process.
-- Boot persistence (launchd/systemd installation) is v2: a daemon started
-  from a shell inherits the credentials in that shell's environment; an
-  installed service needs its own credential story first.
+- A Linux user unit stops at logout unless lingering is on; `doctor` has a
+  row for `loginctl enable-linger` and says the command rather than running
+  it.
 - Windows is out of scope, as everywhere in this tree.
 - Deeper `status` (which channels are connected right now) needs a control
   socket the process answers on; deferred until wanted — `doctor` stays
   static, `status` stays process-level, and neither pretends otherwise.
 
-Refs: ADR-0016, ADR-0019. Non-goals: OS service files, credential vaulting,
-a control socket, multi-gateway coordination.
+Refs: ADR-0012, ADR-0016, ADR-0019. Non-goals: system-level (root) services,
+credential vaulting, a control socket, multi-gateway coordination, installing
+for a non-default data dir.

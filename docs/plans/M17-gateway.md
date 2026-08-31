@@ -31,12 +31,27 @@ real tracing sink in the tree.
    doctor --fix clears it; a schedule entry fires under the gateway (fake
    provider, the M16 schedule test pattern); doctor names a missing
    credential without printing any.
+6. **`install` / `uninstall` + mode-aware verbs (ADR-0020 §7)** — render the
+   plist/unit (current exe, `gateway run`, keep-alive, log paths, no
+   secrets) for the platform, load/unload through the supervisor; while
+   installed, start/stop/restart delegate (`launchctl bootstrap/bootout/
+   kickstart -k` on darwin, `systemctl --user` on linux). Hermetic tests:
+   a fake `launchctl`/`systemctl` script first on PATH records its argv —
+   no test touches the real supervisor; the rendered file is asserted
+   byte-wise (exe path, label, no secret strings).
+7. **The secret's disk home (ADR-0020 §8)** — in `bingo-channels`: the
+   adapter's secret source becomes env-else-auth.json (`channels.<id>`,
+   0600, ADR-0012 store); `bingo channels secret <id>` pastes it hidden
+   (the M15 stty pattern, restore guard); doctor rows for source-in-force
+   and (linux) lingering. `BINGO_FEISHU_APP_SECRET` behaviour with the var
+   set is byte-identical to today.
 
 ## Files
 
 `crates/bingo/src/main.rs` (subcommand), `crates/bingo/src/gateway/*.rs`,
 `crates/bingo/tests/cli/gateway.rs`, possibly `Cargo.toml`/`scripts/budget.toml`
-(+`tracing-subscriber`, measured, reason line). Nothing outside `crates/bingo`.
+(+`tracing-subscriber`, measured, reason line); for brick 7 only,
+`crates/bingo-channels` (secret source + the paste command). Nothing else.
 
 ## Exit criteria
 
@@ -45,6 +60,8 @@ real tracing sink in the tree.
 - [ ] doctor reports settings/credentials/locks/version; --fix removes only dead-pid locks
 - [ ] `warn!` from any plugin lands in `gateway.log` while the gateway runs
 - [ ] a schedule fires with no terminal attached
+- [ ] install writes a secret-free plist/unit naming the current exe; verbs delegate while installed (PATH-shim proven); uninstall unloads and removes
+- [ ] a channel secret pasted via `bingo channels secret` lands in auth.json 0600; env still wins; doctor names the source in force
 - [ ] every gate green (fmt, check, clippy, test, discipline, budget measured, deny)
 
 ## Non-goals
@@ -59,4 +76,7 @@ wrapper; if stdio redirect fights it, the worker reports rather than adding
 libc. R-liveness — `kill -0` races pid reuse; the pidfile's version+start
 row is the tiebreak and stop refuses a pid whose start time disagrees.
 R-env — credentials are captured at `start`; doctor must say which env vars
-the run was and was not started with (names only).
+the run was and was not started with (names only). R-supervisor — launchd's
+KeepAlive and a hand-spawned `run` are two masters; mode detection (is the
+service file present and loaded) is the single switch, and the PATH-shim
+tests pin every delegated argv.
