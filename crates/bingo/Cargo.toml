@@ -33,6 +33,7 @@ bingo-agents.workspace = true
 bingo-rooms.workspace = true
 bingo-tasks.workspace = true
 bingo-experience.workspace = true
+bingo-schedule.workspace = true
 bingo-demo-ui.workspace = true
 bingo-channels.workspace = true
 # `bingo provider add` writes a pasted key to the one credential store
@@ -47,6 +48,9 @@ async-trait.workspace = true
 [dev-dependencies]
 bingo-sdk = { workspace = true, features = ["testing"] }
 tempfile.workspace = true
+# A schedule entry written by hand carries timestamps, and the black-box
+# tests need one that is overdue (M16). Already in the tree.
+jiff.workspace = true
 # Black-box turns against a scripted HTTP endpoint (`--provider openai`, WebFetch).
 wiremock.workspace = true
 # The fake issuer's tokens are JWTs whose claims the codex provider reads.

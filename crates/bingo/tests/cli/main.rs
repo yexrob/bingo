@@ -593,6 +593,7 @@ mod hooks;
 mod instances;
 mod login;
 mod provider_add;
+mod schedule;
 mod sessions;
 mod skills;
 mod stream_json;

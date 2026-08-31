@@ -35,6 +35,7 @@ bingo-auth-oauth = { path = "crates/bingo-auth-oauth", version = "0.1.0" }
 bingo-plugin-rpc = { path = "crates/bingo-plugin-rpc", version = "0.1.0" }
 bingo-experience = { path = "crates/bingo-experience", version = "0.1.0" }
 bingo-channels = { path = "crates/bingo-channels", version = "0.1.0" }
+bingo-schedule = { path = "crates/bingo-schedule", version = "0.1.0" }
 
 tokio = { version = "1.53", default-features = false, features = ["rt-multi-thread", "macros", "sync", "time", "io-util", "io-std", "fs", "process", "signal"] }
 tokio-util = { version = "0.7.19", features = ["codec", "rt"] }

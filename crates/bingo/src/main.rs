@@ -24,6 +24,7 @@ use bingo_provider_anthropic::AnthropicPlugin;
 use bingo_provider_fake::{FakePlugin, FakeProvider, Script};
 use bingo_provider_openai::OpenAiPlugin;
 use bingo_rooms::RoomsPlugin;
+use bingo_schedule::SchedulePlugin;
 use bingo_sdk::{
     Env, ErrorCode, KernelError, LoginMethod, Plugin, SessionId, SessionSelector, SessionSpec,
     SurfaceOptions,
@@ -474,6 +475,7 @@ fn plugins(demo_ui: bool) -> Result<Vec<Box<dyn Plugin>>, KernelError> {
         Box::new(RoomsPlugin),
         Box::new(TasksPlugin),
         Box::new(ExperiencePlugin),
+        Box::new(SchedulePlugin::default()),
         Box::new(PrintPlugin),
         Box::new(RpcPlugin),
         Box::new(TuiPlugin),

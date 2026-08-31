@@ -1,0 +1,40 @@
+[package]
+name = "bingo-schedule"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Schedules plugin for bingo: deferred and recurring turns on a session of their own"
+
+[lints]
+workspace = true
+
+[dependencies]
+bingo-sdk.workspace = true
+async-trait.workspace = true
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+# M16: the whole of the clock. `every`, `daily at` and `once at` are civil
+# arithmetic in the machine's own zone, and a DST jump is the reason the
+# spec brick is pure and property-tested (ADR-0019 §2).
+jiff.workspace = true
+# M16: an entry's id is a minted slug, the way an experience's is.
+ulid.workspace = true
+# M16: the creation card shows the entry file it would write as a diff, the
+# way `ExperienceCommit` shows its own. Already in the tree.
+similar.workspace = true
+# The timer loop sleeps to the next fire and wakes on a store change.
+tokio.workspace = true
+# A fire that cannot open a session is a log line, never a panicked loop.
+tracing.workspace = true
+
+[dev-dependencies]
+bingo-sdk = { workspace = true, features = ["testing"] }
+# M16: the next-fire contract is a property over arbitrary clocks, midnights,
+# month ends and a DST transition (ADR-0019 §2).
+proptest.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
