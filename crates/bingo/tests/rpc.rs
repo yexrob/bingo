@@ -310,7 +310,7 @@ async fn a_session_written_by_a_print_run_reopens_by_id_with_its_items() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn the_catalogue_lists_the_fake_provider_and_the_tools() {
+async fn the_catalogue_lists_the_fake_provider_the_tools_and_the_model_facts() {
     let mut server = Server::spawn(TEXT_TURN);
     let kernel = ready(&mut server).await;
     let providers = kernel.catalog(CatalogKind::Providers).await.unwrap();
@@ -320,6 +320,18 @@ async fn the_catalogue_lists_the_fake_provider_and_the_tools() {
     );
     let tools = kernel.catalog(CatalogKind::Tools).await.unwrap();
     assert!(tools.entries.iter().any(|e| e.id == "Read"), "{tools:?}");
+    // The meta a client reads a model's facts from crosses the wire whole
+    // (ADR-0026 §1); the keys themselves are pinned in the kernel.
+    let models = kernel.catalog(CatalogKind::Models).await.unwrap();
+    let known = models
+        .entries
+        .iter()
+        .find(|e| e.id == "anthropic/claude-sonnet-4-5")
+        .unwrap_or_else(|| panic!("{models:?}"));
+    assert!(known.meta["context"].is_u64(), "{known:?}");
+    assert!(known.meta["output"].is_u64(), "{known:?}");
+    assert!(known.meta["reasoning"].is_boolean(), "{known:?}");
+    assert!(known.meta["images"].is_boolean(), "{known:?}");
     kernel.shutdown().await.unwrap();
 }
 
