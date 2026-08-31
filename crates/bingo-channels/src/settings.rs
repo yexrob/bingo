@@ -12,6 +12,7 @@ use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
 use crate::adapter::ChannelAdapter;
+use crate::feishu::{self, Feishu};
 use crate::gate::Gate;
 use crate::limits::{Dialect, Encoding, Limits};
 use crate::loopback::{self, Loopback};
@@ -32,6 +33,10 @@ pub struct Channels {
     /// The in-process adapter: a test's platform, and the shape of the wire.
     #[serde(default)]
     pub loopback: Option<LoopbackChannel>,
+    /// A self-built (企业自建) Feishu app. The long connection is not offered
+    /// to marketplace apps.
+    #[serde(default)]
+    pub feishu: Option<FeishuChannel>,
     /// How often a streaming answer is redrawn.
     #[serde(default)]
     pub coalesce: Coalesce,
@@ -60,6 +65,43 @@ pub struct LoopbackChannel {
     pub max_text: usize,
     #[serde(default = "three")]
     pub max_actions: usize,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct FeishuChannel {
+    /// The app id, which is public. The secret is not: it comes from
+    /// `BINGO_FEISHU_APP_SECRET`, because a project settings file is a
+    /// committed file.
+    #[serde(default)]
+    pub app_id: Option<String>,
+    /// Where the API lives. Lark International is a different host, and the
+    /// long connection there is unverified (ADR-0016 consequences).
+    #[serde(default)]
+    pub base: Option<String>,
+}
+
+/// The environment variables a Feishu app is signed with.
+pub const APP_ID: &str = "BINGO_FEISHU_APP_ID";
+pub const APP_SECRET: &str = "BINGO_FEISHU_APP_SECRET";
+
+impl FeishuChannel {
+    /// The settings' app id, else the environment's; the secret is only ever
+    /// the environment's.
+    fn config(&self) -> feishu::Config {
+        feishu::Config {
+            app_id: self
+                .app_id
+                .clone()
+                .or_else(|| std::env::var(APP_ID).ok())
+                .unwrap_or_default(),
+            app_secret: std::env::var(APP_SECRET).unwrap_or_default(),
+            base: self
+                .base
+                .clone()
+                .unwrap_or_else(|| feishu::api::BASE.to_string()),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, JsonSchema)]
@@ -112,6 +154,9 @@ impl Channels {
         let mut adapters: Vec<Arc<dyn ChannelAdapter>> = Vec::new();
         if let Some(settings) = &self.loopback {
             adapters.push(Arc::new(Loopback::new(settings.config())));
+        }
+        if let Some(settings) = &self.feishu {
+            adapters.push(Arc::new(Feishu::new(settings.config())));
         }
         adapters
     }
@@ -166,6 +211,7 @@ pub fn from_flags(flags: &[String]) -> Result<Map<String, Value>, String> {
         };
         match adapter {
             Loopback::ID => channels.insert(adapter.into(), json!({ "peer": peer })),
+            Feishu::ID => channels.insert(adapter.into(), json!({ "appId": peer })),
             other => return Err(format!("no such channel adapter: {other}")),
         };
     }

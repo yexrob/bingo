@@ -43,6 +43,7 @@ pub use adapter::{Arrival, Buttons, ChannelAdapter, Edit, Inbox, Incoming, Mode,
 pub use conversation::{Conversation, Posted};
 pub use deliver::{Deliverer, Op};
 pub use error::ChannelError;
+pub use feishu::Feishu;
 pub use gate::Gate;
 pub use host::ChannelsSurface;
 pub use limits::{Dialect, Encoding, Limits};
