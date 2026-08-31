@@ -44,13 +44,25 @@ impl Drop for Claim {
     }
 }
 
+/// The words a taken claim refuses with; [`held_elsewhere`] answers from
+/// them, so the two cannot drift apart.
+const TAKEN: &str = "another bingo already runs the ";
+
 fn taken(adapter: &str, path: &Path) -> ChannelError {
     ChannelError::Refused(format!(
-        "another bingo already runs the {adapter} channel for this app: a second one \
+        "{TAKEN}{adapter} channel for this app: a second one \
          would take half of its events and neither would know. {} says so — remove it \
          if no bingo is running.",
         path.display()
     ))
+}
+
+/// Whether an error is this module's "someone else already listens". A
+/// dedicated listener reads that as the refusal it is; a *beside* listener
+/// reads it as the design working — the lock exists so exactly one process
+/// takes the app's events, and the gateway is usually the one that has it.
+pub fn held_elsewhere(error: &bingo_sdk::KernelError) -> bool {
+    error.message.starts_with(TAKEN)
 }
 
 /// A file name from an identifier that may hold anything: only what is safe

@@ -460,6 +460,13 @@ fn start_channels(host: &Host, options: SurfaceOptions) -> Option<tokio::task::J
     let handle = host.handle();
     Some(tokio::spawn(async move {
         if let Err(error) = surface.run(handle, options).await {
+            // Another process already takes this app's events — for a beside
+            // listener that is the design working (usually the gateway), not
+            // a failure worth a person's stderr on every run.
+            if bingo_channels::lock::held_elsewhere(&error) {
+                tracing::info!("{}", error.message);
+                return;
+            }
             let human = std::io::IsTerminal::is_terminal(&std::io::stderr());
             eprintln!("{}", error_report(error.code, &error.message, human));
         }

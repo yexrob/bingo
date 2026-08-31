@@ -11,9 +11,21 @@ use std::time::{Duration, Instant};
 
 use bingo_sdk::{Event, Frame, TurnStatus};
 
+/// A HOME no test shares with the developer. The settings, stores and locks
+/// of the person running the suite must never reach a black-box run — a real
+/// configured channel once turned every bare run into a listener that fought
+/// the developer's own gateway for its lock. Tests that write set their own
+/// HOME as before; this is the floor under the ones that only read.
+fn isolated_home() -> &'static std::path::Path {
+    static HOME: std::sync::LazyLock<tempfile::TempDir> =
+        std::sync::LazyLock::new(|| tempfile::tempdir().expect("a home for the suite"));
+    HOME.path()
+}
+
 fn bingo() -> Command {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_bingo"));
-    cmd.env_remove("BINGO_FAKE_SCRIPT")
+    cmd.env("HOME", isolated_home())
+        .env_remove("BINGO_FAKE_SCRIPT")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
