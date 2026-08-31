@@ -23,8 +23,10 @@ pub const BINDINGS: &[Binding] = &[
         description: "newline (ctrl+j · alt+enter · \\ enter)",
     },
     Binding {
+        // The stack of [`ESCAPES`], in the order it is obeyed; a test holds
+        // the two together.
         keys: "esc",
-        description: "close dialog, panel or menu · interrupt",
+        description: "sheet → card → dropdown → interrupt",
     },
     Binding {
         keys: "ctrl+c",
@@ -94,6 +96,92 @@ pub const BINDINGS: &[Binding] = &[
 
 pub const FOOTER_HINT: &str = "? for shortcuts";
 pub const PLACEHOLDER: &str = "ask anything · / for commands · ! for shell";
+
+// ---- the two ordered stacks (design §7) ---------------------------------
+
+/// What `esc` closes, innermost first. It is a table rather than a chain of
+/// conditions so that the order is one thing, tested once and printed in the
+/// help exactly as it is obeyed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Escape {
+    /// A sheet over the whole frame: help, the panel, the resume picker.
+    Sheet,
+    /// The card that is asking: leaving it is its own cancel or denial.
+    Card,
+    /// The command dropdown.
+    Dropdown,
+    /// Nothing is open, so the turn is what `esc` stops.
+    Interrupt,
+}
+
+/// The stack, in the order it is closed, with the word the help prints.
+pub const ESCAPES: &[(Escape, &str)] = &[
+    (Escape::Sheet, "sheet"),
+    (Escape::Card, "card"),
+    (Escape::Dropdown, "dropdown"),
+    (Escape::Interrupt, "interrupt"),
+];
+
+/// What is open when `esc` is pressed.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Open {
+    pub sheet: bool,
+    pub card: bool,
+    pub dropdown: bool,
+    pub busy: bool,
+}
+
+impl Open {
+    fn has(self, rung: Escape) -> bool {
+        match rung {
+            Escape::Sheet => self.sheet,
+            Escape::Card => self.card,
+            Escape::Dropdown => self.dropdown,
+            Escape::Interrupt => self.busy,
+        }
+    }
+}
+
+/// The innermost thing `esc` closes, and nothing at all when a person has
+/// nothing open and nothing running.
+pub fn escape(open: Open) -> Option<Escape> {
+    ESCAPES
+        .iter()
+        .map(|(rung, _)| *rung)
+        .find(|rung| open.has(*rung))
+}
+
+/// What `ctrl+c` does, which is not what `esc` does: it is the key that gets
+/// you out, and it says so before it takes you (§7).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Interrupt {
+    /// A turn is running: stop it, and leave the composer alone.
+    Turn,
+    /// Something is half-typed: clear it.
+    Clear,
+    /// Nothing to stop and nothing to clear: say how to leave.
+    Arm,
+    /// It was said a moment ago: leave.
+    Exit,
+}
+
+/// What is true when `ctrl+c` is pressed.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Pressed {
+    pub busy: bool,
+    pub typing: bool,
+    /// A first `ctrl+c` inside the window said how to leave.
+    pub armed: bool,
+}
+
+pub fn interrupt(at: Pressed) -> Interrupt {
+    match (at.busy, at.typing, at.armed) {
+        (true, _, _) => Interrupt::Turn,
+        (false, true, _) => Interrupt::Clear,
+        (false, false, true) => Interrupt::Exit,
+        (false, false, false) => Interrupt::Arm,
+    }
+}
 
 /// From this width the table pairs its rows; below it one column reads better
 /// than two cut-off ones.
@@ -190,6 +278,79 @@ mod tests {
             BINDINGS.len().div_ceil(2),
             "the sheet pairs its rows at 100 columns"
         );
+    }
+
+    /// The order `esc` is obeyed in is the order the help prints, because
+    /// there is only one of it.
+    #[test]
+    fn the_help_prints_the_escape_stack() {
+        let stack = ESCAPES
+            .iter()
+            .map(|(_, word)| *word)
+            .collect::<Vec<_>>()
+            .join(" → ");
+        let esc = BINDINGS
+            .iter()
+            .find(|binding| binding.keys == "esc")
+            .expect("a row for esc");
+        assert_eq!(esc.description, stack);
+        assert!(
+            help_lines(120)
+                .iter()
+                .any(|line| line.to_string().contains(&stack)),
+            "the sheet prints it"
+        );
+    }
+
+    /// One test per rung: what is innermost is what closes.
+    #[test]
+    fn esc_closes_the_innermost_thing_that_is_open() {
+        let all = Open {
+            sheet: true,
+            card: true,
+            dropdown: true,
+            busy: true,
+        };
+        assert_eq!(escape(all), Some(Escape::Sheet));
+        assert_eq!(
+            escape(Open {
+                sheet: false,
+                ..all
+            }),
+            Some(Escape::Card)
+        );
+        assert_eq!(
+            escape(Open {
+                sheet: false,
+                card: false,
+                ..all
+            }),
+            Some(Escape::Dropdown)
+        );
+        assert_eq!(
+            escape(Open {
+                busy: true,
+                ..Open::default()
+            }),
+            Some(Escape::Interrupt)
+        );
+        assert_eq!(escape(Open::default()), None, "and nothing to close");
+    }
+
+    /// One test per row of what ctrl+c does.
+    #[test]
+    fn ctrl_c_stops_a_turn_clears_a_line_and_then_leaves() {
+        let pressed = |busy, typing, armed| {
+            interrupt(Pressed {
+                busy,
+                typing,
+                armed,
+            })
+        };
+        assert_eq!(pressed(true, true, true), Interrupt::Turn);
+        assert_eq!(pressed(false, true, true), Interrupt::Clear);
+        assert_eq!(pressed(false, false, true), Interrupt::Exit);
+        assert_eq!(pressed(false, false, false), Interrupt::Arm);
     }
 
     #[test]

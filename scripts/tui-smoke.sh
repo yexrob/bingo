@@ -68,6 +68,12 @@ long_reply() {
   printf '{"responses":[{"steps":[{"text":"%s"}]}]}' "$text"
 }
 
+# What a terminal sends when its window takes the focus or loses it, once
+# focus reporting is on: `\033[I` and `\033[O`.
+focus() {
+  tmux -L "$SOCKET" send-keys -t "$SESSION" -l "$(printf '\033[%s' "$1")"
+}
+
 # One SGR mouse report: button, column, row (1-based, as a terminal sends it).
 mouse() {
   tmux -L "$SOCKET" send-keys -t "$SESSION" -l "$(printf '\033[<%s;%s;%sM' "$1" "$2" "$3")"
@@ -182,6 +188,34 @@ await '│'
 press_until 'y' 'Wrote it.'
 [ -f "$WORK/cwd/note.txt" ] || { echo "tui-smoke: the approved Write wrote nothing" >&2; exit 1; }
 grep -q 'written by the smoke test' "$WORK/cwd/note.txt"
+finish
+
+step 'a notice holds the status line and then leaves it'
+start '{"responses":[{"steps":[{"text":"nothing to do"}]}]}'
+keys C-c
+await 'press ctrl+c again to exit'
+# It holds its window and goes on its own: nothing is pressed to dismiss it.
+vanish 'press ctrl+c again to exit'
+await '? for shortcuts'
+finish
+
+step 'a question on a window nobody watches notifies and nothing else'
+start '{"responses":[
+  {"steps":[{"toolCall":{"name":"Write","input":{"file_path":"away.txt","content":"written while away\n"}}}]},
+  {"steps":[{"text":"Wrote it."}]}]}'
+# The window loses the focus, so the question that follows goes to the desktop
+# as well as to the screen — and not one byte of it may land on the pane.
+focus O
+keys 'write the note' Enter
+await 'Do you want to '
+press_until 'y' 'Wrote it.'
+[ -f "$WORK/cwd/away.txt" ] || { echo "tui-smoke: the approved Write wrote nothing" >&2; exit 1; }
+if pane | grep -qE 'notify|777|Ptmux'; then
+  echo 'tui-smoke: a notification was printed onto the screen' >&2
+  pane >&2
+  exit 1
+fi
+focus I
 finish
 
 step 'BINGO_ASCII=1 and NO_COLOR leave a terminal nothing it cannot draw'

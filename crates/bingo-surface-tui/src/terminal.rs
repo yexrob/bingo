@@ -15,8 +15,9 @@ use std::sync::Once;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crossterm::event::{
-    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-    KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
+    EnableFocusChange, EnableMouseCapture, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
+    PushKeyboardEnhancementFlags,
 };
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -54,6 +55,10 @@ pub(crate) trait Screen: Send {
 
     fn bell(&mut self) -> io::Result<()>;
 
+    /// Put a message where the desktop can see it, for a window nobody is
+    /// looking at.
+    fn notify(&mut self, bytes: &[u8]) -> io::Result<()>;
+
     /// Hand the terminal a selection for its own clipboard.
     fn copy(&mut self, bytes: &[u8]) -> io::Result<()>;
 
@@ -74,7 +79,14 @@ impl Tui {
         enable_raw_mode()?;
         ENTERED.store(true, Ordering::SeqCst);
         install_hook();
-        crossterm::execute!(out, EnterAlternateScreen, EnableBracketedPaste)?;
+        crossterm::execute!(
+            out,
+            EnterAlternateScreen,
+            EnableBracketedPaste,
+            // Whether the window is looked at is what decides between a bell
+            // and a notification (§6).
+            EnableFocusChange
+        )?;
         take_mouse(&mut out);
         push_enhancement(&mut out);
         let terminal = Terminal::with_options(
@@ -114,6 +126,10 @@ impl Screen for Tui {
         out_of_band(crate::theme::BELL)
     }
 
+    fn notify(&mut self, bytes: &[u8]) -> io::Result<()> {
+        out_of_band(bytes)
+    }
+
     fn copy(&mut self, bytes: &[u8]) -> io::Result<()> {
         out_of_band(bytes)
     }
@@ -121,6 +137,85 @@ impl Screen for Tui {
     fn rows(&self) -> u16 {
         self.terminal.size().map(|size| size.height).unwrap_or(0)
     }
+}
+
+// ---- what a window nobody is looking at says (design §6) ----------------
+
+/// What there is to say to the desktop. The words are §6's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Notification {
+    /// Something wants a person: a card is open.
+    NeedsYou,
+    /// The turn a person started has finished.
+    Done,
+}
+
+impl Notification {
+    fn body(self) -> &'static str {
+        match self {
+            Notification::NeedsYou => "needs you",
+            Notification::Done => "done",
+        }
+    }
+}
+
+/// Which escape a terminal understands. `777` is the one most of them take;
+/// the two that grew their own take `9`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Dialect {
+    Osc777,
+    Osc9,
+}
+
+/// The bytes for one notification, as this terminal wants them.
+pub fn notification(what: Notification) -> Vec<u8> {
+    let term_program = std::env::var("TERM_PROGRAM").ok();
+    let term = std::env::var("TERM").ok();
+    wrapped(
+        message(what, dialect(term_program.as_deref())),
+        multiplexed(term.as_deref(), std::env::var_os("TMUX").is_some()),
+    )
+}
+
+/// iTerm2 and Terminal.app answer to `OSC 9`; everything else that notifies at
+/// all — kitty, foot, WezTerm, Ghostty, rxvt — answers to `OSC 777`, and a
+/// terminal that answers to neither ignores both.
+pub fn dialect(term_program: Option<&str>) -> Dialect {
+    match term_program {
+        Some("iTerm.app" | "Apple_Terminal") => Dialect::Osc9,
+        _ => Dialect::Osc777,
+    }
+}
+
+/// Whether a multiplexer is between this surface and the terminal, and so
+/// whether the sequence has to be passed through it.
+pub fn multiplexed(term: Option<&str>, tmux: bool) -> bool {
+    tmux || term.is_some_and(|term| term.starts_with("tmux") || term.starts_with("screen"))
+}
+
+fn message(what: Notification, dialect: Dialect) -> Vec<u8> {
+    let body = what.body();
+    match dialect {
+        Dialect::Osc777 => format!("\x1b]777;notify;bingo;{body}\x07").into_bytes(),
+        Dialect::Osc9 => format!("\x1b]9;bingo · {body}\x07").into_bytes(),
+    }
+}
+
+/// tmux swallows what it does not know unless it is told to pass it on, and
+/// the escape inside a passthrough is doubled.
+fn wrapped(sequence: Vec<u8>, multiplexed: bool) -> Vec<u8> {
+    if !multiplexed {
+        return sequence;
+    }
+    let mut out = b"\x1bPtmux;".to_vec();
+    for byte in sequence {
+        if byte == 0x1b {
+            out.push(0x1b);
+        }
+        out.push(byte);
+    }
+    out.extend_from_slice(b"\x1b\\");
+    out
 }
 
 /// `OSC 2 ; text BEL`. A stray control byte in a path would end the sequence
@@ -195,6 +290,7 @@ pub fn restore() {
     }
     let _ = crossterm::execute!(
         out,
+        DisableFocusChange,
         DisableBracketedPaste,
         LeaveAlternateScreen,
         crossterm::cursor::Show
@@ -222,5 +318,46 @@ mod tests {
     fn the_title_stack_codes_are_the_xterm_ones() {
         assert_eq!(SAVE_TITLE, b"\x1b[22;2t");
         assert_eq!(RESTORE_TITLE, b"\x1b[23;2t");
+    }
+
+    #[test]
+    fn a_notification_is_one_osc_sequence_in_the_dialect_the_terminal_takes() {
+        assert_eq!(
+            message(Notification::NeedsYou, Dialect::Osc777),
+            "\x1b]777;notify;bingo;needs you\x07".as_bytes(),
+        );
+        assert_eq!(
+            message(Notification::Done, Dialect::Osc9),
+            "\x1b]9;bingo · done\x07".as_bytes(),
+        );
+    }
+
+    #[test]
+    fn the_two_terminals_with_their_own_escape_get_it_and_the_rest_get_777() {
+        assert_eq!(dialect(Some("iTerm.app")), Dialect::Osc9);
+        assert_eq!(dialect(Some("Apple_Terminal")), Dialect::Osc9);
+        assert_eq!(dialect(Some("WezTerm")), Dialect::Osc777);
+        assert_eq!(dialect(Some("ghostty")), Dialect::Osc777);
+        assert_eq!(dialect(None), Dialect::Osc777);
+    }
+
+    #[test]
+    fn a_multiplexer_is_passed_through_with_the_escape_doubled() {
+        assert!(multiplexed(Some("tmux-256color"), false));
+        assert!(multiplexed(Some("screen"), false));
+        assert!(multiplexed(Some("xterm-256color"), true), "TMUX is set");
+        assert!(!multiplexed(Some("xterm-256color"), false));
+
+        let bare = message(Notification::NeedsYou, Dialect::Osc777);
+        assert_eq!(
+            wrapped(bare.clone(), true),
+            [
+                b"\x1bPtmux;".to_vec(),
+                b"\x1b\x1b]777;notify;bingo;needs you\x07".to_vec(),
+                b"\x1b\\".to_vec(),
+            ]
+            .concat(),
+        );
+        assert_eq!(wrapped(bare.clone(), false), bare, "and nothing when not");
     }
 }

@@ -14,6 +14,7 @@ use bingo_sdk::{
 };
 use ratatui::text::{Line, Span};
 
+use crate::clock::Now;
 use crate::theme;
 
 /// The child a tool call spawned, by the item that called it. The child's own
@@ -284,14 +285,14 @@ fn thousands(n: u64) -> String {
 /// The `ctrl+g` dropdown: one row per session in the tree, the one the
 /// keyboard is on marked by the cursor. Which rows exist is the tree's; where
 /// the dropdown is drawn is the frame's.
-pub fn switcher_lines(rows: &[Row<'_>], selected: usize) -> Vec<Line<'static>> {
+pub fn switcher_lines(rows: &[Row<'_>], selected: usize, now: Now) -> Vec<Line<'static>> {
     rows.iter()
         .enumerate()
-        .map(|(index, row)| switcher_line(row, index == selected))
+        .map(|(index, row)| switcher_line(row, index == selected, now))
         .collect()
 }
 
-fn switcher_line(row: &Row<'_>, selected: bool) -> Line<'static> {
+fn switcher_line(row: &Row<'_>, selected: bool, now: Now) -> Line<'static> {
     let name = if selected {
         theme::text()
     } else {
@@ -309,7 +310,10 @@ fn switcher_line(row: &Row<'_>, selected: bool) -> Line<'static> {
         spans.push(Span::styled(format!(" {}", status.label()), theme::dim()));
     }
     if row.attention {
-        spans.push(Span::styled(" · needs you".to_string(), theme::presence()));
+        spans.push(Span::styled(
+            " · needs you".to_string(),
+            theme::attention(now),
+        ));
     }
     Line::from(spans)
 }
@@ -488,7 +492,7 @@ mod tests {
             tree.apply(&frame);
         }
         tree.apply(&log_frame(9, log_announced("#design")));
-        let drawn: Vec<String> = switcher_lines(&tree.rows(), 1)
+        let drawn: Vec<String> = switcher_lines(&tree.rows(), 1, scene().1)
             .iter()
             .map(ToString::to_string)
             .collect();
@@ -508,7 +512,7 @@ mod tests {
         let mut tree = Tree::new(state());
         tree.apply(&child_frame(1, announced("reviewer")));
         tree.apply(&child_frame(2, opened(child_permission())));
-        let drawn = switcher_lines(&tree.rows(), 0);
+        let drawn = switcher_lines(&tree.rows(), 0, scene().1);
         assert_eq!(drawn[1].to_string(), "  reviewer ⏺ idle · needs you");
     }
 }

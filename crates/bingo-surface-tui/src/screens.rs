@@ -84,7 +84,7 @@ fn streaming() {
             },
         ),
     ]);
-    let (ui, now) = scene();
+    let (ui, now) = mid_turn();
     both("streaming", &solo(&state), &ui, now);
 }
 
@@ -101,7 +101,7 @@ fn tool_running() {
             ),
         ),
     ]);
-    let (ui, now) = scene();
+    let (ui, now) = mid_turn();
     both("tool_running", &solo(&state), &ui, now);
 }
 
@@ -391,7 +391,7 @@ fn a_child_transcript() {
     ));
     let mut tree = spawned_tree(frames);
     tree.show(&child_id());
-    let (ui, now) = scene();
+    let (ui, now) = mid_turn();
     both("child_transcript", &tree, &ui, now);
 }
 

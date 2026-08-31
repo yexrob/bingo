@@ -13,6 +13,7 @@ use std::collections::BTreeSet;
 use bingo_sdk::{Action, CommandSpec, ItemId, Level, Seq, SessionState, SessionSummary, View};
 
 use crate::blocks::Blocks;
+use crate::clock::{Anim, FRAME, Now};
 use crate::commands::{self, Suggestion};
 use crate::composer::Composer;
 use crate::dialog::Dialog;
@@ -25,17 +26,55 @@ use crate::search::Search;
 use crate::select::Select;
 use crate::views::Marks;
 
-/// How long a transient notice holds the status line's middle slot (§3).
+/// How long a transient notice holds the status line's middle slot (§3),
+/// between the frames it fades in over and the ones it fades out over.
 pub const NOTICE: Duration = Duration::from_secs(4);
+/// A notice fades into the slot over two frames, and out of it over two (§6).
+pub const NOTICE_FADE: Duration = Duration::from_millis(2 * FRAME.as_millis() as u64);
 /// A second ctrl+c within this window leaves.
 pub const EXIT_WINDOW: Duration = Duration::from_secs(2);
+/// A transcript that has just been stepped into crossfades through dim over
+/// this long: two frames (§6).
+pub const SWITCH: Duration = Duration::from_millis(2 * FRAME.as_millis() as u64);
 
 /// A message that is not transcript: an ack, a warning, a hint.
 #[derive(Clone, Debug)]
 pub struct Notice {
     pub level: Level,
     pub text: String,
-    pub until: Instant,
+    /// What it is about, said after it in dim: the line a refused intent
+    /// carried, so a person sees which of theirs came back.
+    pub about: Option<String>,
+    /// When it took the slot — one notice is read at a time, and the next
+    /// waits (§3). `None` until its turn comes.
+    shown: Option<Instant>,
+}
+
+impl Notice {
+    /// How strongly it is being said: 0 as it arrives, 1 while it is there to
+    /// be read, 0 again as it goes — and nothing at all while it waits.
+    pub fn strength(&self, now: Now) -> Option<f32> {
+        let shown = self.shown?;
+        if !now.motion {
+            return Some(1.0);
+        }
+        let held = NOTICE_FADE + NOTICE;
+        match now.since(shown) {
+            age if age < NOTICE_FADE => Some(Anim::new(shown, NOTICE_FADE).progress(now.instant)),
+            age if age < held => Some(1.0),
+            _ => Some(1.0 - Anim::new(shown + held, NOTICE_FADE).progress(now.instant)),
+        }
+    }
+
+    /// Whether it has said its piece and left.
+    fn gone(&self, now: Instant) -> bool {
+        self.shown
+            .is_some_and(|shown| now.saturating_duration_since(shown) >= self.life())
+    }
+
+    fn life(&self) -> Duration {
+        NOTICE_FADE + NOTICE + NOTICE_FADE
+    }
 }
 
 /// The command dropdown's own state; its rows are derived from the composer.
@@ -159,14 +198,21 @@ impl Layer {
         }
     }
 
-    /// How far in it is at this instant.
-    pub fn reveal(&self, now: Instant) -> Reveal {
-        Reveal::at(self.open.frames(), self.since, now, self.closing)
+    /// How far in it is at this instant. Where nothing may move, a layer is
+    /// whole the moment it opens and gone the moment it closes.
+    pub fn reveal(&self, now: Now) -> Reveal {
+        if !now.motion {
+            return match self.closing {
+                true => Reveal::none(self.open.frames()),
+                false => Reveal::whole(self.open.frames()),
+            };
+        }
+        Reveal::at(self.open.frames(), self.since, now.instant, self.closing)
     }
 
     /// How far in it is, or nothing at all when there is nothing over the
     /// frame — including the moment after the last frame of a leaving.
-    pub fn drawn(&self, now: Instant) -> Option<Reveal> {
+    pub fn drawn(&self, now: Now) -> Option<Reveal> {
         let reveal = self.reveal(now);
         (self.open != Open::Nothing && !reveal.gone()).then_some(reveal)
     }
@@ -245,20 +291,24 @@ pub struct Ui {
     pub catalogs: Catalogs,
     /// An `open` is in flight; the swap happens when it lands.
     pub opening: bool,
-    /// When this surface started, which is what the spinner turns on.
-    pub started: Instant,
+    /// Whether the terminal window is being looked at. A window nobody is
+    /// looking at is the one that may say something to the desktop (§6).
+    pub focused: bool,
+    /// When the session in view was last stepped into: what the transcript
+    /// crossfades from.
+    pub switched: Option<Instant>,
     /// The frame as the last draw left it.
     pub painted: RefCell<Painted>,
 }
 
 impl Ui {
-    pub fn new(history: Vec<String>, started: Instant) -> Self {
+    pub fn new(history: Vec<String>, now: Instant) -> Self {
         Self {
             composer: Composer::default(),
             history: PromptHistory::new(history),
             dialog: Dialog::default(),
             scroll: Scroll::default(),
-            layer: Layer::shut(started),
+            layer: Layer::shut(now),
             menu: Menu::default(),
             search: None,
             select: Select::default(),
@@ -272,7 +322,8 @@ impl Ui {
             armed: None,
             catalogs: Catalogs::default(),
             opening: false,
-            started,
+            focused: true,
+            switched: None,
             painted: RefCell::default(),
         }
     }
@@ -292,24 +343,57 @@ impl Ui {
     }
 
     pub fn notify(&mut self, level: Level, text: impl Into<String>, now: Instant) {
+        self.say(level, text.into(), None, now);
+    }
+
+    /// A notice that names what it is about — the line an intent carried,
+    /// said after it in dim.
+    pub fn notify_about(&mut self, level: Level, text: String, about: String, now: Instant) {
+        self.say(level, text, Some(about), now);
+    }
+
+    /// One notice is read at a time; the next takes the slot when this one has
+    /// left it.
+    fn say(&mut self, level: Level, text: String, about: Option<String>, now: Instant) {
+        let free = self.notices.is_empty();
         self.notices.push(Notice {
             level,
-            text: text.into(),
-            until: now + NOTICE,
+            text,
+            about,
+            shown: free.then_some(now),
         });
     }
 
-    /// Drop what has run out: a notice past its window, a layer that has
-    /// finished leaving. Drawing never mutates, so the loop calls this.
-    pub fn expire(&mut self, now: Instant) {
-        self.notices.retain(|n| n.until > now);
+    /// The notice on the status line, while one is being said.
+    pub fn notice(&self) -> Option<&Notice> {
+        self.notices.first()
+    }
+
+    /// Drop what has run out and start what was waiting for it: a notice past
+    /// its window, a layer that has finished leaving. Drawing never mutates,
+    /// so the loop calls this.
+    pub fn expire(&mut self, now: Now) {
+        if self.notices.first().is_some_and(|n| n.gone(now.instant)) {
+            self.notices.remove(0);
+        }
+        if let Some(next) = self.notices.first_mut()
+            && next.shown.is_none()
+        {
+            next.shown = Some(now.instant);
+        }
         if self.layer.closing && self.layer.reveal(now).gone() {
-            self.layer = Layer::shut(now);
+            self.layer = Layer::shut(now.instant);
         }
     }
 
+    /// Whether the transcript is still crossfading into the session a person
+    /// has just stepped into (§6).
+    pub fn crossfading(&self, now: Now) -> bool {
+        now.motion && self.switched.is_some_and(|at| now.since(at) < SWITCH)
+    }
+
     /// Whether the next frame would draw a layer differently.
-    pub fn layer_moving(&self, now: Instant) -> bool {
+    pub fn layer_moving(&self, now: Now) -> bool {
         self.layer.open != Open::Nothing && self.layer.reveal(now).moving()
     }
 
@@ -374,30 +458,79 @@ impl Ui {
     pub fn page(&self) -> usize {
         self.transcript().1.max(1)
     }
-
-    /// The spinner frame for this instant.
-    pub fn spinner(&self, now: Instant) -> &'static str {
-        crate::theme::sparkle(now.duration_since(self.started))
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::{later, scene};
 
     fn ui() -> Ui {
         Ui::new(Vec::new(), Instant::now())
     }
 
     #[test]
-    fn a_notice_lives_exactly_as_long_as_its_window() {
-        let now = Instant::now();
-        let mut ui = ui();
-        ui.notify(Level::Warn, "careful", now);
-        ui.expire(now + NOTICE - Duration::from_millis(1));
+    fn a_notice_lives_its_window_and_the_frames_it_arrives_and_leaves_in() {
+        let (mut ui, now) = scene();
+        ui.notify(Level::Warn, "careful", now.instant);
+        let life = (NOTICE_FADE + NOTICE + NOTICE_FADE).as_millis() as i64;
+        ui.expire(later(now, life - 1));
         assert_eq!(ui.notices.len(), 1);
-        ui.expire(now + NOTICE);
+        ui.expire(later(now, life));
         assert!(ui.notices.is_empty());
+    }
+
+    #[test]
+    fn a_notice_fades_in_over_two_frames_holds_and_fades_out() {
+        let (mut ui, now) = scene();
+        ui.notify(Level::Warn, "careful", now.instant);
+        let at = |ms| {
+            ui.notice()
+                .and_then(|notice| notice.strength(later(now, ms)))
+        };
+        assert_eq!(at(0), Some(0.0), "it starts dim");
+        assert_eq!(at(33), Some(0.5), "and arrives over two frames");
+        assert_eq!(at(66), Some(1.0));
+        assert_eq!(at(2_000), Some(1.0), "held while it is read");
+        assert_eq!(at(4_066), Some(1.0), "to the end of its window");
+        assert_eq!(at(4_099), Some(0.5), "then it leaves the same way");
+        assert_eq!(at(4_132), Some(0.0));
+    }
+
+    #[test]
+    fn a_still_surface_says_a_notice_at_full_strength() {
+        let (mut ui, now) = scene();
+        ui.notify(Level::Warn, "careful", now.instant);
+        let still = crate::test_support::still(now);
+        assert_eq!(ui.notice().and_then(|n| n.strength(still)), Some(1.0));
+    }
+
+    #[test]
+    fn the_next_notice_waits_until_the_first_has_left() {
+        let (mut ui, now) = scene();
+        ui.notify(Level::Warn, "first", now.instant);
+        ui.notify(Level::Info, "second", now.instant);
+        assert_eq!(
+            ui.notice().map(|n| n.text.clone()).as_deref(),
+            Some("first")
+        );
+        assert_eq!(
+            ui.notices[1].strength(now),
+            None,
+            "the one behind it is not being said at all"
+        );
+
+        let life = (NOTICE_FADE + NOTICE + NOTICE_FADE).as_millis() as i64;
+        ui.expire(later(now, life));
+        assert_eq!(
+            ui.notice().map(|n| n.text.clone()).as_deref(),
+            Some("second")
+        );
+        assert_eq!(
+            ui.notices[0].strength(later(now, life)),
+            Some(0.0),
+            "and it arrives from the beginning of its own life"
+        );
     }
 
     #[test]

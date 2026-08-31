@@ -11,6 +11,7 @@ use bingo_sdk::SessionState;
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
+use crate::clock::Now;
 use crate::tree::{self, Status, Tree};
 use crate::ui::Ui;
 use crate::{keys, permission, theme};
@@ -19,14 +20,21 @@ use crate::{keys, permission, theme};
 const GAP: usize = 2;
 /// The context notice appears at this share of the compaction trigger…
 const CONTEXT_FROM: u64 = 70;
-/// …and turns `bad`, with the way out, at this one.
+/// …starts warming towards `bad` here…
+const CONTEXT_WARM: u64 = 80;
+/// …and says the way out from here, where it is `bad` outright.
 const CONTEXT_BAD: u64 = 90;
 /// What the middle says when nothing else is true and nothing is typed.
 pub const HINT: &str = keys::FOOTER_HINT;
 
 /// The status line at this width.
-pub fn line(tree: &Tree, ui: &Ui, width: usize) -> Line<'static> {
-    place(left(tree.viewed()), middle(tree, ui), right(tree), width)
+pub fn line(tree: &Tree, ui: &Ui, width: usize, now: Now) -> Line<'static> {
+    place(
+        left(tree.viewed()),
+        middle(tree, ui, now),
+        right(tree),
+        width,
+    )
 }
 
 /// The permission mode, as the policy published it. `default` is what a
@@ -43,19 +51,24 @@ fn left(state: &SessionState) -> Vec<Span<'static>> {
 }
 
 /// Only what is true now, in the order the eye should take it.
-fn middle(tree: &Tree, ui: &Ui) -> Vec<Span<'static>> {
+fn middle(tree: &Tree, ui: &Ui, now: Now) -> Vec<Span<'static>> {
     let mut parts: Vec<Span<'static>> = Vec::new();
+    // The answer to the key a person just pressed outruns every queued
+    // notice: an armed exit says so now, or not at all.
+    if ui.exit_armed(now.instant) {
+        parts.push(Span::styled(crate::input::ARM_HINT, theme::text()));
+    }
     if let Some(waiting) = count(tree, Wants::Attention) {
         parts.push(Span::styled(
             format!("{waiting} needs you (ctrl+g)"),
-            theme::presence(),
+            theme::attention(now),
         ));
     }
     if let Some(running) = count(tree, Wants::Running) {
         parts.push(Span::styled(format!("{running} running"), theme::dim()));
     }
     parts.extend(context(tree.viewed()));
-    parts.extend(notice(ui));
+    parts.extend(notice(ui, now));
     if parts.is_empty() && ui.composer.is_empty() {
         parts.push(Span::styled(HINT, theme::dim()));
     }
@@ -83,8 +96,9 @@ fn count(tree: &Tree, wants: Wants) -> Option<usize> {
     (n > 0).then_some(n)
 }
 
-/// How full the context is, from [`CONTEXT_FROM`] % of the trigger; the way
-/// out joins it once it is nearly there.
+/// How full the context is, from [`CONTEXT_FROM`] % of the trigger; it warms
+/// from there towards `bad` as the window fills, and the way out joins it once
+/// it is nearly there (§6).
 fn context(state: &SessionState) -> Vec<Span<'static>> {
     let Some(context) = state.context.filter(|c| c.trigger > 0) else {
         return Vec::new();
@@ -93,31 +107,49 @@ fn context(state: &SessionState) -> Vec<Span<'static>> {
     if share < CONTEXT_FROM {
         return Vec::new();
     }
-    let (tail, style) = if share >= CONTEXT_BAD {
-        (" · /compact", theme::bad())
-    } else {
-        ("", theme::dim())
+    let tail = match share >= CONTEXT_BAD {
+        true => " · /compact",
+        false => "",
     };
     vec![Span::styled(
         format!("context {}%{tail}", context.percent()),
-        style,
+        theme::warming(warmth(share)),
     )]
 }
 
-/// The latest thing the kernel or the surface had to say, until it expires.
-fn notice(ui: &Ui) -> Vec<Span<'static>> {
+/// How far the context notice has warmed: nothing until [`CONTEXT_WARM`] % of
+/// the trigger, all the way at the trigger itself.
+fn warmth(share: u64) -> f32 {
+    let span = (100 - CONTEXT_WARM) as f32;
+    (share.saturating_sub(CONTEXT_WARM) as f32 / span).clamp(0.0, 1.0)
+}
+
+/// What the kernel or the surface had to say, while it is being said: one at
+/// a time, arriving out of dim and leaving into it (§6).
+fn notice(ui: &Ui, now: Now) -> Vec<Span<'static>> {
     if ui.opening {
         return vec![Span::styled("opening a session…", theme::dim())];
     }
-    ui.notices
-        .last()
-        .map(|notice| {
-            vec![Span::styled(
-                notice.text.clone(),
-                theme::level(notice.level),
-            )]
-        })
-        .unwrap_or_default()
+    let Some(notice) = ui.notice() else {
+        return Vec::new();
+    };
+    let Some(strength) = notice.strength(now) else {
+        return Vec::new();
+    };
+    let mut spans = vec![Span::styled(
+        notice.text.clone(),
+        theme::fading(notice.level, strength),
+    )];
+    // What the refusal was about is the person's own line: it is said after
+    // the reason, and never more loudly than it. The slot's own separator
+    // joins the two, as it joins every other pair.
+    if let Some(about) = notice.about.as_ref() {
+        spans.push(Span::styled(
+            about.clone(),
+            theme::fading(bingo_sdk::Level::Info, strength),
+        ));
+    }
+    spans
 }
 
 /// Where you are and what answers you: the model alone at the root.
@@ -254,7 +286,11 @@ mod tests {
     use bingo_sdk::{ContextUsage, Event, TurnId};
 
     fn text(tree: &Tree, ui: &Ui, width: usize) -> String {
-        line(tree, ui, width).to_string()
+        at(tree, ui, width, scene().1)
+    }
+
+    fn at(tree: &Tree, ui: &Ui, width: usize, now: Now) -> String {
+        line(tree, ui, width, now).to_string()
     }
 
     fn with_context(used: u64) -> Tree {
@@ -318,7 +354,7 @@ mod tests {
     fn the_context_notice_is_dim_until_it_is_bad() {
         let (ui, _) = scene();
         let style = |used| {
-            styles(&line(&with_context(used), &ui, 80))
+            styles(&line(&with_context(used), &ui, 80, scene().1))
                 .into_iter()
                 .find(|(text, _)| text.starts_with("context"))
                 .map(|(_, style)| style)
@@ -357,12 +393,18 @@ mod tests {
         assert!(drawn.contains("in reviewer · fake-1"), "{drawn}");
     }
 
+    /// The whole of a notice's life: the frames it arrives in, its window,
+    /// and the frames it leaves in.
+    fn notice_life() -> i64 {
+        (crate::ui::NOTICE_FADE + crate::ui::NOTICE + crate::ui::NOTICE_FADE).as_millis() as i64
+    }
+
     #[test]
     fn a_notice_takes_the_middle_while_it_lasts() {
         let (mut ui, now) = scene();
         ui.notify(bingo_sdk::Level::Warn, "estimating", now.instant);
         assert!(text(&solo(&state()), &ui, 80).contains("estimating"));
-        ui.expire(now.instant + crate::ui::NOTICE);
+        ui.expire(later(now, notice_life()));
         assert!(!text(&solo(&state()), &ui, 80).contains("estimating"));
     }
 

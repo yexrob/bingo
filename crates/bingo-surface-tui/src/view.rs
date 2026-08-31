@@ -13,7 +13,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Padding, Paragraph};
 use unicode_width::UnicodeWidthStr;
 
-use crate::clock::Now;
+use crate::clock::{self, Now};
 use crate::frame::{self, Demand, Regions};
 use crate::tree::{self, Tree};
 use crate::ui::{Card, Open, Picker, Switcher, Ui};
@@ -26,6 +26,23 @@ use crate::{
 const COMPOSER_ROWS: usize = 10;
 /// How many dropdown rows are shown at once.
 const MENU_ROWS: usize = 8;
+/// How long a turn must have run before it is worth a row of its own (§6).
+const ACTIVITY_AFTER: std::time::Duration = std::time::Duration::from_millis(300);
+/// One breath of bingo's presence: the sparkle and the box's border (§6).
+const BREATH: std::time::Duration = std::time::Duration::from_millis(1600);
+/// One turn of the sparkle: four glyphs, 150 ms each (§6).
+const SPARKLE: std::time::Duration = std::time::Duration::from_millis(4 * theme::SPARKLE_MS as u64);
+/// bingo's own words for working (§4), one per turn.
+const VERBS: [&str; 8] = [
+    "Simmering",
+    "Noodling",
+    "Tinkering",
+    "Rummaging",
+    "Mulling",
+    "Weaving",
+    "Sketching",
+    "Percolating",
+];
 
 /// One render path for the whole tree: it paints the session in view and
 /// derives everything about the others — the counts on the status line, the
@@ -49,9 +66,9 @@ pub fn draw(tree: &Tree, ui: &Ui, frame: &mut Frame, now: Now) {
     };
     render_transcript(tree, ui, frame, regions.transcript, now, live);
     render_rail(ui, frame, regions.rail, &drawn);
-    render_activity(tree.viewed(), ui, frame, regions.activity, now);
-    render_composer(tree.viewed(), ui, frame, regions.composer);
-    render_status(tree, ui, frame, regions.status);
+    render_activity(tree.viewed(), frame, regions.activity, now);
+    render_composer(tree.viewed(), ui, frame, regions.composer, now);
+    render_status(tree, ui, frame, regions.status, now);
     layers(tree, ui, frame, regions, now);
 }
 
@@ -60,7 +77,7 @@ fn demand(tree: &Tree, ui: &Ui, width: u16, now: Now, rail: bool) -> Demand {
     let state = tree.viewed();
     Demand {
         composer: u16::try_from(composer_rows(state, ui, width as usize)).unwrap_or(u16::MAX),
-        activity: u16::try_from(activity(state, ui, now).len()).unwrap_or(u16::MAX),
+        activity: u16::try_from(activity(state, now).len()).unwrap_or(u16::MAX),
         rail,
     }
 }
@@ -95,23 +112,23 @@ fn inner_width(state: &SessionState, width: usize) -> usize {
 }
 
 /// The status line, or the search row in its place while one is open.
-fn render_status(tree: &Tree, ui: &Ui, frame: &mut Frame, area: Rect) {
+fn render_status(tree: &Tree, ui: &Ui, frame: &mut Frame, area: Rect, now: Now) {
     if area.height == 0 {
         return;
     }
     let line = match ui.search.as_ref() {
         Some(search) => search::row(search),
-        None => status::line(tree, ui, area.width as usize),
+        None => status::line(tree, ui, area.width as usize, now),
     };
     frame.render_widget(Paragraph::new(vec![line]), area);
 }
 
 /// The activity row and whatever is queued behind it.
-fn render_activity(state: &SessionState, ui: &Ui, frame: &mut Frame, area: Rect, now: Now) {
+fn render_activity(state: &SessionState, frame: &mut Frame, area: Rect, now: Now) {
     if area.height == 0 {
         return;
     }
-    frame.render_widget(Paragraph::new(activity(state, ui, now)), area);
+    frame.render_widget(Paragraph::new(activity(state, now)), area);
 }
 
 /// What floats over the frame, in the order it is stacked: the dropdown and a
@@ -134,8 +151,8 @@ fn layers(tree: &Tree, ui: &Ui, frame: &mut Frame, regions: Regions, now: Now) {
         .concat(),
     );
     ui.painted.borrow_mut().card = None;
-    match ui.layer.drawn(now.instant) {
-        Some(reveal) => layer(tree, ui, frame, above, reveal, width),
+    match ui.layer.drawn(now) {
+        Some(reveal) => layer(tree, ui, frame, above, reveal, width, now),
         None => card(tree, ui, frame, regions, now),
     }
 }
@@ -149,11 +166,12 @@ fn layer(
     above: Rect,
     reveal: layers::Reveal,
     width: usize,
+    now: Now,
 ) {
     match &ui.layer.open {
         Open::Nothing => {}
         // A dropdown above the input box, like the `/` menu: nothing dims.
-        Open::Switcher(switcher) => over(frame, above, switcher_lines(tree, switcher)),
+        Open::Switcher(switcher) => over(frame, above, switcher_lines(tree, switcher, now)),
         Open::Help => sheet(frame, above, help(ui, width), reveal),
         Open::Panel => sheet(
             frame,
@@ -209,7 +227,22 @@ fn card(tree: &Tree, ui: &Ui, frame: &mut Frame, regions: Regions, now: Now) {
         options: rows.iter().map(|(_, option)| *option).collect(),
     });
     layers::dim(frame);
-    layers::card(frame, at, lines, opening(interaction, now));
+    layers::card(
+        frame,
+        at,
+        lines,
+        opening(interaction, now),
+        guarded(interaction, now),
+    );
+}
+
+/// Whether the kernel's guard is still down. A card that cannot be answered
+/// yet says so by being dim: the keys a person presses now would be dropped,
+/// and dropping them silently is what makes a guard feel like a bug (§6).
+fn guarded(interaction: &bingo_sdk::Interaction, now: Now) -> bool {
+    interaction
+        .guard_until
+        .is_some_and(|until| !now.reached(until))
 }
 
 /// Where the row that asked ends, in screen rows, when it is on the screen.
@@ -225,12 +258,13 @@ fn asking_row(ui: &Ui, interaction: &bingo_sdk::Interaction, regions: Regions) -
     (row < region.height).then(|| region.y + row)
 }
 
-/// How far into its arrival a card the kernel opened is.
+/// How far into its arrival a card the kernel opened is. A still surface has
+/// it whole from the first frame.
 fn opening(interaction: &bingo_sdk::Interaction, now: Now) -> layers::Reveal {
-    let elapsed = now
-        .wall
-        .duration_since(interaction.opened_at)
-        .unsigned_abs();
+    if !now.motion {
+        return layers::Reveal::whole(layers::CARD_FRAMES);
+    }
+    let elapsed = now.past(interaction.opened_at);
     let since = now.instant.checked_sub(elapsed).unwrap_or(now.instant);
     layers::Reveal::at(layers::CARD_FRAMES, since, now.instant, false)
 }
@@ -285,6 +319,7 @@ fn render_transcript(
         area.width as usize,
         &ui.expanded,
         live,
+        now,
     );
     painted.top = ui.scroll.top(painted.height, rows, now.instant);
     let mut shown = painted.blocks.window(painted.top, rows);
@@ -299,18 +334,52 @@ fn render_transcript(
     if let Some(run) = ui.select.run.as_ref() {
         select::mark(frame, area, top, run);
     }
+    if ui.crossfading(now) {
+        layers::hush(frame, area);
+    }
 }
 
-/// Only while a turn runs: what it is doing, how long, and how to stop it.
-fn activity(state: &SessionState, ui: &Ui, now: Now) -> Vec<Line<'static>> {
-    let Some(turn) = state.turn.as_ref() else {
-        return Vec::new();
-    };
-    let elapsed = now.wall.duration_since(turn.started_at).as_secs().max(0);
+/// The rows between the transcript and the input box: what the turn is doing,
+/// and whatever is queued behind it.
+fn activity(state: &SessionState, now: Now) -> Vec<Line<'static>> {
+    let mut out: Vec<Line<'static>> = working(state, now).into_iter().collect();
+    out.extend(state.queue.iter().map(|entry| {
+        Line::from(Span::styled(
+            format!("{} {}", theme::user(), entry.preview),
+            theme::dim(),
+        ))
+    }));
+    // A blank row between the transcript and these, as between any two blocks
+    // (§3): they are not the tail of what was said, they are what is going on.
+    if !out.is_empty() {
+        out.insert(0, Line::default());
+    }
+    out
+}
+
+/// `✻ Simmering… (esc to interrupt · 4s · ↓ 1.2k tokens)` — but only once the
+/// turn has been at it for [`ACTIVITY_AFTER`]: a turn that answers at once
+/// says nothing at all, because a row that flashes reports nothing (§6).
+fn working(state: &SessionState, now: Now) -> Option<Line<'static>> {
+    let turn = state.turn.as_ref()?;
+    let elapsed = now.past(turn.started_at);
+    if elapsed < ACTIVITY_AFTER {
+        return None;
+    }
     let mut spans = vec![
-        Span::styled(format!("{} ", ui.spinner(now.instant)), theme::presence()),
-        Span::styled(verb(state, turn), theme::text()),
-        Span::styled(format!(" (esc to interrupt · {elapsed}s)"), theme::dim()),
+        Span::styled(format!("{} ", sparkle(now)), breathing(now)),
+        Span::styled(
+            format!("{}{}", verb(&turn.id), theme::ellipsis()),
+            theme::text(),
+        ),
+        Span::styled(
+            format!(
+                " (esc to interrupt · {}s{})",
+                elapsed.as_secs(),
+                spent(turn)
+            ),
+            theme::dim(),
+        ),
     ];
     if let Some(retry) = turn.retrying {
         spans.push(Span::styled(
@@ -318,30 +387,51 @@ fn activity(state: &SessionState, ui: &Ui, now: Now) -> Vec<Line<'static>> {
             theme::presence(),
         ));
     }
-    let mut out = vec![Line::from(spans)];
-    out.extend(state.queue.iter().map(|entry| {
-        Line::from(Span::styled(
-            format!("{} {}", theme::user(), entry.preview),
-            theme::dim(),
-        ))
-    }));
-    out
+    Some(Line::from(spans))
 }
 
-/// The running tool's name, else the plain verb.
-fn verb(state: &SessionState, turn: &LiveTurn) -> String {
-    state
-        .items
-        .iter()
-        .rev()
-        .find(|item| {
-            item.turn.as_ref() == Some(&turn.id) && item.status == bingo_sdk::ItemStatus::Running
-        })
-        .and_then(|item| match &item.body {
-            bingo_sdk::ItemBody::ToolCall { name, .. } => Some(name.clone()),
-            _ => None,
-        })
-        .unwrap_or_else(|| "Working…".to_string())
+/// What the turn has said so far, in the thousands §6 writes it in — and
+/// nothing at all before it has said anything.
+fn spent(turn: &LiveTurn) -> String {
+    match turn.usage.output_tokens {
+        0 => String::new(),
+        tokens => format!(" · ↓ {:.1}k tokens", tokens as f64 / 1000.0),
+    }
+}
+
+/// bingo's own word for what it is doing (§4), drawn once per turn from the
+/// turn's own id — so the same turn always reads the same way and a test can
+/// name what it will say.
+fn verb(turn: &bingo_sdk::TurnId) -> &'static str {
+    VERBS[seed(turn.as_str()) % VERBS.len()]
+}
+
+/// FNV-1a: a stable spread over the words without a dependency to make one.
+fn seed(id: &str) -> usize {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in id.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash as usize
+}
+
+/// The sparkle's frame, or its first one when nothing may move.
+fn sparkle(now: Now) -> &'static str {
+    match now.motion {
+        true => theme::sparkle(clock::cycle(now, SPARKLE)),
+        false => theme::spark(),
+    }
+}
+
+/// bingo breathing: the sparkle and the input box's border share one clock,
+/// so the whole surface inhales together. Still, it rests at `presence` —
+/// what breathes is the brightness, not the fact that it is working.
+fn breathing(now: Now) -> ratatui::style::Style {
+    match now.motion {
+        true => theme::breath(clock::breath(now, BREATH)),
+        false => theme::presence(),
+    }
 }
 
 /// The `?` panel: the one binding table, then the commands this session can
@@ -362,8 +452,8 @@ fn help(ui: &Ui, width: usize) -> Vec<Line<'static>> {
 }
 
 /// The `ctrl+g` list: the root and its agents, with what each is doing.
-fn switcher_lines(tree: &Tree, switcher: &Switcher) -> Vec<Line<'static>> {
-    tree::switcher_lines(&tree.rows(), switcher.selected)
+fn switcher_lines(tree: &Tree, switcher: &Switcher, now: Now) -> Vec<Line<'static>> {
+    tree::switcher_lines(&tree.rows(), switcher.selected, now)
 }
 
 fn picker_lines(picker: &Picker) -> Vec<Line<'static>> {
@@ -397,13 +487,13 @@ fn picker_lines(picker: &Picker) -> Vec<Line<'static>> {
 
 /// The prompt box: the caret lives here and nowhere else. Its border is the
 /// one box the frame draws itself; what is inside it is [`crate::composer`]'s.
-fn render_composer(state: &SessionState, ui: &Ui, frame: &mut Frame, area: Rect) {
+fn render_composer(state: &SessionState, ui: &Ui, frame: &mut Frame, area: Rect, now: Now) {
     if area.height == 0 {
         return;
     }
     let block = Block::bordered()
         .border_set(theme::border())
-        .border_style(theme::dim())
+        .border_style(border(state, now))
         .padding(Padding::horizontal(1));
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -429,6 +519,15 @@ fn render_composer(state: &SessionState, ui: &Ui, frame: &mut Frame, area: Rect)
                 .unwrap_or(u16::MAX)
                 .min(inner.height.saturating_sub(1)),
     ));
+}
+
+/// The box's border: `dim` while nothing is happening, and glowing on the
+/// activity row's own breath while the model works (§4).
+fn border(state: &SessionState, now: Now) -> ratatui::style::Style {
+    match state.busy() {
+        true => breathing(now),
+        false => theme::dim(),
+    }
 }
 
 /// What the empty composer offers. Nothing answers a `Log` session, so it is
@@ -516,7 +615,7 @@ mod tests {
                 },
             ),
         ]);
-        let (ui, now) = scene();
+        let (ui, now) = mid_turn();
         insta::assert_snapshot!(render(&state, &ui, now));
     }
 
@@ -531,7 +630,7 @@ mod tests {
                 },
             ),
         ]);
-        let (ui, now) = scene();
+        let (ui, now) = mid_turn();
         insta::assert_snapshot!(render(&state, &ui, now));
     }
 
@@ -871,7 +970,7 @@ mod tests {
                 },
             ),
         ]);
-        let (ui, now) = scene();
+        let (ui, now) = mid_turn();
         insta::assert_snapshot!(render(&state, &ui, now));
     }
 
@@ -1057,7 +1156,7 @@ mod tests {
             ),
         ]);
         tree.show(&child_id());
-        let (ui, now) = scene();
+        let (ui, now) = mid_turn();
         let screen = render_tree(&tree, &ui, now);
         assert!(screen.contains("in reviewer · fake-1"), "{screen}");
         assert!(screen.contains("Two nits"), "{screen}");
