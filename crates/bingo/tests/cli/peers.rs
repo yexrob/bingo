@@ -384,3 +384,152 @@ fn a_post_reaches_each_member_exactly_once() {
         );
     }
 }
+
+// ---- standby members (ADR-0027) --------------------------------------------
+
+/// Who every call of `tool` was addressed to, in the order it was made.
+fn addressed(frames: &[Frame], tool: &str) -> Vec<String> {
+    frames
+        .iter()
+        .filter_map(|frame| match &frame.event {
+            Event::ItemCompleted { item } => match &item.body {
+                ItemBody::ToolCall { name, input, .. } if name == tool => {
+                    Some(input["to"].as_str().unwrap_or("?").to_string())
+                }
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect()
+}
+
+/// The turns a session ran, by how many started.
+fn turns(frames: &[Frame]) -> usize {
+    frames
+        .iter()
+        .filter(|frame| matches!(frame.event, Event::TurnStarted { .. }))
+        .count()
+}
+
+/// Three roles seated silent in one room, and one post to start them. Every
+/// response the root gets goes out in one order — a spawn returns at once, so
+/// nothing else has a turn until the kickoff lands — and the root's own tail
+/// is asked for before the fan-out reaches anyone, so it holds the run open
+/// while the members relay.
+///
+/// After that the members race, and the script is written so the race cannot
+/// decide anything: each round of three responses — the last poster's
+/// wrap-up and the two members its post woke — carries exactly one post, and
+/// every one of the three has read the room's head, so whichever takes it
+/// lands it. What is asserted is what holds either way: one post per round,
+/// the count reaching three, and no dispatch from the parent.
+const RELAY: &str = r##"{"responses":[
+    {"steps":[{"toolCall":{"name":"SpawnAgent","input":{"name":"alpha","prompt":"You count in #relay: when a post hands you a number, post the next one.","standby":true}}}]},
+    {"steps":[{"toolCall":{"name":"SpawnAgent","input":{"name":"beta","prompt":"You count in #relay: when a post hands you a number, post the next one.","standby":true}}}]},
+    {"steps":[{"toolCall":{"name":"SpawnAgent","input":{"name":"gamma","prompt":"You count in #relay: when a post hands you a number, post the next one.","standby":true}}}]},
+    {"steps":[{"toolCall":{"name":"SendMessage","input":{"to":"#relay","text":"count to 3, starting at 1"}}}]},
+    {"steps":[{"delay":{"ms":5000}},{"text":"they have it"}]},
+    {"steps":[{"toolCall":{"name":"SendMessage","input":{"to":"#relay","text":"1"}}}]},
+    {"steps":[{"text":"not mine"}]},
+    {"steps":[{"text":"not mine"}]},
+    {"steps":[{"toolCall":{"name":"SendMessage","input":{"to":"#relay","text":"2"}}}]},
+    {"steps":[{"text":"not mine"}]},
+    {"steps":[{"text":"not mine"}]},
+    {"steps":[{"toolCall":{"name":"SendMessage","input":{"to":"#relay","text":"3"}}}]},
+    {"steps":[{"text":"not mine"}]},
+    {"steps":[{"text":"not mine"}]},
+    {"steps":[{"text":"done"}]},
+    {"steps":[{"text":"done"}]},
+    {"steps":[{"text":"done"}]},
+    {"steps":[{"text":"done"}]},
+    {"steps":[{"text":"done"}]},
+    {"steps":[{"text":"done"}]}
+]}"##;
+
+/// ADR-0027 end to end: three members seated silent, one kickoff post, and a
+/// relay that runs itself. The parent writes to nobody by name and is told
+/// nothing back — the count is in the room, which is where the work was.
+#[test]
+fn one_kickoff_post_runs_a_relay_the_parent_never_dispatches() {
+    let home = tempfile::tempdir().unwrap();
+    with_team(
+        home.path(),
+        r#"{"rooms":[{"name":"relay","members":["alpha","beta","gamma"]}]}"#,
+    );
+    let out = run_json(home.path(), &script(RELAY), "seat the relay and start it");
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    let root = root_of(&out);
+
+    assert_eq!(
+        posts(home.path(), &root, "relay"),
+        ["count to 3, starting at 1", "1", "2", "3"],
+        "one post per round, and the count reached three"
+    );
+    assert_eq!(
+        addressed(&frames_of(&out), "SendMessage"),
+        ["#relay"],
+        "the parent posted once and dispatched to nobody by name"
+    );
+
+    for member in ["alpha", "beta", "gamma"] {
+        let heard = said(&journal(home.path(), &format!("agent/{root}/{member}")));
+        let (brief, origin) = heard.first().expect("{member} read something");
+        assert!(brief.starts_with("You count in #relay"), "{heard:?}");
+        assert_eq!(origin.conversation, None, "the brief came from the spawn");
+        assert_eq!(
+            heard[1].0, "count to 3, starting at 1",
+            "the kickoff followed the brief it was read with: {heard:?}"
+        );
+    }
+}
+
+/// The other half of ADR-0027 §1: seating a member costs nothing until
+/// something wakes it, and nothing here does.
+const NEVER_WOKEN: &str = r##"{"responses":[
+    {"steps":[{"toolCall":{"name":"SpawnAgent","input":{"name":"understudy","prompt":"wait for the call","standby":true}}}]},
+    {"steps":[{"text":"seated"}]}
+]}"##;
+
+#[test]
+fn a_standby_member_nothing_wakes_runs_no_turn_at_all() {
+    let home = tempfile::tempdir().unwrap();
+    let out = run_json(home.path(), &script(NEVER_WOKEN), "seat an understudy");
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    let root = root_of(&out);
+
+    let seated = journal(home.path(), &format!("agent/{root}/understudy"));
+    assert_eq!(turns(&seated), 0, "a seated member idles at zero tokens");
+    assert!(
+        said(&seated).is_empty(),
+        "its brief is held, not journalled: {:?}",
+        said(&seated)
+    );
+}
+
+/// ADR-0027 §5, where the model meets it.
+const WAIT_FOR_A_STANDBY: &str = r##"{"responses":[
+    {"steps":[{"toolCall":{"name":"SpawnAgent","input":{"name":"ghost","prompt":"go","standby":true,"background":false}}}]},
+    {"steps":[{"text":"it would have waited forever"}]}
+]}"##;
+
+#[test]
+fn waiting_for_a_standby_agent_is_refused_before_one_is_started() {
+    let home = tempfile::tempdir().unwrap();
+    let out = run_json(home.path(), &script(WAIT_FOR_A_STANDBY), "wait for a ghost");
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    let root = root_of(&out);
+
+    let spawned = results(&frames_of(&out), "SpawnAgent");
+    let [refused] = spawned.as_slice() else {
+        panic!("one spawn was attempted: {spawned:?}");
+    };
+    assert!(refused.is_error, "{}", text_of(refused));
+    let words = text_of(refused);
+    assert!(words.contains("wait forever"), "{words}");
+    assert!(words.contains("background: true"), "{words}");
+    assert!(
+        session_dir(home.path(), &format!("agent/{root}/ghost")).is_none(),
+        "nothing was started to be waited on: {:?}",
+        keys(home.path())
+    );
+}
