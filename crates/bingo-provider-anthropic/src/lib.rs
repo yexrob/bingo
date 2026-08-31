@@ -159,6 +159,11 @@ impl Provider for AnthropicProvider {
         &self.id
     }
 
+    /// A named instance serves the same models the default does (ADR-0017).
+    fn family(&self) -> &str {
+        "anthropic"
+    }
+
     /// Every Claude endpoint counts tokens and caches prefixes, and forwards
     /// images unless a proxy says it strips them; what each model can do is
     /// the kernel catalogue's to say (ADR-0004).
@@ -316,6 +321,21 @@ pub(crate) mod tests {
         );
         assert_eq!(MANIFEST.provides, &["provider:anthropic"]);
         assert_eq!(MANIFEST.id, "bingo.provider.anthropic");
+    }
+
+    /// The model catalogue is asked for a provider's *family* (ADR-0017): an
+    /// instance's models are the default's, or the dropdown shows it empty.
+    #[test]
+    fn every_instance_serves_the_anthropic_family() {
+        let directory = tempfile::tempdir().expect("a temporary directory");
+        let listed = providers(
+            &directory,
+            json!({ "anthropic": { "instances": { "proxy1": {} } } }),
+        );
+        assert_eq!(listed.len(), 2);
+        for provider in listed {
+            assert_eq!(provider.family(), "anthropic", "{}", provider.id());
+        }
     }
 
     #[test]

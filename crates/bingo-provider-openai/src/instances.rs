@@ -199,6 +199,27 @@ mod tests {
         assert_eq!(built(OpenAiEndpoint::default()).id(), "proxy1");
     }
 
+    /// The model catalogue is asked for a provider's *family* (ADR-0017): an
+    /// instance's models are its wire shape's, or the dropdown shows it empty.
+    #[test]
+    fn an_instance_serves_its_variants_family() {
+        let directory = tempfile::tempdir().expect("a temporary directory");
+        let file = directory.path().join("settings.json");
+        let proxy = keyed(
+            "proxy1".into(),
+            OpenAiEndpoint::default(),
+            &file,
+            &store(&directory),
+        );
+        assert_eq!((proxy.id(), proxy.family()), ("proxy1", "openai"));
+        let work = OpenAiProvider::subscription(
+            "work",
+            crate::settings::CodexEndpoint::default(),
+            store(&directory),
+        );
+        assert_eq!((work.id(), work.family()), ("work", "codex"));
+    }
+
     fn names(taken: &[&str]) -> Result<(), PluginError> {
         let mut named = BTreeSet::new();
         taken.iter().try_for_each(|name| claim(&mut named, name))

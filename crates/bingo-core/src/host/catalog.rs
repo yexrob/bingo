@@ -32,9 +32,11 @@ fn models(registry: &Registry, configured: Option<&str>) -> Vec<CatalogEntry> {
         .iter()
         .flat_map(|p| {
             let mut ids: Vec<&str> = configured.into_iter().collect();
+            // Filed by family, not id: a named instance (ADR-0017) has no
+            // models of its own — it serves its wire shape's.
             ids.extend(
                 catalogue
-                    .models_of(p.id())
+                    .models_of(p.family())
                     .filter(|m| Some(*m) != configured),
             );
             ids.into_iter().map(|model| CatalogEntry {

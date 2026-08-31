@@ -326,6 +326,12 @@ impl Provider for OpenAiProvider {
         &self.id
     }
 
+    /// A named instance serves its variant's models (ADR-0017): an
+    /// OpenAI-shaped proxy answers `openai`, a second subscription `codex`.
+    fn family(&self) -> &str {
+        self.variant.provider_id()
+    }
+
     /// Responses caches prefixes on its own and cannot count tokens ahead of
     /// a request; what each model can do is the kernel catalogue's to say
     /// (ADR-0004).

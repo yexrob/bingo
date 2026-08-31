@@ -62,6 +62,14 @@ pub trait Provider: Send + Sync {
     /// The provider id configuration refers to (`anthropic`, `openai`, `codex`, `fake`).
     fn id(&self) -> &str;
 
+    /// The model family this provider serves — what a model catalogue files
+    /// its models under. A named instance (ADR-0017) answers the shape it
+    /// speaks (`openai`, `anthropic`, `codex`); the default is the id, which
+    /// is where the built-ins are filed.
+    fn family(&self) -> &str {
+        self.id()
+    }
+
     /// What this endpoint does with a request for `model`. Fails closed: a
     /// provider that does not know says `false`.
     fn endpoint(&self, model: &str) -> EndpointCapabilities;
