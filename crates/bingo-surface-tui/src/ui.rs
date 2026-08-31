@@ -23,6 +23,7 @@ use crate::history::PromptHistory;
 use crate::layers::{self, Reveal};
 use crate::pager::Pager;
 use crate::rail::{CardId, Pin};
+use crate::rewind::Rewind;
 use crate::scroll::Scroll;
 use crate::search::Search;
 use crate::select::Select;
@@ -155,6 +156,8 @@ pub enum Open {
     Picker(Picker),
     /// One block, whole, as a sheet.
     Pager(Pager),
+    /// The turns of this transcript, as a card above the input box.
+    Rewind(Rewind),
     /// The tree, as a card above the input box.
     Switcher(Switcher),
 }
@@ -174,14 +177,14 @@ impl Open {
     pub fn captures(&self) -> bool {
         matches!(
             self,
-            Open::Picker(_) | Open::Pager(_) | Open::Switcher(_) | Open::Panel
+            Open::Picker(_) | Open::Pager(_) | Open::Switcher(_) | Open::Rewind(_) | Open::Panel
         )
     }
 
     /// How many frames its arrival takes: a card comes down, a sheet rises.
     fn frames(&self) -> u16 {
         match self {
-            Open::Switcher(_) => layers::CARD_FRAMES,
+            Open::Switcher(_) | Open::Rewind(_) => layers::CARD_FRAMES,
             _ => layers::SHEET_FRAMES,
         }
     }
@@ -294,6 +297,9 @@ pub struct Ui {
     pub expanded: BTreeSet<ItemId>,
     /// When ctrl+c was pressed on an empty composer.
     pub armed: Option<Instant>,
+    /// An `esc` closed nothing, so the next one is the second of `esc esc`.
+    /// It needs no clock: any other key clears it.
+    pub esc_armed: bool,
     /// What the kernel offers the dropdown, read once at start.
     pub catalogs: Catalogs,
     /// An `open` is in flight; the swap happens when it lands.
@@ -336,6 +342,7 @@ impl Ui {
             pending: None,
             expanded: BTreeSet::new(),
             armed: None,
+            esc_armed: false,
             catalogs: Catalogs::default(),
             opening: false,
             focused: true,

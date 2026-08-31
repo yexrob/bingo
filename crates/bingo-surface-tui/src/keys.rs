@@ -29,6 +29,10 @@ pub const BINDINGS: &[Binding] = &[
         description: "sheet → card → dropdown → interrupt",
     },
     Binding {
+        keys: "esc esc",
+        description: "rewind to an earlier turn",
+    },
+    Binding {
         keys: "ctrl+c",
         description: "interrupt · clear input · twice to exit",
     },

@@ -704,6 +704,28 @@ fn a_highlighted_code_block() {
     both("code_block", &solo(&state), &ui, now);
 }
 
+/// `esc esc`: the turns of this transcript, newest first, above the input box
+/// like the switcher (design §3 — the rewind picker is a card).
+#[test]
+fn the_rewind_picker() {
+    let mut state = folded(answered());
+    for item in state.items.iter_mut() {
+        item.turn = Some(TurnId::from_raw("trn_1"));
+    }
+    state.items.push({
+        let mut asked = user("itm_3", "now write me a note and run the tests");
+        asked.turn = Some(TurnId::from_raw("trn_2"));
+        asked
+    });
+    let (mut ui, now) = scene();
+    shown(
+        &mut ui,
+        Open::Rewind(crate::rewind::Rewind { selected: 1 }),
+        now,
+    );
+    both("rewind_picker", &solo(&state), &ui, now);
+}
+
 /// `@` in the composer: the paths under the session's own directory, on the
 /// same dropdown the `/` menu rides (design §4).
 #[test]

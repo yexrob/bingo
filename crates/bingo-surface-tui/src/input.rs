@@ -21,6 +21,7 @@ use crate::effect::Effect;
 use crate::keys;
 use crate::pager;
 use crate::rail::{self, CardId, Pin};
+use crate::rewind::{self, Rewind};
 use crate::search::Search;
 use crate::select::Cell;
 use crate::tree::Tree;
@@ -41,6 +42,9 @@ pub fn on_key(ui: &mut Ui, tree: &Tree, key: KeyEvent, now: Now) -> Vec<Effect> 
         return Vec::new();
     }
     ui.block = None;
+    // `esc esc` needs no clock: any other key is what says the two were not
+    // one gesture.
+    ui.esc_armed &= key.code == KeyCode::Esc;
     let state = tree.viewed();
     if let Some(effects) = leaving(ui, state, key, now) {
         return effects;
@@ -82,6 +86,7 @@ fn layered(ui: &mut Ui, tree: &Tree, key: KeyEvent, now: Now) -> Option<Vec<Effe
         match &ui.layer.open {
             Open::Picker(_) => return Some(picker(ui, key, now)),
             Open::Pager(_) => return Some(pager::keys(ui, tree, key, now)),
+            Open::Rewind(_) => return Some(rewind_keys(ui, tree, key, now)),
             _ => {}
         }
     }
@@ -384,12 +389,65 @@ fn escape(ui: &mut Ui, tree: &Tree, now: Now) -> Vec<Effect> {
         dropdown: !ui.suggestions(cwd(tree)).is_empty(),
         busy: tree.viewed().busy(),
     };
-    match keys::escape(open) {
+    // An `esc` that closed something is not half of a gesture.
+    let rung = keys::escape(open);
+    ui.esc_armed &= rung.is_none();
+    match rung {
         Some(keys::Escape::Sheet) => ui.layer.close(now.instant),
         Some(keys::Escape::Card) => return cancel(ui, tree, now),
         Some(keys::Escape::Dropdown) => ui.menu.dismissed = true,
         Some(keys::Escape::Interrupt) => return vec![Effect::Interrupt],
-        None => {}
+        // The stack was empty, so this `esc` is one of `esc esc`.
+        None => twice(ui, tree, now),
+    }
+    Vec::new()
+}
+
+/// `esc esc` on an empty composer opens the rewind picker (design §3). The
+/// first press arms it; the second opens the card, when the session has a
+/// `/rewind` for it to run.
+fn twice(ui: &mut Ui, tree: &Tree, now: Now) {
+    if !ui.composer.is_empty() {
+        return;
+    }
+    if !std::mem::replace(&mut ui.esc_armed, true) {
+        return;
+    }
+    ui.esc_armed = false;
+    if !rewind::offered(&ui.commands()) {
+        return;
+    }
+    let turns = rewind::turns(tree.viewed());
+    if turns.is_empty() {
+        return;
+    }
+    ui.layer.show(Open::Rewind(Rewind::default()), now.instant);
+}
+
+/// The rewind card answers its own keys, as every list does.
+fn rewind_keys(ui: &mut Ui, tree: &Tree, key: KeyEvent, now: Now) -> Vec<Effect> {
+    let turns = rewind::turns(tree.viewed());
+    let rows = rewind::rows(&turns);
+    let Open::Rewind(card) = &mut ui.layer.open else {
+        return Vec::new();
+    };
+    match key.code {
+        KeyCode::Up => card.selected = card.selected.saturating_sub(1),
+        KeyCode::Down => card.selected = (card.selected + 1).min(rows.saturating_sub(1)),
+        KeyCode::Esc => ui.layer.close(now.instant),
+        KeyCode::Enter => {
+            let chosen = turns.get(card.selected).map(rewind::line);
+            ui.layer.close(now.instant);
+            return chosen
+                .map(|line| {
+                    vec![Effect::Submit(Input::text(
+                        line,
+                        Origin::surface(SURFACE_ID),
+                    ))]
+                })
+                .unwrap_or_default();
+        }
+        _ => {}
     }
     Vec::new()
 }
@@ -839,6 +897,87 @@ mod tests {
                 origin: Origin::surface(SURFACE_ID),
             })],
         );
+    }
+
+    /// A transcript of two turns, and a session that can rewind to one.
+    fn rewindable() -> (SessionState, Vec<bingo_sdk::CommandSpec>) {
+        let mut state = state();
+        state.items = vec![
+            in_turn(
+                "itm_1",
+                "trn_1",
+                user("itm_1", "what is in this workspace?"),
+            ),
+            in_turn("itm_2", "trn_2", user("itm_2", "write me a note")),
+        ];
+        (
+            state,
+            vec![bingo_sdk::CommandSpec {
+                name: "rewind".into(),
+                aliases: Vec::new(),
+                hint: "go back to a turn".into(),
+                args: bingo_sdk::ArgSpec::Free {
+                    hint: "<turn>".into(),
+                },
+                instant: true,
+                family: "session".into(),
+            }],
+        )
+    }
+
+    fn in_turn(id: &str, turn: &str, mut item: bingo_sdk::Item) -> bingo_sdk::Item {
+        item.id = bingo_sdk::ItemId::from_raw(id);
+        item.turn = Some(bingo_sdk::TurnId::from_raw(turn));
+        item
+    }
+
+    #[test]
+    fn esc_twice_on_an_empty_composer_lists_the_turns_and_enter_rewinds() {
+        let (state, commands) = rewindable();
+        let tree = solo(&state);
+        let (mut ui, now) = scene();
+        ui.catalogs.commands = commands;
+        on_key(&mut ui, &tree, key(KeyCode::Esc), now);
+        assert!(ui.esc_armed, "the first one arms it and closes nothing");
+        on_key(&mut ui, &tree, key(KeyCode::Esc), now);
+        assert!(ui.layer.is(&Open::Rewind(Rewind::default())));
+
+        on_key(&mut ui, &tree, key(KeyCode::Down), now);
+        let effects = on_key(&mut ui, &tree, key(KeyCode::Enter), now);
+        assert_eq!(
+            effects,
+            vec![Effect::Submit(Input::text(
+                "/rewind trn_1",
+                Origin::surface(SURFACE_ID),
+            ))],
+            "the second row is the older turn"
+        );
+    }
+
+    #[test]
+    fn a_key_between_the_two_escapes_is_what_says_they_were_not_one_gesture() {
+        let (state, commands) = rewindable();
+        let tree = solo(&state);
+        let (mut ui, now) = scene();
+        ui.catalogs.commands = commands;
+        on_key(&mut ui, &tree, key(KeyCode::Esc), now);
+        on_key(&mut ui, &tree, typed('a'), now);
+        assert!(!ui.esc_armed);
+        on_key(&mut ui, &tree, key(KeyCode::Esc), now);
+        assert!(!ui.layer.showing(), "and a half-typed line is not empty");
+    }
+
+    /// The picker is offered only where the session has a `/rewind` to run;
+    /// as of M11e nothing registers one.
+    #[test]
+    fn nothing_opens_where_the_session_cannot_rewind() {
+        let (state, _) = rewindable();
+        let tree = solo(&state);
+        let (mut ui, now) = scene();
+        on_key(&mut ui, &tree, key(KeyCode::Esc), now);
+        on_key(&mut ui, &tree, key(KeyCode::Esc), now);
+        assert!(!ui.layer.showing());
+        assert!(ui.notices.is_empty(), "and it is silent about it");
     }
 
     /// The row the switcher's cursor is on, when it is the layer that is open.

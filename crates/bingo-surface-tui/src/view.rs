@@ -18,8 +18,8 @@ use crate::frame::{self, Demand, Regions};
 use crate::tree::{self, Tree};
 use crate::ui::{Card, Open, Picker, Switcher, Ui};
 use crate::{
-    composer as prompt, dialog, keys, layers, pager, panel, rail, search, select, status, theme,
-    views, wrap,
+    composer as prompt, dialog, keys, layers, pager, panel, rail, rewind, search, select, status,
+    theme, views, wrap,
 };
 
 /// How tall the composer box may grow before it scrolls internally.
@@ -181,6 +181,12 @@ fn layer(
         ),
         Open::Picker(picker) => sheet(frame, above, picker_lines(picker), reveal),
         Open::Pager(open) => paged(tree, frame, above, open, reveal),
+        // A dropdown above the input box, like the switcher's.
+        Open::Rewind(card) => over(
+            frame,
+            above,
+            rewind::lines(&rewind::turns(tree.viewed()), card.selected),
+        ),
     }
 }
 

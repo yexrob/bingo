@@ -54,6 +54,7 @@ mod paths;
 mod permission;
 mod preview;
 mod rail;
+mod rewind;
 mod run;
 mod scroll;
 mod search;
