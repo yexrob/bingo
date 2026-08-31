@@ -16,6 +16,7 @@ use ratatui::layout::Position;
 use crate::SURFACE_ID;
 use crate::clock::Now;
 use crate::commands::{self, Local};
+use crate::complete;
 use crate::effect::Effect;
 use crate::keys;
 use crate::pager;
@@ -56,7 +57,7 @@ pub fn on_key(ui: &mut Ui, tree: &Tree, key: KeyEvent, now: Now) -> Vec<Effect> 
     if key.code == KeyCode::Esc {
         return escape(ui, tree, now);
     }
-    if key.code == KeyCode::Tab && ui.suggestions().is_empty() && cycle_focus(ui, tree) {
+    if key.code == KeyCode::Tab && ui.suggestions(cwd(tree)).is_empty() && cycle_focus(ui, tree) {
         return Vec::new();
     }
     // A prompt raised anywhere in the tree is answered from wherever the
@@ -64,7 +65,7 @@ pub fn on_key(ui: &mut Ui, tree: &Tree, key: KeyEvent, now: Now) -> Vec<Effect> 
     if let Some((_, interaction)) = tree.open_interaction() {
         return ui.dialog.on_key(interaction, key, now);
     }
-    if let Some(effects) = menu(ui, key) {
+    if let Some(effects) = menu(ui, tree, key) {
         return effects;
     }
     editing(ui, tree, key, now)
@@ -326,6 +327,11 @@ fn fire(ui: &mut Ui, tree: &Tree, key: char) -> Option<Vec<Effect>> {
     Some(vec![Effect::Submit(Input::Action { action })])
 }
 
+/// The directory a session's `@` mentions are read from.
+fn cwd(tree: &Tree) -> &str {
+    &tree.viewed().summary.cwd
+}
+
 /// A bracketed paste lands verbatim wherever the caret is.
 pub fn on_paste(ui: &mut Ui, text: &str) {
     ui.composer.insert(text);
@@ -375,7 +381,7 @@ fn escape(ui: &mut Ui, tree: &Tree, now: Now) -> Vec<Effect> {
         // One layer is open at a time, whichever form it takes.
         sheet: ui.layer.showing(),
         card: tree.open_interaction().is_some(),
-        dropdown: !ui.suggestions().is_empty(),
+        dropdown: !ui.suggestions(cwd(tree)).is_empty(),
         busy: tree.viewed().busy(),
     };
     match keys::escape(open) {
@@ -569,18 +575,18 @@ fn switcher(ui: &mut Ui, tree: &Tree, key: KeyEvent, now: Now) -> Vec<Effect> {
 }
 
 /// The dropdown owns the arrows and the completion keys while it is open.
-fn menu(ui: &mut Ui, key: KeyEvent) -> Option<Vec<Effect>> {
-    let rows = ui.suggestions();
+fn menu(ui: &mut Ui, tree: &Tree, key: KeyEvent) -> Option<Vec<Effect>> {
+    let rows = ui.suggestions(cwd(tree));
     if rows.is_empty() {
         return (key.code == KeyCode::Tab).then(Vec::new);
     }
     match key.code {
         KeyCode::Up => ui.menu.selected = ui.menu.selected.saturating_sub(1),
         KeyCode::Down => ui.menu.selected = (ui.menu.selected + 1).min(rows.len() - 1),
-        KeyCode::Tab => return Some(complete(ui)),
+        KeyCode::Tab => return Some(accept(ui, tree)),
         // Enter completes only while there is something left to complete; a
         // name already typed in full is meant to run.
-        KeyCode::Enter if adds_something(ui) => return Some(complete(ui)),
+        KeyCode::Enter if adds_something(ui, tree) => return Some(accept(ui, tree)),
         KeyCode::Enter => {
             ui.menu.dismissed = true;
             return None;
@@ -590,13 +596,13 @@ fn menu(ui: &mut Ui, key: KeyEvent) -> Option<Vec<Effect>> {
     Some(Vec::new())
 }
 
-fn adds_something(ui: &Ui) -> bool {
-    ui.selected_suggestion()
+fn adds_something(ui: &Ui, tree: &Tree) -> bool {
+    ui.selected_suggestion(cwd(tree))
         .is_some_and(|chosen| chosen.value.trim_end() != ui.composer.text().trim_end())
 }
 
-fn complete(ui: &mut Ui) -> Vec<Effect> {
-    if let Some(chosen) = ui.selected_suggestion() {
+fn accept(ui: &mut Ui, tree: &Tree) -> Vec<Effect> {
+    if let Some(chosen) = ui.selected_suggestion(cwd(tree)) {
         ui.composer.set(&chosen.value);
     }
     ui.edited();
@@ -731,10 +737,13 @@ fn submit(ui: &mut Ui, tree: &Tree, now: Now) -> Vec<Effect> {
         })],
         Some(Local::Resume(None)) => vec![Effect::ListSessions],
         Some(Local::Exit) => vec![Effect::Exit],
-        None => vec![Effect::Submit(Input::text(
+        // A picture a person mentioned reaches the model as a part beside the
+        // line, and the line still says which word it was.
+        None => vec![Effect::Submit(Input::Text {
+            attachments: complete::attachments(&text),
             text,
-            Origin::surface(SURFACE_ID),
-        ))],
+            origin: Origin::surface(SURFACE_ID),
+        })],
     }
 }
 
@@ -783,6 +792,54 @@ mod tests {
     use crate::test_support::*;
     use bingo_sdk::{Activation, Answer, SessionId, TurnStatus};
     use crossterm::event::KeyCode;
+
+    /// A session whose own directory has two files a mention could name.
+    fn with_files() -> (tempfile::TempDir, SessionState) {
+        let dir = tempfile::tempdir().expect("a directory");
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").expect("a manifest");
+        std::fs::write(dir.path().join("shot.png"), "png").expect("a picture");
+        let mut state = state();
+        state.summary.cwd = dir.path().to_string_lossy().into_owned();
+        (dir, state)
+    }
+
+    #[test]
+    fn an_at_sign_offers_the_paths_under_the_session_and_enter_takes_one() {
+        let (_dir, state) = with_files();
+        let tree = solo(&state);
+        let (mut ui, now) = scene();
+        write(&mut ui, &state, "@Car", now);
+        assert_eq!(
+            ui.suggestions(&state.summary.cwd)
+                .iter()
+                .map(|row| row.label.clone())
+                .collect::<Vec<_>>(),
+            vec!["@Cargo.toml".to_string()],
+        );
+        on_key(&mut ui, &tree, key(KeyCode::Enter), now);
+        assert_eq!(ui.composer.text(), "@Cargo.toml ");
+        assert!(
+            ui.suggestions(&state.summary.cwd).is_empty(),
+            "a finished mention offers nothing more"
+        );
+    }
+
+    #[test]
+    fn a_mentioned_picture_travels_beside_the_line() {
+        let (_dir, state) = with_files();
+        let tree = solo(&state);
+        let (mut ui, now) = scene();
+        write(&mut ui, &state, "look at @shot.png", now);
+        let effects = on_key(&mut ui, &tree, key(KeyCode::Enter), now);
+        assert_eq!(
+            effects,
+            vec![Effect::Submit(Input::Text {
+                text: "look at @shot.png".into(),
+                attachments: vec!["shot.png".into()],
+                origin: Origin::surface(SURFACE_ID),
+            })],
+        );
+    }
 
     /// The row the switcher's cursor is on, when it is the layer that is open.
     fn selected(ui: &Ui) -> Option<usize> {

@@ -146,7 +146,7 @@ fn layers(tree: &Tree, ui: &Ui, frame: &mut Frame, regions: Regions, now: Now) {
                 .as_ref()
                 .map(|view| views::render(view, width))
                 .unwrap_or_default(),
-            menu(ui),
+            menu(ui, &tree.viewed().summary.cwd),
         ]
         .concat(),
     );
@@ -585,8 +585,8 @@ fn placeholder(state: &SessionState) -> String {
     }
 }
 
-fn menu(ui: &Ui) -> Vec<Line<'static>> {
-    let rows = ui.suggestions();
+fn menu(ui: &Ui, cwd: &str) -> Vec<Line<'static>> {
+    let rows = ui.suggestions(cwd);
     let selected = ui.menu.selected.min(rows.len().saturating_sub(1));
     let column = rows.iter().map(|r| r.label.width()).max().unwrap_or(0);
     rows.iter()

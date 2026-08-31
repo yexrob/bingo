@@ -37,6 +37,7 @@
 mod blocks;
 mod clock;
 mod commands;
+mod complete;
 mod composer;
 mod dialog;
 mod effect;

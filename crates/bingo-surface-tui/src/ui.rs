@@ -15,6 +15,7 @@ use bingo_sdk::{Action, CommandSpec, ItemId, Level, Seq, SessionState, SessionSu
 use crate::blocks::Blocks;
 use crate::clock::{Anim, FRAME, Now};
 use crate::commands::{self, Suggestion};
+use crate::complete;
 use crate::composer::Composer;
 use crate::dialog::Dialog;
 use crate::frame::Regions;
@@ -305,6 +306,15 @@ pub struct Ui {
     pub switched: Option<Instant>,
     /// The frame as the last draw left it.
     pub painted: RefCell<Painted>,
+    /// The paths the `@` dropdown ranks, walked when the first one asks.
+    files: RefCell<Files>,
+}
+
+/// One reading of a directory, kept until the session's own directory changes.
+#[derive(Debug, Default)]
+struct Files {
+    cwd: String,
+    paths: Vec<String>,
 }
 
 impl Ui {
@@ -331,6 +341,7 @@ impl Ui {
             focused: true,
             switched: None,
             painted: RefCell::default(),
+            files: RefCell::default(),
         }
     }
 
@@ -411,20 +422,42 @@ impl Ui {
         all
     }
 
-    /// The dropdown's rows for the line being typed. Empty means no dropdown.
-    pub fn suggestions(&self) -> Vec<Suggestion> {
+    /// The dropdown's rows for the line being typed: a `/` command, or an `@`
+    /// path from the session's own directory. Empty means no dropdown.
+    pub fn suggestions(&self, cwd: &str) -> Vec<Suggestion> {
         if self.menu.dismissed {
             return Vec::new();
         }
-        commands::suggestions(
-            self.composer.text(),
-            &self.commands(),
-            &self.catalogs.values,
-        )
+        let line = self.composer.text();
+        match complete::mention(line) {
+            Some(partial) => self.paths(cwd, partial, line),
+            None => commands::suggestions(line, &self.commands(), &self.catalogs.values),
+        }
     }
 
-    pub fn selected_suggestion(&self) -> Option<Suggestion> {
-        let rows = self.suggestions();
+    /// The `@` rows. The walk is a memo of the directory, taken when the first
+    /// mention asks for it and thrown away when the session's own directory
+    /// changes — nothing here is a second copy of what is on disk.
+    fn paths(&self, cwd: &str, partial: &str, line: &str) -> Vec<Suggestion> {
+        let mut files = self.files.borrow_mut();
+        if files.cwd != cwd {
+            *files = Files {
+                cwd: cwd.to_string(),
+                paths: complete::walk(std::path::Path::new(cwd)),
+            };
+        }
+        complete::rank(partial, &files.paths)
+            .into_iter()
+            .map(|path| Suggestion {
+                value: complete::completed(line, &path),
+                label: format!("@{path}"),
+                hint: String::new(),
+            })
+            .collect()
+    }
+
+    pub fn selected_suggestion(&self, cwd: &str) -> Option<Suggestion> {
+        let rows = self.suggestions(cwd);
         rows.get(self.menu.selected.min(rows.len().saturating_sub(1)))
             .cloned()
     }
@@ -552,10 +585,10 @@ mod tests {
     fn dismissing_the_dropdown_hides_it_until_the_next_edit() {
         let mut ui = ui();
         ui.composer.insert("/he");
-        assert!(!ui.suggestions().is_empty());
+        assert!(!ui.suggestions("/tmp/project").is_empty());
         ui.menu.dismissed = true;
-        assert!(ui.suggestions().is_empty());
+        assert!(ui.suggestions("/tmp/project").is_empty());
         ui.edited();
-        assert!(!ui.suggestions().is_empty());
+        assert!(!ui.suggestions("/tmp/project").is_empty());
     }
 }

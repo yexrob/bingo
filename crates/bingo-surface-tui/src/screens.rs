@@ -676,6 +676,25 @@ fn a_highlighted_code_block() {
     both("code_block", &solo(&state), &ui, now);
 }
 
+/// `@` in the composer: the paths under the session's own directory, on the
+/// same dropdown the `/` menu rides (design §4).
+#[test]
+fn the_at_completion_dropdown() {
+    let dir = tempfile::tempdir().expect("a directory");
+    std::fs::create_dir_all(dir.path().join("src")).expect("a source directory");
+    for name in ["lib.rs", "markdown.rs", "pager.rs", "theme.rs"] {
+        std::fs::write(dir.path().join("src").join(name), "//! it\n").expect("a source");
+    }
+    std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").expect("a manifest");
+    // A transcript long enough that the welcome box — which would carry this
+    // run's temporary directory into the snapshot — has scrolled away.
+    let mut state = long_transcript(24);
+    state.summary.cwd = dir.path().to_string_lossy().into_owned();
+    let (mut ui, now) = scene();
+    write(&mut ui, &state, "read @src/", now);
+    both("at_dropdown", &solo(&state), &ui, now);
+}
+
 /// A long result, open whole: what `⏎` on a focused block and the second
 /// `ctrl+o` both take (design §5).
 #[test]
