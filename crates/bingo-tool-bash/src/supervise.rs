@@ -15,9 +15,12 @@ use std::time::Duration;
 use bingo_sdk::HostHandle;
 use process_wrap::tokio::ChildWrapper;
 use tokio::sync::Mutex;
+// The tokio clock, so a test can drive the quiet window instead of waiting it
+// out: `std::time::Instant` would not move under `tokio::time::pause`.
+use tokio::time::Instant;
 
 use crate::jobs::{Job, Jobs, State};
-use crate::notify::{self, Conditions};
+use crate::notify::{self, Conditions, Notice};
 use crate::run::{self, Running};
 use crate::sink::Sink;
 
@@ -26,6 +29,11 @@ const GRACE: Duration = Duration::from_secs(2);
 
 /// How often a watched job's new output is read for a condition.
 const SCAN: Duration = Duration::from_millis(250);
+
+/// How much quiet one notice of an ongoing watch buys. A pattern that answers
+/// on every line of a busy log must not wake a session on every line, so what
+/// the window swallows becomes a count on the next notice (ADR-0018 §8).
+const QUIET: Duration = Duration::from_secs(30);
 
 /// Everything one job's task needs.
 pub struct Watch {
@@ -54,14 +62,14 @@ async fn supervise(watch: Watch) {
     let state = wait_out(&mut running.child, &job, &mut scan, &host, &running.sink).await;
     run::drain(running.readers).await;
     // The last of the output only reached the log once the readers were done.
-    let hit = scan.look(&job.log).await;
+    let pending = scan.last_look(&job.log).await;
     job.finished(state);
     jobs.publish(&host, &job.session).await;
     announce(
         &host,
         &job,
         &running.sink,
-        notify::finished(&job, state, hit.as_deref()),
+        notify::finished(&job, state, pending.as_ref()),
     )
     .await;
 }
@@ -83,8 +91,8 @@ async fn wait_out(
             }
             () = asked.cancelled() => return end_it(child).await,
             () = tokio::time::sleep(SCAN) => {
-                if let Some(line) = scan.look(&job.log).await {
-                    announce(host, job, sink, notify::matched(job, &line)).await;
+                if let Some(notice) = scan.look(&job.log).await {
+                    announce(host, job, sink, notify::matched(job, &notice)).await;
                 }
             }
         }
@@ -126,35 +134,107 @@ async fn announce(host: &HostHandle, job: &Job, sink: &Mutex<Sink>, text: String
     }
 }
 
-/// The reading of a job's log that looks for a condition. It fires once: a
-/// pattern that matches every line must not wake a session every line.
+/// The reading of a job's log that looks for a condition, and what it makes of
+/// what it finds.
 struct Scan<'a> {
     conditions: &'a Conditions,
     cursor: u64,
-    fired: bool,
+    mode: Mode,
+}
+
+/// What a scan does with a hit after the first one.
+enum Mode {
+    /// The default: one notice, and silence after it. A pattern that matches
+    /// every line must not wake a session every line.
+    Once { fired: bool },
+    /// `notify_all`: every hit is news, but no more than one notice a quiet
+    /// window; what the window swallows is held as a count for the next one.
+    All {
+        last_wake: Option<Instant>,
+        held: Option<Notice>,
+    },
 }
 
 impl<'a> Scan<'a> {
     fn new(conditions: &'a Conditions) -> Self {
+        let mode = if conditions.ongoing() {
+            Mode::All {
+                last_wake: None,
+                held: None,
+            }
+        } else {
+            Mode::Once { fired: false }
+        };
         Self {
             conditions,
             cursor: 0,
-            fired: false,
+            mode,
         }
     }
 
-    /// The first line of what is new that answers a condition, and `None`
-    /// forever after it has answered once.
-    async fn look(&mut self, log: &Path) -> Option<String> {
-        if self.fired || !self.conditions.watched() {
+    /// What the output written since the last look has earned, if anything.
+    async fn look(&mut self, log: &Path) -> Option<Notice> {
+        let text = self.read(log).await?;
+        let conditions = self.conditions;
+        match &mut self.mode {
+            Mode::Once { fired } => first(conditions, &text, fired),
+            Mode::All { last_wake, held } => throttled(conditions, &text, last_wake, held),
+        }
+    }
+
+    /// What is left to say now the job has ended. The completion is going out
+    /// regardless, so the quiet window holds nothing back — this is the one
+    /// thing a count with no hit behind it ever rides (ADR-0018 §8).
+    async fn last_look(&mut self, log: &Path) -> Option<Notice> {
+        let last = self.look(log).await;
+        match &mut self.mode {
+            Mode::Once { .. } => last,
+            Mode::All { held, .. } => last.or_else(|| held.take()),
+        }
+    }
+
+    /// The output written since the last look, or `None` when there is nothing
+    /// left to look for: an unwatched job, and a job whose one notice has
+    /// already gone, cost no read at all.
+    async fn read(&mut self, log: &Path) -> Option<String> {
+        if !self.watching() {
             return None;
         }
         let window = crate::log::window(log, self.cursor, WINDOW).await.ok()?;
         self.cursor = window.cursor;
-        let hit = self.conditions.hit(&window.text)?.to_string();
-        self.fired = true;
-        Some(hit)
+        Some(window.text)
     }
+
+    fn watching(&self) -> bool {
+        self.conditions.watched() && !matches!(self.mode, Mode::Once { fired: true })
+    }
+}
+
+/// The default reading: the first line that answers a condition, once.
+fn first(conditions: &Conditions, text: &str, fired: &mut bool) -> Option<Notice> {
+    let hit = conditions.hit(text)?;
+    *fired = true;
+    Some(Notice::of(hit))
+}
+
+/// The ongoing reading: a hit wakes when the quiet window has passed since the
+/// last notice, and is only counted inside it. Nothing but a hit ever wakes
+/// anything — the window ending on its own flushes no count, because a
+/// suppressed hit is the same pattern matching again (ADR-0018 §8).
+fn throttled(
+    conditions: &Conditions,
+    text: &str,
+    last_wake: &mut Option<Instant>,
+    held: &mut Option<Notice>,
+) -> Option<Notice> {
+    let fresh = conditions.tally(text);
+    let folded = Notice::folded(held.take(), &fresh);
+    if fresh.count == 0 || last_wake.is_some_and(|wake| wake.elapsed() < QUIET) {
+        *held = folded;
+        return None;
+    }
+    *last_wake = Some(Instant::now());
+    folded
 }
 
 /// Bytes of new output one scan reads. A condition on a line further than this
@@ -175,15 +255,27 @@ mod tests {
     }
 
     fn conditions(on: &[&str]) -> Conditions {
-        Conditions::new(on.iter().map(|s| (*s).to_string()).collect(), None)
+        Conditions::new(on.iter().map(|s| (*s).to_string()).collect(), None, false)
             .expect("the conditions compile")
+    }
+
+    /// The same words, watched for the whole of the job (`notify_all`).
+    fn ongoing(on: &[&str]) -> Conditions {
+        Conditions::new(on.iter().map(|s| (*s).to_string()).collect(), None, true)
+            .expect("the conditions compile")
+    }
+
+    /// A log to write into, and the path a scan reads it back from.
+    async fn writing() -> (tempfile::TempDir, Log, std::path::PathBuf) {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let log = Log::create(dir.path(), "job").await.expect("a log");
+        let path = log.path().to_path_buf();
+        (dir, log, path)
     }
 
     #[tokio::test]
     async fn a_scan_reads_on_from_where_it_stopped_and_fires_once() {
-        let dir = tempfile::tempdir().expect("temp dir");
-        let mut log = Log::create(dir.path(), "job").await.expect("a log");
-        let path = log.path().to_path_buf();
+        let (_dir, mut log, path) = writing().await;
         let watched = conditions(&["FAILED"]);
         let mut scan = Scan::new(&watched);
 
@@ -191,14 +283,128 @@ mod tests {
         assert_eq!(scan.look(&path).await, None, "nothing has matched yet");
         log.write("test result: FAILED\n").await.expect("written");
         assert_eq!(
-            scan.look(&path).await.as_deref(),
-            Some("test result: FAILED")
+            scan.look(&path).await,
+            Some(Notice::of("test result: FAILED"))
         );
         log.write("test result: FAILED again\n").await.expect("w");
         assert_eq!(
             scan.look(&path).await,
             None,
             "one notification, not a storm"
+        );
+        assert_eq!(
+            scan.last_look(&path).await,
+            None,
+            "the default says nothing more at the end either"
+        );
+    }
+
+    // ---- the ongoing watch, on a clock the test drives (ADR-0018 §8) ------
+
+    /// The leading edge: the first hit is news the moment it is read, and the
+    /// hits behind it inside the window are only counted.
+    #[tokio::test(start_paused = true)]
+    async fn an_ongoing_watch_wakes_at_once_and_then_holds_the_burst() {
+        let (_dir, mut log, path) = writing().await;
+        let watched = ongoing(&["HIT"]);
+        let mut scan = Scan::new(&watched);
+
+        log.write("warming\nHIT one\n").await.expect("written");
+        assert_eq!(scan.look(&path).await, Some(Notice::of("HIT one")));
+
+        log.write("HIT two\n").await.expect("written");
+        tokio::time::advance(Duration::from_secs(5)).await;
+        assert_eq!(scan.look(&path).await, None, "inside the window, counted");
+        log.write("HIT three\nHIT four\n").await.expect("written");
+        tokio::time::advance(Duration::from_secs(5)).await;
+        assert_eq!(scan.look(&path).await, None, "a burst is still one wake");
+    }
+
+    /// No trailing timer: the window running out flushes nothing on its own,
+    /// because a held count is the same pattern that will match again.
+    #[tokio::test(start_paused = true)]
+    async fn the_window_ending_on_its_own_flushes_nothing() {
+        let (_dir, mut log, path) = writing().await;
+        let watched = ongoing(&["HIT"]);
+        let mut scan = Scan::new(&watched);
+
+        log.write("HIT one\n").await.expect("written");
+        assert_eq!(scan.look(&path).await, Some(Notice::of("HIT one")));
+        log.write("HIT two\n").await.expect("written");
+        assert_eq!(scan.look(&path).await, None, "held by the window");
+
+        tokio::time::advance(QUIET * 3).await;
+        assert_eq!(
+            scan.look(&path).await,
+            None,
+            "the quiet window ending is not news; only a hit is"
+        );
+    }
+
+    /// The next hit past the window carries what the window swallowed, and
+    /// leaves the count at nothing behind it.
+    #[tokio::test(start_paused = true)]
+    async fn the_first_hit_past_the_window_carries_the_count_and_resets_it() {
+        let (_dir, mut log, path) = writing().await;
+        let watched = ongoing(&["HIT"]);
+        let mut scan = Scan::new(&watched);
+
+        log.write("HIT one\nHIT two\n").await.expect("written");
+        assert_eq!(
+            scan.look(&path).await,
+            Some(Notice {
+                line: "HIT two".into(),
+                more: 1
+            }),
+            "the newest line shows and the older one is the count"
+        );
+        log.write("HIT three\nHIT four\n").await.expect("written");
+        assert_eq!(scan.look(&path).await, None, "held by the window");
+
+        tokio::time::advance(QUIET).await;
+        log.write("HIT five\n").await.expect("written");
+        assert_eq!(
+            scan.look(&path).await,
+            Some(Notice {
+                line: "HIT five".into(),
+                more: 2
+            })
+        );
+
+        tokio::time::advance(QUIET).await;
+        log.write("HIT six\n").await.expect("written");
+        assert_eq!(
+            scan.look(&path).await,
+            Some(Notice::of("HIT six")),
+            "the count went with the notice that carried it"
+        );
+    }
+
+    /// What no hit came back for rides the end of the job, and only that.
+    #[tokio::test(start_paused = true)]
+    async fn what_the_window_held_rides_the_end_of_the_job() {
+        let (_dir, mut log, path) = writing().await;
+        let watched = ongoing(&["HIT"]);
+        let mut scan = Scan::new(&watched);
+
+        log.write("HIT one\n").await.expect("written");
+        assert_eq!(scan.look(&path).await, Some(Notice::of("HIT one")));
+        log.write("HIT two\nHIT three\n").await.expect("written");
+        assert_eq!(scan.look(&path).await, None, "held by the window");
+
+        log.write("HIT four\n").await.expect("written");
+        assert_eq!(
+            scan.last_look(&path).await,
+            Some(Notice {
+                line: "HIT four".into(),
+                more: 2
+            }),
+            "the last read and the held count are one message"
+        );
+        assert_eq!(
+            scan.last_look(&path).await,
+            None,
+            "and the ending says it once"
         );
     }
 

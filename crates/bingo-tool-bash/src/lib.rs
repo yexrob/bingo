@@ -86,6 +86,11 @@ pub struct BashArgs {
     /// A regular expression to watch a background job's output for, matched a
     /// line at a time.
     pub notify_regex: Option<String>,
+    /// Keep watching past the first hit, instead of stopping there. You are
+    /// told at most once every thirty seconds; the lines that match in between
+    /// are counted, and the count comes with the next notice. Needs
+    /// `notify_on` or `notify_regex`.
+    pub notify_all: Option<bool>,
     /// What the command does, in five to ten words, in active voice.
     pub description: Option<String>,
 }
@@ -265,9 +270,11 @@ fn description() -> String {
          step — a server, a watcher, a long build or test run. It answers at once with a job id: \
          `BashOutput` reads what the job has written, `KillShell` ends it, and you are told when \
          it finishes, so waiting is a choice rather than the only way. `notify_on` and \
-         `notify_regex` have you told the moment a line you care about appears. A command that \
-         could never finish on its own — `watch`, `tail -f`, a loop with no end, a trailing `&` — \
-         is backgrounded whatever the call said.\n\n\
+         `notify_regex` have you told the moment a line you care about appears. They tell you \
+         once unless `notify_all: true` keeps them watching for the whole job, which tells you \
+         again at most once every thirty seconds and counts the lines that matched in between. A \
+         command that could never finish on its own — `watch`, `tail -f`, a loop with no end, a \
+         trailing `&` — is backgrounded whatever the call said.\n\n\
          Without `background`, the call waits for the command to exit, for {default} milliseconds \
          unless `timeout` says otherwise ({max} milliseconds at most); a person watching may move \
          it into the background while it runs, and then the call answers with a job id instead. \
@@ -317,6 +324,7 @@ impl Tool for BashTool {
         let conditions = match Conditions::new(
             args.notify_on.clone().unwrap_or_default(),
             args.notify_regex.clone(),
+            args.notify_all.unwrap_or(false),
         ) {
             Ok(conditions) => conditions,
             Err(reason) => return Ok(ToolOutput::error(reason)),
@@ -704,6 +712,7 @@ pub(crate) mod tests {
             "background",
             "notify_on",
             "notify_regex",
+            "notify_all",
         ] {
             assert!(
                 spec.input_schema["properties"][field].is_object(),
@@ -827,6 +836,29 @@ pub(crate) mod tests {
             .expect("the call answered");
         assert!(out.is_error);
         assert!(text(&out).contains("notify_regex"), "{}", text(&out));
+        assert!(
+            jobs.running_in(&cx.session).is_empty(),
+            "nothing was started"
+        );
+    }
+
+    /// An ongoing watch with nothing to watch for is refused the same way: a
+    /// job that can never notify is worse than a call that comes back to be
+    /// corrected (ADR-0018 §8).
+    #[tokio::test]
+    async fn notify_all_with_no_condition_is_an_error_result_and_runs_nothing() {
+        let (jobs, _promotions, tool) = tool();
+        let (_host, cx) = context();
+        let out = tool
+            .call(
+                serde_json::json!({"command": "echo hi", "background": true, "notify_all": true}),
+                &cx,
+            )
+            .await
+            .expect("the call answered");
+        assert!(out.is_error);
+        assert!(text(&out).contains("notify_all"), "{}", text(&out));
+        assert!(text(&out).contains("notify_on"), "{}", text(&out));
         assert!(
             jobs.running_in(&cx.session).is_empty(),
             "nothing was started"
