@@ -8,6 +8,15 @@
 # already in the tree, so the `@` completion's walk costs nothing. Images were
 # measured at +33 (`image` +9, `ratatui-image` +24 for its sixel quantiser) and
 # refused: they stay at the `[image: name]` degrade of design §5.
-max_dependencies = 282
+# M13 (docs/plans/M13-channels.md) raises 282 → 295 by the measured 13: the
+# workspace resolves 281 crates without `bingo-channels` and 294 with it. One
+# is the new member itself; the other twelve are `tokio-tungstenite` and what
+# it pulls — `tungstenite`, `data-encoding` and `rustls-native-certs` for the
+# handshake, and `sha1` with its RustCrypto stack (digest, block-buffer,
+# crypto-common, hybrid-array, typenum, const-oid, cpufeatures) for
+# `Sec-WebSocket-Accept`. rustls only: `native-tls` is off and `openssl-sys`
+# is banned in deny.toml. The Deliverer, the loopback and the Feishu HTTP side
+# add nothing: `reqwest` and `base64` were already in the tree.
+max_dependencies = 295
 max_core_check_seconds = 20
 max_target_gb = 5

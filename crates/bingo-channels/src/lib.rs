@@ -11,6 +11,7 @@
 //! - [`runner`] — one conversation on one session, both directions.
 //! - [`host`] — the surface: arrivals in, runners out.
 //! - [`loopback`] — the adapter that is the contract fixture.
+//! - [`feishu`] — the first real platform, wire bricks and all.
 //!
 //! Nothing here reaches the sdk: a channel is a client of the one event
 //! stream like every other surface, folding frames with `SessionState::apply`
@@ -20,6 +21,7 @@ pub mod adapter;
 pub mod conversation;
 pub mod deliver;
 pub mod error;
+pub mod feishu;
 pub mod gate;
 pub mod host;
 pub mod limits;
