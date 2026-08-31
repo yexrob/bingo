@@ -77,7 +77,13 @@ fn demand(tree: &Tree, ui: &Ui, width: u16, now: Now, rail: bool) -> Demand {
     let state = tree.viewed();
     Demand {
         composer: u16::try_from(composer_rows(state, ui, width as usize)).unwrap_or(u16::MAX),
-        activity: u16::try_from(activity(state, now).len()).unwrap_or(u16::MAX),
+        // Never fewer than two: the band holds its air and its verb row even
+        // while idle, so a turn starting or ending moves nothing — the
+        // bottom-anchored transcript used to bounce by two rows at each end
+        // of every stream, which read as flicker (§6: nothing still moves).
+        activity: u16::try_from(activity(state, now).len())
+            .unwrap_or(u16::MAX)
+            .max(2),
         rail,
     }
 }
@@ -831,7 +837,9 @@ mod tests {
                 ),
             ),
         ];
-        frames.extend((3..12).map(|i| {
+        // Few enough that the asking row stays on screen above the reserved
+        // activity band (view.rs's demand keeps two rows for it).
+        frames.extend((3..10).map(|i| {
             item_frame(
                 i,
                 assistant(

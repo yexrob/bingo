@@ -1694,7 +1694,9 @@ mod tests {
         let state = long_transcript(60);
         let (mut ui, now) = scene();
         render(&state, &ui, now);
-        on_mouse(&mut ui, &solo(&state), click(4, 19), now);
+        // Row 17 is the transcript's last: the reserved activity band holds
+        // the two rows beneath it (view.rs's demand).
+        on_mouse(&mut ui, &solo(&state), click(4, 17), now);
         assert_eq!(
             ui.select.block,
             Some(bingo_sdk::ItemId::from_raw("itm_59")),
@@ -1708,8 +1710,8 @@ mod tests {
         let state = long_transcript(60);
         let (mut ui, now) = scene();
         render(&state, &ui, now);
-        on_mouse(&mut ui, &solo(&state), click(2, 17), now);
-        on_mouse(&mut ui, &solo(&state), dragged(6, 19), now);
+        on_mouse(&mut ui, &solo(&state), click(2, 15), now);
+        on_mouse(&mut ui, &solo(&state), dragged(6, 17), now);
         let run = ui.select.run.expect("a run");
         assert_eq!(run.anchor.column, 2);
         assert_eq!(run.head.column, 6);

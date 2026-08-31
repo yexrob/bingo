@@ -324,11 +324,13 @@ fn a_new_block_rises_two_rows_into_place() {
             .filter(|line| line.trim_matches('"').trim().is_empty())
             .count()
     };
-    assert_eq!(rows_below(now), 2, "it enters two rows above its place");
-    assert_eq!(rows_below(later(now, 33)), 1);
+    // Two of the blanks are the reserved activity band (view.rs's demand),
+    // there on every frame; the rise itself contributes 2 → 1 → 0 above them.
+    assert_eq!(rows_below(now), 4, "it enters two rows above its place");
+    assert_eq!(rows_below(later(now, 33)), 3);
     assert_eq!(
         rows_below(later(now, 66)),
-        0,
+        2,
         "and lands on the third frame"
     );
 }

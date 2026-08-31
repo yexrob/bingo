@@ -3,10 +3,6 @@ source: crates/bingo-surface-tui/src/view.rs
 expression: scrolled
 ---
 "                                                                                "
-"> line 11                                                                       "
-"                                                                                "
-"> line 12                                                                       "
-"                                                                                "
 "> line 13                                                                       "
 "                                                                                "
 "> line 14                                                                       "
@@ -22,6 +18,10 @@ expression: scrolled
 "> line 19                                                                       "
 "                                                                                "
 "> line 20                                                                       "
+"                                                                                "
+"> line 21                                                                       "
+"                                                                                "
+"                                                                                "
 "╭──────────────────────────────────────────────────────────────────────────────╮"
 "│ > ask anything · / for commands · ! for shell                                │"
 "╰──────────────────────────────────────────────────────────────────────────────╯"
