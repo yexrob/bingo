@@ -258,22 +258,30 @@ fn slow_draw(took: Duration, already: bool) -> Option<String> {
 }
 
 impl Run {
-    /// Whether the next frame would differ from this one on its own: a turn
+    /// Whether the next frame would differ from the one on the screen: a turn
     /// breathes, a block is still settling, the transcript eases where a key
     /// sent it, a layer is arriving or leaving, a notice is holding the status
-    /// line until its time is up — or frames arrived faster than they can be
-    /// drawn and the newest of them is not on the screen yet.
+    /// line until its time is up, an armed exit is holding its hint — or
+    /// frames arrived faster than they can be drawn and the newest of them is
+    /// not on the screen yet.
+    ///
+    /// Every clock here is read at the instant that frame was drawn, not at
+    /// this one: a draw costs time, and an animation whose remaining frames
+    /// all fall due during a slow one is over before the loop looks again —
+    /// leaving a sheet halfway up the screen until the next keystroke.
     fn animating(&self, now: Now) -> bool {
+        let screen = Now {
+            instant: self.painted,
+            ..now
+        };
         self.behind
             || self.session.tree.sessions().any(SessionState::busy)
-            || self.ui.scroll.moving(now.instant)
-            || self.ui.layer_moving(now)
+            || self.ui.scroll.moving(screen.instant)
+            || self.ui.layer_moving(screen)
             || !self.ui.notices.is_empty()
-            || self.ui.crossfading(now)
+            || self.ui.crossfading(screen)
             || self.ui.painted.borrow().blocks.moving()
-            // An armed exit is a held cue: its hint leaves the status line on
-            // its own when the window lapses, which takes one more frame.
-            || self.ui.exit_armed(now.instant)
+            || self.ui.exit_armed(screen.instant)
     }
 
     /// The way out. Whatever arrived in the last tick is drawn first, so the
@@ -1233,24 +1241,30 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_selection_the_terminal_will_not_take_is_said_out_loud() {
-        let mut run = Run {
+    /// A run with nothing happening in it, whose one painted frame is `at`.
+    fn idle(at: Instant) -> Run {
+        Run {
             host: TestHost::with(vec![]).0,
             data_dir: std::path::PathBuf::new(),
             session: Attached::new(
                 state(),
                 SessionHandle(std::sync::Arc::new(TestSession::default())),
             ),
-            ui: Ui::new(Vec::new(), Instant::now()),
+            ui: Ui::new(Vec::new(), at),
             mine: HashMap::new(),
             replies: mpsc::channel(1).0,
-            clipboard: Some("x".repeat(crate::select::LIMIT)),
-            painted: Instant::now(),
+            clipboard: None,
+            painted: at,
             behind: false,
             sluggish: false,
             exit: None,
-        };
+        }
+    }
+
+    #[test]
+    fn a_selection_the_terminal_will_not_take_is_said_out_loud() {
+        let mut run = idle(Instant::now());
+        run.clipboard = Some("x".repeat(crate::select::LIMIT));
         let mut recorder = Recorder::default();
         run.hand_over(&mut recorder)
             .expect("the notice is not an error");
@@ -1269,6 +1283,29 @@ mod tests {
         harness.go(vec![], script, None).await;
         let data = bingo_sdk::Env::rooted(harness.home.path()).data_dir;
         assert_eq!(crate::history::load(&data), vec!["ls"]);
+    }
+
+    /// A draw costs time, and the clock does not stop while it runs. So the
+    /// question the loop asks between frames is about the frame that is *on
+    /// the screen*, not about this instant: a sheet whose four frames all fell
+    /// due during one slow draw is over by the time the loop looks, and the
+    /// quarter of it that was painted would stay on the screen until the next
+    /// keystroke.
+    #[test]
+    fn a_frame_is_owed_while_the_one_on_the_screen_is_still_arriving() {
+        let (_, opened) = scene();
+        let mut run = idle(opened.instant);
+        run.ui.layer.show(Open::Help, opened.instant);
+        let after = later(opened, 200);
+        assert!(
+            run.animating(after),
+            "the sheet on the screen is a quarter of the way up: the rest is owed"
+        );
+        run.painted = after.instant;
+        assert!(
+            !run.animating(after),
+            "and once the whole of it has been painted, the loop may sleep"
+        );
     }
 
     #[test]
