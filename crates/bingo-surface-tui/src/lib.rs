@@ -27,6 +27,8 @@
 //!   [`keys`], [`permission`], [`paths`], [`welcome`] and [`wrap`] are the
 //!   bricks those stand on, and [`theme`] is the one table of tokens and
 //!   glyphs they draw with.
+//! - [`status`] is the one line of furniture, and [`cycle`] is the strip of
+//!   sessions that takes it while `↓` has it open.
 //!
 //! # What a person types
 //!
@@ -39,6 +41,7 @@ mod clock;
 mod commands;
 mod complete;
 mod composer;
+mod cycle;
 mod dialog;
 mod effect;
 mod frame;

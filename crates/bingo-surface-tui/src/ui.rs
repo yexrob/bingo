@@ -279,6 +279,10 @@ pub struct Ui {
     pub menu: Menu,
     /// `ctrl+f`: the query in the status line's row, while it is there.
     pub search: Option<Search>,
+    /// `↓` on an empty composer: the quick cycle's strip has the status line
+    /// (§3). Which chip it marks is the session the tree is showing, so being
+    /// open is the whole of what there is to remember.
+    pub cycling: bool,
     /// What the transcript is holding: a focused block, a run of cells.
     pub select: Select,
     pub notices: Vec<Notice>,
@@ -333,6 +337,7 @@ impl Ui {
             layer: Layer::shut(now),
             menu: Menu::default(),
             search: None,
+            cycling: false,
             select: Select::default(),
             notices: Vec::new(),
             block: None,

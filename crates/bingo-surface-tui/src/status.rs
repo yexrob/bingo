@@ -230,8 +230,9 @@ fn pad(width: usize) -> Span<'static> {
 }
 
 /// Cut spans to `max` cells, the last one ending in an ellipsis. Nothing is
-/// left of a slot with no room for even that.
-fn clip(spans: Vec<Span<'static>>, max: usize) -> Vec<Span<'static>> {
+/// left of a slot with no room for even that. The quick cycle's strip is the
+/// other thing this row draws, so it is cut to the row by the same rule.
+pub fn clip(spans: Vec<Span<'static>>, max: usize) -> Vec<Span<'static>> {
     if cells(&spans) <= max {
         return spans;
     }

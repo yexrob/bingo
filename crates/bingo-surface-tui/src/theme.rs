@@ -744,6 +744,10 @@ mod tests {
                 "text",
                 &[
                     "composer.rs",
+                    // The session a person is on, in the strip that takes the
+                    // status line: weight rather than hue, so `NO_COLOR` still
+                    // says which of the chips is the one on screen.
+                    "cycle.rs",
                     "dialog.rs",
                     "markdown.rs",
                     "pager.rs",
@@ -771,6 +775,7 @@ mod tests {
                 "dim",
                 &[
                     "composer.rs",
+                    "cycle.rs",
                     "dialog.rs",
                     "keys.rs",
                     "layers.rs",

@@ -45,6 +45,10 @@ pub const BINDINGS: &[Binding] = &[
         description: "prompt history at the first and last line",
     },
     Binding {
+        keys: "left/right",
+        description: "the session strip · down opens it",
+    },
+    Binding {
         keys: "ctrl+a/e",
         description: "start / end of the line (home · end)",
     },

@@ -18,8 +18,8 @@ use crate::frame::{self, Demand, Regions};
 use crate::tree::{self, Tree};
 use crate::ui::{Card, Open, Picker, Switcher, Ui};
 use crate::{
-    composer as prompt, dialog, keys, layers, pager, panel, rail, rewind, search, select, status,
-    theme, views, wrap,
+    composer as prompt, cycle, dialog, keys, layers, pager, panel, rail, rewind, search, select,
+    status, theme, views, wrap,
 };
 
 /// How tall the composer box may grow before it scrolls internally.
@@ -117,14 +117,18 @@ fn inner_width(state: &SessionState, width: usize) -> usize {
         .max(1)
 }
 
-/// The status line, or the search row in its place while one is open.
+/// The one line of furniture: the status line, or what has taken its row —
+/// a search's query, the quick cycle's strip of sessions. All three are one
+/// row, so what a person opens never moves anything above it (§3).
 fn render_status(tree: &Tree, ui: &Ui, frame: &mut Frame, area: Rect, now: Now) {
     if area.height == 0 {
         return;
     }
-    let line = match ui.search.as_ref() {
-        Some(search) => search::row(search),
-        None => status::line(tree, ui, area.width as usize, now),
+    let width = area.width as usize;
+    let line = match (ui.search.as_ref(), ui.cycling) {
+        (Some(search), _) => search::row(search),
+        (None, true) => cycle::strip(&tree.rows(), tree.view(), width),
+        (None, false) => status::line(tree, ui, width, now),
     };
     frame.render_widget(Paragraph::new(vec![line]), area);
 }
@@ -1229,6 +1233,24 @@ mod tests {
         let (mut ui, now) = scene();
         shown(&mut ui, Open::Switcher(Switcher { selected: 1 }), now);
         insta::assert_snapshot!(render_tree(&tree, &ui, now));
+    }
+
+    /// The quick cycle is the status line's other content, so opening it must
+    /// move nothing: every row but the last is the row it already was (§3).
+    #[test]
+    fn the_strip_takes_the_status_lines_row_and_moves_nothing_else() {
+        let tree = spawned(vec![child_frame(2, started("trn_9"))]);
+        let (mut ui, now) = scene();
+        let before = render_tree(&tree, &ui, now);
+        ui.cycling = true;
+        let with_strip = render_tree(&tree, &ui, now);
+
+        let rows = |screen: &str| screen.lines().map(str::to_string).collect::<Vec<_>>();
+        let (was, is) = (rows(&before), rows(&with_strip));
+        assert_eq!(was.len(), is.len(), "the frame keeps its rows");
+        assert_eq!(was[..was.len() - 1], is[..is.len() - 1], "nothing jumps");
+        assert!(is.last().is_some_and(|row| row.contains("⏺ project")));
+        insta::assert_snapshot!(with_strip);
     }
 
     // ---- a session nothing answers --------------------------------------
