@@ -2,6 +2,12 @@
 # The count is of every crate in the workspace's normal tree, members included,
 # so a new member costs one: 268 → 269 is `bingo-demo-ui` (M11d, ADR-0013),
 # which brings no dependency of its own.
-max_dependencies = 269
+# M11e (docs/plans/M11e-content-kinds.md) raises 269 → 282 by the measured 13:
+# syntect + two-face and their seven shared edges (+9), nucleo-matcher (+1),
+# terminal-colorsaurus with terminal-trx and xterm-color (+3). `ignore` was
+# already in the tree, so the `@` completion's walk costs nothing. Images were
+# measured at +33 (`image` +9, `ratatui-image` +24 for its sixel quantiser) and
+# refused: they stay at the `[image: name]` degrade of design §5.
+max_dependencies = 282
 max_core_check_seconds = 20
 max_target_gb = 5

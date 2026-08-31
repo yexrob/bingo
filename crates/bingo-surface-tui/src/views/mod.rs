@@ -17,7 +17,9 @@ mod markdown;
 mod panel;
 mod progress;
 mod stack;
-mod table;
+/// A GFM table in an answer is the same table a plugin publishes, so
+/// [`crate::markdown`] hands its rows straight to this renderer (M11e).
+pub mod table;
 mod text;
 mod tree;
 

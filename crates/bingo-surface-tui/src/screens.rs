@@ -629,3 +629,28 @@ fn the_status_line_spends_no_colour_but_the_mode() {
         "the mode is the one thing the line is allowed to colour"
     );
 }
+
+// ---- M11e: the content kinds of §5 --------------------------------------
+
+/// An answer whose middle is a GFM table: ruled, its numbers down the right.
+#[test]
+fn a_markdown_table_is_ruled() {
+    let state = folded(vec![
+        item(1, user("itm_1", "how many tests are there?")),
+        item(
+            2,
+            assistant(
+                "itm_2",
+                "Per crate:\n\n\
+                 | crate | tests | time |\n\
+                 |---|---|---|\n\
+                 | sdk | 41 | 0.02 |\n\
+                 | core | 137 | 1.40 |\n\
+                 | surface-tui | 9 | |\n",
+                ItemStatus::Completed,
+            ),
+        ),
+    ]);
+    let (ui, now) = scene();
+    both("markdown_table", &solo(&state), &ui, now);
+}

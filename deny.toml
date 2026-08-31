@@ -28,6 +28,8 @@ deny = [
   { crate = "figment", reason = "unmaintained since 2024; the settings merge is hand-rolled" },
   { crate = "openssl-sys", reason = "rustls only" },
   { crate = "reqwest-eventsource", reason = "pins reqwest 0.12; use sse-stream" },
+  { crate = "onig", reason = "a C regex engine; syntect runs on regex-fancy (M11e)" },
+  { crate = "onig_sys", reason = "a C regex engine; syntect runs on regex-fancy (M11e)" },
 ]
 
 [sources]
