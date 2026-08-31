@@ -187,7 +187,7 @@ async fn attach(
         clipboard: None,
         // Older than a frame, on the loop's own clock, so the first thing
         // that happens is drawn.
-        painted: Now::real().instant - TICK,
+        painted: older_than_a_frame(),
         behind: false,
         exit: None,
     };
@@ -199,6 +199,13 @@ async fn attach(
         )));
     }
     Ok((run, Some(attachment.events)))
+}
+
+/// An instant one frame in the past, or this one on a machine that has not
+/// been running for a whole frame yet.
+fn older_than_a_frame() -> Instant {
+    let now = Now::real().instant;
+    now.checked_sub(TICK).unwrap_or(now)
 }
 
 /// A stream that has ended never wakes the loop again.
