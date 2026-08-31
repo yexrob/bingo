@@ -22,6 +22,11 @@
 # for `Sec-WebSocket-Accept`. rustls only: `native-tls` is off and
 # `openssl-sys` is banned in deny.toml. The Deliverer, the loopback and the
 # Feishu HTTP side add nothing: `reqwest` and `base64` were already in the tree.
-max_dependencies = 297
+# M16 (docs/plans/M16-background-work.md, ADR-0019) raises 297 → 298 by the
+# one member `bingo-schedule`. It brings no crate of its own: the clock is
+# `jiff`, the id `ulid`, the creation card's diff `similar`, and the runner is
+# `tokio` — all already in the tree. Cron would have been a dependency, which
+# is why the spec is three forms and a parser (ADR-0019 §2).
+max_dependencies = 298
 max_core_check_seconds = 20
 max_target_gb = 5
