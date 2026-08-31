@@ -654,3 +654,80 @@ fn a_markdown_table_is_ruled() {
     let (ui, now) = scene();
     both("markdown_table", &solo(&state), &ui, now);
 }
+
+const RUST: &str = "// the frame, once\npub fn draw(now: Now) -> bool {\n    let ready = true;\n    ready && now.motion\n}\n";
+
+/// A fenced block in an answer: the fence's word, the gutter, and the code
+/// in the three inks of §5.
+#[test]
+fn a_highlighted_code_block() {
+    let state = folded(vec![
+        item(1, user("itm_1", "show me the draw function")),
+        item(
+            2,
+            assistant(
+                "itm_2",
+                &format!("Here it is:\n\n```rust\n{RUST}```\n"),
+                ItemStatus::Completed,
+            ),
+        ),
+    ]);
+    let (ui, now) = scene();
+    both("code_block", &solo(&state), &ui, now);
+}
+
+/// What a screen cannot show: which token every run of a fence was drawn in.
+/// `keyword` is the one cool colour, `dim` a comment, `text` the rest — and a
+/// fence that names a diff wears the diff's own tints instead.
+#[test]
+fn every_fenced_language_is_inked_by_the_token_table() {
+    insta::assert_snapshot!("inked_rust", inked("rust", RUST));
+    insta::assert_snapshot!(
+        "inked_python",
+        inked(
+            "python",
+            "# read it first\ndef run(path):\n    return open(path).read()\n"
+        )
+    );
+    insta::assert_snapshot!(
+        "inked_json",
+        inked(
+            "json",
+            "{\n  \"model\": \"gpt-5.4\",\n  \"stream\": true\n}\n"
+        )
+    );
+    insta::assert_snapshot!(
+        "inked_diff",
+        inked("diff", "@@ -1,2 +1,2 @@\n-let a = 1;\n+let a = 2;\n ok\n")
+    );
+}
+
+/// One fence, as runs of text with the token each was spent on.
+fn inked(lang: &str, code: &str) -> String {
+    crate::markdown::render(&format!("```{lang}\n{code}```"), 60)
+        .iter()
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|span| format!("{}⟨{}⟩", span.content, token(span.style)))
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn token(style: ratatui::style::Style) -> &'static str {
+    use crate::theme;
+    for (name, spent) in [
+        ("keyword", theme::mode()),
+        ("dim", theme::dim()),
+        ("added", theme::added()),
+        ("removed", theme::removed()),
+        ("text", theme::text()),
+    ] {
+        if style == spent {
+            return name;
+        }
+    }
+    "?"
+}

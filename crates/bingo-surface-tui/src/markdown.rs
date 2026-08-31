@@ -71,6 +71,19 @@ impl Margin {
     }
 }
 
+/// A fenced block being read: the word after its backticks and its text.
+#[derive(Debug)]
+struct Fence {
+    lang: String,
+    text: String,
+}
+
+impl Fence {
+    fn lines(&self, width: usize) -> Vec<Line<'static>> {
+        views::code::lines(Some(&self.lang), &self.text, width)
+    }
+}
+
 struct Writer {
     width: usize,
     lines: Vec<Line<'static>>,
@@ -79,7 +92,9 @@ struct Writer {
     margin: Margin,
     /// One counter per open list; `None` for a bullet list.
     lists: Vec<Option<u64>>,
-    code: bool,
+    /// The fenced block being read; it is laid out only once it is whole, so
+    /// the highlighter sees the block and not one line of it at a time.
+    code: Option<Fence>,
     /// The table being read; while there is one, text is a cell and not prose.
     table: Option<Table>,
     /// The destination of the link being read, appended when it closes.
@@ -95,7 +110,7 @@ impl Writer {
             styles: vec![theme::text()],
             margin: Margin::default(),
             lists: Vec::new(),
-            code: false,
+            code: None,
             table: None,
             link: None,
         }
@@ -121,7 +136,7 @@ impl Writer {
         match event {
             Md::Start(tag) => self.open(tag),
             Md::End(tag) => self.close(tag),
-            Md::Text(text) if self.code => self.code_text(&text),
+            Md::Text(text) if self.code.is_some() => self.code_text(&text),
             Md::Text(text) => self.push(&text, self.style()),
             Md::Code(code) => self.push(&format!("`{code}`"), self.style()),
             Md::Html(html) | Md::InlineHtml(html) => self.push(html.trim_end(), theme::dim()),
@@ -177,7 +192,7 @@ impl Writer {
             | TagEnd::Link => {
                 self.styles.pop();
             }
-            TagEnd::CodeBlock => self.code = false,
+            TagEnd::CodeBlock => self.end_code(),
             TagEnd::BlockQuote(_) => {
                 self.margin.0.pop();
             }
@@ -241,19 +256,30 @@ impl Writer {
     }
 
     fn open_code(&mut self, kind: &CodeBlockKind<'_>) {
-        self.code = true;
-        if let CodeBlockKind::Fenced(lang) = kind
-            && !lang.is_empty()
-        {
-            self.line(vec![Span::styled(format!("    {lang}"), theme::dim())]);
+        let lang = match kind {
+            CodeBlockKind::Fenced(lang) => lang.to_string(),
+            CodeBlockKind::Indented => String::new(),
+        };
+        self.code = Some(Fence {
+            lang,
+            text: String::new(),
+        });
+    }
+
+    fn code_text(&mut self, text: &str) {
+        if let Some(fence) = self.code.as_mut() {
+            fence.text.push_str(text);
         }
     }
 
-    /// A fenced block is emitted line by line: indented, dim, never wrapped
-    /// into prose.
-    fn code_text(&mut self, text: &str) {
-        for line in text.trim_end_matches('\n').split('\n') {
-            self.line(vec![Span::styled(format!("    {line}"), theme::dim())]);
+    /// The block is whole: through the one code renderer, so a fence in an
+    /// answer is drawn exactly like a plugin's `View::Code` (design §5).
+    fn end_code(&mut self) {
+        let Some(fence) = self.code.take() else {
+            return;
+        };
+        for line in fence.lines(self.width) {
+            self.line(line.spans);
         }
     }
 
@@ -366,13 +392,23 @@ mod tests {
     }
 
     #[test]
-    fn a_fence_is_indented_and_dim_line_by_line() {
-        let lines = render("```rust\nfn main() {}\nlet x = 1;\n```", 40);
+    fn a_fence_is_indented_and_highlighted_line_by_line() {
+        let lines = render("```rust\nfn main() {}\n// go\n```", 40);
         assert_eq!(
             text(&lines),
-            vec!["    rust", "    fn main() {}", "    let x = 1;"]
+            vec!["    rust", "    fn main() {}", "    // go"]
         );
-        assert!(lines[1].spans[0].style.add_modifier.contains(Modifier::DIM));
+        assert_eq!(lines[0].spans[0].style, theme::dim(), "the fence's word");
+        assert_eq!(lines[1].spans[1].style, theme::mode(), "`fn` is a keyword");
+        assert_eq!(lines[2].spans[1].style, theme::dim(), "the comment");
+    }
+
+    #[test]
+    fn a_fence_that_names_a_diff_is_a_diff() {
+        let lines = render("```diff\n@@ -1 +1 @@\n-old\n+new\n```", 40);
+        assert_eq!(text(&lines), vec!["@@ -1 +1 @@", "-old", "+new"]);
+        assert_eq!(lines[1].spans[0].style, theme::removed());
+        assert_eq!(lines[2].spans[0].style, theme::added());
     }
 
     #[test]

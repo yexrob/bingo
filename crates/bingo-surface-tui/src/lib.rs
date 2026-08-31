@@ -41,6 +41,7 @@ mod composer;
 mod dialog;
 mod effect;
 mod frame;
+mod highlight;
 mod history;
 mod input;
 mod keys;

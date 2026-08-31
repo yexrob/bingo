@@ -403,6 +403,48 @@ fn scaled(colour: Color, share: f32) -> Color {
     Color::Rgb(at(r), at(g), at(b))
 }
 
+// ---- what highlighted code is drawn in (design §5) ----------------------
+//
+// Three inks and no rainbow. Colour on this screen is spent on state — what
+// is live, what wants a person, what failed — so syntax gets the two tokens
+// it can have without competing: the one cool colour for the words that make
+// a language a language, and `dim` for the words meant for a reader. The rest
+// of the code is text, like every other answer.
+
+/// What a highlighter may say about a run of code.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Ink {
+    Keyword,
+    Comment,
+    Plain,
+}
+
+/// The TextMate scope prefixes each ink answers to — the vocabulary every
+/// syntax in the set is written in — tried in this order. A scope that matches
+/// none of them is [`Ink::Plain`]; a syntax this table has never heard of
+/// still reads as code, which is why the fallback is the answer and not a
+/// colour of its own.
+pub const INKS: &[(Ink, &str)] = &[
+    (Ink::Comment, "comment"),
+    // An operator is punctuation, not vocabulary: colouring `=` and `&&`
+    // would put the cool colour on every other cell of a line.
+    (Ink::Plain, "keyword.operator"),
+    (Ink::Keyword, "keyword"),
+    (Ink::Keyword, "storage"),
+    (Ink::Keyword, "constant.language"),
+    (Ink::Keyword, "variable.language"),
+    (Ink::Keyword, "entity.name.tag"),
+];
+
+/// One ink as a token of §4's table.
+pub fn ink(ink: Ink) -> Style {
+    match ink {
+        Ink::Keyword => mode(),
+        Ink::Comment => dim(),
+        Ink::Plain => text(),
+    }
+}
+
 pub fn bold() -> Style {
     Style::new().add_modifier(Modifier::BOLD)
 }
@@ -609,7 +651,6 @@ mod tests {
                     "tree.rs",
                     "view.rs",
                     "views/actions.rs",
-                    "views/code.rs",
                     "views/keyvalue.rs",
                     "views/list.rs",
                     "views/panel.rs",
@@ -684,6 +725,9 @@ mod tests {
             ("fading", &["status.rs"]),
             ("warming", &["status.rs"]),
             ("attention", &["status.rs", "transcript.rs", "tree.rs"]),
+            // Highlighted code reaches the table through one door, so no view
+            // has to know that a keyword and the mode badge share a colour.
+            ("ink", &["highlight.rs"]),
         ];
         for (token, files) in allowed {
             let mut seen: Vec<String> = sources()

@@ -8,7 +8,10 @@
 
 pub mod actions;
 mod badge;
-mod code;
+/// A fence in an answer is the same block a plugin publishes, so
+/// [`crate::markdown`] hands its language and text straight to this renderer
+/// (M11e).
+pub mod code;
 mod columns;
 mod diff;
 mod keyvalue;
