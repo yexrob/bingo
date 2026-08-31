@@ -19,6 +19,7 @@ A command answers `View::{Text, List, Table}` and the TUI's `ctrl+t` panel draws
 - `View::text()` is the one degrade rule: `--print` prints it, an IM channel sends it, a GUI ignores it. A node added later ships with its fold or it does not ship.
 - A plugin's UI is portable and testable without a terminal: a `View` value is asserted with `assert_eq!`, and a snapshot of the TUI proves the drawing once per node, not once per plugin.
 - The `Widget` extension point and `bingo-teams-tui` in the plan are withdrawn; avatars, if ever, are a `Tree` with badges.
+- `bingo-demo-ui` (2026-08-31) is the reference implementation of the three lanes and the one workspace crate this ADR adds; the dependency ceiling moves 268 → 269 for it and for nothing else.
 - Rate is the publisher's discipline: a signal is coalesced by the reducer, not throttled by the kernel; a plugin that publishes at 1 kHz makes its own subscribers lag (`Lagged` exists for that).
 
 ## Supersedes
