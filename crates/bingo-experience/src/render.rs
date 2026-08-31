@@ -3,7 +3,27 @@
 //! the table `/experience` draws. One vocabulary, so the index, the recall,
 //! the search and the table never describe the same entry differently.
 
-use crate::entry::Entry;
+use jiff::Timestamp;
+
+use crate::entry::{Entry, Status};
+
+pub const HEADERS: [&str; 5] = ["id", "status", "summary", "outcomes", "age"];
+
+/// The one order the prompt's index and a person's table both show: what has
+/// helped most first, what has done harm last, and a retired entry after the
+/// active ones whatever it has to show for itself. Ties go by id, so the list
+/// does not shuffle between reads.
+pub fn by_worth<'a>(entries: impl Iterator<Item = &'a Entry>) -> Vec<&'a Entry> {
+    let mut ordered: Vec<&Entry> = entries.collect();
+    ordered.sort_by(|a, b| {
+        (a.status != Status::Active)
+            .cmp(&(b.status != Status::Active))
+            .then(b.helpful().cmp(&a.helpful()))
+            .then(a.harmful().cmp(&b.harmful()))
+            .then(a.id.cmp(&b.id))
+    });
+    ordered
+}
 
 /// The index line: what an entry is, and what it has been worth.
 pub fn line(entry: &Entry) -> String {
@@ -47,6 +67,17 @@ pub fn full(entry: &Entry) -> String {
     out
 }
 
+/// One row of the table a person reads.
+pub fn row(entry: &Entry, now: Timestamp) -> Vec<String> {
+    vec![
+        entry.id.clone(),
+        entry.status.as_str().to_string(),
+        first_line(&entry.summary),
+        format!("+{} / -{}", entry.helpful(), entry.harmful()),
+        entry.age(now),
+    ]
+}
+
 /// A summary may have been written with newlines in it; a line is a line.
 fn first_line(text: &str) -> String {
     match text.lines().next() {
@@ -66,7 +97,6 @@ mod tests {
     use super::*;
     use crate::entry::tests::entry;
     use crate::entry::{Outcome, Record};
-    use jiff::Timestamp;
 
     fn scored() -> Entry {
         Entry {
@@ -95,6 +125,62 @@ mod tests {
         assert_eq!(
             line_with_status(&scored()),
             "abcd1234 [active] clear the target directory (helpful 1, harmful 1)"
+        );
+    }
+
+    #[test]
+    fn a_row_has_a_column_per_header() {
+        let now = Timestamp::UNIX_EPOCH + jiff::SignedDuration::from_hours(48);
+        let row = row(
+            &Entry {
+                status: Status::Retired,
+                ..scored()
+            },
+            now,
+        );
+        assert_eq!(row.len(), HEADERS.len());
+        assert_eq!(
+            row,
+            [
+                "abcd1234",
+                "retired",
+                "clear the target directory",
+                "+1 / -1",
+                "2d"
+            ]
+        );
+    }
+
+    #[test]
+    fn the_worth_of_an_entry_is_what_it_has_helped_with_and_whether_it_is_live() {
+        let entries: Vec<Entry> = [("aaaa", 0, 0), ("bbbb", 2, 0), ("cccc", 2, 1)]
+            .iter()
+            .map(|(id, helpful, harmful)| Entry {
+                id: (*id).to_string(),
+                outcomes: (0..*helpful)
+                    .map(|_| Record {
+                        outcome: Outcome::Helpful,
+                        at: Timestamp::UNIX_EPOCH,
+                        evidence: "e".into(),
+                    })
+                    .chain((0..*harmful).map(|_| Record {
+                        outcome: Outcome::Harmful,
+                        at: Timestamp::UNIX_EPOCH,
+                        evidence: "e".into(),
+                    }))
+                    .collect(),
+                ..entry()
+            })
+            .chain(std::iter::once(Entry {
+                id: "dddd".into(),
+                status: Status::Retired,
+                ..scored()
+            }))
+            .collect();
+        let ordered = by_worth(entries.iter());
+        assert_eq!(
+            ordered.iter().map(|e| e.id.as_str()).collect::<Vec<_>>(),
+            ["bbbb", "cccc", "aaaa", "dddd"]
         );
     }
 

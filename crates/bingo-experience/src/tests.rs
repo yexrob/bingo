@@ -8,9 +8,12 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use bingo_sdk::{
-    Answer, AnswerSpec, CancellationToken, Env, InteractionKind, ItemBody, ItemId, KernelError,
-    Prompter, SessionId, ToolContext, ToolHost, ToolOutput, TurnId, testing::NoHost,
+    Answer, AnswerSpec, CancellationToken, CommandContext, ContentPart, ContextQuery, ContextUsage,
+    Env, HostHandle, InteractionKind, Item, ItemBody, ItemId, ItemStatus, KernelError,
+    ModelCapabilities, Origin, Prompter, SessionId, SessionSummary, ToolContext, ToolHost,
+    ToolOutput, TurnId, Usage, testing::NoHost,
 };
+use jiff::Timestamp;
 
 use crate::store::{Library, Shelf};
 
@@ -51,6 +54,101 @@ impl Fixture {
             host: NoHost::handle(),
             call: Arc::new(Silent),
         }
+    }
+
+    pub(crate) fn command(&self) -> CommandContext {
+        CommandContext {
+            session: SessionId::from_raw("ses_test"),
+            cwd: self.cwd(),
+            host: NoHost::handle(),
+        }
+    }
+
+    /// What a contributor is asked, with `items` as the transcript so far.
+    pub(crate) fn asked(&self, items: Vec<Item>) -> Asked {
+        Asked {
+            summary: summary(&self.cwd()),
+            turn: TurnId::from_raw("trn_test"),
+            items,
+            usage: ContextUsage {
+                used: 0,
+                window: 100_000,
+                trigger: 90_000,
+            },
+            capabilities: ModelCapabilities {
+                context_window: 100_000,
+                max_output: 8_000,
+                images: false,
+                reasoning: false,
+                count_tokens: false,
+                caching: false,
+            },
+            cwd: self.cwd(),
+            host: NoHost::handle(),
+        }
+    }
+}
+
+/// The owner of everything a `ContextQuery` borrows.
+pub(crate) struct Asked {
+    summary: SessionSummary,
+    turn: TurnId,
+    items: Vec<Item>,
+    usage: ContextUsage,
+    capabilities: ModelCapabilities,
+    cwd: PathBuf,
+    host: HostHandle,
+}
+
+impl Asked {
+    pub(crate) fn query(&self) -> ContextQuery<'_> {
+        ContextQuery {
+            session: &self.summary,
+            host: &self.host,
+            turn: &self.turn,
+            round: 0,
+            items: &self.items,
+            usage: &self.usage,
+            capabilities: &self.capabilities,
+            cwd: &self.cwd,
+        }
+    }
+}
+
+/// One item in a transcript, from whoever wrote it.
+pub(crate) fn said(text: &str, surface: &str) -> Item {
+    Item {
+        id: ItemId::mint(),
+        turn: None,
+        round: 0,
+        status: ItemStatus::Completed,
+        started_at: Timestamp::UNIX_EPOCH,
+        completed_at: None,
+        intent: None,
+        body: ItemBody::User {
+            parts: vec![ContentPart::text(text)],
+            origin: Origin::surface(surface),
+        },
+        meta: Default::default(),
+    }
+}
+
+fn summary(cwd: &Path) -> SessionSummary {
+    SessionSummary {
+        tools: None,
+        system_extra: None,
+        id: SessionId::from_raw("ses_test"),
+        key: None,
+        title: None,
+        cwd: cwd.to_string_lossy().into_owned(),
+        parent: None,
+        driver: Default::default(),
+        model: None,
+        provider: None,
+        created_at: Timestamp::UNIX_EPOCH,
+        updated_at: Timestamp::UNIX_EPOCH,
+        usage: Usage::default(),
+        busy: false,
     }
 }
 
