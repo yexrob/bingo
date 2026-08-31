@@ -1,0 +1,29 @@
+# 0014 — Experience: procedural memory as files, recalled by rank
+
+## Context
+
+The old project grew an experience library (~2,100 lines; mechanism survey 2026-08-31): five tools, BM25 recall, one Markdown file per entry under a per-project directory. Its core is sound and worth keeping: a directory of entries as the single source of truth, rebuilt on every read — no index to drift, `grep` and `rm` work, a corrupt file costs one entry; a zero-dependency BM25 whose tokenizer carries the semantics (CJK bigrams, 4-char ASCII prefix stems, the Lucene positive idf that keeps a 3-entry corpus rankable, a relative floor instead of a stopword list); recall appended after the user's turn so the provider cache prefix is untouched and the transcript records exactly what the model saw; and an anti-self-confirmation policy — outcomes need evidence, and recording one can never promote an entry. Around that core it accreted the faults: the id was a **content hash**, so an entry could not be revised — every wording change forked a duplicate that kept its own evidence and competed for the recall slots, and marking one stale required reproducing its bytes; derived counters were persisted beside the history they derive from; `hits` ranked what a decision had already declared dead; a display-only short id was accepted by no tool; frontmatter was interpolated without escaping and a corrupted file was skipped silently; two ranking paths over one corpus disagreed; recall mixed experience entries and memory lines in one corpus whose length normalization favoured the short lines; and `ExperiencePropose` was a whole tool for a handshake the permission gate already performs.
+
+The new tree has the seams the old lacked: `ContextContributor` (ADR-0009, ADR-0011 §3) for injection, `Tool::preview` and the gate for the propose step, `View` for a user surface (ADR-0013), `serde-saphyr` already in the tree for frontmatter.
+
+## Decision
+
+1. **One plugin, `bingo-experience`.** An experience is a procedural playbook: *when this happens (trigger), do this (steps), check it worked (verify)*. Facts about a project stay the memory extractor's (`bingo-context`); the two stores never share a corpus or a prompt block.
+2. **Entries are files; the id is minted, not derived.** `<config_dir>/experience/<project>/<id>.md`, YAML frontmatter + free body (`notes`). The id is a short random slug minted at creation and is the filename — stored nowhere else. Content is freely revisable under a stable id; outcomes and `created` survive an edit. Frontmatter: `status` (`active` | `retired` — the old `degraded` had no behaviour of its own), `trigger` (list), `summary`, `steps` (list), `verify?`, `outcomes` (list of `{outcome, at, evidence}`). `helpful`/`harmful` are derived from `outcomes` at load and never serialized. Writes are atomic (tmp + rename). **Round-tripping is total**: serialization escapes, and an adversarial-content test (newlines, `---`, commas, CJK) is part of the contract.
+3. **Scope is the project**: normalized `git remote origin` → else toplevel path → else cwd, sanitized to one directory name; computed once per session and cached (the old spawned two `git` processes per turn).
+4. **Four tools, no Propose.** `ExperienceCommit{id?, trigger, summary, steps, verify?, notes?, status?}` — with `id` it revises, without it it first dedups by content (same trigger+summary+steps → revise that entry) and else creates; its `preview` renders the file it would write, so the permission card *is* the propose step. `ExperienceQuery{query, limit?}` ranks every entry, statuses shown. `ExperienceOutcome{id, outcome: helpful|harmful, evidence}` appends one record; evidence is required; status never changes. `ExperienceForget{id}` is destructive. Every tool that takes an `id` accepts a unique prefix — what the index shows is what a tool accepts.
+5. **One ranking path.** A `bm25` module (ported brick: tokenizer, weights trigger 3 / summary 2 / steps 1 / notes 1, positive idf) with one `rank(query, floor)` — the floor is on for recall (unsolicited, noise-guarded) and off for `ExperienceQuery` (solicited, best answer even if weak). No second sort chain.
+6. **Two contributors.** *Index*: `Placement::System`, the top 10 active entries by helpful desc / harmful asc with an overflow pointer (`… N more — ExperienceQuery searches`). *Recall*: `Placement::RoundStart`, the latest user text ranked against active entries only, at most 3 lines, floor on, skipped when the store or the input is empty; it lands as a user item with `Origin{surface:"contributor:…"}`, so the transcript shows what the model saw and the cache prefix stands.
+7. **A person can see it**: `/experience` (instant) answers a `View::Table` of entries — short id, status, summary, helpful/harmful, age.
+8. **No automatic anything else.** No auto-extraction of experiences, no gc, no TTL, no cap: with stable ids, dedup-on-commit and a visible list, unbounded growth is the user's choice, and `ExperienceForget` is the pruning. Revisit if a real store outgrows its index line.
+
+## Consequences
+
+- New crate `bingo-experience` (plugin tier), off nothing and touching no other plugin; the kernel keeps no `experience` noun. No new dependencies — frontmatter parses with `serde-saphyr`, ids mint from the tree's own id facility, and BM25 stays the zero-dep brick it was; the sha2-hashed `evidence_hash` of the old design is dropped as integrity theatre.
+- Dropped from the old design, deliberately: `hits`, `Degraded`, `verified_at`, `ExperiencePropose`, persisted derived counters, the mixed recall corpus, and the uncached project key.
+- The store is hand-editable by design; a file that fails to parse costs one entry and surfaces as a dim notice in `/experience`, never a silent skip.
+- Concurrent outcome writes last-wins per file (atomic rename); serializing them across processes is out of scope until a real collision is observed.
+
+## Supersedes
+
+—
