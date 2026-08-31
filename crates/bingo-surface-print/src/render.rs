@@ -9,8 +9,8 @@ use std::collections::HashMap;
 use std::io::{self, Write};
 
 use bingo_sdk::{
-    DeltaKind, ErrorCode, Event, Frame, Item, ItemBody, ItemId, ItemStatus, SessionState,
-    ToolOutput, TurnStatus,
+    DeltaKind, ErrorCode, Event, Frame, IntentOutcome, Item, ItemBody, ItemId, ItemStatus,
+    SessionState, ToolOutput, TurnStatus,
 };
 use serde_json::Value;
 
@@ -191,6 +191,11 @@ impl Renderer {
                 self.end_line(out)?;
                 self.failure(event, err)?;
             }
+            // A command's receipt: what an instant `/command` answered with.
+            Event::IntentAck {
+                outcome: IntentOutcome::Applied { result },
+                ..
+            } => self.applied(result, out)?,
             // Deliberately silent: state a headless run has no use for.
             Event::ItemDelta { .. }
             | Event::ItemUpdated { .. }
@@ -335,6 +340,21 @@ impl Renderer {
             out.write_all(b"\n")?;
             out.flush()?;
             self.open_line = false;
+        }
+        Ok(())
+    }
+
+    /// A command's answer on stdout: its message, or its view's fold. An
+    /// item result is already in the transcript, and a turn's ack says
+    /// nothing the turn will not say itself.
+    fn applied(&mut self, result: &Value, out: &mut (impl Write + ?Sized)) -> io::Result<()> {
+        if let Some(message) = result.get("message").and_then(Value::as_str) {
+            return self.prose(&format!("{message}\n"), out);
+        }
+        if let Some(view) = result.get("view")
+            && let Ok(view) = serde_json::from_value::<bingo_sdk::View>(view.clone())
+        {
+            return self.prose(&format!("{}\n", view.fold()), out);
         }
         Ok(())
     }
@@ -751,5 +771,40 @@ pub(crate) mod tests {
         };
         let frames = vec![frame(1, Event::ItemCompleted { item })];
         assert_eq!(play(Mode::Text, &frames).out(), "");
+    }
+    #[test]
+    fn a_commands_receipt_lands_on_stdout_as_its_message_or_its_fold() {
+        let frames = vec![
+            frame(
+                1,
+                Event::IntentAck {
+                    intent: bingo_sdk::IntentId::from_raw("req_1"),
+                    outcome: IntentOutcome::Applied {
+                        result: serde_json::json!({"message": "model: fake/one"}),
+                    },
+                },
+            ),
+            frame(
+                2,
+                Event::IntentAck {
+                    intent: bingo_sdk::IntentId::from_raw("req_2"),
+                    outcome: IntentOutcome::Applied {
+                        result: serde_json::json!({"view": {"kind": "keyValue", "rows": [["mode", "default"]]}}),
+                    },
+                },
+            ),
+            frame(
+                3,
+                Event::IntentAck {
+                    intent: bingo_sdk::IntentId::from_raw("req_3"),
+                    outcome: IntentOutcome::Applied {
+                        result: serde_json::json!({"item": "itm_1"}),
+                    },
+                },
+            ),
+        ];
+        let sinks = play(Mode::Text, &frames);
+        assert_eq!(sinks.out(), "model: fake/one\nmode: default\n");
+        assert_eq!(sinks.err(), "", "a receipt is an answer, not a diagnostic");
     }
 }

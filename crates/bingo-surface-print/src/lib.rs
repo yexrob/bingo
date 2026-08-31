@@ -393,6 +393,18 @@ fn react(
             outcome: IntentOutcome::Rejected { error },
             ..
         } => rejected(error, err, console.human()).map(Next::Exit),
+        // The one submit was an instant command and this is its receipt (the
+        // renderer already printed it): there is no turn to wait for. An
+        // answer's own ack carries no receipt keys and holds the run.
+        Event::IntentAck {
+            outcome: IntentOutcome::Applied { result },
+            ..
+        } if ["message", "view", "item"]
+            .iter()
+            .any(|k| result.get(k).is_some()) =>
+        {
+            Ok(Next::Exit(Exit { code: 0 }))
+        }
         _ => Ok(Next::Await),
     }
 }

@@ -67,3 +67,23 @@ fn an_edit_prints_its_diff_under_the_verdict_in_text_mode() {
     let after = &err[verdict..];
     assert!(after.contains("\n  -alpha\n  +beta\n"), "{err}");
 }
+
+/// An instant command under --print answers and the run ends: this hung
+/// forever before the Applied ack became an exit (found in M11d's review).
+#[test]
+fn an_instant_command_prints_its_answer_and_leaves() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = script(r#"{"responses":[]}"#);
+    let out = run_within(
+        bingo()
+            .env("BINGO_FAKE_SCRIPT", script.path())
+            .args(["--print", "--cwd"])
+            .arg(dir.path())
+            .arg("/status"),
+        std::time::Duration::from_secs(20),
+    );
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    let answer = stdout(&out);
+    assert!(answer.contains("mode: default"), "{answer}");
+    assert!(answer.contains("cwd: "), "{answer}");
+}
