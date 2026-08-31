@@ -55,14 +55,14 @@ real tracing sink in the tree.
 
 ## Exit criteria
 
-- [ ] start/stop/restart/status/logs round-trip on a real detached process
-- [ ] TERM is graceful: schedule runner claim and channel locks given back
-- [ ] doctor reports settings/credentials/locks/version; --fix removes only dead-pid locks
-- [ ] `warn!` from any plugin lands in `gateway.log` while the gateway runs
-- [ ] a schedule fires with no terminal attached
-- [ ] install writes a secret-free plist/unit naming the current exe; verbs delegate while installed (PATH-shim proven); uninstall unloads and removes
-- [ ] a channel secret pasted via `bingo channels secret` lands in auth.json 0600; env still wins; doctor names the source in force
-- [ ] every gate green (fmt, check, clippy, test, discipline, budget measured, deny)
+- [x] start/stop/restart/status/logs round-trip on a real detached process
+- [x] TERM is graceful: schedule runner claim and channel locks given back
+- [x] doctor reports settings/credentials/locks/version; --fix removes only dead-pid locks
+- [x] `warn!` from any plugin lands in `gateway.log` while the gateway runs — construction-evidenced: the bin's own WARN+INFO with targets pinned black-box; no plugin warn reachable without contriving one
+- [x] a schedule fires with no terminal attached
+- [x] install writes a secret-free plist/unit naming the current exe; verbs delegate while installed (PATH-shim proven); uninstall unloads and removes
+- [x] a channel secret pasted via `bingo channels secret` lands in auth.json 0600; env still wins; doctor names the source in force
+- [x] every gate green (fmt, check, clippy, test, discipline, budget measured, deny)
 
 ## Non-goals
 
@@ -80,3 +80,48 @@ the run was and was not started with (names only). R-supervisor — launchd's
 KeepAlive and a hand-spawned `run` are two masters; mode detection (is the
 service file present and loaded) is the single switch, and the PATH-shim
 tests pin every delegated argv.
+
+## Verified (2026-09-01)
+
+- Worker D merged `6ee08d5`: two commits — the gateway, and a separate
+  four-fault fix for the live Feishu wedge (`finalize` decoupled the answer
+  from the question it carried, so a refused card edit no longer drops a
+  permission question and wedges the session; the inbox hand-off armed
+  against cancel and the read deadline; HTTP timeouts 30s/10s; the dedupe
+  ring outlives reconnects; a close frame before the socket drops — the
+  connection budget's refusal is fatal). Both wedge regressions were
+  revert-verified against the original code.
+- Integrated gates on the quiet machine (1-min load 5.7): `GATES_EXIT=0`,
+  **2509 tests passed, 0 failed**, `dependencies (unique, normal): 302
+  (max 302)` — tracing-subscriber measured +4, inside §6's +5 rule —
+  `discipline ok`, `advisories/bans/licenses/sources ok`.
+- 10 black-box scenarios on temp HOMEs with a kill-on-drop guard (zero
+  leaked processes): detached round-trip; graceful TERM with the schedule
+  claim and pidfile given back; a stale pidfile reported dead and cleared
+  by `--fix` alone; a schedule firing with no terminal; install/uninstall
+  with byte-wise plist/unit assertions and PATH-shim `launchctl`/
+  `systemctl` argv recordings; the secret paste to auth.json 0600 with env
+  precedence.
+- Taste calls reviewed and kept: mode switch = the service file's presence
+  (install rolls the file back if the supervisor refused, so file-on-disk
+  ⟺ loaded); the liveness tiebreak is `ps -o comm=` (start time is not
+  portably readable) and stop refuses to signal a live pid that is not a
+  bingo; stop-while-installed always tells the supervisor; SIGINT handled
+  beside SIGTERM.
+
+## Carried
+
+- CardKit's 10-minute auto-close is survived, not detected: no text is
+  lost, but a long streaming turn stops updating live. Treating a rejected
+  sequence as recoverable (open a new card) is a design change owed.
+- `Runner::asked` and `Deliverer::asked` are two representations of one
+  open question — surfaced by the wedge diagnosis; the collapse is a real
+  refactor, owed.
+- Supervisor behaviour is PATH-shim-proven only; nothing ran against a
+  real launchd/systemd. The live Feishu confirmation steps are with the
+  user (secret → start → answer a permission → long turn → logs → doctor
+  → stop).
+- Wished seams: a plugin's credential wants as a registry contribution
+  (doctor knows bingo-channels specifically today); `Plugin::claims()` for
+  lock discovery (doctor finds locks by shape); `settings::load` returns
+  the same file twice when cwd == $HOME (cosmetic, pre-existing).

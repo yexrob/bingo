@@ -37,12 +37,12 @@ saying where the room will hang.
 
 ## Exit criteria
 
-- [ ] an agent's OpenRoom (default) reaches its own children; `/room` on the agent lists it
-- [ ] `shared: true` reaches the caller's siblings; root + shared is a worded refusal
-- [ ] the permission card names room, members and placement
-- [ ] a standing room is reset, not duplicated (same door as `/room`)
-- [ ] black-box: agent opens shared room, posts, sibling hears it, transcript attributes it
-- [ ] every gate green (fmt, check, clippy, test, discipline, budget unchanged, deny)
+- [x] an agent's OpenRoom (default) reaches its own children; `/room` on the agent lists it — unit-proven; the CLI depth limit leaves a spawned child childless black-box, so `shared` carries the end-to-end proof
+- [x] `shared: true` reaches the caller's siblings; root + shared is a worded refusal
+- [x] the permission card names room, members and placement
+- [x] a standing room is reset, not duplicated (same door as `/room`)
+- [x] black-box: agent opens shared room, posts, sibling hears it, transcript attributes it
+- [x] every gate green (fmt, check, clippy, test, discipline, budget unchanged, deny)
 
 ## Non-goals
 
@@ -56,3 +56,33 @@ command's own session" anywhere (identity, cwd), the tool must pass the
 placement explicitly and a unit test pins it. R-card — tool preview text is
 the only place a person sees `shared`'s reach before approving; the
 black-box asserts the words.
+
+## Verified (2026-09-01)
+
+- Worker E merged `37f629f`; gates ran on the integrated tree together
+  with M17 and the agents lag fix: `GATES_EXIT=0`, 2509 tests passed,
+  this slice adds no dependency (schemars was already in the workspace —
+  one lock edge).
+- R-seat was a non-issue: `seat::seat` already takes the parent
+  explicitly; `/room`'s only diff is a shared `receipt` helper, its tests
+  untouched. 17 unit tests (placement + tool) and 3 black-box scenarios:
+  the shared room's key `rooms/{root}/design` proves the placement, and
+  the never-started sibling holds the post in its own on-disk journal
+  with `principal: "reviewer"`, `conversation: "#design"`; the card reads
+  `OpenRoom #design under the caller with reviewer, scout` exactly; root
+  + `shared` is a worded refusal proven with the gate held open.
+- The card is `subjects()`, not `confirm()` — reviewed and kept:
+  `confirm()` sits above allow rules and bypass, which would make
+  OpenRoom un-allowlistable and impossible headless (a piped stdin never
+  answers). The subject doubles as the rule key, so
+  `OpenRoom(#design under the caller:*)` covers a placement; the cost is
+  a prose-flavoured rule string, judged worth the card guarantee.
+
+## Carried
+
+- Wished sdk seams: `Preview::Text` (a tool with a sentence to say has
+  nowhere but the summary — would dissolve the subjects-vs-confirm trade
+  whole), splitting "needs a person" from "needs a card sentence", and
+  `SessionFilter { id }` (every plugin regrows its own `own()`).
+- A rooms-listing tool stays deliberately unbuilt (ADR-0021 §3); revisit
+  with the collaboration milestone if briefs prove insufficient.
