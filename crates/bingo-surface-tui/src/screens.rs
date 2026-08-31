@@ -676,6 +676,27 @@ fn a_highlighted_code_block() {
     both("code_block", &solo(&state), &ui, now);
 }
 
+/// The card of §4 with a replacement under its title: the colour comes from
+/// the column, the weight from the words that actually moved.
+#[test]
+fn a_permission_card_previews_a_word_level_diff() {
+    let (tree, ui, now) = asked(permission(
+        Some("Edit(src/)"),
+        Some(Preview::Diff {
+            unified: "--- a/src/view.rs\n+++ b/src/view.rs\n@@ -12,3 +12,3 @@\n fn border(busy: bool) -> Style {\n-    match busy { true => dim() }\n+    match busy { true => breathing() }\n }\n".into(),
+        }),
+    ));
+    both("permission_word_diff", &tree, &ui, now);
+    let painted = painted(80, 24, &tree, &ui, now);
+    let emphasised: Vec<String> = painted
+        .row("+    match busy")
+        .into_iter()
+        .filter(|(_, style)| style.add_modifier.contains(ratatui::style::Modifier::BOLD))
+        .map(|(text, _)| text.trim().to_string())
+        .collect();
+    assert_eq!(emphasised, vec!["breathing()".to_string()]);
+}
+
 /// What a screen cannot show: which token every run of a fence was drawn in.
 /// `keyword` is the one cool colour, `dim` a comment, `text` the rest — and a
 /// fence that names a diff wears the diff's own tints instead.
@@ -721,6 +742,8 @@ fn token(style: ratatui::style::Style) -> &'static str {
     for (name, spent) in [
         ("keyword", theme::mode()),
         ("dim", theme::dim()),
+        ("added·moved", theme::added().patch(theme::bold())),
+        ("removed·moved", theme::removed().patch(theme::bold())),
         ("added", theme::added()),
         ("removed", theme::removed()),
         ("text", theme::text()),

@@ -27,6 +27,9 @@ unicode-segmentation.workspace = true
 # wire (M11a). Already in the workspace tree for the fs tool's image parts.
 base64.workspace = true
 syntect.workspace = true
+# Word-level emphasis inside a changed pair of diff rows (M11e). Already in
+# the workspace tree for the fs tool's edits, so it costs no crate.
+similar.workspace = true
 two-face.workspace = true
 nucleo-matcher.workspace = true
 terminal-colorsaurus.workspace = true
