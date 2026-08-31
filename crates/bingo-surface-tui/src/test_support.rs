@@ -1011,6 +1011,43 @@ pub fn board_view() -> View {
     }
 }
 
+/// A session the demo plugin has written to in two lanes at once: a board it
+/// journaled, and the progress it is publishing as it goes.
+pub fn boarded() -> SessionState {
+    folded(vec![
+        frame(
+            1,
+            Event::ItemCompleted {
+                item: user("itm_1", "run the board"),
+            },
+        ),
+        frame(
+            2,
+            extended("bingo.demo.ui", "board", as_payload(board_view())),
+        ),
+        frame(
+            3,
+            signalled("bingo.demo.ui", "progress", progress_view(24, 30)),
+        ),
+    ])
+}
+
+/// One of the demo plugin's cards, by the kind it published under.
+pub fn demo_card(kind: &str) -> crate::rail::CardId {
+    crate::rail::CardId {
+        plugin: "bingo.demo.ui".into(),
+        kind: kind.into(),
+    }
+}
+
+/// A person who pinned the board into the root session's rail.
+pub fn pin_board(ui: &mut Ui) {
+    ui.pinned.insert(crate::rail::Pin {
+        session: SessionId::from_raw("ses_1"),
+        card: demo_card("board"),
+    });
+}
+
 /// A sub-session that has run a while: three tool calls and some tokens
 /// spent, which is what its row in the parent's transcript reports.
 pub fn busy_child(title: &str) -> Vec<Frame> {

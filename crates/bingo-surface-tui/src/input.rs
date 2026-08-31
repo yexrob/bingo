@@ -1665,6 +1665,111 @@ mod tests {
         assert_eq!(ui.scroll, crate::scroll::Scroll::Tail);
     }
 
+    // ---- the rail, its focus and its actions (ADR-0013 §3) --------------
+
+    /// The action a press fired, when it fired one.
+    fn action_of(effects: &[Effect]) -> Option<&bingo_sdk::Action> {
+        effects.iter().find_map(|effect| match effect {
+            Effect::Submit(Input::Action { action }) => Some(action),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn tab_walks_the_rail_cards_and_comes_back_round_to_none() {
+        let state = boarded();
+        let (mut ui, now) = scene();
+        pin_board(&mut ui);
+        assert_eq!(ui.focus, None);
+        press(&mut ui, &state, key(KeyCode::Tab), now);
+        assert_eq!(ui.focus, Some(demo_card("board")));
+        press(&mut ui, &state, key(KeyCode::Tab), now);
+        assert_eq!(ui.focus, Some(demo_card("progress")));
+        press(&mut ui, &state, key(KeyCode::Tab), now);
+        assert_eq!(ui.focus, None, "and the keys are the composer's again");
+    }
+
+    #[test]
+    fn tab_is_left_alone_when_the_rail_has_no_cards_to_walk() {
+        let (mut ui, now) = scene();
+        press(&mut ui, &state(), key(KeyCode::Tab), now);
+        assert_eq!(ui.focus, None);
+    }
+
+    #[test]
+    fn a_key_on_the_focused_card_fires_the_action_it_names() {
+        let state = boarded();
+        let (mut ui, now) = scene();
+        pin_board(&mut ui);
+        ui.focus = Some(demo_card("board"));
+        let fired = press(&mut ui, &state, typed('1'), now);
+        assert_eq!(
+            action_of(&fired).map(|action| action.name.as_str()),
+            Some("board.tick")
+        );
+        assert_eq!(ui.composer.text(), "", "the key was not typed as well");
+        assert_eq!(
+            ui.pending.as_ref().map(|pending| pending.seq),
+            Some(state.seq),
+            "the mark waits for the stream to move"
+        );
+    }
+
+    #[test]
+    fn a_key_the_focused_card_does_not_offer_is_a_letter_like_any_other() {
+        let state = boarded();
+        let (mut ui, now) = scene();
+        pin_board(&mut ui);
+        ui.focus = Some(demo_card("board"));
+        assert!(press(&mut ui, &state, typed('9'), now).is_empty());
+        assert_eq!(ui.composer.text(), "9");
+    }
+
+    #[test]
+    fn a_digit_with_no_card_focused_is_typed() {
+        let state = boarded();
+        let (mut ui, now) = scene();
+        pin_board(&mut ui);
+        assert!(press(&mut ui, &state, typed('1'), now).is_empty());
+        assert_eq!(ui.composer.text(), "1");
+    }
+
+    #[test]
+    fn a_click_on_the_rail_focuses_the_card_it_landed_on() {
+        let state = boarded();
+        let (mut ui, now) = scene();
+        pin_board(&mut ui);
+        // The rail exists only once it has been drawn: a click is answered
+        // against the frame the last draw left behind.
+        draw_sized(120, 40, &state, &ui, now);
+        let rail = ui
+            .painted
+            .borrow()
+            .regions
+            .rail
+            .expect("a rail at 120 columns");
+        let effects = on_mouse(&mut ui, &solo(&state), click(rail.x + 2, rail.y), now);
+        assert!(effects.is_empty());
+        assert_eq!(ui.focus, Some(demo_card("board")));
+    }
+
+    #[test]
+    fn enter_in_the_panel_sheet_pins_a_panel_and_again_takes_it_back() {
+        let state = boarded();
+        let (mut ui, now) = scene();
+        press(&mut ui, &state, ctrl('t'), now);
+        assert!(ui.layer.captures(), "the sheet answers its own keys");
+        press(&mut ui, &state, key(KeyCode::Enter), now);
+        assert!(ui.pinned.contains(&crate::rail::Pin {
+            session: bingo_sdk::SessionId::from_raw("ses_1"),
+            card: demo_card("board"),
+        }));
+        press(&mut ui, &state, key(KeyCode::Enter), now);
+        assert!(ui.pinned.is_empty(), "the same key takes it back");
+        press(&mut ui, &state, ctrl('t'), now);
+        assert!(!ui.layer.showing(), "ctrl+t still closes it");
+    }
+
     #[test]
     fn a_notice_frame_is_not_a_key_concern() {
         // Folding a notice never touches the composer: it is the loop's job.

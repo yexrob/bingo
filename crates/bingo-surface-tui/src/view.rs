@@ -1182,6 +1182,84 @@ mod tests {
         assert!(!screen.contains("write the plan"), "{screen}");
     }
 
+    // ---- the three lanes (ADR-0013) -------------------------------------
+
+    /// A person who pinned the board into the rail and put the focus on it.
+    fn watching() -> (Ui, Now) {
+        let (mut ui, now) = scene();
+        pin_board(&mut ui);
+        ui.focus = Some(demo_card("board"));
+        (ui, now)
+    }
+
+    #[test]
+    fn the_rail_holds_the_pinned_board_and_the_live_progress_card() {
+        let (ui, now) = watching();
+        let screen = draw_sized(120, 40, &boarded(), &ui, now);
+        assert!(screen.contains("❯ Board"), "{screen}");
+        assert!(screen.contains("[ 1 Tick ]"), "{screen}");
+        assert!(screen.contains("████████░░ 80 %"), "{screen}");
+        insta::assert_snapshot!(screen);
+    }
+
+    #[test]
+    fn a_rail_is_not_drawn_for_a_session_no_plugin_has_written_to() {
+        let (ui, now) = scene();
+        draw_sized(120, 40, &state(), &ui, now);
+        let quiet = ui.painted.borrow().regions;
+        assert!(quiet.rail.is_none(), "an empty rail is not drawn");
+        assert_eq!(quiet.transcript.width, 120, "the transcript keeps it all");
+
+        let (ui, now) = watching();
+        draw_sized(120, 40, &boarded(), &ui, now);
+        let busy = ui.painted.borrow().regions;
+        assert!(busy.rail.is_some(), "a card asks for the column");
+        assert_eq!(busy.transcript.width, 120 - crate::frame::RAIL_WIDTH);
+    }
+
+    /// Below the rail's width the same cards draw under the running rows, so
+    /// a signal is never lost to a narrow terminal (design §3).
+    #[test]
+    fn without_a_rail_the_same_cards_draw_under_the_running_rows() {
+        let (ui, now) = watching();
+        let screen = render(&boarded(), &ui, now);
+        assert!(screen.contains("████████░░ 80 %"), "{screen}");
+        assert!(screen.contains("❯ Board"), "{screen}");
+        insta::assert_snapshot!(screen);
+    }
+
+    /// The block lane: what a tool drew for a person, under its own row and
+    /// folded like any other output.
+    #[test]
+    fn a_display_view_is_drawn_under_the_tool_row_that_made_it() {
+        let output = ToolOutput {
+            parts: vec![ContentPart::text("2 open")],
+            is_error: false,
+            display: Some(View::Table {
+                headers: vec!["id".into(), "task".into()],
+                rows: vec![
+                    vec!["1".into(), "write the plan".into()],
+                    vec!["2".into(), "ship it".into()],
+                ],
+            }),
+        };
+        let state = folded(vec![item_frame(
+            1,
+            tool(
+                "itm_1",
+                "TaskList",
+                json!({}),
+                Some(output),
+                ItemStatus::Completed,
+            ),
+        )]);
+        let (ui, now) = scene();
+        let screen = render(&state, &ui, now);
+        assert!(screen.contains("⎿  id  task"), "{screen}");
+        assert!(!screen.contains("2 open"), "the model's text is not drawn");
+        insta::assert_snapshot!(screen);
+    }
+
     #[test]
     fn the_composer_survives_a_screen_too_small_for_the_chrome() {
         let state = folded(vec![frame(

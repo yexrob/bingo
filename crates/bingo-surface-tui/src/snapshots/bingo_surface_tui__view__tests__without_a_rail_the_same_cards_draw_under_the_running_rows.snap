@@ -1,0 +1,28 @@
+---
+source: crates/bingo-surface-tui/src/view.rs
+expression: screen
+---
+"                                                                                "
+"                                                                                "
+"╭──────────────────────────────────────────────────────────────────────────────╮"
+"│ ✻ Welcome to bingo!                                                          │"
+"│                                                                              │"
+"│   /help for help · /login codex to use a subscription                        │"
+"│   cwd: /tmp/project                                                          │"
+"╰──────────────────────────────────────────────────────────────────────────────╯"
+"                                                                                "
+"> run the board                                                                 "
+"                                                                                "
+"❯ Board                                                                         "
+"id  state                                                                       "
+"─────────                                                                       "
+" 1  ready                                                                       "
+" 2  held                                                                        "
+"[ 1 Tick ] [ 2 Reset ]                                                          "
+"                                                                                "
+"  progress                                                                      "
+"████████░░ 80 % · cargo test                                                    "
+"╭──────────────────────────────────────────────────────────────────────────────╮"
+"│ > ask anything · / for commands · ! for shell                                │"
+"╰──────────────────────────────────────────────────────────────────────────────╯"
+"? for shortcuts                                                           fake-1"
