@@ -22,7 +22,8 @@ use serde_json::Value;
 
 use crate::{PLUGIN, room};
 
-fn ts() -> Timestamp {
+/// Long ago: what a room's journal was stamped with before this process.
+pub(crate) fn ts() -> Timestamp {
     Timestamp::UNIX_EPOCH
 }
 
@@ -110,12 +111,48 @@ impl Fleet {
     /// A room's membership as its own journal has it, folded the way any
     /// client would fold it.
     pub(crate) fn members(&self, session: &SessionId) -> Vec<String> {
-        self.snapshot(session)
-            .extensions
-            .get(PLUGIN)
-            .and_then(|kinds| kinds.get(room::MEMBERS))
-            .map(room::members_from)
-            .unwrap_or_default()
+        room::members_of(&self.snapshot(session))
+    }
+
+    /// A post into a room, written into its journal the way the kernel writes
+    /// one and handed back as the frame the hook would see. One call, so a
+    /// test cannot tell the hook one thing and the room another.
+    pub(crate) fn post(
+        &self,
+        room: &SessionId,
+        text: &str,
+        who: Option<&str>,
+        at: Timestamp,
+    ) -> Event {
+        let event = Event::ItemCompleted {
+            item: Item {
+                started_at: at,
+                completed_at: Some(at),
+                ..posted_item(text, who)
+            },
+        };
+        self.remember(room, event.clone());
+        event
+    }
+
+    /// Every payload this plugin has signalled on a session, in order: what
+    /// the card said, and when it was taken away.
+    pub(crate) fn signalled(&self, session: &SessionId, kind: &str) -> Vec<Value> {
+        let sessions = locked(&self.0.sessions);
+        let Some(live) = sessions.iter().find(|live| &live.summary.id == session) else {
+            return Vec::new();
+        };
+        live.history
+            .iter()
+            .filter_map(|event| match event {
+                Event::Signal {
+                    plugin,
+                    kind: said,
+                    payload,
+                } if plugin == PLUGIN && said == kind => Some(payload.clone()),
+                _ => None,
+            })
+            .collect()
     }
 
     fn snapshot(&self, session: &SessionId) -> SessionState {
@@ -418,23 +455,33 @@ pub(crate) fn extension(payload: Value) -> Event {
 /// A post, as a `Log` session records one.
 pub(crate) fn posted(text: &str, principal: Option<&str>) -> Event {
     Event::ItemCompleted {
-        item: Item {
-            id: ItemId::mint(),
-            turn: None,
-            round: 0,
-            status: ItemStatus::Completed,
-            started_at: ts(),
-            completed_at: Some(ts()),
-            intent: None,
-            body: ItemBody::User {
-                parts: vec![ContentPart::text(text)],
-                origin: Origin {
-                    surface: "test".into(),
-                    principal: principal.map(str::to_string),
-                    conversation: None,
-                },
-            },
-            meta: Default::default(),
+        item: posted_item(text, principal),
+    }
+}
+
+/// The item under one, for a test that reads a post rather than a frame.
+pub(crate) fn posted_item(text: &str, principal: Option<&str>) -> Item {
+    item(ItemBody::User {
+        parts: vec![ContentPart::text(text)],
+        origin: Origin {
+            surface: "test".into(),
+            principal: principal.map(str::to_string),
+            conversation: None,
         },
+    })
+}
+
+/// A completed item of any body, stamped at the epoch.
+pub(crate) fn item(body: ItemBody) -> Item {
+    Item {
+        id: ItemId::mint(),
+        turn: None,
+        round: 0,
+        status: ItemStatus::Completed,
+        started_at: ts(),
+        completed_at: Some(ts()),
+        intent: None,
+        body,
+        meta: Default::default(),
     }
 }

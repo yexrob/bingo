@@ -17,12 +17,26 @@ pub struct Roster(Mutex<BTreeMap<SessionId, Room>>);
 impl Roster {
     /// A room announcing itself, at the head of its stream. A reopen says the
     /// same thing again and must not forget what the frames after the first
-    /// one folded in.
-    pub fn register(&self, summary: &SessionSummary) {
-        let Some(room) = Room::of(summary) else {
-            return;
-        };
-        self.rooms().entry(summary.id.clone()).or_insert(room);
+    /// one folded in, so only a room this process had not seen is handed back
+    /// — the moment, and the only one, at which its journal is re-derived.
+    pub fn register(&self, summary: &SessionSummary) -> Option<Room> {
+        let room = Room::of(summary)?;
+        let mut rooms = self.rooms();
+        if rooms.contains_key(&summary.id) {
+            return None;
+        }
+        rooms.insert(summary.id.clone(), room.clone());
+        Some(room)
+    }
+
+    /// The rooms this process has seen under one session: everyone its card
+    /// speaks for.
+    pub fn under(&self, parent: &SessionId) -> Vec<(SessionId, Room)> {
+        self.rooms()
+            .iter()
+            .filter(|(_, room)| &room.parent == parent)
+            .map(|(id, room)| (id.clone(), room.clone()))
+            .collect()
     }
 
     /// The whole of a known room's membership, as its journal now has it.
@@ -59,14 +73,16 @@ mod tests {
         let announced = room_summary("ses_design", &parent, "design");
         let roster = Roster::default();
 
-        roster.register(&announced);
+        assert!(roster.register(&announced).is_some(), "a room this new");
         roster.set_members(&announced.id, &members(["reviewer", "scout"]));
-        roster.register(&announced);
+        assert_eq!(roster.register(&announced), None, "and not again");
 
         let room = roster.get(&announced.id).expect("still one room");
         assert_eq!(room.title, "#design");
         assert_eq!(room.members, ["reviewer", "scout"]);
         assert_eq!(roster.rooms().len(), 1, "a reopen is the same room");
+        assert_eq!(roster.under(&parent), [(announced.id, room)]);
+        assert!(roster.under(&SessionId::from_raw("ses_other")).is_empty());
     }
 
     #[test]

@@ -24,13 +24,17 @@ serde_json.workspace = true
 tracing.workspace = true
 # M9: reading the team file fails in two ways worth telling apart.
 thiserror.workspace = true
+# M19 (ADR-0022 §3): the chaser is one bounded timer per open mention, and a
+# nudge is sent from it. Already in the tree.
+tokio.workspace = true
+# M19: how long a question has gone unanswered is the difference between two
+# `jiff::Timestamp`s, which is what the journal stamps an item with.
+jiff.workspace = true
 
 [dev-dependencies]
 bingo-sdk = { workspace = true, features = ["testing"] }
 # M9: the attachment the host double hands back carries a frame stream.
 futures.workspace = true
-# M9: a `SessionSummary` the double writes down is stamped with a
-# `jiff::Timestamp`, so writing one needs one.
-jiff.workspace = true
 tempfile.workspace = true
-tokio.workspace = true
+# M19: `tokio::time::pause`, so 300 seconds of patience costs a test none.
+tokio = { workspace = true, features = ["test-util"] }

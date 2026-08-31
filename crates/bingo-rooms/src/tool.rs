@@ -243,7 +243,7 @@ mod tests {
         else {
             panic!("a roster is a table");
         };
-        assert_eq!(rows, [["#design", "helper"]]);
+        assert_eq!(rows, [["#design", "helper", ""]], "a new room owes nothing");
     }
 
     #[tokio::test]

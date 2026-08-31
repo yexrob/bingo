@@ -39,8 +39,12 @@ pub async fn fan_out(
 
 /// The session a member name means: a sibling of the room by that title, and
 /// never another room — a `Log` session answers nobody, so a post into one
-/// would echo rather than arrive.
-fn seat_of<'a>(siblings: &'a [SessionSummary], member: &str) -> Option<&'a SessionSummary> {
+/// would echo rather than arrive. A nudge (ADR-0022 §3) looks a member up
+/// through this too, so the two agree on who is there to hear it.
+pub(crate) fn seat_of<'a>(
+    siblings: &'a [SessionSummary],
+    member: &str,
+) -> Option<&'a SessionSummary> {
     siblings
         .iter()
         .find(|s| s.driver != Driver::Log && s.title.as_deref() == Some(member))

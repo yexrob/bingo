@@ -15,13 +15,21 @@
 //!   session opens, and watches every journal: a room announces itself, an
 //!   extension says who is in it, and a user item in one is a post to fan out.
 //!
-//! Nothing here keeps a roster beside the journal: what the hook holds in
-//! memory is a fold of the frames it saw, and `/room` reads a membership back
-//! out of the room it belongs to.
+//! A post also owes (ADR-0022): `@name` opens a debt the member's next post
+//! closes, one bounded chaser nudges whoever stays silent, and `/room` and a
+//! card on the room's parent show what stands.
+//!
+//! Nothing here keeps a roster or a debt beside the journal: what the hook
+//! holds in memory is a fold of the frames it saw, `/room` reads a membership
+//! back out of the room it belongs to, and the mentions are derived from the
+//! room's own posts every time they are asked for.
 
+mod chase;
 mod command;
 mod hook;
+mod mentions;
 mod name;
+mod owed;
 mod placement;
 mod post;
 mod room;
