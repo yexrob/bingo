@@ -333,6 +333,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "bingo-experience"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bingo-sdk",
+ "jiff",
+ "proptest",
+ "schemars",
+ "serde",
+ "serde-saphyr",
+ "serde_json",
+ "similar 3.2.0",
+ "tempfile",
+ "tokio",
+ "ulid",
+]
+
+[[package]]
 name = "bingo-hooks-shell"
 version = "0.1.0"
 dependencies = [
