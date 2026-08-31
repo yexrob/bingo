@@ -1,0 +1,9 @@
+---
+source: crates/bingo-surface-tui/src/views/tests.rs
+expression: "screen(&columns(), 50)"
+---
+"model   gpt-5.4                                   "
+"rounds  12                                        "
+"• one                                             "
+"• two                                             "
+"• three                                           "

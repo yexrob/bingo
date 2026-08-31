@@ -15,7 +15,7 @@ use serde_json::Value;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::tree::{self, Agents};
-use crate::{markdown, paths, preview, theme, wrap};
+use crate::{markdown, paths, theme, views, wrap};
 
 /// Output rows kept under a finished tool row before the rest folds away.
 const OUTPUT_ROWS: usize = 5;
@@ -39,6 +39,11 @@ impl Rows<'_> {
     /// Prose is read, not scanned: it stops at the measure (design §7).
     fn measure(&self) -> usize {
         wrap::measure(self.width)
+    }
+
+    /// The cells a result has, once the `⎿` gutter has taken its own.
+    fn result_width(&self) -> usize {
+        self.measure().saturating_sub(connector().width()).max(1)
     }
 
     /// A path as a person reads it, from this session's own directory.
@@ -311,7 +316,7 @@ fn result(call: &Call<'_>, rows: &Rows<'_>) -> Vec<Line<'static>> {
     let Some(output) = call.output else {
         return Vec::new();
     };
-    returns(folded(output, call.expanded), rows)
+    returns(folded(output, call.expanded, rows.result_width()), rows)
 }
 
 /// The last rows of what a running tool has printed so far.
@@ -320,10 +325,14 @@ fn tail(progress: &str) -> Vec<Line<'static>> {
     plain(&all[all.len().saturating_sub(TAIL_ROWS)..].join("\n"))
 }
 
-fn folded(output: &ToolOutput, expanded: bool) -> Vec<Line<'static>> {
+/// What a person reads under a finished tool row: the display the tool drew
+/// for them when there is one (ADR-0013 §2, the block lane), else the text the
+/// model read, folded to what a row can spare either way.
+fn folded(output: &ToolOutput, expanded: bool, width: usize) -> Vec<Line<'static>> {
     let (rows, limit) = match &output.display {
-        Some(View::Diff { unified }) => (preview::diff(unified), DIFF_ROWS),
-        Some(view) => (plain(&view.fold()), OUTPUT_ROWS),
+        // A diff is the one display a person reads by the dozen rows.
+        Some(view @ View::Diff { .. }) => (views::render(view, width), DIFF_ROWS),
+        Some(view) => (views::render(view, width), OUTPUT_ROWS),
         None => (plain(&text_of(output)), OUTPUT_ROWS),
     };
     match expanded {
@@ -544,7 +553,7 @@ mod tests {
     fn rendered_with(state: &SessionState, expanded: &BTreeSet<ItemId>) -> Vec<String> {
         let welcomed = crate::welcome::lines(state, 60).len();
         let mut blocks = crate::blocks::Blocks::default();
-        let height = blocks.sync(state, &Agents::new(), 60, expanded);
+        let height = blocks.sync(state, &Agents::new(), 60, expanded, Vec::new());
         let mut rows: Vec<String> = blocks
             .window(0, height)
             .iter()
@@ -739,7 +748,7 @@ mod tests {
         )]);
         let welcomed = crate::welcome::lines(&state, 160).len();
         let mut blocks = crate::blocks::Blocks::default();
-        let height = blocks.sync(&state, &Agents::new(), 160, &BTreeSet::new());
+        let height = blocks.sync(&state, &Agents::new(), 160, &BTreeSet::new(), Vec::new());
         let widest = blocks
             .window(0, height)
             .iter()

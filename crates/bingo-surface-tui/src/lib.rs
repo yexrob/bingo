@@ -20,10 +20,13 @@
 //! - [`tree::Tree`] holds one reducer state per session the attachment
 //!   carries — the root and its sub-sessions (ADR-0010 §3) — and which of
 //!   them is on screen.
-//! - [`transcript`], [`markdown`], [`block`], [`panel`], [`dialog`],
-//!   [`composer`], [`commands`], [`keys`], [`permission`], [`paths`],
-//!   [`welcome`] and [`wrap`] are the bricks those two stand on, and
-//!   [`theme`] is the one table of tokens and glyphs they draw with.
+//! - [`views`] is one renderer per node of the `View` vocabulary (ADR-0013);
+//!   [`rail`] derives the cards a plugin's panels and signals become, and
+//!   [`panel`] is the sheet they are pinned from.
+//! - [`transcript`], [`markdown`], [`dialog`], [`composer`], [`commands`],
+//!   [`keys`], [`permission`], [`paths`], [`welcome`] and [`wrap`] are the
+//!   bricks those stand on, and [`theme`] is the one table of tokens and
+//!   glyphs they draw with.
 //!
 //! # What a person types
 //!
@@ -31,7 +34,6 @@
 //! §6). Every other `/name` and every `!line` is submitted verbatim: the
 //! session actor parses commands, not the client.
 
-mod block;
 mod blocks;
 mod clock;
 mod commands;
@@ -48,6 +50,7 @@ mod panel;
 mod paths;
 mod permission;
 mod preview;
+mod rail;
 mod run;
 mod scroll;
 mod search;
@@ -59,6 +62,7 @@ mod transcript;
 mod tree;
 mod ui;
 mod view;
+mod views;
 mod welcome;
 mod wrap;
 
@@ -147,5 +151,7 @@ impl Plugin for TuiPlugin {
 mod painted;
 #[cfg(test)]
 mod screens;
+#[cfg(test)]
+mod test_lanes;
 #[cfg(test)]
 mod test_support;

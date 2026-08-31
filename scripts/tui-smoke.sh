@@ -75,10 +75,10 @@ mouse() {
 
 # Start bingo on a scripted provider. The script's own text never appears in
 # the command line, so `await` matches the output and not the echo of itself.
-# `$2` is any extra environment the step wants.
+# `$2` is any extra environment the step wants, `$3` any extra flags.
 start() {
   printf '%s' "$1" >"$WORK/script.json"
-  keys "HOME=$WORK/home ${2:-} BINGO_FAKE_SCRIPT=$WORK/script.json $BIN --cwd $WORK/cwd" Enter
+  keys "HOME=$WORK/home ${2:-} BINGO_FAKE_SCRIPT=$WORK/script.json $BIN --cwd $WORK/cwd ${3:-}" Enter
   await '? for shortcuts'
 }
 
@@ -193,6 +193,37 @@ if pane | grep -q '⏺'; then
   pane >&2
   exit 1
 fi
+finish
+
+step 'a live signal moves in the rail and leaves nothing behind'
+start '{"responses":[
+  {"steps":[{"toolCall":{"name":"DemoProgress","input":{"label":"cargo test"}}}]},
+  {"steps":[{"text":"The bar has run."}]}]}' '' '--demo-ui'
+keys 'run the bar' Enter
+# The pane is 120 columns, so the card is in the rail; the bar is published
+# every 200 ms for three seconds, and these are its two ends.
+await '0 %'
+await '100 %'
+await 'The bar has run.'
+finish
+
+step 'a button on a pinned board fires its command and the table changes'
+start '{"responses":[{"steps":[{"text":"nothing to do"}]}]}' '' '--demo-ui'
+keys '/board' Enter
+await 'board published'
+# ctrl+t opens the panel sheet, ⏎ pins the board into the rail, esc closes it.
+keys C-t
+await 'bingo.demo.ui'
+keys Enter
+await 'pinned'
+keys Escape
+await 'Board'
+# tab takes the focus, and the key the board's first button carries fires it.
+keys Tab
+await '❯ Board'
+keys '1'
+keys C-t
+await 'running'
 finish
 
 echo 'tui-smoke ok'

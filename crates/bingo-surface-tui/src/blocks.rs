@@ -92,6 +92,9 @@ pub struct Blocks {
     height: usize,
     /// The failed turn's line, which belongs to no item.
     tail: Vec<Line<'static>>,
+    /// The live cards, where there is no rail to put them in (ADR-0013 §2):
+    /// they belong to no item either, and they sit under the running rows.
+    live: Vec<Line<'static>>,
     /// How many blocks have been drawn since this cache was made. A test
     /// watches it: scrolling must not move it.
     renders: usize,
@@ -106,6 +109,7 @@ impl Blocks {
         agents: &Agents<'_>,
         width: usize,
         expanded: &BTreeSet<ItemId>,
+        live: Vec<Line<'static>>,
     ) -> usize {
         if self.width != width {
             self.blocks.clear();
@@ -126,6 +130,7 @@ impl Blocks {
         // Whatever is left behind the last item was rewound away.
         self.blocks.truncate(kept);
         self.tail = transcript::failure(state, &rows);
+        self.live = live;
         self.height = self.measure();
         self.height
     }
@@ -281,12 +286,18 @@ impl Blocks {
                 lines: entry.lines.as_slice(),
             }
         });
+        let opened = !(self.head.is_empty() && self.blocks.is_empty());
         let tail = (!self.tail.is_empty()).then_some(Segment {
-            gap: !(self.head.is_empty() && self.blocks.is_empty()),
+            gap: opened,
             id: None,
             lines: self.tail.as_slice(),
         });
-        head.into_iter().chain(blocks).chain(tail)
+        let live = (!self.live.is_empty()).then_some(Segment {
+            gap: opened || !self.tail.is_empty(),
+            id: None,
+            lines: self.live.as_slice(),
+        });
+        head.into_iter().chain(blocks).chain(tail).chain(live)
     }
 }
 
@@ -326,7 +337,7 @@ mod tests {
     }
 
     fn sync(blocks: &mut Blocks, state: &SessionState, width: usize) -> usize {
-        blocks.sync(state, &Agents::new(), width, &BTreeSet::new())
+        blocks.sync(state, &Agents::new(), width, &BTreeSet::new(), Vec::new())
     }
 
     /// The rows the welcome box takes at the top, plus the blank under it.

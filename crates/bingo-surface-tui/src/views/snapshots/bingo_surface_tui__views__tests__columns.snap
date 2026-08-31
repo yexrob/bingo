@@ -1,0 +1,7 @@
+---
+source: crates/bingo-surface-tui/src/views/tests.rs
+expression: at_80(&view)
+---
+"model   gpt-5.4                          • one                                  "
+"rounds  12                               • two                                  "
+"                                         • three                                "

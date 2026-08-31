@@ -35,7 +35,12 @@ impl Server {
 
     /// The same, with extra command-line arguments after `--cwd`.
     pub fn spawn_with(script: &str, extra: &[&str]) -> Server {
-        let home = tempfile::tempdir().unwrap();
+        Server::spawn_at(tempfile::tempdir().unwrap(), script, extra)
+    }
+
+    /// A server whose home is handed to it rather than made: what a second
+    /// run continuing the first works in.
+    pub fn spawn_at(home: tempfile::TempDir, script: &str, extra: &[&str]) -> Server {
         let path = home.path().join("script.json");
         std::fs::File::create(&path)
             .unwrap()
@@ -69,6 +74,12 @@ impl Server {
 
     pub fn sessions_dir(&self) -> std::path::PathBuf {
         self.home.path().join(".bingo/data/sessions")
+    }
+
+    /// Take the home back and let the process go: what is on disk is what a
+    /// second run would find there.
+    pub fn into_home(self) -> tempfile::TempDir {
+        self.home
     }
 }
 

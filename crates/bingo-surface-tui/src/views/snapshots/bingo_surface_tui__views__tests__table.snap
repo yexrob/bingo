@@ -1,0 +1,8 @@
+---
+source: crates/bingo-surface-tui/src/views/tests.rs
+expression: at_80(&view)
+---
+"id  task            tokens                                                      "
+"──────────────────────────                                                      "
+" 1  write the plan    1200                                                      "
+" 2  ship it              –                                                      "

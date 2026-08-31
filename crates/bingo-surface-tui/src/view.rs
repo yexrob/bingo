@@ -18,7 +18,8 @@ use crate::frame::{self, Demand, Regions};
 use crate::tree::{self, Tree};
 use crate::ui::{Card, Open, Picker, Switcher, Ui};
 use crate::{
-    block, composer as prompt, dialog, keys, layers, panel, search, select, status, theme, wrap,
+    composer as prompt, dialog, keys, layers, panel, rail, search, select, status, theme, views,
+    wrap,
 };
 
 /// How tall the composer box may grow before it scrolls internally.
@@ -31,9 +32,23 @@ const MENU_ROWS: usize = 8;
 /// `↳` rows, the switcher — from their states.
 pub fn draw(tree: &Tree, ui: &Ui, frame: &mut Frame, now: Now) {
     let area = frame.area();
-    let regions = frame::regions(area, demand(tree, ui, area.width, now));
+    let cards = rail::cards(tree.viewed(), tree.view(), &ui.pinned);
+    let regions = frame::regions(area, demand(tree, ui, area.width, now, !cards.is_empty()));
     ui.painted.borrow_mut().regions = regions;
-    render_transcript(tree, ui, frame, regions.transcript, now);
+    let drawn = rail::render(
+        &cards,
+        rail::width(regions.rail, regions.transcript),
+        ui.focus.as_ref(),
+        &ui.marks(tree.viewed()),
+    );
+    // A card is in the rail, or — where there is no rail — under the running
+    // rows; never in both (design §3).
+    let live = match regions.rail {
+        Some(_) => Vec::new(),
+        None => rail::inline(&drawn),
+    };
+    render_transcript(tree, ui, frame, regions.transcript, now, live);
+    render_rail(ui, frame, regions.rail, &drawn);
     render_activity(tree.viewed(), ui, frame, regions.activity, now);
     render_composer(tree.viewed(), ui, frame, regions.composer);
     render_status(tree, ui, frame, regions.status);
@@ -41,13 +56,25 @@ pub fn draw(tree: &Tree, ui: &Ui, frame: &mut Frame, now: Now) {
 }
 
 /// What the frame must make room for before the transcript is given the rest.
-fn demand(tree: &Tree, ui: &Ui, width: u16, now: Now) -> Demand {
+fn demand(tree: &Tree, ui: &Ui, width: u16, now: Now, rail: bool) -> Demand {
     let state = tree.viewed();
     Demand {
         composer: u16::try_from(composer_rows(state, ui, width as usize)).unwrap_or(u16::MAX),
         activity: u16::try_from(activity(state, ui, now).len()).unwrap_or(u16::MAX),
-        rail: false,
+        rail,
     }
+}
+
+/// The rail: the cards on their raised tint, from the top row down. Where
+/// each landed is left in [`crate::ui::Painted`] for a click to read.
+fn render_rail(ui: &Ui, frame: &mut Frame, area: Option<Rect>, drawn: &[rail::Drawn]) {
+    let Some(area) = area.filter(|area| area.height > 0) else {
+        ui.painted.borrow_mut().rail.clear();
+        return;
+    };
+    let (lines, where_) = rail::painted(drawn, area.width as usize);
+    ui.painted.borrow_mut().rail = where_;
+    frame.render_widget(Paragraph::new(lines), area);
 }
 
 /// The rows the draft needs, at most [`COMPOSER_ROWS`].
@@ -98,7 +125,10 @@ fn layers(tree: &Tree, ui: &Ui, frame: &mut Frame, regions: Regions, now: Now) {
         frame,
         above,
         [
-            ui.block.as_ref().map(block::lines).unwrap_or_default(),
+            ui.block
+                .as_ref()
+                .map(|view| views::render(view, width))
+                .unwrap_or_default(),
             menu(ui),
         ]
         .concat(),
@@ -125,7 +155,12 @@ fn layer(
         // A dropdown above the input box, like the `/` menu: nothing dims.
         Open::Switcher(switcher) => over(frame, above, switcher_lines(tree, switcher)),
         Open::Help => sheet(frame, above, help(ui, width), reveal),
-        Open::Panel => sheet(frame, above, panel::lines(tree.viewed()), reveal),
+        Open::Panel => sheet(
+            frame,
+            above,
+            panel::lines(tree.viewed(), tree.view(), ui.panel, &ui.pinned, width),
+            reveal,
+        ),
         Open::Picker(picker) => sheet(frame, above, picker_lines(picker), reveal),
     }
 }
@@ -231,7 +266,14 @@ fn over(frame: &mut Frame, region: Rect, lines: Vec<Line<'static>>) {
 
 /// The tail of the transcript, or the window the scroll keys parked on. What
 /// it drew is left in [`crate::ui::Painted`] for the next key to read.
-fn render_transcript(tree: &Tree, ui: &Ui, frame: &mut Frame, area: Rect, now: Now) {
+fn render_transcript(
+    tree: &Tree,
+    ui: &Ui,
+    frame: &mut Frame,
+    area: Rect,
+    now: Now,
+    live: Vec<Line<'static>>,
+) {
     if area.height == 0 {
         return;
     }
@@ -242,6 +284,7 @@ fn render_transcript(tree: &Tree, ui: &Ui, frame: &mut Frame, area: Rect, now: N
         &tree.agents(),
         area.width as usize,
         &ui.expanded,
+        live,
     );
     painted.top = ui.scroll.top(painted.height, rows, now.instant);
     let mut shown = painted.blocks.window(painted.top, rows);
@@ -1137,6 +1180,84 @@ mod tests {
         let screen = render_tree(&tree, &ui, now);
         assert!(screen.contains(crate::panel::NOTHING), "{screen}");
         assert!(!screen.contains("write the plan"), "{screen}");
+    }
+
+    // ---- the three lanes (ADR-0013) -------------------------------------
+
+    /// A person who pinned the board into the rail and put the focus on it.
+    fn watching() -> (Ui, Now) {
+        let (mut ui, now) = scene();
+        pin_board(&mut ui);
+        ui.focus = Some(demo_card("board"));
+        (ui, now)
+    }
+
+    #[test]
+    fn the_rail_holds_the_pinned_board_and_the_live_progress_card() {
+        let (ui, now) = watching();
+        let screen = draw_sized(120, 40, &boarded(), &ui, now);
+        assert!(screen.contains("❯ Board"), "{screen}");
+        assert!(screen.contains("[ 1 Tick ]"), "{screen}");
+        assert!(screen.contains("████████░░ 80 %"), "{screen}");
+        insta::assert_snapshot!(screen);
+    }
+
+    #[test]
+    fn a_rail_is_not_drawn_for_a_session_no_plugin_has_written_to() {
+        let (ui, now) = scene();
+        draw_sized(120, 40, &state(), &ui, now);
+        let quiet = ui.painted.borrow().regions;
+        assert!(quiet.rail.is_none(), "an empty rail is not drawn");
+        assert_eq!(quiet.transcript.width, 120, "the transcript keeps it all");
+
+        let (ui, now) = watching();
+        draw_sized(120, 40, &boarded(), &ui, now);
+        let busy = ui.painted.borrow().regions;
+        assert!(busy.rail.is_some(), "a card asks for the column");
+        assert_eq!(busy.transcript.width, 120 - crate::frame::RAIL_WIDTH);
+    }
+
+    /// Below the rail's width the same cards draw under the running rows, so
+    /// a signal is never lost to a narrow terminal (design §3).
+    #[test]
+    fn without_a_rail_the_same_cards_draw_under_the_running_rows() {
+        let (ui, now) = watching();
+        let screen = render(&boarded(), &ui, now);
+        assert!(screen.contains("████████░░ 80 %"), "{screen}");
+        assert!(screen.contains("❯ Board"), "{screen}");
+        insta::assert_snapshot!(screen);
+    }
+
+    /// The block lane: what a tool drew for a person, under its own row and
+    /// folded like any other output.
+    #[test]
+    fn a_display_view_is_drawn_under_the_tool_row_that_made_it() {
+        let output = ToolOutput {
+            parts: vec![ContentPart::text("2 open")],
+            is_error: false,
+            display: Some(View::Table {
+                headers: vec!["id".into(), "task".into()],
+                rows: vec![
+                    vec!["1".into(), "write the plan".into()],
+                    vec!["2".into(), "ship it".into()],
+                ],
+            }),
+        };
+        let state = folded(vec![item_frame(
+            1,
+            tool(
+                "itm_1",
+                "TaskList",
+                json!({}),
+                Some(output),
+                ItemStatus::Completed,
+            ),
+        )]);
+        let (ui, now) = scene();
+        let screen = render(&state, &ui, now);
+        assert!(screen.contains("⎿  id  task"), "{screen}");
+        assert!(!screen.contains("2 open"), "the model's text is not drawn");
+        insta::assert_snapshot!(screen);
     }
 
     #[test]

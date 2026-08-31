@@ -14,6 +14,8 @@ bingo (bin)                     composes Vec<Box<dyn Plugin>>, picks a Surface
 │   session     bingo-store-jsonl (journal + index) · bingo-context (compactor + memory)
 │   features    bingo-skills · bingo-rooms · bingo-tasks · bingo-experience   (a team is resident agents: bingo-agents)
 │   surfaces    bingo-surface-print · bingo-surface-rpc · bingo-surface-tui · bingo-acp · bingo-channels
+│   demo        bingo-demo-ui               off unless `--demo-ui`: the worked example of ADR-0013's
+│                                           three lanes, and what a plugin author reads first
 ├── libraries (`[package.metadata.bingo] tier = "library"`: register nothing, depend on bingo-sdk only)
 │   bingo-auth-oauth            PKCE loopback · device code · auth.json · single-flight refresh (ADR-0012)
 └── bingo-sdk                   stable API: ids · Message/ContentPart · Frame/Event/Item · SessionState + apply

@@ -16,6 +16,8 @@ use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use serde_json::{Value, json};
 
+pub use crate::test_lanes::*;
+
 use crate::clock::Now;
 use crate::tree::Tree;
 use crate::ui::Ui;
