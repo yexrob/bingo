@@ -222,6 +222,27 @@ fn a_second_start_refuses_and_names_the_pid_that_already_has_it() {
     gateway.verb(&["stop"]);
 }
 
+/// The verbs that bring a gateway up validate the channels first
+/// (user-directed): a configuration that cannot run is refused with the
+/// remedy, never handed to a supervisor to crash-loop under KeepAlive.
+#[test]
+fn a_start_with_no_channel_refuses_before_anything_moves() {
+    let gateway = Gateway::with(r#"{}"#);
+    let out = gateway.verb(&["start"]);
+    assert_eq!(out.status.code(), Some(1), "stdout: {}", stdout(&out));
+    let said = stderr(&out);
+    assert!(said.contains("no channel is configured"), "{said}");
+    assert!(said.contains("bingo channels secret"), "{said}");
+    assert!(!gateway.pidfile().exists(), "nothing was spawned");
+
+    let install = gateway.verb(&["install"]);
+    assert_eq!(install.status.code(), Some(1), "install is preflighted too");
+    assert!(
+        !service_file(gateway.path()).exists(),
+        "no service file was written for a configuration that cannot run"
+    );
+}
+
 #[test]
 fn a_stale_pidfile_is_reported_dead_and_doctor_fix_clears_it() {
     let gateway = Gateway::new();

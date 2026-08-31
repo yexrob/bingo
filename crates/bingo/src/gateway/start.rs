@@ -76,7 +76,15 @@ pub async fn start(
     let child = match mode {
         Mode::Installed(supervisor) => {
             let file = supervisor.path(home);
-            service::tell(supervisor, Ask::Start, &service::uid(), &file).map_err(invalid)?;
+            let uid = service::uid();
+            // `install` loads the service, and launchd refuses to bootstrap a
+            // loaded one (error 5: Input/output error). A start that finds it
+            // loaded kicks it instead; only an unloaded one is bootstrapped.
+            let ask = match service::loaded(supervisor, &uid) {
+                true => Ask::Kick,
+                false => Ask::Start,
+            };
+            service::tell(supervisor, ask, &uid, &file).map_err(invalid)?;
             None
         }
         Mode::Hand => Some(spawn(paths, forward)?),

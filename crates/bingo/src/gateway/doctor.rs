@@ -14,7 +14,7 @@
 use std::path::{Path, PathBuf};
 
 use bingo_core::settings;
-use bingo_sdk::{Env, KernelError};
+use bingo_sdk::{Env, ErrorCode, KernelError};
 use serde_json::{Map, Value};
 
 use super::paths::Paths;
@@ -98,6 +98,39 @@ pub fn doctor(patient: &Patient<'_>, probe: &dyn Probe, fix: bool) -> Result<Str
         );
     }
     Ok(report.join("\n"))
+}
+
+/// What `install`, `start` and `restart` check before they act (user-directed
+/// 2026-09-01): the settings parse, a channel is configured, and every
+/// configured channel can sign. The rows are the doctor's own — one
+/// implementation, two readers — so a verb refuses with exactly the lines a
+/// doctor would print, and a gateway is never handed to a supervisor that
+/// would only crash-loop it on a configuration the verb could have read.
+pub fn preflight(patient: &Patient<'_>) -> Result<(), KernelError> {
+    let refuse = |say: String| Err(KernelError::new(ErrorCode::InvalidInput, say));
+    let (settings_row, layers) = settings_check(patient);
+    if settings_row.verdict == Verdict::Bad {
+        return refuse(settings_row.line());
+    }
+    let merged = merged_channels(&layers);
+    if bingo_channels::secret::configured(&merged).is_empty() {
+        return refuse(
+            "no channel is configured: name one under `channels` in the settings \
+             — e.g. \"channels\": { \"feishu\": { \"appId\": \"cli_…\" } } — and give \
+             it a secret with `bingo channels secret <adapter>`. A gateway with \
+             no channel would only crash-loop under its supervisor."
+                .into(),
+        );
+    }
+    let bad: Vec<String> = credential_checks(patient, &layers)
+        .into_iter()
+        .filter(|row| row.verdict == Verdict::Bad)
+        .map(|row| row.line())
+        .collect();
+    match bad.is_empty() {
+        true => Ok(()),
+        false => refuse(bad.join("\n")),
+    }
 }
 
 /// Every check, in the order a person reads them: what is configured, what is
@@ -568,6 +601,63 @@ mod tests {
         let said = case.report(&Fake::empty(), false);
         assert!(said.starts_with("[bad]  settings —"), "{said}");
         assert!(said.contains("Nothing will start"), "{said}");
+    }
+
+    fn patient_of<'a>(case: &'a Case, env: &'a Env, paths: &'a Paths) -> Patient<'a> {
+        Patient {
+            paths,
+            env,
+            cwd: case.home.path(),
+            settings: None,
+        }
+    }
+
+    #[test]
+    fn preflight_refuses_a_gateway_with_no_channel_and_says_how_to_add_one() {
+        let case = Case::new();
+        let env = case.env();
+        let paths = Paths::new(&env);
+        let refused = preflight(&patient_of(&case, &env, &paths))
+            .expect_err("no channel is configured")
+            .message;
+        assert!(refused.contains("no channel is configured"), "{refused}");
+        assert!(refused.contains("\"channels\""), "{refused}");
+        assert!(refused.contains("bingo channels secret"), "{refused}");
+    }
+
+    #[test]
+    fn preflight_refuses_a_channel_that_cannot_sign_with_the_doctor_s_own_line() {
+        let case = Case::new();
+        std::fs::create_dir_all(case.env().config_dir).expect("the directory");
+        std::fs::write(
+            case.env().config_dir.join("settings.json"),
+            r#"{ "channels": { "feishu": { "appId": "cli_public" } } }"#,
+        )
+        .expect("settings");
+        let env = case.env();
+        let paths = Paths::new(&env);
+        let refused = preflight(&patient_of(&case, &env, &paths))
+            .expect_err("no secret anywhere")
+            .message;
+        assert!(
+            refused.contains("[bad]  channels.feishu — no secret"),
+            "{refused}"
+        );
+        assert!(refused.contains("BINGO_FEISHU_APP_SECRET"), "{refused}");
+    }
+
+    #[test]
+    fn preflight_passes_a_channel_that_signs_with_nothing() {
+        let case = Case::new();
+        std::fs::create_dir_all(case.env().config_dir).expect("the directory");
+        std::fs::write(
+            case.env().config_dir.join("settings.json"),
+            r#"{ "channels": { "loopback": {} } }"#,
+        )
+        .expect("settings");
+        let env = case.env();
+        let paths = Paths::new(&env);
+        preflight(&patient_of(&case, &env, &paths)).expect("a loopback needs no secret");
     }
 
     #[test]

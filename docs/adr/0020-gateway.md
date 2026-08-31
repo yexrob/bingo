@@ -26,7 +26,11 @@ doctor`) are the settled UX for this.
    `stop` sends TERM and waits for the pid to leave. `restart` = stop, start.
    `status` reports pid liveness, version, uptime, log path. `logs` prints the
    log path and its tail. `doctor` diagnoses (below). `run` is public but
-   marked as what `start` launches.
+   marked as what `start` launches. **`install`, `start` and `restart`
+   preflight the channels first** (user-directed 2026-09-01): unparseable
+   settings, no configured channel, or a channel that cannot sign is refused
+   with the doctor's own lines — a configuration that cannot run is never
+   handed to a supervisor to crash-loop under KeepAlive.
 3. **The pidfile** `<data_dir>/gateway/gateway.pid` holds pid, binary version
    and start time; written with `create_new` (the channels claim shape), given
    back on drop. Liveness is probed with `kill -0 <pid>` as a subprocess —
@@ -57,7 +61,10 @@ doctor`) are the settled UX for this.
    verbs delegate to the supervisor — start = load, stop = unload, restart =
    `launchctl kickstart -k` / `systemctl --user restart` — so launchd and a
    hand-spawned process never fight over one pidfile; `status` and `doctor`
-   name which mode is in force.
+   name which mode is in force. launchd refuses to bootstrap a service it
+   already holds (error 5), and `install` loads it — so a `start` that finds
+   the service loaded kicks it (`launchctl kickstart`) instead of
+   bootstrapping twice; `systemctl start` is idempotent and needs no probe.
 8. **Secrets get a disk home.** A boot-started gateway has no exported env,
    so a channel secret may live in `auth.json` (0600, ADR-0012's store)
    under `channels.<id>`, written by `bingo channels secret <id>` — hidden

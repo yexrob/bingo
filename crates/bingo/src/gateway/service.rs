@@ -56,6 +56,9 @@ pub enum Ask {
     /// Give it back and forget it.
     Disable,
     Start,
+    /// Run a service the supervisor already holds. launchd refuses to
+    /// bootstrap a loaded service (error 5), so a loaded one is kicked.
+    Kick,
     Stop,
     Restart,
 }
@@ -87,10 +90,26 @@ fn launchctl(ask: Ask, uid: &str, file: &Path) -> Option<Vec<String>> {
             domain,
             file.display().to_string(),
         ],
+        Ask::Kick => vec!["launchctl".into(), "kickstart".into(), target],
         Ask::Disable | Ask::Stop => vec!["launchctl".into(), "bootout".into(), target],
         Ask::Restart => vec!["launchctl".into(), "kickstart".into(), "-k".into(), target],
     };
     Some(words)
+}
+
+/// Whether the supervisor already holds the service. Only launchd needs the
+/// answer: its `bootstrap` refuses a loaded service, while `systemctl start`
+/// is idempotent — so for systemd the question is never asked.
+pub fn loaded(supervisor: Supervisor, uid: &str) -> bool {
+    match supervisor {
+        Supervisor::Launchd => std::process::Command::new("launchctl")
+            .args(["print", &format!("gui/{uid}/{}", super::unit::LABEL)])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success()),
+        Supervisor::Systemd => false,
+    }
 }
 
 fn systemctl(ask: Ask) -> Option<Vec<String>> {
@@ -105,7 +124,7 @@ fn systemctl(ask: Ask) -> Option<Vec<String>> {
         }
         Ask::Enable => &["enable", "--now"],
         Ask::Disable => &["disable", "--now"],
-        Ask::Start => &["start"],
+        Ask::Start | Ask::Kick => &["start"],
         Ask::Stop => &["stop"],
         Ask::Restart => &["restart"],
     };
@@ -278,6 +297,16 @@ mod tests {
             words(Supervisor::Launchd, Ask::Start),
             words(Supervisor::Launchd, Ask::Enable),
             "launchd has no start apart from loading it"
+        );
+        assert_eq!(
+            words(Supervisor::Launchd, Ask::Kick),
+            ["launchctl", "kickstart", "gui/501/com.bingo.gateway"],
+            "a loaded service is kicked, never bootstrapped twice"
+        );
+        assert_eq!(
+            words(Supervisor::Systemd, Ask::Kick),
+            ["systemctl", "--user", "start", "bingo-gateway.service"],
+            "systemctl start is idempotent, so the kick is the start"
         );
         assert!(
             argv(Supervisor::Launchd, Ask::Reload, "501", Path::new("/x")).is_none(),

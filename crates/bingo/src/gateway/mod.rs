@@ -95,6 +95,17 @@ pub async fn dispatch(
         cwd: cwd.to_path_buf(),
         settings: settings.map(Path::to_path_buf),
     };
+    // The verbs that bring a gateway up validate its channels first
+    // (user-directed): a configuration that cannot run is refused here, with
+    // the doctor's own lines, rather than crash-looping under a supervisor.
+    if matches!(verb, Verb::Start | Verb::Restart | Verb::Install) {
+        doctor::preflight(&doctor::Patient {
+            paths: &paths,
+            env,
+            cwd,
+            settings,
+        })?;
+    }
     let said = match verb {
         Verb::Start => start::start(&paths, &home, &forward, &probe).await?,
         Verb::Restart => start::restart(&paths, &home, &forward, &probe).await?,
