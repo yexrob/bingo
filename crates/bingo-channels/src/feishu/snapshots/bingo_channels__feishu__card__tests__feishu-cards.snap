@@ -1,0 +1,108 @@
+---
+source: crates/bingo-channels/src/feishu/card.rs
+assertion_line: 129
+expression: "json!({\n    \"streaming\": streaming(), \"entity\": entity(&streaming()), \"by_id\":\n    by_id(\"ctp_1\"), \"question\":\n    question(&Conversation::group(\"oc_1\").in_thread(\"omt_9\"), &permission(),\n    &limits(),), \"settled\":\n    settled(\"Bash: run `cargo test`\", \"approved in the TUI\"),\n})"
+---
+{
+  "streaming": {
+    "schema": "2.0",
+    "config": {
+      "streaming_mode": true,
+      "update_multi": true
+    },
+    "body": {
+      "elements": [
+        {
+          "tag": "markdown",
+          "element_id": "answer",
+          "content": ""
+        }
+      ]
+    }
+  },
+  "entity": {
+    "type": "card_json",
+    "data": "{\"schema\":\"2.0\",\"config\":{\"streaming_mode\":true,\"update_multi\":true},\"body\":{\"elements\":[{\"tag\":\"markdown\",\"element_id\":\"answer\",\"content\":\"\"}]}}"
+  },
+  "by_id": {
+    "type": "card",
+    "data": {
+      "card_id": "ctp_1"
+    }
+  },
+  "question": {
+    "schema": "2.0",
+    "body": {
+      "elements": [
+        {
+          "tag": "markdown",
+          "content": "Bash: run `cargo test`"
+        },
+        {
+          "tag": "action",
+          "actions": [
+            {
+              "tag": "button",
+              "text": {
+                "tag": "plain_text",
+                "content": "Allow once"
+              },
+              "type": "primary",
+              "behaviors": [
+                {
+                  "type": "callback",
+                  "value": {
+                    "bingo": {
+                      "interaction": "int_1",
+                      "choice": "1",
+                      "chat": "oc_1",
+                      "thread": "omt_9",
+                      "group": true
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "tag": "button",
+              "text": {
+                "tag": "plain_text",
+                "content": "Deny"
+              },
+              "type": "default",
+              "behaviors": [
+                {
+                  "type": "callback",
+                  "value": {
+                    "bingo": {
+                      "interaction": "int_1",
+                      "choice": "2",
+                      "chat": "oc_1",
+                      "thread": "omt_9",
+                      "group": true
+                    }
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "settled": {
+    "schema": "2.0",
+    "body": {
+      "elements": [
+        {
+          "tag": "markdown",
+          "content": "Bash: run `cargo test`"
+        },
+        {
+          "tag": "markdown",
+          "content": "_approved in the TUI_"
+        }
+      ]
+    }
+  }
+}

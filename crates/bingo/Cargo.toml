@@ -34,6 +34,7 @@ bingo-rooms.workspace = true
 bingo-tasks.workspace = true
 bingo-experience.workspace = true
 bingo-demo-ui.workspace = true
+bingo-channels.workspace = true
 clap.workspace = true
 tokio.workspace = true
 serde_json.workspace = true

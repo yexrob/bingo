@@ -1,0 +1,55 @@
+---
+source: crates/bingo-channels/src/loopback.rs
+assertion_line: 496
+expression: "[spoken(&Record::Send\n{\n    to: Conversation::group(\"oc_1\").in_thread(\"omt_2\"), id: Posted::new(\"m1\"),\n    text: \"hi\".into(), mode: Mode::Stream,\n}),\nspoken(&Record::Replace { at: Posted::new(\"m1\"), text: \"hi there\".into(), }),\nspoken(&Record::Finish { at: Posted::new(\"m1\"), text: \"hi there!\".into(), }),\nspoken(&Record::Ask\n{ to: Conversation::direct(\"oc_1\"), id: Posted::new(\"m2\"), question, }),\nspoken(&Record::Settle\n{ at: Posted::new(\"m2\"), outcome: \"approved in the TUI\".into(), }),\nspoken(&Record::Typing { to: Conversation::direct(\"oc_1\"), }),\nspoken(&Record::Reply\n{\n    to: Conversation::direct(\"oc_1\"), parent: Posted::new(\"m1\"), id:\n    Posted::new(\"m3\"), text: \"under it\".into(), mode: Mode::Once,\n}),]"
+---
+[
+  {
+    "op": "send",
+    "chat": "oc_1",
+    "thread": "omt_2",
+    "id": "m1",
+    "text": "hi",
+    "mode": "stream"
+  },
+  {
+    "op": "replace",
+    "id": "m1",
+    "text": "hi there"
+  },
+  {
+    "op": "finish",
+    "id": "m1",
+    "text": "hi there!"
+  },
+  {
+    "op": "ask",
+    "chat": "oc_1",
+    "id": "m2",
+    "question": "int_1",
+    "prompt": "Bash: run tests",
+    "choices": [
+      [
+        "1",
+        "Allow once"
+      ]
+    ]
+  },
+  {
+    "op": "settle",
+    "id": "m2",
+    "outcome": "approved in the TUI"
+  },
+  {
+    "op": "typing",
+    "chat": "oc_1"
+  },
+  {
+    "op": "reply",
+    "chat": "oc_1",
+    "parent": "m1",
+    "id": "m3",
+    "text": "under it",
+    "mode": "once"
+  }
+]

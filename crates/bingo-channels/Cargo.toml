@@ -1,0 +1,49 @@
+[package]
+name = "bingo-channels"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "IM channels surface for bingo: one deliverer, adapters that hand over their mechanism"
+
+[lints]
+workspace = true
+
+[dependencies]
+bingo-sdk.workspace = true
+async-trait.workspace = true
+futures.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+schemars.workspace = true
+thiserror.workspace = true
+# A conversation that drops a frame or a reconnect that never lands is not a
+# decision a person can act on; it is reported here and the pump goes on.
+tracing.workspace = true
+# `net` for the loopback adapter's peer and the Feishu long connection; the
+# workspace default omits it.
+tokio = { workspace = true, features = ["net"] }
+# Feishu's HTTP side: bootstrap, tenant token, sends and the CardKit PUTs.
+reqwest.workspace = true
+# The ACK payload's `data` is base64 of the JSON bytes (ADR-0016 §6).
+base64.workspace = true
+# M13 (docs/plans/M13-channels.md), the one new dependency: Feishu's long
+# connection is a plain wss stream with an application-level ping. rustls
+# only — `openssl-sys` is banned in deny.toml — and the roots reqwest already
+# resolved, so the delta is tungstenite itself and nothing else.
+tokio-tungstenite = { version = "0.30", default-features = false, features = [
+  "connect",
+  "rustls-tls-native-roots",
+] }
+
+[dev-dependencies]
+bingo-sdk = { workspace = true, features = ["testing"] }
+# Frame fixtures carry timestamps; the surface mints none.
+jiff.workspace = true
+# The wire bricks are fixtures: the frame codec and the card bodies are pinned.
+insta.workspace = true
+tempfile.workspace = true
+# Feishu's HTTP endpoints, scripted.
+wiremock.workspace = true
+tokio = { workspace = true, features = ["net", "test-util"] }

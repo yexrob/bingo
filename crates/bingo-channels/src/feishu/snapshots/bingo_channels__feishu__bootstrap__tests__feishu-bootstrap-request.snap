@@ -1,0 +1,10 @@
+---
+source: crates/bingo-channels/src/feishu/bootstrap.rs
+assertion_line: 162
+expression: "request(\"cli_a\", \"secret-a\")"
+---
+{
+  "AppID": "cli_a",
+  "AppSecret": "secret-a",
+  "ClientAssertion": ""
+}

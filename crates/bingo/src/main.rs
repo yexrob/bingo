@@ -8,6 +8,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use bingo_agents::AgentsPlugin;
+use bingo_channels::ChannelsPlugin;
 use bingo_context::ContextPlugin;
 use bingo_core::settings;
 use bingo_core::{Host, HostConfig};
@@ -122,6 +123,11 @@ struct Cli {
     /// says otherwise.
     #[arg(long, global = true)]
     demo_ui: bool,
+
+    /// Listen on an IM channel beside this run: `loopback[=host:port]`
+    /// (ADR-0016). Repeatable; the `channels` setting says the same thing.
+    #[arg(long, value_name = "ADAPTER", global = true)]
+    channels: Vec<String>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -148,6 +154,8 @@ enum Command {
         /// The provider id, e.g. `codex`.
         provider: String,
     },
+    /// Listen on the configured IM channels and nothing else (ADR-0016).
+    Channels,
 }
 
 impl Command {
@@ -167,7 +175,7 @@ impl Command {
                 },
             }),
             Command::Logout { provider } => Some(Credential::Logout { provider }),
-            Command::Serve { .. } => None,
+            Command::Serve { .. } | Command::Channels => None,
         }
     }
 }
@@ -244,16 +252,30 @@ async fn main() -> ExitCode {
     }
 }
 
+/// What this run is for. Decided before the surface options are built,
+/// because building them consumes the command line.
+enum Work {
+    Rpc {
+        stdio: bool,
+    },
+    /// The chat surface as the whole run (ADR-0016 §1): nothing owns the
+    /// terminal, so the concurrent surface is the work.
+    Channels,
+    Session,
+}
+
 async fn run(cli: Cli) -> Result<i32, KernelError> {
-    let serve = match &cli.command {
-        Some(Command::Serve { stdio }) => Some(*stdio),
-        _ => None,
+    let work = match &cli.command {
+        Some(Command::Serve { stdio }) => Work::Rpc { stdio: *stdio },
+        Some(Command::Channels) => Work::Channels,
+        _ => Work::Session,
     };
     check_input(&cli)?;
     let interactive = interactive(&cli);
     let cwd = working_dir(cli.cwd.as_deref())?;
     let config = host_config(&cli, &cwd)?;
     let demo = demo_ui(&cli, &config.layers);
+    let listening = channels_wanted(&cli, &config.layers);
     let host = Host::build(plugins(demo)?, config)
         .await
         .map_err(|e| KernelError::new(ErrorCode::Internal, e.to_string()))?;
@@ -271,17 +293,62 @@ async fn run(cli: Cli) -> Result<i32, KernelError> {
         return Ok(0);
     }
     let env = Arc::new(environment(&cwd));
-    let (id, options) = match serve {
-        Some(stdio) => ("rpc", serve_options(stdio, cwd, env)?),
-        None if interactive => ("tui", surface_options(cli, cwd, env)),
-        None => ("print", surface_options(cli, cwd, env)),
+    let (id, options) = match work {
+        Work::Rpc { stdio } => ("rpc", serve_options(stdio, cwd.clone(), env.clone())?),
+        Work::Channels => (
+            bingo_channels::SURFACE_ID,
+            channel_options(cwd.clone(), env.clone()),
+        ),
+        Work::Session if interactive => ("tui", surface_options(cli, cwd.clone(), env.clone())),
+        Work::Session => ("print", surface_options(cli, cwd.clone(), env.clone())),
+    };
+    let beside = match listening && id != bingo_channels::SURFACE_ID {
+        true => start_channels(&host, channel_options(cwd, env)),
+        false => None,
     };
     let surface = host
         .surface(id)
         .ok_or_else(|| KernelError::new(ErrorCode::Internal, format!("no {id} surface")))?;
     let exit = surface.run(host.handle(), options).await;
+    if let Some(channels) = beside {
+        channels.abort();
+    }
     host.shutdown().await;
     exit.map(|e| e.code)
+}
+
+/// Whether a chat is being listened on: the flag, else any settings layer
+/// that names an adapter. The plugin owns the spelling of the key.
+fn channels_wanted(cli: &Cli, layers: &[settings::Layer]) -> bool {
+    !cli.channels.is_empty()
+        || layers
+            .iter()
+            .any(|layer| bingo_channels::wanted(&Value::Object(layer.value.clone())))
+}
+
+/// The chat surface beside the one that owns the terminal. It is
+/// `SurfaceKind::Concurrent` (ADR-0016 §1), so it lives as long as the run.
+fn start_channels(host: &Host, options: SurfaceOptions) -> Option<tokio::task::JoinHandle<()>> {
+    let surface = host.surface(bingo_channels::SURFACE_ID)?;
+    let handle = host.handle();
+    Some(tokio::spawn(async move {
+        if let Err(error) = surface.run(handle, options).await {
+            let human = std::io::IsTerminal::is_terminal(&std::io::stderr());
+            eprintln!("{}", error_report(error.code, &error.message, human));
+        }
+    }))
+}
+
+/// The chat surface mints its own session keys; the selector is a placeholder
+/// it never reads, as the server's is.
+fn channel_options(cwd: PathBuf, env: Arc<Env>) -> SurfaceOptions {
+    SurfaceOptions {
+        selector: SessionSelector::Latest { cwd: cwd.clone() },
+        cwd,
+        prompt: None,
+        args: Value::Null,
+        env,
+    }
 }
 
 /// The flag combinations that would leave a flag with nothing to act on.
@@ -385,6 +452,7 @@ fn plugins(demo_ui: bool) -> Result<Vec<Box<dyn Plugin>>, KernelError> {
         Box::new(PrintPlugin),
         Box::new(RpcPlugin),
         Box::new(TuiPlugin),
+        Box::new(ChannelsPlugin),
     ];
     if demo_ui {
         all.push(Box::new(DemoUiPlugin));
@@ -399,9 +467,14 @@ fn host_config(cli: &Cli, cwd: &std::path::Path) -> Result<HostConfig, KernelErr
     if let Some(path) = &cli.mcp_config {
         config.layers.push(mcp_layer(path)?);
     }
+    let mut cli_settings = cli_layer(cli);
+    cli_settings.extend(
+        bingo_channels::from_flags(&cli.channels)
+            .map_err(|e| KernelError::new(ErrorCode::InvalidInput, e))?,
+    );
     config
         .layers
-        .push(settings::Layer::new("cli", cli_layer(cli)));
+        .push(settings::Layer::new("cli", cli_settings));
     if let Some(rounds) = cli.max_turns {
         config.budget.max_rounds = rounds;
     }
