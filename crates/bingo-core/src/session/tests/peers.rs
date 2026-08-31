@@ -63,6 +63,64 @@ async fn a_held_delivery_waits_in_the_queue_and_the_next_submit_carries_it_first
     assert!(state.queue.is_empty());
 }
 
+/// ADR-0027 §2, the standby member's arrival: a briefing held on a session
+/// that has never run costs a turn and a token of nothing, and whatever later
+/// wakes it — a room's fan-out, a direct message — opens the one turn that
+/// reads the briefing ahead of its trigger.
+#[tokio::test]
+async fn a_held_briefing_is_read_first_by_the_turn_a_later_wake_opens() {
+    let provider = ScriptedProvider::new(vec![Script::Events(text("ok"))]);
+    let mailbox = start(provider.clone(), vec![]);
+    let (mut state, mut events) = mailbox.attach().await.unwrap();
+
+    let briefing = peer("you count evens", "parent");
+    mailbox.deliver(IntentId::mint(), briefing, Delivery::Hold);
+    let frames = frames_until(&mut events, &mut state, |f| {
+        matches!(f.event, Event::IntentAck { .. })
+    })
+    .await;
+    let labels: Vec<String> = frames.iter().map(|f| label(&f.event)).collect();
+    assert_eq!(labels, ["queue:1", "ack:Queued"]);
+    assert!(state.turn.is_none(), "a seated member opens no turn");
+    assert!(provider.requests().is_empty(), "and spends no tokens");
+
+    mailbox.deliver(
+        IntentId::mint(),
+        peer("start at 1", "#relay"),
+        Delivery::Wake,
+    );
+    let frames = frames_until(&mut events, &mut state, turn_completed).await;
+    assert_eq!(turn_origin(&frames), Some(TurnOrigin::Peer));
+    assert_eq!(user_texts(&state), ["you count evens", "start at 1"]);
+    let Some(Event::TurnStarted { inputs, .. }) = frames
+        .iter()
+        .map(|f| &f.event)
+        .find(|e| matches!(e, Event::TurnStarted { .. }))
+    else {
+        panic!("a turn started");
+    };
+    assert_eq!(inputs.len(), 2, "one turn carries both");
+    let requests = provider.requests();
+    assert_eq!(requests.len(), 1, "one wake, one turn, one call");
+    let read: Vec<&str> = requests[0]
+        .messages
+        .iter()
+        .flat_map(|m| m.parts.iter())
+        .filter_map(|part| part.as_text())
+        .collect();
+    assert_eq!(
+        read,
+        [
+            "[from parent]",
+            "you count evens",
+            "[from #relay]",
+            "start at 1"
+        ],
+        "the briefing is read before what woke the member"
+    );
+    assert!(state.queue.is_empty());
+}
+
 #[tokio::test]
 async fn a_delivery_to_a_busy_session_is_queued_whatever_its_kind() {
     let provider = ScriptedProvider::new(vec![Script::Hang(vec![ModelEvent::TextStart {

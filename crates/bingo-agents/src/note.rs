@@ -24,10 +24,17 @@ pub const NOTE: &str = "\
   and `SendMessage(to: \"<name>\")` reaches one directly. Write to the one whose
   work yours depends on rather than routing it through your parent. A direct
   message asks for nothing back: it is read, and that is all it is owed.
+- Your first turn may open on a standing brief — the role you were seated for,
+  and where the work will reach you — followed by whatever woke you. The brief
+  is not a task to answer: read it, then deal with what came after it. Nobody
+  is waiting on the reply of a turn that opened this way, so what you produce
+  travels by a room or a message, not by ending your turn.
 - A message marked `in #<room>` came from a room, and every member of it read
-  the same message. Answer there — `SendMessage(to: \"#<room>\")` — when what
-  you have is for everyone; otherwise stay quiet and let whoever it concerns
-  answer. `@name` in a room is how you ask for an answer and are owed one.
+  the same message. It is what woke you, so the first question is whether the
+  work it names is yours. When it is, do it and post the result back —
+  `SendMessage(to: \"#<room>\")` — so whoever is next can carry it on; when it
+  is not, end your turn without posting rather than answering for someone
+  else. `@name` in a room is how you ask for an answer and are owed one.
 - Do not put questions to the person: `AskUserQuestion` is not a sub-agent's
   tool, and a question asked instead of an answer is a turn spent on nothing.
   Permission prompts are the exception and do reach them, so a call that needs
@@ -88,5 +95,28 @@ mod tests {
             "how a room's message is marked"
         );
         assert!(!NOTE.contains("colleague"), "a child has no colleagues");
+    }
+
+    /// The member's half of the room pattern (ADR-0027 §4): arriving on a
+    /// held brief, and the two things a post can be — yours or someone
+    /// else's.
+    #[test]
+    fn the_note_teaches_the_member_side_of_a_room() {
+        assert!(
+            NOTE.contains("standing brief"),
+            "a seated member's first turn reads its brief before what woke it"
+        );
+        assert!(
+            NOTE.contains("is waiting on the reply of a turn that opened this way"),
+            "a standby spawn leaves no watcher, so the note may not promise one"
+        );
+        assert!(
+            NOTE.contains("post the result back"),
+            "when the work is yours, the room is where it goes"
+        );
+        assert!(
+            NOTE.contains("end your turn without posting"),
+            "and when it is not, silence is the whole of the answer"
+        );
     }
 }
