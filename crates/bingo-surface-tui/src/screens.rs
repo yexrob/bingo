@@ -11,7 +11,7 @@ use serde_json::json;
 use unicode_width::UnicodeWidthStr;
 
 use crate::clock::Now;
-use crate::painted::{ascii, assert_row_styled, in_look, no_colour, painted, truecolor};
+use crate::painted::{ascii, assert_row_styled, daylight, in_look, no_colour, painted, truecolor};
 use crate::test_support::*;
 use crate::tree::Tree;
 use crate::ui::{Open, Switcher, Ui};
@@ -515,6 +515,34 @@ fn without_colour() {
                 "NO_COLOR spends none on {row:?}"
             );
         }
+    });
+}
+
+/// The same frame over a light ground: nothing of the layout moves, and every
+/// token is the other end of its own hue (design §4).
+#[test]
+fn in_daylight() {
+    let (ui, now) = scene();
+    let tree = solo(&folded(answered()));
+    insta::assert_snapshot!(
+        "light_idle",
+        in_look(daylight(), || draw_tree(80, 24, &tree, &ui, now))
+    );
+    assert_eq!(
+        in_look(daylight(), || draw_tree(80, 24, &tree, &ui, now)),
+        in_look(truecolor(), || draw_tree(80, 24, &tree, &ui, now)),
+        "a palette changes what a cell is worth, never which cell it is"
+    );
+    crate::theme::with(daylight(), || {
+        let painted = painted(80, 24, &tree, &ui, now);
+        let ground = crate::theme::as_drawn(crate::theme::raised()).bg;
+        assert!(
+            painted
+                .row("run the tests")
+                .iter()
+                .all(|(_, style)| style.bg == ground),
+            "what you said is still a band, on the light tint"
+        );
     });
 }
 

@@ -74,6 +74,9 @@ pub struct Tui {
 
 impl Tui {
     pub fn enter() -> io::Result<Self> {
+        // The background is read before the terminal is ours: the probe wants
+        // a plain terminal to write its escape to and read the answer from.
+        crate::theme::detect();
         let mut out = io::stdout();
         out.write_all(SAVE_TITLE)?;
         enable_raw_mode()?;
