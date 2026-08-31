@@ -671,3 +671,100 @@ async fn a_second_surface_on_one_credential_refuses_loudly() {
     assert!(!started.is_finished(), "the second run holds the claim now");
     started.abort();
 }
+
+// ---- what a refusal must not cost ----------------------------------------
+//
+// A platform refuses things: it rate-limits, it closes a streamed card out
+// from under a long answer, it declines a button layout. None of those may
+// cost the conversation the *question*, because a question that never arrives
+// is a session waiting on an interaction nobody was ever shown — and every
+// message after it queues behind a turn that can never end. That is the "it
+// worked for a few messages and then everything stuck, and reconnecting did
+// not help" failure, and no reconnect can help it: the stall is in the
+// session, not in the socket.
+
+/// A turn that says something and then stops to ask — the shape that carries
+/// the answer and the question in one `Finalize`.
+async fn answers_then_asks(session: &TestSession, text: &str) {
+    session.publish(Event::TurnStarted {
+        turn: bingo_sdk::TurnId::from_raw(fixtures::TURN),
+        inputs: Vec::new(),
+        origin: bingo_sdk::TurnOrigin::Submit,
+    });
+    session.publish(Event::ItemCompleted {
+        item: fixtures::assistant("itm_1", text, ItemStatus::Completed),
+    });
+    session.publish(Event::InteractionOpened {
+        interaction: fixtures::permission(None),
+    });
+}
+
+#[tokio::test]
+async fn a_refused_finish_still_asks_the_question_and_says_the_answer_whole() {
+    let chat = Chat::open();
+    chat.say(hello("oc_1")).await;
+    let session = chat.session("loopback/oc_1").await;
+    chat.loopback.refuse_once("finish");
+    answers_then_asks(&session, "Two tests failed.").await;
+
+    let records = chat.records(3).await;
+    assert!(
+        records.iter().any(|record| matches!(
+            record,
+            Record::Send { text, .. } if text.contains("Two tests failed.")
+        )),
+        "the answer is not lost with the card it was written into: {records:?}"
+    );
+    let question = records
+        .iter()
+        .find_map(|record| match record {
+            Record::Ask { question, .. } => Some(question.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("the question survives a refused finish: {records:?}"));
+
+    // And it is a real question, not a message that looks like one: clicking
+    // it answers the interaction the session is waiting on.
+    chat.say(Incoming::Click {
+        conversation: Conversation::direct("oc_1"),
+        principal: "ou_person".into(),
+        question: question.id.clone(),
+        choice: "1".into(),
+    })
+    .await;
+    let answered = chat.until(|| session.answers().first().cloned()).await;
+    assert_eq!(answered.0, InteractionId::from_raw("int_1"));
+    assert_eq!(answered.1, Answer::AllowOnce);
+}
+
+#[tokio::test]
+async fn refused_buttons_ask_in_words_rather_than_losing_the_question() {
+    let chat = Chat::open();
+    chat.say(hello("oc_1")).await;
+    let session = chat.session("loopback/oc_1").await;
+    chat.loopback.refuse_once("ask");
+    asks(&session).await;
+
+    let records = chat.records(1).await;
+    let numbered = records
+        .iter()
+        .find_map(|record| match record {
+            Record::Send { text, .. } => Some(text.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("the question is asked in words instead: {records:?}"));
+    assert!(numbered.contains("1. Allow once"), "{numbered}");
+    assert!(numbered.contains("2. Deny"), "{numbered}");
+
+    // The rung it was drawn as is the rung it is answered on.
+    chat.say(said(Conversation::direct("oc_1"), "2", true))
+        .await;
+    let answered = chat.until(|| session.answers().first().cloned()).await;
+    assert_eq!(answered.1, Answer::Deny { feedback: None });
+    assert_eq!(
+        session.prompts().len(),
+        1,
+        "the reply answered the question rather than starting a turn: {:?}",
+        session.prompts()
+    );
+}

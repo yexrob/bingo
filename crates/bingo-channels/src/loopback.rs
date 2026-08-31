@@ -99,6 +99,14 @@ pub struct Loopback {
     config: Config,
     posted: AtomicU64,
     records: Mutex<Vec<Record>>,
+    /// Mechanisms this adapter will refuse next time they are asked for.
+    ///
+    /// A refusal is part of the contract, not an accident outside it: every
+    /// real platform rate-limits, closes a card out from under a long answer,
+    /// or declines a button layout. The fixture that stands for a platform is
+    /// therefore where a refusal is arranged, so what the surface does about
+    /// one is asserted rather than hoped for.
+    refusals: Mutex<Vec<&'static str>>,
     /// The socket writer's end, once a peer is connected.
     lines: Mutex<Option<mpsc::UnboundedSender<String>>>,
     /// Where events go once the surface has started this adapter. A caller
@@ -122,9 +130,28 @@ impl Loopback {
             config,
             posted: AtomicU64::new(0),
             records: Mutex::new(Vec::new()),
+            refusals: Mutex::new(Vec::new()),
             lines: Mutex::new(None),
             inbox: watch::channel(None).0,
         }
+    }
+
+    /// Refuse the next call of this mechanism, once. `"finish"`, `"ask"`,
+    /// `"send"` and `"replace"` are the names.
+    pub fn refuse_once(&self, mechanism: &'static str) {
+        locked(&self.refusals).push(mechanism);
+    }
+
+    /// Whether this call is the one that was arranged to fail.
+    fn refused(&self, mechanism: &str) -> Result<(), ChannelError> {
+        let mut refusals = locked(&self.refusals);
+        let Some(at) = refusals.iter().position(|which| *which == mechanism) else {
+            return Ok(());
+        };
+        refusals.remove(at);
+        Err(ChannelError::Refused(format!(
+            "the loopback was told to refuse one {mechanism}"
+        )))
     }
 
     /// Say something to the surface, waiting for it to have started this
@@ -349,6 +376,7 @@ impl Edit for Loopback {
     }
 
     async fn finish(&self, at: &Posted, text: &str) -> Result<(), ChannelError> {
+        self.refused("finish")?;
         self.record(Record::Finish {
             at: at.clone(),
             text: text.to_string(),
@@ -360,6 +388,7 @@ impl Edit for Loopback {
 #[async_trait]
 impl Buttons for Loopback {
     async fn ask(&self, to: &Conversation, question: &Question) -> Result<Posted, ChannelError> {
+        self.refused("ask")?;
         let id = self.mint();
         self.record(Record::Ask {
             to: to.clone(),
