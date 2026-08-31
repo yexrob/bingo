@@ -7,8 +7,10 @@ use super::*;
 #[test]
 fn a_provider_without_a_sign_in_says_so() {
     let home = tempfile::tempdir().unwrap();
+    let script = script(r#"{"responses":[]}"#);
     let out = run(bingo()
         .env("HOME", home.path())
+        .env("BINGO_FAKE_SCRIPT", script.path())
         .args(["login", "fake", "--cwd"])
         .arg(home.path()));
     assert_eq!(out.status.code(), Some(1), "stderr: {}", stderr(&out));

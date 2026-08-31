@@ -446,12 +446,19 @@ fn demo_ui(cli: &Cli, layers: &[settings::Layer]) -> bool {
 
 /// Every plugin this build ships, in registration order.
 fn plugins(demo_ui: bool) -> Result<Vec<Box<dyn Plugin>>, KernelError> {
-    let script = Script::from_env()
-        .map_err(|e| KernelError::new(ErrorCode::InvalidInput, e.to_string()))?
-        .unwrap_or_else(Script::demo);
-    let mut all: Vec<Box<dyn Plugin>> = vec![
-        Box::new(FakePlugin::new(Arc::new(FakeProvider::new(script)))),
-        Box::new(AnthropicPlugin),
+    // The fake provider exists for the scripted harness alone: without
+    // `BINGO_FAKE_SCRIPT` it is not registered, so a packaged binary never
+    // lists it and never defaults to it.
+    let script =
+        Script::from_env().map_err(|e| KernelError::new(ErrorCode::InvalidInput, e.to_string()))?;
+    let mut all: Vec<Box<dyn Plugin>> = Vec::new();
+    if let Some(script) = script {
+        all.push(Box::new(FakePlugin::new(Arc::new(FakeProvider::new(
+            script,
+        )))));
+    }
+    all.extend([
+        Box::new(AnthropicPlugin) as Box<dyn Plugin>,
         Box::new(OpenAiPlugin),
         Box::new(PermissionsPlugin),
         Box::new(ShellHooksPlugin),
@@ -471,7 +478,7 @@ fn plugins(demo_ui: bool) -> Result<Vec<Box<dyn Plugin>>, KernelError> {
         Box::new(RpcPlugin),
         Box::new(TuiPlugin),
         Box::new(ChannelsPlugin),
-    ];
+    ]);
     if demo_ui {
         all.push(Box::new(DemoUiPlugin));
     }

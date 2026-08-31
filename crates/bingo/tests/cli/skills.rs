@@ -14,7 +14,9 @@ fn a_project_skill_is_a_command_whose_body_becomes_the_prompt() {
         "---\ndescription: greet someone\nargument-hint: <name>\n---\nSay hello to $ARGUMENTS, warmly.\n",
     )
     .unwrap();
+    let script = script(r#"{"responses":[{"steps":[{"text":"done"}]}]}"#);
     let out = run(bingo()
+        .env("BINGO_FAKE_SCRIPT", script.path())
         .args(["--print", "--output-format", "json", "--cwd"])
         .arg(project.path())
         .arg("/hello world")
@@ -48,7 +50,9 @@ fn a_project_skill_is_a_command_whose_body_becomes_the_prompt() {
 #[test]
 fn an_unknown_slash_command_is_still_refused() {
     let home = tempfile::tempdir().unwrap();
+    let script = script(r#"{"responses":[]}"#);
     let out = run(bingo()
+        .env("BINGO_FAKE_SCRIPT", script.path())
         .args(["--print", "/nosuchskill now"])
         .env("HOME", home.path()));
     assert_eq!(out.status.code(), Some(1));

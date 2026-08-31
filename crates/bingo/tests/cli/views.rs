@@ -87,3 +87,26 @@ fn an_instant_command_prints_its_answer_and_leaves() {
     assert!(answer.contains("mode: default"), "{answer}");
     assert!(answer.contains("cwd: "), "{answer}");
 }
+
+/// The fake provider exists for the scripted harness alone: a binary run
+/// without `BINGO_FAKE_SCRIPT` never defaults to it — with nothing else
+/// configured it refuses with the real provider's hint instead of quietly
+/// answering from a script.
+#[test]
+fn a_binary_without_a_script_has_no_fake_provider() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = run_within(
+        bingo()
+            .env("HOME", dir.path())
+            .env_remove("ANTHROPIC_API_KEY")
+            .args(["--print", "--cwd"])
+            .arg(dir.path())
+            .arg("/status"),
+        std::time::Duration::from_secs(20),
+    );
+    assert_eq!(out.status.code(), Some(1), "stderr: {}", stderr(&out));
+    let err = stderr(&out);
+    assert!(err.contains("AUTH_REQUIRED"), "{err}");
+    assert!(err.contains("anthropic"), "{err}");
+    assert!(!err.contains("fake"), "{err}");
+}

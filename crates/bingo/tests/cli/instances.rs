@@ -269,7 +269,9 @@ async fn an_instance_is_reachable_by_provider_and_by_model() {
 
     let (h, f) = (home.path().to_path_buf(), file.clone());
     let out = tokio::task::spawn_blocking(move || {
+        let script = script(r#"{"responses":[]}"#);
         run(bingo_with(&h, &f)
+            .env("BINGO_FAKE_SCRIPT", script.path())
             .args(["--print", "--provider", "fake"])
             .arg("/model proxy1/gpt-5.4"))
     })
