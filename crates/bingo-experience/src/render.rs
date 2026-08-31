@@ -49,9 +49,17 @@ pub fn line_with_status(entry: &Entry) -> String {
     )
 }
 
-/// The whole playbook, for the model that asked for it.
+/// The whole playbook, for the model that asked for it: nothing is cut here,
+/// a summary written over two lines included.
 pub fn full(entry: &Entry) -> String {
-    let mut out = line_with_status(entry);
+    let mut out = format!(
+        "{} [{}] {} (helpful {}, harmful {})",
+        entry.id,
+        entry.status.as_str(),
+        indented(&entry.summary),
+        entry.helpful(),
+        entry.harmful()
+    );
     for trigger in &entry.trigger {
         out.push_str(&format!("\n  when: {trigger}"));
     }
@@ -185,13 +193,18 @@ mod tests {
     }
 
     #[test]
-    fn a_summary_with_more_than_one_line_is_cut_to_the_first() {
+    fn a_summary_with_more_than_one_line_is_cut_in_a_line_and_whole_in_the_block() {
         let entry = Entry {
             summary: "first line\nsecond line".into(),
             ..entry()
         };
         assert!(line(&entry).contains("first line …"), "{}", line(&entry));
         assert!(!line(&entry).contains("second"), "{}", line(&entry));
+        assert!(
+            full(&entry).contains("first line\n     second line"),
+            "{}",
+            full(&entry)
+        );
     }
 
     #[test]

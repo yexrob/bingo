@@ -12,6 +12,7 @@ use bingo_context::ContextPlugin;
 use bingo_core::settings;
 use bingo_core::{Host, HostConfig};
 use bingo_demo_ui::DemoUiPlugin;
+use bingo_experience::ExperiencePlugin;
 use bingo_hooks_shell::ShellHooksPlugin;
 use bingo_mcp::McpPlugin;
 use bingo_permissions::PermissionsPlugin;
@@ -378,6 +379,7 @@ fn plugins(demo_ui: bool) -> Result<Vec<Box<dyn Plugin>>, KernelError> {
         Box::new(AgentsPlugin),
         Box::new(RoomsPlugin),
         Box::new(TasksPlugin),
+        Box::new(ExperiencePlugin),
         Box::new(PrintPlugin),
         Box::new(RpcPlugin),
         Box::new(TuiPlugin),

@@ -217,6 +217,7 @@ dependencies = [
  "bingo-context",
  "bingo-core",
  "bingo-demo-ui",
+ "bingo-experience",
  "bingo-hooks-shell",
  "bingo-mcp",
  "bingo-permissions",
