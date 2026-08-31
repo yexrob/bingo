@@ -11,6 +11,7 @@ use bingo_agents::AgentsPlugin;
 use bingo_context::ContextPlugin;
 use bingo_core::settings;
 use bingo_core::{Host, HostConfig};
+use bingo_demo_ui::DemoUiPlugin;
 use bingo_hooks_shell::ShellHooksPlugin;
 use bingo_mcp::McpPlugin;
 use bingo_permissions::PermissionsPlugin;
@@ -113,6 +114,12 @@ struct Cli {
     /// screenful of the conversation on the way out unless this is given.
     #[arg(long)]
     no_print_on_exit: bool,
+
+    /// Register the demo plugin: `/board`, `DemoProgress`, and the three
+    /// lanes of ADR-0013 to look at. Off unless this or the `demoUi` setting
+    /// says otherwise.
+    #[arg(long, global = true)]
+    demo_ui: bool,
 }
 
 #[derive(Subcommand, Debug)]
@@ -244,7 +251,8 @@ async fn run(cli: Cli) -> Result<i32, KernelError> {
     let interactive = interactive(&cli);
     let cwd = working_dir(cli.cwd.as_deref())?;
     let config = host_config(&cli, &cwd)?;
-    let host = Host::build(plugins()?, config)
+    let demo = demo_ui(&cli, &config.layers);
+    let host = Host::build(plugins(demo)?, config)
         .await
         .map_err(|e| KernelError::new(ErrorCode::Internal, e.to_string()))?;
     for (code, text) in host.notices() {
@@ -334,12 +342,27 @@ fn environment(cwd: &std::path::Path) -> Env {
     Env::rooted(std::env::home_dir().unwrap_or_else(|| cwd.to_path_buf()))
 }
 
+/// Whether the demo plugin is wanted: the flag, else the highest settings
+/// layer that names the key. The plugin list is composed before a host
+/// exists, so the bin reads this one key itself; the plugin owns its
+/// spelling and its meaning.
+fn demo_ui(cli: &Cli, layers: &[settings::Layer]) -> bool {
+    if cli.demo_ui {
+        return true;
+    }
+    layers
+        .iter()
+        .rev()
+        .find(|layer| layer.value.contains_key(bingo_demo_ui::SETTING))
+        .is_some_and(|layer| bingo_demo_ui::wanted(&Value::Object(layer.value.clone())))
+}
+
 /// Every plugin this build ships, in registration order.
-fn plugins() -> Result<Vec<Box<dyn Plugin>>, KernelError> {
+fn plugins(demo_ui: bool) -> Result<Vec<Box<dyn Plugin>>, KernelError> {
     let script = Script::from_env()
         .map_err(|e| KernelError::new(ErrorCode::InvalidInput, e.to_string()))?
         .unwrap_or_else(Script::demo);
-    Ok(vec![
+    let mut all: Vec<Box<dyn Plugin>> = vec![
         Box::new(FakePlugin::new(Arc::new(FakeProvider::new(script)))),
         Box::new(AnthropicPlugin),
         Box::new(OpenAiPlugin),
@@ -358,7 +381,11 @@ fn plugins() -> Result<Vec<Box<dyn Plugin>>, KernelError> {
         Box::new(PrintPlugin),
         Box::new(RpcPlugin),
         Box::new(TuiPlugin),
-    ])
+    ];
+    if demo_ui {
+        all.push(Box::new(DemoUiPlugin));
+    }
+    Ok(all)
 }
 
 fn host_config(cli: &Cli, cwd: &std::path::Path) -> Result<HostConfig, KernelError> {

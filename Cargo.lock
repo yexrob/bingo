@@ -201,6 +201,7 @@ dependencies = [
  "bingo-agents",
  "bingo-context",
  "bingo-core",
+ "bingo-demo-ui",
  "bingo-hooks-shell",
  "bingo-mcp",
  "bingo-permissions",
@@ -300,6 +301,20 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+]
+
+[[package]]
+name = "bingo-demo-ui"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bingo-sdk",
+ "futures",
+ "jiff",
+ "schemars",
+ "serde",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]

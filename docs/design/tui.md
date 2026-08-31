@@ -20,7 +20,7 @@ The **grammar is Claude Code's**, taken whole because a person who knows it shou
 
 The surface owns the alternate screen for the whole run. Regions, top to bottom — nothing above the transcript — with a rail past 120 columns:
 
-```
+```text
                                                        ┌ rail ─────────────┐
   > what is in this workspace?                         │ Todos             │
                                                        │ ☐ write the plan  │
@@ -162,6 +162,37 @@ A plugin never sees the TUI. It describes what to show as a `View` and chooses a
 | live | `host.signal(session, plugin, kind, view.into())` | until replaced or `Null`; gone on resume | a rail card that updates in place; under the running rows below 120 columns |
 
 Interaction: a `View::Actions` row (`[ 1 Approve ] [ 2 Next hunk ]`) fires `Input::Action{name, args}` into the plugin's command; a question that must stop the turn is `ToolHost::ask` as always. A live `Progress` gets the gradient and the sheen for free; a `Table` in a rail card gets the hairlines; a `Badge` with tone `attention` pulses like everything that wants you. The TUI renders each node exactly once, tested once; a plugin's UI is a value asserted with `assert_eq!`.
+
+What the surface decides, and a plugin never asks about: a panel is pinned into the rail with `⏎` on its row in the `ctrl+t` sheet, and the pin is remembered per session; a signal is a rail card the moment it arrives and needs no pinning; `tab` walks the cards and `❯` marks the one the keyboard is talking to; a key on that card fires the button it names — the plugin's `key` hint, else the button's position — and the button wears `…` until the session's stream answers. One plugin gets eight rows in the rail before the rest folds to `… +N lines`; below 120 columns the same cards draw under the running rows instead.
+
+The worked example is `crates/bingo-demo-ui` — read it whole; this is its middle, and `cargo test --doc -p bingo-demo-ui` compiles it:
+
+```rust
+use bingo_demo_ui::Board;
+use bingo_sdk::{ContentPart, HostHandle, KernelError, SessionId, ToolOutput, View};
+
+/// The block lane: a person reads the board, the model reads the text.
+fn block() -> ToolOutput {
+    ToolOutput {
+        parts: vec![ContentPart::text("3 rows")],
+        is_error: false,
+        display: Some(Board::default().view()),
+    }
+}
+
+/// The panel lane: journaled, and back after `--continue`.
+async fn panel(host: &HostHandle, session: &SessionId) -> Result<(), KernelError> {
+    let view = serde_json::to_value(Board::default().view()).unwrap_or_default();
+    host.extend(session, "bingo.demo.ui", "board", view).await
+}
+
+/// The live lane: never journaled, gone on a resume, `Null` removes it.
+async fn live(host: &HostHandle, session: &SessionId, step: u64) -> Result<(), KernelError> {
+    let bar = View::Progress { value: step, total: Some(15), label: Some("cargo test".into()) };
+    let payload = serde_json::to_value(bar).unwrap_or_default();
+    host.signal(session, "bingo.demo.ui", "progress", payload).await
+}
+```
 
 ## 9. Measures
 

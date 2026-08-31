@@ -152,4 +152,6 @@ mod painted;
 #[cfg(test)]
 mod screens;
 #[cfg(test)]
+mod test_lanes;
+#[cfg(test)]
 mod test_support;
