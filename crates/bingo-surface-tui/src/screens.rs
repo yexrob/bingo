@@ -11,7 +11,7 @@ use serde_json::json;
 use unicode_width::UnicodeWidthStr;
 
 use crate::clock::Now;
-use crate::painted::{ascii, assert_row_styled, in_look, no_colour, painted, truecolor};
+use crate::painted::{ascii, assert_row_styled, daylight, in_look, no_colour, painted, truecolor};
 use crate::test_support::*;
 use crate::tree::Tree;
 use crate::ui::{Open, Switcher, Ui};
@@ -518,6 +518,34 @@ fn without_colour() {
     });
 }
 
+/// The same frame over a light ground: nothing of the layout moves, and every
+/// token is the other end of its own hue (design §4).
+#[test]
+fn in_daylight() {
+    let (ui, now) = scene();
+    let tree = solo(&folded(answered()));
+    insta::assert_snapshot!(
+        "light_idle",
+        in_look(daylight(), || draw_tree(80, 24, &tree, &ui, now))
+    );
+    assert_eq!(
+        in_look(daylight(), || draw_tree(80, 24, &tree, &ui, now)),
+        in_look(truecolor(), || draw_tree(80, 24, &tree, &ui, now)),
+        "a palette changes what a cell is worth, never which cell it is"
+    );
+    crate::theme::with(daylight(), || {
+        let painted = painted(80, 24, &tree, &ui, now);
+        let ground = crate::theme::as_drawn(crate::theme::raised()).bg;
+        assert!(
+            painted
+                .row("run the tests")
+                .iter()
+                .all(|(_, style)| style.bg == ground),
+            "what you said is still a band, on the light tint"
+        );
+    });
+}
+
 #[test]
 fn without_the_glyphs() {
     let (ui, now) = scene();
@@ -628,4 +656,231 @@ fn the_status_line_spends_no_colour_but_the_mode() {
         vec!["⏵⏵ acceptEdits".to_string()],
         "the mode is the one thing the line is allowed to colour"
     );
+}
+
+// ---- M11e: the content kinds of §5 --------------------------------------
+
+/// An answer whose middle is a GFM table: ruled, its numbers down the right.
+#[test]
+fn a_markdown_table_is_ruled() {
+    let state = folded(vec![
+        item(1, user("itm_1", "how many tests are there?")),
+        item(
+            2,
+            assistant(
+                "itm_2",
+                "Per crate:\n\n\
+                 | crate | tests | time |\n\
+                 |---|---|---|\n\
+                 | sdk | 41 | 0.02 |\n\
+                 | core | 137 | 1.40 |\n\
+                 | surface-tui | 9 | |\n",
+                ItemStatus::Completed,
+            ),
+        ),
+    ]);
+    let (ui, now) = scene();
+    both("markdown_table", &solo(&state), &ui, now);
+}
+
+const RUST: &str = "// the frame, once\npub fn draw(now: Now) -> bool {\n    let ready = true;\n    ready && now.motion\n}\n";
+
+/// A fenced block in an answer: the fence's word, the gutter, and the code
+/// in the three inks of §5.
+#[test]
+fn a_highlighted_code_block() {
+    let state = folded(vec![
+        item(1, user("itm_1", "show me the draw function")),
+        item(
+            2,
+            assistant(
+                "itm_2",
+                &format!("Here it is:\n\n```rust\n{RUST}```\n"),
+                ItemStatus::Completed,
+            ),
+        ),
+    ]);
+    let (ui, now) = scene();
+    both("code_block", &solo(&state), &ui, now);
+}
+
+/// `esc esc`: the turns of this transcript, newest first, above the input box
+/// like the switcher (design §3 — the rewind picker is a card).
+#[test]
+fn the_rewind_picker() {
+    let mut state = folded(answered());
+    for item in state.items.iter_mut() {
+        item.turn = Some(TurnId::from_raw("trn_1"));
+    }
+    state.items.push({
+        let mut asked = user("itm_3", "now write me a note and run the tests");
+        asked.turn = Some(TurnId::from_raw("trn_2"));
+        asked
+    });
+    let (mut ui, now) = scene();
+    shown(
+        &mut ui,
+        Open::Rewind(crate::rewind::Rewind { selected: 1 }),
+        now,
+    );
+    both("rewind_picker", &solo(&state), &ui, now);
+}
+
+/// `@` in the composer: the paths under the session's own directory, on the
+/// same dropdown the `/` menu rides (design §4).
+#[test]
+fn the_at_completion_dropdown() {
+    let dir = tempfile::tempdir().expect("a directory");
+    std::fs::create_dir_all(dir.path().join("src")).expect("a source directory");
+    for name in ["lib.rs", "markdown.rs", "pager.rs", "theme.rs"] {
+        std::fs::write(dir.path().join("src").join(name), "//! it\n").expect("a source");
+    }
+    std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").expect("a manifest");
+    // A transcript long enough that the welcome box — which would carry this
+    // run's temporary directory into the snapshot — has scrolled away.
+    let mut state = long_transcript(24);
+    state.summary.cwd = dir.path().to_string_lossy().into_owned();
+    let (mut ui, now) = scene();
+    write(&mut ui, &state, "read @src/", now);
+    both("at_dropdown", &solo(&state), &ui, now);
+}
+
+/// A long result, open whole: what `⏎` on a focused block and the second
+/// `ctrl+o` both take (design §5).
+#[test]
+fn the_pager_sheet() {
+    let output = ToolOutput::text(
+        (1..=40)
+            .map(|i| format!("crates/bingo-surface-tui/src/file_{i}.rs\n"))
+            .collect::<String>(),
+    );
+    let state = folded(vec![
+        item(1, user("itm_0", "list the sources")),
+        item(
+            2,
+            tool(
+                "itm_1",
+                "Glob",
+                json!({"pattern": "crates/**/*.rs"}),
+                Some(output),
+                ItemStatus::Completed,
+            ),
+        ),
+    ]);
+    let (mut ui, now) = scene();
+    shown(
+        &mut ui,
+        Open::Pager(crate::pager::Pager::open(bingo_sdk::ItemId::from_raw(
+            "itm_1",
+        ))),
+        now,
+    );
+    both("pager_sheet", &solo(&state), &ui, now);
+}
+
+/// `⏎` on a `✻ Thought for 2s` row: what was thought, whole.
+#[test]
+fn a_thought_opens_in_a_sheet() {
+    let mut thought = crate::test_support::item(
+        "itm_1",
+        ItemStatus::Completed,
+        ItemBody::Reasoning {
+            text: "The manifest first, because the lockfile only says what the\n\
+                   manifest already asked for.\n\n\
+                   Then the crate map, which is the one place the layering is\n\
+                   written down."
+                .into(),
+            provider_metadata: Default::default(),
+        },
+    );
+    thought.completed_at = Some(ts() + jiff::SignedDuration::from_secs(2));
+    let state = folded(vec![item(1, thought)]);
+    let (mut ui, now) = scene();
+    shown(
+        &mut ui,
+        Open::Pager(crate::pager::Pager::open(bingo_sdk::ItemId::from_raw(
+            "itm_1",
+        ))),
+        now,
+    );
+    both("reasoning_sheet", &solo(&state), &ui, now);
+}
+
+/// The card of §4 with a replacement under its title: the colour comes from
+/// the column, the weight from the words that actually moved.
+#[test]
+fn a_permission_card_previews_a_word_level_diff() {
+    let (tree, ui, now) = asked(permission(
+        Some("Edit(src/)"),
+        Some(Preview::Diff {
+            unified: "--- a/src/view.rs\n+++ b/src/view.rs\n@@ -12,3 +12,3 @@\n fn border(busy: bool) -> Style {\n-    match busy { true => dim() }\n+    match busy { true => breathing() }\n }\n".into(),
+        }),
+    ));
+    both("permission_word_diff", &tree, &ui, now);
+    let painted = painted(80, 24, &tree, &ui, now);
+    let emphasised: Vec<String> = painted
+        .row("+    match busy")
+        .into_iter()
+        .filter(|(_, style)| style.add_modifier.contains(ratatui::style::Modifier::BOLD))
+        .map(|(text, _)| text.trim().to_string())
+        .collect();
+    assert_eq!(emphasised, vec!["breathing()".to_string()]);
+}
+
+/// What a screen cannot show: which token every run of a fence was drawn in.
+/// `keyword` is the one cool colour, `dim` a comment, `text` the rest — and a
+/// fence that names a diff wears the diff's own tints instead.
+#[test]
+fn every_fenced_language_is_inked_by_the_token_table() {
+    insta::assert_snapshot!("inked_rust", inked("rust", RUST));
+    insta::assert_snapshot!(
+        "inked_python",
+        inked(
+            "python",
+            "# read it first\ndef run(path):\n    return open(path).read()\n"
+        )
+    );
+    insta::assert_snapshot!(
+        "inked_json",
+        inked(
+            "json",
+            "{\n  \"model\": \"gpt-5.4\",\n  \"stream\": true\n}\n"
+        )
+    );
+    insta::assert_snapshot!(
+        "inked_diff",
+        inked("diff", "@@ -1,2 +1,2 @@\n-let a = 1;\n+let a = 2;\n ok\n")
+    );
+}
+
+/// One fence, as runs of text with the token each was spent on.
+fn inked(lang: &str, code: &str) -> String {
+    crate::markdown::render(&format!("```{lang}\n{code}```"), 60)
+        .iter()
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|span| format!("{}⟨{}⟩", span.content, token(span.style)))
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn token(style: ratatui::style::Style) -> &'static str {
+    use crate::theme;
+    for (name, spent) in [
+        ("keyword", theme::mode()),
+        ("dim", theme::dim()),
+        ("added·moved", theme::added().patch(theme::bold())),
+        ("removed·moved", theme::removed().patch(theme::bold())),
+        ("added", theme::added()),
+        ("removed", theme::removed()),
+        ("text", theme::text()),
+    ] {
+        if style == spent {
+            return name;
+        }
+    }
+    "?"
 }

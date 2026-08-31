@@ -15,12 +15,15 @@ use bingo_sdk::{Action, CommandSpec, ItemId, Level, Seq, SessionState, SessionSu
 use crate::blocks::Blocks;
 use crate::clock::{Anim, FRAME, Now};
 use crate::commands::{self, Suggestion};
+use crate::complete;
 use crate::composer::Composer;
 use crate::dialog::Dialog;
 use crate::frame::Regions;
 use crate::history::PromptHistory;
 use crate::layers::{self, Reveal};
+use crate::pager::Pager;
 use crate::rail::{CardId, Pin};
+use crate::rewind::Rewind;
 use crate::scroll::Scroll;
 use crate::search::Search;
 use crate::select::Select;
@@ -151,6 +154,10 @@ pub enum Open {
     Panel,
     /// The `/resume` list, as a sheet.
     Picker(Picker),
+    /// One block, whole, as a sheet.
+    Pager(Pager),
+    /// The turns of this transcript, as a card above the input box.
+    Rewind(Rewind),
     /// The tree, as a card above the input box.
     Switcher(Switcher),
 }
@@ -168,13 +175,16 @@ impl Open {
     /// Whether the keyboard belongs to it while it is open. The lists and the
     /// panel answer keys; help is read while a person goes on typing.
     pub fn captures(&self) -> bool {
-        matches!(self, Open::Picker(_) | Open::Switcher(_) | Open::Panel)
+        matches!(
+            self,
+            Open::Picker(_) | Open::Pager(_) | Open::Switcher(_) | Open::Rewind(_) | Open::Panel
+        )
     }
 
     /// How many frames its arrival takes: a card comes down, a sheet rises.
     fn frames(&self) -> u16 {
         match self {
-            Open::Switcher(_) => layers::CARD_FRAMES,
+            Open::Switcher(_) | Open::Rewind(_) => layers::CARD_FRAMES,
             _ => layers::SHEET_FRAMES,
         }
     }
@@ -287,6 +297,9 @@ pub struct Ui {
     pub expanded: BTreeSet<ItemId>,
     /// When ctrl+c was pressed on an empty composer.
     pub armed: Option<Instant>,
+    /// An `esc` closed nothing, so the next one is the second of `esc esc`.
+    /// It needs no clock: any other key clears it.
+    pub esc_armed: bool,
     /// What the kernel offers the dropdown, read once at start.
     pub catalogs: Catalogs,
     /// An `open` is in flight; the swap happens when it lands.
@@ -299,6 +312,15 @@ pub struct Ui {
     pub switched: Option<Instant>,
     /// The frame as the last draw left it.
     pub painted: RefCell<Painted>,
+    /// The paths the `@` dropdown ranks, walked when the first one asks.
+    files: RefCell<Files>,
+}
+
+/// One reading of a directory, kept until the session's own directory changes.
+#[derive(Debug, Default)]
+struct Files {
+    cwd: String,
+    paths: Vec<String>,
 }
 
 impl Ui {
@@ -320,11 +342,13 @@ impl Ui {
             pending: None,
             expanded: BTreeSet::new(),
             armed: None,
+            esc_armed: false,
             catalogs: Catalogs::default(),
             opening: false,
             focused: true,
             switched: None,
             painted: RefCell::default(),
+            files: RefCell::default(),
         }
     }
 
@@ -405,20 +429,42 @@ impl Ui {
         all
     }
 
-    /// The dropdown's rows for the line being typed. Empty means no dropdown.
-    pub fn suggestions(&self) -> Vec<Suggestion> {
+    /// The dropdown's rows for the line being typed: a `/` command, or an `@`
+    /// path from the session's own directory. Empty means no dropdown.
+    pub fn suggestions(&self, cwd: &str) -> Vec<Suggestion> {
         if self.menu.dismissed {
             return Vec::new();
         }
-        commands::suggestions(
-            self.composer.text(),
-            &self.commands(),
-            &self.catalogs.values,
-        )
+        let line = self.composer.text();
+        match complete::mention(line) {
+            Some(partial) => self.paths(cwd, partial, line),
+            None => commands::suggestions(line, &self.commands(), &self.catalogs.values),
+        }
     }
 
-    pub fn selected_suggestion(&self) -> Option<Suggestion> {
-        let rows = self.suggestions();
+    /// The `@` rows. The walk is a memo of the directory, taken when the first
+    /// mention asks for it and thrown away when the session's own directory
+    /// changes — nothing here is a second copy of what is on disk.
+    fn paths(&self, cwd: &str, partial: &str, line: &str) -> Vec<Suggestion> {
+        let mut files = self.files.borrow_mut();
+        if files.cwd != cwd {
+            *files = Files {
+                cwd: cwd.to_string(),
+                paths: complete::walk(std::path::Path::new(cwd)),
+            };
+        }
+        complete::rank(partial, &files.paths)
+            .into_iter()
+            .map(|path| Suggestion {
+                value: complete::completed(line, &path),
+                label: format!("@{path}"),
+                hint: String::new(),
+            })
+            .collect()
+    }
+
+    pub fn selected_suggestion(&self, cwd: &str) -> Option<Suggestion> {
+        let rows = self.suggestions(cwd);
         rows.get(self.menu.selected.min(rows.len().saturating_sub(1)))
             .cloned()
     }
@@ -546,10 +592,10 @@ mod tests {
     fn dismissing_the_dropdown_hides_it_until_the_next_edit() {
         let mut ui = ui();
         ui.composer.insert("/he");
-        assert!(!ui.suggestions().is_empty());
+        assert!(!ui.suggestions("/tmp/project").is_empty());
         ui.menu.dismissed = true;
-        assert!(ui.suggestions().is_empty());
+        assert!(ui.suggestions("/tmp/project").is_empty());
         ui.edited();
-        assert!(!ui.suggestions().is_empty());
+        assert!(!ui.suggestions("/tmp/project").is_empty());
     }
 }

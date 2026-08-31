@@ -8,16 +8,57 @@ use pulldown_cmark::{CodeBlockKind, CowStr, Event as Md, Options, Parser, Tag, T
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 
-use crate::theme;
+use crate::{theme, views};
 
-/// Render CommonMark to lines. `width` is used only where a construct is
-/// defined by the column count (the thematic break).
+/// What this renderer understands beyond CommonMark: GFM's strikethrough and
+/// its tables, which go to the one table renderer (design §5).
+const GFM: Options = Options::ENABLE_STRIKETHROUGH.union(Options::ENABLE_TABLES);
+
+/// Render CommonMark to lines. `width` is used where a construct is defined by
+/// the column count: the thematic break, and a table's columns.
 pub fn render(text: &str, width: usize) -> Vec<Line<'static>> {
     let mut out = Writer::new(width);
-    for event in Parser::new_ext(text, Options::ENABLE_STRIKETHROUGH) {
+    for event in Parser::new_ext(text, GFM) {
         out.event(event);
     }
     out.finish()
+}
+
+/// A GFM table being read. It holds cells rather than lines because the table
+/// is laid out only once it is whole — a column's width is a fact about every
+/// row of it.
+#[derive(Debug, Default)]
+struct Table {
+    headers: Vec<String>,
+    rows: Vec<Vec<String>>,
+    row: Vec<String>,
+    cell: String,
+    /// The row being read is the header row.
+    heading: bool,
+}
+
+impl Table {
+    fn text(&mut self, text: &str) {
+        self.cell.push_str(text);
+    }
+
+    fn end_cell(&mut self) {
+        let cell = std::mem::take(&mut self.cell);
+        self.row.push(cell.trim().to_string());
+    }
+
+    fn end_row(&mut self) {
+        let row = std::mem::take(&mut self.row);
+        match std::mem::take(&mut self.heading) {
+            true => self.headers = row,
+            false => self.rows.push(row),
+        }
+    }
+
+    /// The ruled rows, from the renderer a plugin's `View::Table` uses.
+    fn lines(&self, width: usize) -> Vec<Line<'static>> {
+        views::table::lines(&self.headers, &self.rows, width)
+    }
 }
 
 /// A block's leading decoration: quote bars and list indentation.
@@ -30,6 +71,19 @@ impl Margin {
     }
 }
 
+/// A fenced block being read: the word after its backticks and its text.
+#[derive(Debug)]
+struct Fence {
+    lang: String,
+    text: String,
+}
+
+impl Fence {
+    fn lines(&self, width: usize) -> Vec<Line<'static>> {
+        views::code::lines(Some(&self.lang), &self.text, width)
+    }
+}
+
 struct Writer {
     width: usize,
     lines: Vec<Line<'static>>,
@@ -38,7 +92,11 @@ struct Writer {
     margin: Margin,
     /// One counter per open list; `None` for a bullet list.
     lists: Vec<Option<u64>>,
-    code: bool,
+    /// The fenced block being read; it is laid out only once it is whole, so
+    /// the highlighter sees the block and not one line of it at a time.
+    code: Option<Fence>,
+    /// The table being read; while there is one, text is a cell and not prose.
+    table: Option<Table>,
     /// The destination of the link being read, appended when it closes.
     link: Option<CowStr<'static>>,
 }
@@ -52,7 +110,8 @@ impl Writer {
             styles: vec![theme::text()],
             margin: Margin::default(),
             lists: Vec::new(),
-            code: false,
+            code: None,
+            table: None,
             link: None,
         }
     }
@@ -66,10 +125,18 @@ impl Writer {
     }
 
     fn event(&mut self, event: Md<'_>) {
+        if self.table.is_some()
+            && let Some(text) = cell_text(&event)
+        {
+            if let Some(table) = self.table.as_mut() {
+                table.text(&text);
+            }
+            return;
+        }
         match event {
             Md::Start(tag) => self.open(tag),
             Md::End(tag) => self.close(tag),
-            Md::Text(text) if self.code => self.code_text(&text),
+            Md::Text(text) if self.code.is_some() => self.code_text(&text),
             Md::Text(text) => self.push(&text, self.style()),
             Md::Code(code) => self.push(&format!("`{code}`"), self.style()),
             Md::Html(html) | Md::InlineHtml(html) => self.push(html.trim_end(), theme::dim()),
@@ -83,10 +150,14 @@ impl Writer {
 
     fn open(&mut self, tag: Tag<'_>) {
         match tag {
-            Tag::CodeBlock(_) | Tag::Heading { .. } | Tag::Item => self.flush(),
+            Tag::CodeBlock(_) | Tag::Heading { .. } | Tag::Item | Tag::Table(_) => self.flush(),
             _ => {}
         }
         match tag {
+            // The alignment row is not read: which column is numbers is a fact
+            // about the cells, and the one table renderer already knows it.
+            Tag::Table(_) => self.table = Some(Table::default()),
+            Tag::TableHead => self.heading(),
             Tag::Heading { .. } => self.styles.push(theme::bold()),
             Tag::Emphasis => self.styles.push(theme::italic()),
             Tag::Strong => self.styles.push(theme::bold()),
@@ -108,6 +179,12 @@ impl Writer {
 
     fn close(&mut self, tag: TagEnd) {
         match tag {
+            TagEnd::TableCell => self.end_cell(),
+            TagEnd::TableHead | TagEnd::TableRow => self.end_row(),
+            TagEnd::Table => self.end_table(),
+            _ => {}
+        }
+        match tag {
             TagEnd::Heading(_)
             | TagEnd::Emphasis
             | TagEnd::Strong
@@ -115,7 +192,7 @@ impl Writer {
             | TagEnd::Link => {
                 self.styles.pop();
             }
-            TagEnd::CodeBlock => self.code = false,
+            TagEnd::CodeBlock => self.end_code(),
             TagEnd::BlockQuote(_) => {
                 self.margin.0.pop();
             }
@@ -140,26 +217,69 @@ impl Writer {
         }
         if matches!(
             tag,
-            TagEnd::Paragraph | TagEnd::Heading(_) | TagEnd::CodeBlock | TagEnd::List(_)
+            TagEnd::Paragraph
+                | TagEnd::Heading(_)
+                | TagEnd::CodeBlock
+                | TagEnd::List(_)
+                | TagEnd::Table
         ) {
             self.blank();
         }
     }
 
-    fn open_code(&mut self, kind: &CodeBlockKind<'_>) {
-        self.code = true;
-        if let CodeBlockKind::Fenced(lang) = kind
-            && !lang.is_empty()
-        {
-            self.line(vec![Span::styled(format!("    {lang}"), theme::dim())]);
+    fn heading(&mut self) {
+        if let Some(table) = self.table.as_mut() {
+            table.heading = true;
         }
     }
 
-    /// A fenced block is emitted line by line: indented, dim, never wrapped
-    /// into prose.
+    fn end_cell(&mut self) {
+        if let Some(table) = self.table.as_mut() {
+            table.end_cell();
+        }
+    }
+
+    fn end_row(&mut self) {
+        if let Some(table) = self.table.as_mut() {
+            table.end_row();
+        }
+    }
+
+    /// The table is whole: lay it out and let the cells go.
+    fn end_table(&mut self) {
+        let Some(table) = self.table.take() else {
+            return;
+        };
+        for line in table.lines(self.width) {
+            self.line(line.spans);
+        }
+    }
+
+    fn open_code(&mut self, kind: &CodeBlockKind<'_>) {
+        let lang = match kind {
+            CodeBlockKind::Fenced(lang) => lang.to_string(),
+            CodeBlockKind::Indented => String::new(),
+        };
+        self.code = Some(Fence {
+            lang,
+            text: String::new(),
+        });
+    }
+
     fn code_text(&mut self, text: &str) {
-        for line in text.trim_end_matches('\n').split('\n') {
-            self.line(vec![Span::styled(format!("    {line}"), theme::dim())]);
+        if let Some(fence) = self.code.as_mut() {
+            fence.text.push_str(text);
+        }
+    }
+
+    /// The block is whole: through the one code renderer, so a fence in an
+    /// answer is drawn exactly like a plugin's `View::Code` (design §5).
+    fn end_code(&mut self) {
+        let Some(fence) = self.code.take() else {
+            return;
+        };
+        for line in fence.lines(self.width) {
+            self.line(line.spans);
         }
     }
 
@@ -225,10 +345,23 @@ fn is_blank(line: &Line<'static>) -> bool {
     line.spans.iter().all(|s| s.content.trim().is_empty())
 }
 
+/// What an event contributes to the cell being read. A table's cells are text:
+/// emphasis inside one changes no column width, and a rule is what says these
+/// rows are one table (design §5).
+fn cell_text(event: &Md<'_>) -> Option<String> {
+    match event {
+        Md::Text(text) => Some(text.to_string()),
+        Md::Code(code) => Some(format!("`{code}`")),
+        Md::SoftBreak | Md::HardBreak => Some(" ".to_string()),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use ratatui::style::Modifier;
+    use unicode_width::UnicodeWidthStr;
 
     fn text(lines: &[Line<'static>]) -> Vec<String> {
         lines.iter().map(|l| l.to_string()).collect()
@@ -259,13 +392,23 @@ mod tests {
     }
 
     #[test]
-    fn a_fence_is_indented_and_dim_line_by_line() {
-        let lines = render("```rust\nfn main() {}\nlet x = 1;\n```", 40);
+    fn a_fence_is_indented_and_highlighted_line_by_line() {
+        let lines = render("```rust\nfn main() {}\n// go\n```", 40);
         assert_eq!(
             text(&lines),
-            vec!["    rust", "    fn main() {}", "    let x = 1;"]
+            vec!["    rust", "    fn main() {}", "    // go"]
         );
-        assert!(lines[1].spans[0].style.add_modifier.contains(Modifier::DIM));
+        assert_eq!(lines[0].spans[0].style, theme::dim(), "the fence's word");
+        assert_eq!(lines[1].spans[1].style, theme::mode(), "`fn` is a keyword");
+        assert_eq!(lines[2].spans[1].style, theme::dim(), "the comment");
+    }
+
+    #[test]
+    fn a_fence_that_names_a_diff_is_a_diff() {
+        let lines = render("```diff\n@@ -1 +1 @@\n-old\n+new\n```", 40);
+        assert_eq!(text(&lines), vec!["@@ -1 +1 @@", "-old", "+new"]);
+        assert_eq!(lines[1].spans[0].style, theme::removed());
+        assert_eq!(lines[2].spans[0].style, theme::added());
     }
 
     #[test]
@@ -309,5 +452,64 @@ mod tests {
     #[test]
     fn half_written_text_renders_as_what_it_is() {
         assert_eq!(text(&render("**bol", 40)), vec!["**bol"]);
+    }
+
+    const TABLE: &str = "| crate | tests |\n|---|---|\n| sdk | 41 |\n| core | 7 |";
+
+    #[test]
+    fn a_table_is_ruled_and_its_numbers_hug_the_right_edge() {
+        assert_eq!(
+            text(&render(TABLE, 40)),
+            vec![
+                "crate  tests".to_string(),
+                "────────────".to_string(),
+                "sdk       41".to_string(),
+                "core       7".to_string(),
+            ],
+        );
+    }
+
+    #[test]
+    fn a_tables_header_is_bold_and_its_rule_is_dim() {
+        let lines = render(TABLE, 40);
+        assert_eq!(lines[0].spans[0].style, theme::text().patch(theme::bold()));
+        assert_eq!(lines[1].spans[0].style, theme::dim());
+    }
+
+    #[test]
+    fn a_cell_a_row_has_not_is_marked_and_emphasis_in_one_is_plain_text() {
+        assert_eq!(
+            text(&render("| a | b |\n|---|---|\n| *one* |\n", 40)),
+            vec![
+                "a    b".to_string(),
+                "──────".to_string(),
+                "one  –".to_string()
+            ],
+        );
+    }
+
+    #[test]
+    fn a_table_wider_than_the_measure_folds_to_it() {
+        let wide = format!("| {0} | {0} |\n|---|---|\n| {0} | {0} |", "x".repeat(20));
+        for line in render(&wide, 24) {
+            assert!(line.to_string().width() <= 24, "{line}");
+        }
+    }
+
+    #[test]
+    fn a_table_stands_apart_from_the_prose_around_it() {
+        assert_eq!(
+            text(&render(&format!("before\n\n{TABLE}\n\nafter"), 40)),
+            vec![
+                "before".to_string(),
+                String::new(),
+                "crate  tests".to_string(),
+                "────────────".to_string(),
+                "sdk       41".to_string(),
+                "core       7".to_string(),
+                String::new(),
+                "after".to_string(),
+            ],
+        );
     }
 }

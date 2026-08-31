@@ -18,8 +18,8 @@ use crate::frame::{self, Demand, Regions};
 use crate::tree::{self, Tree};
 use crate::ui::{Card, Open, Picker, Switcher, Ui};
 use crate::{
-    composer as prompt, dialog, keys, layers, panel, rail, search, select, status, theme, views,
-    wrap,
+    composer as prompt, dialog, keys, layers, pager, panel, rail, rewind, search, select, status,
+    theme, views, wrap,
 };
 
 /// How tall the composer box may grow before it scrolls internally.
@@ -146,7 +146,7 @@ fn layers(tree: &Tree, ui: &Ui, frame: &mut Frame, regions: Regions, now: Now) {
                 .as_ref()
                 .map(|view| views::render(view, width))
                 .unwrap_or_default(),
-            menu(ui),
+            menu(ui, &tree.viewed().summary.cwd),
         ]
         .concat(),
     );
@@ -180,7 +180,58 @@ fn layer(
             reveal,
         ),
         Open::Picker(picker) => sheet(frame, above, picker_lines(picker), reveal),
+        Open::Pager(open) => paged(tree, frame, above, open, reveal),
+        // A dropdown above the input box, like the switcher's.
+        Open::Rewind(card) => over(
+            frame,
+            above,
+            rewind::lines(&rewind::turns(tree.viewed()), card.selected),
+        ),
     }
+}
+
+/// One block, whole. What it shows is read from the item every frame, so a
+/// block that is still arriving grows under the sheet rather than being copied
+/// into it.
+fn paged(
+    tree: &Tree,
+    frame: &mut Frame,
+    above: Rect,
+    open: &crate::pager::Pager,
+    reveal: layers::Reveal,
+) {
+    let Some(item) = tree.viewed().items.iter().find(|item| item.id == open.item) else {
+        return;
+    };
+    let content = pager::lines(item, above.width as usize);
+    let window = pager::Window {
+        height: content.len(),
+        rows: usize::from(above.height).saturating_sub(pager::HEAD),
+    };
+    let lines = pager::sheet(&pager::title(item), &content, open, window);
+    sheet(frame, above, lines, reveal);
+    marked(frame, above, open, window, reveal);
+}
+
+/// The hits of the pager's own query, once the sheet has finished arriving:
+/// one still sliding up would carry the marks to the wrong rows.
+fn marked(
+    frame: &mut Frame,
+    above: Rect,
+    open: &crate::pager::Pager,
+    window: pager::Window,
+    reveal: layers::Reveal,
+) {
+    let Some(search) = open.search.as_ref().filter(|_| !reveal.moving()) else {
+        return;
+    };
+    let head = u16::try_from(pager::HEAD).unwrap_or(u16::MAX);
+    let area = Rect {
+        y: above.y + head,
+        height: above.height.saturating_sub(head),
+        ..above
+    };
+    search::mark(frame, area, open.at(window), search);
 }
 
 /// A sheet over a dimmed frame.
@@ -540,8 +591,8 @@ fn placeholder(state: &SessionState) -> String {
     }
 }
 
-fn menu(ui: &Ui) -> Vec<Line<'static>> {
-    let rows = ui.suggestions();
+fn menu(ui: &Ui, cwd: &str) -> Vec<Line<'static>> {
+    let rows = ui.suggestions(cwd);
     let selected = ui.menu.selected.min(rows.len().saturating_sub(1));
     let column = rows.iter().map(|r| r.label.width()).max().unwrap_or(0);
     rows.iter()
@@ -571,6 +622,7 @@ mod tests {
         ContentPart, ContextUsage, Event, InterruptReason, ItemBody, ItemStatus, KernelError,
         Level, Preview, QueueEntry, SessionSummary, ToolOutput, TurnId, TurnStatus, View,
     };
+    use crossterm::event::KeyCode;
     use serde_json::json;
 
     fn item_frame(seq: u64, item: bingo_sdk::Item) -> bingo_sdk::Frame {
@@ -1513,8 +1565,11 @@ mod tests {
         insta::assert_snapshot!(scrolled);
     }
 
+    /// `ctrl+o` only opens further: the fold lifts, then the whole of it takes
+    /// the sheet, and `esc` there folds it back (M11e reverses M11a's
+    /// "again to fold" on purpose).
     #[test]
-    fn ctrl_o_opens_the_latest_result_whole_and_again_folds_it() {
+    fn ctrl_o_lifts_the_fold_then_opens_the_pager_and_esc_folds_it_back() {
         let output = ToolOutput {
             parts: vec![ContentPart::text(
                 (1..=9).map(|i| format!("line {i}\n")).collect::<String>(),
@@ -1534,11 +1589,79 @@ mod tests {
         )]);
         let (mut ui, now) = scene();
         assert!(render(&state, &ui, now).contains("+4 lines (ctrl+o to expand)"));
-        crate::input::on_key(&mut ui, &solo(&state), ctrl('o'), now);
+        let tree = solo(&state);
+        crate::input::on_key(&mut ui, &tree, ctrl('o'), now);
         let opened = render(&state, &ui, now);
         assert!(opened.contains("line 9"), "{opened}");
         assert!(!opened.contains("+4 lines"), "{opened}");
-        crate::input::on_key(&mut ui, &solo(&state), ctrl('o'), now);
-        assert!(render(&state, &ui, now).contains("+4 lines (ctrl+o to expand)"));
+
+        crate::input::on_key(&mut ui, &tree, ctrl('o'), now);
+        let paged = render(&state, &ui, later(now, 200));
+        assert!(
+            paged.contains("Read(src/lib.rs)"),
+            "the sheet says what it is: {paged}"
+        );
+        assert!(paged.contains("j/k"), "{paged}");
+
+        crate::input::on_key(&mut ui, &tree, key(KeyCode::Esc), now);
+        assert!(
+            render(&state, &ui, later(now, 200)).contains("+4 lines (ctrl+o to expand)"),
+            "leaving the sheet folds the result it came from"
+        );
+    }
+
+    #[test]
+    fn the_pager_scrolls_searches_and_leaves_the_frame_as_it_found_it() {
+        let output = ToolOutput {
+            parts: vec![ContentPart::text(
+                (1..=40).map(|i| format!("line {i}\n")).collect::<String>(),
+            )],
+            is_error: false,
+            display: None,
+        };
+        let state = folded(vec![item_frame(
+            1,
+            tool(
+                "itm_1",
+                "Read",
+                json!({"file_path": "src/lib.rs"}),
+                Some(output),
+                ItemStatus::Completed,
+            ),
+        )]);
+        let (mut ui, now) = scene();
+        let tree = solo(&state);
+        let before = render(&state, &ui, now);
+
+        // A click focuses the block; `⏎` opens it whole.
+        crate::input::on_key(&mut ui, &tree, ctrl('o'), now);
+        crate::input::on_key(&mut ui, &tree, ctrl('o'), now);
+        let settled = later(now, 200);
+        let top = render(&state, &ui, settled);
+        assert!(top.contains("line 1"), "{top}");
+
+        crate::input::on_key(&mut ui, &tree, typed('G'), now);
+        let bottom = render(&state, &ui, settled);
+        assert!(bottom.contains("line 40"), "{bottom}");
+        assert_ne!(top, bottom, "G takes the end of it");
+
+        crate::input::on_key(&mut ui, &tree, typed('/'), now);
+        for c in "line 7".chars() {
+            crate::input::on_key(&mut ui, &tree, typed(c), now);
+        }
+        let typing = render(&state, &ui, settled);
+        assert!(typing.contains("/line 7"), "{typing}");
+        crate::input::on_key(&mut ui, &tree, key(KeyCode::Enter), now);
+        let found = render(&state, &ui, settled);
+        assert!(found.contains("1/1 · n/N · esc"), "{found}");
+        assert!(found.contains("line 7"), "{found}");
+
+        crate::input::on_key(&mut ui, &tree, key(KeyCode::Esc), now);
+        crate::input::on_key(&mut ui, &tree, key(KeyCode::Esc), now);
+        assert_eq!(
+            render(&state, &ui, later(now, 400)),
+            before,
+            "the frame beneath is what it was"
+        );
     }
 }

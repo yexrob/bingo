@@ -5,6 +5,15 @@ all-features = false
 [advisories]
 version = 2
 yanked = "deny"
+ignore = [
+  # RUSTSEC-2025-0141 (M11e). `bincode` 1.3.3 is unmaintained by its authors'
+  # own decision, not unsound — their announcement calls 1.3.3 complete and
+  # names no defect. It reaches us only under `syntect`'s dump loader, which
+  # deserializes a syntax set compiled into the binary: no input from the
+  # network, a session or a file a person opened ever reaches it. Revisit if
+  # the advisory ever names a defect, or if syntect moves off it.
+  { id = "RUSTSEC-2025-0141", reason = "bincode 1.3.3 loads syntect's built-in syntax dump only" },
+]
 
 [licenses]
 version = 2
@@ -28,6 +37,8 @@ deny = [
   { crate = "figment", reason = "unmaintained since 2024; the settings merge is hand-rolled" },
   { crate = "openssl-sys", reason = "rustls only" },
   { crate = "reqwest-eventsource", reason = "pins reqwest 0.12; use sse-stream" },
+  { crate = "onig", reason = "a C regex engine; syntect runs on regex-fancy (M11e)" },
+  { crate = "onig_sys", reason = "a C regex engine; syntect runs on regex-fancy (M11e)" },
 ]
 
 [sources]

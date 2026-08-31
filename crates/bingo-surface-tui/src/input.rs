@@ -16,9 +16,12 @@ use ratatui::layout::Position;
 use crate::SURFACE_ID;
 use crate::clock::Now;
 use crate::commands::{self, Local};
+use crate::complete;
 use crate::effect::Effect;
 use crate::keys;
+use crate::pager;
 use crate::rail::{self, CardId, Pin};
+use crate::rewind::{self, Rewind};
 use crate::search::Search;
 use crate::select::Cell;
 use crate::tree::Tree;
@@ -39,6 +42,9 @@ pub fn on_key(ui: &mut Ui, tree: &Tree, key: KeyEvent, now: Now) -> Vec<Effect> 
         return Vec::new();
     }
     ui.block = None;
+    // `esc esc` needs no clock: any other key is what says the two were not
+    // one gesture.
+    ui.esc_armed &= key.code == KeyCode::Esc;
     let state = tree.viewed();
     if let Some(effects) = leaving(ui, state, key, now) {
         return effects;
@@ -49,35 +55,13 @@ pub fn on_key(ui: &mut Ui, tree: &Tree, key: KeyEvent, now: Now) -> Vec<Effect> 
     if ui.search.is_some() {
         return searching(ui, key, now);
     }
-    if ui.layer.captures() && matches!(ui.layer.open, Open::Picker(_)) {
-        return picker(ui, key, now);
-    }
-    if chord(key, 'f') {
-        ui.search = Some(Search::open());
-        return Vec::new();
-    }
-    if chord(key, 'g') {
-        toggle_switcher(ui, tree, now);
-        return Vec::new();
-    }
-    if chord(key, 't') {
-        ui.layer.toggle(Open::Panel, now.instant);
-        return Vec::new();
-    }
-    if chord(key, 'o') {
-        toggle_expanded(ui, tree.viewed());
-        return Vec::new();
-    }
-    if ui.layer.captures() {
-        if matches!(ui.layer.open, Open::Panel) {
-            return panel_keys(ui, tree, key, now);
-        }
-        return switcher(ui, tree, key, now);
+    if let Some(effects) = layered(ui, tree, key, now) {
+        return effects;
     }
     if key.code == KeyCode::Esc {
         return escape(ui, tree, now);
     }
-    if key.code == KeyCode::Tab && ui.suggestions().is_empty() && cycle_focus(ui, tree) {
+    if key.code == KeyCode::Tab && ui.suggestions(cwd(tree)).is_empty() && cycle_focus(ui, tree) {
         return Vec::new();
     }
     // A prompt raised anywhere in the tree is answered from wherever the
@@ -85,10 +69,52 @@ pub fn on_key(ui: &mut Ui, tree: &Tree, key: KeyEvent, now: Now) -> Vec<Effect> 
     if let Some((_, interaction)) = tree.open_interaction() {
         return ui.dialog.on_key(interaction, key, now);
     }
-    if let Some(effects) = menu(ui, key) {
+    if let Some(effects) = menu(ui, tree, key) {
         return effects;
     }
     editing(ui, tree, key, now)
+}
+
+/// What a layer answers, and the chords that open one.
+///
+/// A list and the pager own every key while they are up — the chords included,
+/// so `g` is the pager's and not the switcher's for as long as a block is open.
+/// The panel and the switcher leave the chords alone, because the chord that
+/// opened one is what closes it.
+fn layered(ui: &mut Ui, tree: &Tree, key: KeyEvent, now: Now) -> Option<Vec<Effect>> {
+    if ui.layer.captures() {
+        match &ui.layer.open {
+            Open::Picker(_) => return Some(picker(ui, key, now)),
+            Open::Pager(_) => return Some(pager::keys(ui, tree, key, now)),
+            Open::Rewind(_) => return Some(rewind_keys(ui, tree, key, now)),
+            _ => {}
+        }
+    }
+    if let Some(chord) = chorded(key) {
+        match chord {
+            'f' => ui.search = Some(Search::open()),
+            'g' => toggle_switcher(ui, tree, now),
+            't' => ui.layer.toggle(Open::Panel, now.instant),
+            'o' => deepen(ui, tree, now),
+            _ => return None,
+        }
+        return Some(Vec::new());
+    }
+    if !ui.layer.captures() {
+        return None;
+    }
+    Some(match ui.layer.open {
+        Open::Panel => panel_keys(ui, tree, key, now),
+        _ => switcher(ui, tree, key, now),
+    })
+}
+
+/// The letter of a control chord, if that is what this key is.
+fn chorded(key: KeyEvent) -> Option<char> {
+    match (key.code, key.modifiers.contains(KeyModifiers::CONTROL)) {
+        (KeyCode::Char(c), true) => Some(c),
+        _ => None,
+    }
 }
 
 /// One pure function from a mouse event to a list of effects, against the
@@ -202,28 +228,69 @@ fn transcript_cell(ui: &Ui, mouse: MouseEvent) -> Option<Cell> {
     })
 }
 
-/// `ctrl+o`: the focused block's result opens whole, else the latest one; a
-/// second press folds it again (§4's `ctrl+o to expand`).
-fn toggle_expanded(ui: &mut Ui, state: &SessionState) {
-    let focused = ui.select.block.as_ref();
-    let target = state
+/// `ctrl+o` only ever opens further: the first press lifts the fold on the
+/// focused result — else the latest — and the second takes the whole of it into
+/// the pager, where `esc` folds it again. One key, one direction (§4's
+/// `ctrl+o to expand`).
+fn deepen(ui: &mut Ui, tree: &Tree, now: Now) {
+    let focused = ui.select.block.clone();
+    let Some(id) = latest(tree.viewed(), focused.as_ref(), has_result) else {
+        return;
+    };
+    if ui.expanded.contains(&id) {
+        pager::open_block(ui, tree, now, Some(&id));
+        return;
+    }
+    ui.expanded.insert(id);
+}
+
+/// The newest item a key acts on: the focused block when the transcript is
+/// holding one, else the last that answers `what`.
+pub fn latest(
+    state: &SessionState,
+    focused: Option<&bingo_sdk::ItemId>,
+    what: impl Fn(&bingo_sdk::Item) -> bool,
+) -> Option<bingo_sdk::ItemId> {
+    state
         .items
         .iter()
         .rev()
         .filter(|item| focused.is_none_or(|id| id == &item.id))
-        .find(|item| has_result(item))
-        .map(|item| item.id.clone());
-    if let Some(id) = target
-        && !ui.expanded.remove(&id)
-    {
-        ui.expanded.insert(id);
-    }
+        .find(|item| what(item))
+        .map(|item| item.id.clone())
 }
 
 fn has_result(item: &bingo_sdk::Item) -> bool {
     match &item.body {
         bingo_sdk::ItemBody::ToolCall { output, .. } => output.is_some(),
         _ => false,
+    }
+}
+
+/// The panel sheet answers its own keys: the cursor walks the kinds the
+/// plugins published, and `⏎` pins one into the rail or takes it back.
+fn panel_keys(ui: &mut Ui, tree: &Tree, key: KeyEvent, now: Now) -> Vec<Effect> {
+    let rows = panel::rows(tree.viewed());
+    match key.code {
+        KeyCode::Up => ui.panel = ui.panel.saturating_sub(1),
+        KeyCode::Down => ui.panel = (ui.panel + 1).min(rows.len().saturating_sub(1)),
+        KeyCode::Esc => ui.layer.close(now.instant),
+        KeyCode::Enter => pin(ui, tree.view(), rows.get(ui.panel)),
+        _ => {}
+    }
+    Vec::new()
+}
+
+fn pin(ui: &mut Ui, session: &SessionId, card: Option<&CardId>) {
+    let Some(card) = card else {
+        return;
+    };
+    let pin = Pin {
+        session: session.clone(),
+        card: card.clone(),
+    };
+    if !ui.pinned.remove(&pin) {
+        ui.pinned.insert(pin);
     }
 }
 
@@ -265,35 +332,9 @@ fn fire(ui: &mut Ui, tree: &Tree, key: char) -> Option<Vec<Effect>> {
     Some(vec![Effect::Submit(Input::Action { action })])
 }
 
-/// The panel sheet answers its own keys: the cursor walks the kinds the
-/// plugins published, and `⏎` pins one into the rail or takes it back.
-fn panel_keys(ui: &mut Ui, tree: &Tree, key: KeyEvent, now: Now) -> Vec<Effect> {
-    let rows = panel::rows(tree.viewed());
-    match key.code {
-        KeyCode::Up => ui.panel = ui.panel.saturating_sub(1),
-        KeyCode::Down => ui.panel = (ui.panel + 1).min(rows.len().saturating_sub(1)),
-        KeyCode::Esc => ui.layer.close(now.instant),
-        KeyCode::Enter => pin(ui, tree.view(), rows.get(ui.panel)),
-        _ => {}
-    }
-    Vec::new()
-}
-
-fn pin(ui: &mut Ui, session: &SessionId, card: Option<&CardId>) {
-    let Some(card) = card else {
-        return;
-    };
-    let pin = Pin {
-        session: session.clone(),
-        card: card.clone(),
-    };
-    if !ui.pinned.remove(&pin) {
-        ui.pinned.insert(pin);
-    }
-}
-
-fn chord(key: KeyEvent, c: char) -> bool {
-    key.code == KeyCode::Char(c) && key.modifiers.contains(KeyModifiers::CONTROL)
+/// The directory a session's `@` mentions are read from.
+fn cwd(tree: &Tree) -> &str {
+    &tree.viewed().summary.cwd
 }
 
 /// A bracketed paste lands verbatim wherever the caret is.
@@ -345,15 +386,68 @@ fn escape(ui: &mut Ui, tree: &Tree, now: Now) -> Vec<Effect> {
         // One layer is open at a time, whichever form it takes.
         sheet: ui.layer.showing(),
         card: tree.open_interaction().is_some(),
-        dropdown: !ui.suggestions().is_empty(),
+        dropdown: !ui.suggestions(cwd(tree)).is_empty(),
         busy: tree.viewed().busy(),
     };
-    match keys::escape(open) {
+    // An `esc` that closed something is not half of a gesture.
+    let rung = keys::escape(open);
+    ui.esc_armed &= rung.is_none();
+    match rung {
         Some(keys::Escape::Sheet) => ui.layer.close(now.instant),
         Some(keys::Escape::Card) => return cancel(ui, tree, now),
         Some(keys::Escape::Dropdown) => ui.menu.dismissed = true,
         Some(keys::Escape::Interrupt) => return vec![Effect::Interrupt],
-        None => {}
+        // The stack was empty, so this `esc` is one of `esc esc`.
+        None => twice(ui, tree, now),
+    }
+    Vec::new()
+}
+
+/// `esc esc` on an empty composer opens the rewind picker (design §3). The
+/// first press arms it; the second opens the card, when the session has a
+/// `/rewind` for it to run.
+fn twice(ui: &mut Ui, tree: &Tree, now: Now) {
+    if !ui.composer.is_empty() {
+        return;
+    }
+    if !std::mem::replace(&mut ui.esc_armed, true) {
+        return;
+    }
+    ui.esc_armed = false;
+    if !rewind::offered(&ui.commands()) {
+        return;
+    }
+    let turns = rewind::turns(tree.viewed());
+    if turns.is_empty() {
+        return;
+    }
+    ui.layer.show(Open::Rewind(Rewind::default()), now.instant);
+}
+
+/// The rewind card answers its own keys, as every list does.
+fn rewind_keys(ui: &mut Ui, tree: &Tree, key: KeyEvent, now: Now) -> Vec<Effect> {
+    let turns = rewind::turns(tree.viewed());
+    let rows = rewind::rows(&turns);
+    let Open::Rewind(card) = &mut ui.layer.open else {
+        return Vec::new();
+    };
+    match key.code {
+        KeyCode::Up => card.selected = card.selected.saturating_sub(1),
+        KeyCode::Down => card.selected = (card.selected + 1).min(rows.saturating_sub(1)),
+        KeyCode::Esc => ui.layer.close(now.instant),
+        KeyCode::Enter => {
+            let chosen = turns.get(card.selected).map(rewind::line);
+            ui.layer.close(now.instant);
+            return chosen
+                .map(|line| {
+                    vec![Effect::Submit(Input::text(
+                        line,
+                        Origin::surface(SURFACE_ID),
+                    ))]
+                })
+                .unwrap_or_default();
+        }
+        _ => {}
     }
     Vec::new()
 }
@@ -539,18 +633,18 @@ fn switcher(ui: &mut Ui, tree: &Tree, key: KeyEvent, now: Now) -> Vec<Effect> {
 }
 
 /// The dropdown owns the arrows and the completion keys while it is open.
-fn menu(ui: &mut Ui, key: KeyEvent) -> Option<Vec<Effect>> {
-    let rows = ui.suggestions();
+fn menu(ui: &mut Ui, tree: &Tree, key: KeyEvent) -> Option<Vec<Effect>> {
+    let rows = ui.suggestions(cwd(tree));
     if rows.is_empty() {
         return (key.code == KeyCode::Tab).then(Vec::new);
     }
     match key.code {
         KeyCode::Up => ui.menu.selected = ui.menu.selected.saturating_sub(1),
         KeyCode::Down => ui.menu.selected = (ui.menu.selected + 1).min(rows.len() - 1),
-        KeyCode::Tab => return Some(complete(ui)),
+        KeyCode::Tab => return Some(accept(ui, tree)),
         // Enter completes only while there is something left to complete; a
         // name already typed in full is meant to run.
-        KeyCode::Enter if adds_something(ui) => return Some(complete(ui)),
+        KeyCode::Enter if adds_something(ui, tree) => return Some(accept(ui, tree)),
         KeyCode::Enter => {
             ui.menu.dismissed = true;
             return None;
@@ -560,13 +654,13 @@ fn menu(ui: &mut Ui, key: KeyEvent) -> Option<Vec<Effect>> {
     Some(Vec::new())
 }
 
-fn adds_something(ui: &Ui) -> bool {
-    ui.selected_suggestion()
+fn adds_something(ui: &Ui, tree: &Tree) -> bool {
+    ui.selected_suggestion(cwd(tree))
         .is_some_and(|chosen| chosen.value.trim_end() != ui.composer.text().trim_end())
 }
 
-fn complete(ui: &mut Ui) -> Vec<Effect> {
-    if let Some(chosen) = ui.selected_suggestion() {
+fn accept(ui: &mut Ui, tree: &Tree) -> Vec<Effect> {
+    if let Some(chosen) = ui.selected_suggestion(cwd(tree)) {
         ui.composer.set(&chosen.value);
     }
     ui.edited();
@@ -659,6 +753,14 @@ fn cycle_mode(ui: &mut Ui, state: &SessionState, now: Now) -> Vec<Effect> {
 /// Enter sends, unless the line ends in a backslash — the newline chord for
 /// terminals that cannot tell shift+enter from enter.
 fn enter(ui: &mut Ui, tree: &Tree, now: Now) -> Vec<Effect> {
+    // A block the transcript is holding is what `⏎` is for while nothing is
+    // being typed: it opens whole (design §5). A message outranks it.
+    if ui.composer.is_empty()
+        && let Some(block) = ui.select.block.clone()
+        && pager::open_block(ui, tree, now, Some(&block))
+    {
+        return Vec::new();
+    }
     if ui.composer.text().ends_with('\\') {
         ui.composer.backspace();
         newline(ui);
@@ -693,10 +795,13 @@ fn submit(ui: &mut Ui, tree: &Tree, now: Now) -> Vec<Effect> {
         })],
         Some(Local::Resume(None)) => vec![Effect::ListSessions],
         Some(Local::Exit) => vec![Effect::Exit],
-        None => vec![Effect::Submit(Input::text(
+        // A picture a person mentioned reaches the model as a part beside the
+        // line, and the line still says which word it was.
+        None => vec![Effect::Submit(Input::Text {
+            attachments: complete::attachments(&text),
             text,
-            Origin::surface(SURFACE_ID),
-        ))],
+            origin: Origin::surface(SURFACE_ID),
+        })],
     }
 }
 
@@ -745,6 +850,135 @@ mod tests {
     use crate::test_support::*;
     use bingo_sdk::{Activation, Answer, SessionId, TurnStatus};
     use crossterm::event::KeyCode;
+
+    /// A session whose own directory has two files a mention could name.
+    fn with_files() -> (tempfile::TempDir, SessionState) {
+        let dir = tempfile::tempdir().expect("a directory");
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").expect("a manifest");
+        std::fs::write(dir.path().join("shot.png"), "png").expect("a picture");
+        let mut state = state();
+        state.summary.cwd = dir.path().to_string_lossy().into_owned();
+        (dir, state)
+    }
+
+    #[test]
+    fn an_at_sign_offers_the_paths_under_the_session_and_enter_takes_one() {
+        let (_dir, state) = with_files();
+        let tree = solo(&state);
+        let (mut ui, now) = scene();
+        write(&mut ui, &state, "@Car", now);
+        assert_eq!(
+            ui.suggestions(&state.summary.cwd)
+                .iter()
+                .map(|row| row.label.clone())
+                .collect::<Vec<_>>(),
+            vec!["@Cargo.toml".to_string()],
+        );
+        on_key(&mut ui, &tree, key(KeyCode::Enter), now);
+        assert_eq!(ui.composer.text(), "@Cargo.toml ");
+        assert!(
+            ui.suggestions(&state.summary.cwd).is_empty(),
+            "a finished mention offers nothing more"
+        );
+    }
+
+    #[test]
+    fn a_mentioned_picture_travels_beside_the_line() {
+        let (_dir, state) = with_files();
+        let tree = solo(&state);
+        let (mut ui, now) = scene();
+        write(&mut ui, &state, "look at @shot.png", now);
+        let effects = on_key(&mut ui, &tree, key(KeyCode::Enter), now);
+        assert_eq!(
+            effects,
+            vec![Effect::Submit(Input::Text {
+                text: "look at @shot.png".into(),
+                attachments: vec!["shot.png".into()],
+                origin: Origin::surface(SURFACE_ID),
+            })],
+        );
+    }
+
+    /// A transcript of two turns, and a session that can rewind to one.
+    fn rewindable() -> (SessionState, Vec<bingo_sdk::CommandSpec>) {
+        let mut state = state();
+        state.items = vec![
+            in_turn(
+                "itm_1",
+                "trn_1",
+                user("itm_1", "what is in this workspace?"),
+            ),
+            in_turn("itm_2", "trn_2", user("itm_2", "write me a note")),
+        ];
+        (
+            state,
+            vec![bingo_sdk::CommandSpec {
+                name: "rewind".into(),
+                aliases: Vec::new(),
+                hint: "go back to a turn".into(),
+                args: bingo_sdk::ArgSpec::Free {
+                    hint: "<turn>".into(),
+                },
+                instant: true,
+                family: "session".into(),
+            }],
+        )
+    }
+
+    fn in_turn(id: &str, turn: &str, mut item: bingo_sdk::Item) -> bingo_sdk::Item {
+        item.id = bingo_sdk::ItemId::from_raw(id);
+        item.turn = Some(bingo_sdk::TurnId::from_raw(turn));
+        item
+    }
+
+    #[test]
+    fn esc_twice_on_an_empty_composer_lists_the_turns_and_enter_rewinds() {
+        let (state, commands) = rewindable();
+        let tree = solo(&state);
+        let (mut ui, now) = scene();
+        ui.catalogs.commands = commands;
+        on_key(&mut ui, &tree, key(KeyCode::Esc), now);
+        assert!(ui.esc_armed, "the first one arms it and closes nothing");
+        on_key(&mut ui, &tree, key(KeyCode::Esc), now);
+        assert!(ui.layer.is(&Open::Rewind(Rewind::default())));
+
+        on_key(&mut ui, &tree, key(KeyCode::Down), now);
+        let effects = on_key(&mut ui, &tree, key(KeyCode::Enter), now);
+        assert_eq!(
+            effects,
+            vec![Effect::Submit(Input::text(
+                "/rewind trn_1",
+                Origin::surface(SURFACE_ID),
+            ))],
+            "the second row is the older turn"
+        );
+    }
+
+    #[test]
+    fn a_key_between_the_two_escapes_is_what_says_they_were_not_one_gesture() {
+        let (state, commands) = rewindable();
+        let tree = solo(&state);
+        let (mut ui, now) = scene();
+        ui.catalogs.commands = commands;
+        on_key(&mut ui, &tree, key(KeyCode::Esc), now);
+        on_key(&mut ui, &tree, typed('a'), now);
+        assert!(!ui.esc_armed);
+        on_key(&mut ui, &tree, key(KeyCode::Esc), now);
+        assert!(!ui.layer.showing(), "and a half-typed line is not empty");
+    }
+
+    /// The picker is offered only where the session has a `/rewind` to run;
+    /// as of M11e nothing registers one.
+    #[test]
+    fn nothing_opens_where_the_session_cannot_rewind() {
+        let (state, _) = rewindable();
+        let tree = solo(&state);
+        let (mut ui, now) = scene();
+        on_key(&mut ui, &tree, key(KeyCode::Esc), now);
+        on_key(&mut ui, &tree, key(KeyCode::Esc), now);
+        assert!(!ui.layer.showing());
+        assert!(ui.notices.is_empty(), "and it is silent about it");
+    }
 
     /// The row the switcher's cursor is on, when it is the layer that is open.
     fn selected(ui: &Ui) -> Option<usize> {

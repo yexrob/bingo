@@ -96,6 +96,24 @@ rmcp = { version = "3.1", default-features = false }
 # M10 (docs/plans/M10-oauth-codex.md). SHA-256 and the system random source
 # for PKCE; already resolved under rustls, so this is an edge, not a crate.
 aws-lc-rs = "1"
+# M11e (docs/plans/M11e-content-kinds.md, "Dependencies"). Pure Rust: the
+# `fancy-regex` engine, never `onig` (a C library, banned in deny.toml). No
+# themes are loaded — a scope maps onto the token table (design §4) — so
+# `default-themes`, `plist-load`, `html` and `metadata` stay off.
+syntect = { version = "5.3", default-features = false, features = [
+  "parsing",
+  "default-syntaxes",
+  "regex-fancy",
+] }
+two-face = { version = "0.5", default-features = false, features = [
+  "syntect-fancy",
+] }
+# M11e: the `@` completion's ranking. `unicode-segmentation` is already in the
+# tree for the composer's graphemes, so this is one crate and an edge.
+nucleo-matcher = "0.3"
+# M11e: the terminal's own background, read once at start (OSC 10/11), so the
+# truecolor palette can be the one a person's terminal is already wearing.
+terminal-colorsaurus = "1.0"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

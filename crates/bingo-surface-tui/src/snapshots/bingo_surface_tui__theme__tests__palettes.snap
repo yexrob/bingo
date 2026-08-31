@@ -1,0 +1,14 @@
+---
+source: crates/bingo-surface-tui/src/theme.rs
+expression: rows
+---
+text       dark #ece7df   light #24201a
+dim        dark #8a847a   light #777167
+raised     dark #211d17   light #eee8dd
+presence   dark #d97757   light #b24f2c
+glow       dark #f2a07c   light #d97757
+good       dark #8fcf8a   light #357230
+bad        dark #e0655a   light #b02f24
+mode       dark #8fb4de   light #2f5f99
+good_tint  dark #1b2a1c   light #e0efdd
+bad_tint   dark #2d1a19   light #f7e2df

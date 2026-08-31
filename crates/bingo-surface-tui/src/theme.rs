@@ -48,6 +48,24 @@ pub const DARK: Palette = Palette {
     bad_tint: Color::Rgb(0x2d, 0x1a, 0x19),
 };
 
+/// The same eight, over a light ground. Each is [`DARK`]'s hue at the other
+/// end of its own lightness: the warm off-white becomes a warm near-black,
+/// `presence` deepens until it reads on paper, and `raised` is one step *down*
+/// from the background rather than one step up — the tint is what gives the
+/// frame depth either way (design §4).
+pub const LIGHT: Palette = Palette {
+    text: Color::Rgb(0x24, 0x20, 0x1a),
+    dim: Color::Rgb(0x77, 0x71, 0x67),
+    raised: Color::Rgb(0xee, 0xe8, 0xdd),
+    presence: Color::Rgb(0xb2, 0x4f, 0x2c),
+    glow: Color::Rgb(0xd9, 0x77, 0x57),
+    good: Color::Rgb(0x35, 0x72, 0x30),
+    bad: Color::Rgb(0xb0, 0x2f, 0x24),
+    mode: Color::Rgb(0x2f, 0x5f, 0x99),
+    good_tint: Color::Rgb(0xe0, 0xef, 0xdd),
+    bad_tint: Color::Rgb(0xf7, 0xe2, 0xdf),
+};
+
 /// How much colour a terminal is asked for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Colors {
@@ -150,17 +168,57 @@ pub struct Theme {
     pub glyphs: &'static Glyphs,
 }
 
+/// Which of the two truecolor palettes a person wants: the one their terminal
+/// is already wearing, or one they named.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Look {
+    #[default]
+    Terminal,
+    Light,
+    Dark,
+}
+
+/// `BINGO_THEME`. It sits with `BINGO_MOTION` and `BINGO_ASCII` rather than in
+/// the settings file because the look is chosen before the kernel is up: a
+/// setting would arrive after the first frame had already been drawn.
+pub fn look(setting: Option<&str>) -> Look {
+    match setting {
+        Some("light") => Look::Light,
+        Some("dark") => Look::Dark,
+        _ => Look::Terminal,
+    }
+}
+
+/// Everything the look is chosen from, read once at start.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Ask {
+    /// `NO_COLOR`, which wins over all of it.
+    pub no_color: bool,
+    /// `COLORTERM` says 24 bits are safe.
+    pub truecolor: bool,
+    pub ascii: bool,
+    pub look: Look,
+    /// Whether the terminal answered that its background is light. `None`
+    /// where it did not answer or was never asked.
+    pub light: Option<bool>,
+}
+
 /// What the environment asks for. Truecolor is announced by `COLORTERM`; a
-/// terminal that says nothing gets the eight it is sure of.
-pub fn choose(no_color: bool, colorterm: Option<&str>, ascii: bool) -> Theme {
-    let colors = match (no_color, colorterm) {
+/// terminal that says nothing gets the eight it is sure of. `NO_COLOR` wins
+/// over every other answer, the terminal's own included.
+pub fn choose(ask: Ask) -> Theme {
+    let palette = match (ask.look, ask.light) {
+        (Look::Light, _) | (Look::Terminal, Some(true)) => LIGHT,
+        _ => DARK,
+    };
+    let colors = match (ask.no_color, ask.truecolor) {
         (true, _) => Colors::Plain,
-        (false, Some("truecolor" | "24bit")) => Colors::True(DARK),
-        (false, _) => Colors::Ansi,
+        (false, true) => Colors::True(palette),
+        (false, false) => Colors::Ansi,
     };
     Theme {
         colors,
-        glyphs: if ascii { &ASCII } else { &UNICODE },
+        glyphs: if ask.ascii { &ASCII } else { &UNICODE },
     }
 }
 
@@ -193,16 +251,62 @@ fn current() -> Theme {
     })
 }
 
+/// The look this run draws in, settled by [`detect`] before the first frame.
+#[cfg(not(test))]
+static CHOSEN: std::sync::OnceLock<Theme> = std::sync::OnceLock::new();
+
 #[cfg(not(test))]
 fn current() -> Theme {
-    static CHOSEN: std::sync::OnceLock<Theme> = std::sync::OnceLock::new();
-    *CHOSEN.get_or_init(|| {
-        choose(
-            std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty()),
-            std::env::var("COLORTERM").ok().as_deref(),
-            std::env::var_os("BINGO_ASCII").is_some_and(|v| v == "1"),
-        )
-    })
+    *CHOSEN.get_or_init(|| choose(asked()))
+}
+
+/// Settle the look, asking the terminal what colour its background is where
+/// that is what decides it. Called once, before the terminal is taken: a probe
+/// writes an escape and waits for the answer, which is not something a draw may
+/// do. A test never reaches it — the suite fixes the look instead.
+#[cfg(not(test))]
+pub fn detect() {
+    let _ = CHOSEN.set(choose(asked()));
+}
+
+#[cfg(test)]
+pub fn detect() {}
+
+/// How long the background probe is given. A terminal that has not answered by
+/// then is one whose answer would have arrived after the first frame.
+#[cfg(not(test))]
+const PROBE: std::time::Duration = std::time::Duration::from_millis(400);
+
+#[cfg(not(test))]
+fn asked() -> Ask {
+    let no_color = std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty());
+    let truecolor = matches!(
+        std::env::var("COLORTERM").ok().as_deref(),
+        Some("truecolor" | "24bit")
+    );
+    let look = look(std::env::var("BINGO_THEME").ok().as_deref());
+    Ask {
+        // The terminal is asked only where its answer would change something:
+        // a probe nobody reads is a probe not worth its milliseconds.
+        light: (!no_color && truecolor && look == Look::Terminal)
+            .then(background)
+            .flatten(),
+        no_color,
+        truecolor,
+        ascii: std::env::var_os("BINGO_ASCII").is_some_and(|v| v == "1"),
+        look,
+    }
+}
+
+/// Whether the terminal says its background is light (OSC 10/11). A terminal
+/// that will not say leaves the dark palette standing.
+#[cfg(not(test))]
+fn background() -> Option<bool> {
+    let mut options = terminal_colorsaurus::QueryOptions::default();
+    options.timeout = PROBE;
+    terminal_colorsaurus::theme_mode(options)
+        .ok()
+        .map(|mode| mode == terminal_colorsaurus::ThemeMode::Light)
 }
 
 /// Draw whatever `f` draws in another look.
@@ -403,6 +507,48 @@ fn scaled(colour: Color, share: f32) -> Color {
     Color::Rgb(at(r), at(g), at(b))
 }
 
+// ---- what highlighted code is drawn in (design §5) ----------------------
+//
+// Three inks and no rainbow. Colour on this screen is spent on state — what
+// is live, what wants a person, what failed — so syntax gets the two tokens
+// it can have without competing: the one cool colour for the words that make
+// a language a language, and `dim` for the words meant for a reader. The rest
+// of the code is text, like every other answer.
+
+/// What a highlighter may say about a run of code.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Ink {
+    Keyword,
+    Comment,
+    Plain,
+}
+
+/// The TextMate scope prefixes each ink answers to — the vocabulary every
+/// syntax in the set is written in — tried in this order. A scope that matches
+/// none of them is [`Ink::Plain`]; a syntax this table has never heard of
+/// still reads as code, which is why the fallback is the answer and not a
+/// colour of its own.
+pub const INKS: &[(Ink, &str)] = &[
+    (Ink::Comment, "comment"),
+    // An operator is punctuation, not vocabulary: colouring `=` and `&&`
+    // would put the cool colour on every other cell of a line.
+    (Ink::Plain, "keyword.operator"),
+    (Ink::Keyword, "keyword"),
+    (Ink::Keyword, "storage"),
+    (Ink::Keyword, "constant.language"),
+    (Ink::Keyword, "variable.language"),
+    (Ink::Keyword, "entity.name.tag"),
+];
+
+/// One ink as a token of §4's table.
+pub fn ink(ink: Ink) -> Style {
+    match ink {
+        Ink::Keyword => mode(),
+        Ink::Comment => dim(),
+        Ink::Plain => text(),
+    }
+}
+
 pub fn bold() -> Style {
     Style::new().add_modifier(Modifier::BOLD)
 }
@@ -600,16 +746,17 @@ mod tests {
                     "composer.rs",
                     "dialog.rs",
                     "markdown.rs",
+                    "pager.rs",
                     "panel.rs",
                     "preview.rs",
                     "rail.rs",
+                    "rewind.rs",
                     "search.rs",
                     "status.rs",
                     "transcript.rs",
                     "tree.rs",
                     "view.rs",
                     "views/actions.rs",
-                    "views/code.rs",
                     "views/keyvalue.rs",
                     "views/list.rs",
                     "views/panel.rs",
@@ -628,9 +775,11 @@ mod tests {
                     "keys.rs",
                     "layers.rs",
                     "markdown.rs",
+                    "pager.rs",
                     "panel.rs",
                     "preview.rs",
                     "rail.rs",
+                    "rewind.rs",
                     "search.rs",
                     "status.rs",
                     "transcript.rs",
@@ -684,6 +833,9 @@ mod tests {
             ("fading", &["status.rs"]),
             ("warming", &["status.rs"]),
             ("attention", &["status.rs", "transcript.rs", "tree.rs"]),
+            // Highlighted code reaches the table through one door, so no view
+            // has to know that a keyword and the mode badge share a colour.
+            ("ink", &["highlight.rs"]),
         ];
         for (token, files) in allowed {
             let mut seen: Vec<String> = sources()
@@ -696,21 +848,153 @@ mod tests {
         }
     }
 
+    /// Twenty-four bits and nothing else asked for.
+    fn asking() -> Ask {
+        Ask {
+            truecolor: true,
+            ..Ask::default()
+        }
+    }
+
     #[test]
     fn the_environment_picks_the_look_and_no_colour_wins() {
-        assert_eq!(choose(false, None, false).colors, Colors::Ansi);
+        assert_eq!(choose(Ask::default()).colors, Colors::Ansi);
+        assert_eq!(choose(asking()).colors, Colors::True(DARK));
         assert_eq!(
-            choose(false, Some("truecolor"), false).colors,
-            Colors::True(DARK)
+            choose(Ask {
+                no_color: true,
+                ..asking()
+            })
+            .colors,
+            Colors::Plain,
         );
         assert_eq!(
-            choose(false, Some("24bit"), false).colors,
-            Colors::True(DARK)
+            choose(Ask {
+                ascii: true,
+                ..Ask::default()
+            })
+            .glyphs,
+            &ASCII,
         );
-        assert_eq!(choose(false, Some("8bit"), false).colors, Colors::Ansi);
-        assert_eq!(choose(true, Some("truecolor"), false).colors, Colors::Plain);
-        assert_eq!(choose(false, None, true).glyphs, &ASCII);
-        assert_eq!(choose(false, None, false).glyphs, &UNICODE);
+        assert_eq!(choose(Ask::default()).glyphs, &UNICODE);
+    }
+
+    #[test]
+    fn a_terminal_that_answers_light_gets_the_light_palette() {
+        let terminal = |light| choose(Ask { light, ..asking() }).colors;
+        assert_eq!(terminal(Some(true)), Colors::True(LIGHT));
+        assert_eq!(terminal(Some(false)), Colors::True(DARK));
+        assert_eq!(terminal(None), Colors::True(DARK), "and silence is dark");
+    }
+
+    #[test]
+    fn a_named_look_outranks_what_the_terminal_answered() {
+        let named = |look, light| {
+            choose(Ask {
+                look,
+                light,
+                ..asking()
+            })
+            .colors
+        };
+        assert_eq!(named(Look::Dark, Some(true)), Colors::True(DARK));
+        assert_eq!(named(Look::Light, Some(false)), Colors::True(LIGHT));
+        assert_eq!(look(Some("light")), Look::Light);
+        assert_eq!(look(Some("dark")), Look::Dark);
+        assert_eq!(look(Some("terminal")), Look::Terminal);
+        assert_eq!(look(Some("sepia")), Look::Terminal, "and so is nonsense");
+    }
+
+    #[test]
+    fn no_colour_beats_a_terminal_that_answered_light() {
+        assert_eq!(
+            choose(Ask {
+                no_color: true,
+                light: Some(true),
+                look: Look::Light,
+                ..asking()
+            })
+            .colors,
+            Colors::Plain,
+        );
+    }
+
+    /// One row of §4's table: its name and the value it takes in a palette.
+    type Token = (&'static str, fn(Palette) -> Color);
+
+    /// Every token of §4's table, in the order the table lists them.
+    const TOKENS: &[Token] = &[
+        ("text", |p| p.text),
+        ("dim", |p| p.dim),
+        ("raised", |p| p.raised),
+        ("presence", |p| p.presence),
+        ("glow", |p| p.glow),
+        ("good", |p| p.good),
+        ("bad", |p| p.bad),
+        ("mode", |p| p.mode),
+        ("good_tint", |p| p.good_tint),
+        ("bad_tint", |p| p.bad_tint),
+    ];
+
+    fn hex(colour: Color) -> String {
+        match colour {
+            Color::Rgb(r, g, b) => format!("#{r:02x}{g:02x}{b:02x}"),
+            other => format!("{other:?}"),
+        }
+    }
+
+    /// The two palettes side by side: the same tokens, the same meanings, and
+    /// nothing between them but what each is worth.
+    #[test]
+    fn light_and_dark_differ_only_in_what_each_token_is_worth() {
+        let rows = TOKENS
+            .iter()
+            .map(|(name, of)| {
+                format!(
+                    "{name:<10} dark {}   light {}",
+                    hex(of(DARK)),
+                    hex(of(LIGHT))
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        insta::assert_snapshot!("palettes", rows);
+        for (name, of) in TOKENS {
+            assert_ne!(of(DARK), of(LIGHT), "`{name}` is the same in both");
+        }
+    }
+
+    /// How bright a colour reads, near enough for "is this the light one".
+    fn luma(colour: Color) -> f32 {
+        let Color::Rgb(r, g, b) = colour else {
+            return 0.0;
+        };
+        0.299 * f32::from(r) + 0.587 * f32::from(g) + 0.114 * f32::from(b)
+    }
+
+    #[test]
+    fn each_palette_reads_against_its_own_ground() {
+        assert!(
+            luma(DARK.text) > luma(DARK.raised),
+            "warm off-white on dark"
+        );
+        assert!(
+            luma(LIGHT.text) < luma(LIGHT.raised),
+            "warm near-black on paper"
+        );
+        for (name, of) in TOKENS {
+            if *name == "raised" || name.ends_with("_tint") {
+                continue;
+            }
+            assert!(
+                luma(of(LIGHT)) < luma(LIGHT.raised),
+                "`{name}` must read on the light ground"
+            );
+        }
+        assert!(
+            luma(DARK.raised) < luma(DARK.text) && luma(LIGHT.raised) > luma(LIGHT.text),
+            "the tint steps away from the background either way"
+        );
     }
 
     #[test]

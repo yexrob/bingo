@@ -16,7 +16,7 @@ pub struct Binding {
 pub const BINDINGS: &[Binding] = &[
     Binding {
         keys: "enter",
-        description: "send the message",
+        description: "send the message · open the focused block",
     },
     Binding {
         keys: "shift+enter",
@@ -27,6 +27,10 @@ pub const BINDINGS: &[Binding] = &[
         // the two together.
         keys: "esc",
         description: "sheet → card → dropdown → interrupt",
+    },
+    Binding {
+        keys: "esc esc",
+        description: "rewind to an earlier turn",
     },
     Binding {
         keys: "ctrl+c",
@@ -82,7 +86,7 @@ pub const BINDINGS: &[Binding] = &[
     },
     Binding {
         keys: "ctrl+o",
-        description: "expand the latest result · again to fold",
+        description: "expand the latest result · again for all of it",
     },
     Binding {
         keys: "/ · !",

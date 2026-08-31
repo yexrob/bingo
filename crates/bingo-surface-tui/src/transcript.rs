@@ -441,6 +441,12 @@ fn folded(output: &ToolOutput, expanded: bool, width: usize) -> Vec<Line<'static
     }
 }
 
+/// Everything a result says, with nothing folded away: what the pager opens
+/// (design §5 — a long output opens in a sheet).
+pub fn whole(output: &ToolOutput, width: usize) -> Vec<Line<'static>> {
+    folded(output, true, width)
+}
+
 fn plain(text: &str) -> Vec<Line<'static>> {
     text.trim_end()
         .lines()
@@ -512,7 +518,7 @@ fn child_row(child: &SessionState, input: &Value, rows: &Rows<'_>) -> Vec<Line<'
 }
 
 /// What the call is about, from the field a person would recognise.
-fn summarize(input: &Value) -> String {
+pub fn summarize(input: &Value) -> String {
     for key in ["file_path", "command", "pattern", "url", "query", "prompt"] {
         if let Some(Value::String(value)) = input.get(key) {
             return value.clone();

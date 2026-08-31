@@ -39,6 +39,15 @@ pub fn truecolor() -> Theme {
     }
 }
 
+/// The same look over a light ground, which is what a terminal that answers
+/// `light` to OSC 11 is drawn in.
+pub fn daylight() -> Theme {
+    Theme {
+        colors: Colors::True(theme::LIGHT),
+        glyphs: &theme::UNICODE,
+    }
+}
+
 /// One drawn frame, kept cell by cell.
 pub struct Painted(ratatui::buffer::Buffer);
 

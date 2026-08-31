@@ -8,7 +8,10 @@
 
 pub mod actions;
 mod badge;
-mod code;
+/// A fence in an answer is the same block a plugin publishes, so
+/// [`crate::markdown`] hands its language and text straight to this renderer
+/// (M11e).
+pub mod code;
 mod columns;
 mod diff;
 mod keyvalue;
@@ -17,7 +20,9 @@ mod markdown;
 mod panel;
 mod progress;
 mod stack;
-mod table;
+/// A GFM table in an answer is the same table a plugin publishes, so
+/// [`crate::markdown`] hands its rows straight to this renderer (M11e).
+pub mod table;
 mod text;
 mod tree;
 
