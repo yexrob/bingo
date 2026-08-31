@@ -33,9 +33,9 @@ pub const NOTE: &str = "\
   Permission prompts are the exception and do reach them, so a call that needs
   approval still gets a real answer; anything else you need belongs in your
   reply.
-- Your turn ends when you stop calling tools, and nothing wakes you afterwards.
-  Finish the task within it, or say plainly what is still pending: your parent
-  can send you a follow-up.";
+- Your turn ends when you stop calling tools. Only a message opens another one,
+  so nothing you leave unfinished continues by itself: finish the task within
+  this turn, or say plainly in your reply what is still pending.";
 
 /// A child's `system_extra`: the note, then whatever the definition says.
 pub fn system_extra(system: &str) -> String {
@@ -78,6 +78,10 @@ mod tests {
         assert!(
             NOTE.contains("asks for nothing back"),
             "a direct message carries no obligation (ADR-0024 §4)"
+        );
+        assert!(
+            NOTE.contains("Only a message opens another one"),
+            "one delivery: an idle agent is woken, so the note may not say otherwise"
         );
         assert!(
             NOTE.contains("in #<room>"),
