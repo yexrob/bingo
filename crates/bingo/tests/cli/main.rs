@@ -594,6 +594,7 @@ mod hooks;
 mod instances;
 mod jobs;
 mod login;
+mod mentions;
 mod provider_add;
 mod rooms;
 mod schedule;
