@@ -89,6 +89,10 @@ pub const BINDINGS: &[Binding] = &[
         description: "expand the latest result · again for all of it",
     },
     Binding {
+        keys: "ctrl+b",
+        description: "background the running command",
+    },
+    Binding {
         keys: "/ · !",
         description: "run a command · run a shell line",
     },

@@ -661,13 +661,17 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "bingo-sdk",
+ "jiff",
  "process-wrap 10.0.0",
+ "regex",
  "schemars",
  "serde",
  "serde_json",
  "shlex",
  "tempfile",
  "tokio",
+ "tracing",
+ "ulid",
 ]
 
 [[package]]

@@ -34,6 +34,12 @@ pub const ARM_HINT: &str = "press ctrl+c again to exit";
 pub const UNKNOWN_MODE: &str = "permission mode unknown — /permission <mode>";
 /// What ctrl+g says when the session has spawned nobody to switch to.
 pub const NO_AGENTS: &str = "no sub-agents in this session";
+/// What ctrl+b says when no shell command is running to background.
+pub const NOTHING_RUNNING: &str = "no shell command is running";
+/// The command the shell plugin registers for backgrounding a running one
+/// (ADR-0018 §6). A surface may not import a plugin (ADR-0001), so the name is
+/// the whole of the contract between them.
+const PROMOTE: &str = "bash.promote";
 /// Lines one notch of the wheel moves the transcript.
 const WHEEL: isize = 3;
 
@@ -96,6 +102,7 @@ fn layered(ui: &mut Ui, tree: &Tree, key: KeyEvent, now: Now) -> Option<Vec<Effe
             'g' => toggle_switcher(ui, tree, now),
             't' => ui.layer.toggle(Open::Panel, now.instant),
             'o' => deepen(ui, tree, now),
+            'b' => return Some(background(ui, tree, now)),
             _ => return None,
         }
         return Some(Vec::new());
@@ -242,6 +249,38 @@ fn deepen(ui: &mut Ui, tree: &Tree, now: Now) {
         return;
     }
     ui.expanded.insert(id);
+}
+
+/// `ctrl+b` hands the shell command that is running to the background: the
+/// plugin's own command, fired by name with the call it is to act on
+/// (ADR-0018 §6). The plugin does the rest — the call returns early with a job
+/// id, and the rail draws the job from the signal it already publishes.
+fn background(ui: &mut Ui, tree: &Tree, now: Now) -> Vec<Effect> {
+    let Some(call) = running_shell(tree.viewed()) else {
+        ui.notify(Level::Info, NOTHING_RUNNING, now.instant);
+        return Vec::new();
+    };
+    vec![Effect::Submit(Input::Action {
+        action: bingo_sdk::Action {
+            name: PROMOTE.into(),
+            args: serde_json::Value::String(call),
+        },
+    })]
+}
+
+/// The call id of the shell command in flight, the newest first.
+fn running_shell(state: &SessionState) -> Option<String> {
+    state
+        .items
+        .iter()
+        .rev()
+        .filter(|item| !item.is_terminal())
+        .find_map(|item| match &item.body {
+            bingo_sdk::ItemBody::ToolCall { call_id, name, .. } if name == "Bash" => {
+                Some(call_id.clone())
+            }
+            _ => None,
+        })
 }
 
 /// The newest item a key acts on: the focused block when the transcript is
@@ -1774,6 +1813,85 @@ mod tests {
                 activation: Activation::Keyboard,
             }]
         );
+    }
+
+    // ---- backgrounding the running command (ADR-0018 §6) ------------------
+
+    /// A turn with a shell command in flight.
+    fn running_bash() -> SessionState {
+        folded(vec![
+            frame(1, started("trn_1")),
+            frame(
+                2,
+                bingo_sdk::Event::ItemStarted {
+                    item: running_tool("itm_1", "Bash", "compiling…"),
+                },
+            ),
+        ])
+    }
+
+    #[test]
+    fn ctrl_b_fires_the_plugins_command_naming_the_call_that_is_running() {
+        let (mut ui, now) = scene();
+        let effects = press(&mut ui, &running_bash(), ctrl('b'), now);
+        assert_eq!(
+            effects,
+            vec![Effect::Submit(Input::Action {
+                action: bingo_sdk::Action {
+                    name: "bash.promote".into(),
+                    args: serde_json::Value::String("call_1".into()),
+                },
+            })]
+        );
+        assert!(ui.notices.is_empty(), "the plugin answers, not the surface");
+    }
+
+    #[test]
+    fn ctrl_b_says_so_when_no_shell_command_is_running() {
+        for state in [
+            state(),
+            busy(),
+            // A finished call is not a running one.
+            folded(vec![
+                frame(1, started("trn_1")),
+                frame(
+                    2,
+                    bingo_sdk::Event::ItemCompleted {
+                        item: tool(
+                            "itm_1",
+                            "Bash",
+                            serde_json::json!({ "command": "ls" }),
+                            Some(bingo_sdk::ToolOutput::text("a\n")),
+                            bingo_sdk::ItemStatus::Completed,
+                        ),
+                    },
+                ),
+            ]),
+            // Another tool's call is not the shell's.
+            folded(vec![
+                frame(1, started("trn_1")),
+                frame(
+                    2,
+                    bingo_sdk::Event::ItemStarted {
+                        item: running_tool("itm_1", "Read", "reading…"),
+                    },
+                ),
+            ]),
+        ] {
+            let (mut ui, now) = scene();
+            assert!(press(&mut ui, &state, ctrl('b'), now).is_empty());
+            assert!(ui.notices.iter().any(|n| n.text == NOTHING_RUNNING));
+        }
+    }
+
+    /// The key is in the one binding table, so the `?` sheet prints it.
+    #[test]
+    fn ctrl_b_is_documented_where_every_key_is() {
+        let row = keys::BINDINGS
+            .iter()
+            .find(|binding| binding.keys == "ctrl+b")
+            .expect("a row for ctrl+b");
+        assert_eq!(row.description, "background the running command");
     }
 
     // ---- the plugin-state panel -----------------------------------------

@@ -149,9 +149,9 @@ fn a_sub_sessions_lines_carry_the_call_that_spawned_it() {
 // ---- the host protocol on stdin -----------------------------------------
 
 /// The binary as a host drives it: one JSON line at a time in, one out.
-struct Host {
+pub(crate) struct Host {
     child: Child,
-    stdin: ChildStdin,
+    pub(crate) stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
     /// Every line read so far, so what the run said before the test looked is
     /// still part of the transcript it ends with.
@@ -159,21 +159,21 @@ struct Host {
 }
 
 /// What was left when stdin closed.
-struct Ended {
-    lines: Vec<Value>,
-    err: String,
-    code: Option<i32>,
+pub(crate) struct Ended {
+    pub(crate) lines: Vec<Value>,
+    pub(crate) err: String,
+    pub(crate) code: Option<i32>,
 }
 
 impl Ended {
-    fn types(&self) -> Vec<&str> {
+    pub(crate) fn types(&self) -> Vec<&str> {
         self.lines
             .iter()
             .map(|line| line["type"].as_str().unwrap_or("?"))
             .collect()
     }
 
-    fn results(&self) -> Vec<&Value> {
+    pub(crate) fn results(&self) -> Vec<&Value> {
         self.lines
             .iter()
             .filter(|line| line["type"] == "result")
@@ -182,7 +182,7 @@ impl Ended {
 }
 
 impl Host {
-    fn start(cmd: &mut Command) -> Self {
+    pub(crate) fn start(cmd: &mut Command) -> Self {
         let mut child = cmd.stdin(Stdio::piped()).spawn().expect("the binary runs");
         let stdin = child.stdin.take().expect("a pipe");
         let stdout = BufReader::new(child.stdout.take().expect("a pipe"));
@@ -199,7 +199,7 @@ impl Host {
         self.stdin.flush().expect("the run reads stdin");
     }
 
-    fn prompt(&mut self, text: &str) {
+    pub(crate) fn prompt(&mut self, text: &str) {
         self.send(&json!({
             "type": "user",
             "message": { "role": "user", "content": text },
@@ -220,7 +220,7 @@ impl Host {
     }
 
     /// Read until a line of this type; the run is certainly past it by then.
-    fn until(&mut self, kind: &str) -> Value {
+    pub(crate) fn until(&mut self, kind: &str) -> Value {
         loop {
             let line = self
                 .line()
@@ -251,7 +251,7 @@ impl Host {
     }
 
     /// Close stdin and collect what the run had left to say.
-    fn finish(self) -> Ended {
+    pub(crate) fn finish(self) -> Ended {
         let Host {
             mut child,
             stdin,
@@ -273,7 +273,11 @@ impl Host {
     }
 }
 
-fn hosted(dir: &std::path::Path, script: &tempfile::NamedTempFile, extra: &[&str]) -> Command {
+pub(crate) fn hosted(
+    dir: &std::path::Path,
+    script: &tempfile::NamedTempFile,
+    extra: &[&str],
+) -> Command {
     let mut cmd = bingo();
     cmd.env("BINGO_FAKE_SCRIPT", script.path())
         .env("HOME", dir)

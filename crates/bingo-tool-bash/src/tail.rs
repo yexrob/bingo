@@ -11,7 +11,7 @@ use std::time::Duration;
 use bingo_sdk::ToolContext;
 use tokio::sync::Mutex;
 
-use crate::output::Bounded;
+use crate::sink::Sink;
 
 /// Lines of a running command's output the tail carries. Enough to see what a
 /// build is doing, few enough that it never competes with the transcript.
@@ -50,8 +50,8 @@ pub struct Tail {
 impl Tail {
     /// Replace the progress tail, if the output has moved since the last
     /// sample. A command that has written nothing yet has no tail to show.
-    pub async fn sample(&mut self, output: &Mutex<Bounded>, to: &dyn Progress) {
-        let lines = output.lock().await.tail_lines(LINES);
+    pub async fn sample(&mut self, sink: &Mutex<Sink>, to: &dyn Progress) {
+        let lines = sink.lock().await.tail_lines(LINES);
         if lines.is_empty() || self.sent.as_deref() == Some(lines.as_str()) {
             return;
         }
@@ -65,10 +65,10 @@ mod tests {
     use super::*;
     use crate::tests::context;
 
-    async fn written(text: &str) -> Mutex<Bounded> {
-        let output = Mutex::new(Bounded::new(1_000));
-        output.lock().await.push(text);
-        output
+    async fn written(text: &str) -> Mutex<Sink> {
+        let sink = Mutex::new(Sink::buffer(1_000));
+        sink.lock().await.push(text).await;
+        sink
     }
 
     #[tokio::test]
@@ -94,7 +94,7 @@ mod tests {
         let mut tail = Tail::default();
         tail.sample(&output, &ToCall(&cx)).await;
         tail.sample(&output, &ToCall(&cx)).await;
-        output.lock().await.push("done\n");
+        output.lock().await.push("done\n").await;
         tail.sample(&output, &ToCall(&cx)).await;
         assert_eq!(
             host.tails(),

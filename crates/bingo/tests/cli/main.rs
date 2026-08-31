@@ -591,6 +591,7 @@ mod context;
 mod experience;
 mod hooks;
 mod instances;
+mod jobs;
 mod login;
 mod provider_add;
 mod schedule;
