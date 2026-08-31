@@ -41,7 +41,7 @@ impl Command for RoomCommand {
         let members: Vec<String> = words.map(str::to_string).collect();
         seat::seat(&cx.host, &cx.session, &cx.cwd, name, &members).await?;
         Ok(CommandOutcome::Applied {
-            message: Some(receipt(&name::title(name), &members)),
+            message: Some(seat::receipt(&name::title(name), &members)),
         })
     }
 }
@@ -104,14 +104,6 @@ async fn members(host: &HostHandle, room: &SessionId) -> Vec<String> {
         .and_then(|kinds| kinds.get(room::MEMBERS))
         .map(room::members_from)
         .unwrap_or_default()
-}
-
-/// What the person is told: the room, and who is in it.
-fn receipt(title: &str, members: &[String]) -> String {
-    match members.is_empty() {
-        true => format!("{title}: nobody yet"),
-        false => format!("{title}: {}", members.join(", ")),
-    }
 }
 
 #[cfg(test)]

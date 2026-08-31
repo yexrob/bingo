@@ -4,10 +4,13 @@
 //! person's, its membership is an `Event::Extension` in its own journal, a
 //! post is a `User` item in it, and the fan-out is `deliver`.
 //!
-//! One command and one hook:
+//! One command, one tool and one hook:
 //!
 //! - `/room` lists the rooms under this session; `/room design reviewer scout`
 //!   opens `#design` under it, or resets who is in the one that stands.
+//! - `OpenRoom` is that same door with an agent on the other side of it
+//!   (ADR-0021): the room hangs under the caller, or — with `shared` — under
+//!   the caller's parent, which is the whole of who will hear it.
 //! - The hook seats the rooms `.bingo/team.json` declares when a person's own
 //!   session opens, and watches every journal: a room announces itself, an
 //!   extension says who is in it, and a user item in one is a post to fan out.
@@ -19,17 +22,20 @@
 mod command;
 mod hook;
 mod name;
+mod placement;
 mod post;
 mod room;
 mod roster;
 mod seat;
 mod team;
+mod tool;
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use bingo_sdk::{
     ClientIdentity, Command, Contribution, Hook, Plugin, PluginError, PluginManifest, Registrar,
+    Tool,
 };
 
 pub use command::RoomCommand;
@@ -37,6 +43,7 @@ pub use hook::RoomsHook;
 pub use room::Room;
 pub use seat::seat;
 pub use team::{Entry, TeamError};
+pub use tool::OpenRoomTool;
 
 /// This plugin's id: the owner of a room's key, and the plugin a room's
 /// membership is published under.
@@ -49,7 +56,7 @@ static MANIFEST: PluginManifest = PluginManifest {
     id: PLUGIN,
     version: env!("CARGO_PKG_VERSION"),
     sdk: "^0.1",
-    provides: &["command:room", "hook:rooms"],
+    provides: &["command:room", "hook:rooms", "tool:OpenRoom"],
     requires: &[],
     // Who sits in which room is a project's file, not a person's settings.
     config: None,
@@ -63,8 +70,9 @@ pub(crate) fn identity() -> ClientIdentity {
     }
 }
 
-/// Registers `/room` and the hook that seats and fans out. Both are handed the
-/// host by the kernel at the call, so this plugin keeps none.
+/// Registers `/room`, the tool an agent opens a room with, and the hook that
+/// seats and fans out. Each is handed the host by the kernel at the call, so
+/// this plugin keeps none.
 #[derive(Debug, Default)]
 pub struct RoomsPlugin;
 
@@ -81,6 +89,7 @@ impl Plugin for RoomsPlugin {
         registrar.add(Contribution::Hook(
             Arc::new(RoomsHook::default()) as Arc<dyn Hook>
         ));
+        registrar.add(Contribution::Tool(Arc::new(OpenRoomTool) as Arc<dyn Tool>));
         Ok(())
     }
 }
@@ -96,7 +105,10 @@ mod plugin_tests {
     #[test]
     fn the_manifest_says_what_it_provides_and_claims_no_settings() {
         assert_eq!(MANIFEST.id, "bingo.rooms");
-        assert_eq!(MANIFEST.provides, ["command:room", "hook:rooms"]);
+        assert_eq!(
+            MANIFEST.provides,
+            ["command:room", "hook:rooms", "tool:OpenRoom"]
+        );
         assert!(MANIFEST.requires.is_empty());
         assert!(MANIFEST.config.is_none());
     }
@@ -112,5 +124,6 @@ mod plugin_tests {
         assert_eq!(contributions.len(), MANIFEST.provides.len());
         assert!(matches!(&contributions[0], Contribution::Command(c) if c.spec().name == "room"));
         assert!(matches!(&contributions[1], Contribution::Hook(h) if h.id() == "rooms"));
+        assert!(matches!(&contributions[2], Contribution::Tool(t) if t.spec().name == "OpenRoom"));
     }
 }

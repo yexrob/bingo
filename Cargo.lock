@@ -510,6 +510,7 @@ dependencies = [
  "bingo-sdk",
  "futures",
  "jiff",
+ "schemars",
  "serde",
  "serde_json",
  "tempfile",
