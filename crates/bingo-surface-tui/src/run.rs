@@ -8,7 +8,7 @@
 //! frame stamped with its own session, folded into one reducer state each by
 //! [`crate::tree::Tree`].
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::pin::Pin;
 use std::time::{Duration, Instant};
 
@@ -23,17 +23,17 @@ use futures::{Stream, StreamExt};
 use serde_json::Value;
 use tokio::sync::mpsc;
 
-use crate::clock::Now;
+use crate::clock::{self, Now};
 use crate::effect::Effect;
-use crate::terminal::Screen;
+use crate::terminal::{Notification, Screen};
 use crate::tree::{self, Tree};
 use crate::ui::{Open, Picker, Ui};
 use crate::{SURFACE_ID, commands, history, input};
 
-/// How often a frame is redrawn *while something is moving*. Nothing moves
-/// when nothing is happening, and then there is no tick at all: an idle
-/// surface draws zero frames (§6).
-const TICK: Duration = Duration::from_millis(100);
+/// How often a frame is redrawn *while something is moving*: thirty a second
+/// (§6). Nothing moves when nothing is happening, and then there is no tick at
+/// all — an idle surface draws zero frames.
+const TICK: Duration = clock::FRAME;
 /// Sessions the `/resume` picker lists.
 const RECENT: usize = 20;
 /// What a write says while the mailbox of the session in view is still on its
@@ -85,17 +85,32 @@ impl Attached {
     }
 }
 
+/// Why the loop woke, and so how soon what it did has to be on the screen.
+/// A keystroke echoes on the very next frame; the kernel's own frames are
+/// folded as fast as they arrive and drawn on the animation clock, so a
+/// thousand deltas a second cost thirty draws and not a thousand (§6).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Wake {
+    Echo,
+    Fold,
+}
+
 struct Run {
     host: HostHandle,
     data_dir: std::path::PathBuf,
     session: Attached,
     ui: Ui,
-    /// The intents this client minted, so an ack meant for another client is
-    /// not reported here.
-    mine: HashSet<IntentId>,
+    /// The intents this client minted and the line each carried, so an ack
+    /// meant for another client is not reported here and a refusal can name
+    /// what was refused.
+    mine: HashMap<IntentId, Option<String>>,
     replies: mpsc::Sender<Reply>,
     /// A selection a key asked for, handed to the terminal between frames.
     clipboard: Option<String>,
+    /// When the last frame was painted, and whether anything has happened
+    /// since that has not been.
+    painted: Instant,
+    behind: bool,
     exit: Option<Exit>,
 }
 
@@ -119,19 +134,60 @@ pub(crate) async fn drive(
     screen: &mut dyn Screen,
     mut keys: Keys,
 ) -> Result<Farewell, KernelError> {
+    let (tx, mut replies) = mpsc::channel(16);
+    let (mut run, mut events) = attach(host, opts, tx).await?;
+    loop {
+        let wake = tokio::select! {
+            frame = next_frame(&mut events) => {
+                match frame {
+                    Some(frame) => run.frame(&frame, screen)?,
+                    None => events = None,
+                }
+                Wake::Fold
+            },
+            key = keys.next() => {
+                match key {
+                    Some(event) => run.terminal_event(event),
+                    None => run.exit = Some(Exit { code: 0 }),
+                }
+                Wake::Echo
+            },
+            Some(reply) = replies.recv() => {
+                run.reply(reply, &mut events);
+                Wake::Echo
+            },
+            () = tick(run.animating(Now::real())) => Wake::Echo,
+        };
+        let now = Now::real();
+        run.ui.expire(now);
+        if let Some(exit) = run.exit.take() {
+            return run.leave(screen, exit, now).await;
+        }
+        run.paint(screen, wake, now)?;
+    }
+}
+
+/// Open the session the options name and take everything the loop holds with
+/// it: the tree, the mailboxes, and the first prompt if there was one.
+async fn attach(
+    host: &HostHandle,
+    opts: SurfaceOptions,
+    replies: mpsc::Sender<Reply>,
+) -> Result<(Run, Option<FrameStream>), KernelError> {
     let attachment = host
         .open(opts.selector, identity(), OpenOptions::with_children())
         .await?;
-    let (tx, mut replies) = mpsc::channel(16);
-    let mut events = Some(attachment.events);
     let mut run = Run {
         host: host.clone(),
         data_dir: opts.env.data_dir.clone(),
         session: Attached::new(attachment.snapshot, attachment.handle),
         ui: Ui::new(history::load(&opts.env.data_dir), Instant::now()),
-        mine: HashSet::new(),
-        replies: tx,
+        mine: HashMap::new(),
+        replies,
         clipboard: None,
+        // Older than a frame, so the first thing that happens is drawn.
+        painted: Instant::now() - TICK,
+        behind: false,
         exit: None,
     };
     run.fetch_catalogs();
@@ -141,30 +197,7 @@ pub(crate) async fn drive(
             bingo_sdk::Origin::surface(SURFACE_ID),
         )));
     }
-    loop {
-        tokio::select! {
-            frame = next_frame(&mut events) => match frame {
-                Some(frame) => run.frame(&frame, screen)?,
-                None => events = None,
-            },
-            key = keys.next() => match key {
-                Some(event) => run.terminal_event(event),
-                None => run.exit = Some(Exit { code: 0 }),
-            },
-            Some(reply) = replies.recv() => run.reply(reply, &mut events),
-            () = tick(run.animating(Instant::now())) => {}
-        }
-        run.ui.expire(Instant::now());
-        if let Some(exit) = run.exit.take() {
-            let root = run.session.tree.root_id().clone();
-            let _ = run.host.close(&root, CloseReason::Client).await;
-            return Ok(Farewell {
-                exit,
-                screen: run.farewell(screen.rows()),
-            });
-        }
-        run.paint(screen)?;
-    }
+    Ok((run, Some(attachment.events)))
 }
 
 /// A stream that has ended never wakes the loop again.
@@ -186,13 +219,34 @@ async fn tick(animating: bool) {
 
 impl Run {
     /// Whether the next frame would differ from this one on its own: a turn
-    /// spins, the transcript eases where a key sent it, a notice is holding
-    /// the status line until its time is up.
-    fn animating(&self, now: Instant) -> bool {
-        self.session.tree.sessions().any(SessionState::busy)
-            || self.ui.scroll.moving(now)
+    /// breathes, a block is still settling, the transcript eases where a key
+    /// sent it, a layer is arriving or leaving, a notice is holding the status
+    /// line until its time is up — or frames arrived faster than they can be
+    /// drawn and the newest of them is not on the screen yet.
+    fn animating(&self, now: Now) -> bool {
+        self.behind
+            || self.session.tree.sessions().any(SessionState::busy)
+            || self.ui.scroll.moving(now.instant)
             || self.ui.layer_moving(now)
             || !self.ui.notices.is_empty()
+            || self.ui.painted.borrow().blocks.moving()
+    }
+
+    /// The way out. Whatever arrived in the last tick is drawn first, so the
+    /// screenful handed back to the shell is the one a person saw.
+    async fn leave(
+        &mut self,
+        screen: &mut dyn Screen,
+        exit: Exit,
+        now: Now,
+    ) -> Result<Farewell, KernelError> {
+        self.paint(screen, Wake::Echo, now)?;
+        let root = self.session.tree.root_id().clone();
+        let _ = self.host.close(&root, CloseReason::Client).await;
+        Ok(Farewell {
+            exit,
+            screen: self.farewell(screen.rows()),
+        })
     }
 
     /// The last screenful of the transcript, as plain text, through the block
@@ -203,11 +257,20 @@ impl Run {
         self.ui.painted.borrow().blocks.tail(rows)
     }
 
-    fn paint(&mut self, screen: &mut dyn Screen) -> Result<(), KernelError> {
+    /// Draw, unless the frame this one would replace is younger than one tick
+    /// and nobody is waiting on it: a person's own keystroke is never held
+    /// back, and the kernel's own pace is not the screen's.
+    fn paint(&mut self, screen: &mut dyn Screen, wake: Wake, now: Now) -> Result<(), KernelError> {
+        if wake == Wake::Fold && now.since(self.painted) < TICK {
+            self.behind = true;
+            return Ok(());
+        }
+        self.behind = false;
+        self.painted = now.instant;
         self.hand_over(screen)?;
         screen.title(&title(&self.session.tree)).map_err(stdio)?;
         screen
-            .draw(&self.session.tree, &self.ui, Now::real())
+            .draw(&self.session.tree, &self.ui, now)
             .map_err(stdio)
     }
 
@@ -241,7 +304,15 @@ impl Run {
             // The lagged stream ends at its marker; the reducer left `seq` at
             // the last frame it applied, so replay from there fills the gap.
             Event::Lagged { .. } => self.resync(),
-            Event::InteractionOpened { .. } => screen.bell().map_err(stdio)?,
+            Event::InteractionOpened { .. } => {
+                screen.bell().map_err(stdio)?;
+                self.announce(Notification::NeedsYou, screen)?;
+            }
+            // A child finishing is the parent's business, not the desktop's:
+            // what a person came back for is the turn they started.
+            Event::TurnCompleted { .. } if self.session.tree.is_root(&frame.session) => {
+                self.announce(Notification::Done, screen)?;
+            }
             Event::Notice { level, text, .. } => {
                 self.ui.notify(*level, text.clone(), Instant::now())
             }
@@ -250,6 +321,17 @@ impl Run {
             _ => {}
         }
         Ok(())
+    }
+
+    /// Say it where the desktop can see it — but only to a window nobody is
+    /// looking at (§6). A focused screen is its own notification.
+    fn announce(&self, what: Notification, screen: &mut dyn Screen) -> Result<(), KernelError> {
+        if self.ui.focused {
+            return Ok(());
+        }
+        screen
+            .notify(&crate::terminal::notification(what))
+            .map_err(stdio)
     }
 
     /// The root closing ends the run; a child closing leaves the tree, and
@@ -270,18 +352,26 @@ impl Run {
     }
 
     /// An ack for an intent this client minted; another client's is its own
-    /// business.
+    /// business. A refusal names the line it refused, so a person sees which
+    /// of theirs came back.
     fn ack(&mut self, intent: &IntentId, outcome: &IntentOutcome) {
-        if !self.mine.remove(intent) {
+        let Some(about) = self.mine.remove(intent) else {
             return;
-        }
+        };
         match outcome {
-            IntentOutcome::Rejected { error } => {
-                self.ui
-                    .notify(Level::Error, error.message.clone(), Instant::now())
-            }
+            IntentOutcome::Rejected { error } => self.rejected(&error.message, about),
             IntentOutcome::Applied { result } => self.applied(result),
             _ => {}
+        }
+    }
+
+    fn rejected(&mut self, message: &str, about: Option<String>) {
+        let now = Instant::now();
+        match about {
+            Some(text) => self
+                .ui
+                .notify_about(Level::Error, message.to_string(), text, now),
+            None => self.ui.notify(Level::Error, message.to_string(), now),
         }
     }
 
@@ -310,6 +400,10 @@ impl Run {
                 self.apply(effects);
             }
             Term::Paste(text) => input::on_paste(&mut self.ui, &text),
+            // A window nobody is looking at is the one that may interrupt a
+            // person somewhere else on their desktop.
+            Term::FocusGained => self.ui.focused = true,
+            Term::FocusLost => self.ui.focused = false,
             _ => {}
         }
     }
@@ -341,10 +435,12 @@ impl Run {
         let Some(handle) = self.session.writer() else {
             return self.not_yet();
         };
+        let mut said = None;
         if let Input::Text { text, .. } = &input {
             history::append(&self.data_dir, text);
+            said = Some(text.clone());
         }
-        let intent = self.mint();
+        let intent = self.mint(said);
         handle.submit(intent, input);
     }
 
@@ -352,7 +448,7 @@ impl Run {
         let Some(handle) = self.session.writer() else {
             return self.not_yet();
         };
-        let intent = self.mint();
+        let intent = self.mint(None);
         handle.interrupt(intent, InterruptScope::Head);
     }
 
@@ -366,7 +462,7 @@ impl Run {
         let Some(handle) = self.session.root() else {
             return self.not_yet();
         };
-        let intent = self.mint();
+        let intent = self.mint(None);
         handle.answer(intent, interaction, answer, activation);
     }
 
@@ -396,9 +492,11 @@ impl Run {
         });
     }
 
-    fn mint(&mut self) -> IntentId {
+    /// An intent of this client's own, and the line it carried when it had
+    /// one — which is what a refusal of it says it was about.
+    fn mint(&mut self, about: Option<String>) -> IntentId {
         let intent = IntentId::mint();
-        self.mine.insert(intent.clone());
+        self.mine.insert(intent.clone(), about);
         intent
     }
 
@@ -859,10 +957,10 @@ mod tests {
         .expect("the loop ran");
         assert_eq!(
             harness.recorder.frames.len(),
-            5,
-            "one frame for each of the four things that happened at the start \
-             and one for the keystroke — and none at all for the four seconds \
-             of waiting between them"
+            6,
+            "one frame for each of the four things that happened at the start, \
+             one for the keystroke and one on the way out — and none at all \
+             for the four seconds of waiting between them"
         );
     }
 
@@ -959,9 +1057,11 @@ mod tests {
                 SessionHandle(std::sync::Arc::new(TestSession::default())),
             ),
             ui: Ui::new(Vec::new(), Instant::now()),
-            mine: HashSet::new(),
+            mine: HashMap::new(),
             replies: mpsc::channel(1).0,
             clipboard: Some("x".repeat(crate::select::LIMIT)),
+            painted: Instant::now(),
+            behind: false,
             exit: None,
         };
         let mut recorder = Recorder::default();

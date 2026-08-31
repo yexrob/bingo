@@ -144,6 +144,8 @@ impl Plugin for TuiPlugin {
 }
 
 #[cfg(test)]
+mod doubles;
+#[cfg(test)]
 mod painted;
 #[cfg(test)]
 mod screens;

@@ -13,17 +13,18 @@ use std::time::{Duration, Instant};
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::text::Line;
+use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 
+use crate::clock::Anim;
 use crate::theme;
 
 /// A card comes down over this many frames (§6).
 pub const CARD_FRAMES: u16 = 3;
 /// A sheet slides up over this many.
 pub const SHEET_FRAMES: u16 = 4;
-/// How long one frame of an arrival lasts: 30 a second.
-pub const PER_FRAME: Duration = Duration::from_millis(33);
+/// How long one frame of an arrival lasts: the animation clock's own (§6).
+pub const PER_FRAME: Duration = crate::clock::FRAME;
 
 /// How far a layer has come in. `frame` counts from 0 (not yet on screen) to
 /// `of` (all of it).
@@ -37,11 +38,28 @@ pub struct Reveal {
 }
 
 impl Reveal {
+    /// All of it, at once: what a layer looks like where nothing may move.
+    pub fn whole(of: u16) -> Self {
+        Self {
+            frame: of,
+            of,
+            closing: false,
+        }
+    }
+
+    /// None of it: where nothing may move, what closes is closed.
+    pub fn none(of: u16) -> Self {
+        Self {
+            frame: 0,
+            of,
+            closing: true,
+        }
+    }
+
     /// Where an arrival that started at `since` is now. Closing runs the same
     /// frames backwards, which is what `esc` shows.
     pub fn at(of: u16, since: Instant, now: Instant, closing: bool) -> Self {
-        let elapsed = now.saturating_duration_since(since).as_nanos();
-        let step = u16::try_from(elapsed / PER_FRAME.as_nanos()).unwrap_or(u16::MAX);
+        let step = Anim::new(since, PER_FRAME * u32::from(of)).step(now, of);
         let frame = match closing {
             false => step.saturating_add(1).min(of),
             true => of.saturating_sub(step),
@@ -85,8 +103,14 @@ pub fn dim(frame: &mut Frame) {
 }
 
 /// A bordered box at `at`, revealed top-down. Its top edge lands first, so it
-/// grows downwards into the transcript and nothing under it moves.
-pub fn card(frame: &mut Frame, at: Rect, lines: Vec<Line<'static>>, reveal: Reveal) {
+/// grows downwards into the transcript and nothing under it moves. While the
+/// kernel's guard is down its rows are dim — the border is bright, because the
+/// card has arrived; the answers are not yet listening.
+pub fn card(frame: &mut Frame, at: Rect, lines: Vec<Line<'static>>, reveal: Reveal, guarded: bool) {
+    let lines = match guarded {
+        true => lines.into_iter().map(hushed).collect(),
+        false => lines,
+    };
     let full = box_height(&lines, at);
     let shown = reveal.rows(full);
     if shown == 0 {
@@ -128,6 +152,17 @@ pub fn card(frame: &mut Frame, at: Rect, lines: Vec<Line<'static>>, reveal: Reve
             ..inner
         },
     );
+}
+
+/// One row with every colour taken out of it: what a card wears until it can
+/// be answered.
+fn hushed(line: Line<'static>) -> Line<'static> {
+    let spans = line
+        .spans
+        .into_iter()
+        .map(|span| Span::styled(span.content, theme::dim()))
+        .collect::<Vec<_>>();
+    Line::from(spans)
 }
 
 /// What a card taller than its room shows: its title, then its newest rows —

@@ -1452,10 +1452,10 @@ mod tests {
         press(&mut ui, &state(), key(KeyCode::Esc), now);
         assert!(!ui.layer.showing(), "it is on its way out");
         assert!(
-            !ui.layer.reveal(now.instant).gone(),
+            !ui.layer.reveal(now).gone(),
             "and still drawn while it goes"
         );
-        ui.expire(now.instant + crate::layers::PER_FRAME * 4);
+        ui.expire(frames_at(now, 4));
         assert_eq!(ui.layer.open, Open::Nothing);
     }
 

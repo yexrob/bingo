@@ -21,7 +21,7 @@ expression: screen
 "> review the diff                                                               "
 "                                                                                "
 "⏺ Two nits, otherwise fine.                                                     "
-"✻ Working… (esc to interrupt · 0s)                                              "
+"✻ Rummaging… (esc to interrupt · 1s)                                            "
 "╭──────────────────────────────────────────────────────────────────────────────╮"
 "│ > ask anything · / for commands · ! for shell                                │"
 "╰──────────────────────────────────────────────────────────────────────────────╯"

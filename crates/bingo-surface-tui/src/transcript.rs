@@ -4,6 +4,7 @@
 //! remembers a thing, and [`crate::blocks`] stacks and memoises what it draws.
 
 use std::collections::BTreeSet;
+use std::time::{Duration, Instant};
 
 use bingo_sdk::{
     ContentPart, DecisionKind, Item, ItemBody, ItemId, ItemStatus, SessionState, ToolOutput,
@@ -14,8 +15,16 @@ use ratatui::text::{Line, Span};
 use serde_json::Value;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+use crate::clock::{self, Anim, Now};
 use crate::tree::{self, Agents};
 use crate::{markdown, paths, preview, theme, wrap};
+
+/// How long the comet tail of a block still arriving takes to cool (§6).
+pub const COMET: Duration = Duration::from_millis(180);
+/// How many cells of it are still warm.
+const COMET_CELLS: usize = 8;
+/// One pulse of a live tool's bullet (§6).
+const PULSE: Duration = Duration::from_millis(1200);
 
 /// Output rows kept under a finished tool row before the rest folds away.
 const OUTPUT_ROWS: usize = 5;
@@ -33,6 +42,17 @@ pub struct Rows<'a> {
     pub width: usize,
     /// The results a person opened whole with `ctrl+o`.
     pub expanded: &'a BTreeSet<ItemId>,
+    /// The frame being drawn: what every cue below is a function of.
+    pub now: Now,
+}
+
+/// Where one block is in its own motion (§6): the clock [`crate::blocks`]
+/// measured for it, and whether this is the one frame its completion flashes
+/// for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Cue {
+    pub since: Instant,
+    pub flip: bool,
 }
 
 impl Rows<'_> {
@@ -60,12 +80,13 @@ pub fn item_lines(
     previous: Option<&Item>,
     agents: &Agents<'_>,
     rows: &Rows<'_>,
+    cue: Cue,
 ) -> Vec<Line<'static>> {
     match &item.body {
         ItemBody::User { parts, origin } => user(parts, origin.principal.as_deref(), rows),
-        ItemBody::Assistant { text } => assistant(text, rows),
+        ItemBody::Assistant { text } => assistant(text, item.status, rows, cue),
         ItemBody::Reasoning { .. } => thinking(item),
-        ItemBody::ToolCall { .. } => called(item, agents, rows),
+        ItemBody::ToolCall { .. } => called(item, agents, rows, cue),
         ItemBody::Action { name, args, result } => {
             action(item.status, name, args, result.as_ref(), rows)
         }
@@ -103,7 +124,7 @@ pub fn item_lines(
 
 /// A call that started a session is that session's row; every other call is
 /// its own (design §3: a child is a row where it began).
-fn called(item: &Item, agents: &Agents<'_>, rows: &Rows<'_>) -> Vec<Line<'static>> {
+fn called(item: &Item, agents: &Agents<'_>, rows: &Rows<'_>, cue: Cue) -> Vec<Line<'static>> {
     let ItemBody::ToolCall {
         name,
         input,
@@ -126,6 +147,7 @@ fn called(item: &Item, agents: &Agents<'_>, rows: &Rows<'_>) -> Vec<Line<'static
                 expanded: rows.expanded.contains(&item.id),
             },
             rows,
+            cue,
         ),
     }
 }
@@ -227,10 +249,71 @@ fn bar(line: Line<'static>, width: usize) -> Line<'static> {
     line
 }
 
-/// The answer: the brightest text on the screen, after a white `⏺`.
-fn assistant(text: &str, rows: &Rows<'_>) -> Vec<Line<'static>> {
+/// The answer: the brightest text on the screen, after a white `⏺` — and,
+/// while it is still arriving, a comet tail on the cells that just landed.
+fn assistant(text: &str, status: ItemStatus, rows: &Rows<'_>, cue: Cue) -> Vec<Line<'static>> {
     let body = markdown::render(text, rows.measure().saturating_sub(speaks_indent()));
+    let body = match arriving(status, rows, cue) {
+        Some(age) => comet(body, age),
+        None => body,
+    };
     speaks(theme::text().patch(theme::bold()), body, rows)
+}
+
+/// How far a block still arriving is through its tail, and nothing at all
+/// once the tail has cooled or where nothing may move.
+fn arriving(status: ItemStatus, rows: &Rows<'_>, cue: Cue) -> Option<f32> {
+    if status != ItemStatus::Running || !rows.now.motion {
+        return None;
+    }
+    let age = Anim::new(cue.since, COMET).progress(rows.now.instant);
+    (age < 1.0).then_some(age)
+}
+
+/// The comet tail (§6): the cells that just arrived wear `presence`'s glow and
+/// cool to `text` behind them. It is a style pass over the last row — the text
+/// is the reducer's, and nothing here keeps a copy of it to know what is new.
+fn comet(mut body: Vec<Line<'static>>, age: f32) -> Vec<Line<'static>> {
+    let Some(last) = body.pop() else {
+        return body;
+    };
+    body.push(tail_lit(last, age));
+    body
+}
+
+fn tail_lit(line: Line<'static>, age: f32) -> Line<'static> {
+    let total: usize = line.spans.iter().map(|s| s.content.chars().count()).sum();
+    let from = total.saturating_sub(COMET_CELLS);
+    let mut out: Vec<Span<'static>> = Vec::new();
+    let mut seen = 0;
+    for span in line.spans {
+        let count = span.content.chars().count();
+        if seen + count <= from {
+            seen += count;
+            out.push(span);
+            continue;
+        }
+        let keeps = from.saturating_sub(seen);
+        let head: String = span.content.chars().take(keeps).collect();
+        if !head.is_empty() {
+            out.push(Span::styled(head, span.style));
+        }
+        for (i, c) in span.content.chars().enumerate().skip(keeps) {
+            out.push(Span::styled(
+                c.to_string(),
+                cooling(total - (seen + i) - 1, age),
+            ));
+        }
+        seen += count;
+    }
+    Line::from(out)
+}
+
+/// One cell of the tail: the newest is the warmest, and each cell behind it is
+/// that much further along the same ramp.
+fn cooling(back: usize, age: f32) -> Style {
+    let behind = back as f32 / COMET_CELLS as f32;
+    theme::comet((age + behind).min(1.0))
 }
 
 /// `✻ Thinking…` while it lasts, `✻ Thought for 2s` once it is over.
@@ -265,15 +348,32 @@ struct Call<'a> {
     expanded: bool,
 }
 
-fn tool_call(call: Call<'_>, rows: &Rows<'_>) -> Vec<Line<'static>> {
+fn tool_call(call: Call<'_>, rows: &Rows<'_>, cue: Cue) -> Vec<Line<'static>> {
     let failed = call.status == ItemStatus::Failed || call.output.is_some_and(|o| o.is_error);
     let mut out = speaks(
-        bullet_style(call.status, failed),
+        live_bullet(call.status, failed, rows, cue),
         vec![signature(call.name, &summarize(call.input), rows)],
         rows,
     );
     out.extend(result(&call, rows));
     out
+}
+
+/// The bullet says what state the row is in; its motion says how fresh that
+/// state is — it pulses between `presence` and its glow while the tool runs,
+/// and flashes bold for one frame as the answer lands (§6).
+fn live_bullet(status: ItemStatus, failed: bool, rows: &Rows<'_>, cue: Cue) -> Style {
+    let settled = bullet_style(status, failed);
+    if !rows.now.motion {
+        return settled;
+    }
+    if cue.flip {
+        return settled.patch(theme::bold());
+    }
+    match status {
+        ItemStatus::Running => theme::pulse(clock::breath(rows.now, PULSE)),
+        _ => settled,
+    }
 }
 
 /// `Read(Cargo.toml)`: the name bold, what it is about plain.
@@ -521,8 +621,8 @@ fn rule(text: &str, width: usize) -> Line<'static> {
 mod tests {
     use super::*;
     use crate::test_support::{
-        assistant, completed, folded, frame, item, post, receipt_item, running_tool, started,
-        started_tool, tool, ts, user as person,
+        assistant, completed, folded, frame, item, post, receipt_item, running_tool, scene,
+        started, started_tool, tool, ts, user as person,
     };
     use bingo_sdk::Event;
 
@@ -544,7 +644,7 @@ mod tests {
     fn rendered_with(state: &SessionState, expanded: &BTreeSet<ItemId>) -> Vec<String> {
         let welcomed = crate::welcome::lines(state, 60).len();
         let mut blocks = crate::blocks::Blocks::default();
-        let height = blocks.sync(state, &Agents::new(), 60, expanded);
+        let height = blocks.sync(state, &Agents::new(), 60, expanded, scene().1);
         let mut rows: Vec<String> = blocks
             .window(0, height)
             .iter()
@@ -739,7 +839,7 @@ mod tests {
         )]);
         let welcomed = crate::welcome::lines(&state, 160).len();
         let mut blocks = crate::blocks::Blocks::default();
-        let height = blocks.sync(&state, &Agents::new(), 160, &BTreeSet::new());
+        let height = blocks.sync(&state, &Agents::new(), 160, &BTreeSet::new(), scene().1);
         let widest = blocks
             .window(0, height)
             .iter()

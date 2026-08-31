@@ -236,9 +236,9 @@ pub fn presence() -> Style {
     current().fg(Color::Yellow, |p| p.presence)
 }
 
-/// The bright half of a pulse. The table of §4 carries it, and M11c is what
-/// spends it: everything that breathes moves between this and [`presence`].
-#[allow(dead_code, reason = "the pulse that spends it is M11c's")]
+/// The bright half of a pulse: everything that breathes moves between this
+/// and [`presence`]. Views reach it through [`pulse`] and [`comet`] rather
+/// than directly, because what moves is a phase and not a colour.
 pub fn glow() -> Style {
     current().fg(Color::LightYellow, |p| p.glow)
 }
@@ -271,6 +271,115 @@ fn tinted(fg: Style, tint: fn(Palette) -> Color) -> Style {
         Colors::True(palette) => fg.bg(tint(palette)),
         _ => fg,
     }
+}
+
+// ---- what moves (design §6) ---------------------------------------------
+//
+// Every one of these takes a phase — a number between 0 and 1 that
+// [`crate::clock`] derived from the clock — and answers with the token at that
+// point. The colour stays here; the timing stays there; a view names neither.
+
+/// The steps a breath is drawn in. Twenty-four bits can show five; the eight
+/// have only the two ends, and a terminal without colour has neither.
+pub const BREATH_STEPS: u8 = 5;
+
+/// How dim a breath goes: 65 % of `presence` (§6).
+const BREATH_FLOOR: f32 = 0.65;
+
+/// bingo breathing — the activity row's sparkle and the input box's border
+/// while a turn runs. `level` is 0 at the bottom of the breath and 1 at the
+/// top of it.
+pub fn breath(level: f32) -> Style {
+    let level = steps(level, BREATH_STEPS);
+    match current().colors {
+        Colors::Plain => Style::new(),
+        Colors::Ansi => two_ways(level, dim(), presence()),
+        Colors::True(palette) => Style::new().fg(scaled(
+            palette.presence,
+            BREATH_FLOOR + (1.0 - BREATH_FLOOR) * level,
+        )),
+    }
+}
+
+/// A live `⏺` pulsing between `presence` and its glow.
+pub fn pulse(level: f32) -> Style {
+    match current().colors {
+        Colors::Plain => Style::new(),
+        Colors::Ansi => two_ways(level, presence(), glow()),
+        Colors::True(palette) => Style::new().fg(mix(palette.presence, palette.glow, level)),
+    }
+}
+
+/// The comet tail on streaming text: the cell that just arrived wears the
+/// glow, and cools to `text` as it ages.
+pub fn comet(age: f32) -> Style {
+    match current().colors {
+        Colors::Plain => Style::new(),
+        Colors::Ansi => two_ways(age, glow(), text()),
+        Colors::True(palette) => Style::new().fg(mix(palette.glow, palette.text, age)),
+    }
+}
+
+/// A notice arriving and leaving: `dim` at both edges of its life, its own
+/// level's colour while it is there to be read.
+pub fn fading(level: bingo_sdk::Level, t: f32) -> Style {
+    let arrived = self::level(level);
+    match current().colors {
+        Colors::True(palette) => match arrived.fg {
+            Some(colour) => Style::new().fg(mix(palette.dim, colour, t)),
+            None => arrived,
+        },
+        _ => match t >= 1.0 {
+            true => arrived,
+            false => dim(),
+        },
+    }
+}
+
+/// The context notice warming from `dim` towards `bad` as the window fills.
+pub fn warming(t: f32) -> Style {
+    match current().colors {
+        Colors::Plain => Style::new(),
+        Colors::Ansi => two_ways(t, dim(), bad()),
+        Colors::True(palette) => Style::new().fg(mix(palette.dim, palette.bad, t)),
+    }
+}
+
+/// A ramp the eight colours cannot draw collapses to its two ends, and the
+/// halfway mark is where it changes over.
+fn two_ways(level: f32, low: Style, high: Style) -> Style {
+    match level >= 0.5 {
+        true => high,
+        false => low,
+    }
+}
+
+/// A continuous level, snapped to the steps a ramp is drawn in.
+fn steps(level: f32, steps: u8) -> f32 {
+    let last = f32::from(steps.saturating_sub(1)).max(1.0);
+    (level.clamp(0.0, 1.0) * last).round() / last
+}
+
+/// `t` of the way from one colour to another. Anything but 24 bits has no
+/// room between two colours, so the far end is the answer.
+fn mix(from: Color, to: Color, t: f32) -> Color {
+    let (Color::Rgb(r1, g1, b1), Color::Rgb(r2, g2, b2)) = (from, to) else {
+        return to;
+    };
+    let t = t.clamp(0.0, 1.0);
+    let at = |a: u8, b: u8| (f32::from(a) + (f32::from(b) - f32::from(a)) * t).round() as u8;
+    Color::Rgb(at(r1, r2), at(g1, g2), at(b1, b2))
+}
+
+/// A colour at a share of its own brightness — how a breath dims without
+/// leaving the hue it belongs to.
+fn scaled(colour: Color, share: f32) -> Color {
+    let Color::Rgb(r, g, b) = colour else {
+        return colour;
+    };
+    let share = share.clamp(0.0, 1.0);
+    let at = |c: u8| (f32::from(c) * share).round() as u8;
+    Color::Rgb(at(r), at(g), at(b))
 }
 
 pub fn bold() -> Style {
@@ -405,6 +514,7 @@ mod tests {
             if path.extension().is_none_or(|e| e != "rs")
                 || name == "theme.rs"
                 || name == "test_support.rs"
+                || name == "doubles.rs"
                 || name == "screens.rs"
                 || name == "painted.rs"
             {
@@ -449,6 +559,8 @@ mod tests {
                     "panel.rs",
                     "preview.rs",
                     "search.rs",
+                    // the quiet half of what pulses for a person
+                    "status.rs",
                     "transcript.rs",
                     "tree.rs",
                     "view.rs",
@@ -495,19 +607,30 @@ mod tests {
                     "welcome.rs",
                 ],
             ),
-            // M11c's pulse
+            // the bright half of a pulse: views reach it through the ramps
             ("glow", &[]),
             // a finished bullet
             ("good", &["transcript.rs", "tree.rs"]),
-            // a failed bullet, a failed turn, the gate turned off, a full window
-            ("bad", &["status.rs", "transcript.rs"]),
+            // a failed bullet, a failed turn, the gate turned off
+            ("bad", &["transcript.rs"]),
             // the mode on the status line; links reach it through `link`
             ("mode", &["status.rs"]),
+            // ---- what moves (§6), each a ramp between two of the above ----
+            // the sparkle on the activity row and the input box's border
+            ("breath", &["view.rs"]),
+            // a live tool's bullet
+            ("pulse", &["transcript.rs"]),
+            // the newest cells of streaming text
+            ("comet", &["transcript.rs"]),
+            // a notice arriving at the status line and leaving it
+            ("fading", &["status.rs"]),
+            // the context notice as the window fills
+            ("warming", &["status.rs"]),
         ];
         for (token, files) in allowed {
             let mut seen: Vec<String> = sources()
                 .into_iter()
-                .filter(|(_, code)| code.contains(&format!("theme::{token}()")))
+                .filter(|(_, code)| code.contains(&format!("theme::{token}(")))
                 .map(|(name, _)| name)
                 .collect();
             seen.sort();
@@ -570,6 +693,85 @@ mod tests {
         assert_eq!(at(SPARKLE_MS as u64), "✢");
         assert_eq!(at(SPARKLE_MS as u64 * 3), "✽");
         assert_eq!(at(SPARKLE_MS as u64 * 4), "✻", "it comes back round");
+    }
+
+    fn dark() -> Theme {
+        Theme {
+            colors: Colors::True(DARK),
+            glyphs: &UNICODE,
+        }
+    }
+
+    #[test]
+    fn a_breath_is_five_steps_of_presence_on_twenty_four_bits() {
+        with(dark(), || {
+            let sampled: Vec<Style> = (0..=4).map(|i| breath(i as f32 / 4.0)).collect();
+            let mut distinct = sampled.clone();
+            distinct.dedup();
+            assert_eq!(distinct.len(), 5, "five steps, all different");
+            assert_eq!(sampled[4], presence(), "the top of it is presence itself");
+            assert_eq!(
+                sampled[0],
+                Style::new().fg(scaled(DARK.presence, 0.65)),
+                "and the bottom is 65 % of it"
+            );
+            assert_eq!(breath(0.1), sampled[0], "a level between steps snaps");
+        });
+    }
+
+    #[test]
+    fn a_ramp_the_eight_colours_cannot_draw_takes_its_two_ends() {
+        assert_eq!(breath(0.0), dim());
+        assert_eq!(breath(1.0), presence());
+        assert_eq!(pulse(0.0), presence());
+        assert_eq!(pulse(1.0), glow());
+        assert_eq!(comet(0.0), glow());
+        assert_eq!(comet(1.0), text());
+        assert_eq!(warming(0.0), dim());
+        assert_eq!(warming(1.0), bad());
+    }
+
+    #[test]
+    fn a_ramp_on_twenty_four_bits_passes_between_its_ends() {
+        with(dark(), || {
+            assert_eq!(pulse(0.0).fg, Some(DARK.presence));
+            assert_eq!(pulse(1.0).fg, Some(DARK.glow));
+            let middle = pulse(0.5).fg.expect("a colour between the two");
+            assert_ne!(middle, DARK.presence);
+            assert_ne!(middle, DARK.glow);
+            assert_eq!(comet(0.0).fg, Some(DARK.glow));
+            assert_eq!(comet(1.0).fg, Some(DARK.text));
+            assert_eq!(warming(0.0).fg, Some(DARK.dim));
+            assert_eq!(warming(1.0).fg, Some(DARK.bad));
+        });
+    }
+
+    #[test]
+    fn a_notice_arrives_out_of_dim_and_leaves_into_it() {
+        let level = bingo_sdk::Level::Error;
+        assert_eq!(fading(level, 0.0), dim());
+        assert_eq!(fading(level, 1.0), bad());
+        with(dark(), || {
+            assert_eq!(fading(level, 0.0).fg, Some(DARK.dim));
+            assert_eq!(fading(level, 1.0).fg, Some(DARK.bad));
+        });
+    }
+
+    #[test]
+    fn nothing_that_moves_spends_a_colour_under_no_colour() {
+        with(no_colour(), || {
+            for style in [breath(1.0), pulse(1.0), comet(0.0), warming(1.0)] {
+                assert_eq!(style, Style::new());
+            }
+            assert_eq!(fading(bingo_sdk::Level::Error, 1.0), Style::new());
+        });
+    }
+
+    fn no_colour() -> Theme {
+        Theme {
+            colors: Colors::Plain,
+            glyphs: &UNICODE,
+        }
     }
 
     #[test]
