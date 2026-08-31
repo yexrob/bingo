@@ -25,13 +25,15 @@ pub mod effort;
 pub mod error;
 pub mod events;
 pub mod input;
+pub mod instances;
+pub mod key;
 pub mod models;
 pub mod request;
+pub mod settings;
 pub mod sse;
 pub mod stream;
 pub mod variant;
 
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -43,13 +45,14 @@ use bingo_sdk::{
     ProviderError, Registrar,
 };
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
-use schemars::JsonSchema;
-use serde::Deserialize;
 use serde_json::Value;
 
 use crate::credential::Credential;
+use crate::key::ApiKey;
 use crate::stream::IDLE_TIMEOUT;
 use crate::variant::{ORIGINATOR, Variant};
+
+pub use crate::settings::{CodexConfig, CodexEndpoint, OpenAiConfig, OpenAiEndpoint, Settings};
 
 /// The endpoint every OpenAI API key shares.
 pub const DEFAULT_BASE_URL: &str = "https://api.openai.com";
@@ -72,104 +75,81 @@ const CODEX_MODELS_PATH: &str = "/codex/models?client_version=0.146.0";
 /// A model menu waits for nobody: past this the static list is the answer.
 const CODEX_MODELS_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// The `openai` settings key.
-#[derive(Clone, Debug, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase", default)]
-pub struct OpenAiConfig {
-    pub api_key: Option<String>,
-    pub base_url: Option<String>,
-    /// Whether image parts reach the model. `false` for a proxy that strips
-    /// them: what the *model* can see is the kernel catalogue's to say
-    /// (ADR-0004), this is only what the endpoint forwards.
-    pub images: bool,
-}
-
-impl Default for OpenAiConfig {
-    fn default() -> Self {
-        Self {
-            api_key: None,
-            base_url: None,
-            images: true,
-        }
-    }
-}
-
-/// The `codex` settings key. No key and no token: a subscription credential
-/// only ever comes from a login, and both fields exist for a proxy or a test.
-#[derive(Clone, Debug, Default, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase", default)]
-pub struct CodexConfig {
-    pub base_url: Option<String>,
-    pub issuer: Option<String>,
-}
-
-/// The slice the host hands `register`: the claimed keys and nothing else.
-#[derive(Clone, Debug, Default, Deserialize, JsonSchema)]
-#[serde(default)]
-pub struct Settings {
-    pub openai: OpenAiConfig,
-    pub codex: CodexConfig,
-}
-
-/// One endpoint, one credential. Cheap to clone through the `Arc` the
-/// registry holds.
+/// One endpoint, one credential, one name. Cheap to clone through the `Arc`
+/// the registry holds.
 #[derive(Debug)]
 pub struct OpenAiProvider {
     http: reqwest::Client,
+    /// What `--provider`, `/model <id>/<model>` and `auth.json` call this
+    /// endpoint: `openai`, `codex`, or an instance's own name (ADR-0017 §2).
+    id: String,
     credential: Credential,
     base_url: String,
     variant: Variant,
     images: bool,
-    /// Where a person puts a key, named in the auth status.
-    settings_file: Option<PathBuf>,
 }
 
 impl OpenAiProvider {
-    /// The settings slice, resolved against the environment.
-    pub fn new(config: OpenAiConfig, settings_file: PathBuf) -> Self {
-        let mut provider = Self::with_endpoint(
-            resolve(API_KEY_ENV, config.api_key),
-            resolve(BASE_URL_ENV, config.base_url).unwrap_or_else(|| DEFAULT_BASE_URL.to_string()),
-        );
-        provider.images = config.images;
-        provider.settings_file = Some(settings_file);
+    /// One key-based endpoint under its own name.
+    pub fn keyed(
+        id: impl Into<String>,
+        key: ApiKey,
+        base_url: impl Into<String>,
+        images: bool,
+    ) -> Self {
+        let mut provider = Self::with_credential(id, Credential::Key(key), base_url);
+        provider.images = images;
         provider
     }
 
-    /// The ChatGPT subscription (ADR-0012 §6). The store is the host's, shared
-    /// with every other provider that keeps a credential in it.
-    pub fn codex(config: CodexConfig, store: Arc<CredentialStore>) -> Self {
+    /// One ChatGPT subscription (ADR-0012 §6), keyed in the store by its own
+    /// name so two of them sign in side by side (ADR-0017 §3). The store is
+    /// the host's, shared with every other provider that keeps a credential.
+    pub fn subscription(
+        id: impl Into<String>,
+        endpoint: CodexEndpoint,
+        store: Arc<CredentialStore>,
+    ) -> Self {
+        let id = id.into();
         let source = TokenSource::new(
-            Variant::Codex.provider_id(),
-            codex_issuer(config.issuer),
+            &id,
+            codex_issuer(endpoint.issuer),
             store,
             reqwest::Client::new(),
         );
-        let base_url = config
+        let base_url = endpoint
             .base_url
             .unwrap_or_else(|| CODEX_BASE_URL.to_string());
-        Self::with_tokens(Arc::new(source), base_url).with_variant(Variant::Codex)
+        Self::with_credential(id, Credential::Tokens(Arc::new(source)), base_url)
+            .with_variant(Variant::Codex)
     }
 
-    /// An endpoint as given, with no environment lookup — what a test or an
-    /// embedder uses when the credentials are already resolved.
+    /// An endpoint as given, with no store and no environment lookup — what a
+    /// test or an embedder uses when the credentials are already resolved.
     pub fn with_endpoint(api_key: Option<String>, base_url: impl Into<String>) -> Self {
-        Self::with_credential(Credential::Key(api_key), base_url)
+        let id = Variant::Default.provider_id();
+        let key = ApiKey::detached(id, instances::default_places(None), api_key);
+        Self::with_credential(id, Credential::Key(key), base_url)
     }
 
     /// The same, over a credential that renews itself.
     pub fn with_tokens(source: Arc<TokenSource>, base_url: impl Into<String>) -> Self {
-        Self::with_credential(Credential::Tokens(source), base_url)
+        let id = source.provider().to_string();
+        Self::with_credential(id, Credential::Tokens(source), base_url)
     }
 
-    fn with_credential(credential: Credential, base_url: impl Into<String>) -> Self {
+    fn with_credential(
+        id: impl Into<String>,
+        credential: Credential,
+        base_url: impl Into<String>,
+    ) -> Self {
         Self {
             http: reqwest::Client::new(),
+            id: id.into(),
             credential,
             base_url: base_url.into().trim_end_matches('/').to_string(),
             variant: Variant::Default,
             images: true,
-            settings_file: None,
         }
     }
 
@@ -184,16 +164,6 @@ impl OpenAiProvider {
 
     pub fn variant(&self) -> Variant {
         self.variant
-    }
-
-    fn missing_key_hint(&self) -> String {
-        match &self.settings_file {
-            Some(file) => format!(
-                "Set {API_KEY_ENV}, or add \"openai\": {{\"apiKey\": \"...\"}} to {}.",
-                file.display()
-            ),
-            None => format!("Set {API_KEY_ENV}, or configure openai.apiKey in settings."),
-        }
     }
 
     /// Missing here rather than at the first request: `auth()` reads the same
@@ -327,21 +297,33 @@ impl OpenAiProvider {
         Ok(models::codex(&body))
     }
 
-    /// Signing in is a subscription's business; a key is set, not negotiated.
-    fn subscription(&self, action: &str) -> Result<&Arc<TokenSource>, ProviderError> {
-        match &self.credential {
-            Credential::Tokens(source) => Ok(source),
-            Credential::Key(_) => Err(ProviderError::Unsupported {
-                message: format!("{action}: the {} provider takes an API key", self.id()),
-            }),
-        }
+    /// A subscription signs in against its issuer; a key is pasted (ADR-0017
+    /// §4), and `ApiKey` owns that half.
+    async fn sign_in(
+        &self,
+        source: &Arc<TokenSource>,
+        prompter: Arc<dyn Prompter>,
+        method: Option<LoginMethod>,
+    ) -> Result<String, ProviderError> {
+        // A browser the flow cannot open is a flow a person cannot finish, so
+        // the opt-out the library reads is read here too.
+        let open_browser = std::env::var_os(bingo_auth_oauth::browser::NO_BROWSER_ENV).is_none();
+        let tokens = source
+            .login(
+                prompter,
+                method.unwrap_or(LoginMethod::Browser),
+                open_browser,
+            )
+            .await
+            .map_err(|error| credential::failure(self.id(), error))?;
+        Ok(receipt(self.id(), tokens.email().or(tokens.account_id)))
     }
 }
 
 #[async_trait]
 impl Provider for OpenAiProvider {
     fn id(&self) -> &str {
-        self.variant.provider_id()
+        &self.id
     }
 
     /// Responses caches prefixes on its own and cannot count tokens ahead of
@@ -377,7 +359,7 @@ impl Provider for OpenAiProvider {
     }
 
     fn auth(&self) -> AuthStatus {
-        self.credential.status(|| self.missing_key_hint())
+        self.credential.status()
     }
 
     async fn login(
@@ -385,27 +367,23 @@ impl Provider for OpenAiProvider {
         prompter: Arc<dyn Prompter>,
         method: Option<LoginMethod>,
     ) -> Result<String, ProviderError> {
-        let source = self.subscription("login")?;
-        // A browser the flow cannot open is a flow a person cannot finish, so
-        // the opt-out the library reads is read here too.
-        let open_browser = std::env::var_os(bingo_auth_oauth::browser::NO_BROWSER_ENV).is_none();
-        let tokens = source
-            .login(
-                prompter,
-                method.unwrap_or(LoginMethod::Browser),
-                open_browser,
-            )
-            .await
-            .map_err(|error| credential::failure(self.id(), error))?;
-        Ok(receipt(self.id(), tokens.email().or(tokens.account_id)))
+        match &self.credential {
+            Credential::Key(key) => key.login(prompter, method).await,
+            Credential::Tokens(source) => self.sign_in(source, prompter, method).await,
+        }
     }
 
     async fn logout(&self) -> Result<String, ProviderError> {
-        self.subscription("logout")?
-            .logout()
-            .await
-            .map_err(|error| credential::failure(self.id(), error))?;
-        Ok(format!("Signed out of {}.", self.id()))
+        match &self.credential {
+            Credential::Key(key) => key.forget(),
+            Credential::Tokens(source) => {
+                source
+                    .logout()
+                    .await
+                    .map_err(|error| credential::failure(self.id(), error))?;
+                Ok(format!("Signed out of {}.", self.id()))
+            }
+        }
     }
 }
 
@@ -460,18 +438,6 @@ fn codex_issuer(base: Option<String>) -> Issuer {
     }
 }
 
-/// The environment wins over settings, so one shell can point a run at a
-/// different key or endpoint without editing a file. A blank value counts as
-/// unset in either place, so an exported empty variable does not shadow a
-/// configured one.
-fn resolve(variable: &str, from_settings: Option<String>) -> Option<String> {
-    [std::env::var(variable).ok(), from_settings]
-        .into_iter()
-        .flatten()
-        .map(|value| value.trim().to_string())
-        .find(|value| !value.is_empty())
-}
-
 fn header(response: &reqwest::Response, name: &str) -> Option<String> {
     response
         .headers()
@@ -492,14 +458,15 @@ static MANIFEST: PluginManifest = PluginManifest {
     requires: &[],
     config: Some(ConfigClaim {
         // One endpoint at a time: a project that names its own key and base
-        // url replaces the user's trio rather than half-overriding it.
+        // url replaces the user's trio rather than half-overriding it — its
+        // instances with it (ADR-0017).
         keys: &[("openai", Merge::Replace), ("codex", Merge::Replace)],
         schema: settings_schema,
     }),
 };
 
-/// Registers the two providers this one wire format serves: `openai` from the
-/// `openai` settings key, `codex` from the credential store.
+/// Registers what the two settings keys name: `openai` and `codex`, and one
+/// provider for every instance under either (ADR-0017 §2).
 #[derive(Debug, Default, Clone, Copy)]
 pub struct OpenAiPlugin;
 
@@ -511,12 +478,9 @@ impl Plugin for OpenAiPlugin {
 
     fn register(&self, registrar: &mut Registrar) -> Result<(), PluginError> {
         let settings: Settings = registrar.config()?;
-        let settings_file = registrar.env().config_dir.join("settings.json");
-        let store = Arc::new(CredentialStore::new(registrar.env().data_dir.clone()));
-        let openai = OpenAiProvider::new(settings.openai, settings_file);
-        let codex = OpenAiProvider::codex(settings.codex, store);
-        registrar.provider(Arc::new(openai) as Arc<dyn Provider>);
-        registrar.provider(Arc::new(codex) as Arc<dyn Provider>);
+        for provider in instances::providers(settings, registrar.env())? {
+            registrar.provider(provider);
+        }
         Ok(())
     }
 }
@@ -558,8 +522,9 @@ pub(crate) mod tests {
         if let Some(entry) = entry {
             store.write("codex", entry).expect("a write");
         }
-        OpenAiProvider::codex(
-            CodexConfig {
+        OpenAiProvider::subscription(
+            "codex",
+            CodexEndpoint {
                 base_url: None,
                 issuer,
             },
@@ -586,32 +551,121 @@ pub(crate) mod tests {
             .map(str::to_string)
     }
 
-    fn registered(directory: &tempfile::TempDir) -> Vec<Contribution> {
+    fn registered(directory: &tempfile::TempDir, settings: Value) -> Vec<Contribution> {
         let mut registrar = Registrar::new(
             "bingo.provider.openai",
-            json!({}),
+            settings,
             bingo_sdk::Env::rooted(directory.path()),
         );
         OpenAiPlugin.register(&mut registrar).expect("register");
         registrar.into_contributions()
     }
 
-    fn ids(contributions: &[Contribution]) -> Vec<String> {
-        contributions
-            .iter()
+    fn providers(directory: &tempfile::TempDir, settings: Value) -> Vec<Arc<dyn Provider>> {
+        registered(directory, settings)
+            .into_iter()
             .map(|contribution| match contribution {
-                Contribution::Provider(provider) => provider.id().to_string(),
+                Contribution::Provider(provider) => provider,
                 other => panic!("expected a provider, got {other:?}"),
             })
             .collect()
     }
 
+    fn ids(providers: &[Arc<dyn Provider>]) -> Vec<String> {
+        providers.iter().map(|p| p.id().to_string()).collect()
+    }
+
+    /// The two the manifest claims, then one per instance under either key
+    /// (ADR-0017 §2).
     #[test]
-    fn one_plugin_registers_both_providers_it_claims() {
+    fn one_plugin_registers_a_provider_per_endpoint_the_settings_name() {
         let directory = tempfile::tempdir().expect("a temporary directory");
-        assert_eq!(ids(&registered(&directory)), ["openai", "codex"]);
+        assert_eq!(ids(&providers(&directory, json!({}))), ["openai", "codex"]);
+        assert_eq!(
+            ids(&providers(
+                &directory,
+                json!({
+                    "openai": { "instances": { "proxy2": {}, "proxy1": {} } },
+                    "codex": { "instances": { "work": {} } },
+                })
+            )),
+            ["openai", "codex", "proxy1", "proxy2", "work"],
+            "the defaults first, then the instances in the order a person reads"
+        );
         assert_eq!(MANIFEST.provides, &["provider:openai", "provider:codex"]);
         assert_eq!(MANIFEST.id, "bingo.provider.openai");
+    }
+
+    #[test]
+    fn an_instance_that_takes_a_registered_name_is_refused_at_boot() {
+        let directory = tempfile::tempdir().expect("a temporary directory");
+        let refused = |settings: Value| {
+            let mut registrar = Registrar::new(
+                "bingo.provider.openai",
+                settings,
+                bingo_sdk::Env::rooted(directory.path()),
+            );
+            OpenAiPlugin
+                .register(&mut registrar)
+                .expect_err("a refusal")
+                .to_string()
+        };
+        assert!(
+            refused(json!({ "openai": { "instances": { "codex": {} } } })).contains("`codex`"),
+            "a built-in id is not an instance's to take"
+        );
+        assert!(
+            refused(json!({
+                "openai": { "instances": { "work": {} } },
+                "codex": { "instances": { "work": {} } },
+            }))
+            .contains("`work`"),
+            "the two keys share one namespace"
+        );
+    }
+
+    /// Each instance's credential is its own: the store entry under its name,
+    /// else its own `apiKey`. Nothing ambient reaches a named one.
+    #[test]
+    fn an_instance_reads_its_own_key_and_its_own_endpoint() {
+        let directory = tempfile::tempdir().expect("a temporary directory");
+        let store = CredentialStore::new(directory.path().join(".bingo/data"));
+        store
+            .write(
+                "proxy2",
+                Entry::Api {
+                    key: "sk-pasted".into(),
+                },
+            )
+            .expect("a write");
+        let providers = providers(
+            &directory,
+            json!({ "openai": { "instances": {
+                "proxy1": { "apiKey": "sk-one", "baseUrl": "http://127.0.0.1:8080/", "images": false },
+                "proxy2": {},
+                "proxy3": {},
+            }}}),
+        );
+        let by_id = |id: &str| {
+            providers
+                .iter()
+                .find(|p| p.id() == id)
+                .unwrap_or_else(|| panic!("no {id}"))
+                .clone()
+        };
+        assert_eq!(by_id("proxy1").auth(), AuthStatus::Ready);
+        assert!(!by_id("proxy1").endpoint("gpt-5.4").images);
+        assert_eq!(
+            by_id("proxy2").auth(),
+            AuthStatus::Ready,
+            "the store entry under the instance's own name is its key"
+        );
+        assert!(
+            matches!(by_id("proxy3").auth(), AuthStatus::Missing { hint }
+                if hint.contains("/login proxy3") && !hint.contains(API_KEY_ENV)),
+            "an instance names its own sign-in and no variable: {:?}",
+            by_id("proxy3").auth()
+        );
     }
 
     #[test]
@@ -630,22 +684,16 @@ pub(crate) mod tests {
 
     #[test]
     fn a_claimed_api_key_reaches_the_provider() {
-        let mut registrar = Registrar::new(
-            "bingo.provider.openai",
-            json!({ "openai": { "apiKey": "sk-from-settings" } }),
-            bingo_sdk::Env::rooted("/tmp"),
-        );
-        OpenAiPlugin.register(&mut registrar).expect("register");
-        match &registrar.into_contributions()[0] {
-            Contribution::Provider(provider) => assert_eq!(provider.auth(), AuthStatus::Ready),
-            other => panic!("expected a provider, got {other:?}"),
-        }
+        let directory = tempfile::tempdir().expect("a temporary directory");
+        let providers = providers(&directory, json!({ "openai": { "apiKey": "sk-settings" } }));
+        assert_eq!(providers[0].auth(), AuthStatus::Ready);
     }
 
     #[test]
     fn the_codex_settings_key_moves_both_endpoints_for_a_proxy() {
-        let provider = OpenAiProvider::codex(
-            CodexConfig {
+        let provider = OpenAiProvider::subscription(
+            "codex",
+            CodexEndpoint {
                 base_url: Some("http://127.0.0.1:8080/".into()),
                 issuer: Some("http://127.0.0.1:9090".into()),
             },
@@ -659,8 +707,9 @@ pub(crate) mod tests {
             "the default issuer is codex's own"
         );
         assert_eq!(
-            OpenAiProvider::codex(
-                CodexConfig::default(),
+            OpenAiProvider::subscription(
+                "codex",
+                CodexEndpoint::default(),
                 Arc::new(CredentialStore::new(PathBuf::from("/tmp")))
             )
             .base_url(),
@@ -670,16 +719,11 @@ pub(crate) mod tests {
 
     #[test]
     fn images_default_to_forwarded_and_a_proxy_can_turn_them_off() {
+        let directory = tempfile::tempdir().expect("a temporary directory");
         assert!(hermetic(None).endpoint("gpt-5.4").images);
-        let stripped = OpenAiProvider::new(
-            OpenAiConfig {
-                images: false,
-                ..OpenAiConfig::default()
-            },
-            PathBuf::from("/tmp/settings.json"),
-        );
+        let stripped = providers(&directory, json!({ "openai": { "images": false } }));
         assert_eq!(
-            stripped.endpoint("gpt-5.4"),
+            stripped[0].endpoint("gpt-5.4"),
             EndpointCapabilities {
                 images: false,
                 count_tokens: false,
@@ -688,38 +732,40 @@ pub(crate) mod tests {
         );
     }
 
-    /// `std::env::set_var` is unsafe in Rust 2024 and this workspace forbids
-    /// `unsafe`, so the environment half of the precedence rule is exercised
-    /// through the resolver the provider is built from.
     #[test]
     fn no_key_anywhere_leaves_authentication_missing() {
         assert!(matches!(hermetic(None).auth(), AuthStatus::Missing { .. }));
         assert_eq!(hermetic(Some("sk-test")).auth(), AuthStatus::Ready);
-        assert_eq!(resolve("BINGO_NO_SUCH_VARIABLE", None), None);
-        assert_eq!(resolve("BINGO_NO_SUCH_VARIABLE", Some("  ".into())), None);
-        assert_eq!(
-            resolve("BINGO_NO_SUCH_VARIABLE", Some(" from-settings ".into())),
-            Some("from-settings".into())
-        );
     }
 
+    /// The default instance is the one the variable feeds, and the hint says
+    /// so beside the two places a person may write instead.
     #[test]
-    fn the_missing_key_hint_names_the_variable_and_the_settings_file() {
-        let provider = OpenAiProvider::new(
-            OpenAiConfig::default(),
-            PathBuf::from("/home/me/.config/bingo/settings.json"),
-        );
-        assert_eq!(
-            provider.missing_key_hint(),
-            "Set OPENAI_API_KEY, or add \"openai\": {\"apiKey\": \"...\"} to \
-             /home/me/.config/bingo/settings.json."
-        );
+    fn the_missing_key_hint_names_the_login_the_variable_and_the_settings_file() {
+        let directory = tempfile::tempdir().expect("a temporary directory");
+        let file = directory.path().join(".bingo/settings.json");
+        // A machine that exports the variable has a key, and a provider with
+        // a key has no hint to read.
+        if std::env::var(API_KEY_ENV).is_err() {
+            assert_eq!(
+                providers(&directory, json!({}))[0].auth(),
+                AuthStatus::Missing {
+                    hint: format!(
+                        "No openai key: run `/login openai` to paste a key, set OPENAI_API_KEY, \
+                         or set openai.apiKey in {}.",
+                        file.display()
+                    )
+                }
+            );
+        }
         assert_eq!(
             hermetic(None).auth(),
             AuthStatus::Missing {
-                hint: "Set OPENAI_API_KEY, or configure openai.apiKey in settings.".into()
+                hint: "No openai key: run `/login openai` to paste a key, set OPENAI_API_KEY, \
+                       or configure openai.apiKey in settings."
+                    .into()
             },
-            "with no settings file the hint still names both places"
+            "with no settings file the hint still names every place"
         );
     }
 
@@ -800,11 +846,7 @@ pub(crate) mod tests {
 
     #[test]
     fn the_base_url_defaults_and_a_setting_overrides_it_without_a_trailing_slash() {
-        if std::env::var(BASE_URL_ENV).is_err() {
-            let default =
-                OpenAiProvider::new(OpenAiConfig::default(), PathBuf::from("/tmp/settings.json"));
-            assert_eq!(default.base_url(), DEFAULT_BASE_URL);
-        }
+        assert_eq!(hermetic(None).base_url(), DEFAULT_BASE_URL);
         let custom = OpenAiProvider::with_endpoint(None, "http://127.0.0.1:8080/");
         assert_eq!(custom.base_url(), "http://127.0.0.1:8080");
     }
@@ -852,23 +894,70 @@ pub(crate) mod tests {
         assert_eq!(header_of(&provider, "chatgpt-account-id").await, None);
     }
 
+    /// A key provider signs in by paste and nothing else (ADR-0017 §4); with
+    /// no store behind it there is nowhere to put one either way.
     #[tokio::test]
-    async fn signing_in_and_out_of_an_api_key_provider_is_unsupported() {
+    async fn a_key_provider_signs_in_by_paste_alone() {
         let provider = hermetic(Some("sk-test"));
         let prompter: Arc<dyn Prompter> = Arc::new(NoPrompter);
-        let login = provider
-            .login(prompter, None)
-            .await
-            .expect_err("unsupported");
-        assert!(
-            matches!(login, ProviderError::Unsupported { .. }),
-            "{login:?}"
-        );
-        assert_eq!(login.code(), bingo_sdk::ErrorCode::InvalidInput);
+        for method in [Some(LoginMethod::Browser), Some(LoginMethod::Device)] {
+            let refused = provider
+                .login(prompter.clone(), method)
+                .await
+                .expect_err("unsupported");
+            assert!(
+                matches!(&refused, ProviderError::Unsupported { message }
+                    if message.contains("/login openai paste")),
+                "{refused:?}"
+            );
+            assert_eq!(refused.code(), bingo_sdk::ErrorCode::InvalidInput);
+        }
+        assert!(matches!(
+            provider.login(prompter, None).await,
+            Err(ProviderError::Unsupported { .. }),
+        ));
         assert!(matches!(
             provider.logout().await,
             Err(ProviderError::Unsupported { .. })
         ));
+    }
+
+    /// The same provider a person runs: `/login openai` pastes a key into
+    /// `auth.json`, the endpoint sends it, and `/logout openai` takes it out.
+    #[tokio::test]
+    async fn the_default_key_provider_takes_a_pasted_key() {
+        let directory = tempfile::tempdir().expect("a temporary directory");
+        let store = Arc::new(CredentialStore::new(directory.path().to_path_buf()));
+        let key = ApiKey::new(
+            "openai",
+            instances::default_places(None),
+            store.clone(),
+            None,
+        );
+        let provider = OpenAiProvider::keyed("openai", key, DEFAULT_BASE_URL, true);
+        assert_eq!(
+            provider
+                .login(Arc::new(Pasting), Some(LoginMethod::Paste))
+                .await
+                .expect("a paste"),
+            "Signed in to openai with a pasted key."
+        );
+        assert_eq!(
+            header_of(&provider, "authorization").await.as_deref(),
+            Some("Bearer sk-pasted")
+        );
+        assert_eq!(
+            store.read("openai").expect("a read"),
+            Some(Entry::Api {
+                key: "sk-pasted".into()
+            })
+        );
+        assert_eq!(
+            provider.logout().await.expect("a logout"),
+            "Signed out of openai."
+        );
+        assert_eq!(store.read("openai").expect("a read"), None);
+        assert!(matches!(provider.auth(), AuthStatus::Missing { .. }));
     }
 
     #[test]
@@ -889,7 +978,23 @@ pub(crate) mod tests {
             _kind: bingo_sdk::InteractionKind,
             _answers: Vec<bingo_sdk::AnswerSpec>,
         ) -> Result<bingo_sdk::Answer, bingo_sdk::KernelError> {
-            panic!("an api-key provider never asks")
+            panic!("a provider with no store never asks")
+        }
+    }
+
+    /// A person at the paste dialog.
+    struct Pasting;
+
+    #[async_trait]
+    impl Prompter for Pasting {
+        async fn ask(
+            &self,
+            _kind: bingo_sdk::InteractionKind,
+            _answers: Vec<bingo_sdk::AnswerSpec>,
+        ) -> Result<bingo_sdk::Answer, bingo_sdk::KernelError> {
+            Ok(bingo_sdk::Answer::Text {
+                text: "sk-pasted".into(),
+            })
         }
     }
 

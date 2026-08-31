@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use bingo_auth_oauth::tokens::unix_now;
 use bingo_auth_oauth::{CredentialStore, Entry};
-use bingo_provider_openai::{CodexConfig, OpenAiProvider};
+use bingo_provider_openai::{CodexEndpoint, OpenAiProvider};
 use bingo_sdk::{
     AuthStatus, CancellationToken, Message, ModelEvent, ModelRequest, Provider, ProviderError, Role,
 };
@@ -57,8 +57,9 @@ fn signed_in(server: &MockServer, directory: &TempDir, access: &str) -> OpenAiPr
             },
         )
         .expect("a write");
-    OpenAiProvider::codex(
-        CodexConfig {
+    OpenAiProvider::subscription(
+        "codex",
+        CodexEndpoint {
             base_url: Some(server.uri()),
             issuer: Some(server.uri()),
         },
@@ -202,8 +203,9 @@ async fn a_catalogue_that_will_not_answer_leaves_the_static_list() {
 async fn a_signed_out_subscription_names_the_command_before_any_request() {
     let server = MockServer::start().await;
     let directory = tempfile::tempdir().expect("a temporary directory");
-    let provider = OpenAiProvider::codex(
-        CodexConfig {
+    let provider = OpenAiProvider::subscription(
+        "codex",
+        CodexEndpoint {
             base_url: Some(server.uri()),
             issuer: Some(server.uri()),
         },
