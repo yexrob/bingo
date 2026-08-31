@@ -4,9 +4,9 @@
 //! of its promises do not hold in a child: that the prose of a turn is read by
 //! whoever asked, and that a question can be put to the person. Say so, rather
 //! than letting the model plan against a surface it does not have. Everything
-//! here is a fact about this product — the ways back are the parent and the
-//! rooms this agent is in, and permission prompts are the one interaction that
-//! still reaches a person.
+//! here is a fact about this product — the ways out are the parent, the
+//! teammates beside this agent and the rooms it is in, and permission prompts
+//! are the one interaction that still reaches a person.
 
 /// Prepended to every child's system prompt, before the definition's body.
 pub const NOTE: &str = "\
@@ -20,10 +20,14 @@ pub const NOTE: &str = "\
   *between* turns: you are blocked on a decision, or you found something that
   changes what it is doing. It is not for progress, receipts, or anything
   already in your reply.
+- `ListAgents` names the teammates beside you — agents the same agent started —
+  and `SendMessage(to: \"<name>\")` reaches one directly. Write to the one whose
+  work yours depends on rather than routing it through your parent. A direct
+  message asks for nothing back: it is read, and that is all it is owed.
 - A message marked `in #<room>` came from a room, and every member of it read
   the same message. Answer there — `SendMessage(to: \"#<room>\")` — when what
   you have is for everyone; otherwise stay quiet and let whoever it concerns
-  answer.
+  answer. `@name` in a room is how you ask for an answer and are owed one.
 - Do not put questions to the person: `AskUserQuestion` is not a sub-agent's
   tool, and a question asked instead of an answer is a turn spent on nothing.
   Permission prompts are the exception and do reach them, so a call that needs
@@ -66,6 +70,14 @@ mod tests {
         assert!(
             NOTE.contains("SendMessage(to: \"#<room>\")"),
             "a room is a way back too"
+        );
+        assert!(
+            NOTE.contains("teammates beside you"),
+            "a sub-agent has peers to write to (ADR-0024)"
+        );
+        assert!(
+            NOTE.contains("asks for nothing back"),
+            "a direct message carries no obligation (ADR-0024 §4)"
         );
         assert!(
             NOTE.contains("in #<room>"),

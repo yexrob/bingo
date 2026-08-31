@@ -210,6 +210,12 @@ impl Fleet {
         self.remember(session, [turn_started(), turn_failed(message)]);
     }
 
+    /// A post in a room's journal, as a member's own `SendMessage` left it.
+    /// A post nobody signed came from the session the room hangs under.
+    pub(crate) fn post(&self, room: &SessionId, text: &str, who: Option<&str>) {
+        self.remember(room, [posted(text, who)]);
+    }
+
     fn remember(&self, session: &SessionId, events: impl IntoIterator<Item = Event>) {
         let mut sessions = self.sessions();
         let Some(live) = sessions.iter_mut().find(|l| &l.summary.id == session) else {
@@ -552,6 +558,29 @@ pub(crate) fn assistant(text: &str) -> Event {
             completed_at: Some(ts()),
             intent: None,
             body: ItemBody::Assistant { text: text.into() },
+            meta: Default::default(),
+        },
+    }
+}
+
+pub(crate) fn posted(text: &str, who: Option<&str>) -> Event {
+    Event::ItemCompleted {
+        item: Item {
+            id: ItemId::mint(),
+            turn: None,
+            round: 0,
+            status: ItemStatus::Completed,
+            started_at: ts(),
+            completed_at: Some(ts()),
+            intent: None,
+            body: ItemBody::User {
+                parts: vec![bingo_sdk::ContentPart::text(text)],
+                origin: bingo_sdk::Origin {
+                    surface: "room".into(),
+                    principal: who.map(str::to_string),
+                    conversation: None,
+                },
+            },
             meta: Default::default(),
         },
     }

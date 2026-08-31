@@ -426,7 +426,7 @@ async fn an_absorbed_input_lands_between_one_round_s_tool_item_and_the_next() {
     let host = RecordingHost::new();
     host.queue.lock().unwrap().push((
         IntentId::mint(),
-        Input::text("meanwhile, in the room", Origin::surface("room")),
+        Input::text("meanwhile, from elsewhere", Origin::surface("peer")),
     ));
     run(&cfg, &host, CancellationToken::new()).await;
 

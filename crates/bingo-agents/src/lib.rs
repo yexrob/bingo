@@ -4,14 +4,14 @@
 //! a roster is `sessions{parent}`, and `@name` is a submit hook that
 //! redirects.
 //!
-//! Five tools, two hooks, two commands:
+//! Four tools, two hooks, two commands:
 //!
 //! - `SpawnAgent` mints a child under the calling tool item and delivers the
 //!   prompt. In the foreground it waits for the child's final text; in the
 //!   background it returns the name and leaves a watcher to wake the parent.
-//! - `SendMessage` posts into an agent's queue or a room's journal,
-//!   `FollowupTask` starts a turn on an agent, `WaitAgent` holds until one is
-//!   idle, `ListAgents` reads the tree.
+//! - `SendMessage` wakes an agent — a child, a teammate beside the caller, or
+//!   `parent` — or posts into a room's journal, `WaitAgent` holds until an
+//!   agent is idle, `ListAgents` reads the tree.
 //! - `@name rest` in the composer reaches the child of that name.
 //! - A root session opening in a project with a `.bingo/team.json` seats the
 //!   roles it declares, as children of itself.
@@ -30,6 +30,7 @@ mod list;
 mod message;
 mod names;
 mod note;
+mod serial;
 mod spawn;
 mod team;
 mod wait;
@@ -47,7 +48,7 @@ pub use command::AgentsCommand;
 pub use definition::Definition;
 pub use hook::AtNameHook;
 pub use list::ListAgentsTool;
-pub use message::{Kind, MessageTool};
+pub use message::MessageTool;
 pub use note::NOTE;
 pub use spawn::SpawnAgentTool;
 pub use team::{SeatHook, TeamCommand};
@@ -60,7 +61,6 @@ static MANIFEST: PluginManifest = PluginManifest {
     provides: &[
         "tool:SpawnAgent",
         "tool:SendMessage",
-        "tool:FollowupTask",
         "tool:WaitAgent",
         "tool:ListAgents",
         "hook:agents",
@@ -89,7 +89,7 @@ pub(crate) fn traits(interrupt: Interrupt) -> ToolTraits {
     }
 }
 
-/// Registers the five tools, the `@name` hook and `/agents`. Nothing here
+/// Registers the four tools, the `@name` hook and `/agents`. Nothing here
 /// holds the host: a tool reads it from its call, a hook from its context.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct AgentsPlugin;
@@ -102,8 +102,7 @@ impl Plugin for AgentsPlugin {
 
     fn register(&self, registrar: &mut Registrar) -> Result<(), PluginError> {
         registrar.tool(Arc::new(SpawnAgentTool) as Arc<dyn Tool>);
-        registrar.tool(Arc::new(MessageTool::new(Kind::Message)) as Arc<dyn Tool>);
-        registrar.tool(Arc::new(MessageTool::new(Kind::Followup)) as Arc<dyn Tool>);
+        registrar.tool(Arc::new(MessageTool) as Arc<dyn Tool>);
         registrar.tool(Arc::new(WaitAgentTool) as Arc<dyn Tool>);
         registrar.tool(Arc::new(ListAgentsTool) as Arc<dyn Tool>);
         registrar.add(Contribution::Hook(Arc::new(AtNameHook) as Arc<dyn Hook>));
@@ -140,7 +139,6 @@ mod plugin_tests {
             [
                 "tool:SpawnAgent",
                 "tool:SendMessage",
-                "tool:FollowupTask",
                 "tool:WaitAgent",
                 "tool:ListAgents",
                 "hook:agents",
@@ -168,13 +166,7 @@ mod plugin_tests {
             .collect();
         assert_eq!(
             tools,
-            [
-                "SpawnAgent",
-                "SendMessage",
-                "FollowupTask",
-                "WaitAgent",
-                "ListAgents"
-            ]
+            ["SpawnAgent", "SendMessage", "WaitAgent", "ListAgents"]
         );
         let hooks: Vec<String> = contributions
             .iter()

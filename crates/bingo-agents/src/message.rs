@@ -1,6 +1,7 @@
-//! What one session says to another. Two tools, one noun: `SendMessage`
-//! waits in the target's queue for whatever opens its next turn,
-//! `FollowupTask` wakes it now (ADR-0010 §1).
+//! What one session says to another. One tool, one delivery: `SendMessage`
+//! wakes an idle target and reaches a busy one mid-run (ADR-0024 §2). A post
+//! into a room goes through the same door and is checked against the room's
+//! head first (ADR-0025).
 
 use std::path::Path;
 
@@ -13,7 +14,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::names;
+use crate::{names, serial};
 
 /// The surface an agent's messages come from; a person's say `tui` or `print`.
 pub const SURFACE: &str = "agent";
@@ -29,75 +30,35 @@ pub fn origin(principal: Option<String>) -> Origin {
     }
 }
 
-/// Which of the two a call is.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Kind {
-    /// Waits in the queue; the next turn, whatever opens it, carries it.
-    Message,
-    /// Opens a turn on an idle target now.
-    Followup,
-}
+const DESCRIPTION: &str = "\
+Write to another session: an agent you started, a teammate beside you — one \
+the same agent started, which `ListAgents` names under `Beside you` — \
+`parent`, the agent that started you, or `#room`, a conversation every member \
+of which reads it. The message arrives whatever the target is doing: an idle \
+one takes it up as its next turn, one that is working reads it mid-run. A \
+direct message asks for nothing back: say what you have and go on. When you \
+need an answer from someone, ask in a room with `@name` — a mention is owed an \
+answer, a direct message is not. `to` is the name `SpawnAgent` gave back, a \
+teammate's name, `parent`, or a room's `#name`.";
 
-const MESSAGE: &str = "\
-Write to an agent you started, to `parent` — from a sub-agent, the agent that \
-started you — or to `#room`, a conversation every member of which reads it. \
-The message waits in the target's queue: it is read when the target's next \
-turn begins, and it does not start one. Use it for something that should \
-reach an agent that is already working, for an answer to a question it asked, \
-or for something the whole room needs to know. `to` is the name `SpawnAgent` \
-gave back, `parent`, or a room's `#name`.";
-
-const FOLLOWUP: &str = "\
-Give an agent you started more work, now. The text reaches it the way the \
-first prompt did and starts a turn on it if it is idle; if it is busy, it \
-arrives at the end of the round it is running. Use it to continue a task with \
-an agent that already has the context, rather than spawning a second one. \
-`to` is the name `SpawnAgent` gave back.";
-
-impl Kind {
-    pub fn tool_name(self) -> &'static str {
-        match self {
-            Kind::Message => "SendMessage",
-            Kind::Followup => "FollowupTask",
-        }
-    }
-
-    fn description(self) -> &'static str {
-        match self {
-            Kind::Message => MESSAGE,
-            Kind::Followup => FOLLOWUP,
-        }
-    }
-
-    fn delivery(self) -> Delivery {
-        match self {
-            Kind::Message => Delivery::Hold,
-            Kind::Followup => Delivery::Wake,
-        }
-    }
-
-    fn receipt(self, to: &str) -> String {
-        match self {
-            Kind::Message => format!("Sent to {to}; it will read it when its next turn starts."),
-            Kind::Followup => format!("Sent to {to}; it takes it up as its next turn."),
-        }
-    }
-}
-
-/// What the caller is told. A log session has no turns (ADR-0011 §1), so
-/// neither receipt about a turn is true of a room: the post is the whole of
-/// what happened.
-fn receipt(kind: Kind, to: &str, driver: Driver) -> String {
+/// What the caller is told. A log session has no turns (ADR-0011 §1), so a
+/// receipt about one is not true of a room: the post is the whole of what
+/// happened.
+fn receipt(to: &str, driver: Driver) -> String {
     match driver {
         Driver::Log => format!("Posted to {to}."),
-        Driver::Model => kind.receipt(to),
+        Driver::Model => {
+            format!(
+                "Sent to {to}; it takes it up as its next turn, or reads it mid-run if it is already working."
+            )
+        }
     }
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct MessageArgs {
-    /// Who to write to: the name `SpawnAgent` gave back, `parent` for the
-    /// agent that started you, or `#name` for a room.
+    /// Who to write to: the name `SpawnAgent` gave back, a teammate's name,
+    /// `parent` for the agent that started you, or `#name` for a room.
     pub to: String,
     /// What to say, in full. The recipient sees who wrote it.
     pub text: String,
@@ -105,23 +66,15 @@ pub struct MessageArgs {
 
 /// Posting into another session's queue: this session's own transcript is
 /// unchanged by it, and the target gates whatever it then does.
-#[derive(Debug, Clone, Copy)]
-pub struct MessageTool {
-    kind: Kind,
-}
-
-impl MessageTool {
-    pub fn new(kind: Kind) -> Self {
-        Self { kind }
-    }
-}
+#[derive(Debug, Default, Clone, Copy)]
+pub struct MessageTool;
 
 #[async_trait]
 impl Tool for MessageTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
-            name: self.kind.tool_name().into(),
-            description: self.kind.description().into(),
+            name: "SendMessage".into(),
+            description: DESCRIPTION.into(),
             input_schema: input_schema::<MessageArgs>(),
             meta: Default::default(),
         }
@@ -145,16 +98,19 @@ impl Tool for MessageTool {
             Err(e) => return Ok(ToolOutput::error(e.message)),
         };
         let from = names::speaker(&cx.host, &cx.session).await;
+        // A room is serial: a post written behind its head is handed back
+        // with what it missed, and nothing lands (ADR-0025 §2).
+        if to.driver == Driver::Log
+            && let Some(bounce) = serial::bounce(cx, &to, &from).await
+        {
+            return Ok(bounce);
+        }
         let input = Input::text(args.text, origin(Some(from)));
         cx.host
-            .deliver(&to.id, IntentId::mint(), input, self.kind.delivery())
+            .deliver(&to.id, IntentId::mint(), input, Delivery::Wake)
             .await
             .map_err(|e| ToolError::Failed(e.message))?;
-        Ok(ToolOutput::text(receipt(
-            self.kind,
-            args.to.trim(),
-            to.driver,
-        )))
+        Ok(ToolOutput::text(receipt(args.to.trim(), to.driver)))
     }
 }
 
@@ -175,12 +131,11 @@ mod tests {
         (fleet, root)
     }
 
-    async fn send(kind: Kind, to: &str) -> (ToolOutput, Arc<Recorder>) {
+    async fn send(to: &str) -> (ToolOutput, Arc<Recorder>) {
         let (fleet, root) = fleet();
         let host = Recorder::new(&fleet);
-        let tool = MessageTool::new(kind);
         let cx = tool_context(&root, host.clone());
-        let out = tool
+        let out = MessageTool
             .call(json!({ "to": to, "text": "look again" }), &cx)
             .await
             .expect("a message this crate can deliver");
@@ -188,13 +143,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_message_waits_in_the_child_s_queue_and_says_who_wrote_it() {
-        let (out, host) = send(Kind::Message, "reviewer").await;
+    async fn a_message_wakes_the_child_and_says_who_wrote_it() {
+        let (out, host) = send("reviewer").await;
         assert!(!out.is_error);
         let delivered = host.delivered();
         assert_eq!(delivered.len(), 1);
         let (_, input, delivery) = &delivered[0];
-        assert_eq!(*delivery, Delivery::Hold);
+        assert_eq!(*delivery, Delivery::Wake, "an idle target starts a turn");
         let Input::Text { text, origin, .. } = input else {
             panic!("a peer delivers text");
         };
@@ -202,15 +157,35 @@ mod tests {
         assert_eq!(origin.principal.as_deref(), Some(names::PARENT));
     }
 
+    /// The address space of ADR-0024 §1, through the tool the model calls.
     #[tokio::test]
-    async fn a_follow_up_task_wakes_the_child() {
-        let (_, host) = send(Kind::Followup, "reviewer").await;
-        assert_eq!(host.delivered()[0].2, Delivery::Wake);
+    async fn a_teammate_is_written_to_by_name() {
+        let fleet = Fleet::default();
+        let root = fleet.root();
+        let builder = fleet.child(&root, "builder");
+        let reviewer = fleet.child(&root, "reviewer");
+        let host = Recorder::new(&fleet);
+
+        let out = MessageTool
+            .call(
+                json!({ "to": "reviewer", "text": "look again" }),
+                &tool_context(&builder, host.clone()),
+            )
+            .await
+            .expect("a message this crate can deliver");
+        assert!(!out.is_error);
+        let delivered = host.delivered();
+        assert_eq!(delivered.len(), 1);
+        assert_eq!(delivered[0].0, reviewer);
+        let Input::Text { origin, .. } = &delivered[0].1 else {
+            panic!("a peer delivers text");
+        };
+        assert_eq!(origin.principal.as_deref(), Some("builder"));
     }
 
     #[tokio::test]
     async fn a_name_nobody_has_is_an_error_result_the_model_can_correct() {
-        let (out, host) = send(Kind::Message, "nobody").await;
+        let (out, host) = send("nobody").await;
         assert!(out.is_error);
         assert!(host.delivered().is_empty());
     }
@@ -219,31 +194,33 @@ mod tests {
     /// what did happen and nothing more.
     #[tokio::test]
     async fn a_message_to_a_room_is_a_post() {
-        for kind in [Kind::Message, Kind::Followup] {
-            let (out, host) = send(kind, "#design").await;
-            assert!(!out.is_error);
-            assert_eq!(
-                out.parts[0].as_text(),
-                Some("Posted to #design."),
-                "{kind:?}"
-            );
-            assert_eq!(host.delivered().len(), 1);
-        }
+        let (out, host) = send("#design").await;
+        assert!(!out.is_error);
+        assert_eq!(out.parts[0].as_text(), Some("Posted to #design."));
+        assert_eq!(host.delivered().len(), 1);
     }
 
     #[test]
-    fn both_tools_read_only_and_name_the_agent_a_rule_may_match() {
-        for kind in [Kind::Message, Kind::Followup] {
-            let tool = MessageTool::new(kind);
-            assert_eq!(tool.spec().name, kind.tool_name());
-            let traits = tool.traits(&Value::Null);
-            assert!(traits.read_only && traits.trusted && !traits.concurrency_safe);
-            assert_eq!(
-                tool.subjects(&json!({ "to": "reviewer", "text": "x" }), Path::new("/")),
-                [Subject::Name {
-                    name: "reviewer".into()
-                }]
-            );
-        }
+    fn it_reads_only_and_names_the_agent_a_rule_may_match() {
+        assert_eq!(MessageTool.spec().name, "SendMessage");
+        let traits = MessageTool.traits(&Value::Null);
+        assert!(traits.read_only && traits.trusted && !traits.concurrency_safe);
+        assert_eq!(
+            MessageTool.subjects(&json!({ "to": "reviewer", "text": "x" }), Path::new("/")),
+            [Subject::Name {
+                name: "reviewer".into()
+            }]
+        );
+    }
+
+    /// The rule of ADR-0024 §4, where the model reads it.
+    #[test]
+    fn the_description_says_a_direct_message_owes_nothing() {
+        assert!(DESCRIPTION.contains("Beside you"), "{DESCRIPTION}");
+        assert!(DESCRIPTION.contains("@name"), "{DESCRIPTION}");
+        assert!(
+            DESCRIPTION.contains("a direct message is not"),
+            "{DESCRIPTION}"
+        );
     }
 }
