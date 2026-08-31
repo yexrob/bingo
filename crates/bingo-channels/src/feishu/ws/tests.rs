@@ -199,7 +199,8 @@ async fn a_cancelled_listener_stops_without_dialling_again() {
 
 #[test]
 fn a_pong_hot_updates_the_intervals_the_loop_keeps() {
-    let mut inbound = Inbound::new(ME);
+    let mut seen = Seen::default();
+    let mut inbound = Inbound::new(ME, &mut seen);
     let mut config = ClientConfig::default();
     let mut pong = Frame {
         method: Method::Control,
@@ -215,7 +216,8 @@ fn a_pong_hot_updates_the_intervals_the_loop_keeps() {
 
 #[test]
 fn a_ping_is_answered_with_a_pong_and_a_card_frame_is_dropped() {
-    let mut inbound = Inbound::new(ME);
+    let mut seen = Seen::default();
+    let mut inbound = Inbound::new(ME, &mut seen);
     let mut config = ClientConfig::default();
     let control = |what: &str| {
         let mut frame = Frame {
@@ -237,7 +239,8 @@ fn a_ping_is_answered_with_a_pong_and_a_card_frame_is_dropped() {
 
 #[test]
 fn an_event_is_acked_once_and_a_redelivery_is_acked_but_not_repeated() {
-    let mut inbound = Inbound::new(ME);
+    let mut seen = Seen::default();
+    let mut inbound = Inbound::new(ME, &mut seen);
     let mut config = ClientConfig::default();
     let frame = || frame::decode(&event("evt_1")).expect("a frame");
 

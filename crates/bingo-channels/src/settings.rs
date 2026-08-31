@@ -3,10 +3,12 @@
 //! A credential never lives here. The settings' project layer is committed,
 //! and an app secret in a committed file is an app secret that is gone
 //! (ADR-0012's reason for `auth.json`, applied one level out): what a chat
-//! app is called is settings, what it signs with is the environment.
+//! app is called is settings, what it signs with is the environment — or,
+//! for a gateway that inherits no shell, the credential store (ADR-0020 §8).
 
 use std::sync::Arc;
 
+use bingo_sdk::Env;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
@@ -71,8 +73,8 @@ pub struct LoopbackChannel {
 #[serde(rename_all = "camelCase")]
 pub struct FeishuChannel {
     /// The app id, which is public. The secret is not: it comes from
-    /// `BINGO_FEISHU_APP_SECRET`, because a project settings file is a
-    /// committed file.
+    /// `BINGO_FEISHU_APP_SECRET`, else the credential store, because a project
+    /// settings file is a committed file.
     #[serde(default)]
     pub app_id: Option<String>,
     /// Where the API lives. Lark International is a different host, and the
@@ -86,16 +88,19 @@ pub const APP_ID: &str = "BINGO_FEISHU_APP_ID";
 pub const APP_SECRET: &str = "BINGO_FEISHU_APP_SECRET";
 
 impl FeishuChannel {
-    /// The settings' app id, else the environment's; the secret is only ever
-    /// the environment's.
-    fn config(&self) -> feishu::Config {
+    /// The settings' app id, else the environment's. The secret is never the
+    /// settings': it is the environment's, else the credential store's
+    /// (ADR-0020 §8), because a gateway started at boot inherits no shell.
+    fn config(&self, env: &Env) -> feishu::Config {
         feishu::Config {
             app_id: self
                 .app_id
                 .clone()
                 .or_else(|| std::env::var(APP_ID).ok())
                 .unwrap_or_default(),
-            app_secret: std::env::var(APP_SECRET).unwrap_or_default(),
+            app_secret: crate::secret::find(env, Feishu::ID, APP_SECRET)
+                .map(|found| found.secret)
+                .unwrap_or_default(),
             base: self
                 .base
                 .clone()
@@ -149,14 +154,15 @@ fn seven_hundred() -> u64 {
 }
 
 impl Channels {
-    /// Every adapter these settings ask for, in a fixed order.
-    pub fn adapters(&self) -> Vec<Arc<dyn ChannelAdapter>> {
+    /// Every adapter these settings ask for, in a fixed order. `env` is what
+    /// an adapter's secret may be read from when the environment has none.
+    pub fn adapters(&self, env: &Env) -> Vec<Arc<dyn ChannelAdapter>> {
         let mut adapters: Vec<Arc<dyn ChannelAdapter>> = Vec::new();
         if let Some(settings) = &self.loopback {
             adapters.push(Arc::new(Loopback::new(settings.config())));
         }
         if let Some(settings) = &self.feishu {
-            adapters.push(Arc::new(Feishu::new(settings.config())));
+            adapters.push(Arc::new(Feishu::new(settings.config(env))));
         }
         adapters
     }
@@ -191,10 +197,13 @@ impl LoopbackChannel {
 /// Whether a merged settings object asks for a channel at all. The bin needs
 /// the answer before a host exists, so it reads it here rather than keeping a
 /// second spelling of the key.
+///
+/// It is the same answer `secret::configured` gives, and deliberately the same
+/// code path: two ways of deciding "is a channel configured" would eventually
+/// disagree, and the day they did, a bingo would listen on a channel it had
+/// just told the bin it had none of.
 pub fn wanted(settings: &Value) -> bool {
-    serde_json::from_value::<Settings>(settings.clone())
-        .map(|settings| !settings.channels.adapters().is_empty())
-        .unwrap_or(false)
+    !crate::secret::configured(settings).is_empty()
 }
 
 /// `--channels <adapter>[=<peer>]`, as the settings layer it stands for. The
@@ -230,10 +239,16 @@ mod tests {
         serde_json::from_value(value).expect("the settings parse")
     }
 
+    /// A home no test writes to: `adapters` reads a secret from the store, and
+    /// none of these tests is about a secret.
+    fn env() -> Env {
+        Env::rooted("/nonexistent-bingo-settings-test")
+    }
+
     #[test]
     fn nothing_configured_is_no_adapters_and_the_default_gate() {
         let settings = parse(json!({}));
-        assert!(settings.channels.adapters().is_empty());
+        assert!(settings.channels.adapters(&env()).is_empty());
         assert_eq!(settings.channels.gate(), Gate::default());
         assert!(!wanted(&json!({})));
         assert!(!wanted(&json!({ "channels": {} })));
@@ -242,7 +257,7 @@ mod tests {
     #[test]
     fn a_named_adapter_is_built_with_its_defaults() {
         let settings = parse(json!({ "channels": { "loopback": {} } }));
-        let adapters = settings.channels.adapters();
+        let adapters = settings.channels.adapters(&env());
         assert_eq!(adapters.len(), 1);
         assert_eq!(adapters[0].id(), "loopback");
         assert!(adapters[0].edit().is_some(), "on unless turned off");
@@ -254,7 +269,7 @@ mod tests {
         let settings = parse(json!({
             "channels": { "loopback": { "edits": false, "buttons": false } }
         }));
-        let adapters = settings.channels.adapters();
+        let adapters = settings.channels.adapters(&env());
         assert!(adapters[0].edit().is_none());
         assert!(adapters[0].buttons().is_none());
         assert!(adapters[0].typing().is_some());

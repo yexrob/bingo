@@ -27,6 +27,13 @@
 # `jiff`, the id `ulid`, the creation card's diff `similar`, and the runner is
 # `tokio` — all already in the tree. Cron would have been a dependency, which
 # is why the spec is three forms and a parser (ADR-0019 §2).
-max_dependencies = 298
+# M17 (docs/plans/M17-gateway.md, ADR-0020 §6) raises 298 → 302 by the measured
+# 4: `tracing-subscriber` fmt-only and the three it pulls — `sharded-slab` and
+# `thread_local` for the registry, `lazy_static` under them. The ADR's rule was
+# +5 or hand-roll a Subscriber; +4 buys the real one. `ansi` and `env-filter`
+# are off, which is what keeps `nu-ansi-term` and the regex stack out. The
+# gateway itself brings nothing else: detaching is `process-wrap` and the
+# service files are text.
+max_dependencies = 302
 max_core_check_seconds = 20
 max_target_gb = 5

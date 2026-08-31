@@ -50,11 +50,13 @@ pub async fn listen(
 ) -> Result<(), ChannelError> {
     let mut config = ClientConfig::default();
     let mut attempt = 0u32;
+    // Outlives every connection, unlike the reassembly beside it: see `Inbound`.
+    let mut seen = Seen::default();
     loop {
         if cancel.is_cancelled() {
             return Ok(());
         }
-        match once(api, app_secret, me, inbox, cancel, &mut config).await {
+        match once(api, app_secret, me, inbox, cancel, &mut config, &mut seen).await {
             Ended::Cancelled => return Ok(()),
             Ended::Fatal(why) => return Err(ChannelError::Refused(why)),
             Ended::Dropped(why) => {
@@ -82,6 +84,7 @@ async fn once(
     inbox: &Inbox,
     cancel: &CancellationToken,
     config: &mut ClientConfig,
+    seen: &mut Seen,
 ) -> Ended {
     let url = match api.endpoint(app_secret).await {
         Ok((url, fresh)) => {
@@ -95,7 +98,7 @@ async fn once(
         Ok((socket, _)) => socket,
         Err(error) => return refused(error),
     };
-    pump(socket, config, me, inbox, cancel).await
+    pump(socket, config, me, inbox, cancel, seen).await
 }
 
 /// A refused upgrade says why in three response headers and no body.
@@ -116,16 +119,35 @@ fn refused(error: WsError) -> Ended {
 
 type Socket =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+type Writer = futures::stream::SplitSink<Socket, Message>;
+type Reader = futures::stream::SplitStream<Socket>;
 
+/// One connection, listened to until it ends, and then closed properly
+/// whatever ended it.
 async fn pump(
     socket: Socket,
     config: &mut ClientConfig,
     me: &str,
     inbox: &Inbox,
     cancel: &CancellationToken,
+    seen: &mut Seen,
 ) -> Ended {
     let (mut writer, mut reader) = socket.split();
-    let mut inbound = Inbound::new(me);
+    let ended = listening(&mut writer, &mut reader, config, me, inbox, cancel, seen).await;
+    farewell(&mut writer).await;
+    ended
+}
+
+async fn listening(
+    writer: &mut Writer,
+    reader: &mut Reader,
+    config: &mut ClientConfig,
+    me: &str,
+    inbox: &Inbox,
+    cancel: &CancellationToken,
+    seen: &mut Seen,
+) -> Ended {
+    let mut inbound = Inbound::new(me, seen);
     let mut pings = 0u64;
     let mut ping_at = Instant::now() + config.ping_interval;
     let mut quiet_at = Instant::now() + config.read_deadline();
@@ -153,17 +175,54 @@ async fn pump(
         // just been hot-updated by a pong.
         quiet_at = Instant::now() + config.read_deadline();
         ping_at = ping_at.min(Instant::now() + config.ping_interval);
-        if let Some(reply) = step.reply
-            && let Err(error) = writer.send(binary(&reply)).await
-        {
-            return Ended::Dropped(format!("the ack could not be written: {error}"));
-        }
-        if let Some(event) = step.deliver
-            && inbox.post(event).await.is_err()
-        {
-            return Ended::Cancelled;
+        if let Some(ended) = act(writer, step, inbox, cancel, quiet_at).await {
+            return ended;
         }
     }
+}
+
+/// What one absorbed frame asks for: an ack written back, and an event handed
+/// to the surface. `Some` is the connection ending.
+async fn act(
+    writer: &mut Writer,
+    step: Step,
+    inbox: &Inbox,
+    cancel: &CancellationToken,
+    quiet_at: Instant,
+) -> Option<Ended> {
+    if let Some(reply) = step.reply
+        && let Err(error) = writer.send(binary(&reply)).await
+    {
+        return Some(Ended::Dropped(format!(
+            "the ack could not be written: {error}"
+        )));
+    }
+    let event = step.deliver?;
+    // Handing an event on must never blind the socket. While this task is
+    // parked on a full downstream channel, nothing polls the read deadline,
+    // the ping timer or the cancellation — so a stalled session is
+    // indistinguishable from a healthy connection, no further ack goes out,
+    // the peer drops us, and the reconnect ladder never runs because the pump
+    // never returns. That is the wedge no reconnect can recover from, which is
+    // why this wait is armed like every other one here.
+    tokio::select! {
+        posted = inbox.post(event) => posted.is_err().then_some(Ended::Cancelled),
+        _ = cancel.cancelled() => Some(Ended::Cancelled),
+        _ = tokio::time::sleep_until(quiet_at) => Some(Ended::Dropped(
+            "the session could not take an event within the read deadline".into(),
+        )),
+    }
+}
+
+/// Say goodbye before letting the socket go.
+///
+/// Feishu counts a long connection against the app until the server times the
+/// corpse out, and the limit is fatal (`1000040350`): a run that reconnects a
+/// few times without closing cleanly can exhaust the budget and then be
+/// refused for good. A close frame is what makes a restart recover promptly.
+async fn farewell(writer: &mut Writer) {
+    let _ = writer.send(Message::Close(None)).await;
+    let _ = writer.close().await;
 }
 
 /// The frame in a message, or `None` when the socket is finished with. Text,
@@ -190,19 +249,26 @@ struct Step {
     deliver: Option<Incoming>,
 }
 
-/// The reassembly and dedupe state of one connection.
+/// The reassembly state of one connection, and the dedupe ring of the whole
+/// run.
+///
+/// The chunks belong to the connection: a half-assembled message on a socket
+/// that is gone will never be finished. The `Seen` ring does not — Feishu
+/// redelivers anything it was not acked for, so a ring that started empty on
+/// every reconnect would replay each of those as a brand new message and
+/// submit the same prompt twice.
 struct Inbound<'a> {
     me: &'a str,
     chunks: Chunks,
-    seen: Seen,
+    seen: &'a mut Seen,
 }
 
 impl<'a> Inbound<'a> {
-    fn new(me: &'a str) -> Self {
+    fn new(me: &'a str, seen: &'a mut Seen) -> Self {
         Self {
             me,
             chunks: Chunks::default(),
-            seen: Seen::default(),
+            seen,
         }
     }
 

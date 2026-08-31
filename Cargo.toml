@@ -50,6 +50,12 @@ clap = { version = "4.6", features = ["derive"] }
 ulid = { version = "3.0", features = ["serde"] }
 jiff = { version = "0.2", features = ["serde"] }
 tracing = "0.1"
+# M17 (ADR-0020 §6): the gateway log is the first place in this tree where a
+# `warn!` lands. Measured at +4 unique crates (298 → 302: tracing-subscriber,
+# sharded-slab, thread_local, lazy_static), under the ADR's +5 ceiling, so the
+# hand-rolled Subscriber is not needed. `fmt` only: no `ansi` (a log file wants
+# no escapes), no `env-filter` (which would pull the regex stack).
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt"] }
 # Image files reach the model as base64 parts. `simd-unsafe` is off: this
 # workspace forbids unsafe, and a Read tool is not a throughput problem.
 base64 = { version = "0.23", default-features = false, features = ["std"] }

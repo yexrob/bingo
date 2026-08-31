@@ -211,21 +211,53 @@ impl Runner {
         }
     }
 
+    /// The answer, and then the question that stopped it.
+    ///
+    /// The two are separate deliveries and the second never depends on the
+    /// first. A platform that refused the answer has not refused the question,
+    /// and a question that never arrives is a turn that never ends: the
+    /// session waits on an interaction nobody was ever shown, and every later
+    /// message queues behind it. That is the whole "it worked for a few
+    /// messages and then stuck" failure, so both are attempted and the first
+    /// error is what is reported.
     async fn finalize(
         &mut self,
         text: &str,
         question: Option<Question>,
     ) -> Result<(), ChannelError> {
-        match (self.adapter.edit(), self.streaming.take()) {
-            (Some(edit), Some(at)) => edit.finish(&at, text).await?,
-            _ if !text.is_empty() => {
-                self.post(text).await?;
-            }
-            _ => {}
-        }
-        match question {
+        let said = self.say(text).await;
+        let asked = match question {
             Some(question) => self.ask(question).await,
             None => Ok(()),
+        };
+        said.and(asked)
+    }
+
+    /// The answer itself: finished into the message it was streaming into,
+    /// else posted whole.
+    ///
+    /// A stream that will not close is not an answer that is gone. The card
+    /// may have been auto-closed by the platform under a long turn, or the
+    /// sequence refused; either way the text still exists and goes out as its
+    /// own message rather than disappearing with the card.
+    async fn say(&mut self, text: &str) -> Result<(), ChannelError> {
+        let finished = match (self.adapter.edit(), self.streaming.take()) {
+            (Some(edit), Some(at)) => Some(edit.finish(&at, text).await),
+            _ => None,
+        };
+        match finished {
+            Some(Ok(())) | None if text.is_empty() => Ok(()),
+            Some(Ok(())) => Ok(()),
+            Some(Err(error)) if !text.is_empty() => {
+                tracing::warn!(
+                    %error,
+                    key = %self.key,
+                    "the streamed message would not close; posting the answer whole"
+                );
+                self.post(text).await.map(drop)
+            }
+            Some(Err(error)) => Err(error),
+            None => self.post(text).await.map(drop),
         }
     }
 
@@ -236,10 +268,24 @@ impl Runner {
             .adapter
             .buttons()
             .filter(|_| question.buttons(self.adapter.limits()).is_some());
-        let (at, native) = match native {
-            Some(buttons) => (buttons.ask(&self.conversation, &question).await?, true),
-            None => (self.post(&question.numbered()).await?, false),
+        // Buttons are an affordance, not the question. A platform that refused
+        // the card can still be asked in words, and losing the question here
+        // would leave the session waiting for an answer nobody was shown.
+        let posted = match native {
+            Some(buttons) => match buttons.ask(&self.conversation, &question).await {
+                Ok(at) => Ok((at, true)),
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        key = %self.key,
+                        "the question's buttons were refused; asking in words"
+                    );
+                    self.post(&question.numbered()).await.map(|at| (at, false))
+                }
+            },
+            None => self.post(&question.numbered()).await.map(|at| (at, false)),
         };
+        let (at, native) = posted?;
         self.asked.insert(
             question.id.clone(),
             Asked {
