@@ -17,9 +17,14 @@ use crate::names;
 pub const HEADERS: [&str; 3] = ["agent", "session", "state"];
 
 const DESCRIPTION: &str = "\
-List the sub-agents this session has started: their names, their sessions and \
-whether each is working or idle. Use it before writing to one whose name you \
-are unsure of, or to see whether the ones you started are still running.";
+List the agents you can write to: the ones you started, and — listed apart, \
+under `Beside you` — the ones started alongside you by the same agent. Each \
+row is a name, a session and whether it is working or idle. Use it before \
+writing to one whose name you are unsure of, or to see whether the ones you \
+started are still running.";
+
+/// The line above the agents the caller did not start.
+const BESIDE: &str = "Beside you (the same agent started them):";
 
 /// The arguments a listing takes, which is none. Named so the schema the
 /// model reads is an object like every other tool's.
@@ -44,11 +49,24 @@ pub fn state(child: &SessionSummary) -> &'static str {
     if child.busy { "busy" } else { "idle" }
 }
 
-/// The roster as the model reads it, one agent per line.
-fn listing(children: &[SessionSummary]) -> String {
-    if children.is_empty() {
+/// The roster as the model reads it, one agent per line: the caller's own
+/// first, then the teammates beside it under a line that says so, since the
+/// two are addressed the same way but are not the same thing (ADR-0024 §3).
+fn listing(mine: &[SessionSummary], beside: &[SessionSummary]) -> String {
+    if mine.is_empty() && beside.is_empty() {
         return "No agents are running. SpawnAgent starts one.".to_string();
     }
+    let mut block = Vec::new();
+    if !mine.is_empty() {
+        block.push(lines(mine));
+    }
+    if !beside.is_empty() {
+        block.push(format!("{BESIDE}\n{}", lines(beside)));
+    }
+    block.join("\n\n")
+}
+
+fn lines(children: &[SessionSummary]) -> String {
     children
         .iter()
         .map(|child| row(child).join("  "))
@@ -78,10 +96,13 @@ impl Tool for ListAgentsTool {
     /// The arguments are ignored: a listing has none, and a model that sends
     /// an empty object, a null or a stray key still gets its answer.
     async fn call(&self, _input: Value, cx: &ToolContext) -> Result<ToolOutput, ToolError> {
-        let children = names::agents(&cx.host, &cx.session)
+        let mine = names::agents(&cx.host, &cx.session)
             .await
             .map_err(|e| ToolError::Failed(e.message))?;
-        Ok(ToolOutput::text(listing(&children)))
+        let beside = names::siblings(&cx.host, &cx.session)
+            .await
+            .map_err(|e| ToolError::Failed(e.message))?;
+        Ok(ToolOutput::text(listing(&mine, &beside)))
     }
 }
 
@@ -125,12 +146,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_child_sees_its_own_children_and_not_its_siblings() {
+    async fn a_child_sees_the_teammates_beside_it_marked_as_such() {
         let fleet = Fleet::default();
         let root = fleet.root();
         let reviewer = fleet.child(&root, "reviewer");
-        fleet.child(&root, "scout");
-        assert!(listed(&fleet, &reviewer).await.contains("No agents"));
+        let scout = fleet.child(&root, "scout");
+        fleet.room(&root, "#design");
+
+        let text = listed(&fleet, &reviewer).await;
+        assert!(
+            text.starts_with(BESIDE),
+            "it started none of its own: {text}"
+        );
+        assert!(text.contains(&format!("scout  {scout}  idle")), "{text}");
+        assert!(
+            !text.contains("reviewer"),
+            "a caller is not beside itself: {text}"
+        );
+        assert!(!text.contains("#design"), "a room answers nobody: {text}");
+    }
+
+    #[tokio::test]
+    async fn a_session_alone_at_the_top_lists_only_what_it_started() {
+        let fleet = Fleet::default();
+        let root = fleet.root();
+        fleet.child(&root, "reviewer");
+        let text = listed(&fleet, &root).await;
+        assert!(!text.contains(BESIDE), "the root has no teammates: {text}");
     }
 
     #[test]

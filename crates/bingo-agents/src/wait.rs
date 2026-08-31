@@ -16,15 +16,16 @@ use serde_json::Value;
 use crate::{names, watch};
 
 const DESCRIPTION: &str = "\
-Wait for a sub-agent you started in the background to finish, and read its \
-reply. An agent that is already idle answers at once with what it last said. \
-Use it when you cannot go on without the result; otherwise let the agent \
-report back on its own and keep working. Waiting does not stop the agent: a \
-timeout leaves it running.";
+Wait for an agent to finish, and read its reply. It may be one you started in \
+the background or a teammate beside you; an agent that is already idle answers \
+at once with what it last said. Use it when you cannot go on without the \
+result; otherwise let the agent report back on its own and keep working. \
+Waiting does not stop the agent: a timeout leaves it running.";
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct WaitArgs {
-    /// The agent to wait for, by the name `SpawnAgent` gave back.
+    /// The agent to wait for: the name `SpawnAgent` gave back, or a teammate's
+    /// name. `ListAgents` names both.
     pub name: String,
     /// Give up after this many seconds. Without one, the wait lasts as long
     /// as the agent's turn does.
@@ -80,7 +81,7 @@ impl Tool for WaitAgentTool {
     async fn call(&self, input: Value, cx: &ToolContext) -> Result<ToolOutput, ToolError> {
         let args: WaitArgs =
             serde_json::from_value(input).map_err(|e| ToolError::InvalidInput(e.to_string()))?;
-        let session = match names::child(&cx.host, &cx.session, args.name.trim()).await {
+        let session = match names::agent(&cx.host, &cx.session, args.name.trim()).await {
             Ok(child) => child.id,
             Err(e) => return Ok(ToolOutput::error(e.message)),
         };
@@ -165,6 +166,21 @@ mod tests {
             .await
             .expect_err("the wait ran out");
         assert!(error.to_string().contains("still running"), "{error}");
+    }
+
+    /// The same address space `SendMessage` has (ADR-0024 §3): what a caller
+    /// can write to, it can wait for.
+    #[tokio::test]
+    async fn a_teammate_can_be_waited_for_too() {
+        let fleet = Fleet::default();
+        let root = fleet.root();
+        let builder = fleet.child(&root, "builder");
+        let reviewer = fleet.child(&root, "reviewer");
+        fleet.said(&reviewer, "the diff is fine");
+
+        let out = waited(&fleet, &builder, json!({ "name": "reviewer" })).await;
+        let text = out.parts[0].as_text().unwrap_or_default();
+        assert!(text.contains("the diff is fine"), "{text}");
     }
 
     #[tokio::test]
