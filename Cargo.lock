@@ -220,6 +220,7 @@ dependencies = [
  "bingo-hooks-shell",
  "bingo-mcp",
  "bingo-permissions",
+ "bingo-plugin-rpc",
  "bingo-provider-anthropic",
  "bingo-provider-fake",
  "bingo-provider-openai",
