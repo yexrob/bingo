@@ -535,7 +535,11 @@ async fn without_buttons_the_numbered_rung_is_drawn_and_a_reply_answers_it() {
         .await;
     let answered = chat.until(|| session.answers().first().cloned()).await;
     assert_eq!(answered.1, Answer::Deny { feedback: None });
-    assert_eq!(answered.2, Activation::Keyboard, "typing is a keyboard");
+    assert_eq!(
+        answered.2,
+        Activation::Pointer,
+        "a message that had to be sent is not a stray keystroke"
+    );
     assert!(
         session.prompts().len() == 1,
         "an answer is not also a prompt: {:?}",

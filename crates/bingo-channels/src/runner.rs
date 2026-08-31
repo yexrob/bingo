@@ -302,7 +302,7 @@ impl Runner {
     /// is the next thing to work on.
     fn said(&mut self, principal: &str, text: String) {
         match self.answering(&text) {
-            Some((id, answer)) => self.answer(id, answer, Activation::Keyboard),
+            Some((id, answer)) => self.answer(id, answer),
             None => self.handle.submit(
                 IntentId::mint(),
                 Input::text(
@@ -327,11 +327,18 @@ impl Runner {
         let Some(answer) = self.asked.get(id).and_then(|a| a.question.pick(choice)) else {
             return;
         };
-        self.answer(id.clone(), answer, Activation::Pointer);
+        self.answer(id.clone(), answer);
     }
 
-    fn answer(&self, id: InteractionId, answer: Answer, activation: Activation) {
-        self.handle.answer(IntentId::mint(), id, answer, activation);
+    /// Always `Pointer`, on both rungs. The kernel reads the activation for
+    /// one thing: whether a keystroke could have landed on a prompt that had
+    /// just appeared under it, which it guards against for 400 ms. Neither a
+    /// button press nor a message composed and sent in a chat can be that
+    /// accident, and an answer silently refused as `NOT_READY` would look to
+    /// a person like a chat that had stopped listening.
+    fn answer(&self, id: InteractionId, answer: Answer) {
+        self.handle
+            .answer(IntentId::mint(), id, answer, Activation::Pointer);
     }
 }
 

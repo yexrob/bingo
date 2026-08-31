@@ -30,12 +30,12 @@ A person drives a session from an IM thread (ADR-0016): their messages open or c
 
 ## Exit criteria
 
-- [ ] Deliverer fixtures: a streamed answer coalesces by the dual gate; the pending snapshot never overwrites finalize; a question renders both rungs of the ladder; `Resolved{by}` edits
-- [ ] frame codec fixtures round-trip a captured bootstrap answer, an event frame, a chunked pair, a ping/pong with hot-updated intervals
-- [ ] loopback black-box: message → streamed edits → button and numbered-reply answers both resolve; the TUI race edits the card
-- [ ] a killed socket reconnects on the documented ladder; the second process against one credential refuses loudly
-- [ ] budget: tokio-tungstenite measured and recorded; deny green
-- [ ] every gate green (fmt, check, clippy, test, discipline, budget, deny, tui-smoke)
+- [x] Deliverer fixtures: a streamed answer coalesces by the dual gate; the pending snapshot never overwrites finalize; a question renders both rungs of the ladder; `Resolved{by}` edits
+- [x] frame codec fixtures round-trip a captured bootstrap answer, an event frame, a chunked pair, a ping/pong with hot-updated intervals
+- [x] loopback black-box: message → streamed edits → button and numbered-reply answers both resolve; the TUI race edits the card
+- [x] a killed socket reconnects on the documented ladder; the second process against one credential refuses loudly
+- [x] budget: tokio-tungstenite measured and recorded; deny green
+- [x] every gate green (fmt, check, clippy, test, discipline, budget, deny, tui-smoke)
 - [ ] live Feishu smoke per the runbook — **needs the user's credentials; ticked last, together**
 
 ## Non-goals
@@ -45,3 +45,45 @@ Telegram/Slack/Discord adapters (matrix above is their brief); webhook mode; mar
 ## Risks
 
 R-wire — the Feishu long-connection format is undocumented; the codec-as-brick with fixtures is the mitigation, and a format move is one failing test. R-intl — Lark International's long-conn availability is unverified; the live smoke decides. R-loss — events during a long outage may be dropped (no replay API); accepted for chat. R-streams — CardKit's 10-minute close and the sequence rules are exercised by fixtures, not live, until the smoke.
+
+## Verified (2026-08-31)
+
+```
+cargo fmt --all -- --check                                        → clean
+cargo check --workspace --all-targets --locked                    → Finished
+cargo clippy --workspace --all-targets --locked -- -D warnings    → Finished
+cargo test --workspace --locked                                   → 60 × "test result: ok", 0 failed
+scripts/check_discipline.sh                                       → discipline ok
+scripts/budget.sh    → dependencies 295 (max 295); budget ok
+cargo deny check     → advisories ok, bans ok, licenses ok, sources ok
+scripts/tui-smoke.sh → tui-smoke ok
+```
+
+`cargo test -p bingo-channels` is 124 tests: the ladder and the outcome
+sentences, the dual gate and the pending snapshot, the surface against a
+kernel double (open-or-continue by key, the mention gate, both rungs, the
+two-surface race, the lock file), the Feishu wire bricks with byte and JSON
+fixtures, and the Feishu adapter against a scripted `open.feishu.cn`.
+`cargo test -p bingo --test channels` is 7 more through the real binary.
+
+Dependency delta: **+13**, measured by resolving the workspace with and
+without `crates/bingo-channels` (281 → 294 by `cargo tree`, 282 → 295 by
+`scripts/budget.sh`, which counts one blank line). One is the new member;
+twelve are `tokio-tungstenite` and its tree (`tungstenite`, `data-encoding`,
+`rustls-native-certs`, and `sha1` with digest/block-buffer/crypto-common/
+hybrid-array/typenum/const-oid/cpufeatures). rustls only.
+
+Not done here, and deliberately:
+
+- **The live Feishu smoke.** `scripts/feishu-smoke.md` is the runbook; the
+  smoke needs a tenant and an app secret. Every wire fact in ADR-0016 §6 is
+  pinned in a fixture, so a format move is one failing test — but a fixture
+  is not the platform, and until the smoke is run the adapter is unproven
+  against Feishu itself.
+- **Overflow to `post` messages.** A card holds 20 000 bytes of text
+  (`Limits.max_text`), and the Deliverer clips to it in one place. A second
+  rule that splits past the clip would be a second representation of "too
+  long"; the transcript is cut with an ellipsis instead. Revisit if the live
+  smoke shows people hitting it.
+- **Telegram, Slack, Discord.** The capability matrix above is their brief;
+  the trait is proven by two implementations, which is what the ADR asked for.
