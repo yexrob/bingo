@@ -36,7 +36,7 @@ A person drives a session from an IM thread (ADR-0016): their messages open or c
 - [x] a killed socket reconnects on the documented ladder; the second process against one credential refuses loudly
 - [x] budget: tokio-tungstenite measured and recorded; deny green
 - [x] every gate green (fmt, check, clippy, test, discipline, budget, deny, tui-smoke)
-- [ ] live Feishu smoke per the runbook — **needs the user's credentials; ticked last, together**
+- [x] live Feishu smoke per the runbook — run by the user with their self-built app, reported green 2026-08-31 (user-verified; no machine transcript in this session)
 
 ## Non-goals
 
