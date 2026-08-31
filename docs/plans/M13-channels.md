@@ -87,3 +87,33 @@ Not done here, and deliberately:
   smoke shows people hitting it.
 - **Telegram, Slack, Discord.** The capability matrix above is their brief;
   the trait is proven by two implementations, which is what the ADR asked for.
+
+### Merged — 2026-08-31, `25695c2`
+
+Conflicts were the two union lines; the budget re-baselined onto M14's 284:
+**284 + the measured 13 = 297**, and `budget.sh` counts exactly 297 on the
+merged tree. The definitive quiet-machine run (load < 8, every worker done):
+
+```
+cargo test --workspace --locked        2197 passed, 0 failed
+scripts/tui-smoke.sh                   exit 0, tui-smoke ok
+```
+
+— wall-clock tests included, which also settles the rerun M11's and M14's
+Verified sections were owed: those tests fail only on a loaded machine.
+
+### Carried out of M13
+
+- **`Activation` is really a keystroke-guard flag.** The kernel reads it for
+  the 400 ms guard alone, so the runner sends `Pointer` for typed replies —
+  a documented lie. A `Deliberate`/`Accidental` axis, or moving the guard
+  into the interaction, would remove it. (This cost the worker its one real
+  black-box bug.)
+- **A resolution is attributed to the connection's identity, not `open`'s
+  `who`** on the RPC path; a client with many principals mis-labels.
+- **No `SurfaceOptions` cancellation** — a concurrent surface is stopped by
+  aborting its task; a cooperative stop would let adapters say goodbye.
+- Overflow past the 20 KB card clips with an ellipsis rather than rolling to
+  `post` messages — revisit if the live smoke shows people hitting it.
+- The live Feishu smoke (`scripts/feishu-smoke.md`) stays the unticked
+  criterion until the user's credentials exist.
