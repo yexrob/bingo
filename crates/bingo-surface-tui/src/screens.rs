@@ -676,6 +676,67 @@ fn a_highlighted_code_block() {
     both("code_block", &solo(&state), &ui, now);
 }
 
+/// A long result, open whole: what `⏎` on a focused block and the second
+/// `ctrl+o` both take (design §5).
+#[test]
+fn the_pager_sheet() {
+    let output = ToolOutput::text(
+        (1..=40)
+            .map(|i| format!("crates/bingo-surface-tui/src/file_{i}.rs\n"))
+            .collect::<String>(),
+    );
+    let state = folded(vec![
+        item(1, user("itm_0", "list the sources")),
+        item(
+            2,
+            tool(
+                "itm_1",
+                "Glob",
+                json!({"pattern": "crates/**/*.rs"}),
+                Some(output),
+                ItemStatus::Completed,
+            ),
+        ),
+    ]);
+    let (mut ui, now) = scene();
+    shown(
+        &mut ui,
+        Open::Pager(crate::pager::Pager::open(bingo_sdk::ItemId::from_raw(
+            "itm_1",
+        ))),
+        now,
+    );
+    both("pager_sheet", &solo(&state), &ui, now);
+}
+
+/// `⏎` on a `✻ Thought for 2s` row: what was thought, whole.
+#[test]
+fn a_thought_opens_in_a_sheet() {
+    let mut thought = crate::test_support::item(
+        "itm_1",
+        ItemStatus::Completed,
+        ItemBody::Reasoning {
+            text: "The manifest first, because the lockfile only says what the\n\
+                   manifest already asked for.\n\n\
+                   Then the crate map, which is the one place the layering is\n\
+                   written down."
+                .into(),
+            provider_metadata: Default::default(),
+        },
+    );
+    thought.completed_at = Some(ts() + jiff::SignedDuration::from_secs(2));
+    let state = folded(vec![item(1, thought)]);
+    let (mut ui, now) = scene();
+    shown(
+        &mut ui,
+        Open::Pager(crate::pager::Pager::open(bingo_sdk::ItemId::from_raw(
+            "itm_1",
+        ))),
+        now,
+    );
+    both("reasoning_sheet", &solo(&state), &ui, now);
+}
+
 /// The card of §4 with a replacement under its title: the colour comes from
 /// the column, the weight from the words that actually moved.
 #[test]

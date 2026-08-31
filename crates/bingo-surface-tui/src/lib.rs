@@ -47,6 +47,7 @@ mod input;
 mod keys;
 mod layers;
 mod markdown;
+mod pager;
 mod panel;
 mod paths;
 mod permission;

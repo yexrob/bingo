@@ -20,6 +20,7 @@ use crate::dialog::Dialog;
 use crate::frame::Regions;
 use crate::history::PromptHistory;
 use crate::layers::{self, Reveal};
+use crate::pager::Pager;
 use crate::rail::{CardId, Pin};
 use crate::scroll::Scroll;
 use crate::search::Search;
@@ -151,6 +152,8 @@ pub enum Open {
     Panel,
     /// The `/resume` list, as a sheet.
     Picker(Picker),
+    /// One block, whole, as a sheet.
+    Pager(Pager),
     /// The tree, as a card above the input box.
     Switcher(Switcher),
 }
@@ -168,7 +171,10 @@ impl Open {
     /// Whether the keyboard belongs to it while it is open. The lists and the
     /// panel answer keys; help is read while a person goes on typing.
     pub fn captures(&self) -> bool {
-        matches!(self, Open::Picker(_) | Open::Switcher(_) | Open::Panel)
+        matches!(
+            self,
+            Open::Picker(_) | Open::Pager(_) | Open::Switcher(_) | Open::Panel
+        )
     }
 
     /// How many frames its arrival takes: a card comes down, a sheet rises.

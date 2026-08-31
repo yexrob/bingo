@@ -18,6 +18,7 @@ use crate::clock::Now;
 use crate::commands::{self, Local};
 use crate::effect::Effect;
 use crate::keys;
+use crate::pager;
 use crate::rail::{self, CardId, Pin};
 use crate::search::Search;
 use crate::select::Cell;
@@ -49,30 +50,8 @@ pub fn on_key(ui: &mut Ui, tree: &Tree, key: KeyEvent, now: Now) -> Vec<Effect> 
     if ui.search.is_some() {
         return searching(ui, key, now);
     }
-    if ui.layer.captures() && matches!(ui.layer.open, Open::Picker(_)) {
-        return picker(ui, key, now);
-    }
-    if chord(key, 'f') {
-        ui.search = Some(Search::open());
-        return Vec::new();
-    }
-    if chord(key, 'g') {
-        toggle_switcher(ui, tree, now);
-        return Vec::new();
-    }
-    if chord(key, 't') {
-        ui.layer.toggle(Open::Panel, now.instant);
-        return Vec::new();
-    }
-    if chord(key, 'o') {
-        toggle_expanded(ui, tree.viewed());
-        return Vec::new();
-    }
-    if ui.layer.captures() {
-        if matches!(ui.layer.open, Open::Panel) {
-            return panel_keys(ui, tree, key, now);
-        }
-        return switcher(ui, tree, key, now);
+    if let Some(effects) = layered(ui, tree, key, now) {
+        return effects;
     }
     if key.code == KeyCode::Esc {
         return escape(ui, tree, now);
@@ -89,6 +68,47 @@ pub fn on_key(ui: &mut Ui, tree: &Tree, key: KeyEvent, now: Now) -> Vec<Effect> 
         return effects;
     }
     editing(ui, tree, key, now)
+}
+
+/// What a layer answers, and the chords that open one.
+///
+/// A list and the pager own every key while they are up — the chords included,
+/// so `g` is the pager's and not the switcher's for as long as a block is open.
+/// The panel and the switcher leave the chords alone, because the chord that
+/// opened one is what closes it.
+fn layered(ui: &mut Ui, tree: &Tree, key: KeyEvent, now: Now) -> Option<Vec<Effect>> {
+    if ui.layer.captures() {
+        match &ui.layer.open {
+            Open::Picker(_) => return Some(picker(ui, key, now)),
+            Open::Pager(_) => return Some(pager::keys(ui, tree, key, now)),
+            _ => {}
+        }
+    }
+    if let Some(chord) = chorded(key) {
+        match chord {
+            'f' => ui.search = Some(Search::open()),
+            'g' => toggle_switcher(ui, tree, now),
+            't' => ui.layer.toggle(Open::Panel, now.instant),
+            'o' => deepen(ui, tree, now),
+            _ => return None,
+        }
+        return Some(Vec::new());
+    }
+    if !ui.layer.captures() {
+        return None;
+    }
+    Some(match ui.layer.open {
+        Open::Panel => panel_keys(ui, tree, key, now),
+        _ => switcher(ui, tree, key, now),
+    })
+}
+
+/// The letter of a control chord, if that is what this key is.
+fn chorded(key: KeyEvent) -> Option<char> {
+    match (key.code, key.modifiers.contains(KeyModifiers::CONTROL)) {
+        (KeyCode::Char(c), true) => Some(c),
+        _ => None,
+    }
 }
 
 /// One pure function from a mouse event to a list of effects, against the
@@ -202,28 +222,69 @@ fn transcript_cell(ui: &Ui, mouse: MouseEvent) -> Option<Cell> {
     })
 }
 
-/// `ctrl+o`: the focused block's result opens whole, else the latest one; a
-/// second press folds it again (§4's `ctrl+o to expand`).
-fn toggle_expanded(ui: &mut Ui, state: &SessionState) {
-    let focused = ui.select.block.as_ref();
-    let target = state
+/// `ctrl+o` only ever opens further: the first press lifts the fold on the
+/// focused result — else the latest — and the second takes the whole of it into
+/// the pager, where `esc` folds it again. One key, one direction (§4's
+/// `ctrl+o to expand`).
+fn deepen(ui: &mut Ui, tree: &Tree, now: Now) {
+    let focused = ui.select.block.clone();
+    let Some(id) = latest(tree.viewed(), focused.as_ref(), has_result) else {
+        return;
+    };
+    if ui.expanded.contains(&id) {
+        pager::open_block(ui, tree, now, Some(&id));
+        return;
+    }
+    ui.expanded.insert(id);
+}
+
+/// The newest item a key acts on: the focused block when the transcript is
+/// holding one, else the last that answers `what`.
+pub fn latest(
+    state: &SessionState,
+    focused: Option<&bingo_sdk::ItemId>,
+    what: impl Fn(&bingo_sdk::Item) -> bool,
+) -> Option<bingo_sdk::ItemId> {
+    state
         .items
         .iter()
         .rev()
         .filter(|item| focused.is_none_or(|id| id == &item.id))
-        .find(|item| has_result(item))
-        .map(|item| item.id.clone());
-    if let Some(id) = target
-        && !ui.expanded.remove(&id)
-    {
-        ui.expanded.insert(id);
-    }
+        .find(|item| what(item))
+        .map(|item| item.id.clone())
 }
 
 fn has_result(item: &bingo_sdk::Item) -> bool {
     match &item.body {
         bingo_sdk::ItemBody::ToolCall { output, .. } => output.is_some(),
         _ => false,
+    }
+}
+
+/// The panel sheet answers its own keys: the cursor walks the kinds the
+/// plugins published, and `⏎` pins one into the rail or takes it back.
+fn panel_keys(ui: &mut Ui, tree: &Tree, key: KeyEvent, now: Now) -> Vec<Effect> {
+    let rows = panel::rows(tree.viewed());
+    match key.code {
+        KeyCode::Up => ui.panel = ui.panel.saturating_sub(1),
+        KeyCode::Down => ui.panel = (ui.panel + 1).min(rows.len().saturating_sub(1)),
+        KeyCode::Esc => ui.layer.close(now.instant),
+        KeyCode::Enter => pin(ui, tree.view(), rows.get(ui.panel)),
+        _ => {}
+    }
+    Vec::new()
+}
+
+fn pin(ui: &mut Ui, session: &SessionId, card: Option<&CardId>) {
+    let Some(card) = card else {
+        return;
+    };
+    let pin = Pin {
+        session: session.clone(),
+        card: card.clone(),
+    };
+    if !ui.pinned.remove(&pin) {
+        ui.pinned.insert(pin);
     }
 }
 
@@ -263,37 +324,6 @@ fn fire(ui: &mut Ui, tree: &Tree, key: char) -> Option<Vec<Effect>> {
         seq: state.seq,
     });
     Some(vec![Effect::Submit(Input::Action { action })])
-}
-
-/// The panel sheet answers its own keys: the cursor walks the kinds the
-/// plugins published, and `⏎` pins one into the rail or takes it back.
-fn panel_keys(ui: &mut Ui, tree: &Tree, key: KeyEvent, now: Now) -> Vec<Effect> {
-    let rows = panel::rows(tree.viewed());
-    match key.code {
-        KeyCode::Up => ui.panel = ui.panel.saturating_sub(1),
-        KeyCode::Down => ui.panel = (ui.panel + 1).min(rows.len().saturating_sub(1)),
-        KeyCode::Esc => ui.layer.close(now.instant),
-        KeyCode::Enter => pin(ui, tree.view(), rows.get(ui.panel)),
-        _ => {}
-    }
-    Vec::new()
-}
-
-fn pin(ui: &mut Ui, session: &SessionId, card: Option<&CardId>) {
-    let Some(card) = card else {
-        return;
-    };
-    let pin = Pin {
-        session: session.clone(),
-        card: card.clone(),
-    };
-    if !ui.pinned.remove(&pin) {
-        ui.pinned.insert(pin);
-    }
-}
-
-fn chord(key: KeyEvent, c: char) -> bool {
-    key.code == KeyCode::Char(c) && key.modifiers.contains(KeyModifiers::CONTROL)
 }
 
 /// A bracketed paste lands verbatim wherever the caret is.
@@ -659,6 +689,14 @@ fn cycle_mode(ui: &mut Ui, state: &SessionState, now: Now) -> Vec<Effect> {
 /// Enter sends, unless the line ends in a backslash — the newline chord for
 /// terminals that cannot tell shift+enter from enter.
 fn enter(ui: &mut Ui, tree: &Tree, now: Now) -> Vec<Effect> {
+    // A block the transcript is holding is what `⏎` is for while nothing is
+    // being typed: it opens whole (design §5). A message outranks it.
+    if ui.composer.is_empty()
+        && let Some(block) = ui.select.block.clone()
+        && pager::open_block(ui, tree, now, Some(&block))
+    {
+        return Vec::new();
+    }
     if ui.composer.text().ends_with('\\') {
         ui.composer.backspace();
         newline(ui);
