@@ -1287,8 +1287,12 @@ mod tests {
         ]);
         let (ui, now) = scene();
         let screen = render_tree(&tree, &ui, now);
-        assert!(screen.contains("reviewer: the plan"), "{screen}");
-        assert!(screen.contains("scout: M9's"), "{screen}");
+        assert!(screen.contains("⏺ reviewer: the plan"), "{screen}");
+        assert!(screen.contains("⏺ scout: M9's"), "{screen}");
+        assert!(
+            screen.contains("> then let us ship it"),
+            "and the one line a person typed is the one on a bar: {screen}"
+        );
         assert!(
             !screen.contains("running") && !screen.contains("idle"),
             "nothing answers a room: {screen}"

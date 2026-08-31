@@ -331,6 +331,41 @@ fn thinking_and_its_decay() {
     both("thinking", &solo(&state), &ui, now);
 }
 
+/// What a background job says when it ends, first line first.
+const JOB: &str = "Background job ab12cd34 (`cargo test --workspace`) exited with code 0 after \
+                   2m 4s.\n`BashOutput` with id \"ab12cd34\" reads what it wrote.";
+
+/// The three sides of one rule in one transcript: a job reporting in and an
+/// agent answering are the machinery, and a person writing from a channel is
+/// a person.
+fn reported() -> Vec<bingo_sdk::Frame> {
+    vec![
+        item(1, user("itm_1", "run the tests in the background")),
+        item(
+            2,
+            assistant("itm_2", "Started. I will say.", ItemStatus::Completed),
+        ),
+        item(3, delivered("itm_3", "bash", None, JOB)),
+        item(
+            4,
+            delivered("itm_4", "agent", Some("reviewer"), "Two nits, else fine."),
+        ),
+        item(
+            5,
+            delivered("itm_5", "channels", Some("mei"), "look at the deploy?"),
+        ),
+    ]
+}
+
+/// The machinery reporting in: each notice is a marked line with what to do
+/// about it under it, not a band the width of the screen. A person's own
+/// words get those, and so does a correspondent the closed set does not name.
+#[test]
+fn quiet_notices() {
+    let (ui, now) = scene();
+    both("quiet_notices", &solo(&folded(reported())), &ui, now);
+}
+
 #[test]
 fn a_room_transcript() {
     let tree = room_tree(vec![
@@ -643,6 +678,37 @@ fn a_card_spends_its_colour_on_the_row_the_keyboard_is_on() {
             ("│", crate::theme::presence()),
         ],
     );
+}
+
+/// The quiet rule where the eye reads it: a notice wears the tool row's own
+/// mark and spends no other colour, and a surface the closed set does not name
+/// keeps the band a person's words are on.
+#[test]
+fn a_notice_is_marked_and_everybody_else_keeps_the_bar() {
+    let (ui, now) = scene();
+    crate::theme::with(truecolor(), || {
+        let painted = painted(120, 40, &solo(&folded(reported())), &ui, now);
+        assert_row_styled(
+            &painted,
+            "Background job",
+            &[
+                ("⏺ ", crate::theme::good()),
+                (JOB.lines().next().unwrap_or_default(), crate::theme::text()),
+            ],
+        );
+        assert!(
+            painted.coloured("BashOutput").is_empty(),
+            "what hangs under it is a result and spends nothing"
+        );
+        let bar = painted.row("look at the deploy");
+        let width: usize = bar.iter().map(|(text, _)| text.width()).sum();
+        assert_eq!(width, 120, "a channel is somebody: {bar:#?}");
+        let ground = crate::theme::as_drawn(crate::theme::raised()).bg;
+        assert!(
+            bar.iter().all(|(_, style)| style.bg == ground),
+            "and somebody's line is a band: {bar:#?}"
+        );
+    });
 }
 
 /// The one place `raised` is spent, and the only rule 24 bits can carry that

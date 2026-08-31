@@ -173,6 +173,24 @@ pub fn user(id: &str, text: &str) -> Item {
     )
 }
 
+/// What a subsystem delivered into a session: a user item stamped with the
+/// surface that sent it, the way `bash`, `agent`, `room` and `schedule` do —
+/// and the way a surface nobody has called quiet does too.
+pub fn delivered(id: &str, surface: &str, principal: Option<&str>, text: &str) -> Item {
+    item(
+        id,
+        ItemStatus::Completed,
+        ItemBody::User {
+            parts: vec![ContentPart::text(text)],
+            origin: Origin {
+                surface: surface.into(),
+                principal: principal.map(str::to_owned),
+                conversation: None,
+            },
+        },
+    )
+}
+
 /// What a member posted into a room: a user item that names who wrote it and
 /// where, as the room plugin's fan-out stamps it.
 pub fn post(id: &str, principal: &str, text: &str) -> Item {
