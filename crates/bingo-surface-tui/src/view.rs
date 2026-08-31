@@ -306,6 +306,11 @@ fn activity(state: &SessionState, now: Now) -> Vec<Line<'static>> {
             theme::dim(),
         ))
     }));
+    // A blank row between the transcript and these, as between any two blocks
+    // (§3): they are not the tail of what was said, they are what is going on.
+    if !out.is_empty() {
+        out.insert(0, Line::default());
+    }
     out
 }
 
