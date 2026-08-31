@@ -241,6 +241,7 @@ dependencies = [
  "bingo-tool-web",
  "clap",
  "futures",
+ "jiff",
  "portable-pty",
  "serde_json",
  "tempfile",
