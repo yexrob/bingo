@@ -7,13 +7,11 @@
 //! the slot that gives way when the line does not fit: it is the one whose
 //! words are already the shortest true thing to say.
 
-use std::time::Duration;
-
 use bingo_sdk::SessionState;
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
-use crate::clock::{self, Now};
+use crate::clock::Now;
 use crate::tree::{self, Status, Tree};
 use crate::ui::Ui;
 use crate::{keys, permission, theme};
@@ -28,8 +26,6 @@ const CONTEXT_WARM: u64 = 80;
 const CONTEXT_BAD: u64 = 90;
 /// What the middle says when nothing else is true and nothing is typed.
 pub const HINT: &str = keys::FOOTER_HINT;
-/// What wants a person pulses once a second (§6).
-pub const PULSE: Duration = Duration::from_secs(1);
 
 /// The status line at this width.
 pub fn line(tree: &Tree, ui: &Ui, width: usize, now: Now) -> Line<'static> {
@@ -39,16 +35,6 @@ pub fn line(tree: &Tree, ui: &Ui, width: usize, now: Now) -> Line<'static> {
         right(tree),
         width,
     )
-}
-
-/// What wants a person alternates between bingo's own colour and plain text,
-/// and rests on `presence` where nothing may move (§6). Every such row in the
-/// surface reads this, so they blink together.
-pub fn attention(now: Now) -> ratatui::style::Style {
-    match now.motion && clock::alternating(now, PULSE) {
-        true => theme::text(),
-        false => theme::presence(),
-    }
 }
 
 /// The permission mode, as the policy published it. `default` is what a
@@ -70,7 +56,7 @@ fn middle(tree: &Tree, ui: &Ui, now: Now) -> Vec<Span<'static>> {
     if let Some(waiting) = count(tree, Wants::Attention) {
         parts.push(Span::styled(
             format!("{waiting} needs you (ctrl+g)"),
-            attention(now),
+            theme::attention(now),
         ));
     }
     if let Some(running) = count(tree, Wants::Running) {

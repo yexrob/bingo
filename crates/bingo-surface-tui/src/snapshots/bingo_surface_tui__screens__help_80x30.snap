@@ -4,7 +4,7 @@ expression: "draw_sized(80, 30, &state, &ui, now)"
 ---
 "enter        send the message                                                   "
 "shift+enter  newline (ctrl+j · alt+enter · \ enter)                             "
-"esc          close dialog, panel or menu · interrupt                            "
+"esc          sheet → card → dropdown → interrupt                                "
 "ctrl+c       interrupt · clear input · twice to exit                            "
 "ctrl+d       exit on an empty input                                             "
 "up/down      prompt history at the first and last line                          "

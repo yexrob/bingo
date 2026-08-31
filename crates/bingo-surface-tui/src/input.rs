@@ -17,6 +17,7 @@ use crate::SURFACE_ID;
 use crate::clock::Now;
 use crate::commands::{self, Local};
 use crate::effect::Effect;
+use crate::keys;
 use crate::permission;
 use crate::search::Search;
 use crate::select::Cell;
@@ -69,13 +70,13 @@ pub fn on_key(ui: &mut Ui, tree: &Tree, key: KeyEvent, now: Now) -> Vec<Effect> 
     if ui.layer.captures() {
         return switcher(ui, tree, key, now);
     }
+    if key.code == KeyCode::Esc {
+        return escape(ui, tree, now);
+    }
     // A prompt raised anywhere in the tree is answered from wherever the
     // person is looking; the handle routes the answer back to who asked.
     if let Some((_, interaction)) = tree.open_interaction() {
         return ui.dialog.on_key(interaction, key, now);
-    }
-    if key.code == KeyCode::Esc {
-        return escape(ui, state, now);
     }
     if let Some(effects) = menu(ui, key) {
         return effects;
@@ -220,38 +221,61 @@ fn leaving(ui: &mut Ui, state: &SessionState, key: KeyEvent, now: Now) -> Option
     }
 }
 
+/// What ctrl+c does is [`keys::interrupt`]'s table; this is only the doing of
+/// it.
 fn interrupt_or_exit(ui: &mut Ui, state: &SessionState, now: Now) -> Vec<Effect> {
-    if state.busy() {
-        return vec![Effect::Interrupt];
+    let pressed = keys::Pressed {
+        busy: state.busy(),
+        typing: !ui.composer.is_empty(),
+        armed: ui.exit_armed(now.instant),
+    };
+    match keys::interrupt(pressed) {
+        keys::Interrupt::Turn => return vec![Effect::Interrupt],
+        keys::Interrupt::Clear => {
+            ui.composer.clear();
+            ui.edited();
+        }
+        keys::Interrupt::Exit => return vec![Effect::Exit],
+        keys::Interrupt::Arm => {
+            ui.armed = Some(now.instant);
+            ui.notify(Level::Info, ARM_HINT, now.instant);
+        }
     }
-    if !ui.composer.is_empty() {
-        ui.composer.clear();
-        ui.edited();
-        return Vec::new();
-    }
-    if ui.exit_armed(now.instant) {
-        return vec![Effect::Exit];
-    }
-    ui.armed = Some(now.instant);
-    ui.notify(Level::Info, ARM_HINT, now.instant);
     Vec::new()
 }
 
-/// Esc closes the innermost thing that is open, then interrupts: sheet, card,
-/// dropdown, turn (§7). The card is answered before this, by the dialog.
-fn escape(ui: &mut Ui, state: &SessionState, now: Now) -> Vec<Effect> {
-    if ui.layer.showing() {
-        ui.layer.close(now.instant);
-        return Vec::new();
-    }
-    if !ui.suggestions().is_empty() {
-        ui.menu.dismissed = true;
-        return Vec::new();
-    }
-    if state.busy() {
-        return vec![Effect::Interrupt];
+/// Esc closes the innermost thing that is open and then interrupts, in the
+/// order of [`keys::ESCAPES`]. Leaving a card is the card's own answer, so
+/// that rung goes back to the dialog.
+fn escape(ui: &mut Ui, tree: &Tree, now: Now) -> Vec<Effect> {
+    let open = keys::Open {
+        // One layer is open at a time, whichever form it takes.
+        sheet: ui.layer.showing(),
+        card: tree.open_interaction().is_some(),
+        dropdown: !ui.suggestions().is_empty(),
+        busy: tree.viewed().busy(),
+    };
+    match keys::escape(open) {
+        Some(keys::Escape::Sheet) => ui.layer.close(now.instant),
+        Some(keys::Escape::Card) => return cancel(ui, tree, now),
+        Some(keys::Escape::Dropdown) => ui.menu.dismissed = true,
+        Some(keys::Escape::Interrupt) => return vec![Effect::Interrupt],
+        None => {}
     }
     Vec::new()
+}
+
+/// Leaving the card that is asking: the kernel's own cancel or denial, which
+/// the dialog knows and this does not.
+fn cancel(ui: &mut Ui, tree: &Tree, now: Now) -> Vec<Effect> {
+    let Some((_, interaction)) = tree.open_interaction() else {
+        return Vec::new();
+    };
+    ui.dialog.on_key(
+        interaction,
+        KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+        now,
+    )
 }
 
 fn picker(ui: &mut Ui, key: KeyEvent, now: Now) -> Vec<Effect> {
@@ -846,6 +870,9 @@ mod tests {
 
     // ---- esc ------------------------------------------------------------
 
+    /// One press per rung of [`keys::ESCAPES`], in the order the stack is
+    /// obeyed: a sheet over a card is what `esc` closes first, because
+    /// dismissing the help must never answer the question underneath it.
     #[test]
     fn esc_closes_the_innermost_thing_then_interrupts() {
         let state = folded(vec![
@@ -856,6 +883,9 @@ mod tests {
         ui.dialog.focus_on(state.interactions.first());
         ui.layer.show(Open::Help, now.instant);
 
+        assert!(press(&mut ui, &state, key(KeyCode::Esc), now).is_empty());
+        assert!(!ui.layer.showing(), "the sheet is the outermost thing");
+
         assert_eq!(
             press(&mut ui, &state, key(KeyCode::Esc), now),
             vec![Effect::Answer {
@@ -863,13 +893,10 @@ mod tests {
                 answer: Answer::Deny { feedback: None },
                 activation: Activation::Keyboard,
             }],
-            "the dialog is first"
+            "then the card, whose own answer leaving it is"
         );
 
         let busy = busy();
-        assert!(press(&mut ui, &busy, key(KeyCode::Esc), now).is_empty());
-        assert!(!ui.layer.showing(), "then the help sheet");
-
         write(&mut ui, &busy, "/he", now);
         assert!(press(&mut ui, &busy, key(KeyCode::Esc), now).is_empty());
         assert!(ui.menu.dismissed, "then the dropdown");
@@ -878,16 +905,6 @@ mod tests {
             press(&mut ui, &busy, key(KeyCode::Esc), now),
             vec![Effect::Interrupt],
             "then the running turn"
-        );
-        assert!(
-            press(
-                &mut ui,
-                &crate::test_support::state(),
-                key(KeyCode::Esc),
-                now
-            )
-            .is_empty(),
-            "and then nothing"
         );
     }
 

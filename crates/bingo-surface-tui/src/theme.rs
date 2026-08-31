@@ -286,6 +286,9 @@ pub const BREATH_STEPS: u8 = 5;
 /// How dim a breath goes: 65 % of `presence` (§6).
 const BREATH_FLOOR: f32 = 0.65;
 
+/// What wants a person pulses once a second (§6).
+pub const PULSE: std::time::Duration = std::time::Duration::from_secs(1);
+
 /// bingo breathing — the activity row's sparkle and the input box's border
 /// while a turn runs. `level` is 0 at the bottom of the breath and 1 at the
 /// top of it.
@@ -317,6 +320,17 @@ pub fn comet(age: f32) -> Style {
         Colors::Plain => Style::new(),
         Colors::Ansi => two_ways(age, glow(), text()),
         Colors::True(palette) => Style::new().fg(mix(palette.glow, palette.text, age)),
+    }
+}
+
+/// What wants a person, wherever it is said — the `N needs you` notice, a
+/// waiting child's row, its line in the switcher. It alternates with plain
+/// text once a second so the eye is drawn back to it, and rests on bingo's
+/// own colour where nothing may move (§6).
+pub fn attention(now: crate::clock::Now) -> Style {
+    match now.motion && crate::clock::alternating(now, PULSE) {
+        true => text(),
+        false => presence(),
     }
 }
 
@@ -559,8 +573,6 @@ mod tests {
                     "panel.rs",
                     "preview.rs",
                     "search.rs",
-                    // the quiet half of what pulses for a person
-                    "status.rs",
                     "transcript.rs",
                     "tree.rs",
                     "view.rs",
@@ -600,7 +612,6 @@ mod tests {
                     "layers.rs",
                     "search.rs",
                     "select.rs",
-                    "status.rs",
                     "transcript.rs",
                     "tree.rs",
                     "view.rs",
@@ -626,6 +637,8 @@ mod tests {
             ("fading", &["status.rs"]),
             // the context notice as the window fills
             ("warming", &["status.rs"]),
+            // what wants a person, wherever it is said
+            ("attention", &["status.rs", "transcript.rs", "tree.rs"]),
         ];
         for (token, files) in allowed {
             let mut seen: Vec<String> = sources()

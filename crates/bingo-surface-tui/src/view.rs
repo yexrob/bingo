@@ -122,7 +122,7 @@ fn layers(tree: &Tree, ui: &Ui, frame: &mut Frame, regions: Regions, now: Now) {
     );
     ui.painted.borrow_mut().card = None;
     match ui.layer.drawn(now) {
-        Some(reveal) => layer(tree, ui, frame, above, reveal, width),
+        Some(reveal) => layer(tree, ui, frame, above, reveal, width, now),
         None => card(tree, ui, frame, regions, now),
     }
 }
@@ -136,11 +136,12 @@ fn layer(
     above: Rect,
     reveal: layers::Reveal,
     width: usize,
+    now: Now,
 ) {
     match &ui.layer.open {
         Open::Nothing => {}
         // A dropdown above the input box, like the `/` menu: nothing dims.
-        Open::Switcher(switcher) => over(frame, above, switcher_lines(tree, switcher)),
+        Open::Switcher(switcher) => over(frame, above, switcher_lines(tree, switcher, now)),
         Open::Help => sheet(frame, above, help(ui, width), reveal),
         Open::Panel => sheet(frame, above, panel::lines(tree.viewed()), reveal),
         Open::Picker(picker) => sheet(frame, above, picker_lines(picker), reveal),
@@ -400,8 +401,8 @@ fn help(ui: &Ui, width: usize) -> Vec<Line<'static>> {
 }
 
 /// The `ctrl+g` list: the root and its agents, with what each is doing.
-fn switcher_lines(tree: &Tree, switcher: &Switcher) -> Vec<Line<'static>> {
-    tree::switcher_lines(&tree.rows(), switcher.selected)
+fn switcher_lines(tree: &Tree, switcher: &Switcher, now: Now) -> Vec<Line<'static>> {
+    tree::switcher_lines(&tree.rows(), switcher.selected, now)
 }
 
 fn picker_lines(picker: &Picker) -> Vec<Line<'static>> {

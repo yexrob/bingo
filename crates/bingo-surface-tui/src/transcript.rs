@@ -488,8 +488,14 @@ fn child_row(child: &SessionState, input: &Value, rows: &Rows<'_>) -> Vec<Line<'
         rows,
     );
     if let Some(activity) = tree::activity(child) {
+        // A child that is waiting on a person pulses until they go to it;
+        // one that is simply working recedes like every other result.
+        let style = match tree::asking(child) {
+            true => theme::attention(rows.now),
+            false => theme::dim(),
+        };
         out.extend(returns(
-            vec![Line::from(Span::styled(activity, theme::dim()))],
+            vec![Line::from(Span::styled(activity, style))],
             rows,
         ));
     }
