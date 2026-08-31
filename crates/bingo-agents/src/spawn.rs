@@ -53,6 +53,11 @@ pub struct SpawnArgs {
     /// Return at once and be told when it finishes (the default), or `false`
     /// to wait for its reply as the result of this call.
     pub background: Option<bool>,
+    /// Seat it silent: the prompt is its standing brief, kept unread, and it
+    /// runs no turn until something wakes it — a post in a room it is in, or
+    /// a message. Nothing here is told when it finishes. Use it for the
+    /// members of a room, so one kickoff post starts all of them at once.
+    pub standby: Option<bool>,
     /// The model the sub-agent runs on; this session's by default. Call
     /// `ListModels` to see what is available instead of guessing an id.
     pub model: Option<String>,
@@ -67,6 +72,26 @@ pub struct SpawnArgs {
 impl SpawnArgs {
     fn background(&self) -> bool {
         self.background.unwrap_or(true)
+    }
+
+    fn standby(&self) -> bool {
+        self.standby.unwrap_or(false)
+    }
+
+    /// How the prompt reaches the child. A standby member's is held at the
+    /// head of its queue and read by whatever turn something else opens
+    /// (ADR-0027 §1); waiting for such an agent is a deadlock asked for by
+    /// name, so the pair is refused in words (ADR-0027 §5).
+    fn delivery(&self) -> Result<Delivery, String> {
+        match (self.standby(), self.background()) {
+            (false, _) => Ok(Delivery::Wake),
+            (true, true) => Ok(Delivery::Hold),
+            (true, false) => Err("a standby agent runs no turn until something wakes it, so \
+                 waiting for its reply would wait forever: spawn it with \
+                 `background: true` and wake it with a room post or a message, \
+                 or drop `standby` to have it answer this prompt now"
+                .into()),
+        }
     }
 
     /// What the agent is called before the siblings are consulted: the name
@@ -223,6 +248,7 @@ impl SpawnAgentTool {
         cx: &ToolContext,
     ) -> Result<(String, SessionId, Attachment), ToolError> {
         let host = &cx.host;
+        let delivery = args.delivery().map_err(ToolError::Failed)?;
         let definitions = library::load(&cx.env, &cx.cwd);
         let definition = pick(args.agent.as_deref(), &definitions).map_err(ToolError::Failed)?;
         let plan = Plan::of(args, definition, host).await.map_err(failed)?;
@@ -231,7 +257,7 @@ impl SpawnAgentTool {
         let session = attachment.session.clone();
         let prompt = Input::text(args.prompt.clone(), message::origin(None));
         cx.host
-            .deliver(&session, IntentId::mint(), prompt, Delivery::Wake)
+            .deliver(&session, IntentId::mint(), prompt, delivery)
             .await
             .map_err(failed)?;
         Ok((name, session, attachment))
@@ -240,6 +266,24 @@ impl SpawnAgentTool {
 
 fn failed(error: KernelError) -> ToolError {
     ToolError::Failed(error.message)
+}
+
+/// The address the caller writes to afterwards, as every spawn hands it back.
+fn named(name: &str, session: &SessionId) -> String {
+    json!({ "name": name, "session": session.as_str() }).to_string()
+}
+
+/// A standby member's receipt: the address, and what is true of it — it has
+/// read nothing, it will not be waited for, and nothing here is told when its
+/// turns end (ADR-0027 §3).
+fn seated(name: &str, session: &SessionId) -> String {
+    format!(
+        "{}\n{name} is seated and idle: its brief is held unread and no turn \
+         has opened. Whatever wakes it — a post in a room it is in, a message \
+         — opens the turn that reads the brief first. Nothing will be reported \
+         back here when its turns end.",
+        named(name, session)
+    )
 }
 
 #[async_trait]
@@ -277,6 +321,11 @@ impl Tool for SpawnAgentTool {
             Err(ToolError::Failed(message)) => return Ok(ToolOutput::error(message)),
             Err(other) => return Err(other),
         };
+        // No watcher on a standby member: a teammate is not a one-shot task,
+        // and nothing wakes this session when its turns end (ADR-0027 §3).
+        if args.standby() {
+            return Ok(ToolOutput::text(seated(&name, &session)));
+        }
         if !args.background() {
             let reply = watch::next_reply(&cx.host, &mut attachment, &cx.cancel).await?;
             return Ok(watch::output(&name, &session, &reply));
@@ -284,9 +333,7 @@ impl Tool for SpawnAgentTool {
         let host = cx.host.clone();
         let parent = cx.session.clone();
         tokio::spawn(watch::report(attachment, host, parent, name.clone()));
-        Ok(ToolOutput::text(
-            json!({ "name": name, "session": session.as_str() }).to_string(),
-        ))
+        Ok(ToolOutput::text(named(&name, &session)))
     }
 }
 
@@ -445,6 +492,111 @@ mod tests {
             .expect("a spawn");
         assert_eq!(host.spawned().len(), 2, "the locked name was tried first");
         assert_eq!(host.spawned()[1].title.as_deref(), Some("reviewer-2"));
+    }
+
+    /// Long enough for a watcher, had one been left, to have reported: the
+    /// fleet's script is ready at once, so a few turns of the scheduler are
+    /// the whole of what it needs.
+    async fn settled() {
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+    }
+
+    async fn everything_delivered(input: Value) -> Vec<(SessionId, Input, Delivery)> {
+        let (_, host) = spawned(input).await;
+        settled().await;
+        host.delivered()
+    }
+
+    /// One spawn's spec, less the two fields a fresh fleet's minted ids make
+    /// unique — asserted here rather than compared.
+    async fn minted(input: Value) -> SessionSpec {
+        let (_, host) = spawned(input).await;
+        let mut spec = host.spawned()[0].clone();
+        assert!(
+            spec.key.take().is_some_and(|key| key.ends_with("/counter")),
+            "the key names the child"
+        );
+        assert!(spec.parent.take().is_some(), "and hangs off the call");
+        spec
+    }
+
+    /// ADR-0027 §1: the arm changes how the brief arrives, not who arrives.
+    #[tokio::test]
+    async fn a_standby_member_is_minted_exactly_as_a_woken_one() {
+        let woken = minted(json!({ "prompt": "go", "name": "counter" })).await;
+        let seated = minted(json!({ "prompt": "go", "name": "counter", "standby": true })).await;
+        assert_eq!(woken, seated);
+    }
+
+    #[tokio::test]
+    async fn a_standby_spawn_names_the_child_and_says_it_has_read_nothing() {
+        let (out, host) = spawned(json!({
+            "prompt": "count the evens", "name": "counter", "standby": true
+        }))
+        .await;
+        assert!(!out.is_error);
+        let text = out.parts[0].as_text().unwrap_or_default();
+        let (address, truth) = text.split_once('\n').expect("the address, then the truth");
+        let named: Value = serde_json::from_str(address).expect("a name and a session");
+        assert_eq!(named["name"], "counter");
+        assert!(truth.contains("seated and idle"), "{truth}");
+        assert!(truth.contains("Nothing will be reported back"), "{truth}");
+
+        let delivered = host.delivered();
+        assert_eq!(delivered.len(), 1);
+        assert_eq!(delivered[0].2, Delivery::Hold, "the brief waits to be read");
+        let Input::Text { text, .. } = &delivered[0].1 else {
+            panic!("a brief is text");
+        };
+        assert_eq!(text, "count the evens");
+    }
+
+    /// Whether the parent is ever woken about this child is the whole of the
+    /// difference (ADR-0027 §3): the same script, the same settling.
+    #[tokio::test]
+    async fn a_standby_member_leaves_no_watcher_to_wake_its_parent() {
+        let watched = everything_delivered(json!({ "prompt": "go" })).await;
+        assert_eq!(watched.len(), 2, "the prompt, then the child's end");
+        assert_eq!(watched[0].2, Delivery::Wake);
+
+        let seated = everything_delivered(json!({ "prompt": "go", "standby": true })).await;
+        assert_eq!(seated.len(), 1, "the brief, and nothing ever after it");
+        assert_eq!(seated[0].2, Delivery::Hold);
+    }
+
+    /// ADR-0027 §5: a deadlock asked for by name is answered in words, and
+    /// no child is minted to be waited on.
+    #[tokio::test]
+    async fn a_standby_agent_nobody_could_wait_for_is_refused_in_words() {
+        let (out, host) =
+            spawned(json!({ "prompt": "go", "standby": true, "background": false })).await;
+        assert!(out.is_error);
+        let text = out.parts[0].as_text().unwrap_or_default();
+        assert!(text.contains("wait forever"), "{text}");
+        assert!(host.spawned().is_empty(), "nothing to wait on was started");
+        assert!(host.delivered().is_empty());
+    }
+
+    #[test]
+    fn standby_holds_the_brief_and_a_plain_spawn_wakes_on_it() {
+        let args = |value: Value| serde_json::from_value::<SpawnArgs>(value).expect("args");
+        let plain = args(json!({ "prompt": "p" }));
+        assert!(
+            !plain.standby(),
+            "a spawn is a wake unless it says otherwise"
+        );
+        assert_eq!(plain.delivery(), Ok(Delivery::Wake));
+        assert_eq!(
+            args(json!({ "prompt": "p", "standby": true })).delivery(),
+            Ok(Delivery::Hold)
+        );
+        assert!(
+            args(json!({ "prompt": "p", "standby": true, "background": false }))
+                .delivery()
+                .is_err()
+        );
     }
 
     #[tokio::test]
