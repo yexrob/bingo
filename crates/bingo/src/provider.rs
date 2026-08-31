@@ -163,7 +163,7 @@ fn stty(argument: &str) -> bool {
 /// The file as JSON, in the order it was written (`serde_json/preserve_order`).
 /// A file that is not plain JSON is not this command's to rewrite: the layers
 /// are read as JSONC, and a round trip would drop the comments in it.
-fn read(path: &Path) -> Result<Map<String, Value>, KernelError> {
+pub(crate) fn read(path: &Path) -> Result<Map<String, Value>, KernelError> {
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Map::new()),
@@ -227,7 +227,7 @@ fn insert(
 
 /// Through a temporary file and a rename: a settings file a person wrote is
 /// not something to lose half of.
-fn write(path: &Path, document: &Map<String, Value>) -> Result<(), KernelError> {
+pub(crate) fn write(path: &Path, document: &Map<String, Value>) -> Result<(), KernelError> {
     let directory = path
         .parent()
         .ok_or_else(|| internal(format!("{} has no directory", path.display())))?;

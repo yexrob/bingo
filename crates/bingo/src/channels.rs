@@ -1,14 +1,90 @@
-//! `bingo channels secret <adapter>`: one secret, pasted and put where a
-//! gateway started at boot can read it (ADR-0020 §8).
+//! `bingo channels add <adapter>` and `bingo channels secret <adapter>`: a
+//! channel configured in one sitting, and a secret rotated on its own
+//! (ADR-0020 §8, user-directed 2026-09-01: the add flow asks for the app id
+//! and the secret together).
 //!
-//! It runs before any kernel exists, like `provider add` — an adapter is built
-//! at boot, so what this writes is what the *next* run signs with. The typing
-//! is not echoed and the value is never printed back, here or by `doctor`; the
-//! receipt names the file and the key and stops there.
+//! Both run before any kernel exists, like `provider add` — an adapter is
+//! built at boot, so what these write is what the *next* run reads. Two files
+//! are touched, each for what it is: the app id goes to the user settings
+//! layer, the secret to `auth.json` (0600) and never to a file a project
+//! layer commits. The typing of a secret is not echoed and the value is never
+//! printed back, here or by `doctor`.
 
 use bingo_sdk::{Env, ErrorCode, KernelError};
+use serde_json::Value;
 
+use crate::login::line;
 use crate::provider::unechoed;
+
+/// Ask for everything the adapter needs — the app id in the clear (it is
+/// public), the secret unechoed — and write each where it belongs.
+pub async fn add(env: &Env, adapter: &str) -> Result<String, KernelError> {
+    let wanted = signing(adapter)?;
+    eprint!("App id for {adapter} (public, goes to the settings): ");
+    let app_id = line().await?;
+    if app_id.is_empty() {
+        return Err(invalid("an app id is what the platform knows you as"));
+    }
+    eprint!("Paste the {adapter} app secret (not shown): ");
+    let secret = unechoed().await?;
+    if secret.is_empty() {
+        return Err(invalid(
+            "nothing was pasted; neither file was touched".to_string(),
+        ));
+    }
+    let settings = configured(env, adapter, &app_id)?;
+    let auth = bingo_channels::secret::store(env, wanted.id, secret)
+        .map_err(|e| KernelError::new(ErrorCode::Internal, e))?;
+    Ok([
+        format!(
+            "{adapter} is configured: its app id is in {}, its secret in {} \
+             under `{}`, mode 0600.",
+            settings.display(),
+            auth.display(),
+            bingo_channels::secret::credential(adapter)
+        ),
+        "`bingo gateway restart` (or `start`) picks it up.".into(),
+    ]
+    .join("\n"))
+}
+
+/// The app id into the user settings layer, through the same round trip
+/// `provider add` uses; the spelling of the key is the plugin's
+/// (`from_flags`), so this file never learns how a channel is written down.
+fn configured(env: &Env, adapter: &str, app_id: &str) -> Result<std::path::PathBuf, KernelError> {
+    let path = env.config_dir.join("settings.json");
+    let mut document = crate::provider::read(&path)?;
+    let layer = bingo_channels::from_flags(&[format!("{adapter}={app_id}")])
+        .map_err(|e| KernelError::new(ErrorCode::InvalidInput, e))?;
+    merge(&mut document, layer)?;
+    crate::provider::write(&path, &document)?;
+    Ok(path)
+}
+
+/// The flag layer's `channels.<adapter>` object into the document, replacing
+/// that adapter's entry and moving nothing beside it.
+fn merge(
+    document: &mut serde_json::Map<String, Value>,
+    layer: serde_json::Map<String, Value>,
+) -> Result<(), KernelError> {
+    let Some(Value::Object(named)) = layer.get(bingo_channels::SETTING) else {
+        return Ok(());
+    };
+    let channels = document
+        .entry(bingo_channels::SETTING)
+        .or_insert_with(|| Value::Object(serde_json::Map::new()))
+        .as_object_mut()
+        .ok_or_else(|| {
+            invalid(format!(
+                "`{}` in the settings is not an object",
+                bingo_channels::SETTING
+            ))
+        })?;
+    for (name, value) in named {
+        channels.insert(name.clone(), value.clone());
+    }
+    Ok(())
+}
 
 /// Ask for the secret, refuse an adapter that signs with nothing, and write it.
 pub async fn secret(env: &Env, adapter: &str) -> Result<String, KernelError> {

@@ -115,10 +115,10 @@ pub fn preflight(patient: &Patient<'_>) -> Result<(), KernelError> {
     let merged = merged_channels(&layers);
     if bingo_channels::secret::configured(&merged).is_empty() {
         return refuse(
-            "no channel is configured: name one under `channels` in the settings \
-             — e.g. \"channels\": { \"feishu\": { \"appId\": \"cli_…\" } } — and give \
-             it a secret with `bingo channels secret <adapter>`. A gateway with \
-             no channel would only crash-loop under its supervisor."
+            "no channel is configured: `bingo channels add feishu` asks for the \
+             app id and the secret and writes both where the next run reads \
+             them (or name one under `channels` in the settings by hand). A \
+             gateway with no channel would only crash-loop under its supervisor."
                 .into(),
         );
     }
@@ -621,8 +621,8 @@ mod tests {
             .expect_err("no channel is configured")
             .message;
         assert!(refused.contains("no channel is configured"), "{refused}");
-        assert!(refused.contains("\"channels\""), "{refused}");
-        assert!(refused.contains("bingo channels secret"), "{refused}");
+        assert!(refused.contains("bingo channels add"), "{refused}");
+        assert!(refused.contains("crash-loop"), "{refused}");
     }
 
     #[test]

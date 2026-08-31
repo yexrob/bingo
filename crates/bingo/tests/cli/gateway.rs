@@ -232,7 +232,7 @@ fn a_start_with_no_channel_refuses_before_anything_moves() {
     assert_eq!(out.status.code(), Some(1), "stdout: {}", stdout(&out));
     let said = stderr(&out);
     assert!(said.contains("no channel is configured"), "{said}");
-    assert!(said.contains("bingo channels secret"), "{said}");
+    assert!(said.contains("bingo channels add"), "{said}");
     assert!(!gateway.pidfile().exists(), "nothing was spawned");
 
     let install = gateway.verb(&["install"]);
@@ -435,6 +435,39 @@ fn a_pasted_channel_secret_lands_in_auth_json_and_doctor_names_its_source() {
         "{said}"
     );
     assert!(!said.contains("s-from-the-shell"), "{said}");
+}
+
+/// `channels add`: the app id and the secret in one sitting (user-directed),
+/// each written where it belongs, and a settings neighbour untouched.
+#[test]
+fn channels_add_asks_for_both_and_writes_each_where_it_belongs() {
+    let home = tempfile::tempdir().unwrap();
+    let config = home.path().join(".bingo");
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::write(config.join("settings.json"), r#"{ "provider": "openai" }"#).unwrap();
+
+    let mut cmd = bingo();
+    let out = typed(
+        cmd.env("HOME", home.path())
+            .args(["channels", "add", "feishu"]),
+        &["cli_myapp", "s-added-not-printed"],
+    );
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    let said = stdout(&out);
+    assert!(said.contains("settings.json"), "{said}");
+    assert!(said.contains("auth.json"), "{said}");
+    assert!(said.contains("gateway restart"), "{said}");
+    assert!(!said.contains("s-added-not-printed"), "no echo: {said}");
+
+    let settings = std::fs::read_to_string(config.join("settings.json")).unwrap();
+    assert!(settings.contains("\"appId\": \"cli_myapp\""), "{settings}");
+    assert!(
+        settings.contains("\"provider\": \"openai\""),
+        "a neighbour survived the round trip: {settings}"
+    );
+    let auth = std::fs::read_to_string(home.path().join(".bingo/data/auth.json")).unwrap();
+    assert!(auth.contains("s-added-not-printed"), "{auth}");
+    assert!(auth.contains("channels.feishu"), "{auth}");
 }
 
 // ---- the supervisor, faked ------------------------------------------------

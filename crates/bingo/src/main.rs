@@ -186,8 +186,14 @@ enum ProviderAction {
 
 #[derive(Subcommand, Debug)]
 enum ChannelsAction {
-    /// Paste a channel's app secret into the credential store, so a gateway
-    /// started at boot can read it (ADR-0020 §8).
+    /// Ask for the app id and the secret together, and write each where the
+    /// next run reads it (ADR-0020 §8).
+    Add {
+        /// The adapter id, e.g. `feishu`.
+        adapter: String,
+    },
+    /// Paste a channel's app secret into the credential store on its own —
+    /// rotation, when the app id already stands.
     Secret {
         /// The adapter id, e.g. `feishu`.
         adapter: String,
@@ -414,6 +420,9 @@ async fn before_any_host(cli: &Cli, cwd: &std::path::Path) -> Option<Result<i32,
     match &cli.command {
         Some(Command::Provider { .. }) => Some(added_provider(&env).await),
         Some(Command::Channels {
+            action: Some(ChannelsAction::Add { adapter }),
+        }) => Some(channel_add(&env, adapter).await),
+        Some(Command::Channels {
             action: Some(ChannelsAction::Secret { adapter }),
         }) => Some(channel_secret(&env, adapter).await),
         Some(Command::Gateway { verb }) if !verb.is_run() => {
@@ -421,6 +430,12 @@ async fn before_any_host(cli: &Cli, cwd: &std::path::Path) -> Option<Result<i32,
         }
         _ => None,
     }
+}
+
+/// `bingo channels add <adapter>`: app id and secret in one sitting.
+async fn channel_add(env: &Env, adapter: &str) -> Result<i32, KernelError> {
+    println!("{}", channels::add(env, adapter).await?);
+    Ok(0)
 }
 
 /// `bingo channels secret <adapter>` (ADR-0020 §8).
