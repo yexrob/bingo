@@ -3,8 +3,11 @@
 
 use async_trait::async_trait;
 use bingo_sdk::{Tool, ToolContext, ToolError, ToolOutput, ToolSpec, ToolTraits, input_schema};
+use schemars::JsonSchema;
+use serde::Deserialize;
 use serde_json::Value;
 
+use crate::board::{self, In};
 use crate::task::Draft;
 use crate::{failed, journal, task};
 
@@ -15,7 +18,19 @@ the subject in the imperative — \"write the plan\", not \"writing the plan\" \
 while the task is in progress. `blockedBy` names the ids that must finish \
 before this task can start, `blocks` the ids waiting on it. One task per unit \
 of work someone would tick off; the list survives the run, so record what is \
-worth coming back to.";
+worth coming back to. With `in`, the task goes on a room's shared board \
+instead — everyone in the room reads and writes that one list, and two \
+writers at once overwrite each other, so put a task there once and let its \
+owner move it on.";
+
+/// What `TaskCreate` takes: the task, and the board it goes on.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CreateArgs {
+    #[serde(flatten)]
+    pub draft: Draft,
+    #[serde(flatten)]
+    pub board: In,
+}
 
 /// Reading the list, adding to it, writing it back.
 #[derive(Debug, Default, Clone, Copy)]
@@ -27,7 +42,7 @@ impl Tool for TaskCreateTool {
         ToolSpec {
             name: "TaskCreate".into(),
             description: DESCRIPTION.into(),
-            input_schema: input_schema::<Draft>(),
+            input_schema: input_schema::<CreateArgs>(),
             meta: Default::default(),
         }
     }
@@ -37,11 +52,17 @@ impl Tool for TaskCreateTool {
     }
 
     async fn call(&self, input: Value, cx: &ToolContext) -> Result<ToolOutput, ToolError> {
-        let draft: Draft =
+        let args: CreateArgs =
             serde_json::from_value(input).map_err(|e| ToolError::InvalidInput(e.to_string()))?;
-        let mut tasks = journal::read(&cx.host, &cx.session).await.map_err(failed)?;
-        let task = task::create(&mut tasks, draft);
-        journal::write(&cx.host, &cx.session, &tasks)
+        let board = match board::of(&cx.host, &cx.session, &args.board).await {
+            Ok(board) => board,
+            Err(error) => return crate::misaddressed(error),
+        };
+        let mut tasks = journal::read(&cx.host, &board.session)
+            .await
+            .map_err(failed)?;
+        let task = task::create(&mut tasks, args.draft);
+        journal::write(&cx.host, &board.session, &tasks)
             .await
             .map_err(failed)?;
         Ok(ToolOutput::text(format!(
@@ -121,6 +142,53 @@ mod tests {
         assert!(matches!(error, ToolError::InvalidInput(_)), "{error:?}");
     }
 
+    /// The board is a room's list, reached by a name and nothing else: the
+    /// caller's own list is untouched by a call that named one.
+    #[tokio::test]
+    async fn a_task_created_in_a_room_lands_on_the_room_s_list() {
+        let journals = Journals::new();
+        let root = journals.session();
+        let room = journals.room(&root, "#design");
+        let out = TaskCreateTool
+            .call(
+                json!({"subject": "write the plan", "in": "#design"}),
+                &tool_context(&root, &journals),
+            )
+            .await
+            .expect("a task");
+        assert_eq!(text(&out), "Created #1: write the plan");
+
+        let host = journals.handle();
+        assert_eq!(
+            journal::read(&host, &room).await.expect("the board")[0].subject,
+            "write the plan"
+        );
+        assert!(
+            journal::read(&host, &root)
+                .await
+                .expect("its own")
+                .is_empty(),
+            "the caller's own list was written to"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_board_nothing_answers_to_is_an_error_the_model_can_read() {
+        let journals = Journals::new();
+        let root = journals.session();
+        journals.room(&root, "#design");
+        let out = TaskCreateTool
+            .call(
+                json!({"subject": "write the plan", "in": "#nowhere"}),
+                &tool_context(&root, &journals),
+            )
+            .await
+            .expect("an output, not a failure");
+        assert!(out.is_error);
+        assert!(text(&out).contains("#nowhere"), "{}", text(&out));
+        assert!(text(&out).contains("#design"), "{}", text(&out));
+    }
+
     #[test]
     fn the_schema_is_a_bare_object_and_the_traits_are_the_crate_s() {
         let spec = TaskCreateTool.spec();
@@ -129,6 +197,8 @@ mod tests {
         assert!(spec.input_schema.get("$schema").is_none());
         assert!(spec.input_schema["properties"].get("activeForm").is_some());
         assert!(spec.input_schema["properties"].get("blockedBy").is_some());
+        assert!(spec.input_schema["properties"].get("in").is_some());
+        assert_eq!(spec.input_schema["required"], json!(["subject"]));
         assert_eq!(TaskCreateTool.traits(&Value::Null), crate::traits());
     }
 }
