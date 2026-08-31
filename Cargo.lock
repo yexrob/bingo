@@ -451,6 +451,7 @@ name = "bingo-provider-anthropic"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "bingo-auth-oauth",
  "bingo-sdk",
  "futures",
  "insta",
@@ -459,6 +460,7 @@ dependencies = [
  "schemars",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "wiremock",
 ]
