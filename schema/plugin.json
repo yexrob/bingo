@@ -1,0 +1,1411 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "bingo plugin",
+  "protocol": 1,
+  "$defs": {
+    "Action": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "args": {
+          "default": null
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "description": "A typed action a client asks for (GUI buttons, hosts); the kernel dispatches it to a command."
+    },
+    "ActionItem": {
+      "type": "object",
+      "properties": {
+        "label": {
+          "type": "string"
+        },
+        "action": {
+          "$ref": "#/$defs/Action"
+        },
+        "key": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1,
+          "maxLength": 1,
+          "description": "A single-key hint; the surface may use another key."
+        }
+      },
+      "required": [
+        "label",
+        "action"
+      ],
+      "description": "A button: the surface fires `Input::Action` with `action` (ADR-0008 §1)."
+    },
+    "ArgSpec": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "none"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "hint": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "free"
+            }
+          },
+          "required": [
+            "kind",
+            "hint"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "source": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "catalog"
+            }
+          },
+          "required": [
+            "kind",
+            "source"
+          ],
+          "description": "Completed from a catalog kind the command validates against."
+        }
+      ]
+    },
+    "CommandCompleteParams": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "partial": {
+          "type": "string"
+        },
+        "cwd": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "partial",
+        "cwd"
+      ]
+    },
+    "CommandCompleteResult": {
+      "type": "object",
+      "properties": {
+        "completions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Completion"
+          },
+          "default": []
+        }
+      }
+    },
+    "CommandOutcome": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "message": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "kind": {
+              "type": "string",
+              "const": "applied"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "view": {
+              "$ref": "#/$defs/View"
+            },
+            "kind": {
+              "type": "string",
+              "const": "view"
+            }
+          },
+          "required": [
+            "kind",
+            "view"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "text": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "prompt"
+            }
+          },
+          "required": [
+            "kind",
+            "text"
+          ],
+          "description": "Becomes a turn, submitted with the command's own intent and origin."
+        },
+        {
+          "type": "object",
+          "properties": {
+            "body": {
+              "$ref": "#/$defs/ItemBody"
+            },
+            "kind": {
+              "type": "string",
+              "const": "record"
+            }
+          },
+          "required": [
+            "kind",
+            "body"
+          ],
+          "description": "One completed item the kernel records in the transcript (a shell\nline's output, a login's receipt); the ack carries its id."
+        }
+      ]
+    },
+    "CommandRunParams": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "args": {
+          "type": "string"
+        },
+        "cwd": {
+          "type": "string"
+        },
+        "session": {
+          "$ref": "#/$defs/SessionId"
+        }
+      },
+      "required": [
+        "name",
+        "args",
+        "cwd",
+        "session"
+      ],
+      "description": "One `/name args` line, with the argument text exactly as it was typed."
+    },
+    "CommandRunResult": {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "$ref": "#/$defs/CommandOutcome"
+        }
+      },
+      "required": [
+        "outcome"
+      ]
+    },
+    "CommandSpec": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "aliases": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "hint": {
+          "type": "string"
+        },
+        "args": {
+          "$ref": "#/$defs/ArgSpec"
+        },
+        "instant": {
+          "type": "boolean",
+          "description": "May run while a turn is busy (read-only commands).",
+          "default": false
+        },
+        "family": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "hint",
+        "args",
+        "family"
+      ]
+    },
+    "Completion": {
+      "type": "object",
+      "properties": {
+        "value": {
+          "type": "string"
+        },
+        "label": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "value"
+      ]
+    },
+    "ContentPart": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "text": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "text"
+            }
+          },
+          "required": [
+            "type",
+            "text"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "mediaType": {
+              "type": "string"
+            },
+            "data": {
+              "type": "string",
+              "description": "Base64 payload."
+            },
+            "type": {
+              "type": "string",
+              "const": "image"
+            }
+          },
+          "required": [
+            "type",
+            "mediaType",
+            "data"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "input": true,
+            "type": {
+              "type": "string",
+              "const": "toolUse"
+            }
+          },
+          "required": [
+            "type",
+            "id",
+            "name",
+            "input"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "toolUseId": {
+              "type": "string"
+            },
+            "parts": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/ContentPart"
+              }
+            },
+            "isError": {
+              "type": "boolean",
+              "default": false
+            },
+            "type": {
+              "type": "string",
+              "const": "toolResult"
+            }
+          },
+          "required": [
+            "type",
+            "toolUseId",
+            "parts"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "text": {
+              "type": "string"
+            },
+            "providerMetadata": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "object",
+                "additionalProperties": true
+              }
+            },
+            "type": {
+              "type": "string",
+              "const": "reasoning"
+            }
+          },
+          "required": [
+            "type",
+            "text"
+          ]
+        }
+      ]
+    },
+    "DecisionKind": {
+      "type": "string",
+      "enum": [
+        "allow",
+        "allowSession",
+        "deny"
+      ]
+    },
+    "Entry": {
+      "type": "object",
+      "properties": {
+        "command": {
+          "type": "string"
+        },
+        "args": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "env": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Added to the host's environment, never replacing it.",
+          "default": {}
+        }
+      },
+      "required": [
+        "command"
+      ],
+      "description": "The process to spawn."
+    },
+    "HostEnv": {
+      "type": "object",
+      "properties": {
+        "home": {
+          "type": "string"
+        },
+        "configDir": {
+          "type": "string"
+        },
+        "dataDir": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "home",
+        "configDir",
+        "dataDir"
+      ],
+      "description": "Where the host lives, as a process that is not in it can read.\n\nA projection of the sdk's `Env`, which is not `Serialize`: a plugin that\nkeeps state of its own needs somewhere to put it, and `dataDir` is where."
+    },
+    "InitializeParams": {
+      "type": "object",
+      "properties": {
+        "protocol": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "pluginRoot": {
+          "type": "string",
+          "description": "The directory the manifest was read from, already resolved."
+        },
+        "config": {
+          "description": "This plugin's settings slice (`plugins.<name>`); `null` when unset.",
+          "default": null
+        },
+        "env": {
+          "$ref": "#/$defs/HostEnv"
+        }
+      },
+      "required": [
+        "protocol",
+        "pluginRoot",
+        "env"
+      ],
+      "description": "The handshake, sent once on a fresh process."
+    },
+    "InitializeResult": {
+      "type": "object",
+      "properties": {
+        "protocol": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0,
+          "description": "The major the process speaks. The host refuses any but its own, which\nit can only do if the process says which one it is."
+        },
+        "name": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        },
+        "tools": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ToolSpec"
+          },
+          "default": []
+        },
+        "commands": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CommandSpec"
+          },
+          "default": []
+        }
+      },
+      "required": [
+        "protocol",
+        "name",
+        "version"
+      ],
+      "description": "What the process says it is and what it contributes. Everything here is a\nclaim: the tools it names are registered untrusted (ADR-0015 §4)."
+    },
+    "InteractionId": {
+      "type": "string",
+      "description": "A pending question or permission, answered once by id."
+    },
+    "ItemBody": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "parts": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/ContentPart"
+              }
+            },
+            "origin": {
+              "$ref": "#/$defs/Origin"
+            },
+            "kind": {
+              "type": "string",
+              "const": "user"
+            }
+          },
+          "required": [
+            "kind",
+            "parts",
+            "origin"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "text": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "assistant"
+            }
+          },
+          "required": [
+            "kind",
+            "text"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "text": {
+              "type": "string"
+            },
+            "providerMetadata": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "object",
+                "additionalProperties": true
+              }
+            },
+            "kind": {
+              "type": "string",
+              "const": "reasoning"
+            }
+          },
+          "required": [
+            "kind",
+            "text"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "callId": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "input": true,
+            "output": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ToolOutput"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "progress": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "durationMs": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0
+            },
+            "kind": {
+              "type": "string",
+              "const": "toolCall"
+            }
+          },
+          "required": [
+            "kind",
+            "callId",
+            "name",
+            "input"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "args": {
+              "default": null
+            },
+            "result": true,
+            "kind": {
+              "type": "string",
+              "const": "action"
+            }
+          },
+          "required": [
+            "kind",
+            "name"
+          ],
+          "description": "A long-running non-turn operation (login, reconnect, team start)."
+        },
+        {
+          "type": "object",
+          "properties": {
+            "summary": {
+              "type": "string"
+            },
+            "replaced": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "before": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "after": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "durationMs": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "kind": {
+              "type": "string",
+              "const": "compaction"
+            }
+          },
+          "required": [
+            "kind",
+            "summary",
+            "replaced",
+            "before",
+            "after",
+            "durationMs"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "toTurn": {
+              "$ref": "#/$defs/TurnId"
+            },
+            "dropped": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "kind": {
+              "type": "string",
+              "const": "rewind"
+            }
+          },
+          "required": [
+            "kind",
+            "toTurn",
+            "dropped"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "marker": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "interruption"
+            }
+          },
+          "required": [
+            "kind",
+            "marker"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "level": {
+              "$ref": "#/$defs/Level"
+            },
+            "code": {
+              "type": "string"
+            },
+            "text": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "notice"
+            }
+          },
+          "required": [
+            "kind",
+            "level",
+            "code",
+            "text"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "interaction": {
+              "$ref": "#/$defs/InteractionId"
+            },
+            "question": {
+              "type": "string"
+            },
+            "answer": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "questionAnswer"
+            }
+          },
+          "required": [
+            "kind",
+            "interaction",
+            "question",
+            "answer"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "interaction": {
+              "$ref": "#/$defs/InteractionId"
+            },
+            "tool": {
+              "type": "string"
+            },
+            "decision": {
+              "$ref": "#/$defs/DecisionKind"
+            },
+            "feedback": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "kind": {
+              "type": "string",
+              "const": "permissionReceipt"
+            }
+          },
+          "required": [
+            "kind",
+            "interaction",
+            "tool",
+            "decision"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "asset": {
+              "type": "string"
+            },
+            "label": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "kind": {
+              "type": "string",
+              "const": "asset"
+            }
+          },
+          "required": [
+            "kind",
+            "asset"
+          ]
+        }
+      ]
+    },
+    "Level": {
+      "type": "string",
+      "enum": [
+        "info",
+        "warn",
+        "error"
+      ]
+    },
+    "Manifest": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "What the plugin calls itself. It must be the name of the directory\nholding it: the path is what one layer overrides another by, so two\nspellings of the name would be two answers to \"which plugin is this\"."
+        },
+        "version": {
+          "type": "string"
+        },
+        "entry": {
+          "$ref": "#/$defs/Entry"
+        },
+        "config": {
+          "description": "A JSON Schema for this plugin's own settings — the slice a person\nwrites under `plugins.<name>`, which reaches the process as\n`initialize.config`. It is what a person reads; nothing in this\nworkspace validates a document against a schema."
+        }
+      },
+      "required": [
+        "name",
+        "version",
+        "entry"
+      ],
+      "description": "What one directory under `plugins/` declares about itself.\n\nUnknown keys are kept rather than refused: a manifest written for a later\nhost must still start on this one."
+    },
+    "Origin": {
+      "type": "object",
+      "properties": {
+        "surface": {
+          "type": "string"
+        },
+        "principal": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "conversation": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "surface"
+      ],
+      "description": "Who submitted the input, as every surface records it."
+    },
+    "SessionId": {
+      "type": "string",
+      "description": "One persisted context: one journal, one actor."
+    },
+    "Tone": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "neutral",
+            "good",
+            "bad"
+          ]
+        },
+        {
+          "type": "string",
+          "const": "attention",
+          "description": "Wants a person: a surface makes it move."
+        }
+      ],
+      "description": "The one styling hook a plugin has; the surface owns the colour."
+    },
+    "ToolCallParams": {
+      "type": "object",
+      "properties": {
+        "callId": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "input": true,
+        "cwd": {
+          "type": "string"
+        },
+        "session": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "turn": {
+          "$ref": "#/$defs/TurnId"
+        }
+      },
+      "required": [
+        "callId",
+        "name",
+        "input",
+        "cwd",
+        "session",
+        "turn"
+      ],
+      "description": "One call, named as the plugin named it — the `plugin__<name>__` prefix is\nthe model's and the permission grammar's, never the process's."
+    },
+    "ToolCallResult": {
+      "type": "object",
+      "properties": {
+        "output": {
+          "$ref": "#/$defs/ToolOutput"
+        }
+      },
+      "required": [
+        "output"
+      ]
+    },
+    "ToolCancelParams": {
+      "type": "object",
+      "properties": {
+        "callId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "callId"
+      ],
+      "description": "Kernel → plugin: this call's turn was interrupted. The host keeps waiting\nfor the answer — a bridge tool's `Interrupt` is `Block` — so a process that\nignores this is slow, not broken."
+    },
+    "ToolOutput": {
+      "type": "object",
+      "properties": {
+        "parts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ContentPart"
+          }
+        },
+        "isError": {
+          "type": "boolean"
+        },
+        "display": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/View"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "parts"
+      ],
+      "description": "What a tool returned: the parts the model sees, plus what a person sees\ninstead when the tool has something better than the text (ADR-0013 §2)."
+    },
+    "ToolProgressParams": {
+      "type": "object",
+      "properties": {
+        "callId": {
+          "type": "string"
+        },
+        "tail": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "callId",
+        "tail"
+      ],
+      "description": "Plugin → kernel, while a call runs: the whole of the live output line."
+    },
+    "ToolSpec": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "inputSchema": true,
+        "meta": {
+          "type": "object",
+          "additionalProperties": true,
+          "description": "What a catalogue may show beside the tool (an MCP tool's `server`);\nnever sent to a model."
+        }
+      },
+      "required": [
+        "name",
+        "description",
+        "inputSchema"
+      ],
+      "description": "A tool as the model sees it."
+    },
+    "TreeNode": {
+      "type": "object",
+      "properties": {
+        "label": {
+          "type": "string"
+        },
+        "badge": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tone": {
+          "$ref": "#/$defs/Tone",
+          "default": "neutral"
+        },
+        "children": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/TreeNode"
+          }
+        }
+      },
+      "required": [
+        "label"
+      ]
+    },
+    "TurnId": {
+      "type": "string",
+      "description": "One run of the turn loop, closed exactly once."
+    },
+    "View": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "text": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "text"
+            }
+          },
+          "required": [
+            "kind",
+            "text"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "text": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "markdown"
+            }
+          },
+          "required": [
+            "kind",
+            "text"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "lang": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "text": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "code"
+            }
+          },
+          "required": [
+            "kind",
+            "text"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "unified": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "diff"
+            }
+          },
+          "required": [
+            "kind",
+            "unified"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "items": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "kind": {
+              "type": "string",
+              "const": "list"
+            }
+          },
+          "required": [
+            "kind",
+            "items"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "headers": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "rows": {
+              "type": "array",
+              "items": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "kind": {
+              "type": "string",
+              "const": "table"
+            }
+          },
+          "required": [
+            "kind",
+            "headers",
+            "rows"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "rows": {
+              "type": "array",
+              "items": {
+                "type": "array",
+                "prefixItems": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "string"
+                  }
+                ],
+                "minItems": 2,
+                "maxItems": 2
+              }
+            },
+            "kind": {
+              "type": "string",
+              "const": "keyValue"
+            }
+          },
+          "required": [
+            "kind",
+            "rows"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "total": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0,
+              "description": "Unbounded when absent: the surface shows activity, not a fraction."
+            },
+            "label": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "kind": {
+              "type": "string",
+              "const": "progress"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "text": {
+              "type": "string"
+            },
+            "tone": {
+              "$ref": "#/$defs/Tone",
+              "default": "neutral"
+            },
+            "kind": {
+              "type": "string",
+              "const": "badge"
+            }
+          },
+          "required": [
+            "kind",
+            "text"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "nodes": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/TreeNode"
+              }
+            },
+            "kind": {
+              "type": "string",
+              "const": "tree"
+            }
+          },
+          "required": [
+            "kind",
+            "nodes"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "children": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/View"
+              }
+            },
+            "kind": {
+              "type": "string",
+              "const": "stack"
+            }
+          },
+          "required": [
+            "kind",
+            "children"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "children": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/View"
+              }
+            },
+            "kind": {
+              "type": "string",
+              "const": "columns"
+            }
+          },
+          "required": [
+            "kind",
+            "children"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "title": {
+              "type": "string"
+            },
+            "child": {
+              "$ref": "#/$defs/View"
+            },
+            "kind": {
+              "type": "string",
+              "const": "panel"
+            }
+          },
+          "required": [
+            "kind",
+            "title",
+            "child"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "items": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/ActionItem"
+              }
+            },
+            "kind": {
+              "type": "string",
+              "const": "actions"
+            }
+          },
+          "required": [
+            "kind",
+            "items"
+          ]
+        }
+      ]
+    }
+  },
+  "manifest": {
+    "$ref": "#/$defs/Manifest"
+  },
+  "methods": {
+    "initialize": {
+      "params": {
+        "$ref": "#/$defs/InitializeParams"
+      },
+      "result": {
+        "$ref": "#/$defs/InitializeResult"
+      }
+    },
+    "tool/call": {
+      "params": {
+        "$ref": "#/$defs/ToolCallParams"
+      },
+      "result": {
+        "$ref": "#/$defs/ToolCallResult"
+      }
+    },
+    "command/run": {
+      "params": {
+        "$ref": "#/$defs/CommandRunParams"
+      },
+      "result": {
+        "$ref": "#/$defs/CommandRunResult"
+      }
+    },
+    "command/complete": {
+      "params": {
+        "$ref": "#/$defs/CommandCompleteParams"
+      },
+      "result": {
+        "$ref": "#/$defs/CommandCompleteResult"
+      }
+    }
+  },
+  "notifications": {
+    "tool/progress": {
+      "params": {
+        "$ref": "#/$defs/ToolProgressParams"
+      }
+    },
+    "tool/cancel": {
+      "params": {
+        "$ref": "#/$defs/ToolCancelParams"
+      }
+    }
+  }
+}

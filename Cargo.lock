@@ -389,6 +389,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "bingo-plugin-rpc"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bingo-sdk",
+ "schemars",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "bingo-provider-anthropic"
 version = "0.1.0"
 dependencies = [
