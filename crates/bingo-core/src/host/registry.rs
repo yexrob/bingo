@@ -60,19 +60,19 @@ pub struct Registry {
 }
 
 impl Registry {
-    /// Load plugins in the order given. One whose requirements no earlier
-    /// plugin provides is disabled with a reason, never fatal.
-    /// `slices` holds each plugin's claimed settings, by plugin id.
+    /// Load plugins in the order given, standing or disabled by
+    /// [`standing`]'s verdict. A disabled plugin is a warning and a status,
+    /// never fatal. `slices` holds each plugin's claimed settings, by
+    /// plugin id.
     pub(super) fn load(
         plugins: &[Box<dyn Plugin>],
         slices: &BTreeMap<String, Value>,
         env: &Env,
     ) -> Result<Self, HostError> {
         let mut registry = Registry::default();
-        let mut provided: HashSet<&'static str> = HashSet::new();
-        for plugin in plugins {
+        for (plugin, reason) in plugins.iter().zip(standing(plugins)) {
             let manifest = plugin.manifest();
-            if let Some(reason) = unmet(manifest, &provided) {
+            if let Some(reason) = reason {
                 tracing::warn!(plugin = manifest.id, %reason, "plugin disabled");
                 registry
                     .plugins
@@ -80,7 +80,6 @@ impl Registry {
                 continue;
             }
             registry.register(plugin.as_ref(), slices, env)?;
-            provided.extend(manifest.provides.iter().copied());
             registry.plugins.push(PluginStatus::loaded(manifest));
         }
         Ok(registry)
@@ -235,6 +234,35 @@ impl Registry {
 }
 
 /// The requirements nobody has provided yet, as a reason to disable.
+/// Why each plugin cannot stand, or `None` for one that can. A requirement is
+/// checked against what the whole composition provides — never against the
+/// accident of the caller's order — and the check runs to a fixpoint, so a
+/// plugin whose provider was itself disabled goes down with it, the reason
+/// naming what went missing.
+fn standing(plugins: &[Box<dyn Plugin>]) -> Vec<Option<String>> {
+    let mut reasons: Vec<Option<String>> = vec![None; plugins.len()];
+    loop {
+        let provided: HashSet<&'static str> = plugins
+            .iter()
+            .zip(&reasons)
+            .filter(|(_, reason)| reason.is_none())
+            .flat_map(|(plugin, _)| plugin.manifest().provides.iter().copied())
+            .collect();
+        let mut changed = false;
+        for (i, plugin) in plugins.iter().enumerate() {
+            if reasons[i].is_none()
+                && let Some(reason) = unmet(plugin.manifest(), &provided)
+            {
+                reasons[i] = Some(reason);
+                changed = true;
+            }
+        }
+        if !changed {
+            return reasons;
+        }
+    }
+}
+
 fn unmet(manifest: &PluginManifest, provided: &HashSet<&'static str>) -> Option<String> {
     let missing: Vec<&str> = manifest
         .requires
@@ -243,4 +271,101 @@ fn unmet(manifest: &PluginManifest, provided: &HashSet<&'static str>) -> Option<
         .filter(|r| !provided.contains(r))
         .collect();
     (!missing.is_empty()).then(|| format!("unmet requirements: {}", missing.join(", ")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bingo_sdk::{PluginError, Registrar};
+
+    /// A plugin that is nothing but its manifest.
+    struct Paper(&'static PluginManifest);
+
+    #[async_trait::async_trait]
+    impl Plugin for Paper {
+        fn manifest(&self) -> &'static PluginManifest {
+            self.0
+        }
+        fn register(&self, _: &mut Registrar) -> Result<(), PluginError> {
+            Ok(())
+        }
+    }
+
+    static NEEDS: PluginManifest = PluginManifest {
+        id: "test.needs",
+        version: "0.0.0",
+        sdk: "^0.1",
+        provides: &[],
+        requires: &["service:x"],
+        config: None,
+    };
+    static GIVES: PluginManifest = PluginManifest {
+        id: "test.gives",
+        version: "0.0.0",
+        sdk: "^0.1",
+        provides: &["service:x"],
+        requires: &[],
+        config: None,
+    };
+    static CHAIN: PluginManifest = PluginManifest {
+        id: "test.chain",
+        version: "0.0.0",
+        sdk: "^0.1",
+        provides: &["service:y"],
+        requires: &["service:missing"],
+        config: None,
+    };
+    static LEANS: PluginManifest = PluginManifest {
+        id: "test.leans",
+        version: "0.0.0",
+        sdk: "^0.1",
+        provides: &[],
+        requires: &["service:y"],
+        config: None,
+    };
+
+    fn loaded(plugins: Vec<Box<dyn Plugin>>) -> Registry {
+        Registry::load(&plugins, &BTreeMap::new(), &Env::rooted("/nowhere"))
+            .expect("nothing here fails to register")
+    }
+
+    /// The bug this module had: dependency correctness hung on the bin's
+    /// hand-written plugin order, and a provider listed later silently
+    /// disabled its consumer.
+    #[test]
+    fn a_requirement_met_later_in_the_order_still_stands() {
+        let registry = loaded(vec![Box::new(Paper(&NEEDS)), Box::new(Paper(&GIVES))]);
+        assert!(
+            registry.plugins.iter().all(|status| status.enabled),
+            "{:?}",
+            registry.plugins
+        );
+    }
+
+    #[test]
+    fn a_loss_cascades_to_whoever_required_the_lost_capability() {
+        let registry = loaded(vec![Box::new(Paper(&LEANS)), Box::new(Paper(&CHAIN))]);
+        let chain = &registry.plugins[1];
+        assert!(!chain.enabled, "{:?}", registry.plugins);
+        assert!(
+            chain
+                .reason
+                .as_deref()
+                .unwrap_or_default()
+                .contains("service:missing"),
+            "{:?}",
+            chain.reason
+        );
+        let leans = &registry.plugins[0];
+        assert!(!leans.enabled, "the loss cascades: {:?}", registry.plugins);
+        assert!(
+            leans
+                .reason
+                .as_deref()
+                .unwrap_or_default()
+                .contains("service:y"),
+            "{:?}",
+            leans.reason
+        );
+    }
 }
