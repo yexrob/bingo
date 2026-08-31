@@ -43,6 +43,18 @@ fn run_within(cmd: &mut Command, limit: Duration) -> Output {
     }
 }
 
+/// The binary with a person at the keyboard: every line is answered in order,
+/// then stdin closes, so a prompt that wanted more sees the end of it.
+fn typed(cmd: &mut Command, answers: &[&str]) -> Output {
+    let mut child = cmd.stdin(Stdio::piped()).spawn().expect("the binary runs");
+    let mut stdin = child.stdin.take().expect("stdin");
+    for answer in answers {
+        writeln!(stdin, "{answer}").expect("the answer is typed");
+    }
+    drop(stdin);
+    child.wait_with_output().expect("output")
+}
+
 fn stdout(out: &Output) -> String {
     String::from_utf8(out.stdout.clone()).expect("utf-8 stdout")
 }
@@ -567,6 +579,7 @@ mod experience;
 mod hooks;
 mod instances;
 mod login;
+mod provider_add;
 mod sessions;
 mod skills;
 mod stream_json;

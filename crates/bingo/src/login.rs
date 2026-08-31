@@ -75,11 +75,25 @@ impl Prompter for Terminal {
     }
 }
 
-async fn line() -> Result<String, KernelError> {
+/// One line of what a person typed. End of input reads as an empty line, and
+/// every caller treats that as an answer nobody gave.
+pub(crate) async fn line() -> Result<String, KernelError> {
     let mut text = String::new();
-    tokio::io::BufReader::new(tokio::io::stdin())
+    keyboard()
+        .lock()
+        .await
         .read_line(&mut text)
         .await
         .map_err(|e| KernelError::new(ErrorCode::Internal, format!("stdin: {e}")))?;
     Ok(text.trim().to_string())
+}
+
+/// One reader for the whole run. A fresh `BufReader` per line would swallow
+/// whatever else is already in the pipe — every answer after the first, when
+/// something other than a person is doing the typing.
+fn keyboard() -> &'static tokio::sync::Mutex<tokio::io::BufReader<tokio::io::Stdin>> {
+    static KEYBOARD: std::sync::OnceLock<
+        tokio::sync::Mutex<tokio::io::BufReader<tokio::io::Stdin>>,
+    > = std::sync::OnceLock::new();
+    KEYBOARD.get_or_init(|| tokio::sync::Mutex::new(tokio::io::BufReader::new(tokio::io::stdin())))
 }

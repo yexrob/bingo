@@ -35,6 +35,9 @@ bingo-tasks.workspace = true
 bingo-experience.workspace = true
 bingo-demo-ui.workspace = true
 bingo-channels.workspace = true
+# `bingo provider add` writes a pasted key to the one credential store
+# (ADR-0012 §2): the library tier, not a new external crate.
+bingo-auth-oauth.workspace = true
 clap.workspace = true
 tokio.workspace = true
 serde_json.workspace = true

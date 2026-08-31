@@ -52,19 +52,6 @@ fn turn(home: &std::path::Path, file: &std::path::Path, provider: &str) -> Comma
     cmd
 }
 
-/// `bingo login <name> --paste` with the credential on stdin, the way a
-/// person types it: the terminal prompter reads one line.
-fn paste(cmd: &mut Command, credential: &str) -> Output {
-    let mut child = cmd.stdin(Stdio::piped()).spawn().expect("the binary runs");
-    child
-        .stdin
-        .take()
-        .expect("stdin")
-        .write_all(format!("{credential}\n").as_bytes())
-        .expect("the credential is typed");
-    child.wait_with_output().expect("output")
-}
-
 /// One OpenAI-shaped endpoint that answers a turn for the key it expects.
 async fn endpoint_for(key: &str) -> MockServer {
     let server = MockServer::start().await;
@@ -173,9 +160,9 @@ async fn a_pasted_key_reaches_the_wire_and_a_logout_takes_it_away() {
 
     let (h, f) = (home.path().to_path_buf(), file.clone());
     let out = tokio::task::spawn_blocking(move || {
-        paste(
+        typed(
             bingo_with(&h, &f).args(["login", "proxy1", "--paste"]),
-            "sk-proxy1",
+            &["sk-proxy1"],
         )
     })
     .await
