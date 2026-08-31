@@ -2,8 +2,10 @@
 //!
 //! The child is a session like any other — same journal, same reducer, same
 //! gate — so nothing here runs a turn or holds a transcript. It mints the
-//! session, delivers the prompt, and either waits for the reply or leaves a
-//! watcher to bring it back.
+//! session and delivers the prompt; what differs between the three arms is
+//! only what becomes of the answer — waited for, watched for, or, on standby,
+//! neither: the prompt is held unread until something else wakes the member
+//! (ADR-0027).
 
 use std::path::Path;
 
@@ -37,7 +39,13 @@ sees nothing of this conversation and cannot ask the user anything, so the \
 prompt has to stand on its own: what to do, what it may assume, and what to \
 report back. In the background, which is the default, the call returns the \
 agent's name at once and its reply arrives as a message when it finishes; \
-with `background: false` the call waits and returns the agent's final text.";
+with `background: false` the call waits and returns the agent's final text. \
+When several agents are to work with each other rather than each report back, \
+seat them instead of tasking them: `OpenRoom` naming the roles, one \
+`standby: true` spawn per role, then a single `SendMessage` to `#room` \
+carrying the kickoff. That one post wakes every member at once and each reads \
+its own brief in the turn it opens; writing to them one at a time instead \
+makes you the switchboard every step has to pass back through.";
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct SpawnArgs {
@@ -618,6 +626,25 @@ mod tests {
         assert!(args.background(), "background is the default");
         let picked = definition.expect("the definition");
         assert_eq!(picked.provider.as_deref(), Some("other"));
+    }
+
+    /// The room pattern where the model reads it (ADR-0027 §4): the shape is
+    /// taught here, or the hub habit is what it falls back on.
+    #[test]
+    fn the_description_teaches_the_room_pattern_over_per_member_dispatch() {
+        assert!(
+            DESCRIPTION.contains("`OpenRoom` naming the roles"),
+            "{DESCRIPTION}"
+        );
+        assert!(
+            DESCRIPTION.contains("one `standby: true` spawn per role"),
+            "{DESCRIPTION}"
+        );
+        assert!(
+            DESCRIPTION.contains("wakes every member at once"),
+            "{DESCRIPTION}"
+        );
+        assert!(DESCRIPTION.contains("switchboard"), "{DESCRIPTION}");
     }
 
     #[test]
