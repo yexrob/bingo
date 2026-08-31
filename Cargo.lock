@@ -220,6 +220,7 @@ dependencies = [
  "bingo-hooks-shell",
  "bingo-mcp",
  "bingo-permissions",
+ "bingo-plugin-rpc",
  "bingo-provider-anthropic",
  "bingo-provider-fake",
  "bingo-provider-openai",
@@ -386,6 +387,20 @@ dependencies = [
  "tracing",
  "tree-sitter",
  "tree-sitter-bash",
+]
+
+[[package]]
+name = "bingo-plugin-rpc"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bingo-sdk",
+ "schemars",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

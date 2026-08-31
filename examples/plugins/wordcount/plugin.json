@@ -1,0 +1,8 @@
+{
+  "name": "wordcount",
+  "version": "0.1.0",
+  "entry": {
+    "command": "python3",
+    "args": ["${PLUGIN_ROOT}/main.py"]
+  }
+}

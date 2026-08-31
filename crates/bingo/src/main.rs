@@ -15,6 +15,7 @@ use bingo_demo_ui::DemoUiPlugin;
 use bingo_hooks_shell::ShellHooksPlugin;
 use bingo_mcp::McpPlugin;
 use bingo_permissions::PermissionsPlugin;
+use bingo_plugin_rpc::PluginRpcPlugin;
 use bingo_provider_anthropic::AnthropicPlugin;
 use bingo_provider_fake::{FakePlugin, FakeProvider, Script};
 use bingo_provider_openai::OpenAiPlugin;
@@ -375,6 +376,7 @@ fn plugins(demo_ui: bool) -> Result<Vec<Box<dyn Plugin>>, KernelError> {
         Box::new(WebPlugin),
         Box::new(SkillsPlugin),
         Box::new(McpPlugin::default()),
+        Box::new(PluginRpcPlugin::default()),
         Box::new(AgentsPlugin),
         Box::new(RoomsPlugin),
         Box::new(TasksPlugin),
