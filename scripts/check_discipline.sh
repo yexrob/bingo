@@ -59,7 +59,7 @@ while IFS= read -r f; do
 done < <(find crates -name '*.rs' -not -path '*/target/*')
 
 # 4. Feature nouns must not appear in the kernel or sdk (identifiers only, case-insensitive).
-nouns=$(grep -rEinw 'room|team|hire|experience' crates/bingo-sdk/src crates/bingo-core/src --include='*.rs' 2>/dev/null | grep -vE '^[^:]+:[0-9]+:\s*//' || true)
+nouns=$(grep -rEinw 'room|team|hire|experience|schedule' crates/bingo-sdk/src crates/bingo-core/src --include='*.rs' 2>/dev/null | grep -vE '^[^:]+:[0-9]+:\s*//' || true)
 if [ -n "$nouns" ]; then
   say "feature noun found in kernel/sdk code:"; say "$nouns" | head; fail=1
 fi

@@ -19,7 +19,7 @@ A local coding-agent harness in Rust: a minimal kernel, everything else a plugin
 - **Bricks first.** Pure function → primitive → component → feature. A feature without a pure brick underneath is suspect.
 - **Subtract by default.** Deleting needs no reason; adding does.
 - Tool properties fail closed: an unknown tool is not concurrency-safe, not read-only, and its interrupt behaviour is Block.
-- The kernel owns no feature nouns. `room`, `team`, `hire`, `task`, `experience` do not appear in `bingo-sdk` or `bingo-core`.
+- The kernel owns no feature nouns. `room`, `team`, `hire`, `task`, `experience`, `schedule` do not appear in `bingo-sdk` or `bingo-core`.
 
 ## Verification
 
