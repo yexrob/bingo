@@ -106,7 +106,13 @@ loud or quiet deliberately.
 
 ## Carried
 
-- The pager sheet defect, until its worker lands.
+- The pager sheet defect was root-caused and fixed the same night (worker
+  M, merged `d43ad4f` + `43c5cf2`): `animating` sampled the wall instead
+  of the painted frame — a slow draw ended an animation unseen and parked
+  the sheet — masked by a motion debt in `blocks.rs` that never cleared
+  (and kept idle surfaces redrawing at the tick rate). Cause and mask
+  proven as a pair by A/B; smoke eight consecutive greens; the record is
+  tui.md §10.
 - A notice longer than five lines folds with no key to open it — the
   pager does not reach `User` items; a small follow-up if wanted.
 - `screens.rs` at 969 lines sits 31 under the fail; the next screen test
