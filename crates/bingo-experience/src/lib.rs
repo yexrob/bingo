@@ -7,8 +7,15 @@
 //! procedure, and the two never share a corpus or a prompt block.
 
 pub mod bm25;
+mod diff;
 pub mod entry;
 mod frontmatter;
 mod id;
 mod project;
+mod rank;
+mod render;
 pub mod store;
+pub mod tools;
+
+#[cfg(test)]
+mod tests;

@@ -66,6 +66,11 @@ impl Library {
         self.root.join(self.key(cwd))
     }
 
+    /// Where one entry lives. The file may not exist; the id is the name.
+    pub fn path(&self, cwd: &Path, id: &str) -> PathBuf {
+        self.dir(cwd).join(format!("{id}.md"))
+    }
+
     /// Whether there is a store at all — the one check a contributor makes
     /// before it reads anything.
     pub fn occupied(&self, cwd: &Path) -> bool {
@@ -100,7 +105,7 @@ impl Library {
     pub fn save(&self, cwd: &Path, entry: &Entry) -> std::io::Result<PathBuf> {
         let dir = self.dir(cwd);
         std::fs::create_dir_all(&dir)?;
-        let path = dir.join(format!("{}.md", entry.id));
+        let path = self.path(cwd, &entry.id);
         let tmp = dir.join(format!(".{}.tmp", entry.id));
         std::fs::write(&tmp, frontmatter::to_markdown(entry))?;
         match std::fs::rename(&tmp, &path) {
@@ -114,7 +119,7 @@ impl Library {
 
     /// Forget one entry. A file that is already gone is not an error.
     pub fn delete(&self, cwd: &Path, id: &str) -> std::io::Result<()> {
-        match std::fs::remove_file(self.dir(cwd).join(format!("{id}.md"))) {
+        match std::fs::remove_file(self.path(cwd, id)) {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
             other => other,
         }
@@ -122,9 +127,8 @@ impl Library {
 
     /// An id no file in this project has yet.
     pub fn mint(&self, cwd: &Path) -> String {
-        let dir = self.dir(cwd);
         std::iter::repeat_with(id::mint)
-            .find(|id| !dir.join(format!("{id}.md")).exists())
+            .find(|id| !self.path(cwd, id).exists())
             .unwrap_or_else(id::mint)
     }
 
