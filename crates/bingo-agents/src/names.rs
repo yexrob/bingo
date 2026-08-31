@@ -92,9 +92,9 @@ pub fn names_of(children: &[SessionSummary]) -> Vec<String> {
 }
 
 /// The session a `to` names, as the host lists it: a child of the caller by
-/// name, a `#room` the caller can reach, or — for `parent` — the session that
-/// spawned the caller. A leading `@` is how a person writes it and means the
-/// same thing.
+/// name, a teammate beside it, a `#room` the caller can reach, or — for
+/// `parent` — the session that spawned the caller. A leading `@` is how a
+/// person writes it and means the same thing.
 pub async fn resolve(
     host: &HostHandle,
     caller: &SessionId,
@@ -107,17 +107,50 @@ pub async fn resolve(
     if to.starts_with(ROOM) {
         return room(host, caller, to).await;
     }
-    child(host, caller, to).await
+    agent(host, caller, to).await
 }
 
-/// A child of the caller by name.
+/// An agent by name: a child of the caller, else a teammate beside it — the
+/// rule rooms already use, applied to agents (ADR-0024 §1). A caller's own
+/// child shadows a sibling of the same name, so an address always means the
+/// nearer session.
+pub async fn agent(
+    host: &HostHandle,
+    caller: &SessionId,
+    name: &str,
+) -> Result<SessionSummary, KernelError> {
+    let mine = children(host, caller).await?;
+    if let Some(child) = named(&mine, name) {
+        return Ok(child);
+    }
+    let beside = siblings(host, caller).await?;
+    named(&beside, name).ok_or_else(|| unknown(name, &mine, &beside))
+}
+
+/// A child of the caller by name, and no further: what a person's `@name`
+/// reaches, which is their own session's agents.
 pub async fn child(
     host: &HostHandle,
     caller: &SessionId,
     name: &str,
 ) -> Result<SessionSummary, KernelError> {
     let children = children(host, caller).await?;
-    named(&children, name).ok_or_else(|| unknown(name, &children))
+    named(&children, name).ok_or_else(|| unknown(name, &children, &[]))
+}
+
+/// The caller's teammates: the other model-driven children of the session
+/// that spawned it. A room answers nobody and a caller is not beside itself,
+/// so neither is here; a session with no parent has no teammates at all.
+pub async fn siblings(
+    host: &HostHandle,
+    caller: &SessionId,
+) -> Result<Vec<SessionSummary>, KernelError> {
+    let Ok(parent) = parent(host, caller).await else {
+        return Ok(Vec::new());
+    };
+    let mut beside = agents(host, &parent.id).await?;
+    beside.retain(|peer| &peer.id != caller);
+    Ok(beside)
 }
 
 /// A room by name: one the caller opened, else one beside it — a member and
@@ -127,14 +160,16 @@ async fn room(
     caller: &SessionId,
     name: &str,
 ) -> Result<SessionSummary, KernelError> {
-    let mut known = children(host, caller).await?;
-    if let Some(room) = named(&known, name) {
+    let mine = children(host, caller).await?;
+    if let Some(room) = named(&mine, name) {
         return Ok(room);
     }
+    let mut beside = Vec::new();
     if let Ok(parent) = parent(host, caller).await {
-        known.extend(children(host, &parent.id).await?);
+        beside = children(host, &parent.id).await?;
+        beside.retain(|peer| &peer.id != caller);
     }
-    named(&known, name).ok_or_else(|| unknown(name, &known))
+    named(&beside, name).ok_or_else(|| unknown(name, &mine, &beside))
 }
 
 /// The one of these sessions that answers to `name`.
@@ -177,15 +212,20 @@ fn pick<'a>(all: &'a [SessionSummary], id: &SessionId) -> Result<&'a SessionSumm
 }
 
 /// What a caller could have written instead. Agents and rooms are both
-/// sessions of the tree and both answer to a name, so both are named here.
-fn unknown(name: &str, known: &[SessionSummary]) -> KernelError {
-    let (rooms, agents): (Vec<String>, Vec<String>) = names_of(known)
-        .into_iter()
-        .partition(|name| name.starts_with(ROOM));
+/// sessions of the tree and both answer to a name, so both are named here;
+/// the agents beside the caller are named apart from the ones it started, so
+/// the model can tell a teammate from a child of its own (ADR-0024 §3).
+fn unknown(name: &str, mine: &[SessionSummary], beside: &[SessionSummary]) -> KernelError {
+    let (my_rooms, my_agents) = split(mine);
+    let (their_rooms, their_agents) = split(beside);
     let mut here = Vec::new();
-    if !agents.is_empty() {
-        here.push(format!("the agents running are: {}", agents.join(", ")));
+    if !my_agents.is_empty() {
+        here.push(format!("you started: {}", my_agents.join(", ")));
     }
+    if !their_agents.is_empty() {
+        here.push(format!("beside you: {}", their_agents.join(", ")));
+    }
+    let rooms: Vec<String> = my_rooms.into_iter().chain(their_rooms).collect();
     if !rooms.is_empty() {
         here.push(format!("the rooms here are: {}", rooms.join(", ")));
     }
@@ -194,6 +234,14 @@ fn unknown(name: &str, known: &[SessionSummary]) -> KernelError {
         false => format!("nothing is called {name}; {}", here.join("; ")),
     };
     KernelError::new(ErrorCode::InvalidInput, message)
+}
+
+/// The rooms and the agents among these sessions, by the one thing that tells
+/// them apart in writing.
+fn split(sessions: &[SessionSummary]) -> (Vec<String>, Vec<String>) {
+    names_of(sessions)
+        .into_iter()
+        .partition(|name| name.starts_with(ROOM))
 }
 
 #[cfg(test)]
@@ -278,6 +326,64 @@ mod tests {
             .await
             .expect_err("no such room");
         assert!(error.message.contains("#design"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn a_teammate_resolves_and_an_own_child_of_that_name_shadows_it() {
+        let fleet = Fleet::default();
+        let root = fleet.root();
+        let builder = fleet.child(&root, "builder");
+        let reviewer = fleet.child(&root, "reviewer");
+        let host = fleet.handle();
+
+        assert_eq!(
+            resolve(&host, &builder, "reviewer").await.unwrap().id,
+            reviewer,
+            "the teammate beside it"
+        );
+
+        let own = fleet.child(&builder, "reviewer");
+        assert_eq!(
+            resolve(&host, &builder, "reviewer").await.unwrap().id,
+            own,
+            "an own child shadows a sibling of the same name"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_caller_is_not_beside_itself_and_a_room_is_nobody_s_teammate() {
+        let fleet = Fleet::default();
+        let root = fleet.root();
+        let builder = fleet.child(&root, "builder");
+        fleet.room(&root, "#design");
+        let host = fleet.handle();
+
+        assert!(
+            resolve(&host, &builder, "builder").await.is_err(),
+            "a session does not write to itself by name"
+        );
+        assert_eq!(siblings(&host, &builder).await.unwrap(), Vec::new());
+        assert_eq!(
+            siblings(&host, &root).await.unwrap(),
+            Vec::new(),
+            "a session with no parent has no teammates"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_name_nobody_has_tells_a_teammate_apart_from_a_child() {
+        let fleet = Fleet::default();
+        let root = fleet.root();
+        let builder = fleet.child(&root, "builder");
+        fleet.child(&root, "reviewer");
+        fleet.child(&builder, "helper");
+        let host = fleet.handle();
+
+        let error = resolve(&host, &builder, "nobody")
+            .await
+            .expect_err("no such agent");
+        assert!(error.message.contains("you started: helper"), "{error}");
+        assert!(error.message.contains("beside you: reviewer"), "{error}");
     }
 
     #[tokio::test]

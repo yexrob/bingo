@@ -407,6 +407,46 @@ async fn queued_input_is_absorbed_at_the_barrier() {
     assert_eq!(user.parts[1].as_text(), Some("also do this"));
 }
 
+/// Where an absorbed input lands in the journal: after the tool item of the
+/// round it was queued during, and before the next round's. A tool that reads
+/// its own session therefore sees everything absorbed at earlier barriers and
+/// nothing absorbed at this one — which is what makes the calling item a
+/// usable cut (ADR-0025 §2).
+#[tokio::test]
+async fn an_absorbed_input_lands_between_one_round_s_tool_item_and_the_next() {
+    let provider = ScriptedProvider::new(vec![
+        Script::Events(tool_call("Echo", json!({"v": 1}))),
+        Script::Events(tool_call("Echo", json!({"v": 2}))),
+        Script::Events(text("ok")),
+    ]);
+    let cfg = config(
+        provider.clone(),
+        vec![Arc::new(EchoTool { read_only: true })],
+    );
+    let host = RecordingHost::new();
+    host.queue.lock().unwrap().push((
+        IntentId::mint(),
+        Input::text("meanwhile, from elsewhere", Origin::surface("peer")),
+    ));
+    run(&cfg, &host, CancellationToken::new()).await;
+
+    let kinds = host.kinds();
+    let at = |what: &str| -> Vec<usize> {
+        kinds
+            .iter()
+            .enumerate()
+            .filter(|(_, k)| k.as_str() == what)
+            .map(|(i, _)| i)
+            .collect()
+    };
+    let calls = at("started:tool/pending");
+    let absorbed = at("completed:user/completed");
+    assert_eq!(calls.len(), 2, "{kinds:?}");
+    assert_eq!(absorbed.len(), 1, "{kinds:?}");
+    assert!(calls[0] < absorbed[0], "{kinds:?}");
+    assert!(absorbed[0] < calls[1], "{kinds:?}");
+}
+
 #[tokio::test]
 async fn a_length_stop_injects_a_continue_prompt_up_to_three_times() {
     let cut = || {

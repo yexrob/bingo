@@ -84,7 +84,7 @@ python3 - <<'PY' || fail=1
 import re, sys, pathlib
 # Names that are only ever a tool's, anywhere; names that are also words (Read, Write, Edit)
 # only quoted or backticked as a whole token.
-names = r"\b(SpawnAgent|SendMessage|FollowupTask|WaitAgent|ListAgents|TaskCreate|TaskUpdate|TaskGet|TaskList|AskUserQuestion|WebFetch|WebSearch|Bash|Glob|Grep|Skill)\b|[`\"](Read|Write|Edit)[`\"]"
+names = r"\b(SpawnAgent|SendMessage|WaitAgent|ListAgents|ListModels|TaskCreate|TaskUpdate|TaskGet|TaskList|AskUserQuestion|WebFetch|WebSearch|Bash|Glob|Grep|Skill)\b|[`\"](Read|Write|Edit)[`\"]"
 bad = []
 for f in list(pathlib.Path("crates/bingo-sdk/src").rglob("*.rs")) + list(pathlib.Path("crates/bingo-core/src").rglob("*.rs")):
     if "test" in f.name or "tests" in f.parts:

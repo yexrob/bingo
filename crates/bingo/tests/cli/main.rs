@@ -609,6 +609,7 @@ mod jobs;
 mod login;
 mod mentions;
 mod models;
+mod peers;
 mod provider_add;
 mod rooms;
 mod schedule;

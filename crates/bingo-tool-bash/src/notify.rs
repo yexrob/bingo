@@ -3,7 +3,7 @@
 //! Finishing always is, and so is a line the call asked to be told about.
 //! Output merely growing never is: that is what `BashOutput` is for
 //! (ADR-0018 §4). The message goes through `deliver(…, Wake)`, the same door
-//! an agent's followup uses, so `--print`, RPC, the channels and the TUI all
+//! a message to an agent uses, so `--print`, RPC, the channels and the TUI all
 //! hear it without any of them knowing this plugin exists.
 
 use bingo_sdk::{Delivery, HostHandle, Input, IntentId, KernelError, Origin, SessionId};

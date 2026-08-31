@@ -9,9 +9,10 @@
 //! - `SpawnAgent` mints a child under the calling tool item and delivers the
 //!   prompt. In the foreground it waits for the child's final text; in the
 //!   background it returns the name and leaves a watcher to wake the parent.
-//! - `SendMessage` posts into an agent's queue or a room's journal,
-//!   `FollowupTask` starts a turn on an agent, `WaitAgent` holds until one is
-//!   idle, `ListAgents` reads the tree.
+//! - `SendMessage` wakes an agent — a child, a teammate beside the caller, or
+//!   `parent` — or posts into a room's journal, `WaitAgent` holds until an
+//!   agent is idle, `ListAgents` reads the tree, `ListModels` reads the
+//!   model catalogue.
 //! - `@name rest` in the composer reaches the child of that name.
 //! - A root session opening in a project with a `.bingo/team.json` seats the
 //!   roles it declares, as children of itself.
@@ -31,6 +32,7 @@ mod message;
 mod models;
 mod names;
 mod note;
+mod serial;
 mod spawn;
 mod team;
 mod wait;
@@ -48,7 +50,7 @@ pub use command::AgentsCommand;
 pub use definition::Definition;
 pub use hook::AtNameHook;
 pub use list::ListAgentsTool;
-pub use message::{Kind, MessageTool};
+pub use message::MessageTool;
 pub use models::ListModelsTool;
 pub use note::NOTE;
 pub use spawn::SpawnAgentTool;
@@ -62,7 +64,6 @@ static MANIFEST: PluginManifest = PluginManifest {
     provides: &[
         "tool:SpawnAgent",
         "tool:SendMessage",
-        "tool:FollowupTask",
         "tool:WaitAgent",
         "tool:ListAgents",
         "tool:ListModels",
@@ -105,8 +106,7 @@ impl Plugin for AgentsPlugin {
 
     fn register(&self, registrar: &mut Registrar) -> Result<(), PluginError> {
         registrar.tool(Arc::new(SpawnAgentTool) as Arc<dyn Tool>);
-        registrar.tool(Arc::new(MessageTool::new(Kind::Message)) as Arc<dyn Tool>);
-        registrar.tool(Arc::new(MessageTool::new(Kind::Followup)) as Arc<dyn Tool>);
+        registrar.tool(Arc::new(MessageTool) as Arc<dyn Tool>);
         registrar.tool(Arc::new(WaitAgentTool) as Arc<dyn Tool>);
         registrar.tool(Arc::new(ListAgentsTool) as Arc<dyn Tool>);
         registrar.tool(Arc::new(ListModelsTool) as Arc<dyn Tool>);
@@ -144,7 +144,6 @@ mod plugin_tests {
             [
                 "tool:SpawnAgent",
                 "tool:SendMessage",
-                "tool:FollowupTask",
                 "tool:WaitAgent",
                 "tool:ListAgents",
                 "tool:ListModels",
@@ -176,7 +175,6 @@ mod plugin_tests {
             [
                 "SpawnAgent",
                 "SendMessage",
-                "FollowupTask",
                 "WaitAgent",
                 "ListAgents",
                 "ListModels"

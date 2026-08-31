@@ -47,9 +47,8 @@ pub struct SpawnArgs {
     /// A named definition, `.bingo/agents/<name>.md`: its system prompt,
     /// model and tool set. Without one the sub-agent inherits this session's.
     pub agent: Option<String>,
-    /// What to call this one, for `SendMessage`, `FollowupTask` and
-    /// `WaitAgent`. Defaults to the definition's name; a name a sibling
-    /// already holds gets `-2`, `-3`.
+    /// What to call this one, for `SendMessage` and `WaitAgent`. Defaults to
+    /// the definition's name; a name a sibling already holds gets `-2`, `-3`.
     pub name: Option<String>,
     /// Return at once and be told when it finishes (the default), or `false`
     /// to wait for its reply as the result of this call.
