@@ -97,3 +97,14 @@ local plugin's tools is worse than a bounded wait.
   question would read better. Polish, pre-existing, applies to MCP too.
 - The commit card's diff headers carry long absolute store paths; `~`-short
   forms would read better.
+
+### Live — 2026-08-31, codex subscription, `gpt-5.6-luna`
+
+The real model, headless, three runs: a plain turn streams and exits 0; the
+model calls `plugin__wordcount__count` (the Python process answers, the
+`View::Table` folds into `--print`, the model reads 9 back); the model
+composes a well-formed `ExperienceCommit` (two triggers, verify, notes —
+its own structure), the store writes the entry, and a **fresh session**
+recalls it — asked "what are the exact steps", the model answers with the
+two steps verbatim. One trip: the project plugin layer really is the
+process's directory, not `--cwd`'s — the carried gap, met live.

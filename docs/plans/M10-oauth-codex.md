@@ -76,7 +76,7 @@ Found while integrating:
 
 Open, carried forward:
 
-- [x] **Live smoke with a ChatGPT subscription** — the user ran `bingo login codex` and a `--provider codex` turn on their own account and reported it working (2026-08-30; output not pasted here). Still only a documented shape rather than a recording: `fixtures/codex_models.json`; record a live `/codex/models` body when one is at hand. The refresh body stays JSON until a live refresh says otherwise.
+- [x] **Live smoke with a ChatGPT subscription** — the user ran `bingo login codex` and a `--provider codex` turn on their own account and reported it working (2026-08-30; output not pasted here). Recorded 2026-08-31 (`gpt-5.6-luna`, headless): a plain turn, a plugin tool round trip and an experience commit + fresh-session recall, output pasted in `M14-experience-bridge.md` §Live — token use and streaming are no longer just reported. Still only a documented shape rather than a recording: `fixtures/codex_models.json`; record a live `/codex/models` body when one is at hand. The refresh body stays JSON until a live refresh says otherwise.
 - A `Prompter` double in `bingo_sdk::testing` (`ScriptedPrompter`), replacing the three local ones.
 - The catalogue's `Models` for a provider whose list is dynamic (`/model codex/<tab>` completes nothing; typing the id works).
 - Anthropic subscription login: the library is ready, the issuer is not known.
