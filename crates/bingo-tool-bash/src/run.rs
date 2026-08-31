@@ -3,9 +3,15 @@
 //! The shell is spawned as its own process-group leader, so a timeout or an
 //! interrupt reaches every grandchild instead of orphaning the ones the shell
 //! started. Its stdin is `/dev/null`, so nothing it runs can wait for a person.
-//! Its stdout and stderr go into one buffer in arrival order, because a
+//! Its stdout and stderr go into one sink in arrival order, because a
 //! command's error lines are part of its story and the model reads them where
 //! they happened.
+//!
+//! A run comes apart into three: [`start`] spawns and begins draining the
+//! pipes, [`watch`] waits for whichever of the exit, the deadline, the
+//! interrupt or a promotion comes first, and [`conclude`] turns what is left
+//! into an answer. A promotion keeps the [`Running`] instead of concluding it:
+//! the same process and the same pipes go to the job table (ADR-0018 §6).
 //!
 //! POSIX only in M1 (the plan's non-goals put Windows dialects in M6). A Windows
 //! port replaces two things and nothing else: [`shell`], which would resolve
@@ -24,12 +30,17 @@ use tokio::process::Command;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 
-use crate::output::{Bounded, Ended, MAX_OUTPUT_CHARS};
+use crate::output::{Ended, MAX_OUTPUT_CHARS};
+use crate::sink::Sink;
 use crate::tail::{self, Progress, Tail, ToCall, Unwatched};
 
 /// How long the pipes are given once the process is gone. A grandchild that
 /// inherited them and outlived the kill must not hold the turn open.
 const DRAIN: Duration = Duration::from_secs(2);
+
+/// `SIGTERM`, the signal a program is given the chance to answer before the
+/// one it cannot. POSIX fixes the number; nothing here needs libc for it.
+pub const TERM: i32 = 15;
 
 /// The shell every command runs under. `bash` is what the tool is named after
 /// and what the model writes for; `sh` is the fallback where there is no bash.
@@ -53,33 +64,46 @@ pub struct Run {
     pub ended: Ended,
 }
 
+/// A command under way: the process group, the tasks draining its pipes, and
+/// where its output is going. All three move together, which is what lets a
+/// running command change hands without restarting.
+pub struct Running {
+    pub child: Box<dyn ChildWrapper>,
+    pub readers: Vec<Reader>,
+    pub sink: Arc<Mutex<Sink>>,
+}
+
 /// What running a command takes from whoever asked for it: the directory it
-/// starts in, the token that stops it early, and where its tail goes while it
-/// works. A tool call lends all three; a line a person typed lends only the
-/// first.
+/// starts in, the token that stops it early, the one that hands it to the
+/// background, and where its tail goes while it works. A tool call lends all
+/// four; a line a person typed lends only the first.
 pub struct Context<'a> {
     cwd: &'a Path,
     cancel: CancellationToken,
+    promote: CancellationToken,
     progress: Box<dyn Progress + 'a>,
 }
 
 impl<'a> Context<'a> {
-    /// A tool call: the turn's interrupt stops the command, and the call's own
-    /// progress line is where its tail goes.
-    pub fn of_call(cx: &'a ToolContext) -> Self {
+    /// A tool call: the turn's interrupt stops the command, the call's own
+    /// progress line is where its tail goes, and `promote` is the flag a
+    /// surface flips to take it into the background.
+    pub fn of_call(cx: &'a ToolContext, promote: CancellationToken) -> Self {
         Self {
             cwd: &cx.cwd,
             cancel: cx.cancel.clone(),
+            promote,
             progress: Box::new(ToCall(cx)),
         }
     }
 
-    /// A line a person typed: nothing but the timeout stops it, and no call is
-    /// watching it.
+    /// A line a person typed: nothing but the timeout stops it, no call is
+    /// watching it, and there is no call id to promote it by.
     pub fn unwatched(cwd: &'a Path) -> Self {
         Self {
             cwd,
             cancel: CancellationToken::new(),
+            promote: CancellationToken::new(),
             progress: Box::new(Unwatched),
         }
     }
@@ -87,13 +111,26 @@ impl<'a> Context<'a> {
 
 /// Run one command to its end, to the timeout, or to the interrupt.
 pub async fn run(command: &str, timeout: Duration, cx: &Context<'_>) -> Result<Run, ToolError> {
-    let mut child = spawn(command, cx.cwd)?;
-    let output = Arc::new(Mutex::new(Bounded::new(MAX_OUTPUT_CHARS)));
-    let readers = read_pipes(child.as_mut(), &output);
-    let ended = watch(&mut child, timeout, cx, &output).await?;
-    drain(readers).await;
-    let output = output.lock().await.finish();
-    Ok(Run { output, ended })
+    let mut running = start(command, cx.cwd, Sink::buffer(MAX_OUTPUT_CHARS))?;
+    let over = match watch(&mut running, timeout, cx).await? {
+        Stop::Over(over) => over,
+        // Nobody was handed this run's promote token, so this cannot happen;
+        // killing the group and reporting what it wrote is the safe reading.
+        Stop::Promoted => Over::Interrupted,
+    };
+    conclude(running, over, timeout).await
+}
+
+/// Spawn a command and start draining its pipes into `sink`.
+pub fn start(command: &str, cwd: &Path, sink: Sink) -> Result<Running, ToolError> {
+    let mut child = spawn(command, cwd)?;
+    let sink = Arc::new(Mutex::new(sink));
+    let readers = read_pipes(child.as_mut(), &sink);
+    Ok(Running {
+        child,
+        readers,
+        sink,
+    })
 }
 
 fn spawn(command: &str, cwd: &Path) -> Result<Box<dyn ChildWrapper>, ToolError> {
@@ -113,76 +150,91 @@ fn spawn(command: &str, cwd: &Path) -> Result<Box<dyn ChildWrapper>, ToolError> 
         .map_err(|e| ToolError::Failed(format!("could not run {}: {e}", shell())))
 }
 
-/// How the wait ended, before anything is done about it.
-enum Stop {
+/// How the wait ended.
+pub enum Stop {
+    /// The command is nobody's to wait for any more.
+    Over(Over),
+    /// A person took it into the background: it is still running.
+    Promoted,
+}
+
+/// The three ways a wait ends with the command over.
+pub enum Over {
     Exited(ExitStatus),
     Timeout,
     Interrupted,
 }
 
 /// Wait for the command, sampling the tail on the way, and stop for whichever
-/// comes first: the exit, the deadline, or the turn's interrupt.
-async fn watch(
-    child: &mut Box<dyn ChildWrapper>,
+/// comes first: the exit, the deadline, the turn's interrupt, or the promotion.
+pub async fn watch(
+    running: &mut Running,
     timeout: Duration,
     cx: &Context<'_>,
-    output: &Mutex<Bounded>,
-) -> Result<Ended, ToolError> {
+) -> Result<Stop, ToolError> {
     let deadline = tokio::time::Instant::now() + timeout;
     let mut tail = Tail::default();
+    // The two fields are borrowed apart, so waiting on the process and
+    // sampling what it wrote do not contend for the whole of `running`.
+    let child = &mut running.child;
+    let sink = &running.sink;
     loop {
-        let stop = tokio::select! {
-            status = child.wait() => Stop::Exited(
+        let over = tokio::select! {
+            status = child.wait() => Over::Exited(
                 status.map_err(|e| ToolError::Failed(format!("waiting for the command: {e}")))?,
             ),
-            () = tokio::time::sleep_until(deadline) => Stop::Timeout,
-            () = cx.cancel.cancelled() => Stop::Interrupted,
+            () = tokio::time::sleep_until(deadline) => Over::Timeout,
+            () = cx.cancel.cancelled() => Over::Interrupted,
+            () = cx.promote.cancelled() => return Ok(Stop::Promoted),
             () = tokio::time::sleep(tail::INTERVAL) => {
-                tail.sample(output, cx.progress.as_ref()).await;
+                tail.sample(sink, cx.progress.as_ref()).await;
                 continue;
             }
         };
-        return settle(child, stop, timeout).await;
+        return Ok(Stop::Over(over));
     }
 }
 
 /// An exit needs nothing; anything else kills the group first. The kernel keeps
 /// an interrupted `Block` tool's real output, so an interrupt is reported as
 /// what the command had produced, not as a cancellation.
-async fn settle(
-    child: &mut Box<dyn ChildWrapper>,
-    stop: Stop,
+pub async fn conclude(
+    mut running: Running,
+    over: Over,
     timeout: Duration,
-) -> Result<Ended, ToolError> {
-    match stop {
+) -> Result<Run, ToolError> {
+    let ended = match over {
         // A shell killed by a signal left no status of its own to report.
-        Stop::Exited(status) => Ok(Ended::Exited(status.code().unwrap_or(-1))),
-        Stop::Timeout => {
-            kill(child).await;
-            Ok(Ended::Timeout {
+        Over::Exited(status) => Ended::Exited(status.code().unwrap_or(-1)),
+        Over::Timeout => {
+            kill(&mut running.child).await;
+            Ended::Timeout {
                 after_ms: timeout.as_millis().try_into().unwrap_or(u64::MAX),
-            })
+            }
         }
-        Stop::Interrupted => {
-            kill(child).await;
-            Ok(Ended::Interrupted)
+        Over::Interrupted => {
+            kill(&mut running.child).await;
+            Ended::Interrupted
         }
-    }
+    };
+    drain(running.readers).await;
+    let output = running.sink.lock().await.finish();
+    Ok(Run { output, ended })
 }
 
 /// `SIGKILL` to the whole group — the wrapper's `start_kill` is a `killpg`, so a
 /// grandchild that outlived its parent goes with it — then reap what is left,
 /// bounded so an escapee cannot hold the turn.
-async fn kill(child: &mut Box<dyn ChildWrapper>) {
+pub async fn kill(child: &mut Box<dyn ChildWrapper>) {
     let _ = child.start_kill();
     let _ = tokio::time::timeout(DRAIN, child.wait()).await;
 }
 
-type Reader = JoinHandle<()>;
+pub type Reader = JoinHandle<()>;
 
-/// One task per pipe, both writing into the same buffer, so stdout and stderr
+/// One task per pipe, both writing into the same sink, so stdout and stderr
 /// interleave in the order they arrived.
-fn read_pipes(child: &mut dyn ChildWrapper, output: &Arc<Mutex<Bounded>>) -> Vec<Reader> {
+fn read_pipes(child: &mut dyn ChildWrapper, sink: &Arc<Mutex<Sink>>) -> Vec<Reader> {
     let pipes = [
         child.stdout().take().map(boxed),
         child.stderr().take().map(boxed),
@@ -190,7 +242,7 @@ fn read_pipes(child: &mut dyn ChildWrapper, output: &Arc<Mutex<Bounded>>) -> Vec
     pipes
         .into_iter()
         .flatten()
-        .map(|pipe| tokio::spawn(pump(pipe, output.clone())))
+        .map(|pipe| tokio::spawn(pump(pipe, sink.clone())))
         .collect()
 }
 
@@ -201,7 +253,7 @@ fn boxed(pipe: impl AsyncRead + Unpin + Send + 'static) -> Pipe {
 }
 
 /// Read one pipe to its end, decoding as the bytes arrive.
-async fn pump(mut pipe: Pipe, output: Arc<Mutex<Bounded>>) {
+async fn pump(mut pipe: Pipe, sink: Arc<Mutex<Sink>>) {
     let mut buffer = [0u8; 8 * 1024];
     let mut stream = Utf8Stream::default();
     loop {
@@ -211,7 +263,7 @@ async fn pump(mut pipe: Pipe, output: Arc<Mutex<Bounded>>) {
         };
         let text = stream.decode(&buffer[..read]);
         if !text.is_empty() {
-            output.lock().await.push(&text);
+            sink.lock().await.push(&text).await;
         }
     }
 }
@@ -251,7 +303,7 @@ impl Utf8Stream {
 }
 
 /// Let the readers finish what the pipes already hold, then let them go.
-async fn drain(readers: Vec<Reader>) {
+pub async fn drain(readers: Vec<Reader>) {
     let deadline = tokio::time::Instant::now() + DRAIN;
     for mut reader in readers {
         if tokio::time::timeout_at(deadline, &mut reader)
@@ -273,9 +325,13 @@ mod tests {
 
     const NO_TIMEOUT: Duration = Duration::from_secs(30);
 
+    fn watched(cx: &ToolContext) -> Context<'_> {
+        Context::of_call(cx, CancellationToken::new())
+    }
+
     async fn bash(command: &str) -> Run {
         let (_host, cx) = context();
-        run(command, NO_TIMEOUT, &Context::of_call(&cx))
+        run(command, NO_TIMEOUT, &watched(&cx))
             .await
             .expect("the command ran")
     }
@@ -305,7 +361,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("temp dir");
         std::fs::write(dir.path().join("marker"), "").expect("write");
         let (_host, cx) = context_in(dir.path().to_path_buf());
-        let out = run("ls", NO_TIMEOUT, &Context::of_call(&cx))
+        let out = run("ls", NO_TIMEOUT, &watched(&cx))
             .await
             .expect("the command ran");
         assert_eq!(out.output, "marker\n");
@@ -324,9 +380,7 @@ mod tests {
     #[tokio::test]
     async fn a_directory_that_is_not_there_fails_to_spawn() {
         let (_host, cx) = context_in(PathBuf::from("/no/such/directory/here"));
-        let error = run("echo hi", NO_TIMEOUT, &Context::of_call(&cx))
-            .await
-            .err();
+        let error = run("echo hi", NO_TIMEOUT, &watched(&cx)).await.err();
         assert!(
             matches!(&error, Some(ToolError::Failed(m)) if m.starts_with("could not run")),
             "got {error:?}"
@@ -352,7 +406,7 @@ mod tests {
         );
 
         let started = Instant::now();
-        let out = run(&command, Duration::from_millis(200), &Context::of_call(&cx))
+        let out = run(&command, Duration::from_millis(200), &watched(&cx))
             .await
             .expect("the command ran");
         let elapsed = started.elapsed();
@@ -392,7 +446,7 @@ mod tests {
         });
 
         let started = Instant::now();
-        let out = run("echo started; sleep 30", NO_TIMEOUT, &Context::of_call(&cx))
+        let out = run("echo started; sleep 30", NO_TIMEOUT, &watched(&cx))
             .await
             .expect("the command ran");
 
@@ -401,27 +455,39 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(5));
     }
 
+    /// The seam promotion stands on: the wait ends, and the process, its pipes
+    /// and its buffer are still there to be handed on.
     #[tokio::test]
-    async fn a_running_command_streams_its_tail() {
-        let (host, cx) = context();
-        let out = run(
-            "for i in 1 2 3; do echo line $i; sleep 0.15; done",
+    async fn a_promoted_wait_hands_the_running_command_back_untouched() {
+        let (_host, cx) = context();
+        let promote = CancellationToken::new();
+        let flag = promote.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            flag.cancel();
+        });
+
+        let mut running = start(
+            "echo started; sleep 30",
+            &cx.cwd,
+            Sink::buffer(MAX_OUTPUT_CHARS),
+        )
+        .expect("spawned");
+        let stop = watch(
+            &mut running,
             NO_TIMEOUT,
-            &Context::of_call(&cx),
+            &Context::of_call(&cx, promote.clone()),
         )
         .await
-        .expect("the command ran");
-        assert_eq!(out.ended, Ended::Exited(0));
-        let tails = host.tails();
-        assert!(!tails.is_empty(), "no tail went out");
-        assert!(
-            tails.iter().all(|t| t.starts_with("line 1")),
-            "the tail is not the output: {tails:?}"
-        );
-        assert!(
-            tails.last().is_some_and(|t| t.contains("line 2")),
-            "the tail never moved: {tails:?}"
-        );
+        .expect("the wait ended");
+        assert!(matches!(stop, Stop::Promoted));
+        assert!(running.child.id().is_some(), "the process is still there");
+        assert_eq!(running.sink.lock().await.finish(), "started\n");
+
+        let out = conclude(running, Over::Interrupted, NO_TIMEOUT)
+            .await
+            .expect("concluded");
+        assert_eq!(out.output, "started\n");
     }
 
     #[test]

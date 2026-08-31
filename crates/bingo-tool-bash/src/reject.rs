@@ -5,10 +5,12 @@
 //! editors), reaches around the pipes for `/dev/tty` (`sudo`, `ssh`, pagers), or
 //! exits at once with nothing to say (a bare REPL). None of them can be driven
 //! from here, so they are answered with a reason and an alternative instead of a
-//! spawn. A second table catches commands that never end on their own.
+//! spawn. What a command needs a terminal for is this module's question;
+//! whether it can ever finish is [`crate::endless`]'s, and that one backgrounds
+//! rather than refuses.
 //!
-//! Both tables are pure: no filesystem, no environment, no process. They read
-//! the command as words, so a compound command is judged by its first word — the
+//! The table is pure: no filesystem, no environment, no process. It reads the
+//! command as words, so a compound command is judged by its first word — the
 //! permission gate is what splits `&&` and `|`.
 
 /// A command as the tables see it: the leading `VAR=value` assignments, the
@@ -46,35 +48,9 @@ pub fn interactive_reason(command: &str) -> Option<String> {
     }
 }
 
-/// Why this command never ends on its own, if it does not.
-///
-/// Only the two commands that truly never exit are refused: `watch`, and
-/// `tail` asked to follow. The old harness also refused every shell loop and
-/// every `tail`, which turned `for f in *.rs` and `tail -n 20 app.log` into
-/// friction; a loop that hangs is bounded by the timeout like anything else.
-pub fn periodic_reason(command: &str) -> Option<String> {
-    let words = tokenise(command);
-    let what = match words.first().map(String::as_str)? {
-        "watch" => "`watch` repeats until something stops it",
-        "tail" if follows(&words[1..]) => "`tail -f` follows its file until something stops it",
-        _ => return None,
-    };
-    Some(format!(
-        "{what}, and this tool waits for the command to exit; rejected. Pass `timeout` (milliseconds) to bound the run"
-    ))
-}
-
-/// `-f`, `-F`, `--follow[=…]`, or a short-flag cluster holding `f`/`F`.
-fn follows(args: &[String]) -> bool {
-    args.iter().any(|arg| {
-        arg.starts_with("--follow")
-            || (arg.starts_with('-') && !arg.starts_with("--") && arg.contains(['f', 'F']))
-    })
-}
-
 /// Shell words, quotes honoured. An unbalanced quote is the shell's problem, not
 /// the table's: fall back to whitespace so the base command is still judged.
-fn tokenise(command: &str) -> Vec<String> {
+pub fn tokenise(command: &str) -> Vec<String> {
     shlex::split(command)
         .unwrap_or_else(|| command.split_whitespace().map(str::to_string).collect())
 }
@@ -589,40 +565,5 @@ mod tests {
     #[test]
     fn an_unbalanced_quote_still_reaches_the_base_command() {
         assert!(interactive_reason("vim 'unterminated").is_some());
-    }
-
-    /// Every row: a command, and whether it is refused as never-ending.
-    const PERIODIC: &[(&str, bool)] = &[
-        ("watch ls", true),
-        ("watch -n 2 ls", true),
-        ("tail -f app.log", true),
-        ("tail -F app.log", true),
-        ("tail --follow=name app.log", true),
-        ("tail -fn 10 app.log", true),
-        ("tail -n 20 app.log", false),
-        ("while true; do echo hi; done", false),
-        ("for i in 1 2 3; do echo $i; done", false),
-        ("echo watch", false),
-        ("ls | tail -f", false),
-        ("cargo watch", false),
-        ("", false),
-    ];
-
-    #[test]
-    fn the_periodic_table_answers_every_row() {
-        for (command, rejected) in PERIODIC {
-            assert_eq!(
-                periodic_reason(command).is_some(),
-                *rejected,
-                "{command:?} -> {:?}",
-                periodic_reason(command)
-            );
-        }
-    }
-
-    #[test]
-    fn a_periodic_refusal_points_at_the_timeout() {
-        let reason = periodic_reason("watch ls").expect("watch is refused");
-        assert!(reason.contains("timeout"), "{reason}");
     }
 }

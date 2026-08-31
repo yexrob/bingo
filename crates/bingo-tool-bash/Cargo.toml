@@ -13,12 +13,19 @@ workspace = true
 [dependencies]
 bingo-sdk.workspace = true
 async-trait.workspace = true
+# M16: a job's card says when it started, and the sdk re-exports no clock.
+jiff.workspace = true
 process-wrap.workspace = true
 schemars.workspace = true
+# M16: `notify_regex` is a caller's pattern over a job's output (ADR-0018 §4).
+regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 shlex.workspace = true
 tokio.workspace = true
+tracing.workspace = true
+# M16: a job's id is the tail of a ULID, as an experience entry's is.
+ulid.workspace = true
 
 [dev-dependencies]
 bingo-sdk = { workspace = true, features = ["testing"] }
