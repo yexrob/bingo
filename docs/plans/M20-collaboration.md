@@ -55,16 +55,16 @@ the union merge is the integrator's. No new dependencies; budget 302.
 
 ## Exit criteria
 
-- [ ] a sibling resolves (own child shadows); roster and hints name siblings
-- [ ] `SendMessage` wakes an idle target; `FollowupTask` gone from every file
-- [ ] a stale post bounces with the missed posts quoted and lands on retry;
+- [x] a sibling resolves (own child shadows); roster and hints name siblings
+- [x] `SendMessage` wakes an idle target; `FollowupTask` gone from every file
+- [x] a stale post bounces with the missed posts quoted and lands on retry;
       a bounce unlocks even a lost fan-out; exactly-once fan-out pinned
-- [ ] a bounced post neither opens nor answers a mention debt
-- [ ] `catalog(Models)` meta carries context/output/reasoning/images (fixture)
-- [ ] `ListModels` lists providers with auth and models with facts;
+- [x] a bounced post neither opens nor answers a mention debt
+- [x] `catalog(Models)` meta carries context/output/reasoning/images (fixture)
+- [x] `ListModels` lists providers with auth and models with facts;
       `SpawnAgent` docs point at it
-- [ ] black-box scenarios of bricks 4 and 7 green
-- [ ] every gate green (fmt, check, clippy, test, discipline, budget
+- [x] black-box scenarios of bricks 4 and 7 green
+- [x] every gate green (fmt, check, clippy, test, discipline, budget
       unchanged, deny)
 
 ## Non-goals
@@ -83,3 +83,29 @@ R-sweep — `FollowupTask` references outside `bingo-agents` (surfaces,
 permission fixtures): `rg` before deleting, sweep all. R-merge — shared
 `lib.rs`/`spawn.rs` doc edits between H and I; small, unioned at merge.
 R-drift — models.dev meta keys are wire-visible; the fixture is the lock.
+
+## Verified (2026-09-01)
+
+- Worker I merged `1b77d48` (catalog meta + `ListModels` + the rpc wire
+  fixture); worker H merged `39a5ec6` (siblings, one Wake delivery with
+  `FollowupTask` deleted everywhere, the serial room in `serial.rs`, the
+  kernel barrier-order test). The union reconciled `lib.rs` to five tools
+  and added `ListModels` to the discipline tool regex.
+- H's amendment to ADR-0025 §2, accepted on review: the room's ledger
+  starts at the caller's `created_at` — nobody is behind on a post fanned
+  out before its session existed; the holder posts blind and is bounced
+  once, which is §3's repair working, not an exception to it.
+- Gates ran integrated with M21/M22 on `0dda5a7`: fmt / check / clippy /
+  discipline / budget (302/302) / deny all exit 0; the workspace suite's
+  one red was M22's relay black-box under full-parallel load — 3/3 green
+  solo and the cli suite 121/121 green on a quiet machine. The evidence
+  table sits in M22's plan.
+
+## Carried
+
+- The SeatHook seating race H diagnosed and did not chase: under parallel
+  load a declared role occasionally never seats, `seat()`'s error
+  swallowed into a tracing warn nobody sees. Worth chasing when it bites.
+- `quoted()` parses the bounce ledger out of any tool result's text; a
+  result that echoes a bounce verbatim could inflate "seen". Accepted at
+  this scale, recorded here.

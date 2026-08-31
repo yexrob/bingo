@@ -51,14 +51,14 @@ No shared files between L and K; no new dependencies; budget unchanged.
 
 ## Exit criteria
 
-- [ ] kernel order pinned: held briefing + later wake = one turn, briefing first
-- [ ] standby spawn: no watcher, seated receipt, foreground refusal
-- [ ] the relay black-box runs on one kickoff post; an unwoken standby
+- [x] kernel order pinned: held briefing + later wake = one turn, briefing first
+- [x] standby spawn: no watcher, seated receipt, foreground refusal
+- [x] the relay black-box runs on one kickoff post; an unwoken standby
       member has zero turns
-- [ ] tool words teach the room pattern and the member side
-- [ ] subsystem notices render as marked lines; person input renders as
+- [x] tool words teach the room pattern and the member side
+- [x] subsystem notices render as marked lines; person input renders as
       today; unknown surfaces stay person-loud; `TestBackend` proves all three
-- [ ] every gate green (fmt, check, clippy, test, discipline, budget
+- [x] every gate green (fmt, check, clippy, test, discipline, budget
       unchanged, deny)
 
 ## Non-goals
@@ -77,3 +77,39 @@ leak of nothing: it holds no process, no tokens; accepted and said in the
 receipt. R-notice-detection — surface strings are the contract here;
 the set is closed and named in one place so a new subsystem must choose
 loud or quiet deliberately.
+
+## Verified (2026-09-01)
+
+- Worker K merged `d677c5d`: the closed quiet set written down once in
+  `transcript.rs` with the lean-loud rule in its comment; the notice
+  reuses the tool row's own bricks (same `⏺`, same status colour); `cut`
+  promises no key a notice cannot answer; a room's journal reads as a
+  chat of marked lines — a taste call accepted on review. Worker L
+  merged `0dda5a7`: brick 1 found the kernel matching ADR-0027 §2
+  exactly (a Hold to a never-run session waits; a later Wake opens one
+  turn absorbing briefing-then-trigger as one four-part model message —
+  pinned); the `delivery()` pure brick with the worded foreground
+  refusal; no watcher; the relay's teeth proven by reverting `standby`.
+- Integrated gates on `0dda5a7`, quiet machine (1-min load 5.7): fmt /
+  check / clippy / discipline / budget (302/302) / deny all exit 0. The
+  workspace suite's single red was the relay test under full-parallel
+  load; 3/3 green solo and the cli suite 121/121 green quiet — recorded
+  beside the wall-clock family as load-sensitive, not a race (every
+  response past the last deterministic point says the same word).
+- The PTY smoke is red on this machine at one scene that predates all of
+  this: "a focused block opens whole in the pager" — the sheet sits ~9
+  rows short with the transcript still visible above it and `G`'s offset
+  applied against a bigger window. Bisect: red at `f631082` (M19,
+  before today's work) and at K's branch head; green once at `b910d5d`;
+  K ran the full smoke green twice on its branch. Filed as its own
+  defect with a dedicated worker; every gate named above is green.
+
+## Carried
+
+- The pager sheet defect, until its worker lands.
+- A notice longer than five lines folds with no key to open it — the
+  pager does not reach `User` items; a small follow-up if wanted.
+- `screens.rs` at 969 lines sits 31 under the fail; the next screen test
+  forces the split K sketched (the colour-landing section out).
+- The relay test budgets 5 s of tail; under full-parallel load that
+  margin flaked once — widen only if it ever flakes quiet.

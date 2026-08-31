@@ -39,12 +39,12 @@ first-hit-once, byte-identical to today.
 
 ## Exit criteria
 
-- [ ] default behaviour byte-identical: one hit, one wake, silence after
-- [ ] `notify_all`: first hit immediate; a burst in the window is counted,
+- [x] default behaviour byte-identical: one hit, one wake, silence after
+- [x] `notify_all`: first hit immediate; a burst in the window is counted,
       not delivered; the count rides the next wake or the completion
-- [ ] paused-clock coverage of the window; no wall-clock waits
-- [ ] `notify_all` without conditions refused with a worded error
-- [ ] black-box scenarios green; every gate green (fmt, check, clippy,
+- [x] paused-clock coverage of the window; no wall-clock waits
+- [x] `notify_all` without conditions refused with a worded error
+- [x] black-box scenarios green; every gate green (fmt, check, clippy,
       test, discipline, budget unchanged, deny)
 
 ## Non-goals
@@ -60,3 +60,27 @@ clock drives, or the tests wait thirty real seconds; the chase timers are
 the precedent. R-race — a hit landing between the last scan and process
 exit must be neither lost nor doubled: the end-of-job look already runs
 after the readers drain, and the pending tally folds into `finished`.
+
+## Verified (2026-09-01)
+
+- Worker J merged `b910d5d`, clean: `Conditions::tally` under both
+  readings (the first-hit read is the tally stopped at one match, so the
+  two cannot disagree), `Scan`'s `Mode::{Once, All}` with the 30 s
+  `QUIET` window on `tokio::time::Instant`, `Notice { line, more }`
+  making "a count with no line" unrepresentable, the held tally riding
+  the completion via `last_look`.
+- Four paused-clock tests drive the window with `tokio::time::advance`;
+  nothing waits wall-clock. Deviations accepted on review: the mode
+  carries `held: Option<Notice>` rather than two drifting fields, and a
+  post-window wake shows the newest match of its scan window with the
+  older ones counted.
+- `bingo-tool-bash` 133 tests; the three black-box scenarios gate their
+  determinism on files the test creates, never on scan-tick races. The
+  worktree's own gate run was fully green; the integrated run's table
+  sits in M22's plan.
+
+## Carried
+
+- A gone session's "nobody was told…" note lands in the job's own log; an
+  ongoing pattern that happens to match that text re-matches it, bounded
+  to one further note per quiet window. Pre-existing in shape; left.
