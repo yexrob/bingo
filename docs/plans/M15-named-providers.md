@@ -18,13 +18,13 @@
 
 ## Exit criteria
 
-- [ ] two codex instances, two `auth.json` entries, each refreshed independently (wiremock)
-- [ ] `/login <key-instance>` pastes a key into `auth.json` (0600) and the next turn sends it; `/logout` removes it
-- [ ] env feeds only the defaults; a named instance with no key fails with a message naming `/login <name>`
-- [ ] a colliding instance name is refused at boot, named
-- [ ] the catalogue lists instances; `/model <name>/<model>` switches to one
-- [ ] `bingo provider add` writes the instance and the key; the next run resolves `--provider <name>`; an unparseable settings file is left untouched
-- [ ] every gate green (fmt, check, clippy, test, discipline, budget unchanged, deny, tui-smoke)
+- [x] two codex instances, two `auth.json` entries, each refreshed independently (wiremock)
+- [x] `/login <key-instance>` pastes a key into `auth.json` (0600) and the next turn sends it; `/logout` removes it
+- [x] env feeds only the defaults; a named instance with no key fails with a message naming `/login <name>`
+- [x] a colliding instance name is refused at boot, named
+- [x] the catalogue lists instances; `/model <name>/<model>` switches to one
+- [x] `bingo provider add` writes the instance and the key; the next run resolves `--provider <name>`; an unparseable settings file is left untouched
+- [x] every gate green (fmt, check, clippy, test, discipline, budget unchanged, deny, tui-smoke)
 
 ## Non-goals
 
@@ -33,3 +33,36 @@ New wire shapes (an instance is one of the three existing ones); per-instance mo
 ## Risks
 
 R-order — the credential resolution order is where a proxy user gets silently the wrong key; the env-only-defaults rule has its own test. R-replace — `Merge::Replace` on the parent key replaces the instances too; documented in the ADR, not worked around.
+
+## Verified — 2026-08-31, merged `cfbede5`
+
+The worker was stopped by accident after its last commit and before its
+report; the integrator verified from the worktree instead. Four commits:
+instances + paste for each provider crate, the end-to-end tests, and the
+`provider add` subcommand.
+
+```
+provider crates                 73 + 12 + 101 tests, all ok
+cli black-box                   72 (instances.rs, provider_add.rs among them)
+fmt / clippy / discipline / deny            all 0
+scripts/budget.sh               297 (max 297) — unchanged, no new crate
+quiet rerun (load 5.2)          the three wall-clock TUI tests 3/3; tui-smoke exit 0
+```
+
+(The loaded-machine episode repeated during the merge gates — load hit
+42/92/117 and the three wall-clock tests plus one smoke scene failed; both
+passed untouched once the machine quieted. Same rule as M11/M13: read
+`uptime` before reading a timing failure.)
+
+Probed on the real binary (tmux): `bingo provider add` walks name →
+protocol (an explicit `openai`/`anthropic` choice) → base url → hidden key;
+the instance lands in settings **without** the secret, the key lands in
+`auth.json` (0600) under the instance's name, and the pasted key never
+appears on the pane.
+
+Resolution notes: `key.rs` reads `auth.json` first so `/login`/`/logout`
+mean something in a shell that already exports a key; a named instance is
+built with no environment variable at all, so the rule is unrepresentable
+rather than checked. A cross-plugin instance-name collision falls to the
+registry's later-duplicate-dropped rule (each plugin sees only its own
+settings); recorded as accepted.
