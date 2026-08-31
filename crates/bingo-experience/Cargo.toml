@@ -1,0 +1,35 @@
+[package]
+name = "bingo-experience"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Experience plugin for bingo: procedural playbooks as files, recalled by rank"
+
+[lints]
+workspace = true
+
+[dependencies]
+bingo-sdk.workspace = true
+async-trait.workspace = true
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+# M14: an entry's frontmatter, read the way a skill's is.
+serde-saphyr.workspace = true
+# M14: `created` and an outcome's `at` are timestamps, and `/experience` shows an age.
+jiff.workspace = true
+# M14: the tree's id facility mints an entry's slug (ADR-0014 §2).
+ulid.workspace = true
+# M14: the commit card shows the file it would write as a diff, rendered the
+# way `bingo-tool-fs` renders one. Already in the tree, so it costs no crate.
+similar.workspace = true
+
+[dev-dependencies]
+bingo-sdk = { workspace = true, features = ["testing"] }
+# M14: the tokenizer's contract is a property over arbitrary CJK/ASCII mixes.
+proptest.workspace = true
+tempfile.workspace = true
+tokio.workspace = true

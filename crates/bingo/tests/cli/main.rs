@@ -563,6 +563,7 @@ fn scripted_run(
 
 mod agents;
 mod context;
+mod experience;
 mod hooks;
 mod login;
 mod sessions;

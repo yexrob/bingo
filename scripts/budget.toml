@@ -8,10 +8,12 @@
 # already in the tree, so the `@` completion's walk costs nothing. Images were
 # measured at +33 (`image` +9, `ratatui-image` +24 for its sixel quantiser) and
 # refused: they stay at the `[image: name]` degrade of design §5.
-# M14 (docs/plans/M14-experience-bridge.md, ADR-0015) raises 282 → 283 for the
-# one new member, `bingo-plugin-rpc`. It brings no dependency of its own: the
-# framing is serde_json over lines and the process is `tokio::process`, both
-# already in the tree.
-max_dependencies = 283
+# M14 (docs/plans/M14-experience-bridge.md, ADR-0014/0015) raises 282 → 284
+# for the two new members, `bingo-plugin-rpc` and `bingo-experience`. Neither
+# brings a dependency of its own: the bridge's framing is serde_json over
+# lines on `tokio::process`, and the library's BM25 is the zero-dep brick,
+# its frontmatter `serde-saphyr`, its id `ulid`, its commit-card diff
+# `similar` — all already in the tree.
+max_dependencies = 284
 max_core_check_seconds = 20
 max_target_gb = 5
