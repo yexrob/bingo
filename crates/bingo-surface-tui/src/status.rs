@@ -136,10 +136,11 @@ fn notice(ui: &Ui, now: Now) -> Vec<Span<'static>> {
         theme::fading(notice.level, strength),
     )];
     // What the refusal was about is the person's own line: it is said after
-    // the reason, and never more loudly than it.
+    // the reason, and never more loudly than it. The slot's own separator
+    // joins the two, as it joins every other pair.
     if let Some(about) = notice.about.as_ref() {
         spans.push(Span::styled(
-            format!(" · {about}"),
+            about.clone(),
             theme::fading(bingo_sdk::Level::Info, strength),
         ));
     }

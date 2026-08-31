@@ -30,7 +30,11 @@ pub struct Now {
 impl Now {
     pub fn real() -> Self {
         Self {
-            instant: Instant::now(),
+            // The clock the loop sleeps on is the clock it measures with:
+            // outside a runtime, and in one, this is the monotonic clock, and
+            // under a paused runtime it is the one the timers obey — so a test
+            // that stops time stops the animation with it.
+            instant: tokio::time::Instant::now().into_std(),
             wall: Timestamp::now(),
             motion: moves(std::env::var("BINGO_MOTION").ok().as_deref()),
         }

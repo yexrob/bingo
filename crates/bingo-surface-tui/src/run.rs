@@ -156,7 +156,7 @@ pub(crate) async fn drive(
                 run.reply(reply, &mut events);
                 Wake::Echo
             },
-            () = tick(run.animating(Now::real())) => Wake::Echo,
+            () = tick(run.animating(Now::real()), run.painted + TICK) => Wake::Echo,
         };
         let now = Now::real();
         run.ui.expire(now);
@@ -185,8 +185,9 @@ async fn attach(
         mine: HashMap::new(),
         replies,
         clipboard: None,
-        // Older than a frame, so the first thing that happens is drawn.
-        painted: Instant::now() - TICK,
+        // Older than a frame, on the loop's own clock, so the first thing
+        // that happens is drawn.
+        painted: Now::real().instant - TICK,
         behind: false,
         exit: None,
     };
@@ -208,11 +209,17 @@ async fn next_frame(events: &mut Option<FrameStream>) -> Option<bingo_sdk::Frame
     }
 }
 
-/// The animation clock: a tick while something moves, and nothing at all
-/// while nothing does — the one place a redraw can happen without an event.
-async fn tick(animating: bool) {
+/// The animation clock: a wake at the next frame boundary while something
+/// moves, and nothing at all while nothing does — the one place a redraw can
+/// happen without an event.
+///
+/// The deadline is measured from the last frame painted rather than from this
+/// moment, so a storm of events cannot keep pushing it back: a new `sleep` on
+/// every pass of the loop would be cancelled by the next delta and the screen
+/// would go still exactly when it has the most to say.
+async fn tick(animating: bool, next: Instant) {
     match animating {
-        true => tokio::time::sleep(TICK).await,
+        true => tokio::time::sleep_until(next.into()).await,
         false => std::future::pending().await,
     }
 }
@@ -229,6 +236,7 @@ impl Run {
             || self.ui.scroll.moving(now.instant)
             || self.ui.layer_moving(now)
             || !self.ui.notices.is_empty()
+            || self.ui.crossfading(now)
             || self.ui.painted.borrow().blocks.moving()
     }
 
@@ -474,6 +482,9 @@ impl Run {
     /// time, so what is typed there reaches it.
     fn show(&mut self, session: SessionId) {
         self.session.tree.show(&session);
+        // Somewhere else is somewhere else: the transcript comes back up out
+        // of dim so the change of place is seen and not just noticed (§6).
+        self.ui.switched = Some(Instant::now());
         self.ui.scroll = Default::default();
         self.refocus();
         if self.session.handles.contains_key(&session) {
@@ -961,6 +972,132 @@ mod tests {
             "one frame for each of the four things that happened at the start, \
              one for the keystroke and one on the way out — and none at all \
              for the four seconds of waiting between them"
+        );
+    }
+
+    /// A window nobody is looking at is the one that may interrupt a person
+    /// somewhere else on their desktop (§6).
+    async fn unfocused(
+        harness: &mut Harness,
+        mut frames: Vec<bingo_sdk::Frame>,
+        focus: bool,
+    ) -> usize {
+        // The window says where it is first; the session closing is what ends
+        // the run, so no key has to race the frames.
+        frames.push(closed(900));
+        let (host, _) = TestHost::paced(frames, Duration::from_millis(50));
+        let script = match focus {
+            true => Vec::new(),
+            false => vec![Term::FocusLost],
+        };
+        drive(
+            &host,
+            options(None, harness.home.path()),
+            &mut harness.recorder,
+            terminal_events(script, Duration::from_millis(5)),
+        )
+        .await
+        .expect("the loop ran");
+        harness.recorder.notifications.len()
+    }
+
+    #[tokio::test]
+    async fn a_question_that_opens_on_a_window_nobody_watches_says_so() {
+        let mut harness = Harness::new();
+        let asked = vec![frame(1, opened(permission(Some("Edit(src/)"), None)))];
+        assert_eq!(
+            unfocused(&mut harness, asked.clone(), false).await,
+            1,
+            "exactly one notification, and the bell as well"
+        );
+        assert_eq!(harness.recorder.bells, 1);
+        let bytes = harness.recorder.notifications[0].clone();
+        assert!(bytes.starts_with(b"\x1b"), "{bytes:?}");
+        assert!(
+            String::from_utf8_lossy(&bytes).contains("needs you"),
+            "{bytes:?}"
+        );
+
+        let mut watched = Harness::new();
+        assert_eq!(
+            unfocused(&mut watched, asked, true).await,
+            0,
+            "and none at all while the window is being looked at"
+        );
+        assert_eq!(watched.recorder.bells, 1, "the bell stays either way");
+    }
+
+    #[tokio::test]
+    async fn a_turn_that_finishes_on_a_window_nobody_watches_says_so() {
+        let mut harness = Harness::new();
+        let done = vec![
+            frame(1, started("trn_1")),
+            frame(2, completed("trn_1", TurnStatus::Completed)),
+        ];
+        assert_eq!(unfocused(&mut harness, done.clone(), false).await, 1);
+        assert!(
+            String::from_utf8_lossy(&harness.recorder.notifications[0]).contains("done"),
+            "{:?}",
+            harness.recorder.notifications
+        );
+
+        let mut child = Harness::new();
+        let elsewhere = vec![
+            child_frame(1, announced("reviewer")),
+            child_frame(2, started("trn_9")),
+            child_frame(3, completed("trn_9", TurnStatus::Completed)),
+        ];
+        assert_eq!(
+            unfocused(&mut child, elsewhere, false).await,
+            0,
+            "a child finishing is the parent's business, not the desktop's"
+        );
+    }
+
+    /// §6's budget: the kernel's own pace is not the screen's.
+    #[tokio::test(start_paused = true)]
+    async fn a_storm_of_deltas_costs_one_draw_a_frame_and_no_more() {
+        let mut harness = Harness::new();
+        let mut frames = vec![
+            frame(1, started("trn_1")),
+            frame(
+                2,
+                Event::ItemStarted {
+                    item: assistant("itm_1", "", ItemStatus::Running),
+                },
+            ),
+        ];
+        // A thousand deltas a second, for a second.
+        frames.extend((0..1_000).map(|i| {
+            frame(
+                3 + i,
+                Event::ItemDelta {
+                    item: bingo_sdk::ItemId::from_raw("itm_1"),
+                    n: i as u32,
+                    kind: bingo_sdk::DeltaKind::Text,
+                    data: "x".into(),
+                },
+            )
+        }));
+        frames.push(closed(1_100));
+        let (host, _) = TestHost::paced(frames, Duration::from_millis(1));
+        drive(
+            &host,
+            options(None, harness.home.path()),
+            &mut harness.recorder,
+            keys(vec![]),
+        )
+        .await
+        .expect("the loop ran");
+        let drawn = harness.recorder.frames.len();
+        assert!(
+            (10..=40).contains(&drawn),
+            "a second of storm is about thirty frames, not a thousand: {drawn}"
+        );
+        assert!(
+            harness.recorder.last().contains(&"x".repeat(20)),
+            "and the last of them is up to date: {}",
+            harness.recorder.last()
         );
     }
 

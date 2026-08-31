@@ -529,6 +529,7 @@ mod tests {
                 || name == "theme.rs"
                 || name == "test_support.rs"
                 || name == "doubles.rs"
+                || name == "motion.rs"
                 || name == "screens.rs"
                 || name == "painted.rs"
             {

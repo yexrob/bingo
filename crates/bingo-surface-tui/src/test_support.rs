@@ -436,11 +436,12 @@ pub fn still(now: Now) -> Now {
     }
 }
 
-/// A scene a turn has been running in for a second: past the activity row's
-/// delay, so what §6 calls the working screen is on it.
+/// A scene a turn has been running in for a second and a half: past the
+/// activity row's delay, and on the turn of every cycle §6 names — so a cue
+/// sampled from here starts at the beginning of itself.
 pub fn mid_turn() -> (Ui, Now) {
     let (ui, now) = scene();
-    (ui, later(now, 1_000))
+    (ui, later(now, 1_600))
 }
 
 /// A scene whose wall clock is far enough past [`ts`] for a card the kernel

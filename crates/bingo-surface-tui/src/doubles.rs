@@ -14,6 +14,7 @@ use bingo_sdk::{
     Seq, SessionFilter, SessionHandle, SessionId, SessionPort, SessionSelector, SessionState,
     SessionSummary,
 };
+use futures::StreamExt;
 use serde_json::Value;
 
 use crate::clock::Now;
@@ -26,6 +27,9 @@ use crate::ui::Ui;
 #[derive(Debug, Default)]
 pub struct TestSession {
     frames: Vec<bingo_sdk::Frame>,
+    /// How long each frame waits before it arrives, so a test can be a storm
+    /// rather than a burst.
+    pace: std::time::Duration,
     submitted: Mutex<Vec<Input>>,
     answers: Mutex<Vec<(bingo_sdk::InteractionId, bingo_sdk::Answer, Activation)>>,
     interrupts: Mutex<usize>,
@@ -42,7 +46,14 @@ impl TestSession {
                 break;
             }
         }
-        Box::pin(futures::stream::iter(frames))
+        if self.pace.is_zero() {
+            return Box::pin(futures::stream::iter(frames));
+        }
+        let pace = self.pace;
+        Box::pin(futures::stream::iter(frames).then(move |frame| async move {
+            tokio::time::sleep(pace).await;
+            frame
+        }))
     }
 
     pub fn submitted(&self) -> Vec<Input> {
@@ -118,6 +129,25 @@ impl TestHost {
     pub fn with(frames: Vec<bingo_sdk::Frame>) -> (HostHandle, Arc<TestSession>) {
         let (host, session, _) = Self::tree(frames);
         (host, session)
+    }
+
+    /// A host whose frames arrive `pace` apart: what a storm of deltas looks
+    /// like from the loop's side.
+    pub fn paced(
+        frames: Vec<bingo_sdk::Frame>,
+        pace: std::time::Duration,
+    ) -> (HostHandle, Arc<TestSession>) {
+        let session = Arc::new(TestSession {
+            frames,
+            pace,
+            ..Default::default()
+        });
+        let host = TestHost {
+            session: Arc::clone(&session),
+            child: Arc::new(TestSession::default()),
+            closed: Mutex::new(Vec::new()),
+        };
+        (HostHandle(Arc::new(host)), session)
     }
 
     /// The root's mailbox and the child's, which `open(ById)` answers with.
@@ -324,10 +354,24 @@ pub fn keys_after(
 }
 
 fn pressed(script: Vec<crossterm::event::KeyEvent>, wait: std::time::Duration) -> crate::run::Keys {
-    use futures::StreamExt;
-    let keys = futures::stream::iter(script).then(move |key| async move {
+    terminal_events(
+        script
+            .into_iter()
+            .map(crossterm::event::Event::Key)
+            .collect(),
+        wait,
+    )
+}
+
+/// Everything else a terminal sends: the window taking the focus and losing
+/// it, which is what turns a completion into a notification (§6).
+pub fn terminal_events(
+    script: Vec<crossterm::event::Event>,
+    wait: std::time::Duration,
+) -> crate::run::Keys {
+    let events = futures::stream::iter(script).then(move |event| async move {
         tokio::time::sleep(wait).await;
-        crossterm::event::Event::Key(key)
+        event
     });
-    Box::pin(keys.chain(futures::stream::pending()))
+    Box::pin(events.chain(futures::stream::pending()))
 }

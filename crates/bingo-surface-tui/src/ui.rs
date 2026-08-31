@@ -31,6 +31,9 @@ pub const NOTICE: Duration = Duration::from_secs(4);
 pub const NOTICE_FADE: Duration = Duration::from_millis(2 * FRAME.as_millis() as u64);
 /// A second ctrl+c within this window leaves.
 pub const EXIT_WINDOW: Duration = Duration::from_secs(2);
+/// A transcript that has just been stepped into crossfades through dim over
+/// this long: two frames (§6).
+pub const SWITCH: Duration = Duration::from_millis(2 * FRAME.as_millis() as u64);
 
 /// A message that is not transcript: an ack, a warning, a hint.
 #[derive(Clone, Debug)]
@@ -268,6 +271,9 @@ pub struct Ui {
     /// Whether the terminal window is being looked at. A window nobody is
     /// looking at is the one that may say something to the desktop (§6).
     pub focused: bool,
+    /// When the session in view was last stepped into: what the transcript
+    /// crossfades from.
+    pub switched: Option<Instant>,
     /// The frame as the last draw left it.
     pub painted: RefCell<Painted>,
 }
@@ -290,6 +296,7 @@ impl Ui {
             catalogs: Catalogs::default(),
             opening: false,
             focused: true,
+            switched: None,
             painted: RefCell::default(),
         }
     }
@@ -336,6 +343,12 @@ impl Ui {
         if self.layer.closing && self.layer.reveal(now).gone() {
             self.layer = Layer::shut(now.instant);
         }
+    }
+
+    /// Whether the transcript is still crossfading into the session a person
+    /// has just stepped into (§6).
+    pub fn crossfading(&self, now: Now) -> bool {
+        now.motion && self.switched.is_some_and(|at| now.since(at) < SWITCH)
     }
 
     /// Whether the next frame would draw a layer differently.

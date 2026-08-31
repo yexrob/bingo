@@ -1,0 +1,749 @@
+//! Every row of `docs/design/tui.md` §6, frame by frame on an injected clock.
+//!
+//! A cue is a pure function of [`crate::clock::Now`] and state, so each row
+//! below is a handful of samples at named instants rather than something to
+//! watch for. What the samples assert is the *cue* — a glyph, a style, a row
+//! that is there or is not — because that is what §6 promises; where the cue
+//! is drawn is `screens.rs`'s business.
+//!
+//! The rule the whole file is here to hold: every motion reports a state
+//! change, stillness is the default, and `BINGO_MOTION=off` stills all of it.
+
+use std::time::Duration;
+
+use bingo_sdk::{Event, ItemStatus, TurnStatus};
+use ratatui::style::Style;
+
+use crate::clock::{FRAME, Now};
+use crate::test_support::*;
+use crate::tree::Tree;
+use crate::{keys, theme};
+
+/// The style of the run of cells carrying `needle` on a drawn frame.
+fn style_of(tree: &Tree, ui: &crate::ui::Ui, now: Now, needle: &str) -> Style {
+    let painted = crate::painted::painted(80, 24, tree, ui, now);
+    painted
+        .row(needle)
+        .into_iter()
+        .find(|(text, _)| text.contains(needle))
+        .map(|(_, style)| style)
+        .unwrap_or_else(|| panic!("no run carries {needle:?}"))
+}
+
+/// A screen at one instant, as text.
+fn screen(tree: &Tree, ui: &crate::ui::Ui, now: Now) -> String {
+    draw_tree(80, 24, tree, ui, now)
+}
+
+/// The style of the first run of the row carrying `needle` — the sparkle on
+/// the activity row, the border on the input box's own row.
+fn leading_style(tree: &Tree, ui: &crate::ui::Ui, now: Now, needle: &str) -> Style {
+    crate::painted::painted(80, 24, tree, ui, now)
+        .row(needle)
+        .first()
+        .map(|(_, style)| *style)
+        .unwrap_or_else(|| panic!("no row carries {needle:?}"))
+}
+
+/// One row of it, without the quotes a test backend prints around each.
+fn row(tree: &Tree, ui: &crate::ui::Ui, now: Now, needle: &str) -> String {
+    screen(tree, ui, now)
+        .lines()
+        .find(|line| line.contains(needle))
+        .map(|line| line.trim_matches('"').trim_end().to_string())
+        .unwrap_or_else(|| panic!("no row carries {needle:?}"))
+}
+
+/// The style of the span carrying `needle` in the transcript itself, which is
+/// where a cue lives before a card dims the world in front of it.
+fn transcript_style(tree: &Tree, now: Now, needle: &str) -> Style {
+    let mut blocks = crate::blocks::Blocks::default();
+    let height = blocks.sync(
+        tree.viewed(),
+        &tree.agents(),
+        80,
+        &std::collections::BTreeSet::new(),
+        now,
+    );
+    blocks
+        .window(0, height)
+        .iter()
+        .flat_map(|line| line.spans.clone())
+        .find(|span| span.content.contains(needle))
+        .map(|span| span.style)
+        .unwrap_or_else(|| panic!("no span carries {needle:?}"))
+}
+
+// ---- presence: the sparkle and the breath -------------------------------
+
+/// A turn that has been running long enough to have a row of its own.
+fn turning() -> Tree {
+    solo(&folded(vec![frame(1, started("trn_1"))]))
+}
+
+#[test]
+fn the_sparkle_walks_its_four_glyphs_at_a_hundred_and_fifty_milliseconds() {
+    let tree = turning();
+    let (ui, now) = mid_turn();
+    let glyph = |ms| {
+        row(&tree, &ui, later(now, ms), "esc to interrupt")
+            .chars()
+            .next()
+            .expect("its first cell")
+    };
+    assert_eq!(glyph(0), '✻');
+    assert_eq!(glyph(150), '✢');
+    assert_eq!(glyph(300), '✶');
+    assert_eq!(glyph(450), '✽');
+    assert_eq!(glyph(600), '✻', "and it comes back round");
+}
+
+#[test]
+fn the_presence_mark_breathes_between_two_thirds_and_all_of_itself() {
+    let tree = turning();
+    let (ui, now) = mid_turn();
+    let at = |ms| leading_style(&tree, &ui, later(now, ms), "esc to interrupt");
+    // Five samples across the 1.6 s breath. On the eight colours the ramp has
+    // only its two ends, which is what a terminal without 24 bits can show.
+    let sampled: Vec<Style> = [0i64, 400, 800, 1200, 1600]
+        .iter()
+        .map(|ms| at(*ms))
+        .collect();
+    assert_eq!(sampled[0], theme::as_drawn(theme::breath(0.0)));
+    assert_eq!(sampled[1], theme::as_drawn(theme::breath(0.5)));
+    assert_eq!(sampled[2], theme::as_drawn(theme::breath(1.0)));
+    assert_eq!(sampled[3], sampled[1], "and back down the way it came");
+    assert_eq!(sampled[4], sampled[0]);
+
+    crate::theme::with(crate::painted::truecolor(), || {
+        let mut steps: Vec<String> = (0..32)
+            .map(|i| {
+                let style = leading_style(&tree, &ui, later(now, i * 50), "esc to interrupt");
+                format!("{style:?}")
+            })
+            .collect();
+        steps.sort();
+        steps.dedup();
+        assert_eq!(steps.len(), 5, "five steps where 24 bits can draw them");
+    });
+}
+
+#[test]
+fn the_input_box_glows_on_the_same_breath_and_is_dim_when_idle() {
+    let (ui, now) = mid_turn();
+    let working = leading_style(&turning(), &ui, now, keys::PLACEHOLDER);
+    assert_eq!(
+        working,
+        leading_style(&turning(), &ui, now, "esc to interrupt"),
+        "the box and the sparkle share one breath"
+    );
+
+    let idle = solo(&state());
+    assert_eq!(
+        leading_style(&idle, &ui, now, keys::PLACEHOLDER),
+        theme::as_drawn(theme::dim()),
+        "and it is dim while nothing is happening"
+    );
+}
+
+#[test]
+fn nothing_of_the_presence_is_on_screen_while_no_turn_runs() {
+    let (ui, now) = mid_turn();
+    let screen = screen(&solo(&state()), &ui, now);
+    assert!(!screen.contains("esc to interrupt"), "{screen}");
+    assert!(
+        !screen.contains('✻') || screen.contains("Welcome"),
+        "{screen}"
+    );
+}
+
+// ---- streaming: the comet tail ------------------------------------------
+
+/// An answer that is still arriving, with a tail long enough to ramp.
+fn streaming() -> Tree {
+    solo(&folded(vec![
+        frame(1, started("trn_1")),
+        frame(
+            2,
+            Event::ItemStarted {
+                item: assistant("itm_1", "", ItemStatus::Running),
+            },
+        ),
+        frame(
+            3,
+            Event::ItemDelta {
+                item: bingo_sdk::ItemId::from_raw("itm_1"),
+                n: 0,
+                kind: bingo_sdk::DeltaKind::Text,
+                data: "the last cells are still warm".into(),
+            },
+        ),
+    ]))
+}
+
+/// The styles of the last eight cells of the answer, oldest first.
+fn tail(ui: &crate::ui::Ui, now: Now, at: Now) -> Vec<Style> {
+    let tree = streaming();
+    // The block is rendered once at `now` so the cache dates its arrival
+    // there, and again at `at` so the tail has aged.
+    crate::painted::painted(80, 24, &tree, ui, now);
+    let painted = crate::painted::painted(80, 24, &tree, ui, at);
+    let mut runs: Vec<Style> = painted
+        .row("still warm")
+        .into_iter()
+        .rev()
+        .filter(|(text, _)| !text.trim().is_empty())
+        .take(8)
+        .map(|(_, style)| style)
+        .collect();
+    runs.reverse();
+    runs
+}
+
+#[test]
+fn a_comet_tail_cools_from_the_glow_to_the_text_behind_it() {
+    let (ui, now) = mid_turn();
+    crate::theme::with(crate::painted::truecolor(), || {
+        let fresh = tail(&ui, now, now);
+        assert_eq!(
+            fresh.last().copied(),
+            Some(theme::as_drawn(theme::comet(0.0))),
+            "the cell that just landed wears the glow"
+        );
+        assert_ne!(fresh.first(), fresh.last(), "and the ramp is a ramp");
+
+        let warm = tail(&ui, now, later(now, 75));
+        assert_ne!(warm, fresh, "the whole tail cools as it ages");
+        let cool = tail(&ui, now, later(now, 150));
+        assert_ne!(cool, warm);
+        let cold = tail(&ui, now, later(now, 180));
+        assert_eq!(
+            cold,
+            tail(&ui, now, still(later(now, 180))),
+            "and after 180 ms the row is drawn as a still surface draws it"
+        );
+    });
+}
+
+#[test]
+fn the_tail_is_style_and_never_text() {
+    let (ui, now) = mid_turn();
+    let tree = streaming();
+    assert_eq!(
+        screen(&tree, &ui, now),
+        screen(&tree, &ui, later(now, 90)),
+        "what a `--print` would see does not move"
+    );
+}
+
+// ---- a tool running, and finishing --------------------------------------
+
+fn running_bash() -> Vec<bingo_sdk::Frame> {
+    vec![
+        frame(1, started("trn_1")),
+        started_tool(2, running_tool("itm_1", "Bash", "compiling…")),
+    ]
+}
+
+#[test]
+fn a_live_bullet_pulses_between_presence_and_its_glow() {
+    let tree = solo(&folded(running_bash()));
+    let (ui, now) = mid_turn();
+    crate::theme::with(crate::painted::truecolor(), || {
+        let at = |ms| style_of(&tree, &ui, later(now, ms), "⏺");
+        let (start, half, whole) = (at(0), at(600), at(1_200));
+        assert_ne!(start, half, "it is somewhere else half a pulse in");
+        assert_eq!(start, whole, "and back where it began after 1.2 s");
+    });
+}
+
+#[test]
+fn a_completion_flashes_bold_for_exactly_one_frame() {
+    let (ui, now) = mid_turn();
+    let mut state = folded(running_bash());
+    let running = solo(&state);
+    crate::painted::painted(80, 24, &running, &ui, now);
+
+    state.apply(&frame(
+        3,
+        Event::ItemCompleted {
+            item: tool(
+                "itm_1",
+                "Bash",
+                serde_json::json!({"command": "cargo test"}),
+                Some(bingo_sdk::ToolOutput::text("ok")),
+                ItemStatus::Completed,
+            ),
+        },
+    ));
+    let done = solo(&state);
+    let flash = style_of(&done, &ui, now, "⏺");
+    assert_eq!(
+        flash,
+        theme::as_drawn(theme::good().patch(theme::bold())),
+        "one bold frame in `good`"
+    );
+    let settled = style_of(&done, &ui, later(now, FRAME.as_millis() as i64), "⏺");
+    assert_eq!(
+        settled,
+        theme::as_drawn(theme::good()),
+        "and it settles on the very next frame"
+    );
+}
+
+// ---- a block arriving ---------------------------------------------------
+
+#[test]
+fn a_new_block_rises_two_rows_into_place() {
+    let (ui, now) = mid_turn();
+    let before = folded(vec![frame(
+        1,
+        Event::ItemCompleted {
+            item: user("itm_1", "first"),
+        },
+    )]);
+    // The first draw is the transcript a person arrived to; nothing in it has
+    // just arrived, so nothing rises.
+    let settled = screen(&solo(&before), &ui, now);
+    assert!(!settled.ends_with("\n\n"), "{settled}");
+
+    let mut after = before.clone();
+    after.apply(&frame(
+        2,
+        Event::ItemCompleted {
+            item: assistant("itm_2", "second", ItemStatus::Completed),
+        },
+    ));
+    let arriving = solo(&after);
+    let rows_below = |at: Now| {
+        screen(&arriving, &ui, at)
+            .lines()
+            .skip_while(|line| !line.contains("second"))
+            .take_while(|line| !line.contains('╭'))
+            .filter(|line| line.trim_matches('"').trim().is_empty())
+            .count()
+    };
+    assert_eq!(rows_below(now), 2, "it enters two rows above its place");
+    assert_eq!(rows_below(later(now, 33)), 1);
+    assert_eq!(
+        rows_below(later(now, 66)),
+        0,
+        "and lands on the third frame"
+    );
+}
+
+// ---- the activity row ---------------------------------------------------
+
+#[test]
+fn a_turn_that_answers_at_once_never_flashes_a_row() {
+    let tree = turning();
+    let (ui, now) = scene();
+    for ms in [0i64, 100, 200, 299] {
+        let screen = screen(&tree, &ui, later(now, ms));
+        assert!(!screen.contains("esc to interrupt"), "at {ms} ms: {screen}");
+    }
+    assert!(
+        screen(&tree, &ui, later(now, 300)).contains("esc to interrupt"),
+        "and it appears at 300 ms"
+    );
+}
+
+#[test]
+fn the_activity_row_says_a_verb_a_clock_and_what_the_turn_has_said() {
+    let mut state = folded(vec![frame(1, started("trn_1"))]);
+    state.apply(&frame(
+        2,
+        Event::TurnUsage {
+            turn: bingo_sdk::TurnId::from_raw("trn_1"),
+            usage: bingo_sdk::Usage {
+                output_tokens: 1_200,
+                ..Default::default()
+            },
+            context: Default::default(),
+        },
+    ));
+    let (ui, now) = scene();
+    let tree = solo(&state);
+    let row = |ms| row(&tree, &ui, later(now, ms), "esc to interrupt");
+    assert_eq!(
+        row(4_000),
+        "✻ Rummaging… (esc to interrupt · 4s · ↓ 1.2k tokens)",
+        "the verb is drawn from the turn's own id, so the row never changes its mind"
+    );
+    assert!(
+        row(5_000).contains("· 5s ·"),
+        "the clock ticks once a second"
+    );
+}
+
+#[test]
+fn every_verb_is_one_of_bingos_own() {
+    let words = [
+        "Simmering",
+        "Noodling",
+        "Tinkering",
+        "Rummaging",
+        "Mulling",
+        "Weaving",
+        "Sketching",
+        "Percolating",
+    ];
+    let (ui, now) = mid_turn();
+    for id in ["trn_1", "trn_2", "trn_9", "trn_ffff", "trn_01J"] {
+        let state = folded(vec![frame(1, started(id))]);
+        let row = screen(&solo(&state), &ui, now)
+            .lines()
+            .find(|line| line.contains("esc to interrupt"))
+            .expect("the activity row")
+            .to_string();
+        assert!(words.iter().any(|word| row.contains(word)), "{id}: {row}");
+    }
+}
+
+// ---- a card's guard -----------------------------------------------------
+
+/// A permission the kernel guards for 400 ms, as it does every card.
+fn guarded() -> bingo_sdk::Interaction {
+    let mut asking = permission(Some("Edit(src/)"), None);
+    asking.guard_until = Some(ts() + jiff::SignedDuration::from_millis(400));
+    asking
+}
+
+#[test]
+fn a_cards_rows_are_dim_until_the_guard_lifts_and_plain_the_moment_it_does() {
+    let state = folded(vec![frame(1, opened(guarded()))]);
+    let (mut ui, now) = settled();
+    ui.dialog.focus_on(state.interactions.first());
+    let tree = solo(&state);
+    // The card is drawn from the wall clock the kernel stated the guard in.
+    let at = |ms| style_of(&tree, &ui, later(now, ms), "Do you want to");
+    assert_eq!(
+        at(199),
+        theme::as_drawn(theme::dim()),
+        "a key pressed now would be dropped, and the card says so"
+    );
+    assert_eq!(
+        at(200),
+        theme::as_drawn(theme::text()),
+        "and it brightens in one frame as the guard lifts"
+    );
+}
+
+#[test]
+fn a_card_reveals_top_down_and_a_sheet_slides_up() {
+    let asked = folded(vec![frame(1, opened(permission(Some("Edit(src/)"), None)))]);
+    let (mut ui, now) = scene();
+    ui.dialog.focus_on(asked.interactions.first());
+    let tree = solo(&asked);
+    let card: Vec<String> = (0..4)
+        .map(|f| screen(&tree, &ui, later(now, f * 33)))
+        .collect();
+    insta::assert_snapshot!("card_reveal", card.join("\n"));
+
+    let (mut sheet, now) = scene();
+    sheet.layer.show(crate::ui::Open::Help, now.instant);
+    let plain = solo(&state());
+    let frames: Vec<String> = (0..5)
+        .map(|f| screen(&plain, &sheet, later(now, f * 33)))
+        .collect();
+    insta::assert_snapshot!("sheet_slide", frames.join("\n"));
+}
+
+#[test]
+fn esc_runs_a_sheet_back_down_the_way_it_came() {
+    let (mut ui, now) = scene();
+    shown(&mut ui, crate::ui::Open::Help, now);
+    ui.layer.close(now.instant);
+    let tree = solo(&state());
+    let closing: Vec<String> = (0..5)
+        .map(|f| screen(&tree, &ui, later(now, f * 33)))
+        .collect();
+    assert_eq!(
+        closing[4],
+        screen(&tree, &crate::ui::Ui::new(Vec::new(), now.instant), now),
+        "by the last frame it has gone"
+    );
+    insta::assert_snapshot!("sheet_close", closing.join("\n"));
+}
+
+// ---- notices ------------------------------------------------------------
+
+#[test]
+fn a_notice_arrives_out_of_dim_and_leaves_into_it() {
+    let tree = solo(&state());
+    let (mut ui, now) = scene();
+    ui.notify(bingo_sdk::Level::Error, "unknown command: /x", now.instant);
+    let at = |ms| style_of(&tree, &ui, later(now, ms), "unknown command");
+    assert_eq!(
+        at(0),
+        theme::as_drawn(theme::fading(bingo_sdk::Level::Error, 0.0))
+    );
+    assert_eq!(
+        at(33),
+        theme::as_drawn(theme::fading(bingo_sdk::Level::Error, 0.5))
+    );
+    assert_eq!(
+        at(66),
+        theme::as_drawn(theme::bad()),
+        "and it is there to read"
+    );
+    assert_eq!(
+        at(4_099),
+        theme::as_drawn(theme::fading(bingo_sdk::Level::Error, 0.5))
+    );
+}
+
+#[test]
+fn a_refused_line_is_named_after_the_reason_that_refused_it() {
+    let tree = solo(&state());
+    let (mut ui, now) = scene();
+    ui.notify_about(
+        bingo_sdk::Level::Error,
+        "unknown command: /x".into(),
+        "/x the whole line".into(),
+        now.instant,
+    );
+    let screen = screen(&tree, &ui, later(now, 66));
+    assert!(
+        screen.contains("unknown command: /x · /x the whole line"),
+        "{screen}"
+    );
+    assert_eq!(
+        style_of(&tree, &ui, later(now, 66), "/x the whole"),
+        theme::as_drawn(theme::dim()),
+        "what it was about is said quietly"
+    );
+}
+
+// ---- what wants a person ------------------------------------------------
+
+#[test]
+fn what_wants_a_person_alternates_on_the_second() {
+    let tree = folded_tree(vec![
+        child_frame(1, announced("reviewer")),
+        child_frame(2, opened(child_permission())),
+    ]);
+    // The beat is the wall clock's own second, so the samples start on one.
+    let (ui, now) = scene();
+    // The status line itself: a card is up over the screen, and everything
+    // behind it is dim by then (§3), so the slot is read where it is written.
+    let at = |ms| {
+        crate::status::styles(&crate::status::line(&tree, &ui, 80, later(now, ms)))
+            .into_iter()
+            .find(|(text, _)| text.contains("needs you"))
+            .map(|(_, style)| style)
+            .expect("the notice")
+    };
+    assert_eq!(at(0), theme::presence());
+    assert_eq!(at(999), theme::presence());
+    assert_eq!(at(1_000), theme::text(), "on the second");
+    assert_eq!(at(2_000), theme::presence());
+}
+
+#[test]
+fn a_waiting_childs_row_and_its_switcher_line_pulse_with_it() {
+    let mut tree = spawned_tree(vec![
+        child_frame(1, announced("reviewer")),
+        child_frame(2, opened(child_permission())),
+    ]);
+    let (_, now) = scene();
+    assert_eq!(transcript_style(&tree, now, "Needs"), theme::presence());
+    assert_eq!(
+        transcript_style(&tree, later(now, 1_000), "Needs"),
+        theme::text(),
+        "the child's row is on the same beat"
+    );
+
+    let root = tree.root_id().clone();
+    tree.show(&root);
+    let switcher = |at: Now| {
+        crate::tree::switcher_lines(&tree.rows(), 0, at)
+            .iter()
+            .flat_map(|line| line.spans.clone())
+            .find(|span| span.content.contains("needs you"))
+            .map(|span| span.style)
+            .expect("the row that is asking")
+    };
+    assert_eq!(switcher(now), theme::presence());
+    assert_eq!(
+        switcher(later(now, 1_000)),
+        theme::text(),
+        "and so is its line in the switcher"
+    );
+}
+
+// ---- the context notice -------------------------------------------------
+
+/// A session that has used `share` per cent of its compaction trigger.
+fn context(share: u64) -> Tree {
+    solo(&folded(vec![frame(
+        1,
+        Event::TurnUsage {
+            turn: bingo_sdk::TurnId::from_raw("trn_1"),
+            usage: Default::default(),
+            context: bingo_sdk::ContextUsage {
+                used: share * 1_000,
+                window: 200_000,
+                trigger: 100_000,
+            },
+        },
+    )]))
+}
+
+#[test]
+fn the_context_notice_appears_at_seventy_and_warms_across_the_last_fifth() {
+    let (ui, now) = scene();
+    assert!(
+        !screen(&context(69), &ui, now).contains("context"),
+        "nothing at all below 70 %"
+    );
+    crate::theme::with(crate::painted::truecolor(), || {
+        let at = |share| style_of(&context(share), &ui, now, "context");
+        assert_eq!(at(79), theme::as_drawn(theme::warming(0.0)), "dim to 80 %");
+        let between = at(90);
+        assert_ne!(between, theme::as_drawn(theme::warming(0.0)));
+        assert_ne!(between, theme::as_drawn(theme::warming(1.0)));
+        assert_eq!(
+            at(100),
+            theme::as_drawn(theme::warming(1.0)),
+            "bad at the trigger"
+        );
+    });
+}
+
+// ---- stepping into another session --------------------------------------
+
+#[test]
+fn the_transcript_crossfades_through_dim_into_the_session_stepped_into() {
+    let mut tree = spawned_tree(busy_child("reviewer"));
+    tree.show(&child_id());
+    let (mut ui, now) = scene();
+    let row = |ui: &crate::ui::Ui, at| {
+        crate::painted::painted(80, 24, &tree, ui, at).row("Read(src/lib.rs)")
+    };
+    let plain = row(&ui, now);
+
+    ui.switched = Some(now.instant);
+    assert_ne!(
+        row(&ui, now),
+        plain,
+        "everything recedes for the two frames of the crossfade"
+    );
+    assert_eq!(
+        row(&ui, later(now, 66)),
+        plain,
+        "and comes back up as it was"
+    );
+}
+
+// ---- reduced motion -----------------------------------------------------
+
+#[test]
+fn motion_off_holds_every_cue_at_its_resting_frame() {
+    let tree = turning();
+    let (ui, now) = mid_turn();
+    let still = still(later(now, 450));
+    assert_eq!(
+        leading_style(&tree, &ui, still, "esc to interrupt"),
+        theme::as_drawn(theme::presence()),
+        "the sparkle rests at presence"
+    );
+    let drawn = row(&tree, &ui, still, "esc to interrupt");
+    assert!(drawn.starts_with('✻'), "and holds its first glyph: {drawn}");
+
+    // A live bullet, a tail and a rise are all absent rather than frozen.
+    let bash = solo(&folded(running_bash()));
+    assert_eq!(
+        style_of(&bash, &ui, still, "⏺"),
+        theme::as_drawn(theme::presence()),
+        "a live bullet does not pulse"
+    );
+    let tail = crate::painted::painted(80, 24, &streaming(), &ui, still);
+    assert!(
+        tail.coloured("still warm").is_empty(),
+        "and streaming text carries no tail"
+    );
+}
+
+#[test]
+fn motion_off_puts_a_layer_up_whole_and_takes_it_away_at_once() {
+    let (mut ui, now) = scene();
+    ui.layer.show(crate::ui::Open::Help, now.instant);
+    let still = still(now);
+    let tree = solo(&state());
+    assert_eq!(
+        screen(&tree, &ui, still),
+        screen(&tree, &ui, later(now, 200)),
+        "a sheet is whole on its first frame"
+    );
+    ui.layer.close(now.instant);
+    assert!(
+        ui.layer.drawn(still).is_none(),
+        "and gone on the frame it closes"
+    );
+}
+
+#[test]
+fn a_still_notice_is_said_at_once_and_still_leaves() {
+    let tree = solo(&state());
+    let (mut ui, now) = scene();
+    ui.notify(bingo_sdk::Level::Error, "unknown command: /x", now.instant);
+    assert_eq!(
+        style_of(&tree, &ui, still(now), "unknown command"),
+        theme::as_drawn(theme::bad()),
+        "no fade, but the same words"
+    );
+    ui.expire(still(later(now, 4_132)));
+    assert!(
+        !screen(&tree, &ui, still(later(now, 4_132))).contains("unknown command"),
+        "and it still goes when its time is up"
+    );
+}
+
+// ---- what a completed turn leaves behind --------------------------------
+
+#[test]
+fn a_finished_turn_takes_the_whole_of_the_presence_with_it() {
+    let state = folded(vec![
+        frame(1, started("trn_1")),
+        frame(2, completed("trn_1", TurnStatus::Completed)),
+    ]);
+    let (ui, now) = mid_turn();
+    let screen = screen(&solo(&state), &ui, now);
+    assert!(!screen.contains("esc to interrupt"), "{screen}");
+    assert_eq!(
+        leading_style(&solo(&state), &ui, now, keys::PLACEHOLDER),
+        theme::as_drawn(theme::dim()),
+        "and the box's border is dim again"
+    );
+}
+
+/// §6's budget: nothing moves when nothing is happening. The loop's own
+/// counter proves it (`run::tests`); this proves the frame is identical, so
+/// even a redraw would cost nothing.
+#[test]
+fn an_idle_frame_is_the_same_frame_a_second_later() {
+    let tree = solo(&folded(vec![frame(
+        1,
+        Event::ItemCompleted {
+            item: assistant("itm_1", "All green.", ItemStatus::Completed),
+        },
+    )]));
+    let (ui, now) = scene();
+    let first = screen(&tree, &ui, now);
+    for ms in [33i64, 150, 1_000, 4_000] {
+        assert_eq!(first, screen(&tree, &ui, later(now, ms)), "at {ms} ms");
+    }
+}
+
+/// A duration named in §6 is named once, here, so a change of rhythm is a
+/// change of one line rather than a hunt.
+#[test]
+fn the_rhythms_are_the_ones_the_design_names() {
+    assert_eq!(FRAME, Duration::from_millis(33));
+    assert_eq!(crate::transcript::COMET, Duration::from_millis(180));
+    assert_eq!(theme::PULSE, Duration::from_secs(1));
+    assert_eq!(crate::ui::NOTICE, Duration::from_secs(4));
+    assert_eq!(crate::ui::NOTICE_FADE, FRAME * 2);
+    assert_eq!(crate::ui::SWITCH, FRAME * 2);
+}

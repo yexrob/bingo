@@ -291,6 +291,9 @@ fn render_transcript(tree: &Tree, ui: &Ui, frame: &mut Frame, area: Rect, now: N
     if let Some(run) = ui.select.run.as_ref() {
         select::mark(frame, area, top, run);
     }
+    if ui.crossfading(now) {
+        layers::hush(frame, area);
+    }
 }
 
 /// The rows between the transcript and the input box: what the turn is doing,

@@ -93,7 +93,12 @@ impl Reveal {
 /// (§3): a style pass over what is already painted, so no view has to know
 /// whether something is open above it.
 pub fn dim(frame: &mut Frame) {
-    let area = frame.area();
+    hush(frame, frame.area());
+}
+
+/// The same pass over one region: what a transcript being stepped into
+/// crossfades through (§6).
+pub fn hush(frame: &mut Frame, area: Rect) {
     let buffer = frame.buffer_mut();
     for y in area.top()..area.bottom() {
         for x in area.left()..area.right() {
