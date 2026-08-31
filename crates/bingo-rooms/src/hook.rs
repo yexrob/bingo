@@ -1,24 +1,29 @@
 //! The one hook. It watches two things and nothing else: a root session
 //! opening, so a project's declared rooms are seated under it, and every frame
-//! of every journal, so a post into a room reaches the room's members.
+//! of every journal, so a post into a room reaches the room's members and what
+//! the room owes for it is chased and shown (ADR-0022 §3–4).
 //!
 //! Nothing it does waits on the session it observes: what it reads is the
 //! session tree, and what it writes to is another session's queue.
 
 use async_trait::async_trait;
 use bingo_sdk::{
-    ContentPart, Event, Frame, Hook, HookContext, HookMatcher, HookPoint, ItemBody, Origin, Phase,
-    SessionFilter, SessionId,
+    ContentPart, Event, Frame, Hook, HookContext, HookMatcher, HookPoint, Item, ItemBody, Origin,
+    Phase, SessionFilter, SessionId,
 };
+use jiff::Timestamp;
 
+use crate::chase::Chaser;
 use crate::name::PARENT;
+use crate::room::Room;
 use crate::roster::Roster;
-use crate::{PLUGIN, post, room, seat, team};
+use crate::{PLUGIN, mentions, owed, post, room, seat, team};
 
 /// The rooms this hook has seen, and what it does about a post into one.
 #[derive(Debug, Default)]
 pub struct RoomsHook {
     rooms: Roster,
+    chaser: Chaser,
 }
 
 #[async_trait]
@@ -45,7 +50,11 @@ impl Hook for RoomsHook {
 
     async fn on_event(&self, frame: &Frame, cx: &HookContext) {
         match &frame.event {
-            Event::SessionUpdated { summary } => self.rooms.register(summary),
+            Event::SessionUpdated { summary } => {
+                if let Some(room) = self.rooms.register(summary) {
+                    self.reckon(&frame.session, &room, cx).await;
+                }
+            }
             Event::Extension {
                 plugin,
                 kind,
@@ -53,11 +62,7 @@ impl Hook for RoomsHook {
             } if plugin == PLUGIN && kind == room::MEMBERS => {
                 self.rooms.set_members(&frame.session, payload)
             }
-            Event::ItemCompleted { item } => {
-                if let ItemBody::User { parts, origin } = &item.body {
-                    self.posted(&frame.session, parts, origin, cx).await;
-                }
-            }
+            Event::ItemCompleted { item } => self.item(&frame.session, item, cx).await,
             _ => {}
         }
     }
@@ -83,30 +88,55 @@ impl RoomsHook {
         }
     }
 
-    /// A user item in a room is a post. Everywhere else it is somebody's own
+    /// A user item in a room is a post: it reaches every other member, and it
+    /// changes what the room owes. Everywhere else it is somebody's own
     /// conversation and no business of this plugin's.
-    async fn posted(
-        &self,
-        session: &SessionId,
-        parts: &[ContentPart],
-        origin: &Origin,
-        cx: &HookContext,
-    ) {
+    async fn item(&self, session: &SessionId, item: &Item, cx: &HookContext) {
+        let ItemBody::User { parts, origin } = &item.body else {
+            return;
+        };
         let Some(room) = self.rooms.get(session) else {
             return;
         };
         let Some(text) = parts.first().and_then(ContentPart::as_text) else {
             return;
         };
+        self.fan_out(&room, origin, text, cx).await;
+        self.reckon(session, &room, cx).await;
+    }
+
+    /// Everyone else in the room hears it.
+    async fn fan_out(&self, room: &Room, origin: &Origin, text: &str, cx: &HookContext) {
         // A person's own session leaves no principal, and `parent` is what the
         // members of the room call it.
         let author = origin
             .principal
             .clone()
             .unwrap_or_else(|| PARENT.to_string());
-        if let Err(error) = post::fan_out(&cx.host, &room, &author, text).await {
+        if let Err(error) = post::fan_out(&cx.host, room, &author, text).await {
             tracing::warn!(room = %room.title, %error, "a post did not reach every member");
         }
+    }
+
+    /// What the room owes now, and what to do about it: chase whoever has not
+    /// answered, and show the parent what stands. Both read the one authority
+    /// — the room's own journal — and nothing kept here.
+    async fn reckon(&self, session: &SessionId, room: &Room, cx: &HookContext) {
+        let open = mentions::of_room(&cx.host, session).await;
+        self.chaser
+            .reconcile(&cx.host, room, session, &open, Timestamp::now());
+        self.show(&room.parent, cx).await;
+    }
+
+    /// The card on a session: every debt in every room under it, or nothing at
+    /// all once the last one closes.
+    async fn show(&self, parent: &SessionId, cx: &HookContext) {
+        let mut rows = Vec::new();
+        for (id, room) in self.rooms.under(parent) {
+            let open = mentions::of_room(&cx.host, &id).await;
+            rows.extend(owed::rows(&room.title, &open));
+        }
+        owed::publish(&cx.host, parent, owed::view(rows)).await;
     }
 }
 
@@ -129,8 +159,9 @@ async fn is_root(cx: &HookContext) -> bool {
 mod tests {
     use super::*;
     use crate::room::payload;
-    use crate::tests::{Fleet, extension, hook_context, posted, stamped, updated};
+    use crate::tests::{Fleet, extension, hook_context, posted, stamped, ts, updated};
     use bingo_sdk::Delivery;
+    use serde_json::Value;
     use std::path::{Path, PathBuf};
 
     /// A root with a reviewer and a scout under it, and a room the hook has
@@ -271,6 +302,121 @@ mod tests {
             .on_session(Phase::Start, &hook_context(&root, &fleet, &cwd))
             .await;
         assert!(fleet.created().is_empty());
+    }
+
+    /// A room already standing with a membership, as another process left it.
+    async fn standing(members: &[&str]) -> (Fleet, SessionId, SessionId) {
+        let fleet = Fleet::default();
+        let root = fleet.root();
+        for member in members {
+            fleet.child(&root, member);
+        }
+        let seated: Vec<String> = members.iter().map(|m| m.to_string()).collect();
+        let room = seat::seat(
+            &fleet.handle(),
+            &root,
+            Path::new("/work/project"),
+            "design",
+            &seated,
+        )
+        .await
+        .expect("a room this crate can open");
+        (fleet, root, room)
+    }
+
+    /// The room announcing itself, which is where this process first reads it.
+    async fn announce(fleet: &Fleet, hook: &RoomsHook, room: &SessionId) {
+        let cx = hook_context(room, fleet, Path::new("/work/project"));
+        hook.on_event(&stamped(1, updated(&fleet.summary(room)), room), &cx)
+            .await;
+    }
+
+    /// A post, as the room's journal takes it and the hook sees it.
+    async fn says(
+        fleet: &Fleet,
+        hook: &RoomsHook,
+        room: &SessionId,
+        who: Option<&str>,
+        text: &str,
+    ) {
+        let cx = hook_context(room, fleet, Path::new("/work/project"));
+        let event = fleet.post(room, text, who, Timestamp::now());
+        hook.on_event(&stamped(9, event, room), &cx).await;
+    }
+
+    /// Let a chase that is due now — an overdue debt waits no time at all —
+    /// run to its nudge. Nothing here moves the clock, so a debt still inside
+    /// its patience stays unchased.
+    async fn settle() {
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+    }
+
+    fn nudges(fleet: &Fleet) -> Vec<String> {
+        fleet
+            .delivered()
+            .into_iter()
+            .filter_map(|(_, input, _)| match input {
+                bingo_sdk::Input::Text { text, origin, .. } => {
+                    origin.principal.is_none().then_some(text)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_question_this_process_finds_already_overdue_is_chased_once() {
+        let (fleet, _, room) = standing(&["scout"]).await;
+        fleet.post(&room, "@scout what does the log say?", None, ts());
+        let hook = RoomsHook::default();
+
+        announce(&fleet, &hook, &room).await;
+        settle().await;
+
+        let nudged = nudges(&fleet);
+        assert_eq!(nudged.len(), 1, "{nudged:?}");
+        assert!(nudged[0].contains("#design"), "{}", nudged[0]);
+        assert!(
+            nudged[0].contains("what does the log say?"),
+            "{}",
+            nudged[0]
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_question_nobody_asked_of_a_member_chases_nobody() {
+        let (fleet, _, room) = standing(&["scout"]).await;
+        fleet.post(&room, "@all stand-up in five", None, ts());
+        fleet.post(&room, "mail@scout is not a call", None, ts());
+        let hook = RoomsHook::default();
+
+        announce(&fleet, &hook, &room).await;
+        settle().await;
+        assert!(nudges(&fleet).is_empty(), "{:?}", fleet.delivered());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_card_says_what_stands_and_goes_when_the_last_debt_closes() {
+        let (fleet, root, room) = standing(&["scout"]).await;
+        let hook = RoomsHook::default();
+        announce(&fleet, &hook, &room).await;
+
+        says(&fleet, &hook, &room, None, "@scout look at the build").await;
+        says(&fleet, &hook, &room, Some("scout"), "looking").await;
+        settle().await;
+
+        let cards = fleet.signalled(&root, owed::KIND);
+        let [opened, standing, closed] = cards.as_slice() else {
+            panic!("one card per fold: {cards:?}");
+        };
+        assert_eq!(*opened, Value::Null, "a room owing nothing carries no card");
+        assert_eq!(standing["kind"], "table");
+        assert_eq!(standing["rows"][0][0], "#design");
+        assert_eq!(standing["rows"][0][1], "scout");
+        assert_eq!(*closed, Value::Null, "answered, and the card goes");
+        assert!(nudges(&fleet).is_empty(), "nobody was chased for it");
     }
 
     #[test]

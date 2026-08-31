@@ -3,13 +3,14 @@
 use async_trait::async_trait;
 use bingo_sdk::{
     ArgSpec, Command, CommandContext, CommandOutcome, CommandSpec, HostHandle, KernelError,
-    OpenOptions, SessionFilter, SessionId, SessionSelector, View,
+    OpenOptions, SessionFilter, SessionId, SessionSelector, SessionState, View,
 };
+use jiff::Timestamp;
 
 use crate::room::{self, Room};
-use crate::{PLUGIN, identity, name, seat};
+use crate::{identity, mentions, name, owed, seat};
 
-const HEADERS: [&str; 2] = ["room", "members"];
+const HEADERS: [&str; 3] = ["room", "members", "owed"];
 
 /// What a session with no rooms in it is told.
 const NONE: &str = "no rooms here; `/room <name> [member…]` opens one";
@@ -54,9 +55,17 @@ async fn list(cx: &CommandContext) -> Result<CommandOutcome, KernelError> {
             view: View::Text { text: NONE.into() },
         });
     }
+    let now = Timestamp::now();
     let mut rows = Vec::with_capacity(rooms.len());
     for (id, room) in rooms {
-        rows.push(vec![room.title, members(&cx.host, &id).await.join(", ")]);
+        let read = read(&cx.host, &id).await;
+        let members = read.as_ref().map(room::members_of).unwrap_or_default();
+        let open = read.as_ref().map(mentions::of_state).unwrap_or_default();
+        rows.push(vec![
+            room.title,
+            members.join(", "),
+            owed::column(&open, now),
+        ]);
     }
     Ok(CommandOutcome::View {
         view: View::Table {
@@ -83,10 +92,12 @@ async fn under(
         .collect())
 }
 
-/// The members a room's own journal names. They are read where they live
-/// rather than from the hook's fold: `/room` answers from the one fact, and a
-/// room a hook never saw a frame of still lists what it has.
-async fn members(host: &HostHandle, room: &SessionId) -> Vec<String> {
+/// A room as its own journal has it: who is in it, and what its posts owe.
+/// Both are read where they live rather than from the hook's fold, so `/room`
+/// answers from the one fact and a room a hook never saw a frame of still
+/// says what it has. A room that cannot be read says nothing rather than
+/// guessing.
+async fn read(host: &HostHandle, room: &SessionId) -> Option<SessionState> {
     let opened = host
         .open(
             SessionSelector::ById { id: room.clone() },
@@ -94,16 +105,7 @@ async fn members(host: &HostHandle, room: &SessionId) -> Vec<String> {
             OpenOptions::default(),
         )
         .await;
-    let Ok(attachment) = opened else {
-        return Vec::new();
-    };
-    attachment
-        .snapshot
-        .extensions
-        .get(PLUGIN)
-        .and_then(|kinds| kinds.get(room::MEMBERS))
-        .map(room::members_from)
-        .unwrap_or_default()
+    opened.ok().map(|attachment| attachment.snapshot)
 }
 
 #[cfg(test)]
@@ -160,7 +162,30 @@ mod tests {
             panic!("a roster is a table");
         };
         assert_eq!(headers, HEADERS);
-        assert_eq!(rows, [["#design", "reviewer"], ["#standup", ""]]);
+        assert_eq!(
+            rows,
+            [["#design", "reviewer", ""], ["#standup", "", ""]],
+            "a room nobody has asked anything in owes nothing"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_owed_column_names_who_has_not_answered_and_for_how_long() {
+        let fleet = Fleet::default();
+        let root = fleet.root();
+        fleet.child(&root, "scout");
+        typed(&fleet, &root, "design scout").await;
+        let room = fleet.titled("#design").expect("the room was opened");
+        let asked = Timestamp::now() - jiff::SignedDuration::from_secs(120);
+        fleet.post(&room, "@scout what does the log say?", None, asked);
+
+        let CommandOutcome::View {
+            view: View::Table { rows, .. },
+        } = typed(&fleet, &root, "").await
+        else {
+            panic!("a roster is a table");
+        };
+        assert_eq!(rows[0][2], "scout 2m");
     }
 
     #[tokio::test]

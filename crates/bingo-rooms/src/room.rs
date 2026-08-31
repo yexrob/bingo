@@ -3,7 +3,7 @@
 //! members are the latest `members` extension published into its journal, and
 //! nothing here keeps a copy of either beside them.
 
-use bingo_sdk::{Driver, SessionId, SessionSummary};
+use bingo_sdk::{Driver, SessionId, SessionState, SessionSummary};
 use serde_json::{Value, json};
 
 /// The one kind this plugin publishes. A payload is the whole of a room's
@@ -53,6 +53,18 @@ impl Room {
             .filter(|member| *member != author)
             .collect()
     }
+}
+
+/// Who is in a room, as the room's own journal has it. Every reader — the
+/// command, the fold, a test — comes through here, so none of them can hold a
+/// second idea of a membership.
+pub fn members_of(state: &SessionState) -> Vec<String> {
+    state
+        .extensions
+        .get(crate::PLUGIN)
+        .and_then(|kinds| kinds.get(MEMBERS))
+        .map(members_from)
+        .unwrap_or_default()
 }
 
 /// The names a `members` payload holds. Anything else in it is not a name.
