@@ -176,34 +176,36 @@ impl Bridge {
     /// The live process, or nothing plus a respawn on its way. This is the
     /// only place a death is noticed, so it is the only place one is reported.
     async fn ready(self: &Arc<Self>) -> Option<Arc<Live>> {
-        let departed = {
-            let mut state = self.state.lock().await;
-            match &state.live {
-                Some(live) if live.connection.is_alive() => return Some(Arc::clone(live)),
-                // A process that has just died is due an attempt at once.
-                Some(_) => state.live.take(),
-                None => None,
-            }
-        };
+        let mut state = self.state.lock().await;
+        if let Some(live) = &state.live
+            && live.connection.is_alive()
+        {
+            return Some(Arc::clone(live));
+        }
+        let departed = state.live.take();
+        if departed.is_some() {
+            // A process that has just died is due an attempt at once, and the
+            // reset shares the critical section with the take so that a
+            // failure filed meanwhile cannot have its backoff undone.
+            state.failures = 0;
+            state.next_attempt = None;
+        }
+        drop(state);
         if let Some(live) = departed {
-            self.died(&live).await;
+            self.died(&live);
         }
         self.respawn();
         None
     }
 
-    /// Say the process ended, once however many readers saw it, and put the
-    /// next attempt back at the front of the queue.
-    async fn died(&self, live: &Live) {
+    /// Say the process ended, once however many readers saw it.
+    fn died(&self, live: &Live) {
         if live.connection.claim_death() {
             self.notices.push(Notice::warn(
                 "PLUGIN_DIED",
                 format!("the {} plugin process ended; restarting it", self.name),
             ));
         }
-        let mut state = self.state.lock().await;
-        state.failures = 0;
-        state.next_attempt = None;
     }
 
     /// Start an attempt on its own task, unless one is running or the backoff
