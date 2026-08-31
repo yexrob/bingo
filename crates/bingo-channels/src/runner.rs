@@ -190,10 +190,15 @@ impl Runner {
     }
 
     /// A message the answer streams into — only where there is something to
-    /// stream with. Without an `edit()` the answer arrives whole, once.
+    /// stream with. Without an `edit()` the answer arrives whole and late, so
+    /// the typing affordance is what a person gets meanwhile; a platform that
+    /// streams needs none, because the message writing itself is the sign.
     async fn begin(&mut self) -> Result<(), ChannelError> {
         if self.adapter.edit().is_none() {
-            return Ok(());
+            return match self.adapter.typing() {
+                Some(typing) => typing.poke(&self.conversation).await,
+                None => Ok(()),
+            };
         }
         self.streaming = Some(self.post_mode("", Mode::Stream).await?);
         Ok(())
@@ -247,16 +252,26 @@ impl Runner {
     }
 
     /// The buttons come off however they went on, and the outcome goes where
-    /// they were.
+    /// they were. A question drawn as a numbered list has no live button to
+    /// strip, so if the platform will not edit that message the outcome is
+    /// said in a new one rather than lost.
     async fn settle(&mut self, id: &InteractionId, outcome: &str) -> Result<(), ChannelError> {
         let Some(asked) = self.asked.remove(id) else {
             return Ok(());
         };
+        if asked.native
+            && let Some(buttons) = self.adapter.buttons()
+        {
+            return buttons.settle(&asked.at, &asked.question, outcome).await;
+        }
         let settled = format!("{}\n\n{outcome}", asked.question.prompt);
-        match (asked.native, self.adapter.buttons(), self.adapter.edit()) {
-            (true, Some(buttons), _) => buttons.settle(&asked.at, &asked.question, outcome).await,
-            (_, _, Some(edit)) => edit.replace(&asked.at, &settled).await,
-            _ => self.post(&settled).await.map(drop),
+        let edited = match self.adapter.edit() {
+            Some(edit) => edit.replace(&asked.at, &settled).await,
+            None => Err(ChannelError::Unsupported("editing")),
+        };
+        match edited {
+            Ok(()) => Ok(()),
+            Err(_) => self.post(&settled).await.map(drop),
         }
     }
 

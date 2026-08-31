@@ -460,6 +460,7 @@ async fn without_an_edit_the_answer_arrives_whole_and_once() {
     let chat = Chat::with(loopback::Config {
         edits: false,
         threads: false,
+        typing: false,
         ..loopback::Config::default()
     });
     chat.say(hello("oc_1")).await;
@@ -487,6 +488,39 @@ async fn asks(session: &TestSession) {
     session.publish(Event::InteractionOpened {
         interaction: fixtures::permission(None),
     });
+}
+
+#[tokio::test]
+async fn a_platform_that_cannot_stream_says_it_is_typing_instead() {
+    let chat = Chat::with(loopback::Config {
+        edits: false,
+        threads: false,
+        ..loopback::Config::default()
+    });
+    chat.say(hello("oc_1")).await;
+    let session = chat.session("loopback/oc_1").await;
+    answers(&session, "Two tests failed.").await;
+    let records = chat.records(2).await;
+    assert_eq!(
+        records[0],
+        Record::Typing {
+            to: Conversation::direct("oc_1"),
+        },
+        "the answer will arrive whole and late, so say something meanwhile"
+    );
+}
+
+#[tokio::test]
+async fn a_platform_that_streams_needs_no_typing_affordance() {
+    let chat = Chat::open();
+    chat.say(hello("oc_1")).await;
+    let session = chat.session("loopback/oc_1").await;
+    answers(&session, "Two tests failed.").await;
+    let records = chat.records(3).await;
+    assert!(
+        !records.iter().any(|r| matches!(r, Record::Typing { .. })),
+        "the message writing itself is the sign: {records:?}"
+    );
 }
 
 #[tokio::test]
@@ -545,6 +579,35 @@ async fn without_buttons_the_numbered_rung_is_drawn_and_a_reply_answers_it() {
         "an answer is not also a prompt: {:?}",
         session.prompts()
     );
+}
+
+/// Neither buttons nor an edit: there is no live button to strip, and the
+/// outcome is said rather than lost.
+#[tokio::test]
+async fn with_nothing_to_edit_the_outcome_is_said_in_a_message_of_its_own() {
+    let chat = Chat::with(loopback::Config {
+        buttons: false,
+        edits: false,
+        threads: false,
+        ..loopback::Config::default()
+    });
+    chat.say(hello("oc_1")).await;
+    let session = chat.session("loopback/oc_1").await;
+    asks(&session).await;
+    chat.records(1).await;
+    session.publish(Event::InteractionResolved {
+        id: InteractionId::from_raw("int_1"),
+        answer: Answer::AllowOnce,
+        by: ResolvedBy::Client {
+            name: "tui".into(),
+            surface: "tui".into(),
+        },
+    });
+    let records = chat.records(2).await;
+    let Record::Send { text, .. } = records.last().expect("the outcome") else {
+        panic!("expected a message, got {records:?}");
+    };
+    assert!(text.contains("approved in the TUI"), "{text}");
 }
 
 #[tokio::test]
