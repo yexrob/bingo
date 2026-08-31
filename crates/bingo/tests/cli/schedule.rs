@@ -26,16 +26,26 @@ fn sessions(home: &Path) -> PathBuf {
 }
 
 /// One entry, written the way a person editing the store by hand would.
-fn write_entry(home: &Path, id: &str, spec: &str, text: &str, created: Timestamp) {
+fn write_entry(
+    home: &Path,
+    id: &str,
+    spec: &str,
+    text: &str,
+    created: Timestamp,
+    mode: Option<&str>,
+) {
     let dir = schedules(home);
     std::fs::create_dir_all(&dir).unwrap();
-    let entry = serde_json::json!({
+    let mut entry = serde_json::json!({
         "spec": spec,
         "text": text,
         "cwd": home,
         "enabled": true,
         "created": created.to_string(),
     });
+    if let Some(mode) = mode {
+        entry["permissionMode"] = serde_json::json!(mode);
+    }
     std::fs::write(
         dir.join(format!("{id}.json")),
         serde_json::to_string_pretty(&entry).unwrap(),
@@ -97,16 +107,25 @@ struct Running {
 }
 
 impl Running {
+    /// A process that would allow anything: what a fire is allowed to do is
+    /// not what most of these tests are asking about.
     fn start(home: &Path, script: &tempfile::NamedTempFile) -> Self {
+        Self::spawn(home, script, &["--dangerously-skip-permissions"])
+    }
+
+    /// A process with the gate as it ships and nobody at the keyboard, so
+    /// only the entry's own permission mode can let a scheduled turn write.
+    fn unattended(home: &Path, script: &tempfile::NamedTempFile) -> Self {
+        Self::spawn(home, script, &[])
+    }
+
+    fn spawn(home: &Path, script: &tempfile::NamedTempFile, extra: &[&str]) -> Self {
         let mut child = bingo()
             .env("BINGO_FAKE_SCRIPT", script.path())
             .env("HOME", home)
-            .args([
-                "serve",
-                "--stdio",
-                "--dangerously-skip-permissions",
-                "--cwd",
-            ])
+            .args(["serve", "--stdio"])
+            .args(extra)
+            .arg("--cwd")
             .arg(home)
             .stdin(Stdio::piped())
             .spawn()
@@ -175,6 +194,7 @@ fn the_schedule_command_folds_to_stdout_under_print() {
         "every 2h",
         "check the nightly build",
         Timestamp::now(),
+        None,
     );
     let script = script(r#"{"responses":[]}"#);
     let out = run_within(
@@ -209,6 +229,7 @@ fn a_short_every_fires_a_real_turn_on_the_schedule_s_own_session() {
         "every 2s",
         "say the word",
         Timestamp::now(),
+        None,
     );
     let script = script(r#"{"responses":[{"steps":[{"text":"the word, on time"}]}]}"#);
     let running = Running::start(home.path(), &script);
@@ -242,6 +263,7 @@ fn an_overdue_schedule_fires_once_however_long_it_was_overdue() {
         "every 1h",
         "the overdue one",
         Timestamp::now() - SignedDuration::from_hours(5),
+        None,
     );
     // Five hours late is five missed occurrences. A second response would
     // only ever be reached by a second fire.
@@ -285,6 +307,7 @@ fn a_once_at_fires_and_then_disables_itself() {
         &format!("once at {due}"),
         "the only time",
         Timestamp::now() - SignedDuration::from_mins(5),
+        None,
     );
     let script = script(r#"{"responses":[{"steps":[{"text":"once and no more"}]}]}"#);
     let running = Running::start(home.path(), &script);
@@ -300,6 +323,40 @@ fn a_once_at_fires_and_then_disables_itself() {
     running.stop();
 }
 
+/// ADR-0019 §4: the scheduled session runs under the entry's
+/// `permission_mode`. Nobody is there to answer a card, so a `Write` that
+/// had to ask would never land; under `acceptEdits` it lands without one.
+#[test]
+fn a_schedule_fires_under_the_permission_mode_its_entry_names() {
+    let home = tempfile::tempdir().unwrap();
+    let target = home.path().join("written-by-a-schedule.txt");
+    write_entry(
+        home.path(),
+        "ffff6666",
+        "every 1h",
+        "write the file",
+        Timestamp::now() - SignedDuration::from_hours(2),
+        Some("acceptEdits"),
+    );
+    let script = script(&format!(
+        r#"{{"responses":[
+            {{"steps":[{{"toolCall":{{"name":"Write","input":{{
+                "file_path":{},
+                "content":"a schedule wrote this\n"
+            }}}}}}]}},
+            {{"steps":[{{"text":"Written."}}]}}
+        ]}}"#,
+        serde_json::to_string(&target).unwrap()
+    ));
+    let running = Running::unattended(home.path(), &script);
+
+    let written = until("the scheduled turn wrote the file", || {
+        std::fs::read_to_string(&target).ok()
+    });
+    assert_eq!(written, "a schedule wrote this\n");
+    running.stop();
+}
+
 #[test]
 fn a_second_process_runs_with_the_schedules_dormant_and_says_who_has_them() {
     let home = tempfile::tempdir().unwrap();
@@ -309,6 +366,7 @@ fn a_second_process_runs_with_the_schedules_dormant_and_says_who_has_them() {
         "every 2h",
         "not this process's job",
         Timestamp::now(),
+        None,
     );
     let script = script(r#"{"responses":[]}"#);
     let holder = Running::start(home.path(), &script);
