@@ -41,6 +41,7 @@ impl Command for ScheduleCommand {
             view: render::view(
                 &self.schedules.store().load(),
                 &self.schedules.holder(),
+                self.schedules.trouble().as_deref(),
                 &TimeZone::system(),
             ),
         })

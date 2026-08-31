@@ -19,6 +19,7 @@ use crate::store::Store;
 pub struct Schedules {
     store: Arc<Store>,
     changed: Arc<Notify>,
+    trouble: Arc<Mutex<Option<String>>>,
     /// Held from `start` to `stop`; `None` in a process that came second.
     claim: Mutex<Option<Claim>>,
     cancel: CancellationToken,
@@ -29,9 +30,24 @@ impl Schedules {
         Self {
             store: Arc::new(Store::new(data_dir)),
             changed: Arc::new(Notify::new()),
+            trouble: Arc::new(Mutex::new(None)),
             claim: Mutex::new(None),
             cancel: CancellationToken::new(),
         }
+    }
+
+    /// The last fire that never reached a turn, if there was one.
+    ///
+    /// The loop's own account of itself is `tracing`, and this tree installs
+    /// no subscriber, so a warning it writes is a warning nobody reads. What
+    /// goes wrong inside a fired turn lands in that turn's transcript; what
+    /// stops a fire from becoming a turn at all would otherwise be silent,
+    /// and this is where a person finds it.
+    pub fn trouble(&self) -> Option<String> {
+        self.trouble
+            .lock()
+            .unwrap_or_else(|held| held.into_inner())
+            .clone()
     }
 
     pub fn store(&self) -> &Store {
@@ -65,6 +81,7 @@ impl Schedules {
                         Arc::clone(&self.store),
                         host,
                         Arc::clone(&self.changed),
+                        Arc::clone(&self.trouble),
                         self.cancel.clone(),
                     )
                     .run(),

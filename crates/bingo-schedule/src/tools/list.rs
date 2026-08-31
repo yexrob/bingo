@@ -54,7 +54,12 @@ impl Tool for ScheduleListTool {
 
     async fn call(&self, _input: Value, _cx: &ToolContext) -> Result<ToolOutput, ToolError> {
         let shelf = self.schedules.store().load();
-        let view = render::view(&shelf, &self.schedules.holder(), &TimeZone::system());
+        let view = render::view(
+            &shelf,
+            &self.schedules.holder(),
+            self.schedules.trouble().as_deref(),
+            &TimeZone::system(),
+        );
         let mut out = ToolOutput::text(view.fold());
         out.display = Some(view);
         Ok(out)

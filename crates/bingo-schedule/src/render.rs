@@ -21,10 +21,11 @@ const HEAD: usize = 48;
 /// What a next fire that is not coming shows as.
 const NEVER: &str = "—";
 
-/// The whole screen: the entries, who runs them, and any file that was
-/// meant to be one. `/schedule` and `ScheduleList` show this, so a person
-/// and the model read the same store.
-pub fn view(shelf: &Shelf, holder: &str, tz: &TimeZone) -> View {
+/// The whole screen: the entries, who runs them, the last fire that never
+/// became a turn, and any file that was meant to be an entry. `/schedule`
+/// and `ScheduleList` show this, so a person and the model read the same
+/// store.
+pub fn view(shelf: &Shelf, holder: &str, trouble: Option<&str>, tz: &TimeZone) -> View {
     let mut parts = vec![match shelf.is_empty() {
         true => View::Text { text: NONE.into() },
         false => View::Table {
@@ -35,6 +36,10 @@ pub fn view(shelf: &Shelf, holder: &str, tz: &TimeZone) -> View {
     parts.push(View::Text {
         text: format!("schedules: {holder}"),
     });
+    parts.extend(trouble.map(|said| View::Badge {
+        text: said.to_string(),
+        tone: bingo_sdk::Tone::Bad,
+    }));
     parts.extend(unreadable(shelf));
     View::Stack { children: parts }
 }
@@ -136,6 +141,7 @@ mod tests {
         let shown = children(view(
             &shelf(Vec::new()),
             "held by this process",
+            None,
             &TimeZone::UTC,
         ));
         assert_eq!(shown[0], View::Text { text: NONE.into() });
@@ -153,6 +159,7 @@ mod tests {
         let shown = children(view(
             &shelf(vec![entry()]),
             "dormant — held by pid 42",
+            None,
             &TimeZone::UTC,
         ));
         let View::Table { headers, rows } = &shown[0] else {
@@ -178,12 +185,31 @@ mod tests {
                 why: "expected value at line 1".into(),
             }],
         };
-        let shown = children(view(&shelf, "held by this process", &TimeZone::UTC));
+        let shown = children(view(&shelf, "held by this process", None, &TimeZone::UTC));
         let View::Text { text } = &shown[2] else {
             panic!("the notice is text: {shown:?}");
         };
         assert!(text.contains("broken.json"), "{text}");
         assert!(text.contains("1 file(s) could not be read"), "{text}");
+    }
+
+    #[test]
+    fn a_fire_that_opened_no_turn_is_shown_where_a_person_looks() {
+        let said = "abcd1234 fired at 1970-01-01 00:30 and opened no turn";
+        let shown = children(view(
+            &shelf(vec![entry()]),
+            "held by this process",
+            Some(said),
+            &TimeZone::UTC,
+        ));
+        assert_eq!(
+            shown[2],
+            View::Badge {
+                text: said.into(),
+                tone: bingo_sdk::Tone::Bad
+            },
+            "this tree installs no tracing subscriber, so a log line would be nowhere"
+        );
     }
 
     #[test]

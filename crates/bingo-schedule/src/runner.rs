@@ -13,7 +13,7 @@
 //! that fired something recomputes at once rather than trusting a schedule
 //! it has just changed.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bingo_sdk::{
@@ -81,6 +81,8 @@ pub struct Runner {
     /// Rung by the tools when they write to the store, so a schedule made
     /// now is not waited for.
     changed: Arc<Notify>,
+    /// Where a fire that never became a turn is left for a person to find.
+    trouble: Arc<Mutex<Option<String>>>,
     cancel: CancellationToken,
 }
 
@@ -89,12 +91,14 @@ impl Runner {
         store: Arc<Store>,
         host: HostHandle,
         changed: Arc<Notify>,
+        trouble: Arc<Mutex<Option<String>>>,
         cancel: CancellationToken,
     ) -> Self {
         Self {
             store,
             host,
             changed,
+            trouble,
             cancel,
         }
     }
@@ -140,12 +144,15 @@ impl Runner {
             tracing::warn!(schedule = entry.id, "the fire was not written down: {e}");
         }
         if let Err(e) = self.turn(entry).await {
-            tracing::warn!(
-                schedule = entry.id,
-                "no turn was opened on {}: {}",
+            let said = format!(
+                "{} fired at {} and opened no turn on {}: {}",
+                entry.id,
+                render::when(Some(now)),
                 entry.key(),
                 e.message
             );
+            tracing::warn!("{said}");
+            *self.trouble.lock().unwrap_or_else(|held| held.into_inner()) = Some(said);
         }
     }
 
