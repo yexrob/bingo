@@ -30,3 +30,6 @@ ulid.workspace = true
 [dev-dependencies]
 bingo-sdk = { workspace = true, features = ["testing"] }
 tempfile.workspace = true
+# M21: `tokio::time::pause`, so the ongoing watch's thirty-second quiet window
+# costs a test no wall clock at all (ADR-0018 §8). Already in the tree.
+tokio = { workspace = true, features = ["test-util"] }
