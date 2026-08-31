@@ -171,4 +171,52 @@ mod tests {
         assert!(!one.token().is_cancelled());
         assert!(two.token().is_cancelled());
     }
+
+    /// What the surface fires, and what a person may type.
+    async fn fired(promotions: &Arc<Promotions>, args: &str) -> String {
+        let cx = crate::tests::command_context(std::env::temp_dir());
+        let outcome = PromoteCommand::new(promotions.clone())
+            .run(args, &cx)
+            .await
+            .expect("the command answered");
+        let CommandOutcome::Applied { message } = outcome else {
+            panic!("promoting applies at once, got {outcome:?}");
+        };
+        message.expect("a promotion always says what happened")
+    }
+
+    #[tokio::test]
+    async fn the_command_flips_the_call_it_names() {
+        let promotions = Arc::new(Promotions::new());
+        let listener = promotions.listen("call_1");
+        assert_eq!(fired(&promotions, "call_1").await, "backgrounding it");
+        assert!(listener.token().is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn the_command_says_why_it_promoted_nothing() {
+        let promotions = Arc::new(Promotions::new());
+        assert_eq!(
+            fired(&promotions, "call_1").await,
+            "no shell command is running"
+        );
+        let _listening = promotions.listen("call_1");
+        assert_eq!(
+            fired(&promotions, "call_2").await,
+            "no shell command is running as `call_2`"
+        );
+        assert_eq!(
+            fired(&promotions, "  ").await,
+            "say which call to background"
+        );
+    }
+
+    #[test]
+    fn the_command_runs_during_a_turn_and_takes_the_call_id() {
+        let spec = PromoteCommand::new(Arc::new(Promotions::new())).spec();
+        assert_eq!(spec.name, ACTION);
+        assert!(spec.instant, "there is only anything to promote mid-turn");
+        assert_eq!(spec.family, "shell");
+        assert!(matches!(spec.args, ArgSpec::Free { .. }));
+    }
 }
