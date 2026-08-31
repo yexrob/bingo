@@ -17,6 +17,7 @@ use crate::SURFACE_ID;
 use crate::clock::Now;
 use crate::commands::{self, Local};
 use crate::complete;
+use crate::cycle;
 use crate::effect::Effect;
 use crate::keys;
 use crate::pager;
@@ -51,6 +52,9 @@ pub fn on_key(ui: &mut Ui, tree: &Tree, key: KeyEvent, now: Now) -> Vec<Effect> 
     // `esc esc` needs no clock: any other key is what says the two were not
     // one gesture.
     ui.esc_armed &= key.code == KeyCode::Esc;
+    if let Some(effects) = cycling(ui, tree, key) {
+        return effects;
+    }
     let state = tree.viewed();
     if let Some(effects) = leaving(ui, state, key, now) {
         return effects;
@@ -630,6 +634,45 @@ fn step(ui: &mut Ui, by: isize, now: Now) {
     ui.scroll.show(hit.line, total, rows, now.instant);
 }
 
+/// The quick cycle's strip owns the arrows while it is up: `←`/`→` walk it,
+/// `↑` and `esc` give the status line back, and every other key gives it back
+/// and then means what it always meant — a letter still lands in the composer
+/// (design §3). `None` says the key was not the strip's.
+fn cycling(ui: &mut Ui, tree: &Tree, key: KeyEvent) -> Option<Vec<Effect>> {
+    if !ui.cycling {
+        return None;
+    }
+    match key.code {
+        KeyCode::Left => Some(walk(tree, -1)),
+        KeyCode::Right => Some(walk(tree, 1)),
+        // The gesture that opened it is not the one that closes it.
+        KeyCode::Down => Some(Vec::new()),
+        KeyCode::Up | KeyCode::Esc => {
+            ui.cycling = false;
+            Some(Vec::new())
+        }
+        _ => {
+            ui.cycling = false;
+            None
+        }
+    }
+}
+
+/// One step along the strip. The view goes with the highlight, so the
+/// transcript changes as a person walks: it is a switch, not a choice (§3).
+fn walk(tree: &Tree, by: isize) -> Vec<Effect> {
+    cycle::step(&tree.rows(), tree.view(), by)
+        .map(|next| vec![Effect::View(next)])
+        .unwrap_or_default()
+}
+
+/// `↓` on an empty composer is the quick cycle's gesture — but only where
+/// there is somewhere to go. Alone in the tree the key keeps the meaning it
+/// has always had rather than putting up a strip of one.
+fn opens_the_cycle(ui: &Ui, tree: &Tree) -> bool {
+    ui.composer.is_empty() && tree.rows().len() > 1
+}
+
 /// Open the switcher on the session in view, or close it again. There is
 /// nothing to switch between until the session has spawned somebody.
 fn toggle_switcher(ui: &mut Ui, tree: &Tree, now: Now) {
@@ -745,6 +788,7 @@ fn plain(ui: &mut Ui, tree: &Tree, key: KeyEvent, now: Now) -> Vec<Effect> {
         KeyCode::Enter => return enter(ui, tree, now),
         KeyCode::BackTab => return cycle_mode(ui, tree.viewed(), now),
         KeyCode::Up => history_or_line(ui, Step::Up),
+        KeyCode::Down if opens_the_cycle(ui, tree) => ui.cycling = true,
         KeyCode::Down => history_or_line(ui, Step::Down),
         KeyCode::PageUp => scroll(ui, ui.page() as isize, now),
         KeyCode::PageDown => scroll(ui, -(ui.page() as isize), now),
@@ -1613,6 +1657,98 @@ mod tests {
             press_tree(&mut ui, &tree, key(KeyCode::Enter), now),
             vec![Effect::View(child_id())]
         );
+    }
+
+    // ---- the quick cycle ------------------------------------------------
+
+    #[test]
+    fn down_on_an_empty_line_puts_up_the_strip_and_the_arrows_switch_the_view() {
+        let tree = with_child(vec![]);
+        let (mut ui, now) = scene();
+        assert!(press_tree(&mut ui, &tree, key(KeyCode::Down), now).is_empty());
+        assert!(ui.cycling, "the strip has the status line");
+        assert!(!ui.layer.showing(), "and nothing is over the frame");
+
+        assert_eq!(
+            press_tree(&mut ui, &tree, key(KeyCode::Right), now),
+            vec![Effect::View(child_id())],
+            "walking is switching: the transcript changes as the highlight moves"
+        );
+        assert!(ui.cycling, "and the strip stays up to be walked again");
+    }
+
+    /// The walk goes round, so one key reaches the other end of a short tree.
+    #[test]
+    fn the_strip_wraps_at_both_ends() {
+        let tree = with_child(vec![]);
+        let (mut ui, now) = scene();
+        press_tree(&mut ui, &tree, key(KeyCode::Down), now);
+        assert_eq!(
+            press_tree(&mut ui, &tree, key(KeyCode::Left), now),
+            vec![Effect::View(child_id())],
+            "back past the first chip is the last one"
+        );
+    }
+
+    #[test]
+    fn up_esc_and_typing_all_give_the_status_line_back() {
+        let tree = with_child(vec![]);
+        let (mut ui, now) = scene();
+        let open = |ui: &mut Ui| {
+            press_tree(ui, &tree, key(KeyCode::Down), now);
+        };
+        open(&mut ui);
+        press_tree(&mut ui, &tree, key(KeyCode::Up), now);
+        assert!(!ui.cycling);
+        assert!(ui.composer.is_empty(), "and up recalled nothing on its way");
+
+        open(&mut ui);
+        press_tree(&mut ui, &tree, key(KeyCode::Esc), now);
+        assert!(!ui.cycling);
+        assert!(
+            !ui.esc_armed,
+            "the esc that closed it is not half a gesture"
+        );
+
+        open(&mut ui);
+        press_tree(&mut ui, &tree, typed('h'), now);
+        assert!(!ui.cycling);
+        assert_eq!(ui.composer.text(), "h", "and the letter is typed as ever");
+    }
+
+    /// `esc` on the strip closes the strip and nothing else: it is the one
+    /// row a person opened, so it is the one thing that press takes away.
+    #[test]
+    fn esc_on_the_strip_does_not_reach_the_turn() {
+        let tree = with_child(vec![frame(2, started("trn_1"))]);
+        let (mut ui, now) = scene();
+        press_tree(&mut ui, &tree, key(KeyCode::Down), now);
+        assert!(press_tree(&mut ui, &tree, key(KeyCode::Esc), now).is_empty());
+        assert_eq!(
+            press_tree(&mut ui, &tree, key(KeyCode::Esc), now),
+            vec![Effect::Interrupt],
+            "and the next one is the turn's again"
+        );
+    }
+
+    #[test]
+    fn down_keeps_its_old_meaning_where_there_is_nowhere_to_cycle_to() {
+        let (mut ui, now) = scene();
+        line(&mut ui, &state(), "the first thing", now);
+        press(&mut ui, &state(), key(KeyCode::Up), now);
+        assert_eq!(ui.composer.text(), "the first thing");
+        press(&mut ui, &state(), key(KeyCode::Down), now);
+        assert!(ui.composer.is_empty(), "the walk came back to the draft");
+        assert!(!ui.cycling, "and a session alone put up no strip");
+    }
+
+    #[test]
+    fn a_half_typed_line_keeps_the_arrows_for_itself() {
+        let tree = with_child(vec![]);
+        let (mut ui, now) = scene();
+        write(&mut ui, tree.viewed(), "half a thought", now);
+        press_tree(&mut ui, &tree, key(KeyCode::Down), now);
+        assert!(!ui.cycling);
     }
 
     #[test]
