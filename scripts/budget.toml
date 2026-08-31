@@ -1,4 +1,7 @@
 # Hard limits enforced by scripts/budget.sh. Raise only with an ADR line.
-max_dependencies = 268
+# The count is of every crate in the workspace's normal tree, members included,
+# so a new member costs one: 268 → 269 is `bingo-demo-ui` (M11d, ADR-0013),
+# which brings no dependency of its own.
+max_dependencies = 269
 max_core_check_seconds = 20
 max_target_gb = 5

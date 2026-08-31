@@ -24,12 +24,12 @@ None new for the vocabulary. `pulldown-cmark` is already in; `Code` highlighting
 
 ## Exit criteria
 
-- [ ] every node has a JSON fixture, a fold test, and one `TestBackend` snapshot at 80 columns; `Columns` also at 50
-- [ ] `ToolOutput.display` round-trips through the wire and the journal; `Display` is gone from the workspace
-- [ ] a `Signal` is on the live stream and absent from the journal and from `history`; the reducer keeps the latest per kind and drops on `Null`
-- [ ] the demo: the progress bar moves in tmux and is gone after `--continue`; the board is back after `--continue`; `1` on the focused board fires `board.tick` and the table changes
-- [ ] a plugin author's example in `docs/design/tui.md` §8 compiles as a doc test against the demo crate
-- [ ] sdk changed once; ADR-0013 lists what it touched; `check_discipline.sh` unchanged and green
+- [x] every node has a JSON fixture, a fold test, and one `TestBackend` snapshot at 80 columns; `Columns` also at 50
+- [x] `ToolOutput.display` round-trips through the wire and the journal; `Display` is gone from the workspace
+- [x] a `Signal` is on the live stream and absent from the journal and from `history`; the reducer keeps the latest per kind and drops on `Null`
+- [x] the demo: the progress bar moves in tmux and is gone after `--continue`; the board is back after `--continue`; `1` on the focused board fires `board.tick` and the table changes
+- [x] a plugin author's example in `docs/design/tui.md` §8 compiles as a doc test against the demo crate
+- [x] sdk changed once; ADR-0013 lists what it touched; `check_discipline.sh` unchanged and green
 
 ## Non-goals
 
@@ -38,3 +38,39 @@ Forms as an interaction. Node-level styling (colour, alignment) chosen by plugin
 ## Risks
 
 Vocabulary creep — a node enters only with its fold and its snapshot; ten nodes is the cap for M11. A signal storm from a careless plugin — the reducer coalesces; a plugin publishing faster than 20 Hz gets a `Lagged` and a notice naming it.
+
+## Verified
+
+2026-08-31, bricks 3–7 (bricks 1–2 landed with the sdk and the kernel).
+
+```
+$ cargo test -p bingo-surface-tui
+test result: ok. 336 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+$ cargo test -p bingo-demo-ui
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+   Doc-tests bingo_demo_ui
+test crates/bingo-demo-ui/src/lib.rs - DesignDoc (line 280) ... ok   ← §8's example
+$ cargo test --test views
+test a_button_fires_its_command_and_the_table_changes ... ok
+test a_second_run_reads_the_board_back_and_not_the_bar ... ok
+test a_signal_is_on_the_live_stream_and_never_in_the_journal ... ok
+$ cargo test --workspace --locked
+1801 tests, 0 failed
+$ cargo fmt --all -- --check && cargo check --workspace --all-targets --locked
+$ cargo clippy --workspace --all-targets --locked -- -D warnings
+$ scripts/check_discipline.sh
+dependency direction ok · kernel names no tool · cohesion ok · discipline ok
+$ scripts/budget.sh
+dependencies (unique, normal): 269 (max 269) · budget ok
+$ cargo deny check
+advisories ok, bans ok, licenses ok, sources ok
+$ cargo build && scripts/tui-smoke.sh
+  a live signal moves in the rail and leaves nothing behind
+  a button on a pinned board fires its command and the table changes
+tui-smoke ok
+```
+
+- Every node draws once: `views/{text,markdown,code,diff,list,table,keyvalue,progress,badge,tree,stack,columns,panel,actions}.rs`, one snapshot each at 80 columns and `Columns` again at 50. `views::tests::named` is an exhaustive match, so a fifteenth node cannot enter without one.
+- `Signal` is proved absent from the journal by replaying `events_since(0)` on a live session and by a second process reading the same directory back: the board is there, `signals` is empty. It never reaches `history`, which pages items and not frames.
+- `scripts/budget.toml` moved from 268 to 269: the count includes workspace members, and `bingo-demo-ui` is one. It brings no dependency of its own.
+- `check_discipline.sh` is untouched; `bingo-sdk` and `bingo-core` are untouched by this slice.
