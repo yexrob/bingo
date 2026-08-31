@@ -228,6 +228,7 @@ dependencies = [
  "bingo-provider-fake",
  "bingo-provider-openai",
  "bingo-rooms",
+ "bingo-schedule",
  "bingo-sdk",
  "bingo-skills",
  "bingo-store-jsonl",

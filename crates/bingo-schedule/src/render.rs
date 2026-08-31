@@ -3,18 +3,61 @@
 //! `/schedule` and `ScheduleList` show the same rows, so what a person sees
 //! and what the model sees cannot drift apart.
 
+use bingo_sdk::View;
 use jiff::Zoned;
 use jiff::tz::TimeZone;
 
 use crate::entry::Entry;
+use crate::store::Shelf;
 
 pub const HEADERS: [&str; 5] = ["id", "spec", "next fire", "enabled", "text"];
+
+/// What a store with nothing in it says.
+const NONE: &str = "no schedules yet";
 
 /// Enough of a prompt to tell two schedules apart, in a table cell.
 const HEAD: usize = 48;
 
 /// What a next fire that is not coming shows as.
 const NEVER: &str = "—";
+
+/// The whole screen: the entries, who runs them, and any file that was
+/// meant to be one. `/schedule` and `ScheduleList` show this, so a person
+/// and the model read the same store.
+pub fn view(shelf: &Shelf, holder: &str, tz: &TimeZone) -> View {
+    let mut parts = vec![match shelf.is_empty() {
+        true => View::Text { text: NONE.into() },
+        false => View::Table {
+            headers: HEADERS.map(str::to_string).to_vec(),
+            rows: shelf.entries.iter().map(|e| row(e, tz)).collect(),
+        },
+    }];
+    parts.push(View::Text {
+        text: format!("schedules: {holder}"),
+    });
+    parts.extend(unreadable(shelf));
+    View::Stack { children: parts }
+}
+
+/// A file that was meant to be an entry says so here, and nowhere else: a
+/// store is hand-editable, and a silent skip is how a person loses one.
+fn unreadable(shelf: &Shelf) -> Option<View> {
+    if shelf.unreadable.is_empty() {
+        return None;
+    }
+    let lines: Vec<String> = shelf
+        .unreadable
+        .iter()
+        .map(|bad| format!("{}: {}", bad.file, bad.why))
+        .collect();
+    Some(View::Text {
+        text: format!(
+            "{} file(s) could not be read:\n{}",
+            lines.len(),
+            lines.join("\n")
+        ),
+    })
+}
 
 pub fn row(entry: &Entry, tz: &TimeZone) -> Vec<String> {
     vec![
@@ -72,6 +115,75 @@ mod tests {
         );
         assert_eq!(row[2], NEVER);
         assert_eq!(row[3], "no");
+    }
+
+    fn shelf(entries: Vec<Entry>) -> Shelf {
+        Shelf {
+            entries,
+            unreadable: Vec::new(),
+        }
+    }
+
+    fn children(view: View) -> Vec<View> {
+        match view {
+            View::Stack { children } => children,
+            other => panic!("a schedule table is a stack, not {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_empty_store_is_one_line_and_still_says_who_runs_it() {
+        let shown = children(view(
+            &shelf(Vec::new()),
+            "held by this process",
+            &TimeZone::UTC,
+        ));
+        assert_eq!(shown[0], View::Text { text: NONE.into() });
+        assert_eq!(
+            shown[1],
+            View::Text {
+                text: "schedules: held by this process".into()
+            }
+        );
+        assert_eq!(shown.len(), 2);
+    }
+
+    #[test]
+    fn every_entry_is_a_row_and_the_holder_is_the_line_under_them() {
+        let shown = children(view(
+            &shelf(vec![entry()]),
+            "dormant — held by pid 42",
+            &TimeZone::UTC,
+        ));
+        let View::Table { headers, rows } = &shown[0] else {
+            panic!("a store with entries is a table: {shown:?}");
+        };
+        assert_eq!(headers, &HEADERS);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0][0], "abcd1234");
+        assert_eq!(
+            shown[1],
+            View::Text {
+                text: "schedules: dormant — held by pid 42".into()
+            }
+        );
+    }
+
+    #[test]
+    fn a_file_that_could_not_be_read_is_said_out_loud() {
+        let shelf = Shelf {
+            entries: vec![entry()],
+            unreadable: vec![crate::store::Unreadable {
+                file: "broken.json".into(),
+                why: "expected value at line 1".into(),
+            }],
+        };
+        let shown = children(view(&shelf, "held by this process", &TimeZone::UTC));
+        let View::Text { text } = &shown[2] else {
+            panic!("the notice is text: {shown:?}");
+        };
+        assert!(text.contains("broken.json"), "{text}");
+        assert!(text.contains("1 file(s) could not be read"), "{text}");
     }
 
     #[test]
