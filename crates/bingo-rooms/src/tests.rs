@@ -9,12 +9,13 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use async_trait::async_trait;
 use bingo_sdk::{
-    Activation, Answer, Attachment, Catalog, CatalogKind, ClientIdentity, CloseReason,
-    CommandContext, ContentPart, Delivery, Driver, ErrorCode, Event, Frame, FrameStream,
-    GatewayStream, HistoryChunk, HistoryPage, HookContext, HostApi, HostHandle, Input, IntentId,
-    InteractionId, InterruptScope, Item, ItemBody, ItemId, ItemStatus, KernelError, OpenOptions,
-    Origin, ParentLink, Seq, SessionFilter, SessionHandle, SessionId, SessionPort, SessionSelector,
-    SessionSpec, SessionState, SessionSummary, Usage,
+    Activation, Answer, AnswerSpec, Attachment, CancellationToken, Catalog, CatalogKind,
+    ClientIdentity, CloseReason, CommandContext, ContentPart, Delivery, Driver, Env, ErrorCode,
+    Event, Frame, FrameStream, GatewayStream, HistoryChunk, HistoryPage, HookContext, HostApi,
+    HostHandle, Input, IntentId, InteractionId, InteractionKind, InterruptScope, Item, ItemBody,
+    ItemId, ItemStatus, KernelError, OpenOptions, Origin, ParentLink, Prompter, Seq, SessionFilter,
+    SessionHandle, SessionId, SessionPort, SessionSelector, SessionSpec, SessionState,
+    SessionSummary, ToolContext, ToolHost, TurnId, Usage,
 };
 use jiff::Timestamp;
 use serde_json::Value;
@@ -296,6 +297,44 @@ impl SessionPort for Deaf {
 
     async fn events_since(&self, _since: Seq) -> Result<FrameStream, KernelError> {
         unreachable!("this plugin re-subscribes to nothing")
+    }
+}
+
+/// The call's own side of the host. This plugin's tool opens a room and says
+/// so in its result; it asks nobody anything and records nothing else.
+struct Call;
+
+#[async_trait]
+impl Prompter for Call {
+    async fn ask(
+        &self,
+        _kind: InteractionKind,
+        _answers: Vec<AnswerSpec>,
+    ) -> Result<Answer, KernelError> {
+        unreachable!("this plugin's tool asks nobody anything")
+    }
+}
+
+#[async_trait]
+impl ToolHost for Call {
+    fn progress(&self, _item: &ItemId, _tail: String) {}
+
+    async fn record(&self, _body: ItemBody) -> Result<ItemId, KernelError> {
+        unreachable!("this plugin's tool records nothing of its own")
+    }
+}
+
+pub(crate) fn tool_context(session: &SessionId, fleet: &Fleet) -> ToolContext {
+    ToolContext {
+        call_id: "call_test".into(),
+        session: session.clone(),
+        turn: TurnId::from_raw("trn_call"),
+        item: ItemId::from_raw("itm_call"),
+        cwd: PathBuf::from("/work/project"),
+        cancel: CancellationToken::new(),
+        env: Arc::new(Env::rooted("/nowhere")),
+        host: fleet.handle(),
+        call: Arc::new(Call),
     }
 }
 

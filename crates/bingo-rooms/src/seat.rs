@@ -33,6 +33,21 @@ pub async fn seat(
     Ok(room)
 }
 
+/// What the caller is told once a room is seated: the room, and who is in it.
+/// `/room` and `OpenRoom` are the same act (ADR-0021 §3), so they say the same
+/// thing about it.
+pub(crate) fn receipt(title: &str, members: &[String]) -> String {
+    format!("{title}: {}", roster(members))
+}
+
+/// Who is in a room, as a person or a model reads it.
+pub(crate) fn roster(members: &[String]) -> String {
+    match members.is_empty() {
+        true => "nobody yet".to_string(),
+        false => members.join(", "),
+    }
+}
+
 /// The room of that title already under this session, live or persisted.
 async fn standing(
     host: &HostHandle,
