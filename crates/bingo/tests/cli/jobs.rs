@@ -9,7 +9,7 @@
 
 use serde_json::Value;
 
-use super::stream_json::{Host, hosted};
+use super::stream_json::{Ended, Host, hosted};
 use super::*;
 
 /// A hosted run that may spend a shell: the gate is not what these are about.
@@ -271,6 +271,176 @@ fn a_running_command_is_promoted_mid_turn_and_the_call_returns_early() {
         log.starts_with("before"),
         "the buffer did not follow: {log}"
     );
+}
+
+/// Every byte journaled under a run's data dir. A wake's own text is what the
+/// session heard, not something the stream prints, so this is where an
+/// ongoing watch's notices are read back from (the precedent is `agents.rs`).
+fn journal_text(dir: &std::path::Path) -> String {
+    let mut text = String::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return text;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            text.push_str(&journal_text(&path));
+        } else if let Ok(contents) = std::fs::read_to_string(&path) {
+            text.push_str(&contents);
+        }
+    }
+    text
+}
+
+/// A job that writes one matching line, waits, then bursts three more and
+/// ends. Both waits are on files the test makes, so every notice lands
+/// between two turns and no scan tick has to win a race for the test to mean
+/// what it says.
+fn gated(notify_all: bool) -> tempfile::NamedTempFile {
+    let all = if notify_all {
+        r#""notify_all":true,"#
+    } else {
+        ""
+    };
+    script(&format!(
+        r#"{{"responses":[
+            {{"steps":[{{"toolCall":{{"name":"Bash","input":{{
+                "command":"echo warming; while [ ! -f start ]; do sleep 0.05; done; echo HIT one; while [ ! -f go ]; do sleep 0.05; done; echo HIT two; echo HIT three; echo HIT four",
+                "background":true,{all}"notify_on":["HIT"]}}}}}}]}},
+            {{"steps":[{{"text":"started it"}}]}},
+            {{"steps":[{{"text":"heard the first hit"}}]}},
+            {{"steps":[{{"text":"heard it finish"}}]}}
+        ]}}"#
+    ))
+}
+
+/// Drive `gated`: the job's first hit only happens once the turn that started
+/// it is over, and the burst only once that hit's own turn is over.
+fn run_gated(dir: &std::path::Path, script: &tempfile::NamedTempFile) -> Ended {
+    let mut host = Host::start(&mut allowed(dir, script));
+    host.prompt("watch it and tell me what it writes");
+    assert_eq!(host.until("result")["result"], "started it");
+
+    std::fs::write(dir.join("start"), "").unwrap();
+    assert_eq!(host.until("result")["result"], "heard the first hit");
+
+    std::fs::write(dir.join("go"), "").unwrap();
+    assert_eq!(host.until("result")["result"], "heard it finish");
+    host.finish()
+}
+
+/// The tail of the clause an ongoing watch adds for what its quiet window
+/// swallowed, singular and plural alike.
+const SINCE: &str = "matched since the last notice";
+
+/// `notify_all` (ADR-0018 §8): the first hit wakes at once, the three that
+/// follow inside the thirty-second window are only counted, and the count
+/// rides the completion — one line and a number, never a list.
+#[test]
+fn an_ongoing_watch_wakes_once_and_counts_the_rest_onto_the_end() {
+    let dir = tempfile::tempdir().unwrap();
+    let ended = run_gated(dir.path(), &gated(true));
+    assert_eq!(ended.code, Some(0), "stderr: {}", ended.err);
+    assert_eq!(
+        ended.results().len(),
+        3,
+        "the hit and the end are one turn each: {:?}",
+        ended.types()
+    );
+
+    let journal = journal_text(&dir.path().join(".bingo/data"));
+    assert!(
+        journal.contains("wrote a line you asked to be told about"),
+        "the first hit never woke the session"
+    );
+    assert!(
+        journal.contains("It matched: HIT four"),
+        "the completion carried no pending tally"
+    );
+    assert!(
+        journal.contains(&format!("…and 2 more lines {SINCE}.")),
+        "the two lines the window swallowed were not counted"
+    );
+    assert_eq!(
+        journal.matches(SINCE).count(),
+        1,
+        "the count went out once and was reset by the notice that carried it"
+    );
+    // One line per notice: the swallowed lines are in the log, not the wake.
+    assert_eq!(
+        log_text(dir.path()),
+        "warming\nHIT one\nHIT two\nHIT three\nHIT four\n"
+    );
+}
+
+/// The default is unchanged (ADR-0018 §4): one notice for the first hit, and
+/// the three lines after it are neither delivered nor counted.
+#[test]
+fn a_default_watch_still_says_it_once_and_counts_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let ended = run_gated(dir.path(), &gated(false));
+    assert_eq!(ended.code, Some(0), "stderr: {}", ended.err);
+    assert_eq!(ended.results().len(), 3, "{:?}", ended.types());
+
+    let journal = journal_text(&dir.path().join(".bingo/data"));
+    assert_eq!(
+        journal
+            .matches("wrote a line you asked to be told about")
+            .count(),
+        1,
+        "one notification, not a storm"
+    );
+    assert!(!journal.contains(SINCE), "the default counts nothing");
+    assert!(
+        !journal.contains("It matched:"),
+        "a fired watch has nothing left for the completion to carry"
+    );
+}
+
+/// `notify_all` with nothing to watch for is refused before anything runs,
+/// with the wording that says what to add (ADR-0018 §8).
+#[test]
+fn notify_all_with_no_condition_is_refused_and_starts_no_job() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = script(
+        r#"{"responses":[
+            {"steps":[{"toolCall":{"name":"Bash","input":{
+                "command":"echo hi","background":true,"notify_all":true}}}]},
+            {"steps":[{"text":"it was refused"}]}
+        ]}"#,
+    );
+    let out = scripted_run(
+        dir.path(),
+        &script,
+        &["--dangerously-skip-permissions"],
+        "watch everything, but say what for",
+    );
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+
+    let refused = frames_of(&out)
+        .into_iter()
+        .find_map(|f| match f.event {
+            Event::ItemCompleted { item } => match item.body {
+                bingo_sdk::ItemBody::ToolCall {
+                    name,
+                    output: Some(output),
+                    ..
+                } if name == "Bash" => Some(output),
+                _ => None,
+            },
+            _ => None,
+        })
+        .expect("the Bash call completed");
+    assert!(refused.is_error);
+    let text: String = refused
+        .parts
+        .iter()
+        .filter_map(bingo_sdk::ContentPart::as_text)
+        .collect();
+    assert!(text.contains("notify_all watches nothing"), "{text}");
+    assert!(text.contains("notify_on"), "{text}");
+    assert!(text.contains("notify_regex"), "{text}");
+    assert!(logs(dir.path()).is_empty(), "a refused call started a job");
 }
 
 #[test]
