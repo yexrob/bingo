@@ -43,9 +43,9 @@ async fn wait_for(
     args: &WaitArgs,
 ) -> Result<watch::Reply, ToolError> {
     let Some(seconds) = args.timeout_s else {
-        return watch::next_reply(attachment, &cx.cancel).await;
+        return watch::next_reply(&cx.host, attachment, &cx.cancel).await;
     };
-    let wait = watch::next_reply(attachment, &cx.cancel);
+    let wait = watch::next_reply(&cx.host, attachment, &cx.cancel);
     match tokio::time::timeout(Duration::from_secs(seconds), wait).await {
         Ok(reply) => reply,
         Err(_) => Err(ToolError::Failed(format!(

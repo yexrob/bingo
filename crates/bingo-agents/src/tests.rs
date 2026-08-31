@@ -30,6 +30,14 @@ fn ts() -> Timestamp {
     Timestamp::UNIX_EPOCH
 }
 
+/// The marker a subscriber that fell behind hears instead of its frames.
+pub(crate) fn lagged() -> Event {
+    Event::Lagged {
+        from: Seq(3),
+        to: Seq(9),
+    }
+}
+
 /// A machine with agent definitions on it: a home holding the person's own
 /// layer, and a working directory to run in.
 pub(crate) struct Tree(tempfile::TempDir);

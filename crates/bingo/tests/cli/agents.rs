@@ -109,6 +109,116 @@ fn the_child_s_reply_is_the_tool_call_s_result() {
     assert!(text.contains("hi from the child"), "{text}");
 }
 
+/// A background agent's end wakes the session that spawned it (the deliver
+/// door of ADR-0010, the async-by-default policy of ADR-0018): a hosted run
+/// gets a second result with no further input. The two middle responses are
+/// the same words because the parent's receipt round and the child's turn
+/// race for the script's cursor; the fourth can only be the woken turn's,
+/// which fires strictly after both.
+const BACKGROUND_WAKE: &str = r#"{"responses":[
+    {"steps":[{"toolCall":{"name":"SpawnAgent","input":{"prompt":"work quietly","background":true}}}]},
+    {"steps":[{"text":"spawned, or the work itself"}]},
+    {"steps":[{"text":"spawned, or the work itself"}]},
+    {"steps":[{"text":"heard the agent finish"}]}
+]}"#;
+
+#[test]
+fn a_finished_background_agent_wakes_the_run_that_spawned_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = script(BACKGROUND_WAKE);
+    let mut host = super::stream_json::Host::start(&mut super::stream_json::hosted(
+        dir.path(),
+        &script,
+        &["--dangerously-skip-permissions"],
+    ));
+    host.prompt("spawn a background worker");
+    let first = host.until("result");
+    assert_eq!(first["result"], "spawned, or the work itself");
+
+    // Nothing more is sent: only the agent's end can open the next turn.
+    std::thread::sleep(std::time::Duration::from_secs(3));
+    let ended = host.finish();
+    assert_eq!(ended.code, Some(0), "stderr: {}", ended.err);
+    let results = ended.results();
+    assert_eq!(
+        results.len(),
+        2,
+        "the agent's end opened no turn: {:?}",
+        ended.types()
+    );
+    assert_eq!(results[1]["result"], "heard the agent finish");
+    assert_eq!(
+        results[0]["session_id"], results[1]["session_id"],
+        "the wake landed on the session that spawned the agent"
+    );
+}
+
+/// The other branch of the deliver door: the child finishes while the parent
+/// is still mid-turn. The design (ADR-0008 §2, v7's "a running agent never
+/// wakes") is absorption, not a second turn: the wake is queued and steered
+/// into the running turn at its next tool barrier, so the parent hears the
+/// news as input of the turn it is already in. The parent stays busy on a
+/// real shell sleep; the two identical middle texts absorb the child/parent
+/// race for the script's cursor.
+const BACKGROUND_WAKE_BUSY: &str = r#"{"responses":[
+    {"steps":[{"toolCall":{"name":"SpawnAgent","input":{"prompt":"work quietly","background":true}}}]},
+    {"steps":[{"toolCall":{"name":"Bash","input":{"command":"sleep 2"}}}]},
+    {"steps":[{"text":"still the first turn, or the work"}]},
+    {"steps":[{"text":"still the first turn, or the work"}]},
+    {"steps":[{"text":"heard the agent finish"}]}
+]}"#;
+
+#[test]
+fn a_wake_that_finds_the_parent_busy_is_absorbed_at_the_barrier() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = script(BACKGROUND_WAKE_BUSY);
+    let mut host = super::stream_json::Host::start(&mut super::stream_json::hosted(
+        dir.path(),
+        &script,
+        &["--dangerously-skip-permissions"],
+    ));
+    host.prompt("spawn a background worker and keep going");
+    let first = host.until("result");
+    assert_eq!(first["result"], "still the first turn, or the work");
+
+    std::thread::sleep(std::time::Duration::from_secs(3));
+    let ended = host.finish();
+    assert_eq!(ended.code, Some(0), "stderr: {}", ended.err);
+    assert_eq!(
+        ended.results().len(),
+        1,
+        "absorption is not a second turn: {:?}",
+        ended.types()
+    );
+    // The news reached the running turn as input. The stream shows no line
+    // for an absorbed steering item, so the proof is the journal: the
+    // parent's own record holds the completion as a user item.
+    let journal = journal_text(&dir.path().join(".bingo/data"));
+    assert!(
+        journal.contains("finished."),
+        "the parent never heard the completion: {:?}",
+        ended.types()
+    );
+}
+
+/// Every byte journaled under the data dir, for asserting what a session
+/// heard rather than what a stream chose to print.
+fn journal_text(dir: &std::path::Path) -> String {
+    let mut text = String::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return text;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            text.push_str(&journal_text(&path));
+        } else if let Ok(contents) = std::fs::read_to_string(&path) {
+            text.push_str(&contents);
+        }
+    }
+    text
+}
+
 /// A text or json run is attached to the tree as well (ADR-0010 §3): off a
 /// tty the child's permission prompt is refused as the root's would be, and
 /// the run ends instead of waiting on a prompt nobody can see. The output

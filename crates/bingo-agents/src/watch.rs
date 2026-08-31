@@ -48,7 +48,17 @@ impl Reply {
 
 /// The child's reply to the turn it is running, once that turn ends.
 /// Cancelling the waiting call stops the wait, never the child.
+///
+/// A watcher that falls behind hears a `Lagged` marker and then nothing:
+/// the kernel ends a lagged subscription and the client has to resync
+/// (`session/subscribers.rs`). So the marker reopens the session — the
+/// fresh snapshot already knows whether the turn ended inside the gap, and
+/// a child still at work is watched on from the new attachment. Before
+/// this, a chatty child's end could fall in the gap and the watcher went
+/// deaf: the parent was never woken, though `WaitAgent` could still read
+/// the reply from a fresh snapshot.
 pub async fn next_reply(
+    host: &HostHandle,
     attachment: &mut Attachment,
     cancel: &CancellationToken,
 ) -> Result<Reply, ToolError> {
@@ -60,6 +70,16 @@ pub async fn next_reply(
         let Some(frame) = frame else {
             return Err(ToolError::Failed("the agent's session ended".into()));
         };
+        if matches!(frame.event, Event::Lagged { .. }) {
+            let session = attachment.session.clone();
+            *attachment = follow(host, &session)
+                .await
+                .map_err(|e| ToolError::Failed(e.message))?;
+            if attachment.snapshot.turn.is_none() {
+                return Ok(last_reply(&attachment.snapshot));
+            }
+            continue;
+        }
         attachment.snapshot.apply(&frame);
         if let Event::TurnCompleted { turn, status, .. } = &frame.event {
             return Ok(Reply {
@@ -105,7 +125,7 @@ pub fn last_reply(state: &SessionState) -> Reply {
 /// reply wakes the parent as a peer message. The kernel's fold puts `[from
 /// <name>]` above it, so the text says only what happened.
 pub async fn report(mut attachment: Attachment, host: HostHandle, parent: SessionId, name: String) {
-    let text = match next_reply(&mut attachment, &CancellationToken::new()).await {
+    let text = match next_reply(&host, &mut attachment, &CancellationToken::new()).await {
         Ok(reply) => finished(&reply),
         Err(error) => {
             tracing::debug!(agent = %name, %error, "an agent's turn was not followed to its end");
@@ -209,7 +229,7 @@ mod tests {
         fleet.script([assistant("one"), assistant("two"), turn_completed()]);
 
         let mut attachment = follow(&fleet.handle(), &child).await.unwrap();
-        let reply = next_reply(&mut attachment, &CancellationToken::new())
+        let reply = next_reply(&fleet.handle(), &mut attachment, &CancellationToken::new())
             .await
             .unwrap();
         assert_eq!(reply, completed("one\ntwo"));
@@ -225,7 +245,7 @@ mod tests {
         let mut attachment = follow(&fleet.handle(), &child).await.unwrap();
         let cancel = CancellationToken::new();
         cancel.cancel();
-        let error = next_reply(&mut attachment, &cancel)
+        let error = next_reply(&fleet.handle(), &mut attachment, &cancel)
             .await
             .expect_err("stop");
         assert!(matches!(error, ToolError::Cancelled), "{error}");
@@ -276,6 +296,45 @@ mod tests {
             panic!("a peer delivers text");
         };
         assert_eq!(text, "failed: no key\n\nIt had said:\nhalf a review");
+    }
+
+    /// The kernel ends a lagged subscription at the marker and expects a
+    /// resync; a watcher that does not is deaf, and the parent is never
+    /// woken (the user-reported bug: a chatty child's end fell in the gap).
+    #[tokio::test]
+    async fn a_lagged_watcher_resyncs_and_still_wakes_the_parent() {
+        let fleet = Fleet::default();
+        let root = fleet.root();
+        let child = fleet.child(&root, "reviewer");
+        // The end of the child's turn fell inside the gap: the stream holds
+        // only the marker, and only the fresh snapshot knows how it went.
+        fleet.said(&child, "done during the gap");
+        fleet.script([crate::tests::lagged()]);
+        let host = Recorder::new(&fleet);
+
+        let attachment = follow(&fleet.handle(), &child).await.unwrap();
+        report(
+            attachment,
+            fleet.handle(),
+            root.clone(),
+            "reviewer".to_string(),
+        )
+        .await;
+
+        let delivered = host.delivered();
+        assert_eq!(delivered.len(), 1, "the lagged watcher went deaf");
+        let (to, input, delivery) = &delivered[0];
+        assert_eq!(to, &root);
+        assert_eq!(*delivery, Delivery::Wake);
+        let Input::Text { text, .. } = input else {
+            panic!("a peer delivers text");
+        };
+        assert_eq!(text, "finished.\n\ndone during the gap");
+        assert!(
+            fleet.opened().len() >= 2,
+            "a resync reopens the session: {:?}",
+            fleet.opened()
+        );
     }
 
     #[tokio::test]

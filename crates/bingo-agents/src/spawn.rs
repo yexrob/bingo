@@ -277,7 +277,7 @@ impl Tool for SpawnAgentTool {
             Err(other) => return Err(other),
         };
         if !args.background() {
-            let reply = watch::next_reply(&mut attachment, &cx.cancel).await?;
+            let reply = watch::next_reply(&cx.host, &mut attachment, &cx.cancel).await?;
             return Ok(watch::output(&name, &session, &reply));
         }
         let host = cx.host.clone();
