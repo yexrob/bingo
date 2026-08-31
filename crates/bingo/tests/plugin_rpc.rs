@@ -178,7 +178,10 @@ fn the_plugin_s_command_answers_with_its_view() {
     // The command answers by itself, but a session still needs a provider
     // (f251b1f: without a script there is no fake one). The response is
     // never consumed.
-    let script = script(home.path(), r#"{"responses":[{"steps":[{"text":"unused"}]}]}"#);
+    let script = script(
+        home.path(),
+        r#"{"responses":[{"steps":[{"text":"unused"}]}]}"#,
+    );
     let out = run(bingo(home.path(), project.path())
         .env("BINGO_FAKE_SCRIPT", &script)
         .arg("/wordcount notes.txt"));
