@@ -168,6 +168,38 @@ keys Escape
 await '? for shortcuts'
 finish
 
+step 'a focused block opens whole in the pager and gives the frame back'
+start "$(long_reply)"
+keys 'say a lot' Enter
+await ' line 80'
+# A click takes the block; the frame it is answered against is the last one
+# drawn, so the drive waits for it before pressing anything.
+mouse 0 10 5
+sleep 0.5
+keys Enter
+await 'j/k · pgup/pgdn'
+keys 'G'
+await ' line 80'
+keys '/'
+keys 'line 42'
+await '/line 42'
+keys Enter
+await 'n/N · esc'
+keys Escape
+keys Escape
+vanish 'j/k · pgup/pgdn'
+await '? for shortcuts'
+finish
+
+step 'an @ offers the paths under the session and enter takes one'
+printf '[package]\nname = "smoke"\n' >"$WORK/cwd/Cargo.toml"
+start '{"responses":[{"steps":[{"text":"nothing to do"}]}]}'
+keys '@Car'
+await '@Cargo.toml'
+keys Enter
+await '> @Cargo.toml'
+finish
+
 step 'the help sheet opens on ? and closes on esc'
 start '{"responses":[{"steps":[{"text":"nothing to do"}]}]}'
 keys '?'

@@ -343,6 +343,25 @@ mod tests {
         assert_eq!(title(&item), "Thinking");
     }
 
+    /// A table never wraps: it folds to the width it is laid out in (design
+    /// §7). In the transcript that width is the prose measure; in the sheet it
+    /// is the whole frame, which is what opening one is for.
+    #[test]
+    fn a_table_too_wide_for_the_measure_has_more_room_in_the_sheet() {
+        let cell = "x".repeat(60);
+        let table = format!("| {cell} | {cell} |\n|---|---|\n| {cell} | {cell} |\n");
+        let item = assistant("itm_1", &table, ItemStatus::Completed);
+        let widest = |rows: &[Line<'static>]| {
+            rows.iter()
+                .map(|row| unicode_width::UnicodeWidthStr::width(row.to_string().trim_end()))
+                .max()
+                .unwrap_or(0)
+        };
+        let in_transcript = crate::markdown::render(&table, crate::wrap::measure(160) - 2);
+        assert_eq!(widest(&in_transcript), 98, "cut to the measure, with an …");
+        assert_eq!(widest(&lines(&item, 160)), 122, "and whole in the sheet");
+    }
+
     #[test]
     fn a_row_that_already_shows_everything_opens_nothing() {
         let item = user("itm_1", "run the tests");
