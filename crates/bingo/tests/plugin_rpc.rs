@@ -175,7 +175,13 @@ fn the_plugin_s_command_answers_with_its_view() {
         return;
     }
     let (home, project) = installed();
-    let out = run(bingo(home.path(), project.path()).arg("/wordcount notes.txt"));
+    // The command answers by itself, but a session still needs a provider
+    // (f251b1f: without a script there is no fake one). The response is
+    // never consumed.
+    let script = script(home.path(), r#"{"responses":[{"steps":[{"text":"unused"}]}]}"#);
+    let out = run(bingo(home.path(), project.path())
+        .env("BINGO_FAKE_SCRIPT", &script)
+        .arg("/wordcount notes.txt"));
     assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
     let said = stdout(&out);
     assert!(said.contains("notes.txt"), "{said}");
@@ -188,7 +194,13 @@ fn the_plugin_s_command_answers_with_its_view() {
 fn a_host_with_no_plugins_installed_runs_as_it_always_did() {
     let home = tempfile::tempdir().unwrap();
     let project = tempfile::tempdir().unwrap();
-    let out = run(bingo(home.path(), project.path()).arg("hello"));
+    let script = script(
+        home.path(),
+        r#"{"responses":[{"steps":[{"text":"Hello from the fake provider."}]}]}"#,
+    );
+    let out = run(bingo(home.path(), project.path())
+        .env("BINGO_FAKE_SCRIPT", &script)
+        .arg("hello"));
     assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
     assert_eq!(stdout(&out), "Hello from the fake provider.\n");
     assert_eq!(stderr(&out), "");
