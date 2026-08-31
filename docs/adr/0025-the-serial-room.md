@@ -32,6 +32,10 @@ before landing.
    journal **before the assistant item that issued this call** (`cx.item`
    is the cut; what was absorbed at this turn's barriers after the model
    spoke was not seen by it). Behind → bounce; even → land.
+   The room's ledger starts at the caller's own `created_at`: a post that
+   landed before the session existed was fanned out to nobody, so no
+   author can be behind on it, and a member spawned into a running room
+   is level with it rather than behind its whole history.
 3. **Seen = absorbed or quoted.** The bounce is a worded tool error that
    quotes the missed posts, and a journaled bounce counts toward "seen" on
    the next attempt: seen(room) = max(posts absorbed before the cut,
@@ -54,7 +58,13 @@ before landing.
 - Cost: one extra tool round-trip per stale post, worst case; at
   single-digit member counts this is noise, and it buys the property that
   every landed post was written in full knowledge of the room's head.
-- The rule rides entirely on `Origin` fields and journal order — sdk
-  vocabulary; `bingo-agents` still imports nothing of `bingo-rooms`.
+- The rule rides entirely on `Origin` fields, `created_at` and journal
+  order — sdk vocabulary; `bingo-agents` still imports nothing of
+  `bingo-rooms`, and knows nothing of who a room's members are.
+- The session a room hangs under is never fanned out to (`post.rs`: a room
+  reaches into the tree, not up out of it), so its own model posts blind
+  and is bounced once whenever a member has spoken since. That bounce is
+  the only reading of the room it gets, which is the repair of §3 doing
+  its work rather than an exception to it.
 - Restart-safe by construction: both ledgers are re-derived from journals;
   process death loses timers, never the discipline.

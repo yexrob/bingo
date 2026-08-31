@@ -608,6 +608,7 @@ mod instances;
 mod jobs;
 mod login;
 mod mentions;
+mod peers;
 mod provider_add;
 mod rooms;
 mod schedule;
