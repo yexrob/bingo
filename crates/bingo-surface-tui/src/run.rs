@@ -1032,6 +1032,58 @@ mod tests {
         );
     }
 
+    /// A turn that answers and finishes, then `wait` of nothing at all before
+    /// ctrl+d. Answers with how many frames the run drew.
+    async fn frames_of_a_flash(wait: Duration) -> usize {
+        let mut harness = Harness::new();
+        let frames = vec![
+            frame(1, started("trn_1")),
+            frame(
+                2,
+                Event::ItemStarted {
+                    item: assistant("itm_1", "All gr", ItemStatus::Running),
+                },
+            ),
+            frame(
+                3,
+                Event::ItemCompleted {
+                    item: assistant("itm_1", "All green.", ItemStatus::Completed),
+                },
+            ),
+            frame(4, completed("trn_1", TurnStatus::Completed)),
+        ];
+        // A frame apart, so one is drawn while the answer is still running: a
+        // completion only flashes where the rendering it replaces was seen.
+        let (host, _) = TestHost::paced(frames, TICK * 2);
+        drive(
+            &host,
+            options(None, harness.home.path()),
+            &mut harness.recorder,
+            keys_after(wait, vec![ctrl('d')]),
+        )
+        .await
+        .expect("the loop ran");
+        assert!(
+            harness.recorder.last().contains("All green."),
+            "it comes to rest on the finished answer: {}",
+            harness.recorder.last()
+        );
+        harness.recorder.frames.len()
+    }
+
+    /// The idle measure again, over a run that had motion in it. The waiting
+    /// is what must cost nothing: a cue that went on reporting itself after
+    /// its window had lapsed would draw through it at the tick rate, thirty
+    /// frames a wasted second, and the surface would never be idle again.
+    #[tokio::test(start_paused = true)]
+    async fn the_seconds_after_a_flash_cost_no_frames_at_all() {
+        assert_eq!(
+            frames_of_a_flash(Duration::from_secs(1)).await,
+            frames_of_a_flash(Duration::from_secs(3)).await,
+            "two more seconds of waiting drew two more seconds of frames"
+        );
+    }
+
     /// A window nobody is looking at is the one that may interrupt a person
     /// somewhere else on their desktop (§6).
     async fn unfocused(
