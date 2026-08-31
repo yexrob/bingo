@@ -2,7 +2,9 @@
 //! run one surface, exit with its code. Nothing here knows how a turn works.
 
 mod login;
+mod provider;
 
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -154,8 +156,21 @@ enum Command {
         /// The provider id, e.g. `codex`.
         provider: String,
     },
+    /// Named provider instances: more endpoints than the three built in
+    /// (ADR-0017).
+    Provider {
+        #[command(subcommand)]
+        action: ProviderAction,
+    },
     /// Listen on the configured IM channels and nothing else (ADR-0016).
     Channels,
+}
+
+#[derive(Subcommand, Debug)]
+enum ProviderAction {
+    /// Ask for a name, a wire protocol, an endpoint and an optional key, and
+    /// write them where the next run reads them.
+    Add,
 }
 
 impl Command {
@@ -175,7 +190,7 @@ impl Command {
                 },
             }),
             Command::Logout { provider } => Some(Credential::Logout { provider }),
-            Command::Serve { .. } | Command::Channels => None,
+            Command::Serve { .. } | Command::Channels | Command::Provider { .. } => None,
         }
     }
 }
@@ -273,6 +288,9 @@ async fn run(cli: Cli) -> Result<i32, KernelError> {
     check_input(&cli)?;
     let interactive = interactive(&cli);
     let cwd = working_dir(cli.cwd.as_deref())?;
+    if matches!(cli.command, Some(Command::Provider { .. })) {
+        return added_provider(&environment(&cwd)).await;
+    }
     let config = host_config(&cli, &cwd)?;
     let demo = demo_ui(&cli, &config.layers);
     let listening = channels_wanted(&cli, &config.layers);
@@ -458,6 +476,26 @@ fn plugins(demo_ui: bool) -> Result<Vec<Box<dyn Plugin>>, KernelError> {
         all.push(Box::new(DemoUiPlugin));
     }
     Ok(all)
+}
+
+/// `bingo provider add` (`ProviderAction::Add`, the only one), before any
+/// kernel: a provider is registered at boot, so what this writes is what the
+/// next run reads (ADR-0017).
+async fn added_provider(env: &Env) -> Result<i32, KernelError> {
+    println!("{}", provider::add(env, provider_ids()?).await?);
+    Ok(0)
+}
+
+/// Every provider id this build registers before an instance is read, from
+/// the manifests the plugins publish (`provider:<id>`): a name to refuse is
+/// nothing this file knows on its own.
+fn provider_ids() -> Result<BTreeSet<String>, KernelError> {
+    Ok(plugins(false)?
+        .iter()
+        .flat_map(|plugin| plugin.manifest().provides)
+        .filter_map(|provided| provided.strip_prefix("provider:"))
+        .map(str::to_string)
+        .collect())
 }
 
 fn host_config(cli: &Cli, cwd: &std::path::Path) -> Result<HostConfig, KernelError> {

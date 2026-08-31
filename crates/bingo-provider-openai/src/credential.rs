@@ -1,23 +1,24 @@
 //! What the provider puts in its `Authorization` header, and what it says
 //! when it cannot.
 //!
-//! Two endpoints, two kinds of credential: the public API takes a key from
-//! settings or the environment, the ChatGPT subscription takes a bearer that
-//! only an OAuth flow yields and that expires. The difference is one enum
-//! here rather than a branch in every method, and the hints are written once
-//! so a refusal at session open and a dialog inside a session read alike.
+//! Two kinds of credential: a key, which is pasted or configured and does not
+//! expire (`key.rs`), and a subscription bearer, which only an OAuth flow
+//! yields and which does. The difference is one enum here rather than a
+//! branch in every method, and the hints are written once so a refusal at
+//! session open and a dialog inside a session read alike.
 
 use std::sync::Arc;
 
 use bingo_auth_oauth::{AuthError, Status, TokenSource};
 use bingo_sdk::{AuthStatus, ProviderError};
 
-use crate::API_KEY_ENV;
+use crate::key::ApiKey;
 
 #[derive(Debug)]
 pub enum Credential {
-    /// An API key, absent until someone configures one.
-    Key(Option<String>),
+    /// An API key: the store, then the settings or the environment
+    /// (ADR-0017 §3).
+    Key(ApiKey),
     /// A subscription token set, refreshed in place (ADR-0012 §3).
     Tokens(Arc<TokenSource>),
 }
@@ -27,12 +28,7 @@ impl Credential {
     /// the first request of a turn is already up to date.
     pub async fn bearer(&self) -> Result<String, ProviderError> {
         match self {
-            Credential::Key(Some(key)) => Ok(key.clone()),
-            Credential::Key(None) => Err(ProviderError::Auth {
-                message: format!(
-                    "no OpenAI API key: set {API_KEY_ENV} or the `openai.apiKey` setting"
-                ),
-            }),
+            Credential::Key(key) => key.bearer(),
             Credential::Tokens(source) => source
                 .access_token()
                 .await
@@ -41,14 +37,9 @@ impl Credential {
     }
 
     /// Synchronous, so the kernel can refuse a session before a turn starts.
-    /// `missing_key` is the provider's to write: only it knows which settings
-    /// file a person would put a key in.
-    pub fn status(&self, missing_key: impl FnOnce() -> String) -> AuthStatus {
+    pub fn status(&self) -> AuthStatus {
         match self {
-            Credential::Key(Some(_)) => AuthStatus::Ready,
-            Credential::Key(None) => AuthStatus::Missing {
-                hint: missing_key(),
-            },
+            Credential::Key(key) => key.status(),
             Credential::Tokens(source) => match source.status() {
                 Status::SignedIn { .. } => AuthStatus::Ready,
                 Status::SignedOut => AuthStatus::Missing {
