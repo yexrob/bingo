@@ -103,6 +103,19 @@ impl Motion {
         self.moving(now) || self.moved
     }
 
+    /// The same motion, as of a rendering taken at `now`. A rendering taken
+    /// after the motion has stopped *is* the resting form, so it pays off the
+    /// frame [`Motion::redraw`] was owed; a debt never marked paid keeps the
+    /// whole surface awake for the rest of the run. It is the same sample the
+    /// cue is drawn from, so a block can never come to rest while the frame
+    /// held of it is still a flashing one.
+    fn drawn(self, now: Instant) -> Self {
+        Self {
+            moved: self.moving(now),
+            ..self
+        }
+    }
+
     fn cue(&self, now: Instant) -> Cue {
         Cue {
             since: self.since,
@@ -309,11 +322,12 @@ impl Blocks {
     }
 
     /// The clock this rendering is drawn against: the one it already had while
-    /// nothing about it changed, and a new one the moment it did.
+    /// nothing about it changed — settled against this frame, which is the one
+    /// paying off whatever it still owed — and a new one the moment it did.
     fn motion(&self, held: Option<&Entry>, item: &Item, revision: &Revision, now: Now) -> Motion {
         let was = held.filter(|entry| &entry.revision == revision);
         if let Some(entry) = was {
-            return entry.motion;
+            return entry.motion.drawn(now.instant);
         }
         let finished = held.is_some_and(|entry| !entry.revision.status.is_terminal())
             && item.status.is_terminal();
@@ -656,6 +670,42 @@ mod tests {
         let failed = sync(&mut blocks, &with_failure, 60);
         assert_eq!(failed, plain + 2);
         assert!(blocks.tail(1)[0].contains("boom"), "{:?}", blocks.tail(1));
+    }
+
+    /// The flash owes every frame it lasts, and one more: the frame that
+    /// replaces it with the resting form. Owing for longer keeps the whole
+    /// surface awake for the rest of the run; owing for less leaves the
+    /// flashed rendering on the screen with nothing coming to relieve it.
+    #[test]
+    fn a_flash_owes_frames_until_its_resting_form_is_drawn() {
+        let mut state = state();
+        state.items = vec![assistant("itm_1", "half a s", ItemStatus::Running)];
+        let mut blocks = cache();
+        let (_, now) = scene();
+        sync_at(&mut blocks, &state, 60, now);
+        assert!(blocks.moving(), "an answer still arriving is moving");
+
+        // It finishes, so the block flashes for one frame (§6).
+        state.items = vec![assistant("itm_1", "half a second", ItemStatus::Completed)];
+        sync_at(&mut blocks, &state, 60, now);
+        assert!(blocks.moving(), "the completion is flashing");
+        sync_at(&mut blocks, &state, 60, later(now, 16));
+        assert!(blocks.moving(), "and has not run out halfway through");
+
+        // Past the flash: this sync draws the rest, and owes nothing after it.
+        let flip = FLIP.as_millis() as i64;
+        sync_at(&mut blocks, &state, 60, later(now, flip));
+        assert!(
+            !blocks.moving(),
+            "the resting form is the frame just drawn: nothing more is owed"
+        );
+        let settled = blocks.renders();
+        sync_at(&mut blocks, &state, 60, later(now, 5_000));
+        assert_eq!(
+            blocks.renders(),
+            settled,
+            "and a block at rest is never drawn again"
+        );
     }
 
     #[test]
