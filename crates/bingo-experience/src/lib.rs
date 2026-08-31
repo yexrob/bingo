@@ -7,3 +7,8 @@
 //! procedure, and the two never share a corpus or a prompt block.
 
 pub mod bm25;
+pub mod entry;
+mod frontmatter;
+mod id;
+mod project;
+pub mod store;
