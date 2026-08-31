@@ -29,6 +29,7 @@ pub mod lock;
 pub mod loopback;
 pub mod question;
 pub mod runner;
+pub mod secret;
 pub mod settings;
 
 #[cfg(test)]
@@ -81,7 +82,8 @@ impl Plugin for ChannelsPlugin {
 
     fn register(&self, registrar: &mut Registrar) -> Result<(), PluginError> {
         let settings: Settings = registrar.config()?;
-        let surface = ChannelsSurface::new(settings.channels.adapters(), settings.channels.gate());
+        let adapters = settings.channels.adapters(registrar.env());
+        let surface = ChannelsSurface::new(adapters, settings.channels.gate());
         registrar.surface(Arc::new(surface) as Arc<dyn Surface>);
         Ok(())
     }

@@ -129,7 +129,7 @@ async fn ask_key(name: &str) -> Result<Option<String>, KernelError> {
 /// crate here owns a terminal (ADR-0001 keeps the terminal stack in the TUI),
 /// so `stty` is what turns it off; where stdin is not a terminal there is
 /// nothing to hide and nothing is run.
-async fn unechoed() -> Result<String, KernelError> {
+pub(crate) async fn unechoed() -> Result<String, KernelError> {
     let echo = Echo::off();
     let typed = line().await;
     drop(echo);

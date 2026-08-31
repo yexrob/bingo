@@ -1,6 +1,8 @@
 //! The binary: parse the command line, compose the plugins, build the host,
 //! run one surface, exit with its code. Nothing here knows how a turn works.
 
+mod channels;
+mod gateway;
 mod login;
 mod provider;
 
@@ -164,7 +166,15 @@ enum Command {
         action: ProviderAction,
     },
     /// Listen on the configured IM channels and nothing else (ADR-0016).
-    Channels,
+    Channels {
+        #[command(subcommand)]
+        action: Option<ChannelsAction>,
+    },
+    /// One resident bingo per data dir, managed like a service (ADR-0020).
+    Gateway {
+        #[command(subcommand)]
+        verb: gateway::Verb,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -172,6 +182,16 @@ enum ProviderAction {
     /// Ask for a name, a wire protocol, an endpoint and an optional key, and
     /// write them where the next run reads them.
     Add,
+}
+
+#[derive(Subcommand, Debug)]
+enum ChannelsAction {
+    /// Paste a channel's app secret into the credential store, so a gateway
+    /// started at boot can read it (ADR-0020 §8).
+    Secret {
+        /// The adapter id, e.g. `feishu`.
+        adapter: String,
+    },
 }
 
 impl Command {
@@ -191,7 +211,10 @@ impl Command {
                 },
             }),
             Command::Logout { provider } => Some(Credential::Logout { provider }),
-            Command::Serve { .. } | Command::Channels | Command::Provider { .. } => None,
+            Command::Serve { .. }
+            | Command::Channels { .. }
+            | Command::Gateway { .. }
+            | Command::Provider { .. } => None,
         }
     }
 }
@@ -270,6 +293,7 @@ async fn main() -> ExitCode {
 
 /// What this run is for. Decided before the surface options are built,
 /// because building them consumes the command line.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Work {
     Rpc {
         stdio: bool,
@@ -277,21 +301,23 @@ enum Work {
     /// The chat surface as the whole run (ADR-0016 §1): nothing owns the
     /// terminal, so the concurrent surface is the work.
     Channels,
+    /// The same work, resident (ADR-0020 §1): a pidfile held, a log sink
+    /// installed, and a signal rather than a terminal to end it.
+    Gateway,
     Session,
 }
 
 async fn run(cli: Cli) -> Result<i32, KernelError> {
-    let work = match &cli.command {
-        Some(Command::Serve { stdio }) => Work::Rpc { stdio: *stdio },
-        Some(Command::Channels) => Work::Channels,
-        _ => Work::Session,
-    };
+    let work = work_of(&cli);
     check_input(&cli)?;
     let interactive = interactive(&cli);
     let cwd = working_dir(cli.cwd.as_deref())?;
-    if matches!(cli.command, Some(Command::Provider { .. })) {
-        return added_provider(&environment(&cwd)).await;
+    if let Some(code) = before_any_host(&cli, &cwd).await {
+        return code;
     }
+    // Held for the whole run and dropped after `Host::shutdown`, so the
+    // pidfile goes only once every plugin has given its own claims back.
+    let _resident = resident(work, &cwd)?;
     let config = host_config(&cli, &cwd)?;
     let demo = demo_ui(&cli, &config.layers);
     let listening = channels_wanted(&cli, &config.layers);
@@ -302,19 +328,13 @@ async fn run(cli: Cli) -> Result<i32, KernelError> {
         let human = std::io::IsTerminal::is_terminal(&std::io::stderr());
         eprintln!("{}", notice_report(&code, &text, human));
     }
-    if let Some(credential) = cli.command.as_ref().and_then(Command::credential) {
-        let receipt = match credential {
-            Credential::Login { provider, method } => login::login(&host, provider, method).await,
-            Credential::Logout { provider } => login::logout(&host, provider).await,
-        };
-        host.shutdown().await;
-        println!("{}", receipt?);
-        return Ok(0);
+    if let Some(code) = credentials(&host, &cli).await {
+        return code;
     }
     let env = Arc::new(environment(&cwd));
     let (id, options) = match work {
         Work::Rpc { stdio } => ("rpc", serve_options(stdio, cwd.clone(), env.clone())?),
-        Work::Channels => (
+        Work::Channels | Work::Gateway => (
             bingo_channels::SURFACE_ID,
             channel_options(cwd.clone(), env.clone()),
         ),
@@ -328,12 +348,85 @@ async fn run(cli: Cli) -> Result<i32, KernelError> {
     let surface = host
         .surface(id)
         .ok_or_else(|| KernelError::new(ErrorCode::Internal, format!("no {id} surface")))?;
-    let exit = surface.run(host.handle(), options).await;
+    let exit = match work {
+        // The resident gateway ends on a signal, not on its surface: the
+        // channels surface is concurrent and never returns of its own accord,
+        // and something has to come back here for `shutdown` to run at all.
+        Work::Gateway => gateway::run::until_signalled(surface, host.handle(), options).await,
+        _ => surface.run(host.handle(), options).await,
+    };
     if let Some(channels) = beside {
         channels.abort();
     }
     host.shutdown().await;
     exit.map(|e| e.code)
+}
+
+/// What this command line is for, decided before anything is built.
+fn work_of(cli: &Cli) -> Work {
+    match &cli.command {
+        Some(Command::Serve { stdio }) => Work::Rpc { stdio: *stdio },
+        Some(Command::Channels { action: None }) => Work::Channels,
+        Some(Command::Gateway { verb }) if verb.is_run() => Work::Gateway,
+        _ => Work::Session,
+    }
+}
+
+/// The pidfile and the log sink a resident gateway takes before any plugin
+/// exists (ADR-0020 §3): a second gateway on one data dir is refused here,
+/// before it can take a claim it would have to give back.
+fn resident(
+    work: Work,
+    cwd: &std::path::Path,
+) -> Result<Option<gateway::run::Resident>, KernelError> {
+    match work {
+        Work::Gateway => gateway::run::enter(
+            &gateway::paths::Paths::new(&environment(cwd)),
+            &gateway::probe::Kill,
+        )
+        .map(Some),
+        _ => Ok(None),
+    }
+}
+
+/// `login` and `logout`: a whole host, one exchange, and out. They need the
+/// provider registry and nothing else a run has.
+async fn credentials(host: &Host, cli: &Cli) -> Option<Result<i32, KernelError>> {
+    let credential = cli.command.as_ref().and_then(Command::credential)?;
+    let receipt = match credential {
+        Credential::Login { provider, method } => login::login(host, provider, method).await,
+        Credential::Logout { provider } => login::logout(host, provider).await,
+    };
+    host.shutdown().await;
+    Some(match receipt {
+        Ok(receipt) => {
+            println!("{receipt}");
+            Ok(0)
+        }
+        Err(e) => Err(e),
+    })
+}
+
+/// The commands answered before a kernel exists: they write what the *next*
+/// run reads, or they speak to a bingo rather than being one.
+async fn before_any_host(cli: &Cli, cwd: &std::path::Path) -> Option<Result<i32, KernelError>> {
+    let env = environment(cwd);
+    match &cli.command {
+        Some(Command::Provider { .. }) => Some(added_provider(&env).await),
+        Some(Command::Channels {
+            action: Some(ChannelsAction::Secret { adapter }),
+        }) => Some(channel_secret(&env, adapter).await),
+        Some(Command::Gateway { verb }) if !verb.is_run() => {
+            Some(gateway::dispatch(verb, &env, cwd, cli.settings.as_deref()).await)
+        }
+        _ => None,
+    }
+}
+
+/// `bingo channels secret <adapter>` (ADR-0020 §8).
+async fn channel_secret(env: &Env, adapter: &str) -> Result<i32, KernelError> {
+    println!("{}", channels::secret(env, adapter).await?);
+    Ok(0)
 }
 
 /// Whether a chat is being listened on: the flag, else any settings layer

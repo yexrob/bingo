@@ -1,0 +1,207 @@
+//! `gateway run`: the resident bingo itself (ADR-0020 §1, §3, §4).
+//!
+//! It is not a bridge and proxies nothing. The host it assembles is the
+//! ordinary one on the existing `Work::Channels` path — the same sessions, the
+//! same transcripts, the same schedule runner claim in the same place — with
+//! three things wrapped around it: the log sink is installed, the pidfile is
+//! held, and TERM ends the surface instead of the process, so every `Drop` and
+//! every `Plugin::stop` runs before the claims are given back.
+
+use std::sync::Arc;
+
+use bingo_sdk::{ErrorCode, Exit, HostHandle, KernelError, Surface, SurfaceOptions};
+use jiff::Timestamp;
+
+use super::paths::Paths;
+use super::pidfile::{self, Record};
+use super::probe::{self, Probe};
+
+/// What a resident process holds for as long as it runs. Dropping it gives the
+/// pidfile back, so it must outlive `Host::shutdown`.
+#[derive(Debug)]
+pub struct Resident {
+    _claim: pidfile::Claim,
+}
+
+/// Everything that must be true before a host is built: the directory exists,
+/// the log is open and taking lines, and this process holds the pidfile.
+///
+/// The sink goes in first so that a refusal below is the first thing written
+/// to the log a person will go and read.
+pub fn enter(paths: &Paths, probe: &dyn Probe) -> Result<Resident, KernelError> {
+    paths.ensure().map_err(internal)?;
+    let file = super::log::open(&paths.log()).map_err(internal)?;
+    super::log::install(file).map_err(internal)?;
+    let path = paths.pidfile();
+    if let Some(old) = pidfile::read(&path).map_err(internal)? {
+        replace(&path, &old, probe)?;
+    }
+    let claim = pidfile::Claim::take(&path, &Record::here(Timestamp::now())).map_err(internal)?;
+    tracing::info!(
+        pid = std::process::id(),
+        version = pidfile::version(),
+        pidfile = %path.display(),
+        "the gateway is up"
+    );
+    Ok(Resident { _claim: claim })
+}
+
+/// A record already there: refuse if its process is still running, and take
+/// the file over if it is not.
+///
+/// A crash leaves the record behind, and a supervisor's respawn must not wedge
+/// on the corpse's file (ADR-0020 §3) — but a *live* pid is never stepped on,
+/// whatever it turns out to be running.
+fn replace(path: &std::path::Path, old: &Record, probe: &dyn Probe) -> Result<(), KernelError> {
+    if probe.alive(old.pid) {
+        return Err(KernelError::new(
+            ErrorCode::InvalidInput,
+            taken(path, old, probe),
+        ));
+    }
+    tracing::warn!(
+        pid = old.pid,
+        version = %old.version,
+        started = %old.started,
+        pidfile = %path.display(),
+        "replacing the record of a gateway that is gone; it did not stop cleanly"
+    );
+    std::fs::remove_file(path).map_err(|e| internal(format!("{}: {e}", path.display())))
+}
+
+/// The refusal a second gateway gets, with the pid it lost to and what that
+/// pid turns out to be.
+fn taken(path: &std::path::Path, old: &Record, probe: &dyn Probe) -> String {
+    let what = match probe::is_bingo(probe, old.pid) {
+        true => format!("a bingo {} started {}", old.version, old.started),
+        false => format!(
+            "pid {} is alive but is not a bingo — the number came round again",
+            old.pid
+        ),
+    };
+    format!(
+        "a gateway already holds this data dir: pid {} ({what}). {} says so — \
+         `bingo gateway stop`, or remove that file if no bingo is running.",
+        old.pid,
+        path.display()
+    )
+}
+
+/// The surface, until it ends on its own or the operating system asks this
+/// process to leave.
+///
+/// The channels surface is `SurfaceKind::Concurrent` and never returns of its
+/// own accord, so in practice this is the signal arm. Returning from here is
+/// what lets the caller run `Host::shutdown` — the difference between a
+/// gateway that gave its locks back and one that has to be cleaned up by hand.
+pub async fn until_signalled(
+    surface: Arc<dyn Surface>,
+    host: HostHandle,
+    options: SurfaceOptions,
+) -> Result<Exit, KernelError> {
+    let mut term = signal(SignalKind::Terminate)?;
+    let mut interrupt = signal(SignalKind::Interrupt)?;
+    tokio::select! {
+        exit = surface.run(host, options) => {
+            tracing::warn!("the channels surface ended on its own");
+            exit
+        }
+        _ = term.recv() => Ok(leaving("SIGTERM")),
+        _ = interrupt.recv() => Ok(leaving("SIGINT")),
+    }
+}
+
+/// The two signals that mean "stop". TERM is what a supervisor and
+/// `gateway stop` send; INT is what a person at the keyboard sends to a
+/// `gateway run` they started in the foreground, and it deserves the same
+/// clean end rather than a killed process and a stale claim.
+#[derive(Clone, Copy, Debug)]
+enum SignalKind {
+    Terminate,
+    Interrupt,
+}
+
+fn signal(kind: SignalKind) -> Result<tokio::signal::unix::Signal, KernelError> {
+    let kind = match kind {
+        SignalKind::Terminate => tokio::signal::unix::SignalKind::terminate(),
+        SignalKind::Interrupt => tokio::signal::unix::SignalKind::interrupt(),
+    };
+    tokio::signal::unix::signal(kind).map_err(|e| internal(format!("listening for a signal: {e}")))
+}
+
+fn leaving(signal: &str) -> Exit {
+    tracing::info!(signal, "stopping: surfaces first, then the plugins");
+    Exit { code: 0 }
+}
+
+fn internal(message: impl Into<String>) -> KernelError {
+    KernelError::new(ErrorCode::Internal, message)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::gateway::probe::tests::Fake;
+
+    fn paths(home: &std::path::Path) -> Paths {
+        Paths::new(&bingo_sdk::Env::rooted(home))
+    }
+
+    /// `enter` installs a process-wide log sink, which a test process may only
+    /// do once; these exercise the pidfile policy directly instead.
+    fn wrote(home: &std::path::Path, record: &Record) -> std::path::PathBuf {
+        let paths = paths(home);
+        paths.ensure().expect("the directory");
+        let path = paths.pidfile();
+        std::fs::write(&path, pidfile::render(record)).expect("a record");
+        path
+    }
+
+    fn record(pid: u32) -> Record {
+        Record {
+            pid,
+            version: "0.1.0".into(),
+            started: "2026-08-31T09:00:00Z".parse().expect("a timestamp"),
+        }
+    }
+
+    #[test]
+    fn a_record_whose_process_is_gone_is_taken_over() {
+        let home = tempfile::tempdir().expect("a temporary home");
+        let path = wrote(home.path(), &record(4242));
+        replace(&path, &record(4242), &Fake::empty()).expect("the corpse's file is taken");
+        assert!(
+            !path.exists(),
+            "a respawn after a crash must not wedge on the file"
+        );
+    }
+
+    #[test]
+    fn a_record_whose_process_is_alive_is_refused_and_left_alone() {
+        let home = tempfile::tempdir().expect("a temporary home");
+        let path = wrote(home.path(), &record(4242));
+        let table = Fake::of(&[(4242, "bingo")]);
+        let refused = replace(&path, &record(4242), &table)
+            .expect_err("the live gateway keeps its file")
+            .message;
+        assert!(refused.contains("pid 4242"), "{refused}");
+        assert!(refused.contains("a bingo 0.1.0 started"), "{refused}");
+        assert!(refused.contains("bingo gateway stop"), "{refused}");
+        assert!(path.exists(), "the holder's record is untouched");
+    }
+
+    #[test]
+    fn a_live_pid_that_is_not_a_bingo_is_still_never_stepped_on() {
+        let home = tempfile::tempdir().expect("a temporary home");
+        let path = wrote(home.path(), &record(4242));
+        let table = Fake::of(&[(4242, "postgres")]);
+        let refused = replace(&path, &record(4242), &table)
+            .expect_err("a live pid is a live pid")
+            .message;
+        assert!(
+            refused.contains("came round again"),
+            "it says why it will not guess: {refused}"
+        );
+        assert!(path.exists());
+    }
+}
