@@ -594,6 +594,7 @@ mod instances;
 mod jobs;
 mod login;
 mod provider_add;
+mod rooms;
 mod schedule;
 mod sessions;
 mod skills;
