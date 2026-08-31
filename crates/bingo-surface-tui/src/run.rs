@@ -34,6 +34,10 @@ use crate::{SURFACE_ID, commands, history, input};
 /// (§6). Nothing moves when nothing is happening, and then there is no tick at
 /// all — an idle surface draws zero frames.
 const TICK: Duration = clock::FRAME;
+
+/// A draw that costs this much is itself the latency a person feels, and is
+/// owned up to once per run (`slow_draw`).
+const SLOW_DRAW: Duration = Duration::from_millis(100);
 /// Sessions the `/resume` picker lists.
 const RECENT: usize = 20;
 /// What a write says while the mailbox of the session in view is still on its
@@ -111,6 +115,8 @@ struct Run {
     /// since that has not been.
     painted: Instant,
     behind: bool,
+    /// Whether this run has already owned up to slow drawing.
+    sluggish: bool,
     exit: Option<Exit>,
 }
 
@@ -137,14 +143,15 @@ pub(crate) async fn drive(
     let (tx, mut replies) = mpsc::channel(16);
     let (mut run, mut events) = attach(host, opts, tx).await?;
     loop {
+        // `biased`, keys first: a person outranks the machine, and a
+        // keystroke is never continuously ready, so checking it first
+        // starves nobody. Under the default random pick, a frame storm
+        // whose draws run longer than a tick makes a pending key lose the
+        // coin flip a few times, each loss costing another whole draw —
+        // tens of felt milliseconds. Frames stay ahead of the tick, or an
+        // animation could shut the stream out while draws run long.
         let wake = tokio::select! {
-            frame = next_frame(&mut events) => {
-                match frame {
-                    Some(frame) => run.frame(&frame, screen)?,
-                    None => events = None,
-                }
-                Wake::Fold
-            },
+            biased;
             key = keys.next() => {
                 match key {
                     Some(event) => run.terminal_event(event),
@@ -155,6 +162,13 @@ pub(crate) async fn drive(
             Some(reply) = replies.recv() => {
                 run.reply(reply, &mut events);
                 Wake::Echo
+            },
+            frame = next_frame(&mut events) => {
+                match frame {
+                    Some(frame) => run.frame(&frame, screen)?,
+                    None => events = None,
+                }
+                Wake::Fold
             },
             () = tick(run.animating(Now::real()), run.painted + TICK) => Wake::Echo,
         };
@@ -189,6 +203,7 @@ async fn attach(
         // that happens is drawn.
         painted: older_than_a_frame(),
         behind: false,
+        sluggish: false,
         exit: None,
     };
     run.fetch_catalogs();
@@ -229,6 +244,17 @@ async fn tick(animating: bool, next: Instant) {
         true => tokio::time::sleep_until(next.into()).await,
         false => std::future::pending().await,
     }
+}
+
+/// The complaint a run earns the first time a draw costs several frames;
+/// `None` while drawing keeps up, or once it has already been said.
+fn slow_draw(took: Duration, already: bool) -> Option<String> {
+    (!already && took >= SLOW_DRAW).then(|| {
+        format!(
+            "drawing took {}ms; a debug build or a slow terminal does this",
+            took.as_millis()
+        )
+    })
 }
 
 impl Run {
@@ -287,9 +313,22 @@ impl Run {
         self.painted = now.instant;
         self.hand_over(screen)?;
         screen.title(&title(&self.session.tree)).map_err(stdio)?;
+        let began = Instant::now();
         screen
             .draw(&self.session.tree, &self.ui, now)
-            .map_err(stdio)
+            .map_err(stdio)?;
+        self.grumble(began.elapsed());
+        Ok(())
+    }
+
+    /// Own up, once per run, when drawing itself is the latency a person
+    /// feels: a debug build, a huge transcript or a slow terminal all land
+    /// here, and no scheduling can hide a draw that costs several frames.
+    fn grumble(&mut self, took: Duration) {
+        if let Some(text) = slow_draw(took, self.sluggish) {
+            self.sluggish = true;
+            self.ui.notify(Level::Warn, text, Instant::now());
+        }
     }
 
     /// The selection goes to the terminal's own clipboard between frames, as
@@ -1209,6 +1248,7 @@ mod tests {
             clipboard: Some("x".repeat(crate::select::LIMIT)),
             painted: Instant::now(),
             behind: false,
+            sluggish: false,
             exit: None,
         };
         let mut recorder = Recorder::default();
@@ -1229,5 +1269,13 @@ mod tests {
         harness.go(vec![], script, None).await;
         let data = bingo_sdk::Env::rooted(harness.home.path()).data_dir;
         assert_eq!(crate::history::load(&data), vec!["ls"]);
+    }
+
+    #[test]
+    fn a_slow_draw_is_owned_up_to_once_and_a_quick_one_never() {
+        assert_eq!(slow_draw(Duration::from_millis(3), false), None);
+        let said = slow_draw(SLOW_DRAW, false).expect("several frames is worth a word");
+        assert!(said.contains("ms"), "{said}");
+        assert_eq!(slow_draw(Duration::from_secs(1), true), None, "said once");
     }
 }
