@@ -3,9 +3,12 @@
 
 use async_trait::async_trait;
 use bingo_sdk::{Tool, ToolContext, ToolError, ToolOutput, ToolSpec, ToolTraits, input_schema};
+use schemars::JsonSchema;
+use serde::Deserialize;
 use serde_json::Value;
 
-use crate::task::Change;
+use crate::board::{self, In};
+use crate::task::{Change, Task};
 use crate::{failed, journal, task};
 
 const DESCRIPTION: &str = "\
@@ -14,7 +17,31 @@ rest stay as they are. Mark a task `in_progress` when you start it and \
 `completed` the moment it is done — one task in progress at a time reads \
 best. `addBlockedBy` and `addBlocks` add ids to what the task waits for and \
 what waits on it, and `metadata` merges by key. Use `TaskList` first if you \
-are unsure of an id.";
+are unsure of an id. With `in`, the task is one on a room's shared board: \
+`claim` takes it for yourself, `owner` gives it to somebody else, and two \
+writers at once overwrite each other, so change a board task once and say so \
+in the room rather than racing.";
+
+/// What `TaskUpdate` takes: the change, the board the task is on, and whether
+/// the caller is taking it for itself.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct UpdateArgs {
+    #[serde(flatten)]
+    pub change: Change,
+    #[serde(flatten)]
+    pub board: In,
+    /// Take the task for yourself: your own name is written as its owner. The
+    /// runtime knows which session you are, so do not say who — and do not
+    /// pass `owner` as well, which is for giving a task to somebody else.
+    #[serde(default)]
+    pub claim: Option<bool>,
+}
+
+impl UpdateArgs {
+    fn claims(&self) -> bool {
+        self.claim.unwrap_or(false)
+    }
+}
 
 /// Reading the list, changing one task, writing it back.
 #[derive(Debug, Default, Clone, Copy)]
@@ -26,7 +53,7 @@ impl Tool for TaskUpdateTool {
         ToolSpec {
             name: "TaskUpdate".into(),
             description: DESCRIPTION.into(),
-            input_schema: input_schema::<Change>(),
+            input_schema: input_schema::<UpdateArgs>(),
             meta: Default::default(),
         }
     }
@@ -36,22 +63,44 @@ impl Tool for TaskUpdateTool {
     }
 
     async fn call(&self, input: Value, cx: &ToolContext) -> Result<ToolOutput, ToolError> {
-        let change: Change =
+        let mut args: UpdateArgs =
             serde_json::from_value(input).map_err(|e| ToolError::InvalidInput(e.to_string()))?;
-        let id = change.id;
-        let mut tasks = journal::read(&cx.host, &cx.session).await.map_err(failed)?;
-        let Some(task) = task::update(&mut tasks, change) else {
-            return Ok(crate::unknown(id));
+        let board = match board::of(&cx.host, &cx.session, &args.board).await {
+            Ok(board) => board,
+            Err(error) => return crate::misaddressed(error),
         };
-        journal::write(&cx.host, &cx.session, &tasks)
+        if args.claims() {
+            match board::claimant(&cx.host, &cx.session).await {
+                Ok(name) => args.change.owner = Some(name),
+                Err(error) => return crate::misaddressed(error),
+            }
+        }
+        let (id, claimed) = (args.change.id, args.claims());
+        let mut tasks = journal::read(&cx.host, &board.session)
             .await
             .map_err(failed)?;
-        Ok(ToolOutput::text(format!(
-            "Updated #{} ({}): {}",
-            task.id,
-            task.status.as_str(),
-            task.subject
-        )))
+        let Some(task) = task::update(&mut tasks, args.change) else {
+            return Ok(crate::unknown(id));
+        };
+        journal::write(&cx.host, &board.session, &tasks)
+            .await
+            .map_err(failed)?;
+        Ok(ToolOutput::text(receipt(&task, claimed)))
+    }
+}
+
+/// What the call answers with. A claim names the owner it stamped: the caller
+/// never wrote that name, so this is where it learns what it is called.
+fn receipt(task: &Task, claimed: bool) -> String {
+    let line = format!(
+        "Updated #{} ({}): {}",
+        task.id,
+        task.status.as_str(),
+        task.subject
+    );
+    match (claimed, &task.owner) {
+        (true, Some(owner)) => format!("{line} — {owner}"),
+        _ => line,
     }
 }
 
@@ -139,14 +188,112 @@ mod tests {
         assert_eq!(tasks[0].status, crate::task::Status::Pending);
     }
 
+    /// A board task with a member on the other end: the member never says who
+    /// it is, and the name that lands is its own (ADR-0023 §2).
+    #[tokio::test]
+    async fn a_claim_stamps_the_caller_s_own_name_without_it_saying_so() {
+        let journals = Journals::new();
+        let root = journals.session();
+        let room = journals.room(&root, "#design");
+        let member = journals.child(&root, "reviewer");
+        TaskCreateTool
+            .call(
+                json!({"subject": "write the plan", "in": "#design"}),
+                &tool_context(&root, &journals),
+            )
+            .await
+            .expect("a task on the board");
+
+        let out = TaskUpdateTool
+            .call(
+                json!({"id": 1, "status": "in_progress", "claim": true, "in": "#design"}),
+                &tool_context(&member, &journals),
+            )
+            .await
+            .expect("a claim");
+        assert!(!out.is_error);
+        assert_eq!(
+            text(&out),
+            "Updated #1 (in_progress): write the plan — reviewer"
+        );
+        let tasks = journal::read(&journals.handle(), &room)
+            .await
+            .expect("the board");
+        assert_eq!(tasks[0].owner.as_deref(), Some("reviewer"));
+    }
+
+    /// A session with no name of its own cannot sign a claim, and is told to
+    /// name the doer instead of having one guessed for it.
+    #[tokio::test]
+    async fn a_root_claiming_is_refused_in_words_and_changes_nothing() {
+        let journals = Journals::new();
+        let root = journals.session();
+        let room = journals.room(&root, "#design");
+        let cx = tool_context(&root, &journals);
+        TaskCreateTool
+            .call(json!({"subject": "write the plan", "in": "#design"}), &cx)
+            .await
+            .expect("a task on the board");
+
+        let out = TaskUpdateTool
+            .call(json!({"id": 1, "claim": true, "in": "#design"}), &cx)
+            .await
+            .expect("an output, not a failure");
+        assert!(out.is_error);
+        assert!(text(&out).contains("`owner`"), "{}", text(&out));
+        let tasks = journal::read(&journals.handle(), &room)
+            .await
+            .expect("the board");
+        assert_eq!(tasks[0].owner, None, "the refusal wrote an owner anyway");
+    }
+
+    /// Assignment is untouched: a named owner still means the caller is
+    /// handing the task to somebody.
+    #[tokio::test]
+    async fn a_named_owner_is_still_an_assignment() {
+        let (journals, session) = with_a_task().await;
+        TaskUpdateTool
+            .call(
+                json!({"id": 1, "owner": "scout"}),
+                &tool_context(&session, &journals),
+            )
+            .await
+            .expect("an assignment");
+        let tasks = journal::read(&journals.handle(), &session)
+            .await
+            .expect("the journal has it");
+        assert_eq!(tasks[0].owner.as_deref(), Some("scout"));
+    }
+
     #[test]
     fn the_schema_names_the_id_and_the_fields_that_may_change() {
         let spec = TaskUpdateTool.spec();
         assert_eq!(spec.name, "TaskUpdate");
         let properties = &spec.input_schema["properties"];
-        for field in ["id", "subject", "status", "addBlockedBy", "addBlocks"] {
+        for field in [
+            "id",
+            "subject",
+            "status",
+            "addBlockedBy",
+            "addBlocks",
+            "in",
+            "claim",
+        ] {
             assert!(properties.get(field).is_some(), "{field}");
         }
         assert_eq!(spec.input_schema["required"], json!(["id"]));
+    }
+
+    /// The gate asks a person the same thing for a board write as for a
+    /// private one. Writing another session's journal is what `SendMessage`
+    /// already does, and it is trusted read-only for the same reason: nothing
+    /// outside the process changes, and whatever the board's readers then do
+    /// is gated where they do it (ADR-0023 §4).
+    #[test]
+    fn a_board_write_is_gated_no_differently_than_a_private_one() {
+        assert_eq!(
+            TaskUpdateTool.traits(&json!({"id": 1, "in": "#design", "claim": true})),
+            TaskUpdateTool.traits(&json!({"id": 1}))
+        );
     }
 }

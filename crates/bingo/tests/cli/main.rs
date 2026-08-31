@@ -587,6 +587,7 @@ fn scripted_run(
 }
 
 mod agents;
+mod board;
 mod context;
 mod experience;
 mod gateway;

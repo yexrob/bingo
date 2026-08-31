@@ -7,19 +7,23 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
 
+use crate::board::{self, In};
 use crate::{failed, journal, task};
 
 const DESCRIPTION: &str = "\
 Read one task of this session's list in full — its description, its owner, \
 what it waits for and its metadata — by the id `TaskCreate` or `TaskList` \
-reported. `TaskList` is the cheaper way to see them all.";
+reported. `TaskList` is the cheaper way to see them all. With `in`, the task \
+is one on a room's shared board.";
 
-/// The one argument a read takes.
+/// What a read takes: the id, and the board the task is on.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct GetArgs {
     /// The task to read, by the id `TaskCreate` or `TaskList` reported.
     pub id: u64,
+    #[serde(flatten)]
+    pub board: In,
 }
 
 /// Reading one task; it changes nothing.
@@ -44,7 +48,13 @@ impl Tool for TaskGetTool {
     async fn call(&self, input: Value, cx: &ToolContext) -> Result<ToolOutput, ToolError> {
         let args: GetArgs =
             serde_json::from_value(input).map_err(|e| ToolError::InvalidInput(e.to_string()))?;
-        let tasks = journal::read(&cx.host, &cx.session).await.map_err(failed)?;
+        let board = match board::of(&cx.host, &cx.session, &args.board).await {
+            Ok(board) => board,
+            Err(error) => return crate::misaddressed(error),
+        };
+        let tasks = journal::read(&cx.host, &board.session)
+            .await
+            .map_err(failed)?;
         let Some(task) = task::get(&tasks, args.id) else {
             return Ok(crate::unknown(args.id));
         };
@@ -111,11 +121,38 @@ mod tests {
         assert!(text(&out).contains("#3"), "{}", text(&out));
     }
 
+    #[tokio::test]
+    async fn a_task_on_a_board_is_read_from_the_room_s_list() {
+        let journals = Journals::new();
+        let root = journals.session();
+        journals.room(&root, "#design");
+        let cx = tool_context(&root, &journals);
+        TaskCreateTool
+            .call(json!({"subject": "write the plan", "in": "#design"}), &cx)
+            .await
+            .expect("a task on the board");
+
+        let out = TaskGetTool
+            .call(json!({"id": 1, "in": "#design"}), &cx)
+            .await
+            .expect("the task");
+        assert!(!out.is_error);
+        let value: Value = serde_json::from_str(&text(&out)).expect("pretty json");
+        assert_eq!(value["subject"], json!("write the plan"));
+
+        let own = TaskGetTool
+            .call(json!({"id": 1}), &cx)
+            .await
+            .expect("an output");
+        assert!(own.is_error, "the board's task is not on the caller's list");
+    }
+
     #[test]
     fn the_schema_asks_for_an_id() {
         let spec = TaskGetTool.spec();
         assert_eq!(spec.name, "TaskGet");
         assert_eq!(spec.input_schema["required"], json!(["id"]));
         assert_eq!(spec.input_schema["properties"]["id"]["type"], "integer");
+        assert!(spec.input_schema["properties"].get("in").is_some());
     }
 }

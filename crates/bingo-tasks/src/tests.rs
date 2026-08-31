@@ -11,10 +11,10 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use async_trait::async_trait;
 use bingo_sdk::{
     Activation, Answer, AnswerSpec, Attachment, CancellationToken, Catalog, CatalogKind,
-    ClientIdentity, CloseReason, CommandContext, ContextQuery, ContextUsage, Delivery, Env,
+    ClientIdentity, CloseReason, CommandContext, ContextQuery, ContextUsage, Delivery, Driver, Env,
     ErrorCode, Event, Frame, FrameStream, GatewayStream, HistoryChunk, HistoryPage, HostApi,
     HostHandle, Input, IntentId, InteractionId, InteractionKind, InterruptScope, Item, ItemBody,
-    ItemId, KernelError, ModelCapabilities, OpenOptions, Prompter, Seq, SessionFilter,
+    ItemId, KernelError, ModelCapabilities, OpenOptions, ParentLink, Prompter, Seq, SessionFilter,
     SessionHandle, SessionId, SessionPort, SessionSelector, SessionState, SessionSummary,
     ToolContext, ToolHost, ToolOutput, TurnId, Usage,
 };
@@ -27,6 +27,9 @@ struct Inner {
     /// The kernel's frames arrive in one order; the reducer refuses a frame
     /// it has already seen, so a double must number them as it does.
     seq: Mutex<u64>,
+    /// How often the tree was listed, so a test can prove a private list
+    /// walks nothing.
+    listings: Mutex<usize>,
 }
 
 /// A host that keeps one folded state per session and nothing else.
@@ -42,11 +45,42 @@ impl Journals {
         HostHandle(Arc::new(self.clone()))
     }
 
-    /// A session with an empty journal, as a surface opens one.
+    /// A session with an empty journal, as a surface opens one: no parent and
+    /// no name of its own, which is what a person's own session is.
     pub(crate) fn session(&self) -> SessionId {
+        self.open(None, None, Driver::default())
+    }
+
+    /// A session that answers, under `parent` and by that name.
+    pub(crate) fn child(&self, parent: &SessionId, title: &str) -> SessionId {
+        self.open(Some(parent), Some(title), Driver::default())
+    }
+
+    /// A room: a session nobody answers for, which is what a board hangs in.
+    pub(crate) fn room(&self, parent: &SessionId, title: &str) -> SessionId {
+        self.open(Some(parent), Some(title), Driver::Log)
+    }
+
+    fn open(&self, parent: Option<&SessionId>, title: Option<&str>, driver: Driver) -> SessionId {
         let id = SessionId::mint();
-        self.states().push(SessionState::new(summary(&id)));
+        let mut summary = summary(&id);
+        summary.title = title.map(str::to_string);
+        summary.driver = driver;
+        summary.parent = parent.map(|session| ParentLink {
+            session: session.clone(),
+            item: None,
+        });
+        self.states().push(SessionState::new(summary));
         id
+    }
+
+    /// How often anything asked the host for the session tree.
+    pub(crate) fn session_reads(&self) -> usize {
+        *self
+            .0
+            .listings
+            .lock()
+            .unwrap_or_else(|held| held.into_inner())
     }
 
     fn states(&self) -> MutexGuard<'_, Vec<SessionState>> {
@@ -65,8 +99,27 @@ impl Journals {
 
 #[async_trait]
 impl HostApi for Journals {
-    async fn sessions(&self, _filter: SessionFilter) -> Result<Vec<SessionSummary>, KernelError> {
-        unreachable!("this plugin reads no session list")
+    /// The tree, as the kernel lists it: every session, or the children of
+    /// one. Counted, so a test can hold a private list to reading none of it.
+    async fn sessions(&self, filter: SessionFilter) -> Result<Vec<SessionSummary>, KernelError> {
+        *self
+            .0
+            .listings
+            .lock()
+            .unwrap_or_else(|held| held.into_inner()) += 1;
+        Ok(self
+            .states()
+            .iter()
+            .map(|state| state.summary.clone())
+            .filter(|summary| {
+                filter.parent.as_ref().is_none_or(|parent| {
+                    summary
+                        .parent
+                        .as_ref()
+                        .is_some_and(|link| &link.session == parent)
+                })
+            })
+            .collect())
     }
 
     /// The session's own state, cut as an attachment: what a tool reads.

@@ -7,17 +7,24 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
 
+use crate::board::{self, In};
+use crate::render::Present;
 use crate::{failed, journal, render};
 
 const DESCRIPTION: &str = "\
 List this session's tasks: their ids, their statuses, their subjects, who \
 owns them and what holds them up. Read it before writing to a task whose id \
-you are unsure of, and to see what is left to do.";
+you are unsure of, and to see what is left to do. With `in`, it is a room's \
+shared board that is listed, and an owner no session in that room answers to \
+any more reads `owner (gone)` — nobody rewrote the task, it is only being \
+said plainly that its owner is not here.";
 
-/// The arguments a listing takes, which is none. Named so the schema the
-/// model reads is an object like every other tool's.
+/// The arguments a listing takes: which board, and nothing else.
 #[derive(Debug, Default, Deserialize, JsonSchema)]
-pub struct ListArgs {}
+pub struct ListArgs {
+    #[serde(flatten)]
+    pub board: In,
+}
 
 /// Reading the list; it changes nothing.
 #[derive(Debug, Default, Clone, Copy)]
@@ -38,11 +45,30 @@ impl Tool for TaskListTool {
         crate::traits()
     }
 
-    /// The arguments are ignored: a listing has none, and a model that sends
-    /// an empty object, a null or a stray key still gets its answer.
-    async fn call(&self, _input: Value, cx: &ToolContext) -> Result<ToolOutput, ToolError> {
-        let tasks = journal::read(&cx.host, &cx.session).await.map_err(failed)?;
-        Ok(ToolOutput::text(render::listing(&tasks)))
+    /// A listing asks for at most a board: a model that sends a null, an
+    /// empty object or a stray key still gets its answer, and only an `in`
+    /// that is not a name at all is refused rather than quietly read as none.
+    async fn call(&self, input: Value, cx: &ToolContext) -> Result<ToolOutput, ToolError> {
+        let args = args(input)?;
+        let board = match board::of(&cx.host, &cx.session, &args.board).await {
+            Ok(board) => board,
+            Err(error) => return crate::misaddressed(error),
+        };
+        let tasks = journal::read(&cx.host, &board.session)
+            .await
+            .map_err(failed)?;
+        let here = board.present();
+        Ok(ToolOutput::text(render::listing(
+            &tasks,
+            Present::among(here.as_deref()),
+        )))
+    }
+}
+
+fn args(input: Value) -> Result<ListArgs, ToolError> {
+    match input {
+        Value::Null => Ok(ListArgs::default()),
+        input => serde_json::from_value(input).map_err(|e| ToolError::InvalidInput(e.to_string())),
     }
 }
 
@@ -109,6 +135,74 @@ mod tests {
         }
     }
 
+    /// The board's listing, and the one thing it says that a private list
+    /// does not: who is not here any more. Nothing is written by the saying.
+    #[tokio::test]
+    async fn a_board_marks_an_owner_no_session_here_answers_to() {
+        let journals = Journals::new();
+        let root = journals.session();
+        let room = journals.room(&root, "#design");
+        journals.child(&root, "reviewer");
+        let cx = tool_context(&root, &journals);
+        TaskCreateTool
+            .call(
+                json!({"subject": "write the plan", "owner": "reviewer", "in": "#design"}),
+                &cx,
+            )
+            .await
+            .expect("a task");
+        TaskCreateTool
+            .call(
+                json!({"subject": "ship it", "owner": "scout", "in": "#design"}),
+                &cx,
+            )
+            .await
+            .expect("a task");
+
+        let out = TaskListTool
+            .call(json!({"in": "#design"}), &cx)
+            .await
+            .expect("a listing");
+        assert_eq!(
+            text(&out),
+            "#1 [pending] write the plan — reviewer\n#2 [pending] ship it — scout (gone)"
+        );
+        let tasks = journal::read(&journals.handle(), &room)
+            .await
+            .expect("the board");
+        assert_eq!(
+            tasks[1].owner.as_deref(),
+            Some("scout"),
+            "the mark reached the journal"
+        );
+    }
+
+    /// The same owner on the caller's own list is a note to itself, and the
+    /// listing asserts nothing about it.
+    #[tokio::test]
+    async fn a_private_list_never_marks_an_owner() {
+        let journals = Journals::new();
+        let session = journals.session();
+        let cx = tool_context(&session, &journals);
+        TaskCreateTool
+            .call(json!({"subject": "ship it", "owner": "scout"}), &cx)
+            .await
+            .expect("a task");
+        let out = TaskListTool.call(json!({}), &cx).await.expect("a listing");
+        assert_eq!(text(&out), "#1 [pending] ship it — scout");
+    }
+
+    #[tokio::test]
+    async fn an_in_that_is_not_a_name_is_refused_rather_than_read_as_none() {
+        let journals = Journals::new();
+        let session = journals.session();
+        let error = TaskListTool
+            .call(json!({"in": 7}), &tool_context(&session, &journals))
+            .await
+            .expect_err("a board is named by a word");
+        assert!(matches!(error, ToolError::InvalidInput(_)), "{error:?}");
+    }
+
     #[test]
     fn the_schema_is_an_empty_object() {
         let spec = TaskListTool.spec();
@@ -116,5 +210,6 @@ mod tests {
         assert_eq!(spec.input_schema["type"], "object");
         assert!(spec.input_schema.get("$schema").is_none());
         assert!(spec.input_schema.get("required").is_none());
+        assert!(spec.input_schema["properties"].get("in").is_some());
     }
 }

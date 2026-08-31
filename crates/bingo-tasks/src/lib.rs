@@ -17,7 +17,14 @@
 //! anything outside this process. None is concurrency-safe — they share one
 //! list, and two calls at once would each publish a list without the other's
 //! change.
+//!
+//! A room's list is the same list: the four tools and `/tasks` take an
+//! optional `in: "#room"`, and the journal's read and write already address
+//! any session, so the board needs no second noun and no second store
+//! (ADR-0023). Without `in`, every one of them means the caller's own session
+//! and does exactly what it did before.
 
+mod board;
 mod command;
 mod contributor;
 mod create;
@@ -32,8 +39,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use bingo_sdk::{
-    Command, ContextContributor, Contribution, Interrupt, KernelError, Plugin, PluginError,
-    PluginManifest, Registrar, Tool, ToolError, ToolOutput, ToolTraits,
+    Command, ContextContributor, Contribution, ErrorCode, Interrupt, KernelError, Plugin,
+    PluginError, PluginManifest, Registrar, Tool, ToolError, ToolOutput, ToolTraits,
 };
 
 pub use command::TasksCommand;
@@ -61,10 +68,14 @@ static MANIFEST: PluginManifest = PluginManifest {
     config: None,
 };
 
-/// What every tool here is. They read and write one session's journal and
-/// nothing outside the process, so trusting these traits costs a person
-/// nothing. None is concurrency-safe: the list is one value, and two calls
-/// running at once would each publish it without the other's change.
+/// What every tool here is, with `in` and without it. They read and write a
+/// session's journal and nothing outside the process, so trusting these traits
+/// costs a person nothing: a board write reaches another session in the same
+/// tree, which is what `SendMessage` already does under the same traits, and
+/// whatever that session then decides is gated where it is decided. None is
+/// concurrency-safe: the list is one value, and two calls running at once —
+/// on one board, two of them — would each publish it without the other's
+/// change (ADR-0023 §4).
 pub(crate) fn traits() -> ToolTraits {
     ToolTraits {
         read_only: true,
@@ -84,6 +95,16 @@ pub(crate) fn failed(error: KernelError) -> ToolError {
 /// not a failed call.
 pub(crate) fn unknown(id: u64) -> ToolOutput {
     ToolOutput::error(format!("No task #{id}. TaskList shows what there is."))
+}
+
+/// Finding out where a list lives, or what the caller is called, went wrong. A
+/// name nothing answers to is the model's to correct, like an unknown id; a
+/// host that failed under the walk is not, and fails the call.
+pub(crate) fn misaddressed(error: KernelError) -> Result<ToolOutput, ToolError> {
+    match error.code {
+        ErrorCode::InvalidInput => Ok(ToolOutput::error(error.message)),
+        _ => Err(failed(error)),
+    }
 }
 
 /// Registers the four tools, the prompt block and `/tasks`. It keeps nothing
