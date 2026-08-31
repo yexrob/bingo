@@ -7,8 +7,8 @@ use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
 
 use bingo_sdk::{
-    ContentPart, DecisionKind, Item, ItemBody, ItemId, ItemStatus, SessionState, ToolOutput,
-    TurnStatus, View,
+    ContentPart, DecisionKind, Item, ItemBody, ItemId, ItemStatus, Origin, SessionState,
+    ToolOutput, TurnStatus, View,
 };
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
@@ -88,7 +88,10 @@ pub fn item_lines(
     cue: Cue,
 ) -> Vec<Line<'static>> {
     match &item.body {
-        ItemBody::User { parts, origin } => user(parts, origin.principal.as_deref(), rows),
+        ItemBody::User { parts, origin } => match quiet(origin) {
+            true => notice(parts, origin.principal.as_deref(), item.status, rows),
+            false => user(parts, origin.principal.as_deref(), rows),
+        },
         ItemBody::Assistant { text } => assistant(text, item.status, rows, cue),
         ItemBody::Reasoning { .. } => thinking(item),
         ItemBody::ToolCall { .. } => called(item, agents, rows, cue),
@@ -211,16 +214,79 @@ fn returns(body: Vec<Line<'static>>, rows: &Rows<'_>) -> Vec<Line<'static>> {
 
 // ---- the kinds ----------------------------------------------------------
 
-/// A person's own line, on a bar the width of the transcript. An origin that
-/// names a principal is somebody else speaking — a room's member, a parent
-/// talking to its child — so the line says who, as a chat does. Where they
-/// said it is the view one is looking at; saying it again would be noise.
-fn user(parts: &[ContentPart], principal: Option<&str>, rows: &Rows<'_>) -> Vec<Line<'static>> {
-    let text = parts
+/// The surfaces whose input is the machinery reporting in rather than
+/// somebody speaking: a background job that ended, a message from another
+/// session, a room's post, a scheduled turn. What they deliver reads as a
+/// tool row does, because that is what it is — something that happened, not
+/// something anyone said to you.
+///
+/// The set is closed, and this list is the only place it is written down: a
+/// surface nobody has put here is loud. A new subsystem chooses its side by
+/// being added or left out, deliberately, and the cost of each mistake says
+/// which way to lean — a person's own words drawn as machinery is a wrong
+/// nobody can undo by reading harder.
+const QUIET_SURFACES: &[&str] = &["agent", "bash", "room", "schedule"];
+
+fn quiet(origin: &Origin) -> bool {
+    QUIET_SURFACES.contains(&origin.surface.as_str())
+}
+
+/// What a `User` item says, as its parts spell it.
+fn said(parts: &[ContentPart]) -> String {
+    parts
         .iter()
         .filter_map(ContentPart::as_text)
         .collect::<Vec<_>>()
-        .join("");
+        .join("")
+}
+
+/// A subsystem's notice, marked the way a tool row is: the bullet, the one
+/// line that says what happened, and the rest of it hanging under a `⎿` —
+/// dim, folded, subordinate. The text already leads with the outcome, so the
+/// first line is the summary and nothing has to be invented for it.
+fn notice(
+    parts: &[ContentPart],
+    principal: Option<&str>,
+    status: ItemStatus,
+    rows: &Rows<'_>,
+) -> Vec<Line<'static>> {
+    let text = said(parts);
+    let text = text.trim();
+    if text.is_empty() {
+        return Vec::new();
+    }
+    let (head, rest) = text.split_once('\n').unwrap_or((text, ""));
+    let mut out = speaks(
+        bullet_style(status, false),
+        vec![headline(head, principal)],
+        rows,
+    );
+    if !rest.trim().is_empty() {
+        out.extend(returns(cut(plain(rest), OUTPUT_ROWS, None), rows));
+    }
+    out
+}
+
+/// The marked line itself: the sender's name where the origin carries one —
+/// an agent, a room's member — and what happened.
+fn headline(head: &str, principal: Option<&str>) -> Line<'static> {
+    let mut spans = Vec::new();
+    if let Some(name) = principal {
+        spans.push(Span::styled(
+            format!("{name}: "),
+            theme::text().patch(theme::bold()),
+        ));
+    }
+    spans.push(Span::styled(head.to_string(), theme::text()));
+    Line::from(spans)
+}
+
+/// A person's own line, on a bar the width of the transcript. An origin that
+/// names a principal is somebody else speaking — a channel's correspondent, a
+/// person writing from elsewhere — so the line says who, as a chat does. Where
+/// they said it is the view one is looking at; saying it again would be noise.
+fn user(parts: &[ContentPart], principal: Option<&str>, rows: &Rows<'_>) -> Vec<Line<'static>> {
+    let text = said(parts);
     if text.trim().is_empty() {
         return Vec::new();
     }
@@ -483,11 +549,18 @@ fn text_of(output: &ToolOutput) -> String {
 
 /// The first rows, then how many were left out and what opens them.
 fn fold(rows: Vec<Line<'static>>, limit: usize) -> Vec<Line<'static>> {
+    cut(rows, limit, Some(EXPAND))
+}
+
+/// The same cut, for what no key opens: `ctrl+o` reaches a result, so a block
+/// that is not one says how much it kept back and promises nothing.
+fn cut(rows: Vec<Line<'static>>, limit: usize, opens: Option<&str>) -> Vec<Line<'static>> {
     let hidden = rows.len().saturating_sub(limit);
     let mut out: Vec<Line<'static>> = rows.into_iter().take(limit).collect();
     if hidden > 0 {
+        let key = opens.map(|key| format!(" ({key})")).unwrap_or_default();
         out.push(Line::from(Span::styled(
-            format!("{} +{hidden} lines ({EXPAND})", theme::ellipsis()),
+            format!("{} +{hidden} lines{key}", theme::ellipsis()),
             theme::dim(),
         )));
     }
@@ -642,8 +715,8 @@ fn rule(text: &str, width: usize) -> Line<'static> {
 mod tests {
     use super::*;
     use crate::test_support::{
-        assistant, completed, folded, frame, item, post, receipt_item, running_tool, scene,
-        started, started_tool, tool, ts, user as person,
+        assistant, completed, delivered, folded, frame, item, post, receipt_item, running_tool,
+        scene, started, started_tool, tool, ts, user as person,
     };
     use bingo_sdk::Event;
 
@@ -686,10 +759,11 @@ mod tests {
                 person("itm_2", "thanks"),
             ]),
             vec![
-                "> reviewer: two nits, otherwise fine".to_string(),
+                "⏺ reviewer: two nits, otherwise fine".to_string(),
                 String::new(),
                 "> thanks".to_string(),
             ],
+            "the machinery is marked; what a person typed is a block"
         );
     }
 
@@ -702,9 +776,78 @@ mod tests {
     #[test]
     fn a_second_line_of_yours_stays_on_the_bar_under_the_first() {
         assert_eq!(
-            drawn(vec![post("itm_1", "scout", "one\ntwo")]),
-            vec!["> scout: one".to_string(), "  two".to_string()],
+            drawn(vec![person("itm_1", "one\ntwo")]),
+            vec!["> one".to_string(), "  two".to_string()],
         );
+    }
+
+    /// The whole of the closed set, read from the list itself, and a handful
+    /// of surfaces outside it — the ones that exist and one that never will.
+    #[test]
+    fn every_quiet_surface_is_a_marked_line_and_nothing_else_is() {
+        for surface in QUIET_SURFACES {
+            assert_eq!(
+                drawn(vec![delivered("itm_1", surface, None, "it ended")]),
+                vec!["⏺ it ended".to_string()],
+                "{surface} is quiet"
+            );
+        }
+        for loud in ["tui", "print", "rpc", "acp", "channels", "brand-new"] {
+            assert_eq!(
+                drawn(vec![delivered("itm_1", loud, None, "it ended")]),
+                vec!["> it ended".to_string()],
+                "{loud} is not in the set, so it stays loud"
+            );
+        }
+    }
+
+    /// A job reporting in: the first line says what happened, and what one
+    /// does about it hangs under the row the way a result does.
+    #[test]
+    fn a_finished_job_reads_as_a_tool_row_does() {
+        assert_eq!(
+            drawn(vec![delivered(
+                "itm_1",
+                "bash",
+                None,
+                "Background job ab12cd34 exited with code 1 after 2m.\n\
+                 `BashOutput` with id \"ab12cd34\" reads what it wrote.",
+            )]),
+            vec![
+                "⏺ Background job ab12cd34 exited with code 1 after 2m.".to_string(),
+                "  ⎿  `BashOutput` with id \"ab12cd34\" reads what it wrote.".to_string(),
+            ],
+        );
+    }
+
+    /// A message from another session says who sent it, as a room's post does.
+    #[test]
+    fn an_agents_message_names_the_agent_on_the_marked_line() {
+        assert_eq!(
+            drawn(vec![delivered(
+                "itm_1",
+                "agent",
+                Some("reviewer"),
+                "done, two nits"
+            )]),
+            vec!["⏺ reviewer: done, two nits".to_string()],
+        );
+    }
+
+    /// A long notice folds the way a long result does — and offers no key,
+    /// because `ctrl+o` reaches a result and this is not one.
+    #[test]
+    fn a_long_notice_folds_without_promising_a_key() {
+        let body: String = (1..=9).map(|i| format!("\nline {i}")).collect();
+        let drawn = drawn(vec![delivered(
+            "itm_1",
+            "schedule",
+            None,
+            &format!("the nightly run is in{body}"),
+        )]);
+        assert_eq!(drawn.len(), OUTPUT_ROWS + 2);
+        assert_eq!(drawn[0], "⏺ the nightly run is in");
+        assert_eq!(drawn.last().map(String::as_str), Some("     … +4 lines"));
     }
 
     #[test]
