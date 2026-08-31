@@ -54,9 +54,11 @@ pub struct SpawnArgs {
     /// Return at once and be told when it finishes (the default), or `false`
     /// to wait for its reply as the result of this call.
     pub background: Option<bool>,
-    /// The model the sub-agent runs on; this session's by default.
+    /// The model the sub-agent runs on; this session's by default. Call
+    /// `ListModels` to see what is available instead of guessing an id.
     pub model: Option<String>,
-    /// The provider the sub-agent runs on; this session's by default.
+    /// The provider the sub-agent runs on; this session's by default. Call
+    /// `ListModels` to see what is available instead of guessing an id.
     pub provider: Option<String>,
     /// The tools the sub-agent may call, by name. By default it has every
     /// tool this session has, except `SpawnAgent`.

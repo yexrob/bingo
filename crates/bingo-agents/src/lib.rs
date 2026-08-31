@@ -28,6 +28,7 @@ mod layers;
 mod library;
 mod list;
 mod message;
+mod models;
 mod names;
 mod note;
 mod spawn;
@@ -48,6 +49,7 @@ pub use definition::Definition;
 pub use hook::AtNameHook;
 pub use list::ListAgentsTool;
 pub use message::{Kind, MessageTool};
+pub use models::ListModelsTool;
 pub use note::NOTE;
 pub use spawn::SpawnAgentTool;
 pub use team::{SeatHook, TeamCommand};
@@ -63,6 +65,7 @@ static MANIFEST: PluginManifest = PluginManifest {
         "tool:FollowupTask",
         "tool:WaitAgent",
         "tool:ListAgents",
+        "tool:ListModels",
         "hook:agents",
         "hook:team",
         "command:agents",
@@ -106,6 +109,7 @@ impl Plugin for AgentsPlugin {
         registrar.tool(Arc::new(MessageTool::new(Kind::Followup)) as Arc<dyn Tool>);
         registrar.tool(Arc::new(WaitAgentTool) as Arc<dyn Tool>);
         registrar.tool(Arc::new(ListAgentsTool) as Arc<dyn Tool>);
+        registrar.tool(Arc::new(ListModelsTool) as Arc<dyn Tool>);
         registrar.add(Contribution::Hook(Arc::new(AtNameHook) as Arc<dyn Hook>));
         registrar.add(Contribution::Hook(
             Arc::new(SeatHook::new(registrar.env().clone())) as Arc<dyn Hook>,
@@ -143,6 +147,7 @@ mod plugin_tests {
                 "tool:FollowupTask",
                 "tool:WaitAgent",
                 "tool:ListAgents",
+                "tool:ListModels",
                 "hook:agents",
                 "hook:team",
                 "command:agents",
@@ -173,7 +178,8 @@ mod plugin_tests {
                 "SendMessage",
                 "FollowupTask",
                 "WaitAgent",
-                "ListAgents"
+                "ListAgents",
+                "ListModels"
             ]
         );
         let hooks: Vec<String> = contributions

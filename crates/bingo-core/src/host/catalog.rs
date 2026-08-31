@@ -2,10 +2,10 @@
 //! reader per kind.
 
 use bingo_sdk::*;
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
 use super::Registry;
-use crate::models::ModelCatalog;
+use crate::models::{ModelCatalog, ModelFacts};
 
 pub(super) async fn entries(
     registry: &Registry,
@@ -42,10 +42,26 @@ fn models(registry: &Registry, configured: Option<&str>) -> Vec<CatalogEntry> {
             ids.into_iter().map(|model| CatalogEntry {
                 id: format!("{}/{model}", p.id()),
                 label: model.to_string(),
-                meta: json!({ "provider": p.id() }),
+                meta: model_meta(p.id(), catalogue.lookup(p.family(), model)),
             })
         })
         .collect()
+}
+
+/// What a client is told about one model: the provider that serves it, and
+/// the facts the embedded catalogue holds for it (ADR-0026 §1). A model the
+/// catalogue does not know — a configured override, a private endpoint's id —
+/// carries the provider alone: an absent fact is never guessed.
+fn model_meta(provider: &str, facts: Option<ModelFacts>) -> Value {
+    let mut meta = Map::new();
+    meta.insert("provider".into(), json!(provider));
+    if let Some(facts) = facts {
+        meta.insert("context".into(), json!(facts.context_window));
+        meta.insert("output".into(), json!(facts.max_output));
+        meta.insert("reasoning".into(), json!(facts.reasoning));
+        meta.insert("images".into(), json!(facts.images));
+    }
+    Value::Object(meta)
 }
 
 fn providers(registry: &Registry) -> Vec<CatalogEntry> {
@@ -111,4 +127,109 @@ fn plugins(registry: &Registry) -> Vec<CatalogEntry> {
             meta: json!({ "enabled": p.enabled, "reason": p.reason }),
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use async_trait::async_trait;
+
+    use super::*;
+
+    /// An endpoint that serves a catalogued family under a name of its own
+    /// (ADR-0017), which is how a model's facts are found at all.
+    struct Endpoint;
+
+    #[async_trait]
+    impl Provider for Endpoint {
+        fn id(&self) -> &str {
+            "house"
+        }
+
+        fn family(&self) -> &str {
+            "anthropic"
+        }
+
+        fn endpoint(&self, _model: &str) -> EndpointCapabilities {
+            EndpointCapabilities::default()
+        }
+
+        async fn stream(
+            &self,
+            _request: ModelRequest,
+            _cancel: CancellationToken,
+        ) -> Result<ModelStream, ProviderError> {
+            unreachable!("the catalogue runs no turn")
+        }
+    }
+
+    fn listed(configured: Option<&str>) -> Vec<CatalogEntry> {
+        let registry = Registry {
+            providers: vec![Arc::new(Endpoint) as Arc<dyn Provider>],
+            ..Registry::default()
+        };
+        models(&registry, configured)
+    }
+
+    fn entry(entries: &[CatalogEntry], id: &str) -> CatalogEntry {
+        entries
+            .iter()
+            .find(|e| e.id == id)
+            .unwrap_or_else(|| panic!("no {id} in {entries:?}"))
+            .clone()
+    }
+
+    fn keys(entry: &CatalogEntry) -> Vec<&str> {
+        let mut keys: Vec<&str> = entry
+            .meta
+            .as_object()
+            .expect("an object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        keys
+    }
+
+    /// The wire shape a client reads (ADR-0026 §1): these keys, these types.
+    /// A rename here is a break, so it is pinned rather than described.
+    #[test]
+    fn a_catalogued_model_carries_the_provider_and_the_four_facts() {
+        let entries = listed(None);
+        let sonnet = entry(&entries, "house/claude-sonnet-4-5");
+        assert_eq!(
+            keys(&sonnet),
+            ["context", "images", "output", "provider", "reasoning"]
+        );
+        assert_eq!(sonnet.meta["provider"], json!("house"));
+        assert!(sonnet.meta["context"].is_u64(), "{:?}", sonnet.meta);
+        assert!(sonnet.meta["output"].is_u64(), "{:?}", sonnet.meta);
+        assert!(sonnet.meta["reasoning"].is_boolean(), "{:?}", sonnet.meta);
+        assert!(sonnet.meta["images"].is_boolean(), "{:?}", sonnet.meta);
+        assert_eq!(sonnet.label, "claude-sonnet-4-5");
+    }
+
+    /// A configured id the snapshot never heard of keeps the one fact the
+    /// kernel knows. Nothing is filled in for it.
+    #[test]
+    fn a_model_the_catalogue_does_not_know_carries_the_provider_alone() {
+        let entries = listed(Some("house-private-1"));
+        let private = entry(&entries, "house/house-private-1");
+        assert_eq!(keys(&private), ["provider"]);
+        assert_eq!(private.meta, json!({ "provider": "house" }));
+    }
+
+    /// The same facts a lookup returns, unrenamed and unrounded.
+    #[test]
+    fn the_facts_are_the_catalogue_s_own() {
+        let facts = ModelCatalog::embedded()
+            .lookup("anthropic", "claude-sonnet-4-5")
+            .expect("the snapshot knows it");
+        let sonnet = entry(&listed(None), "house/claude-sonnet-4-5");
+        assert_eq!(sonnet.meta["context"], json!(facts.context_window));
+        assert_eq!(sonnet.meta["output"], json!(facts.max_output));
+        assert_eq!(sonnet.meta["reasoning"], json!(facts.reasoning));
+        assert_eq!(sonnet.meta["images"], json!(facts.images));
+    }
 }
