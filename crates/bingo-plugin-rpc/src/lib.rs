@@ -9,12 +9,14 @@
 //!
 //! Registration is synchronous and does no I/O, so the plugin contributes one
 //! source per kind — tools, commands, contributors, compaction strategies,
-//! providers — rather than the things themselves (ADR-0009 §1, ADR-0030 §2);
-//! `start` reads the two layers and shakes hands with what it finds. With
-//! nothing discovered the whole crate is inert.
+//! providers, hooks — rather than the things themselves (ADR-0009 §1,
+//! ADR-0030 §2); `start` reads the two layers and shakes hands with what it
+//! finds. With nothing discovered the whole crate is inert.
 //!
 //! Nothing a process says about itself is believed: a bridge tool's traits are
 //! the fail-closed default, so the gate asks about every call (ADR-0015 §4).
+//! A bridge hook is the one thing a process says that the kernel acts on, and
+//! it can only tighten: `HookOutcome` has no `Allow` (ADR-0032 §4).
 
 pub mod bridge;
 pub mod codec;
