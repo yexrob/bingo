@@ -1,6 +1,8 @@
 # ADR-0030 — Fixed-interface capabilities cross the bridge
 
-Status: accepted · 2026-09-01 · Plans: M26, M27
+Status: accepted · 2026-09-01 · Plans: M26, M27 · amended 2026-09-01
+(ADR-0032: hooks cross after all — tighten-only, the line narrows to
+policies)
 
 ## Context
 
@@ -65,6 +67,7 @@ contract — the debt ADR-0011 forbids.
 - A slow external contributor costs its own pieces, never the turn;
   the notice says whose deadline was missed.
 
-Refs: ADR-0009 §1, ADR-0011 §1, ADR-0015, ADR-0031.
-Non-goals: Hook or Policy over the wire; Store; a parallel remote
-trait hierarchy; any change to in-process registration.
+Refs: ADR-0009 §1, ADR-0011 §1, ADR-0015, ADR-0031, ADR-0032.
+Non-goals: Policy over the wire (Hook crosses by ADR-0032); Store; a
+parallel remote trait hierarchy; any change to in-process
+registration.
