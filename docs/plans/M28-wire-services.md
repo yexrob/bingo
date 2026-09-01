@@ -99,7 +99,7 @@ $ cargo check --workspace --all-targets --locked
 $ cargo clippy --workspace --all-targets --locked -- -D warnings
     Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.98s
 $ cargo test --workspace --locked
-1267 passed; 0 failed (69 suites)
+2796 passed; 0 failed, over 69 suites
 $ scripts/check_discipline.sh
 dependency direction ok / kernel names no tool / cohesion ok
 discipline ok
