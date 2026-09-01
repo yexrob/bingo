@@ -1,6 +1,6 @@
 # ADR-0028 — The holder on the roster
 
-Status: accepted · 2026-09-01 · Plan: M23
+Status: accepted · 2026-09-01 · Plan: M23 · amended 2026-09-01 (M24)
 
 ## Context
 
@@ -27,16 +27,20 @@ vocabulary: `Delivery::Hold` and `Delivery::Wake`.
    the room hangs under — the name its members already call it, and the
    name a root holder's posts already sign. No other holder address is
    introduced.
-2. **A post fans to a rostered holder as `Hold`.** It queues at zero
-   cost; whatever next opens a turn — the person speaking, a message, a
-   report — absorbs the room's traffic in journal order. This is the
-   old digest with the timers deleted: the turn boundary is the batch
-   boundary, and a busy holder reads it at the next barrier exactly as
-   Wake would deliver it.
-3. **A post that mentions `@parent` is delivered `Wake` instead** — the
-   urgent bypass — and opens an ordinary mention debt (ADR-0022)
-   against the seat, closed by the seat's next post. One delivery per
-   post either way; the exactly-once pin stands.
+2. **A post fans to a rostered holder as `Wake`, like to any member.**
+   A busy holder reads it at its next barrier — a steer, not a
+   conversation — and an idle one opens a turn that drains whatever
+   queued behind it: the kernel's own batching, no timers. (Amended
+   2026-09-01: the first cut delivered `Hold` and woke only on
+   `@parent` — a digest that priced liveness away, and a mention read
+   for routing, the thing ADR-0022 refuses. The noise the old tree's
+   debounce fought is already carried by M22's quiet notices; what
+   remains is tokens and context, and the roster itself is that dial —
+   a room that should not spend the holder's attention leaves `parent`
+   off it.)
+3. **`@parent` opens an ordinary mention debt** (ADR-0022) against the
+   seat, closed by the seat's next post — obligation only, never a
+   delivery mode. One delivery per post; the exactly-once pin stands.
 4. **Explicit, never default.** A roster without `parent` is today's
    room, byte-identical: the holder stays blind, `@parent` opens
    nothing. The old tree's own rule — create seats only the caller,
@@ -57,9 +61,11 @@ vocabulary: `Delivery::Hold` and `Delivery::Wake`.
 - The chaser learns one address: a debt owed by `parent` is nudged at
   the room's parent session, `Wake` like every nudge. The `owed` card
   and `/room` show the seat by the name everyone uses for it.
-- The mention parse and the delivery-mode check are one matcher —
-  `@parent` in the text is read the way ADR-0022 reads every mention,
-  never a second grammar.
+- A queued subsystem input is a steer in flight, not a pending message:
+  the composer's pending area renders only what the person themselves
+  queued, with M22's quiet set as the boundary and an unknown surface
+  failing to the loud, person side. Nothing lingers behind that rule —
+  a woken seat drains its queue.
 - The tools' words teach it where the pattern lives: `SpawnAgent`'s
   room shape names `parent` among the members when the caller wants to
   hear the room itself; `/room` and `OpenRoom` say what a rostered
@@ -78,5 +84,5 @@ vocabulary: `Delivery::Hold` and `Delivery::Wake`.
 
 Refs: ADR-0011 §1, ADR-0022, ADR-0025, ADR-0027; the collaboration
 survey (D95, D98, the mail.rs digest).
-Non-goals: rostering the holder by default, digest timers, `@all`
-waking a holder, any change to the person's exemption (ADR-0025 §4).
+Non-goals: rostering the holder by default, digest timers or any
+stored inbox, any change to the person's exemption (ADR-0025 §4).
