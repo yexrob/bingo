@@ -6,10 +6,11 @@
 //! whether this run moves at all, so a cue asks the frame it is drawing in
 //! rather than the environment (`BINGO_MOTION=off`, design §7).
 //!
-//! Everything below is a pure function of a duration: time in, a number
-//! between 0 and 1 out. What a number means in colour is [`crate::theme`]'s,
-//! and what it means on the screen is the view's — so every row of §6 is a
-//! sample at a named instant rather than something to watch for.
+//! Everything below is a pure function of a duration: time in, and a number
+//! between 0 and 1 — or, for the one a person reads, a phrase — out. What a
+//! number means in colour is [`crate::theme`]'s, and what it means on the
+//! screen is the view's — so every row of §6 is a sample at a named instant
+//! rather than something to watch for.
 
 use std::time::{Duration, Instant};
 
@@ -53,6 +54,22 @@ impl Now {
     /// Whether a wall-clock deadline has arrived.
     pub fn reached(&self, when: Timestamp) -> bool {
         self.wall >= when
+    }
+}
+
+/// How long ago, as a person says it. Coarse on purpose: a row that offers a
+/// session to resume has to tell this morning from last week, and nothing it
+/// could say to a tenth of a minute would be read.
+pub fn ago(past: Duration) -> String {
+    const MINUTE: u64 = 60;
+    const HOUR: u64 = 60 * MINUTE;
+    const DAY: u64 = 24 * HOUR;
+    let seconds = past.as_secs();
+    match seconds {
+        ..MINUTE => "just now".to_string(),
+        MINUTE..HOUR => format!("{}m ago", seconds / MINUTE),
+        HOUR..DAY => format!("{}h ago", seconds / HOUR),
+        _ => format!("{}d ago", seconds / DAY),
     }
 }
 
@@ -159,6 +176,21 @@ mod tests {
 
     fn ms(n: u64) -> Duration {
         Duration::from_millis(n)
+    }
+
+    #[test]
+    fn how_long_ago_is_said_in_the_largest_unit_that_fits() {
+        let secs = |n| ago(Duration::from_secs(n));
+        assert_eq!(secs(0), "just now");
+        assert_eq!(secs(59), "just now");
+        assert_eq!(secs(60), "1m ago");
+        assert_eq!(secs(90), "1m ago", "rounded down, never up");
+        assert_eq!(secs(59 * 60), "59m ago");
+        assert_eq!(secs(60 * 60), "1h ago");
+        assert_eq!(secs(2 * 60 * 60), "2h ago");
+        assert_eq!(secs(24 * 60 * 60 - 1), "23h ago");
+        assert_eq!(secs(24 * 60 * 60), "1d ago");
+        assert_eq!(secs(45 * 24 * 60 * 60), "45d ago");
     }
 
     #[test]

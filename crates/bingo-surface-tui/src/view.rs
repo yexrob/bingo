@@ -6,7 +6,7 @@
 //!
 //! `draw` is pure of everything but the frame it paints.
 
-use bingo_sdk::{Driver, LiveTurn, Origin, SessionState};
+use bingo_sdk::{Driver, LiveTurn, Origin, SessionState, SessionSummary};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
@@ -189,7 +189,7 @@ fn layer(
             panel::lines(tree.viewed(), tree.view(), ui.panel, &ui.pinned, width),
             reveal,
         ),
-        Open::Picker(picker) => sheet(frame, above, picker_lines(picker), reveal),
+        Open::Picker(picker) => sheet(frame, above, picker_lines(picker, now), reveal),
         Open::Pager(open) => paged(tree, frame, above, open, reveal),
         // A dropdown above the input box, like the switcher's.
         Open::Rewind(card) => over(
@@ -537,7 +537,7 @@ fn switcher_lines(tree: &Tree, switcher: &Switcher, now: Now) -> Vec<Line<'stati
     )
 }
 
-fn picker_lines(picker: &Picker) -> Vec<Line<'static>> {
+fn picker_lines(picker: &Picker, now: Now) -> Vec<Line<'static>> {
     let mut out = vec![Line::from(Span::styled(
         "Resume".to_string(),
         theme::bold(),
@@ -549,21 +549,34 @@ fn picker_lines(picker: &Picker) -> Vec<Line<'static>> {
         } else {
             theme::dim()
         };
-        let title = session.title.clone().unwrap_or_else(|| "untitled".into());
         out.push(Line::from(vec![
             theme::cursor_span(selected),
             Span::styled(
-                format!(
-                    "{}. {title} · {} · {}",
-                    index + 1,
-                    session.updated_at,
-                    session.id
-                ),
+                format!("{}. {}", index + 1, picker_row(session, now)),
                 style,
             ),
         ]));
     }
     out
+}
+
+/// What a row says a session is: what it was about, how much was said in it,
+/// and how long ago. The id is what `/resume <id>` takes for hands and is not
+/// what a person recognises a conversation by, so it is not here. A summary
+/// written before the count says nothing rather than a `0` it does not mean.
+fn picker_row(session: &SessionSummary, now: Now) -> String {
+    let mut said = vec![
+        session
+            .title
+            .clone()
+            .unwrap_or_else(|| "untitled".to_string()),
+    ];
+    if let Some(messages) = session.messages {
+        let plural = if messages == 1 { "" } else { "s" };
+        said.push(format!("{messages} msg{plural}"));
+    }
+    said.push(clock::ago(now.past(session.updated_at)));
+    said.join(" · ")
 }
 
 /// The prompt box: the caret lives here and nowhere else. Its border is the
@@ -1234,21 +1247,37 @@ mod tests {
         insta::assert_snapshot!(render(&state, &ui, now));
     }
 
+    /// A row says what a session is — its first ask, how much was said, how
+    /// long ago — and never its id. The three counts are the three states:
+    /// many, one, and a summary written before the count existed, which shows
+    /// nothing rather than a `0` it does not mean.
     #[test]
     fn the_session_picker_lists_what_can_be_resumed() {
         let state = state();
         let (mut ui, now) = scene();
+        let stale = |hours: i64| now.wall - jiff::SignedDuration::from_hours(hours);
         shown(
             &mut ui,
             Open::Picker(Picker {
                 sessions: vec![
                     SessionSummary {
                         title: Some("fix the parser".into()),
+                        messages: Some(12),
+                        updated_at: stale(2),
                         ..summary()
                     },
                     SessionSummary {
                         id: bingo_sdk::SessionId::from_raw("ses_2"),
+                        title: Some("请帮我把这个解析器修好".into()),
+                        messages: Some(1),
+                        updated_at: stale(30),
+                        ..summary()
+                    },
+                    SessionSummary {
+                        id: bingo_sdk::SessionId::from_raw("ses_3"),
                         title: None,
+                        messages: None,
+                        updated_at: stale(24 * 5),
                         ..summary()
                     },
                 ],
