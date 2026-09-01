@@ -15,7 +15,10 @@
 //! `get` over a map this process keeps, so two of these pair through the host.
 //! `--protocol N` answers the handshake with a major this host does not speak;
 //! `--placement <kind>` declares a placement that may not be one;
-//! `--no-service` declares no service at all, which is what a caller is.
+//! `--no-service` declares no service at all, which is what a caller is;
+//! `--announce <line>` says one line through `bingo.host` the moment the
+//! handshake is answered, with no tool call anywhere — which is what a notice
+//! that waits for one looks like from outside.
 
 use std::collections::BTreeMap;
 use std::io::{BufRead, Write};
@@ -24,6 +27,7 @@ use std::process::ExitCode;
 use bingo_plugin_rpc::codec::{
     INVALID_PARAMS, METHOD_NOT_FOUND, Message, Outcome, Request, Response, RpcError,
 };
+use bingo_plugin_rpc::doors;
 use bingo_plugin_rpc::wire::{
     CommandCompleteParams, CommandCompleteResult, CommandRunParams, CommandRunResult,
     CompactorCompactParams, CompactorCompactResult, CompactorSpec, ContextContributeParams,
@@ -53,8 +57,9 @@ struct State {
     cancelled: Vec<String>,
     store: BTreeMap<String, String>,
     /// Service calls this process asked the host for, each with the tool call
-    /// that is waiting to say what came back.
-    pending: Vec<(i64, i64)>,
+    /// that is waiting to say what came back — or nothing, for one this
+    /// process asked on its own account.
+    pending: Vec<(i64, Option<i64>)>,
     asked: i64,
 }
 
@@ -76,6 +81,9 @@ struct Options {
     /// Whether it declares the `kv` service. A caller declares none: one key
     /// has one owner, and the second to claim it is refused.
     serves: bool,
+    /// A line to say through `bingo.host` as soon as the handshake is
+    /// answered, on no call at all.
+    announce: Option<String>,
 }
 
 fn main() -> ExitCode {
@@ -101,6 +109,7 @@ fn options() -> Options {
         protocol: PROTOCOL,
         placement: json!({ "kind": "roundStart" }),
         serves: true,
+        announce: None,
     };
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     options.serves = !args.iter().any(|arg| arg == "--no-service");
@@ -110,6 +119,7 @@ fn options() -> Options {
         match (arg.as_str(), args.next()) {
             ("--protocol", Some(n)) => options.protocol = n.parse().unwrap_or(PROTOCOL),
             ("--placement", Some(kind)) => options.placement = json!({ "kind": kind }),
+            ("--announce", Some(line)) => options.announce = Some(line),
             _ => {}
         }
     }
@@ -134,7 +144,10 @@ fn serve(line: &str, options: &Options, state: &mut State) -> bool {
 
 fn request_line(request: Request, options: &Options, state: &mut State) -> bool {
     match request.method.as_str() {
-        name::INITIALIZE => answer(request.id, handshake(options)),
+        name::INITIALIZE => {
+            answer(request.id, handshake(options));
+            announce(options, state);
+        }
         name::TOOL_CALL => return call(request.id, request.params, state),
         name::COMMAND_RUN => answer(request.id, run(request.params)),
         name::COMMAND_COMPLETE => answer(request.id, complete(request.params)),
@@ -272,10 +285,28 @@ fn served(id: i64, params: Value, state: &mut State) {
     );
 }
 
+/// One line through the host's own service, on nobody's call: this is what a
+/// plugin saying something of its own looks like, and it happens here before
+/// any tool has ever been called.
+fn announce(options: &Options, state: &mut State) {
+    let Some(line) = &options.announce else {
+        return;
+    };
+    crossed(
+        &json!({
+            "key": doors::KEY,
+            "method": doors::NOTICE,
+            "params": { "level": "warn", "message": line }
+        }),
+        None,
+        state,
+    );
+}
+
 /// This process asking the host for a service call. The tool call that wanted
 /// it stays open until the answer arrives: one line is read at a time here, so
 /// nothing may wait inside one.
-fn crossed(asked: &Value, call: i64, state: &mut State) {
+fn crossed(asked: &Value, call: Option<i64>, state: &mut State) {
     let id = state.next_id();
     state.pending.push((id, call));
     send(&Message::Request(Request::new(
@@ -303,7 +334,10 @@ fn came_back(response: Response, state: &mut State) {
             .unwrap_or_else(|error| error.to_string()),
         Outcome::Error(error) => error.message,
     };
-    answer(call, output(said));
+    // Nothing is waiting on a call this process asked for on its own account.
+    if let Some(call) = call {
+        answer(call, output(said));
+    }
 }
 
 /// A string as itself, anything else as the JSON it is: a tool answers text.
@@ -390,7 +424,7 @@ fn call(id: i64, params: Value, state: &mut State) -> bool {
         return true;
     }
     if let Some(asked) = params.input.get("call").cloned() {
-        crossed(&asked, id, state);
+        crossed(&asked, Some(id), state);
         return true;
     }
     answer(id, output(said(&params.input)));

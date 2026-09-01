@@ -254,12 +254,11 @@ impl HostApi for Listening {
 }
 
 /// A tool host that keeps what a call told it, so a test can read the live
-/// output line and the notices the transcript was given — and answers the
-/// questions the call asks with whatever it was built with.
+/// output line and what the call was asked — and answers every question with
+/// whatever it was built with.
 #[derive(Debug)]
 pub struct Recorder {
     progress: Mutex<Vec<String>>,
-    recorded: Mutex<Vec<ItemBody>>,
     asked: Mutex<Vec<InteractionKind>>,
     answer: Answer,
 }
@@ -275,7 +274,6 @@ impl Recorder {
     pub fn answering(answer: Answer) -> Self {
         Self {
             progress: Mutex::new(Vec::new()),
-            recorded: Mutex::new(Vec::new()),
             asked: Mutex::new(Vec::new()),
             answer,
         }
@@ -283,10 +281,6 @@ impl Recorder {
 
     pub fn progress(&self) -> Vec<String> {
         self.progress.lock().unwrap().clone()
-    }
-
-    pub fn recorded(&self) -> Vec<ItemBody> {
-        self.recorded.lock().unwrap().clone()
     }
 
     /// What this call was asked, in the order it was asked.
@@ -313,8 +307,9 @@ impl ToolHost for Recorder {
         self.progress.lock().unwrap().push(tail);
     }
 
-    async fn record(&self, body: ItemBody) -> Result<ItemId, KernelError> {
-        self.recorded.lock().unwrap().push(body);
+    /// Nothing here records: the bridge's notices go through the host now, and
+    /// a call has nothing else to write.
+    async fn record(&self, _body: ItemBody) -> Result<ItemId, KernelError> {
         Ok(ItemId::from_raw("itm_test"))
     }
 }
@@ -333,8 +328,19 @@ pub fn hook_context() -> bingo_sdk::HookContext {
 }
 
 pub fn context(call: Arc<Recorder>, cwd: &Path, cancel: CancellationToken) -> ToolContext {
+    context_id(CALL_ID, call, cwd, cancel)
+}
+
+/// The same, under a call id of the test's choosing: two calls running at once
+/// have to be told apart, which is the whole point of the `ask` door's check.
+pub fn context_id(
+    call_id: &str,
+    call: Arc<Recorder>,
+    cwd: &Path,
+    cancel: CancellationToken,
+) -> ToolContext {
     ToolContext {
-        call_id: CALL_ID.into(),
+        call_id: call_id.into(),
         session: SessionId::from_raw("ses_test"),
         turn: TurnId::from_raw("trn_test"),
         item: ItemId::from_raw("itm_test"),

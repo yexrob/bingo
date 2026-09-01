@@ -11,8 +11,9 @@ use std::collections::BTreeMap;
 use schemars::{SchemaGenerator, generate::SchemaSettings};
 use serde_json::{Map, Value, json};
 
+use crate::doors;
 use crate::manifest::Manifest;
-use crate::wire::{HOST_METHODS, METHODS, NOTIFICATIONS, PROTOCOL, Ref, host, schema_of};
+use crate::wire::{METHODS, NOTIFICATIONS, PROTOCOL, Ref, schema_of};
 
 /// Types the method table does not name. The manifest is the first thing a
 /// plugin author writes and the last thing the wire mentions.
@@ -22,7 +23,7 @@ pub fn document() -> Value {
     let mut generator = generator();
     let methods = method_table(&mut generator);
     let notifications = notification_table(&mut generator);
-    let doors = table(&mut generator, HOST_METHODS);
+    let opened = table(&mut generator, doors::METHODS);
     for name in UNNAMED {
         name(&mut generator);
     }
@@ -34,7 +35,7 @@ pub fn document() -> Value {
         "manifest": { "$ref": "#/$defs/Manifest" },
         "methods": methods,
         "notifications": notifications,
-        "hostService": { "key": host::KEY, "methods": doors },
+        "hostService": { "key": doors::KEY, "methods": opened },
     })
 }
 
@@ -158,13 +159,10 @@ mod tests {
     fn the_committed_schema_names_the_host_s_own_service_and_its_doors() {
         let file = std::fs::read_to_string(committed()).unwrap_or_default();
         let document: Value = serde_json::from_str(&file).expect("the committed schema is json");
-        assert_eq!(
-            document["hostService"]["key"],
-            json!(crate::wire::host::KEY)
-        );
+        assert_eq!(document["hostService"]["key"], json!(doors::KEY));
         let mut named = keys(&document["hostService"]["methods"]);
         named.sort();
-        let mut spoken: Vec<String> = HOST_METHODS.iter().map(|door| door.0.to_owned()).collect();
+        let mut spoken: Vec<String> = doors::METHODS.iter().map(|d| d.0.to_owned()).collect();
         spoken.sort();
         assert_eq!(named, spoken);
         assert!(
@@ -283,7 +281,7 @@ mod tests {
         references(&document["hostService"], &mut found);
         assert_eq!(
             found.len(),
-            1 + (METHODS.len() + HOST_METHODS.len()) * 2 + NOTIFICATIONS.len()
+            1 + (METHODS.len() + doors::METHODS.len()) * 2 + NOTIFICATIONS.len()
         );
         for reference in found {
             let name = reference

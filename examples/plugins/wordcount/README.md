@@ -53,6 +53,12 @@ write your own. In short:
   {"methods": {"<name>": <schema>}}}` in the handshake to serve one, and send
   the same request to the host to call anybody's — the host routes it, so two
   plugins pair without knowing of each other.
+- **The host serves one of its own**, under the key `bingo.host`, with no
+  declaration needed: `ask {call, question}` → `{answer}` puts a question to
+  the person on a `callId` you are running, and `notice {level?, message}` →
+  `{}` says one line under your plugin's name at any time. A call that has
+  ended, and a call that is not yours, are refused in words; a question is a
+  question and nothing else — a permission prompt is the host's own to open.
 - **Hooks** are declared as `hooks: [{id, points?, tool?}]` — the points you
   claim, and an optional tool name for the tool points; claim nothing and you
   are asked at every point. The four that decide arrive as `hook/decide

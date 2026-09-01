@@ -18,9 +18,9 @@ use serde_json::Value;
 
 use crate::bridge::{Bridge, Setting};
 use crate::discovery::{self, Found};
-use crate::doors::{Caller, Doors};
+use crate::doors::{self, Caller, Doors};
 use crate::notice::{self, Notices};
-use crate::wire::{HostEnv, host};
+use crate::wire::HostEnv;
 
 /// The bridges, and what they were built from.
 pub struct Manager {
@@ -155,8 +155,8 @@ impl Manager {
     /// notice: every process still reaches these doors through its own hub, so
     /// there is nothing for a person to do about it.
     fn open_doors(&self, host: &HostHandle) {
-        if let Err(why) = host.open_service(host::KEY, self.doors.face(Caller::Host)) {
-            tracing::debug!(key = host::KEY, %why, "the host's own service is not in the registry");
+        if let Err(why) = host.open_service(doors::KEY, self.doors.face(Caller::Host)) {
+            tracing::debug!(key = doors::KEY, %why, "the host's own service is not in the registry");
         }
     }
 

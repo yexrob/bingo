@@ -213,6 +213,35 @@
         }
       ]
     },
+    "AskParams": {
+      "type": "object",
+      "properties": {
+        "call": {
+          "type": "string",
+          "description": "The `callId` this process was given in `tool/call`."
+        },
+        "question": {
+          "$ref": "#/$defs/InteractionKind"
+        }
+      },
+      "required": [
+        "call",
+        "question"
+      ],
+      "description": "`bingo.host.ask`: a question from the process, on one of its running calls.\n\nThe call names the crossing and is the whole of the grant: the bridge\nalready tracks running calls, an ended one is not there to ask on, and\nanother connection's is not this caller's to reach (ADR-0033 §3 as\namended). Nothing is minted for it.\n\nThe question is the sdk's own `InteractionKind`, so the person is asked by\nthe machinery every in-process tool's question rides. Only a question\ncrosses: a permission, a confirmation or a login is the host's own to open,\nand a grant is never Allow-shaped."
+    },
+    "AskResult": {
+      "type": "object",
+      "properties": {
+        "answer": {
+          "$ref": "#/$defs/Answer"
+        }
+      },
+      "required": [
+        "answer"
+      ],
+      "description": "What the person answered, as the sdk writes it — including the cancel that\nis an answer."
+    },
     "CancelReason": {
       "oneOf": [
         {
@@ -2112,35 +2141,6 @@
       ],
       "description": "The value a hook rewrote, in the one shape the point that owns it takes.\nA point that owns no mutable argument has no variant here, so a rewrite\nanywhere else is refused by the shape rather than by a check."
     },
-    "HostAskParams": {
-      "type": "object",
-      "properties": {
-        "call": {
-          "type": "string",
-          "description": "The `callId` this process was given in [`name::TOOL_CALL`]."
-        },
-        "question": {
-          "$ref": "#/$defs/InteractionKind"
-        }
-      },
-      "required": [
-        "call",
-        "question"
-      ],
-      "description": "`bingo.host.ask`: a question from the process, on one of its running calls.\n\nThe call names the crossing and is the whole of the grant: the bridge\nalready tracks running calls, an ended one is not there to ask on, and\nanother connection's is not this caller's to reach (ADR-0033 §3 as\namended). Nothing is minted for it.\n\nThe question is the sdk's own `InteractionKind`, so the person is asked by\nthe machinery every in-process tool's question rides. Only a question\ncrosses: a permission, a confirmation or a login is the host's own to open,\nand a grant is never Allow-shaped."
-    },
-    "HostAskResult": {
-      "type": "object",
-      "properties": {
-        "answer": {
-          "$ref": "#/$defs/Answer"
-        }
-      },
-      "required": [
-        "answer"
-      ],
-      "description": "What the person answered, as the sdk writes it — including the cancel that\nis an answer."
-    },
     "HostEnv": {
       "type": "object",
       "properties": {
@@ -2160,26 +2160,6 @@
         "dataDir"
       ],
       "description": "Where the host lives, as a process that is not in it can read.\n\nA projection of the sdk's `Env`, which is not `Serialize`: a plugin that\nkeeps state of its own needs somewhere to put it, and `dataDir` is where."
-    },
-    "HostNoticeParams": {
-      "type": "object",
-      "properties": {
-        "level": {
-          "$ref": "#/$defs/Level",
-          "default": "info"
-        },
-        "message": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "message"
-      ],
-      "description": "`bingo.host.notice`: one line for the person, under the plugin's own name.\n\nThe one door that is scoped by nothing (ADR-0033 §4): it spends nothing but\na line, so it needs no crossing to belong to. The level is the kernel's own\nthree and nothing else can be written; an omitted one is the quietest."
-    },
-    "HostNoticeResult": {
-      "type": "object",
-      "description": "A notice is told, not asked: there is nothing to answer with."
     },
     "InitializeParams": {
       "type": "object",
@@ -3474,6 +3454,26 @@
         "messages",
         "tools"
       ]
+    },
+    "NoticeParams": {
+      "type": "object",
+      "properties": {
+        "level": {
+          "$ref": "#/$defs/Level",
+          "default": "info"
+        },
+        "message": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "message"
+      ],
+      "description": "`bingo.host.notice`: one line for the person, under the plugin's own name.\n\nThe one door that is scoped by nothing (ADR-0033 §4): it spends nothing but\na line, so it needs no crossing to belong to. The level is the kernel's own\nthree and nothing else can be written; an omitted one is the quietest."
+    },
+    "NoticeResult": {
+      "type": "object",
+      "description": "A notice is told, not asked: there is nothing to answer with."
     },
     "Origin": {
       "type": "object",
@@ -4881,18 +4881,18 @@
     "methods": {
       "ask": {
         "params": {
-          "$ref": "#/$defs/HostAskParams"
+          "$ref": "#/$defs/AskParams"
         },
         "result": {
-          "$ref": "#/$defs/HostAskResult"
+          "$ref": "#/$defs/AskResult"
         }
       },
       "notice": {
         "params": {
-          "$ref": "#/$defs/HostNoticeParams"
+          "$ref": "#/$defs/NoticeParams"
         },
         "result": {
-          "$ref": "#/$defs/HostNoticeResult"
+          "$ref": "#/$defs/NoticeResult"
         }
       }
     }

@@ -21,7 +21,8 @@ use crate::bridge::Bridge;
 use crate::codec::{INTERNAL_ERROR, INVALID_PARAMS, METHOD_NOT_FOUND, RpcError};
 use crate::connection::Connection;
 use crate::deadline;
-use crate::wire::{ServiceCallParams, ServiceCallResult, ServiceSpec, host, name};
+use crate::doors;
+use crate::wire::{ServiceCallParams, ServiceCallResult, ServiceSpec, name};
 
 /// A service one plugin process declared, as the one face the registry holds.
 /// N remote services are N of these; they differ by the declaration they were
@@ -165,7 +166,7 @@ impl Hub {
     /// one whose owner never opened a face. Crossing is the owner's choice
     /// (ADR-0031 §3), and what did not choose it does not exist out there.
     fn wire(&self, key: &str) -> Result<Arc<dyn WireService>, RpcError> {
-        if key == host::KEY {
+        if key == doors::KEY {
             return Ok(Arc::clone(&self.doors));
         }
         if let Some(wire) = self.host.service_wire(key) {

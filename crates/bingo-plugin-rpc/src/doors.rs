@@ -21,16 +21,87 @@
 //! and each connection's hub holds a face bound to that connection. Two faces
 //! of one live object is what `Services` already keeps for every service
 //! (ADR-0031 §3).
+//!
+//! The shapes live here rather than in [`crate::wire`] because they are not
+//! the wire's: they ride inside one `service/call`'s opaque params, exactly as
+//! any other service's do. [`METHODS`] is this service's one table — the
+//! schema writes it down and [`Doors::answer`] dispatches on it.
 
 use std::sync::{Arc, Weak};
 
 use async_trait::async_trait;
-use bingo_sdk::{AnswerSpec, InteractionKind, ServiceError, ToolHost, WireService};
+use bingo_sdk::{Answer, AnswerSpec, InteractionKind, Level, ServiceError, ToolHost, WireService};
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::bridge::Bridge;
 use crate::notice::{Notice, Notices};
-use crate::wire::{HOST_METHODS, HostAskParams, HostAskResult, HostNoticeParams, host};
+use crate::wire::{Method, schema_of};
+
+/// The key the host's own service is registered under. Reserved: a plugin
+/// that declares it is refused the way any second claimant is.
+pub const KEY: &str = "bingo.host";
+/// Put a question to the person, on the crossing that is already running.
+pub const ASK: &str = "ask";
+/// Say one line to the person, at any time.
+pub const NOTICE: &str = "notice";
+
+/// `bingo.host.ask`: a question from the process, on one of its running calls.
+///
+/// The call names the crossing and is the whole of the grant: the bridge
+/// already tracks running calls, an ended one is not there to ask on, and
+/// another connection's is not this caller's to reach (ADR-0033 §3 as
+/// amended). Nothing is minted for it.
+///
+/// The question is the sdk's own `InteractionKind`, so the person is asked by
+/// the machinery every in-process tool's question rides. Only a question
+/// crosses: a permission, a confirmation or a login is the host's own to open,
+/// and a grant is never Allow-shaped.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AskParams {
+    /// The `callId` this process was given in `tool/call`.
+    pub call: String,
+    pub question: InteractionKind,
+}
+
+/// What the person answered, as the sdk writes it — including the cancel that
+/// is an answer.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AskResult {
+    pub answer: Answer,
+}
+
+/// `bingo.host.notice`: one line for the person, under the plugin's own name.
+///
+/// The one door that is scoped by nothing (ADR-0033 §4): it spends nothing but
+/// a line, so it needs no crossing to belong to. The level is the kernel's own
+/// three and nothing else can be written; an omitted one is the quietest.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct NoticeParams {
+    #[serde(default = "quietest")]
+    pub level: Level,
+    pub message: String,
+}
+
+fn quietest() -> Level {
+    Level::Info
+}
+
+/// A notice is told, not asked: there is nothing to answer with.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct NoticeResult {}
+
+/// The doors, in one table: the schema walks it and [`Doors::answer`]
+/// dispatches on it, so the set a caller is told about is the set it can call.
+pub static METHODS: &[Method] = &[
+    (ASK, schema_of::<AskParams>, schema_of::<AskResult>),
+    (NOTICE, schema_of::<NoticeParams>, schema_of::<NoticeResult>),
+];
 
 /// Who is at the door. A process speaks through the bridge that runs it, which
 /// is what makes another process's call refusable; the host itself speaks for
@@ -106,8 +177,8 @@ impl Doors {
         params: Value,
     ) -> Result<Value, ServiceError> {
         match method {
-            host::ASK => self.ask(caller, params).await,
-            host::NOTICE => self.notice(caller, params),
+            ASK => self.ask(caller, params).await,
+            NOTICE => self.notice(caller, params),
             other => Err(unknown(other)),
         }
     }
@@ -116,26 +187,26 @@ impl Doors {
     /// same path an in-process tool's question takes, so a person answers it
     /// where they answer every other.
     async fn ask(&self, caller: &Caller, params: Value) -> Result<Value, ServiceError> {
-        let params: HostAskParams = read(params)?;
+        let params: AskParams = read(params)?;
         let question = only_a_question(params.question)?;
         let call = caller.running(&params.call).await?;
         let answer = call
             .ask(question.clone(), answers(&question))
             .await
             .map_err(|error| refused(error.to_string()))?;
-        write(HostAskResult { answer })
+        write(AskResult { answer })
     }
 
     /// One line, under the caller's own name, on the crate's one notice
     /// channel — which the drain says whether or not anything else is running.
     fn notice(&self, caller: &Caller, params: Value) -> Result<Value, ServiceError> {
-        let params: HostNoticeParams = read(params)?;
+        let params: NoticeParams = read(params)?;
         self.notices.push(Notice::said(
             caller.speaker(),
             params.level,
             &params.message,
         ));
-        write(crate::wire::HostNoticeResult {})
+        write(NoticeResult {})
     }
 }
 
@@ -157,10 +228,9 @@ impl WireService for Door {
 /// same sentence a plugin's own service refuses an unknown method with
 /// (ADR-0031 §5).
 fn unknown(method: &str) -> ServiceError {
-    let spoken: Vec<&str> = HOST_METHODS.iter().map(|door| door.0).collect();
+    let spoken: Vec<&str> = METHODS.iter().map(|door| door.0).collect();
     refused(format!(
-        "the service {} does not speak {method}; it speaks {}",
-        host::KEY,
+        "the service {KEY} does not speak {method}; it speaks {}",
         spoken.join(", ")
     ))
 }
@@ -209,7 +279,7 @@ fn refused(why: impl Into<String>) -> ServiceError {
 mod tests {
     use super::*;
     use crate::testing::{Silent, unanswering};
-    use bingo_sdk::{Answer, Level, QuestionOption};
+    use bingo_sdk::QuestionOption;
     use serde_json::json;
 
     fn doors() -> (Arc<Notices>, Arc<Doors>) {
@@ -277,7 +347,7 @@ mod tests {
         );
         let answered = face
             .call(
-                host::ASK,
+                ASK,
                 json!({ "call": "call_1", "question": question(&["main"]) }),
             )
             .await
@@ -295,10 +365,7 @@ mod tests {
         let (_bridge, face, watch) = running(&doors, "call_1", Answer::Cancel);
         drop(watch);
         let why = face
-            .call(
-                host::ASK,
-                json!({ "call": "call_1", "question": question(&[]) }),
-            )
+            .call(ASK, json!({ "call": "call_1", "question": question(&[]) }))
             .await
             .expect_err("the call is over")
             .to_string();
@@ -318,10 +385,7 @@ mod tests {
         let theirs = Bridge::live("other", unanswering());
         let face = doors.face(Caller::plugin("other", Arc::downgrade(&theirs)));
         let why = face
-            .call(
-                host::ASK,
-                json!({ "call": "call_1", "question": question(&[]) }),
-            )
+            .call(ASK, json!({ "call": "call_1", "question": question(&[]) }))
             .await
             .expect_err("that call is not this plugin's")
             .to_string();
@@ -336,10 +400,7 @@ mod tests {
         let (_notices, doors) = doors();
         let why = doors
             .face(Caller::Host)
-            .call(
-                host::ASK,
-                json!({ "call": "call_1", "question": question(&[]) }),
-            )
+            .call(ASK, json!({ "call": "call_1", "question": question(&[]) }))
             .await
             .expect_err("the host runs no plugin call")
             .to_string();
@@ -358,7 +419,7 @@ mod tests {
             json!({ "kind": "login", "provider": "codex", "flow": { "kind": "paste" } }),
         ] {
             let why = face
-                .call(host::ASK, json!({ "call": "call_1", "question": kind }))
+                .call(ASK, json!({ "call": "call_1", "question": kind }))
                 .await
                 .expect_err("only a question crosses")
                 .to_string();
@@ -391,7 +452,7 @@ mod tests {
         let (_bridge, face, _watch) = running(&doors, "call_1", Answer::Cancel);
         let answered = face
             .call(
-                host::NOTICE,
+                NOTICE,
                 json!({ "level": "warn", "message": "the index is stale" }),
             )
             .await
@@ -408,17 +469,130 @@ mod tests {
         let (_notices, doors) = doors();
         let face = doors.face(Caller::Host);
         assert!(
-            face.call(host::NOTICE, json!({ "level": "warn" }))
-                .await
-                .is_err(),
+            face.call(NOTICE, json!({ "level": "warn" })).await.is_err(),
             "a notice with nothing to say is not one"
         );
         assert!(
-            face.call(host::ASK, json!({ "question": question(&[]) }))
+            face.call(ASK, json!({ "question": question(&[]) }))
                 .await
                 .is_err(),
             "an ask names the call it is on"
         );
+    }
+
+    // ------------------------------------------------- the shapes on the wire
+
+    /// The `ask` line: the running call that is the whole of the grant, and
+    /// the sdk's own question beside it. Nothing else — no allowance, no
+    /// session, no turn — because the call names the crossing already.
+    #[test]
+    fn an_ask_carries_the_running_call_and_the_sdk_s_own_question() {
+        let params = AskParams {
+            call: "call_1".into(),
+            question: InteractionKind::Question {
+                question: "Which branch?".into(),
+                header: Some("Release".into()),
+                options: vec![QuestionOption {
+                    id: "0".into(),
+                    label: "main".into(),
+                    description: None,
+                }],
+                free_text: true,
+                multi: false,
+            },
+        };
+        let wire = serde_json::to_value(&params).expect("an ask serialises");
+        assert_eq!(wire["call"], json!("call_1"));
+        assert_eq!(wire["question"]["kind"], json!("question"));
+        assert_eq!(wire["question"]["freeText"], json!(true));
+        assert_eq!(
+            serde_json::from_value::<AskParams>(wire).expect("and parses"),
+            params
+        );
+    }
+
+    /// The answer comes back as the sdk writes it, cancel included: a person
+    /// who answered nothing has answered.
+    #[test]
+    fn an_answer_crosses_as_the_sdk_writes_it() {
+        assert_eq!(
+            serde_json::to_value(AskResult {
+                answer: Answer::Text {
+                    text: "main".into()
+                },
+            })
+            .expect("an answer serialises"),
+            json!({ "answer": { "kind": "text", "text": "main" } })
+        );
+        let cancelled: AskResult =
+            serde_json::from_value(json!({ "answer": { "kind": "cancel" } })).expect("and parses");
+        assert_eq!(cancelled.answer, Answer::Cancel);
+    }
+
+    /// The verdict plane is not a door (ADR-0033 Consequences): the shape a
+    /// process writes can carry a permission prompt's words, so the door
+    /// refuses one — `doors` proves that. What is pinned here is that no
+    /// answer to it is Allow-shaped by accident: the only Allow a person can
+    /// give is to a permission, which is the one kind the door will not open.
+    #[test]
+    fn a_process_may_write_a_question_and_the_door_is_what_refuses_the_rest() {
+        let permission: AskParams = serde_json::from_value(json!({
+            "call": "call_1",
+            "question": { "kind": "permission", "tool": "Bash", "summary": "rm -rf /" }
+        }))
+        .expect("the shape parses; the door is what refuses it");
+        assert!(matches!(
+            permission.question,
+            InteractionKind::Permission { .. }
+        ));
+    }
+
+    /// A notice is told, not asked: a level from the kernel's three, a line,
+    /// and an answer with nothing in it.
+    #[test]
+    fn a_notice_carries_a_level_and_a_line_and_answers_nothing() {
+        let params = NoticeParams {
+            level: Level::Warn,
+            message: "the index is stale".into(),
+        };
+        let wire = serde_json::to_value(&params).expect("a notice serialises");
+        assert_eq!(
+            wire,
+            json!({ "level": "warn", "message": "the index is stale" })
+        );
+        assert_eq!(
+            serde_json::from_value::<NoticeParams>(wire).expect("and parses"),
+            params
+        );
+        assert_eq!(
+            serde_json::to_value(NoticeResult {}).expect("it serialises"),
+            json!({})
+        );
+    }
+
+    /// The set is the kernel's three and nothing else can be written; a
+    /// notice that names no level is the quietest one.
+    #[test]
+    fn a_level_outside_the_kernel_s_three_is_not_a_notice_at_all() {
+        let quiet: NoticeParams =
+            serde_json::from_value(json!({ "message": "nothing much" })).expect("a notice");
+        assert_eq!(quiet.level, Level::Info);
+        for shouted in ["fatal", "critical", "WARN", "debug"] {
+            assert!(
+                serde_json::from_value::<NoticeParams>(json!({ "level": shouted, "message": "x" }))
+                    .is_err(),
+                "{shouted} was read as a level"
+            );
+        }
+    }
+
+    /// The doors are one table, as the methods are: what the schema tells a
+    /// plugin author is what `doors` dispatches on.
+    #[test]
+    fn the_host_speaks_two_doors_and_no_more() {
+        let named: Vec<&str> = METHODS.iter().map(|door| door.0).collect();
+        assert_eq!(named, [ASK, NOTICE]);
+        assert_eq!(KEY, "bingo.host");
     }
 
     /// A question a plugin may write, pinned against the sdk's own type: what
