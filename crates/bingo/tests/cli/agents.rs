@@ -77,6 +77,44 @@ fn a_foreground_agent_answers_the_root_and_stdout_stays_the_root_s() {
     );
 }
 
+/// M32: only a session nobody named earns a name from its first ask. A seat
+/// is named when it is opened, so the mint never reaches it — the child here
+/// is called by its agent name and not by the prompt it was given.
+#[test]
+fn the_mint_names_the_root_and_leaves_a_seat_its_own_name() {
+    let home = tempfile::tempdir().unwrap();
+    let script = script(FOREGROUND);
+    let out = scripted_run(home.path(), &script, &[], "spawn one");
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+
+    let mut named: Vec<(String, String)> =
+        std::fs::read_dir(home.path().join(".bingo/data/sessions"))
+            .expect("the store")
+            .flatten()
+            .filter_map(|entry| {
+                let bytes = std::fs::read(entry.path().join("summary.json")).ok()?;
+                let summary: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+                Some((
+                    summary["title"].as_str()?.to_string(),
+                    summary["key"].as_str().unwrap_or("root").to_string(),
+                ))
+            })
+            .collect();
+    named.sort();
+    assert_eq!(
+        named
+            .iter()
+            .map(|(title, _)| title.as_str())
+            .collect::<Vec<_>>(),
+        ["agent", "spawn one"],
+        "the seat keeps the name it was opened with: {named:?}"
+    );
+    assert!(
+        named[0].1.starts_with("agent/"),
+        "and it is the seat that is called `agent`: {named:?}"
+    );
+}
+
 #[test]
 fn the_child_s_reply_is_the_tool_call_s_result() {
     let home = tempfile::tempdir().unwrap();
