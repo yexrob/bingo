@@ -68,6 +68,13 @@ vocabulary: `Delivery::Hold` and `Delivery::Wake`.
   shadow the holder's authorship; sibling naming already forbids
   duplicates beside the room, the residue is noted in the plan and
   accepted at this scale.
+- An *agent* holder's `@parent` debt does not close itself: the fold
+  matches debts by roster name, and an agent holder signs its title,
+  not `parent`. It is still delivered, woken and nudged; the debt just
+  outlives its answer in `owed`. Closing it would mean threading the
+  holder's title into the pure fold — machinery deferred until an
+  agent-held room actually leans on mention debts (found in M23
+  review, recorded in the plan's Carried).
 
 Refs: ADR-0011 §1, ADR-0022, ADR-0025, ADR-0027; the collaboration
 survey (D95, D98, the mail.rs digest).
