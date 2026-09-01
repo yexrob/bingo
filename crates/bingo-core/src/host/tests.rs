@@ -11,6 +11,7 @@ mod commands;
 mod login;
 mod policy;
 mod providers;
+mod resume;
 mod services;
 mod tree;
 mod views;
@@ -72,6 +73,42 @@ static NEEDY: PluginManifest = PluginManifest {
     requires: &["service:missing"],
     config: None,
 };
+
+static STORE: PluginManifest = PluginManifest {
+    id: "test.store",
+    version: "0",
+    sdk: "^0.1",
+    provides: &["store:memory"],
+    requires: &[],
+    config: None,
+};
+
+/// A host on a shared store, as a second process would be.
+async fn host_on(
+    store: Arc<crate::journal::MemoryStore>,
+    provider: Arc<ScriptedProvider>,
+) -> Arc<Host> {
+    let plugins = vec![
+        TestPlugin::boxed(&PROVIDER, vec![Contribution::Provider(provider)]),
+        TestPlugin::boxed(&STORE, vec![Contribution::Store(store)]),
+    ];
+    let config = HostConfig::new(env()).with_layer("cli", json!({"model": "m"}));
+    Host::build(plugins, config).await.unwrap()
+}
+
+/// Submit once and read until the turn completes; the seq of that frame.
+async fn one_turn(attachment: &mut Attachment, prompt: &str) -> Seq {
+    attachment.handle.submit(
+        IntentId::mint(),
+        Input::text(prompt, Origin::surface("test")),
+    );
+    while let Some(frame) = attachment.events.next().await {
+        if matches!(frame.event, Event::TurnCompleted { .. }) {
+            return frame.seq;
+        }
+    }
+    panic!("the turn never completed");
+}
 
 fn env() -> Env {
     Env {
@@ -494,385 +531,6 @@ async fn a_declared_window_is_the_ruler_the_turn_measures_with() {
         "the input side: the window less the output budget"
     );
     assert_eq!(provider.requests()[0].max_tokens, 25_000, "half the window");
-}
-
-static STORE: PluginManifest = PluginManifest {
-    id: "test.store",
-    version: "0",
-    sdk: "^0.1",
-    provides: &["store:memory"],
-    requires: &[],
-    config: None,
-};
-
-/// A host on a shared store, as a second process would be.
-async fn host_on(
-    store: Arc<crate::journal::MemoryStore>,
-    provider: Arc<ScriptedProvider>,
-) -> Arc<Host> {
-    let plugins = vec![
-        TestPlugin::boxed(&PROVIDER, vec![Contribution::Provider(provider)]),
-        TestPlugin::boxed(&STORE, vec![Contribution::Store(store)]),
-    ];
-    let config = HostConfig::new(env()).with_layer("cli", json!({"model": "m"}));
-    Host::build(plugins, config).await.unwrap()
-}
-
-/// Submit once and read until the turn completes; the seq of that frame.
-async fn one_turn(attachment: &mut Attachment, prompt: &str) -> Seq {
-    attachment.handle.submit(
-        IntentId::mint(),
-        Input::text(prompt, Origin::surface("test")),
-    );
-    while let Some(frame) = attachment.events.next().await {
-        if matches!(frame.event, Event::TurnCompleted { .. }) {
-            return frame.seq;
-        }
-    }
-    panic!("the turn never completed");
-}
-
-#[tokio::test]
-async fn a_stored_session_reopens_on_another_host_with_its_history() {
-    let store = Arc::new(crate::journal::MemoryStore::new());
-    let first = ScriptedProvider::new(vec![Script::Events(text("first answer"))]);
-    let host_a = host_on(store.clone(), first).await;
-    let mut a = host_a
-        .open(
-            SessionSelector::Create {
-                spec: spec("/work"),
-            },
-            who(),
-            OpenOptions::default(),
-        )
-        .await
-        .unwrap();
-    let ended_at = one_turn(&mut a, "hello").await;
-    let id = a.session.clone();
-
-    let second = ScriptedProvider::new(vec![Script::Events(text("second answer"))]);
-    let host_b = host_on(store.clone(), second.clone()).await;
-    let mut b = host_b
-        .open(
-            SessionSelector::ById { id: id.clone() },
-            who(),
-            OpenOptions::default(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(b.session, id);
-    assert!(
-        b.snapshot.seq > ended_at,
-        "a new head after the old journal"
-    );
-    assert!(
-        b.snapshot
-            .items
-            .iter()
-            .any(|i| matches!(&i.body, ItemBody::Assistant { text } if text == "first answer")),
-        "the old items are in the snapshot"
-    );
-    assert!(!b.snapshot.busy());
-
-    one_turn(&mut b, "again").await;
-    let sent = &second.requests()[0].messages;
-    assert!(
-        sent.iter()
-            .any(|m| m.parts.iter().any(|p| p.as_text() == Some("first answer"))),
-        "the next request carries the old conversation: {sent:?}"
-    );
-
-    let listed = host_b
-        .sessions(SessionFilter {
-            cwd: Some("/work".into()),
-            ..SessionFilter::default()
-        })
-        .await
-        .unwrap();
-    assert_eq!(listed.iter().map(|s| &s.id).collect::<Vec<_>>(), [&id]);
-}
-
-#[tokio::test]
-async fn latest_in_a_directory_comes_from_the_store_when_nothing_is_live() {
-    let store = Arc::new(crate::journal::MemoryStore::new());
-    let host_a = host_on(
-        store.clone(),
-        ScriptedProvider::new(vec![Script::Events(text("one"))]),
-    )
-    .await;
-    let mut a = host_a
-        .open(
-            SessionSelector::Create {
-                spec: spec("/work"),
-            },
-            who(),
-            OpenOptions::default(),
-        )
-        .await
-        .unwrap();
-    one_turn(&mut a, "hello").await;
-
-    let host_b = host_on(store.clone(), ScriptedProvider::new(vec![])).await;
-    let b = host_b
-        .open(
-            SessionSelector::Latest {
-                cwd: "/work".into(),
-            },
-            who(),
-            OpenOptions::default(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(b.session, a.session);
-    assert_eq!(b.snapshot.summary.model.as_deref(), Some("m"));
-    let missing = host_b
-        .open(
-            SessionSelector::Latest {
-                cwd: "/elsewhere".into(),
-            },
-            who(),
-            OpenOptions::default(),
-        )
-        .await
-        .err()
-        .unwrap();
-    assert_eq!(missing.code, ErrorCode::SessionNotFound);
-    let unknown = host_b
-        .open(
-            SessionSelector::ById {
-                id: SessionId::from_raw("ses_nope"),
-            },
-            who(),
-            OpenOptions::default(),
-        )
-        .await
-        .err()
-        .unwrap();
-    assert_eq!(unknown.code, ErrorCode::SessionNotFound);
-}
-
-/// A `Log` session (ADR-0011 §1) resolves no model: a host with no provider
-/// at all opens one, records what it is told, and refuses a model change.
-#[tokio::test]
-async fn a_log_session_needs_no_provider_and_answers_nothing() {
-    let host = Host::build(vec![], HostConfig::new(env())).await.unwrap();
-    let spec = SessionSpec {
-        driver: Driver::Log,
-        title: Some("#design".into()),
-        ..spec("/work")
-    };
-    let mut journal = host
-        .open(
-            SessionSelector::Create { spec },
-            who(),
-            OpenOptions::default(),
-        )
-        .await
-        .expect("no provider is needed");
-    assert_eq!(journal.snapshot.summary.driver, Driver::Log);
-    assert!(journal.snapshot.summary.model.is_none());
-
-    journal.handle.submit(
-        IntentId::mint(),
-        Input::text("hello", Origin::surface("test")),
-    );
-    let mut recorded = false;
-    while let Some(frame) = journal.events.next().await {
-        match &frame.event {
-            Event::ItemCompleted { .. } => recorded = true,
-            Event::IntentAck {
-                outcome: IntentOutcome::Applied { .. },
-                ..
-            } => break,
-            Event::TurnStarted { .. } => panic!("a log opens no turn"),
-            _ => {}
-        }
-    }
-    assert!(recorded, "the input is the journal's");
-
-    let err = host
-        .reconfigure(
-            &journal.session,
-            Change::Model {
-                provider: None,
-                model: "m".into(),
-            },
-        )
-        .await
-        .expect_err("there is no model to change");
-    assert_eq!(err.code, ErrorCode::InvalidInput);
-}
-
-/// `deliver` and `extend` reopen a session that is persisted but not live
-/// (ADR-0011 §3), so a roster read from the store can be written to.
-#[tokio::test]
-async fn a_delivery_reaches_a_stored_session_that_is_not_live() {
-    let store = Arc::new(crate::journal::MemoryStore::new());
-    let first = ScriptedProvider::new(vec![Script::Events(text("first answer"))]);
-    let host_a = host_on(store.clone(), first).await;
-    let mut a = host_a
-        .open(
-            SessionSelector::Create {
-                spec: spec("/work"),
-            },
-            who(),
-            OpenOptions::default(),
-        )
-        .await
-        .unwrap();
-    one_turn(&mut a, "hello").await;
-    let id = a.session.clone();
-    drop(a);
-
-    let host_b = host_on(store.clone(), ScriptedProvider::new(vec![])).await;
-    assert!(host_b.live(&id).is_err(), "nothing of it is live here yet");
-    let from_peer = Input::text(
-        "are you there",
-        Origin {
-            surface: "agent".into(),
-            principal: Some("scout".into()),
-            conversation: None,
-        },
-    );
-    host_b
-        .deliver(&id, IntentId::mint(), from_peer, Delivery::Hold)
-        .await
-        .expect("reopened and delivered");
-    assert!(host_b.live(&id).is_ok(), "the delivery reopened it");
-    host_b
-        .extend(&id, "bingo.test", "things", json!([1]))
-        .await
-        .expect("extended in place");
-
-    let b = host_b
-        .open(
-            SessionSelector::ById { id: id.clone() },
-            who(),
-            OpenOptions::default(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(
-        b.snapshot.queue.len(),
-        1,
-        "held in the queue of an idle session"
-    );
-    assert_eq!(b.snapshot.extensions["bingo.test"]["things"], json!([1]));
-}
-
-/// `--continue` means the person's session: `Latest` prefers a root over a
-/// child under it, live or in the store, though the child is newer.
-#[tokio::test]
-async fn latest_prefers_a_root_over_the_newer_child_under_it() {
-    let store = Arc::new(crate::journal::MemoryStore::new());
-    let host_a = host_on(store.clone(), ScriptedProvider::new(vec![])).await;
-    let root = host_a
-        .open(
-            SessionSelector::Create {
-                spec: spec("/work"),
-            },
-            who(),
-            OpenOptions::default(),
-        )
-        .await
-        .unwrap()
-        .session;
-    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-    let child = SessionSpec {
-        parent: Some(ParentLink {
-            session: root.clone(),
-            item: None,
-        }),
-        title: Some("reviewer".into()),
-        ..spec("/work")
-    };
-    host_a
-        .open(
-            SessionSelector::Create { spec: child },
-            who(),
-            OpenOptions::default(),
-        )
-        .await
-        .unwrap();
-    let latest = SessionSelector::Latest {
-        cwd: "/work".into(),
-    };
-    let live = host_a
-        .open(latest.clone(), who(), OpenOptions::default())
-        .await
-        .unwrap();
-    assert_eq!(live.session, root, "live: the root, not its newer child");
-
-    let host_b = host_on(store, ScriptedProvider::new(vec![])).await;
-    let stored = host_b
-        .open(latest, who(), OpenOptions::default())
-        .await
-        .unwrap();
-    assert_eq!(
-        stored.session, root,
-        "stored: the root, not its newer child"
-    );
-}
-
-/// What a session was opened with comes back with it: its extra system
-/// prompt and its tool set are in its summary, so a resume gives them back.
-#[tokio::test]
-async fn a_resumed_session_keeps_its_system_prompt_and_tool_set() {
-    let store = Arc::new(crate::journal::MemoryStore::new());
-    let host_a = host_on(store.clone(), ScriptedProvider::new(vec![])).await;
-    let opened = SessionSpec {
-        system_extra: Some("Be brief.".into()),
-        tools: Some(vec!["Echo".into()]),
-        ..spec("/work")
-    };
-    let id = host_a
-        .open(
-            SessionSelector::Create { spec: opened },
-            who(),
-            OpenOptions::default(),
-        )
-        .await
-        .unwrap()
-        .session;
-
-    let second = ScriptedProvider::new(vec![Script::Events(text("ok"))]);
-    let plugins = vec![
-        TestPlugin::boxed(&PROVIDER, vec![Contribution::Provider(second.clone())]),
-        TestPlugin::boxed(&STORE, vec![Contribution::Store(store)]),
-        TestPlugin::boxed(
-            &TOOLS,
-            vec![Contribution::Tool(Arc::new(EchoTool { read_only: true }))],
-        ),
-    ];
-    let config = HostConfig::new(env()).with_layer("cli", json!({"model": "m"}));
-    let host_b = Host::build(plugins, config).await.unwrap();
-    let mut b = host_b
-        .open(SessionSelector::ById { id }, who(), OpenOptions::default())
-        .await
-        .unwrap();
-    assert_eq!(
-        b.snapshot.summary.system_extra.as_deref(),
-        Some("Be brief.")
-    );
-    assert_eq!(b.snapshot.summary.tools, Some(vec!["Echo".to_string()]));
-    one_turn(&mut b, "hello").await;
-    let request = &second.requests()[0];
-    assert!(
-        request
-            .system
-            .iter()
-            .any(|block| block.text.contains("Be brief.")),
-        "the resumed turn's system prompt carries it"
-    );
-    assert_eq!(
-        request
-            .tools
-            .iter()
-            .map(|t| t.name.as_str())
-            .collect::<Vec<_>>(),
-        ["Echo"],
-        "the resumed turn is held to the tool set"
-    );
 }
 
 static HOOKS: PluginManifest = PluginManifest {
