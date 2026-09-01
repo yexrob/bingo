@@ -30,8 +30,8 @@ pub fn contributor_id(plugin: &str, contributor: &str) -> String {
 
 /// A contributor a plugin process declared, bound to the pipe that answers it.
 pub struct RemoteContributor {
-    plugin: String,
-    /// The id the kernel sees; the process is asked by [`ContributorSpec::id`].
+    /// The id the kernel sees, the plugin's name in it; the process is asked
+    /// by [`ContributorSpec::id`].
     id: String,
     spec: ContributorSpec,
     connection: Arc<Connection>,
@@ -40,7 +40,6 @@ pub struct RemoteContributor {
 impl RemoteContributor {
     pub fn new(plugin: &str, spec: ContributorSpec, connection: Arc<Connection>) -> Self {
         Self {
-            plugin: plugin.to_string(),
             id: contributor_id(plugin, &spec.id),
             spec,
             connection,
@@ -56,12 +55,13 @@ impl RemoteContributor {
 
     /// The pieces, or why there are none. A process that answers late is
     /// reported like one that answers badly: the round is what matters, and
-    /// it has already gone on.
+    /// it has already gone on. Nothing here names the plugin — the kernel
+    /// prints the error under [`Self::id`], which already carries it.
     async fn ask(
         &self,
         params: ContextContributeParams,
     ) -> Result<Vec<ContextPiece>, ContextError> {
-        let value = serde_json::to_value(params).map_err(|e| self.failed(e.to_string()))?;
+        let value = serde_json::to_value(params).map_err(failed)?;
         let answered = tokio::time::timeout(
             deadline::CONTRIBUTE,
             self.connection.request(name::CONTEXT_CONTRIBUTE, value),
@@ -70,18 +70,18 @@ impl RemoteContributor {
         match answered {
             Ok(Ok(value)) => serde_json::from_value::<ContextContributeResult>(value)
                 .map(|result| result.pieces)
-                .map_err(|e| self.failed(e.to_string())),
-            Ok(Err(error)) => Err(self.failed(error.message)),
-            Err(_) => Err(self.failed(format!(
+                .map_err(failed),
+            Ok(Err(error)) => Err(ContextError(error.message)),
+            Err(_) => Err(ContextError(format!(
                 "nothing within {}s; the round went on without it",
                 deadline::CONTRIBUTE.as_secs()
             ))),
         }
     }
+}
 
-    fn failed(&self, why: String) -> ContextError {
-        ContextError(format!("{}: {why}", self.plugin))
-    }
+fn failed(error: serde_json::Error) -> ContextError {
+    ContextError(error.to_string())
 }
 
 #[async_trait]
@@ -149,7 +149,11 @@ mod tests {
             .await
             .expect_err("a process that says nothing contributes nothing");
         let said = error.to_string();
-        assert!(said.starts_with("notes: "), "{said}");
         assert!(said.contains("within 3s"), "{said}");
+        assert_eq!(
+            format!("{}: {said}", remote.id()),
+            "notes:recall: nothing within 3s; the round went on without it",
+            "the kernel's notice names whose deadline was missed"
+        );
     }
 }
