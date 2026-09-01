@@ -109,3 +109,9 @@ that window invisible, so land it with brick 1 in one commit.
   Carried said "widen only if it ever flakes quiet"; it has. Filed to
   its own worker: fix the test's determinism (or teach provider-fake
   addressed responses), never the assertion.
+  Repaid 2026-09-01 (worker R, merged `6f41f42`): cursor theft proven
+  by forcing the interleaving, the product hypothesis refuted — fan-out,
+  wakes and ordering correct in every run. `provider-fake` responses
+  gained an optional `when` matcher (first-free-match dealing; a
+  matcherless script is dealt byte-identically, schema-pinned) and the
+  relay script now addresses its two sides. 50 consecutive green loops.
