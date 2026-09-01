@@ -15,8 +15,11 @@ bill, no authorization, and no visibility. The taxonomy that survived
 the discussion: what is visible and attributable (spawn, post) crosses
 as a plugin-owned service (ADR-0031); what only observes rides
 ADR-0032's observe lane; what **spends** — money, the person's
-attention — crosses as an allowance: minted for one crossing, metered,
-and dead when the crossing ends.
+attention, or their private data — crosses as an allowance: minted for
+one crossing, metered, and dead when the crossing ends. The family's
+test is irreversible outflow of something the person owns: what the
+permission gate already checks per action, and what the journal
+already attributes, need no allowance.
 
 ## Decision
 
