@@ -414,39 +414,46 @@ fn turns(frames: &[Frame]) -> usize {
         .count()
 }
 
-/// Three roles seated silent in one room, and one post to start them. Every
-/// response the root gets goes out in one order — a spawn returns at once, so
-/// nothing else has a turn until the kickoff lands — and the root's own tail
-/// is asked for before the fan-out reaches anyone, so it holds the run open
-/// while the members relay.
+/// Three roles seated silent in one room, and one post to start them.
 ///
-/// After that the members race, and the script is written so the race cannot
-/// decide anything: each round of three responses — the last poster's
-/// wrap-up and the two members its post woke — carries exactly one post, and
-/// every one of the three has read the room's head, so whichever takes it
-/// lands it. What is asserted is what holds either way: one post per round,
-/// the count reaching three, and no dispatch from the parent.
+/// Four sessions share one script here, and the script is dealt to whoever
+/// asks next, so every response is addressed to the side that must have it.
+/// The parent is known by the person's prompt, which only its own transcript
+/// carries; a member is known by the `[from … in #relay]` header a post is
+/// fanned out under, which only a session that was handed one carries. The
+/// parent is not in the room and no member is ever told what the person said,
+/// so neither can take the other's turn however the two races land.
+///
+/// Within the members the race still decides nothing, and now that is all it
+/// can do: each round of three responses — the last poster's wrap-up and the
+/// two members its post woke — carries exactly one post, and every one of the
+/// three has read the room's head, so whichever takes it lands it. The
+/// parent's tail is a delay long enough to hold the run open while a relay
+/// that takes milliseconds runs; it is a liveness bound, not a bet on who
+/// asks first.
 const RELAY: &str = r##"{"responses":[
-    {"steps":[{"toolCall":{"name":"SpawnAgent","input":{"name":"alpha","prompt":"You count in #relay: when a post hands you a number, post the next one.","standby":true}}}]},
-    {"steps":[{"toolCall":{"name":"SpawnAgent","input":{"name":"beta","prompt":"You count in #relay: when a post hands you a number, post the next one.","standby":true}}}]},
-    {"steps":[{"toolCall":{"name":"SpawnAgent","input":{"name":"gamma","prompt":"You count in #relay: when a post hands you a number, post the next one.","standby":true}}}]},
-    {"steps":[{"toolCall":{"name":"SendMessage","input":{"to":"#relay","text":"count to 3, starting at 1"}}}]},
-    {"steps":[{"delay":{"ms":5000}},{"text":"they have it"}]},
-    {"steps":[{"toolCall":{"name":"SendMessage","input":{"to":"#relay","text":"1"}}}]},
-    {"steps":[{"text":"not mine"}]},
-    {"steps":[{"text":"not mine"}]},
-    {"steps":[{"toolCall":{"name":"SendMessage","input":{"to":"#relay","text":"2"}}}]},
-    {"steps":[{"text":"not mine"}]},
-    {"steps":[{"text":"not mine"}]},
-    {"steps":[{"toolCall":{"name":"SendMessage","input":{"to":"#relay","text":"3"}}}]},
-    {"steps":[{"text":"not mine"}]},
-    {"steps":[{"text":"not mine"}]},
-    {"steps":[{"text":"done"}]},
-    {"steps":[{"text":"done"}]},
-    {"steps":[{"text":"done"}]},
-    {"steps":[{"text":"done"}]},
-    {"steps":[{"text":"done"}]},
-    {"steps":[{"text":"done"}]}
+    {"when":{"contains":"seat the relay"},"steps":[{"toolCall":{"name":"SpawnAgent","input":{"name":"alpha","prompt":"You count in #relay: when a post hands you a number, post the next one.","standby":true}}}]},
+    {"when":{"contains":"seat the relay"},"steps":[{"toolCall":{"name":"SpawnAgent","input":{"name":"beta","prompt":"You count in #relay: when a post hands you a number, post the next one.","standby":true}}}]},
+    {"when":{"contains":"seat the relay"},"steps":[{"toolCall":{"name":"SpawnAgent","input":{"name":"gamma","prompt":"You count in #relay: when a post hands you a number, post the next one.","standby":true}}}]},
+    {"when":{"contains":"seat the relay"},"steps":[{"toolCall":{"name":"SendMessage","input":{"to":"#relay","text":"count to 3, starting at 1"}}}]},
+    {"when":{"contains":"seat the relay"},"steps":[{"delay":{"ms":5000}},{"text":"they have it"}]},
+    {"when":{"contains":"in #relay]"},"steps":[{"toolCall":{"name":"SendMessage","input":{"to":"#relay","text":"1"}}}]},
+    {"when":{"contains":"in #relay]"},"steps":[{"text":"not mine"}]},
+    {"when":{"contains":"in #relay]"},"steps":[{"text":"not mine"}]},
+    {"when":{"contains":"in #relay]"},"steps":[{"toolCall":{"name":"SendMessage","input":{"to":"#relay","text":"2"}}}]},
+    {"when":{"contains":"in #relay]"},"steps":[{"text":"not mine"}]},
+    {"when":{"contains":"in #relay]"},"steps":[{"text":"not mine"}]},
+    {"when":{"contains":"in #relay]"},"steps":[{"toolCall":{"name":"SendMessage","input":{"to":"#relay","text":"3"}}}]},
+    {"when":{"contains":"in #relay]"},"steps":[{"text":"not mine"}]},
+    {"when":{"contains":"in #relay]"},"steps":[{"text":"not mine"}]},
+    {"when":{"contains":"in #relay]"},"steps":[{"text":"done"}]},
+    {"when":{"contains":"in #relay]"},"steps":[{"text":"done"}]},
+    {"when":{"contains":"in #relay]"},"steps":[{"text":"done"}]},
+    {"when":{"contains":"in #relay]"},"steps":[{"text":"done"}]},
+    {"when":{"contains":"in #relay]"},"steps":[{"text":"done"}]},
+    {"when":{"contains":"in #relay]"},"steps":[{"text":"done"}]},
+    {"when":{"contains":"seat the relay"},"steps":[{"text":"done"}]},
+    {"when":{"contains":"seat the relay"},"steps":[{"text":"done"}]}
 ]}"##;
 
 /// ADR-0027 end to end: three members seated silent, one kickoff post, and a

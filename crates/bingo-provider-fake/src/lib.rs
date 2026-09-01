@@ -6,9 +6,15 @@
 //! script knows every event it will see. Requests are recorded and validated
 //! the way a real API validates them, so a malformed conversation fails here
 //! instead of at the first real provider.
+//!
+//! Responses are handed out in order, one per `stream()` call. One script
+//! serves every session of a run, so as soon as two sessions are awake that
+//! order is decided by whichever of them asks first. A response that must not
+//! be spent on the wrong one carries a `when` matcher and waits for the
+//! request it was written for; a response without one goes to whoever asks
+//! next, which is what a single-session script wants.
 
 use std::path::Path;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -48,6 +54,37 @@ pub struct Response {
     /// Overrides the finish reason derived from the steps.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finish: Option<UnifiedFinish>,
+    /// Which requests may take this response. Without one it goes to whichever
+    /// session asks next; with one it is passed over until its own asker comes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub when: Option<Match>,
+}
+
+impl Response {
+    /// Whether a request carrying `text` may be answered with this response.
+    fn answers(&self, text: &str) -> bool {
+        self.when.as_ref().is_none_or(|when| when.matches(text))
+    }
+}
+
+/// What a response waits for: a way of recognising the request it was written
+/// for, so a script shared by several sessions can address a turn instead of
+/// racing for it.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub enum Match {
+    /// The request carries this text somewhere — its system prompt, a message,
+    /// a tool call's input, or a tool result. Pick something only the intended
+    /// session can have said or been told.
+    Contains(String),
+}
+
+impl Match {
+    fn matches(&self, text: &str) -> bool {
+        match self {
+            Self::Contains(needle) => text.contains(needle),
+        }
+    }
 }
 
 /// One block of a response.
@@ -90,6 +127,7 @@ impl Script {
             responses: vec![Response {
                 steps: vec![Step::Text("Hello from the fake provider.".into())],
                 finish: Some(UnifiedFinish::Stop),
+                when: None,
             }],
             side: Vec::new(),
         }
@@ -108,10 +146,12 @@ impl Script {
                         },
                     ],
                     finish: Some(UnifiedFinish::ToolCalls),
+                    when: None,
                 },
                 Response {
                     steps: vec![Step::Text("Read it.".into())],
                     finish: Some(UnifiedFinish::Stop),
+                    when: None,
                 },
             ],
             side: Vec::new(),
@@ -140,23 +180,72 @@ impl Script {
     }
 }
 
+/// A list of responses and which of them have been handed out. A request takes
+/// the first one still free that it matches, so an unaddressed script is dealt
+/// straight down the list while an addressed response is passed over until the
+/// request it names arrives.
+#[derive(Debug)]
+struct Deck {
+    responses: Vec<Response>,
+    taken: Mutex<Vec<bool>>,
+}
+
+impl Deck {
+    fn new(responses: Vec<Response>) -> Self {
+        let taken = Mutex::new(vec![false; responses.len()]);
+        Self { responses, taken }
+    }
+
+    /// The first free response a request carrying `text` matches, marked taken.
+    fn claim(&self, text: &str) -> Option<(usize, &Response)> {
+        let mut taken = self.lock_taken();
+        let index = self
+            .responses
+            .iter()
+            .enumerate()
+            .find(|(index, response)| !taken[*index] && response.answers(text))
+            .map(|(index, _)| index)?;
+        taken[index] = true;
+        Some((index, &self.responses[index]))
+    }
+
+    /// How many responses nobody has taken yet.
+    fn free(&self) -> usize {
+        self.lock_taken().iter().filter(|taken| !**taken).count()
+    }
+
+    fn lock_taken(&self) -> std::sync::MutexGuard<'_, Vec<bool>> {
+        // A panic in another thread must not strand every request after it.
+        self.taken.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+/// What a request that could take nothing is told: a spent script and one
+/// whose remainder belongs to other sessions are different mistakes.
+fn nothing_left(free: usize) -> ProviderError {
+    if free == 0 {
+        return request_error("script exhausted");
+    }
+    request_error(format!(
+        "script exhausted for this request: {free} response(s) left, none addressed to it"
+    ))
+}
+
 /// A provider that replays a script and records what it was asked.
 #[derive(Debug)]
 pub struct FakeProvider {
-    script: Script,
-    /// The next response to hand out; also the number of `stream()` calls served.
-    cursor: AtomicUsize,
-    /// Where the side answers are up to; the two lists move independently.
-    side_cursor: AtomicUsize,
+    conversation: Deck,
+    /// Side questions are dealt from their own deck, so one never spends a
+    /// response the conversation was going to need.
+    side: Deck,
     requests: Mutex<Vec<ModelRequest>>,
 }
 
 impl FakeProvider {
     pub fn new(script: Script) -> Self {
         Self {
-            script,
-            cursor: AtomicUsize::new(0),
-            side_cursor: AtomicUsize::new(0),
+            conversation: Deck::new(script.responses),
+            side: Deck::new(script.side),
             requests: Mutex::new(Vec::new()),
         }
     }
@@ -236,6 +325,44 @@ fn request_chars(request: &ModelRequest) -> usize {
     system + messages + tools
 }
 
+/// Everything a request says, for a response's `when` to read: the system
+/// prompt and every message part, a tool call's input and a tool result
+/// included. The tool specs are left out — they are the same on every request,
+/// so nothing in them can tell one session from another.
+fn request_text(request: &ModelRequest) -> String {
+    let mut text = String::new();
+    for block in &request.system {
+        text.push_str(&block.text);
+        text.push('\n');
+    }
+    for part in request.messages.iter().flat_map(|m| m.parts.iter()) {
+        push_part_text(&mut text, part);
+    }
+    text
+}
+
+/// One part's text, appended; a tool result is whatever its own parts say.
+fn push_part_text(text: &mut String, part: &ContentPart) {
+    match part {
+        ContentPart::Text { text: said } | ContentPart::Reasoning { text: said, .. } => {
+            text.push_str(said);
+            text.push('\n');
+        }
+        ContentPart::ToolUse { name, input, .. } => {
+            text.push_str(name);
+            text.push('\n');
+            text.push_str(&json_text(input));
+            text.push('\n');
+        }
+        ContentPart::ToolResult { parts, .. } => {
+            for part in parts {
+                push_part_text(text, part);
+            }
+        }
+        ContentPart::Image { .. } => {}
+    }
+}
+
 fn part_chars(part: &ContentPart) -> usize {
     match part {
         ContentPart::Text { text } => text.chars().count(),
@@ -299,10 +426,9 @@ fn nothing_to_say(input_chars: usize) -> Vec<Result<ModelEvent, ProviderError>> 
 
 impl FakeProvider {
     /// The next side answer, or nothing to say.
-    fn side_answer(&self, input_chars: usize) -> ModelStream {
-        let index = self.side_cursor.fetch_add(1, Ordering::SeqCst);
-        let events: Vec<Result<ModelEvent, ProviderError>> = match self.script.side.get(index) {
-            Some(response) => beats(response, index, input_chars)
+    fn side_answer(&self, text: &str, input_chars: usize) -> ModelStream {
+        let events: Vec<Result<ModelEvent, ProviderError>> = match self.side.claim(text) {
+            Some((index, response)) => beats(response, index, input_chars)
                 .into_iter()
                 .filter_map(|beat| match beat {
                     Beat::Event(event) => Some(Ok(event)),
@@ -458,6 +584,7 @@ impl Provider for FakeProvider {
         cancel: CancellationToken,
     ) -> Result<ModelStream, ProviderError> {
         let input_chars = request_chars(&request);
+        let text = request_text(&request);
         // Recorded before it is judged: a rejected request is the one a test
         // most wants to read back.
         let verdict = validate(&request);
@@ -465,11 +592,10 @@ impl Provider for FakeProvider {
         self.lock_requests().push(request);
         verdict?;
         if side {
-            return Ok(self.side_answer(input_chars));
+            return Ok(self.side_answer(&text, input_chars));
         }
-        let index = self.cursor.fetch_add(1, Ordering::SeqCst);
-        let Some(response) = self.script.responses.get(index) else {
-            return Err(request_error("script exhausted"));
+        let Some((index, response)) = self.conversation.claim(&text) else {
+            return Err(nothing_left(self.conversation.free()));
         };
         let beats = beats(response, index, input_chars).into_iter();
         Ok(Box::pin(futures::stream::unfold(
@@ -562,6 +688,7 @@ mod side_tests {
             responses: vec![Response {
                 steps: vec![Step::Text("the turn's answer".into())],
                 finish: None,
+                when: None,
             }],
 
             side: Vec::new(),
@@ -611,6 +738,206 @@ mod side_tests {
 }
 
 #[cfg(test)]
+mod addressed_tests {
+    use super::*;
+    use bingo_sdk::{Message, ProviderMetadata};
+    use futures::StreamExt;
+
+    fn request(text: &str) -> ModelRequest {
+        ModelRequest {
+            model: FAKE_MODEL.into(),
+            max_tokens: 16,
+            system: Vec::new(),
+            messages: vec![Message::text(Role::User, text)],
+            tools: Vec::new(),
+            reasoning: None,
+            provider_options: ProviderMetadata::new(),
+        }
+    }
+
+    fn addressed(needle: &str, says: &str) -> Response {
+        Response {
+            steps: vec![Step::Text(says.into())],
+            finish: None,
+            when: Some(Match::Contains(needle.into())),
+        }
+    }
+
+    fn open(says: &str) -> Response {
+        Response {
+            steps: vec![Step::Text(says.into())],
+            finish: None,
+            when: None,
+        }
+    }
+
+    fn script(responses: Vec<Response>) -> Script {
+        Script {
+            responses,
+            side: Vec::new(),
+        }
+    }
+
+    /// What one `stream()` call said, and the id of the response it came from —
+    /// `fake-<index>`, so a test can see where in the script it was taken from.
+    async fn answer(provider: &FakeProvider, asks: ModelRequest) -> (String, Option<String>) {
+        let mut stream = provider
+            .stream(asks, CancellationToken::new())
+            .await
+            .expect("a response");
+        let (mut said, mut from) = (String::new(), None);
+        while let Some(event) = stream.next().await {
+            match event {
+                Ok(ModelEvent::TextDelta { delta, .. }) => said.push_str(&delta),
+                Ok(ModelEvent::ResponseMetadata { id, .. }) => from = id,
+                _ => {}
+            }
+        }
+        (said, from)
+    }
+
+    /// The defect `when` exists for: one script serves every session of a run,
+    /// so a response written for one of them is spent on whichever asks next.
+    /// Addressed, it survives being asked for out of order — and the ids still
+    /// come from where the response sits in the script, not from when it went.
+    #[tokio::test]
+    async fn an_addressed_response_waits_for_its_own_asker() {
+        let provider = FakeProvider::new(script(vec![
+            addressed("seat the relay", "the parent's tail"),
+            addressed("in #relay]", "the member's count"),
+        ]));
+
+        assert_eq!(
+            answer(&provider, request("[from parent in #relay]\ncount to 3")).await,
+            ("the member's count".into(), Some("fake-1".into())),
+            "the member took the response written for it, not the one in front of it"
+        );
+        assert_eq!(
+            answer(&provider, request("seat the relay and start it")).await,
+            ("the parent's tail".into(), Some("fake-0".into())),
+            "and the parent's was still waiting when the parent came for it"
+        );
+    }
+
+    /// A script that addresses nothing is dealt straight down the list — which
+    /// is every script written before `when` existed.
+    #[tokio::test]
+    async fn an_unaddressed_script_is_dealt_in_order() {
+        let provider = FakeProvider::new(script(vec![open("first"), open("second")]));
+        assert_eq!(answer(&provider, request("alice")).await.0, "first");
+        assert_eq!(answer(&provider, request("bob")).await.0, "second");
+    }
+
+    /// The sharp edge of the rule: addressing protects only what carries a
+    /// matcher. An open response in front of one still goes to whoever asks.
+    #[tokio::test]
+    async fn an_open_response_is_taken_by_whoever_asks_first() {
+        let provider = FakeProvider::new(script(vec![
+            open("anyone's"),
+            addressed("parent", "the parent's"),
+        ]));
+        assert_eq!(
+            answer(&provider, request("parent")).await.0,
+            "anyone's",
+            "the open response was in front, so the parent took that"
+        );
+    }
+
+    /// `when` reads the whole request, not the last thing said into it: a
+    /// session is known by anything in its transcript, a tool result included.
+    #[tokio::test]
+    async fn a_matcher_reads_tool_calls_and_their_results() {
+        let provider = FakeProvider::new(script(vec![addressed("is seated and idle", "go on")]));
+        let mut asks = request("seat one");
+        asks.messages
+            .push(Message::assistant(vec![ContentPart::ToolUse {
+                id: "call_0".into(),
+                name: "SpawnAgent".into(),
+                input: serde_json::json!({ "name": "alpha" }),
+            }]));
+        asks.messages
+            .push(Message::user(vec![ContentPart::ToolResult {
+                tool_use_id: "call_0".into(),
+                parts: vec![ContentPart::text("alpha is seated and idle")],
+                is_error: false,
+            }]));
+
+        assert_eq!(answer(&provider, asks).await.0, "go on");
+    }
+
+    /// A request nothing left is addressed to is told exactly that, instead of
+    /// being handed a response written for somebody else.
+    #[tokio::test]
+    async fn a_request_matching_nothing_left_is_refused() {
+        let provider = FakeProvider::new(script(vec![addressed("parent", "the parent's")]));
+        let refused = provider
+            .stream(request("a member"), CancellationToken::new())
+            .await
+            .err();
+        let Some(ProviderError::Request { message }) = refused else {
+            panic!("nothing here is addressed to a member: {refused:?}");
+        };
+        assert!(message.contains("1 response(s) left"), "{message}");
+        assert!(message.contains("none addressed to it"), "{message}");
+    }
+
+    /// A spent script still says the one thing every script test knows.
+    #[tokio::test]
+    async fn a_spent_script_is_exhausted() {
+        let provider = FakeProvider::new(script(vec![open("only")]));
+        answer(&provider, request("first")).await;
+        assert_eq!(
+            provider
+                .stream(request("second"), CancellationToken::new())
+                .await
+                .err(),
+            Some(ProviderError::Request {
+                message: "script exhausted".into()
+            })
+        );
+    }
+
+    /// The side list is dealt by the same rule, so two plugins asking beside
+    /// one conversation are not the same race the conversation just lost.
+    #[tokio::test]
+    async fn a_side_question_takes_the_side_response_addressed_to_it() {
+        let provider = FakeProvider::new(Script {
+            responses: Vec::new(),
+            side: vec![
+                addressed("what did we learn", "a fact"),
+                addressed("what is it called", "a name"),
+            ],
+        });
+        let mut asks = request("what is it called?");
+        let mut about = serde_json::Map::new();
+        about.insert("purpose".into(), Value::String("naming".into()));
+        asks.provider_options.insert("bingo".into(), about);
+
+        assert_eq!(answer(&provider, asks).await.0, "a name");
+    }
+
+    /// The field is optional: a script written before `when` existed parses
+    /// unchanged, and one that sets none serialises without mentioning it.
+    #[test]
+    fn when_is_optional_in_the_script_schema() {
+        let plain = Script::from_json(r#"{"responses":[{"steps":[{"text":"hi"}]}]}"#)
+            .expect("a script without `when` parses");
+        assert_eq!(plain.responses[0].when, None);
+        let json = serde_json::to_string(&plain).expect("serialize");
+        assert!(!json.contains("when"), "{json}");
+
+        let addressed = Script::from_json(
+            r#"{"responses":[{"steps":[{"text":"hi"}],"when":{"contains":"a"}}]}"#,
+        )
+        .expect("a script with `when` parses");
+        assert_eq!(
+            addressed.responses[0].when,
+            Some(Match::Contains("a".into()))
+        );
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use bingo_sdk::{Contribution, Message};
@@ -646,6 +973,7 @@ mod tests {
             responses: vec![Response {
                 steps: vec![Step::Text("0123456789".into())],
                 finish: None,
+                when: None,
             }],
 
             side: Vec::new(),
@@ -730,6 +1058,7 @@ mod tests {
                     input: serde_json::json!({}),
                 }],
                 finish: None,
+                when: None,
             }],
 
             side: Vec::new(),
@@ -760,6 +1089,7 @@ mod tests {
                     Step::Text("never".into()),
                 ],
                 finish: None,
+                when: None,
             }],
 
             side: Vec::new(),
@@ -787,6 +1117,7 @@ mod tests {
             responses: vec![Response {
                 steps: vec![Step::Reasoning("think".into())],
                 finish: None,
+                when: None,
             }],
 
             side: Vec::new(),
@@ -824,6 +1155,7 @@ mod tests {
             responses: vec![Response {
                 steps: vec![Step::Delay { ms: 5_000 }, Step::Text("late".into())],
                 finish: None,
+                when: None,
             }],
 
             side: Vec::new(),
@@ -839,6 +1171,7 @@ mod tests {
             responses: vec![Response {
                 steps: vec![Step::Text("0123456789abcdefgh".into())],
                 finish: None,
+                when: None,
             }],
 
             side: Vec::new(),
@@ -967,6 +1300,7 @@ mod tests {
                         Step::Error(ProviderError::Timeout),
                     ],
                     finish: Some(UnifiedFinish::Length),
+                    when: None,
                 },
                 Response::default(),
             ],
