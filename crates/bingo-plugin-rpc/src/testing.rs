@@ -23,7 +23,7 @@ pub fn unanswering() -> Arc<Connection> {
         args: Vec::new(),
         env: Default::default(),
     };
-    let connection = Connection::spawn("quiet", &entry, dir.path(), dir.path())
+    let connection = Connection::spawn("quiet", &entry, dir.path(), dir.path(), None)
         .expect("`cat` exists on every unix");
     Arc::new(connection)
 }

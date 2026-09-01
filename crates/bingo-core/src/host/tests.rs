@@ -11,6 +11,7 @@ mod commands;
 mod login;
 mod policy;
 mod providers;
+mod services;
 mod tree;
 mod views;
 

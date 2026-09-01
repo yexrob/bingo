@@ -10,6 +10,12 @@
 //! A stream's queue is bounded, and the reader waits on it: a process that
 //! writes faster than a turn reads blocks on its own pipe rather than growing a
 //! queue in this one.
+//!
+//! One kind of line comes the other way round: a request. Exactly one method
+//! is served — `service/call` (ADR-0031 §4) — on a task of its own, so a slow
+//! service never stops this reader; every other method a process asks for
+//! keeps the refusal it has always had, because what more a process may ask
+//! the host is a decision to be taken, not a door to be widened here.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -28,6 +34,7 @@ use crate::codec::{
     Id, Message, Notification, Outcome, Request, Response, RpcError, TRANSPORT_ERROR,
 };
 use crate::manifest::Entry;
+use crate::service::ServiceCalls;
 use crate::wire::{ProviderDeltaParams, ToolProgressParams, name};
 
 /// What a request came back with.
@@ -38,8 +45,65 @@ pub fn log_path(data_dir: &Path, plugin: &str) -> std::path::PathBuf {
     data_dir.join("logs").join(format!("plugin-{plugin}.log"))
 }
 
-/// Where a reply and a progress line go, and whether the process is still
-/// there to send either.
+/// The writing half of the pipe: one whole message at a time, in the order
+/// the host wrote them. The reader answers a process's own request on it, so
+/// it is shared rather than owned by the connection alone.
+#[derive(Debug)]
+struct Writer(tokio::sync::Mutex<ChildStdin>);
+
+impl Writer {
+    async fn write(&self, message: Message) -> Result<(), String> {
+        let line = message.line().map_err(|e| e.to_string())?;
+        let mut stdin = self.0.lock().await;
+        stdin
+            .write_all(line.as_bytes())
+            .await
+            .map_err(|e| e.to_string())?;
+        stdin.write_all(b"\n").await.map_err(|e| e.to_string())?;
+        stdin.flush().await.map_err(|e| e.to_string())
+    }
+}
+
+/// Who answers the one request a process may send, and how the answer gets
+/// back to it. Absent where nobody is serving — a connection a test drives,
+/// a host that keeps no services — and then that request is refused like any
+/// other (ADR-0031 §4).
+struct Serving {
+    calls: Arc<dyn ServiceCalls>,
+    writer: Arc<Writer>,
+}
+
+impl std::fmt::Debug for Serving {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Serving")
+    }
+}
+
+impl Serving {
+    /// On a task of its own: a service that takes a second must not stop the
+    /// reader, which is also carrying this process's replies and deltas.
+    fn answer(&self, request: Request) {
+        let (calls, writer) = (Arc::clone(&self.calls), Arc::clone(&self.writer));
+        tokio::spawn(async move {
+            let answered = match calls.call(request.params).await {
+                Ok(result) => Response::ok(request.id, result),
+                Err(error) => Response::failed(Some(request.id), error),
+            };
+            if let Err(why) = writer.write(Message::Response(answered)).await {
+                tracing::debug!(%why, "an answer to a plugin went nowhere");
+            }
+        });
+    }
+}
+
+/// Whether the host answers a request a process sent at all. Exactly one
+/// method, by name (ADR-0031 §4).
+fn served(method: &str) -> bool {
+    method == name::SERVICE_CALL
+}
+
+/// Where a reply and a progress line go, whether the process is still there
+/// to send either, and who answers the one thing it may ask.
 #[derive(Debug, Default)]
 struct Router {
     alive: AtomicBool,
@@ -48,6 +112,7 @@ struct Router {
     waiting: Mutex<HashMap<Id, oneshot::Sender<Reply>>>,
     running: Mutex<HashMap<String, UnboundedSender<String>>>,
     streaming: Mutex<HashMap<String, Sender<ModelEvent>>>,
+    serving: Option<Serving>,
 }
 
 impl Router {
@@ -71,11 +136,20 @@ impl Router {
             Ok(Message::Notification(notification)) => {
                 self.notification(plugin, notification).await
             }
-            Ok(Message::Request(request)) => {
-                tracing::warn!(plugin, method = %request.method, "a plugin asked, which it may not");
-            }
+            Ok(Message::Request(request)) => self.asked(plugin, request),
             Err(error) => {
                 tracing::warn!(plugin, %error, "a plugin sent a line that is not a message");
+            }
+        }
+    }
+
+    /// The one request a process may send the host, and the refusal every
+    /// other one has always had.
+    fn asked(&self, plugin: &str, request: Request) {
+        match self.serving.as_ref().filter(|_| served(&request.method)) {
+            Some(serving) => serving.answer(request),
+            None => {
+                tracing::warn!(plugin, method = %request.method, "a plugin asked, which it may not");
             }
         }
     }
@@ -149,7 +223,7 @@ impl Router {
 pub struct Connection {
     plugin: String,
     child: tokio::sync::Mutex<Child>,
-    stdin: tokio::sync::Mutex<ChildStdin>,
+    writer: Arc<Writer>,
     next_id: AtomicI64,
     router: Arc<Router>,
 }
@@ -172,6 +246,7 @@ impl Connection {
         entry: &Entry,
         root: &Path,
         data_dir: &Path,
+        serving: Option<Arc<dyn ServiceCalls>>,
     ) -> Result<Self, String> {
         let mut command = Command::new(&entry.command);
         command
@@ -188,19 +263,30 @@ impl Connection {
         let (Some(stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
             return Err("the child was spawned without pipes".to_string());
         };
-        Ok(Self::over(plugin, child, stdin, stdout))
+        Ok(Self::over(plugin, child, stdin, stdout, serving))
     }
 
-    fn over(plugin: &str, child: Child, stdin: ChildStdin, stdout: ChildStdout) -> Self {
+    fn over(
+        plugin: &str,
+        child: Child,
+        stdin: ChildStdin,
+        stdout: ChildStdout,
+        serving: Option<Arc<dyn ServiceCalls>>,
+    ) -> Self {
+        let writer = Arc::new(Writer(tokio::sync::Mutex::new(stdin)));
         let router = Arc::new(Router {
             alive: AtomicBool::new(true),
+            serving: serving.map(|calls| Serving {
+                calls,
+                writer: Arc::clone(&writer),
+            }),
             ..Router::default()
         });
         tokio::spawn(pump(plugin.to_string(), stdout, Arc::clone(&router)));
         Self {
             plugin: plugin.to_string(),
             child: tokio::sync::Mutex::new(child),
-            stdin: tokio::sync::Mutex::new(stdin),
+            writer,
             next_id: AtomicI64::new(1),
             router,
         }
@@ -282,14 +368,7 @@ impl Connection {
     }
 
     async fn write(&self, message: Message) -> Result<(), String> {
-        let line = message.line().map_err(|e| e.to_string())?;
-        let mut stdin = self.stdin.lock().await;
-        stdin
-            .write_all(line.as_bytes())
-            .await
-            .map_err(|e| e.to_string())?;
-        stdin.write_all(b"\n").await.map_err(|e| e.to_string())?;
-        stdin.flush().await.map_err(|e| e.to_string())
+        self.writer.write(message).await
     }
 }
 
@@ -389,6 +468,7 @@ mod tests {
             &entry("bingo-no-such-plugin", &[]),
             dir.path(),
             dir.path(),
+            None,
         )
         .expect_err("there is no such command");
         assert!(
@@ -409,8 +489,9 @@ mod tests {
     #[tokio::test]
     async fn a_request_whose_process_ends_fails_instead_of_hanging() {
         let dir = tempfile::tempdir().expect("a temporary directory");
-        let connection = Connection::spawn("quiet", &entry("true", &[]), dir.path(), dir.path())
-            .expect("`true` exists on every unix");
+        let connection =
+            Connection::spawn("quiet", &entry("true", &[]), dir.path(), dir.path(), None)
+                .expect("`true` exists on every unix");
         let error = connection
             .request("initialize", json!({}))
             .await
@@ -512,8 +593,53 @@ mod tests {
     #[tokio::test]
     async fn one_process_mints_one_series_of_stream_names() {
         let dir = tempfile::tempdir().expect("a temporary directory");
-        let connection = Connection::spawn("quiet", &entry("cat", &[]), dir.path(), dir.path())
-            .expect("`cat` exists on every unix");
+        let connection =
+            Connection::spawn("quiet", &entry("cat", &[]), dir.path(), dir.path(), None)
+                .expect("`cat` exists on every unix");
         assert_ne!(connection.next_call(), connection.next_call());
+    }
+
+    /// The whole of the reverse lane's width (ADR-0031 §4): one method. What
+    /// else a process may ask the host for is a decision nobody has taken.
+    #[test]
+    fn exactly_one_method_travels_from_a_process_to_the_host() {
+        assert!(served(name::SERVICE_CALL));
+        for other in [
+            name::INITIALIZE,
+            name::TOOL_CALL,
+            name::COMMAND_RUN,
+            name::COMMAND_COMPLETE,
+            name::CONTEXT_CONTRIBUTE,
+            name::COMPACTOR_COMPACT,
+            name::PROVIDER_STREAM,
+        ] {
+            assert!(
+                !served(other),
+                "{other} is the host's to ask, not to answer"
+            );
+        }
+    }
+
+    /// A request nobody serves is refused where it arrives, and the reader
+    /// carries on: a plugin that asks what it may not is not fatal.
+    #[tokio::test]
+    async fn a_request_the_host_does_not_serve_is_refused_and_the_reader_goes_on() {
+        let router = Router {
+            alive: AtomicBool::new(true),
+            ..Router::default()
+        };
+        router
+            .line(
+                "noisy",
+                r#"{"jsonrpc":"2.0","id":1,"method":"tool/call","params":{}}"#,
+            )
+            .await;
+        router
+            .line(
+                "noisy",
+                r#"{"jsonrpc":"2.0","id":2,"method":"service/call","params":{"key":"kv","method":"get"}}"#,
+            )
+            .await;
+        assert!(router.alive.load(Ordering::Acquire));
     }
 }
