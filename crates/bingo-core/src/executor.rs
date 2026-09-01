@@ -177,6 +177,7 @@ mod tests {
 
     use async_trait::async_trait;
     use serde_json::{Value, json};
+    use tokio::sync::Barrier;
 
     use super::*;
 
@@ -209,6 +210,70 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(self.delay_ms)).await;
             self.log.lock().unwrap().push(input["v"].to_string());
             Ok(ToolOutput::text(input["v"].to_string()))
+        }
+    }
+
+    /// A call that finishes only if another one is running beside it: it
+    /// announces its start, then waits for its partner to reach the same
+    /// barrier. Two of these complete when they overlap and fail when they do
+    /// not, so the pin needs no wall clock — a serialized batch leaves the
+    /// first one waiting until the bound below expires.
+    struct Rendezvous {
+        meet: Arc<Barrier>,
+        log: Arc<Mutex<Vec<String>>>,
+    }
+
+    /// Long enough that no load can starve a batch that truly runs together,
+    /// short enough that a serialized one fails in reasonable time.
+    const MEET_BOUND: Duration = Duration::from_secs(10);
+
+    #[async_trait]
+    impl Tool for Rendezvous {
+        fn spec(&self) -> ToolSpec {
+            ToolSpec {
+                name: "Rendezvous".into(),
+                description: String::new(),
+                input_schema: json!({}),
+                meta: Default::default(),
+            }
+        }
+        fn traits(&self, _: &Value) -> ToolTraits {
+            ToolTraits {
+                concurrency_safe: true,
+                interrupt: Interrupt::Cancel,
+                trusted: true,
+                ..ToolTraits::default()
+            }
+        }
+        async fn call(&self, input: Value, _cx: &ToolContext) -> Result<ToolOutput, ToolError> {
+            self.log.lock().unwrap().push(input["v"].to_string());
+            match tokio::time::timeout(MEET_BOUND, self.meet.wait()).await {
+                Ok(_) => Ok(ToolOutput::text(input["v"].to_string())),
+                Err(_) => Ok(ToolOutput::error("nothing else was running")),
+            }
+        }
+    }
+
+    fn rendezvous(log: &Arc<Mutex<Vec<String>>>) -> impl Fn(i32) -> PendingCall {
+        let meet = Arc::new(Barrier::new(2));
+        let log = log.clone();
+        move |v| {
+            let tool = Arc::new(Rendezvous {
+                meet: meet.clone(),
+                log: log.clone(),
+            });
+            let traits = tool.traits(&json!({}));
+            PendingCall {
+                item: ItemId::from_raw(format!("i{v}")),
+                call: ToolCall {
+                    call_id: format!("c{v}"),
+                    name: "Rendezvous".into(),
+                    input: json!({ "v": v }),
+                },
+                tool: Some(tool),
+                traits,
+                gate: Gate::Allowed,
+            }
         }
     }
 
@@ -261,7 +326,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn safe_calls_run_together_and_results_stay_in_order() {
+    async fn results_come_back_in_input_order_whichever_finishes_first() {
         let log = Arc::new(Mutex::new(vec![]));
         let slow = Arc::new(Echo {
             safe: true,
@@ -276,7 +341,6 @@ mod tests {
             log: log.clone(),
         });
         let cancel = CancellationToken::new();
-        let started = Instant::now();
         let out = execute(
             vec![
                 pending(1, slow, Gate::Allowed),
@@ -287,10 +351,6 @@ mod tests {
             |_| {},
         )
         .await;
-        assert!(
-            started.elapsed() < Duration::from_millis(55),
-            "ran in parallel"
-        );
         assert_eq!(
             out.iter().map(|o| o.call_id.as_str()).collect::<Vec<_>>(),
             ["c1", "c2"]
@@ -300,6 +360,134 @@ mod tests {
             ["2", "1"],
             "fast one finished first"
         );
+    }
+
+    #[tokio::test]
+    async fn two_safe_allowed_calls_are_in_flight_at_the_same_moment() {
+        let log = Arc::new(Mutex::new(vec![]));
+        let call = rendezvous(&log);
+        let cancel = CancellationToken::new();
+        let out = execute(vec![call(1), call(2)], &cancel, |_| cx(&cancel), |_| {}).await;
+        assert!(
+            out.iter().all(|o| o.status == ItemStatus::Completed),
+            "each call only finishes once it has met the other: {out:?}"
+        );
+        assert_eq!(log.lock().unwrap().len(), 2, "both calls started");
+    }
+
+    #[tokio::test]
+    async fn a_call_that_cannot_run_together_splits_the_batch_around_it() {
+        let log = Arc::new(Mutex::new(vec![]));
+        let safe = |delay_ms| {
+            Arc::new(Echo {
+                safe: true,
+                delay_ms,
+                interrupt: Interrupt::Cancel,
+                log: log.clone(),
+            })
+        };
+        let alone = Arc::new(Echo {
+            safe: false,
+            delay_ms: 1,
+            interrupt: Interrupt::Cancel,
+            log: log.clone(),
+        });
+        let cancel = CancellationToken::new();
+        execute(
+            vec![
+                pending(1, safe(30), Gate::Allowed),
+                pending(2, alone, Gate::Allowed),
+                pending(3, safe(1), Gate::Allowed),
+            ],
+            &cancel,
+            |_| cx(&cancel),
+            |_| {},
+        )
+        .await;
+        assert_eq!(
+            log.lock().unwrap().as_slice(),
+            ["1", "2", "3"],
+            "three groups, each waiting for the one before"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_denied_call_splits_the_batch_around_it_too() {
+        let log = Arc::new(Mutex::new(vec![]));
+        let safe = |delay_ms| {
+            Arc::new(Echo {
+                safe: true,
+                delay_ms,
+                interrupt: Interrupt::Cancel,
+                log: log.clone(),
+            })
+        };
+        let cancel = CancellationToken::new();
+        execute(
+            vec![
+                pending(1, safe(30), Gate::Allowed),
+                pending(
+                    2,
+                    safe(1),
+                    Gate::Denied {
+                        message: "no".into(),
+                    },
+                ),
+                pending(3, safe(1), Gate::Allowed),
+            ],
+            &cancel,
+            |_| cx(&cancel),
+            |_| {},
+        )
+        .await;
+        assert_eq!(log.lock().unwrap().as_slice(), ["1", "3"]);
+    }
+
+    #[tokio::test]
+    async fn an_interrupt_before_a_batch_runs_none_of_it() {
+        let log = Arc::new(Mutex::new(vec![]));
+        let call = rendezvous(&log);
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let out = execute(vec![call(1), call(2)], &cancel, |_| cx(&cancel), |_| {}).await;
+        assert!(out.iter().all(|o| o.status == ItemStatus::Interrupted));
+        assert_eq!(
+            out[0].output.parts[0].as_text(),
+            Some(INTERRUPTED_MARKER),
+            "each one says why"
+        );
+        assert!(log.lock().unwrap().is_empty(), "neither call started");
+    }
+
+    #[tokio::test]
+    async fn an_interrupt_keeps_what_a_parallel_batch_already_finished() {
+        let log = Arc::new(Mutex::new(vec![]));
+        let call = rendezvous(&log);
+        let after = Arc::new(Echo {
+            safe: false,
+            delay_ms: 1,
+            interrupt: Interrupt::Cancel,
+            log: log.clone(),
+        });
+        let cancel = CancellationToken::new();
+        let landed = Mutex::new(0);
+        let out = execute(
+            vec![call(1), call(2), pending(3, after, Gate::Allowed)],
+            &cancel,
+            |_| cx(&cancel),
+            |_| {
+                let mut n = landed.lock().unwrap();
+                *n += 1;
+                if *n == 2 {
+                    cancel.cancel();
+                }
+            },
+        )
+        .await;
+        assert_eq!(out[0].status, ItemStatus::Completed);
+        assert_eq!(out[1].status, ItemStatus::Completed, "both met and kept");
+        assert_eq!(out[2].status, ItemStatus::Interrupted);
+        assert_eq!(log.lock().unwrap().len(), 2, "the third never started");
     }
 
     #[tokio::test]

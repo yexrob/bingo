@@ -272,6 +272,23 @@ pub fn running_tool(id: &str, name: &str, progress: &str) -> Item {
     )
 }
 
+/// A live command with a call id and a command of its own, so a step can hold
+/// more than one of them and each row still reads as itself.
+pub fn running_command(id: &str, command: &str) -> Item {
+    item(
+        id,
+        ItemStatus::Running,
+        ItemBody::ToolCall {
+            call_id: format!("call_{id}"),
+            name: "Bash".into(),
+            input: json!({ "command": command }),
+            output: None,
+            progress: None,
+            duration_ms: None,
+        },
+    )
+}
+
 pub fn diff_output() -> ToolOutput {
     ToolOutput {
         parts: vec![ContentPart::text("wrote src/lib.rs")],

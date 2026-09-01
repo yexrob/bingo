@@ -599,6 +599,7 @@ fn scripted_run(
 }
 
 mod agents;
+mod batch;
 mod board;
 mod context;
 mod experience;
