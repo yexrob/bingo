@@ -106,6 +106,15 @@ pub trait ContextSource: Send + Sync {
     async fn contributors(&self) -> Vec<Arc<dyn ContextContributor>>;
 }
 
+/// Providers that exist only after I/O — an external process's, once it has
+/// answered the handshake. Read where a provider is resolved: when a session
+/// chooses its model, and when a catalogue is read (ADR-0009 §1, ADR-0030 §2).
+#[async_trait]
+pub trait ProviderSource: Send + Sync {
+    fn id(&self) -> &str;
+    async fn providers(&self) -> Vec<Arc<dyn Provider>>;
+}
+
 /// Compaction strategies that exist only after I/O. Read when a turn starts;
 /// the slot holds one, so a source's strategy is the turn's only where nothing
 /// in-process already holds it.
@@ -122,6 +131,8 @@ pub enum Contribution {
     /// Tools resolved late, from a source that does its I/O elsewhere.
     Tools(Arc<dyn ToolSource>),
     Provider(Arc<dyn Provider>),
+    /// Providers resolved late, from a source that does its I/O elsewhere.
+    Providers(Arc<dyn ProviderSource>),
     Policy(Arc<dyn PermissionPolicy>),
     Hook(Arc<dyn Hook>),
     Context(Arc<dyn ContextContributor>),
@@ -148,6 +159,7 @@ impl fmt::Debug for Contribution {
             Contribution::Tool(t) => write!(f, "Tool({})", t.spec().name),
             Contribution::Tools(s) => write!(f, "Tools({})", s.id()),
             Contribution::Provider(p) => write!(f, "Provider({})", p.id()),
+            Contribution::Providers(s) => write!(f, "Providers({})", s.id()),
             Contribution::Policy(p) => write!(f, "Policy({})", p.id()),
             Contribution::Hook(h) => write!(f, "Hook({})", h.id()),
             Contribution::Context(c) => write!(f, "Context({})", c.id()),

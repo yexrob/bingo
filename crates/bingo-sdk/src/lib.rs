@@ -38,7 +38,7 @@ pub use ids::*;
 pub use model::*;
 pub use plugin::{
     CommandSource, CompactorSource, ConfigClaim, ContextSource, Contribution, Merge, Plugin,
-    PluginError, PluginManifest, Registrar, ToolSource,
+    PluginError, PluginManifest, ProviderSource, Registrar, ToolSource,
 };
 pub use policy::{Decision, PermissionPolicy, PolicyInput, Reason, Verdict};
 pub use provider::{AuthStatus, LoginMethod, ModelInfo, Provider};

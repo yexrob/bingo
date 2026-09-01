@@ -446,6 +446,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "bingo-sdk",
+ "futures",
  "schemars",
  "serde",
  "serde_json",

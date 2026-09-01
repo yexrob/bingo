@@ -37,7 +37,8 @@ impl Command for ModelCommand {
                 },
             });
         }
-        let (provider, model) = split(args.trim(), |id| host.has_provider(id));
+        let known = host.providers().await;
+        let (provider, model) = split(args.trim(), |id| known.iter().any(|p| p.id() == id));
         let summary = host
             .reconfigure(
                 &cx.session,

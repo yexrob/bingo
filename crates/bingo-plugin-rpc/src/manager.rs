@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::{Arc, OnceLock};
 
-use bingo_sdk::{Command, Compactor, ContextContributor, Env, Tool};
+use bingo_sdk::{Command, Compactor, ContextContributor, Env, Provider, Tool};
 use serde_json::Value;
 
 use crate::bridge::Bridge;
@@ -105,6 +105,14 @@ impl Manager {
         compactors
     }
 
+    pub async fn providers(&self) -> Vec<Arc<dyn Provider>> {
+        let mut providers = Vec::new();
+        for bridge in self.bridges() {
+            providers.extend(bridge.providers().await);
+        }
+        providers
+    }
+
     pub async fn shutdown(&self) {
         for bridge in self.bridges() {
             bridge.stop().await;
@@ -140,6 +148,7 @@ mod tests {
         assert!(manager.commands().await.is_empty());
         assert!(manager.contributors().await.is_empty());
         assert!(manager.compactors().await.is_empty());
+        assert!(manager.providers().await.is_empty());
         assert!(manager.names().is_empty());
         manager.shutdown().await;
     }

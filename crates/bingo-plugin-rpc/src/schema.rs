@@ -238,6 +238,11 @@ mod tests {
             "Compaction",
             "Item",
             "SessionSummary",
+            "ModelRequest",
+            "ModelEvent",
+            "ModelInfo",
+            "ProviderError",
+            "EndpointCapabilities",
         ] {
             assert!(
                 document["$defs"].get(name).is_some(),

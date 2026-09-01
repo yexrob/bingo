@@ -10,6 +10,7 @@ use crate::test_support::*;
 mod commands;
 mod login;
 mod policy;
+mod providers;
 mod tree;
 mod views;
 

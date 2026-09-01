@@ -29,7 +29,9 @@ use crate::models::{self, Learned, ModelCatalog};
 use crate::prompt::{self, PromptInput};
 use crate::session::{self, Mailbox};
 use crate::settings::{self, Claim, Layer, Merged, SettingsError};
-use crate::turn::{CompactorSet, ContributorSet, ModelChoice, ToolSet, TurnBudget, TurnConfig};
+use crate::turn::{
+    CompactorSet, ContributorSet, ModelChoice, ProviderSet, ToolSet, TurnBudget, TurnConfig,
+};
 
 /// Gateway events buffered per subscriber before the oldest is dropped.
 const GATEWAY_CAPACITY: usize = 64;
@@ -367,26 +369,39 @@ impl Host {
         Ok(Arc::new(SessionToolHost { mailbox }))
     }
 
+    /// Every provider this host can choose from, resolved at the one point
+    /// they are resolved (ADR-0030 §2): the registered ones and whatever the
+    /// sources answer with now. `provider`, the catalogue and `/model`'s
+    /// reading of `<provider>/<model>` all read this and nothing else.
+    pub async fn providers(&self) -> Vec<Arc<dyn Provider>> {
+        ProviderSet {
+            fixed: self.registry.providers.clone(),
+            sources: self.registry.provider_sources.clone(),
+        }
+        .gather()
+        .await
+    }
+
     /// The provider `id` names; with none, the settings' provider, else the
     /// first registered.
-    pub fn provider(&self, id: Option<&str>) -> Result<Arc<dyn Provider>, KernelError> {
+    pub async fn provider(&self, id: Option<&str>) -> Result<Arc<dyn Provider>, KernelError> {
+        let providers = self.providers().await;
         let wanted = id
             .map(str::to_string)
             .or_else(|| self.settings.kernel.provider.clone())
-            .or_else(|| self.registry.providers.first().map(|p| p.id().to_string()))
+            .or_else(|| providers.first().map(|p| p.id().to_string()))
             .ok_or_else(|| {
                 KernelError::new(
                     ErrorCode::ProviderUnavailable,
                     "No model provider is registered in this build.",
                 )
             })?;
-        self.registry
-            .providers
+        providers
             .iter()
             .find(|p| p.id() == wanted)
             .cloned()
             .ok_or_else(|| {
-                let known: Vec<&str> = self.registry.providers.iter().map(|p| p.id()).collect();
+                let known: Vec<&str> = providers.iter().map(|p| p.id()).collect();
                 KernelError::new(
                     ErrorCode::ProviderUnavailable,
                     format!(
@@ -476,7 +491,7 @@ impl Host {
         spec: &SessionSpec,
         thinking: Option<Effort>,
     ) -> Result<ModelChoice, KernelError> {
-        let provider = self.provider(spec.provider.as_deref())?;
+        let provider = self.provider(spec.provider.as_deref()).await?;
         check_auth(provider.as_ref())?;
         let model = self.model(provider.as_ref(), spec.model.as_deref()).await?;
         let capabilities = self.resolve_model(provider.as_ref(), &model);
@@ -675,10 +690,6 @@ impl Host {
         Ok(state)
     }
 
-    pub fn has_provider(&self, id: &str) -> bool {
-        self.registry.providers.iter().any(|p| p.id() == id)
-    }
-
     /// The live session a selector names, if it is live in this host.
     fn resolve(&self, selector: &SessionSelector) -> Option<Mailbox> {
         let sessions = self.lock();
@@ -840,10 +851,16 @@ impl HostApi for Host {
     }
 
     async fn catalog(&self, kind: CatalogKind) -> Result<Catalog, KernelError> {
+        let resolved = self.providers().await;
         Ok(Catalog {
             kind,
-            entries: catalog::entries(&self.registry, self.settings.kernel.model.as_deref(), kind)
-                .await,
+            entries: catalog::entries(
+                &self.registry,
+                &resolved,
+                self.settings.kernel.model.as_deref(),
+                kind,
+            )
+            .await,
         })
     }
 

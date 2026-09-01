@@ -33,7 +33,7 @@ impl Command for LoginCommand {
     async fn run(&self, args: &str, cx: &CommandContext) -> Result<CommandOutcome, KernelError> {
         let host = super::host(&self.host)?;
         let (id, method) = parse(args)?;
-        let provider = host.provider(Some(id))?;
+        let provider = host.provider(Some(id)).await?;
         let prompter = host.prompter(&cx.session)?;
         let receipt = provider
             .login(prompter, method)
@@ -69,7 +69,7 @@ impl Command for LogoutCommand {
                 "usage: /logout <provider>",
             ));
         }
-        let provider = host.provider(Some(id))?;
+        let provider = host.provider(Some(id)).await?;
         let receipt = provider.logout().await.map_err(provider_error)?;
         Ok(receipt_of("logout", provider.id(), receipt))
     }
