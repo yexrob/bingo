@@ -52,6 +52,12 @@ read. Across processes that form is a schema, not a type.
 - The reverse-request machinery lands once, scoped to `service/call`;
   anything more an external process may ask of the host is a future
   ADR's door, not a side effect of this one.
+- A service that needed I/O to exist — one an external process
+  declared, known only after its handshake — enters through
+  `HostApi::open_service`, and `service_wire` reads the entry's second
+  face; both default fail-closed, so hosts that keep no services
+  refuse in words. (Found in M28: registration is synchronous, and a
+  second source trait was not worth minting against §2.)
 - The Rust-side sugar keeps one fact in one place: the typed trait is
   the source, the adapters are derived and mechanical, and neither
   side hand-writes the contract twice.
