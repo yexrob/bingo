@@ -341,8 +341,8 @@ mod tests {
         }
     }
 
-    /// A hook that is nothing but an id and the points it claims.
-    struct Claims(&'static str, Vec<HookPoint>);
+    /// A hook that is nothing but an id and what it claims.
+    struct Claims(&'static str, HookMatcher);
 
     #[async_trait::async_trait]
     impl Hook for Claims {
@@ -350,15 +350,20 @@ mod tests {
             self.0
         }
         fn matcher(&self) -> HookMatcher {
-            HookMatcher {
-                points: self.1.clone(),
-                tool: None,
-            }
+            self.1.clone()
         }
     }
 
     fn claims(id: &'static str, points: Vec<HookPoint>) -> Arc<dyn Hook> {
-        Arc::new(Claims(id, points))
+        Arc::new(Claims(id, HookMatcher { points, tool: None }))
+    }
+
+    fn claims_tool(id: &'static str, tool: &str) -> Arc<dyn Hook> {
+        let matcher = HookMatcher {
+            points: vec![HookPoint::BeforeTool],
+            tool: Some(tool.to_string()),
+        };
+        Arc::new(Claims(id, matcher))
     }
 
     #[tokio::test]
@@ -389,6 +394,22 @@ mod tests {
         assert_eq!(
             hook_ids(&set.at(HookPoint::Event, None).await),
             ["everything", "watches"]
+        );
+    }
+
+    /// The same skip by tool name, which is what an external hook declaring
+    /// one tool rests on: the call it did not claim never reaches it, so for a
+    /// hook on the far side of a pipe it never crosses.
+    #[tokio::test]
+    async fn a_call_a_hook_did_not_claim_never_reaches_it() {
+        let set = HookSet::fixed(vec![claims_tool("guard", "Bash")]);
+        assert_eq!(
+            hook_ids(&set.at(HookPoint::BeforeTool, Some("Bash")).await),
+            ["guard"]
+        );
+        assert!(
+            set.at(HookPoint::BeforeTool, Some("Read")).await.is_empty(),
+            "another tool's call is not this hook's to see"
         );
     }
 

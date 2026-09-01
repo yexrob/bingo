@@ -143,6 +143,19 @@ impl ToolHost for Recorder {
     }
 }
 
+/// Where a hook is standing, for a test that drives one itself: a session, a
+/// turn, a directory, and nothing that answers.
+pub fn hook_context() -> bingo_sdk::HookContext {
+    bingo_sdk::HookContext {
+        session: SessionId::from_raw("ses_test"),
+        turn: Some(TurnId::from_raw("trn_test")),
+        cwd: PathBuf::from("/work"),
+        provider: None,
+        model: Some("stub-1".into()),
+        host: bingo_sdk::testing::NoHost::handle(),
+    }
+}
+
 pub fn context(call: Arc<Recorder>, cwd: &Path, cancel: CancellationToken) -> ToolContext {
     ToolContext {
         call_id: "call_test".into(),
