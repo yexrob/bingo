@@ -302,6 +302,11 @@ impl Tool for BashTool {
         ToolTraits {
             trusted: true,
             interrupt: Interrupt::Block,
+            // Whether two commands may run at once is the model's judgment,
+            // exactly as it is for two edits: it emitted them in one step. The
+            // gate still serializes anything it does not allow outright, and a
+            // long command belongs in the background (ADR-0018), not in a batch.
+            concurrency_safe: true,
             // The tool caps its own output; the kernel's clip would take the
             // exit line with it.
             result_limit: ResultLimit::SelfBounded,
@@ -659,13 +664,16 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn the_traits_fail_closed_except_for_trust() {
+    fn the_traits_fail_closed_except_for_trust_and_running_together() {
         let (_jobs, _promotions, tool) = tool();
         let traits = tool.traits(&Value::Null);
         assert!(traits.trusted);
         assert_eq!(traits.interrupt, Interrupt::Block);
         assert!(!traits.read_only);
-        assert!(!traits.concurrency_safe);
+        assert!(
+            traits.concurrency_safe,
+            "two commands in one step run together"
+        );
         assert!(!traits.edit);
         assert!(!traits.destructive);
     }
