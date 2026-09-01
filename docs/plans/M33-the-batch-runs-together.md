@@ -52,13 +52,13 @@ untouched (no wire change).
 
 ## Exit criteria
 
-- [ ] the rendezvous test proves two safe allowed calls overlap and
+- [x] the rendezvous test proves two safe allowed calls overlap and
       fails (times out) when execution is serialized
-- [ ] a batch splits at a non-safe or non-allowed call, pinned
-- [ ] Bash carries `concurrency_safe: true` with the rationale in
+- [x] a batch splits at a non-safe or non-allowed call, pinned
+- [x] Bash carries `concurrency_safe: true` with the rationale in
       its doc comment; background jobs behave as before
-- [ ] the TUI lane shows two pulsing presence bullets in one step
-- [ ] black-box: a one-step two-bash turn completes with both
+- [x] the TUI lane shows two pulsing presence bullets in one step
+- [x] black-box: a one-step two-bash turn completes with both
       receipts; every gate green (fmt, check, clippy, test,
       discipline, budget unchanged, deny)
 
@@ -81,3 +81,64 @@ this milestone. R-interrupt — a parallel batch under interrupt must
 keep completed results and mark the rest per executor's existing
 contract; the rendezvous test runs once more under a cancelled
 token to pin it.
+
+## Verified
+
+2026-09-01, worktree on 6f30958. Bash: `16bd995`; executor pins:
+`f7d5544`; prompt: `2468c09`; TUI lane: `f10fd15`; smoke: `50926be`;
+the two file-size splits M33's additions forced: `fe7ef16`, `c0dc528`.
+
+The pins bite. Forcing `let safe = false` in `execute` (serial
+execution) fails exactly the three overlap tests, at the barrier's
+bound rather than by a clock:
+
+```
+failures:
+    executor::tests::an_interrupt_keeps_what_a_parallel_batch_already_finished
+    executor::tests::results_come_back_in_input_order_whichever_finishes_first
+    executor::tests::two_safe_allowed_calls_are_in_flight_at_the_same_moment
+test result: FAILED. 7 passed; 3 failed; ... finished in 10.01s
+```
+
+Dropping the `concurrency_safe` and `gate` conjuncts from the forward
+scan (batch everything) fails the other side:
+
+```
+failures:
+    executor::tests::a_call_that_cannot_run_together_splits_the_batch_around_it
+    executor::tests::a_denied_call_splits_the_batch_around_it_too
+    executor::tests::an_interrupt_keeps_what_a_parallel_batch_already_finished
+```
+
+The TUI pin bites too: give the second call a finished status and
+`every_row_of_a_batch_wears_the_live_mark_at_once` fails on the row it
+carries. No test in this milestone asserts a duration.
+
+Gates, all green (load average 9-15 throughout, 47 at the peak of the
+test run; no rerun needed):
+
+```
+cargo fmt --all -- --check                      clean
+cargo check --workspace --all-targets --locked  Finished
+cargo clippy ... -- -D warnings                 Finished
+cargo test --workspace --locked                 2895 passed; 0 failed
+                                                (69 targets, 0 FAILED)
+scripts/check_discipline.sh                     discipline ok
+scripts/budget.sh                               budget ok (302 deps, max 302)
+cargo deny check                                advisories/bans/licenses/sources ok
+scripts/tui-smoke.sh                            tui-smoke ok
+```
+
+Two calls the plan left open, taken here. The interrupt pin is two
+tests, not one: under an *already*-cancelled token nothing runs at all,
+so "completed results kept" cannot be exercised there — that half is
+pinned by cancelling from `on_done` once the parallel batch has landed.
+And the black-box smoke is behavioural only, as the plan asks, so it
+does not itself prove overlap; that proof is the rendezvous test, and
+the trait test is what joins Bash to it.
+
+Not proved here: that two real shell commands overlap end to end. The
+only black-box proof would be a filesystem rendezvous inside the two
+commands, which runs into Bash's own timeout and auto-background
+heuristics; the executor pin plus the trait pin compose to the same
+fact.
