@@ -45,6 +45,19 @@ pub fn query() -> (SessionSummary, TurnId, HostHandle) {
     )
 }
 
+/// Where a hook is standing, for the tests that only need it to be somewhere:
+/// one session, one turn, one directory, and nothing that answers.
+pub fn hook_context() -> bingo_sdk::HookContext {
+    bingo_sdk::HookContext {
+        session: bingo_sdk::SessionId::from_raw("ses_1"),
+        turn: Some(TurnId::from_raw("trn_1")),
+        cwd: "/work".into(),
+        provider: None,
+        model: Some("stub-1".into()),
+        host: bingo_sdk::testing::NoHost::handle(),
+    }
+}
+
 /// The model a remote compaction never asks: the strategy is on the other
 /// side of the pipe, and a `CompactContext` still has to carry a provider.
 pub struct NoProvider;

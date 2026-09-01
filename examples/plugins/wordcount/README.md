@@ -40,8 +40,9 @@ write your own. In short:
   `<data_dir>/logs/plugin-wordcount.log`.
 - **The handshake** is `initialize {protocol, pluginRoot, config, env}`, and
   the answer is `{protocol, name, version, tools, commands, contributors,
-  compactors}`. A `protocol` the host does not speak is refused rather than
-  guessed at; declare only the kinds you have, and leave the rest out.
+  compactors, providers, hooks, services}`. A `protocol` the host does not
+  speak is refused rather than guessed at; declare only the kinds you have,
+  and leave the rest out.
 - **Calls** are `tool/call {callId, name, input, cwd, session, turn}` →
   `{output}`, `command/run {name, args, cwd, session}` → `{outcome}`,
   `command/complete {name, partial, cwd}` → `{completions}`,
@@ -52,6 +53,16 @@ write your own. In short:
   {"methods": {"<name>": <schema>}}}` in the handshake to serve one, and send
   the same request to the host to call anybody's — the host routes it, so two
   plugins pair without knowing of each other.
+- **Hooks** are declared as `hooks: [{id, points?, tool?}]` — the points you
+  claim, and an optional tool name for the tool points; claim nothing and you
+  are asked at every point. The four that decide arrive as `hook/decide
+  {id, site, point, payload}` → `{outcome, value?}`, where `outcome` is
+  `{"kind": "continue" | "deny" | "ask" | "block" | "redirect"}` — there is no
+  allowing outcome, so a hook can tighten what happens and never widen it —
+  and `value` is the rewritten input or call at `submit` and `beforeTool`
+  only. The four that watch arrive as a `hook/observe {id, site, point,
+  payload}` notification, which nothing waits on. A `hook/decide` you do not
+  answer in time decides nothing at all.
 - **Notifications**: the plugin may send `tool/progress {callId, tail}` while a
   call runs — it becomes that call's live output line — and the host sends
   `tool/cancel {callId}` when the turn is interrupted. The host still waits for

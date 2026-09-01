@@ -85,7 +85,7 @@ fn providers(resolved: &[Arc<dyn Provider>]) -> Vec<CatalogEntry> {
 /// `meta` rides beside its description.
 async fn tools(registry: &Registry) -> Vec<CatalogEntry> {
     let mut all = registry.tools.clone();
-    for source in &registry.tool_sources {
+    for source in &registry.sources.tools {
         all.extend(source.tools().await);
     }
     all.iter()
@@ -107,7 +107,7 @@ async fn tools(registry: &Registry) -> Vec<CatalogEntry> {
 async fn commands(registry: &Registry) -> Vec<CatalogEntry> {
     let here = std::env::current_dir().unwrap_or_default();
     let mut all = registry.commands.clone();
-    for source in &registry.command_sources {
+    for source in &registry.sources.commands {
         all.extend(source.commands(&here).await);
     }
     all.iter()
