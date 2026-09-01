@@ -142,3 +142,9 @@ only black-box proof would be a filesystem rendezvous inside the two
 commands, which runs into Bash's own timeout and auto-background
 heuristics; the executor pin plus the trait pin compose to the same
 fact.
+
+Integrated on main at `ae445fc` (2026-09-01): the whole gate suite
+green on the merge — `cargo test --workspace --locked --no-fail-fast`
+exit 0 with an empty `failures:` capture across all targets,
+fmt/check/clippy clean, discipline ok (pre-existing warns only),
+budget 302, deny ok, tui-smoke ok. Load 8.4 → 12.5; no rerun needed.
