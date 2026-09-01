@@ -133,3 +133,20 @@ as the registry already does for a shadowed command); and a remote
 contributor's kernel-visible id is `<plugin>:<declared>`, so two plugins
 may both declare `notes` and the transcript's origin still says which
 one wrote.
+
+Integrated on main at `1f5c4d3` (2026-09-01, load 11–30, after the
+worker-R and worker-Q merges): every gate green, workspace 0 failures
+(plugin-rpc 181 + 67 + 13, cli 130, rooms 140); ADR-0015 §6 amended
+with the supersession note.
+
+## Carried
+
+- **The compactor slot is first-wins, and the shipped composition
+  always fills it**: `bingo-context` registers `SummaryCompactor`, so
+  an external compaction strategy is inert in the default binary. The
+  reversal is one line in `CompactorSet::resolve`, but choosing the
+  active strategy is a product decision — the clean shape when demand
+  arrives is a settings key naming the compactor, not a registration
+  order. Decide when the first external strategy exists.
+- `crates/bingo-core/src/turn/tests.rs` reached 777 lines (700 warn,
+  1000 fail); split it on its next growth.
