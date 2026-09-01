@@ -92,6 +92,13 @@ table, the scope drifted — stop and report.
 
 ## Verified
 
+Integrated on main at `ecf5a21` (2026-09-01, load 17–34): every gate
+green; the target recount settled 69 targets, 2854 passed, 0 failed
+on `--no-fail-fast`; budget 302, deny ok. The merge's one conflict
+was this plan file (both sides changed it from base `03ab15b` — the
+worker branched before the rescope and checked main's docs out),
+resolved by taking the worker's superset.
+
 Worker run, every gate green, 1-minute load 4.7–11.6 (the doors'
 black-box waits on no deadline and no wall clock but the harness's
 existing poll; nothing was rerun):
