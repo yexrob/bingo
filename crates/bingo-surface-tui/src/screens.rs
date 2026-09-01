@@ -105,6 +105,29 @@ fn tool_running() {
     both("tool_running", &solo(&state), &ui, now);
 }
 
+/// Two commands the model asked for in one step. The executor runs a batch of
+/// concurrency-safe allowed calls together, so neither row is waiting on the
+/// other: both are live at the same moment.
+fn running_together() -> Vec<bingo_sdk::Frame> {
+    vec![
+        frame(1, started("trn_1")),
+        item(2, user("itm_0", "check the formatting and the tests")),
+        started_tool(3, running_command("itm_1", "cargo fmt --all -- --check")),
+        started_tool(4, running_command("itm_2", "cargo test --workspace")),
+    ]
+}
+
+#[test]
+fn two_tools_running_at_once() {
+    let (ui, now) = mid_turn();
+    both(
+        "tools_running_together",
+        &solo(&folded(running_together())),
+        &ui,
+        now,
+    );
+}
+
 #[test]
 fn tool_done_with_output() {
     let output = ToolOutput {
@@ -652,6 +675,25 @@ fn an_answer_row_is_white_after_its_bullet() {
             ("All 33 pass.", crate::theme::text()),
         ],
     );
+}
+
+/// What a person reads off a batch: not one live row above a waiting one, but
+/// two bullets in `presence` in the same frame, breathing side by side.
+#[test]
+fn every_row_of_a_batch_wears_the_live_mark_at_once() {
+    let (ui, now) = mid_turn();
+    let painted = painted(80, 24, &solo(&folded(running_together())), &ui, now);
+    for command in ["cargo fmt --all -- --check", "cargo test --workspace"] {
+        assert_row_styled(
+            &painted,
+            command,
+            &[
+                ("⏺ ", crate::theme::presence()),
+                ("Bash", crate::theme::bold()),
+                (&format!("({command})"), crate::theme::text()),
+            ],
+        );
+    }
 }
 
 #[test]
