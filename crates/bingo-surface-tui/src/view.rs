@@ -1288,6 +1288,42 @@ mod tests {
         insta::assert_snapshot!(render(&state, &ui, now));
     }
 
+    /// A name as long as the mint allows is twice as wide as it is long when
+    /// it is CJK, and wider than the card. The sheet clips rather than wraps,
+    /// so the row under it is still the row under it.
+    #[test]
+    fn a_row_wider_than_the_card_is_cut_and_pushes_nothing_down() {
+        let state = state();
+        let (mut ui, now) = scene();
+        shown(
+            &mut ui,
+            Open::Picker(Picker {
+                sessions: vec![
+                    SessionSummary {
+                        title: Some("解".repeat(48)),
+                        messages: Some(9),
+                        ..summary()
+                    },
+                    SessionSummary {
+                        id: bingo_sdk::SessionId::from_raw("ses_2"),
+                        title: Some("the row under it".into()),
+                        messages: Some(1),
+                        ..summary()
+                    },
+                ],
+                selected: 0,
+            }),
+            now,
+        );
+        let screen = render(&state, &ui, now);
+        let rows: Vec<&str> = screen.lines().collect();
+        assert!(rows[1].contains("❯ 1. 解解解"), "{screen}");
+        assert!(
+            rows[2].contains("2. the row under it"),
+            "the second row stayed second: {screen}"
+        );
+    }
+
     // ---- the tree -------------------------------------------------------
 
     /// A transcript whose tool call spawned `reviewer`, and the child's own
