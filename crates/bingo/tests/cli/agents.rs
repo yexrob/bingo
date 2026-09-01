@@ -226,6 +226,16 @@ fn agent_journal(home: &std::path::Path, key: &str) -> String {
     panic!("no session is keyed {key}");
 }
 
+/// One session's journal by its id: `<data_dir>/sessions/<id>/journal.jsonl`
+/// (ADR-0005 §1).
+fn journal_by_id(home: &std::path::Path, session: &bingo_sdk::SessionId) -> String {
+    let path = home
+        .join(".bingo/data/sessions")
+        .join(session.to_string())
+        .join("journal.jsonl");
+    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+}
+
 /// Every byte journaled under the data dir, for asserting what a session
 /// heard rather than what a stream chose to print.
 fn journal_text(dir: &std::path::Path) -> String {
@@ -433,6 +443,77 @@ fn the_same_roles_come_back_on_continue() {
         "the roles were reopened, not seated again"
     );
     assert_eq!(final_text(&second), "two are seated");
+}
+
+// ---- a child left mid-turn (M31) -------------------------------------------
+
+/// One background agent that will not finish, and a wait short enough to end
+/// the root's turn while it is still at it. The spawn and the wait are one
+/// round, so the root asks the provider for nothing between them: the child
+/// takes the long response the moment it is woken, and the root's next
+/// request comes a whole deadline later.
+const LEFT_AT_WORK: &str = r#"{"responses":[
+    {"steps":[
+        {"toolCall":{"name":"SpawnAgent","input":{"name":"slow","prompt":"take your time","background":true}}},
+        {"toolCall":{"name":"WaitAgent","input":{"agents":["slow"],"timeout_s":2}}}
+    ]},
+    {"steps":[{"delay":{"ms":600000}},{"text":"never"}]},
+    {"steps":[{"text":"it is still at it"}]}
+]}"#;
+
+/// M31: the process ends while a background child is inside a turn — killed,
+/// so nothing is closed and its journal ends where the last flush left it.
+/// `--continue` brings the root back with one line about that child, the
+/// child's journal is byte for byte what it was, and the child itself is not
+/// reopened: `recover` still owns the turn it left open.
+#[test]
+fn a_resumed_root_is_told_which_child_was_mid_turn_when_the_process_ended() {
+    let home = tempfile::tempdir().unwrap();
+    let leaving = script(LEFT_AT_WORK);
+    let mut host = super::stream_json::Host::start(&mut super::stream_json::hosted(
+        home.path(),
+        &leaving,
+        &["--dangerously-skip-permissions"],
+    ));
+    host.prompt("start the long job");
+    let done = host.until("result");
+    assert_eq!(done["result"], "it is still at it", "{done}");
+    let root = bingo_sdk::SessionId::from_raw(
+        done["session_id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{done}")),
+    );
+    host.kill();
+
+    let key = format!("agent/{root}/slow");
+    let before = agent_journal(home.path(), &key);
+    assert!(before.contains(r#""type":"turnStarted""#), "{before}");
+    assert!(
+        !before.contains(r#""type":"turnCompleted""#),
+        "the child was still inside its turn: {before}"
+    );
+
+    let back = script(r#"{"responses":[{"steps":[{"text":"noted"}]}]}"#);
+    let out = scripted_run(home.path(), &back, &["--continue"], "what happened?");
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    assert_eq!(frames_of(&out)[0].session, root, "the same root came back");
+
+    let said = journal_by_id(home.path(), &root);
+    let lines: Vec<&str> = said
+        .lines()
+        .filter(|line| line.contains("CHILD_TURN_LOST"))
+        .collect();
+    assert_eq!(lines.len(), 1, "one line for the one child: {said}");
+    assert!(
+        lines[0].contains("slow"),
+        "it names the child: {}",
+        lines[0]
+    );
+    assert_eq!(
+        agent_journal(home.path(), &key),
+        before,
+        "and the child's own journal is untouched"
+    );
 }
 
 // ---- the join (M23, ADR-0027) ----------------------------------------------

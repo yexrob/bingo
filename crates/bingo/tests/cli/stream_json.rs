@@ -250,6 +250,15 @@ impl Host {
         }));
     }
 
+    /// End the process where it stands, the way a crash or a `kill` does:
+    /// nothing is closed, and what the journals hold is what was flushed.
+    /// stdin stays open until the process is gone, so this is never mistaken
+    /// for the orderly exit `finish` asks for.
+    pub(crate) fn kill(mut self) {
+        self.child.kill().expect("the run is killed");
+        self.child.wait().expect("the binary is reaped");
+    }
+
     /// Close stdin and collect what the run had left to say.
     pub(crate) fn finish(self) -> Ended {
         let Host {
