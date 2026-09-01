@@ -25,7 +25,7 @@ use crate::rail::{self, CardId, Pin};
 use crate::rewind::{self, Rewind};
 use crate::search::Search;
 use crate::select::Cell;
-use crate::tree::Tree;
+use crate::tree::{self, Tree};
 use crate::ui::{Open, Pending, Switcher, Ui};
 use crate::{panel, permission, views};
 
@@ -33,8 +33,6 @@ use crate::{panel, permission, views};
 pub const ARM_HINT: &str = "press ctrl+c again to exit";
 /// What shift+tab says when no policy published a mode it can walk.
 pub const UNKNOWN_MODE: &str = "permission mode unknown — /permission <mode>";
-/// What ctrl+g says when the session has spawned nobody to switch to.
-pub const NO_AGENTS: &str = "no sub-agents in this session";
 /// What ctrl+b says when no shell command is running to background.
 pub const NOTHING_RUNNING: &str = "no shell command is running";
 /// The command the shell plugin registers for backgrounding a running one
@@ -103,7 +101,7 @@ fn layered(ui: &mut Ui, tree: &Tree, key: KeyEvent, now: Now) -> Option<Vec<Effe
     if let Some(chord) = chorded(key) {
         match chord {
             'f' => ui.search = Some(Search::open()),
-            'g' => toggle_switcher(ui, tree, now),
+            'g' => return Some(toggle_switcher(ui, tree, now)),
             't' => ui.layer.toggle(Open::Panel, now.instant),
             'o' => deepen(ui, tree, now),
             'b' => return Some(background(ui, tree, now)),
@@ -673,45 +671,54 @@ fn opens_the_cycle(ui: &Ui, tree: &Tree) -> bool {
     ui.composer.is_empty() && tree.rows().len() > 1
 }
 
-/// Open the switcher on the session in view, or close it again. There is
-/// nothing to switch between until the session has spawned somebody.
-fn toggle_switcher(ui: &mut Ui, tree: &Tree, now: Now) {
+/// Open the switcher on the session in view, or close it again. What this
+/// attachment carries is on the card at once; what is only in the store lands
+/// when the read the opening spawns comes back, which is why the card goes up
+/// even where the tree is the root alone.
+fn toggle_switcher(ui: &mut Ui, tree: &Tree, now: Now) -> Vec<Effect> {
     if ui.layer.showing() {
         ui.layer.close(now.instant);
-        return;
+        return Vec::new();
     }
-    let rows = tree.rows();
-    if rows.len() < 2 {
-        ui.notify(Level::Info, NO_AGENTS, now.instant);
-        return;
-    }
-    let selected = rows
+    let selected = tree
+        .rows()
         .iter()
         .position(|row| row.session == tree.view())
         .unwrap_or(0);
-    ui.layer
-        .show(Open::Switcher(Switcher { selected }), now.instant);
+    ui.layer.show(
+        Open::Switcher(Switcher {
+            selected,
+            stored: Vec::new(),
+        }),
+        now.instant,
+    );
+    vec![Effect::ListStored]
 }
 
 fn switcher(ui: &mut Ui, tree: &Tree, key: KeyEvent, now: Now) -> Vec<Effect> {
-    let rows = tree.rows();
-    let Open::Switcher(switcher) = &mut ui.layer.open else {
+    let Open::Switcher(open) = &ui.layer.open else {
         return Vec::new();
     };
+    let rows = tree::roster(tree, &open.stored);
+    let last = rows.len().saturating_sub(1);
+    let chosen = rows.get(open.selected).map(|row| row.session.clone());
     match key.code {
-        KeyCode::Up => switcher.selected = switcher.selected.saturating_sub(1),
-        KeyCode::Down => {
-            switcher.selected = (switcher.selected + 1).min(rows.len().saturating_sub(1))
-        }
+        KeyCode::Up => move_cursor(ui, |at| at.saturating_sub(1)),
+        KeyCode::Down => move_cursor(ui, |at| (at + 1).min(last)),
         KeyCode::Esc => ui.layer.close(now.instant),
         KeyCode::Enter => {
-            let chosen = rows.get(switcher.selected).map(|row| row.session.clone());
             ui.layer.close(now.instant);
             return chosen.map(|id| vec![Effect::View(id)]).unwrap_or_default();
         }
         _ => {}
     }
     Vec::new()
+}
+
+fn move_cursor(ui: &mut Ui, to: impl FnOnce(usize) -> usize) {
+    if let Open::Switcher(open) = &mut ui.layer.open {
+        open.selected = to(open.selected);
+    }
 }
 
 /// The dropdown owns the arrows and the completion keys while it is open.
@@ -1616,7 +1623,11 @@ mod tests {
     fn ctrl_g_lists_the_tree_and_enter_switches_the_view() {
         let tree = with_child(vec![]);
         let (mut ui, now) = scene();
-        assert!(press_tree(&mut ui, &tree, ctrl('g'), now).is_empty());
+        assert_eq!(
+            press_tree(&mut ui, &tree, ctrl('g'), now),
+            vec![Effect::ListStored],
+            "the tree is on the card at once and the store is asked for the rest"
+        );
         assert_eq!(selected(&ui), Some(0), "it opens on the session in view");
         press_tree(&mut ui, &tree, key(KeyCode::Down), now);
         assert_eq!(
@@ -1638,12 +1649,39 @@ mod tests {
         assert!(!ui.layer.showing());
     }
 
+    /// A root alone in this process may still have children in the store, and
+    /// only the store knows: the card goes up and the read fills it.
     #[test]
-    fn ctrl_g_says_so_when_there_is_nobody_to_switch_to() {
+    fn ctrl_g_on_a_lone_root_still_asks_what_the_store_holds() {
         let (mut ui, now) = scene();
-        assert!(press(&mut ui, &state(), ctrl('g'), now).is_empty());
+        assert_eq!(
+            press(&mut ui, &state(), ctrl('g'), now),
+            vec![Effect::ListStored]
+        );
+        assert!(ui.layer.showing());
+        assert!(ui.notices.is_empty(), "nothing is said about an empty tree");
+    }
+
+    /// The stored rows the read answered with: chosen by `⏎`, they are
+    /// reopened by id, and the loop's `View` is what does it.
+    #[test]
+    fn enter_on_a_stored_row_steps_into_the_session_it_names() {
+        let tree = with_child(vec![]);
+        let (mut ui, now) = scene();
+        press_tree(&mut ui, &tree, ctrl('g'), now);
+        let Open::Switcher(open) = &mut ui.layer.open else {
+            panic!("the switcher is open");
+        };
+        open.stored = vec![stored_summary("ses_7", "scout")];
+        for _ in 0..2 {
+            press_tree(&mut ui, &tree, key(KeyCode::Down), now);
+        }
+        assert_eq!(selected(&ui), Some(2), "the stored row is walked to");
+        assert_eq!(
+            press_tree(&mut ui, &tree, key(KeyCode::Enter), now),
+            vec![Effect::View(SessionId::from_raw("ses_7"))]
+        );
         assert!(!ui.layer.showing());
-        assert!(ui.notices.iter().any(|n| n.text == NO_AGENTS));
     }
 
     #[test]

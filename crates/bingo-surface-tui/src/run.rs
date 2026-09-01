@@ -57,6 +57,8 @@ enum Reply {
     /// attachment's own stream is dropped: the tree's carries the child.
     Handle(SessionId, SessionHandle),
     Sessions(Vec<SessionSummary>),
+    /// What the store holds, for the switcher's stored rows.
+    Stored(Vec<SessionSummary>),
     Commands(Vec<CommandSpec>),
     /// One catalogue's ids, by the source name a command's argument gives.
     Catalogue(String, Vec<String>),
@@ -491,6 +493,7 @@ impl Run {
             Effect::View(session) => self.show(session),
             Effect::Open(selector) => self.open(selector),
             Effect::ListSessions => self.list_sessions(),
+            Effect::ListStored => self.list_stored(),
             Effect::Copy(text) => self.clipboard = Some(text),
             Effect::Exit => self.exit = Some(Exit { code: 0 }),
         }
@@ -600,6 +603,19 @@ impl Run {
         self.spawn(async move { host.sessions(filter).await.map(Reply::Sessions) });
     }
 
+    /// What the switcher lists besides the tree: everything the host knows of,
+    /// unfiltered — which of them hang under this root is the roster's own
+    /// question, and a child need not work where its root does. One read per
+    /// opening; nothing watches the store.
+    fn list_stored(&mut self) {
+        let host = self.host.clone();
+        self.spawn(async move {
+            host.sessions(SessionFilter::default())
+                .await
+                .map(Reply::Stored)
+        });
+    }
+
     /// The catalogues are read once: the dropdown ranks them, it does not
     /// watch them.
     fn fetch_catalogs(&mut self) {
@@ -647,6 +663,7 @@ impl Run {
                 }),
                 Instant::now(),
             ),
+            Reply::Stored(sessions) => self.fill_switcher(sessions),
             Reply::Commands(specs) => self.ui.catalogs.commands = specs,
             Reply::Catalogue(source, ids) => {
                 self.ui.catalogs.values.insert(source, ids);
@@ -655,6 +672,14 @@ impl Run {
                 self.ui.opening = false;
                 self.ui.notify(Level::Error, error.message, Instant::now());
             }
+        }
+    }
+
+    /// The store's answer lands after the card is already up. It fills the
+    /// card while that is still what is open, and is dropped when it is not.
+    fn fill_switcher(&mut self, sessions: Vec<SessionSummary>) {
+        if let Open::Switcher(open) = &mut self.ui.layer.open {
+            open.stored = sessions;
         }
     }
 
@@ -981,6 +1006,26 @@ mod tests {
             vec![Input::text("hi", bingo_sdk::Origin::surface("tui"))]
         );
         assert!(root.submitted().is_empty(), "the root was not written to");
+    }
+
+    /// M31 §2: opening the switcher spawns one `sessions` read on the loop's
+    /// own host-call lane — no key waits on it — and what comes back fills
+    /// the card that is already on the screen.
+    #[tokio::test]
+    async fn opening_the_switcher_reads_the_store_and_the_card_fills() {
+        let mut harness = Harness::new();
+        let (host, _) = TestHost::with_stored(vec![], vec![stored_summary("ses_7", "scout")]);
+        let ended = drive(
+            &host,
+            options(None, harness.home.path()),
+            &mut harness.recorder,
+            keys(vec![ctrl('g'), ctrl('d')]),
+        )
+        .await
+        .expect("the loop ran");
+        assert_eq!(ended.exit, Exit { code: 0 });
+        let screen = harness.recorder.last();
+        assert!(screen.contains("scout ⏺ stored"), "{screen}");
     }
 
     #[tokio::test]

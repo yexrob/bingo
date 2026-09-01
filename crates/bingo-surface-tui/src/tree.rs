@@ -6,11 +6,17 @@
 //! by `frame.session`. What is the surface's own is which of them is on
 //! screen. Names, tallies, the `↳` rows and the switcher are derived from
 //! these states at render time, so nothing about a child is stored twice.
+//!
+//! The tree holds live descendants only. The switcher lists more than that:
+//! [`roster`] merges these states with a listing the host answered with, so
+//! what an earlier process spawned is visible and can be chosen — a row, not
+//! a state, and the live one always wins.
 
 use std::collections::BTreeMap;
 
 use bingo_sdk::{
     Applied, Driver, Event, Frame, Interaction, ItemBody, ItemId, SessionId, SessionState,
+    SessionSummary,
 };
 use ratatui::text::{Line, Span};
 
@@ -29,6 +35,8 @@ pub enum Status {
     Done,
     /// Idle, and it has not run yet.
     Idle,
+    /// Not open in this process: in the store, and reopened by choosing it.
+    Stored,
 }
 
 impl Status {
@@ -52,11 +60,14 @@ impl Status {
             Status::Running => "running",
             Status::Done => "done",
             Status::Idle => "idle",
+            Status::Stored => "stored",
         }
     }
 }
 
-/// One row of the switcher, derived from a session in the tree.
+/// One row of the switcher, derived from a session in the tree or from what
+/// the store answered with.
+#[derive(Debug)]
 pub struct Row<'a> {
     pub session: &'a SessionId,
     pub name: String,
@@ -101,9 +112,11 @@ impl Tree {
         self.view.as_ref().and_then(|id| self.children.get(id))
     }
 
-    /// The session the keyboard writes to.
+    /// The session the keyboard writes to: the one a person stepped into,
+    /// even while its head frames are still on their way. A line typed at a
+    /// session that is still opening is refused, never sent to the root.
     pub fn view(&self) -> &SessionId {
-        &self.viewed().summary.id
+        self.view.as_ref().unwrap_or_else(|| self.root_id())
     }
 
     pub fn is_root(&self, session: &SessionId) -> bool {
@@ -146,9 +159,12 @@ impl Tree {
         }
     }
 
-    /// Paint this session from now on; an unknown one is the root.
+    /// Paint this session from now on. One the tree has not heard of is
+    /// remembered all the same: the root stays on the screen until that
+    /// session's head frames arrive, and then it is what is painted. That is
+    /// how a stored child, reopened by being chosen, turns live in place.
     pub fn show(&mut self, session: &SessionId) {
-        self.view = self.children.contains_key(session).then(|| session.clone());
+        self.view = Some(session.clone());
     }
 
     /// The person is looking at this one.
@@ -204,14 +220,67 @@ impl Tree {
     }
 }
 
+/// The switcher's rows: what this attachment carries, then the root's stored
+/// descendants that are not among them. Live wins — a session that is both
+/// live and stored is one row, and it is the live one.
+pub fn roster<'a>(tree: &'a Tree, stored: &'a [SessionSummary]) -> Vec<Row<'a>> {
+    let mut rows = tree.rows();
+    let live: Vec<SessionId> = rows.iter().map(|row| row.session.clone()).collect();
+    let mut asleep: Vec<Row<'a>> = descendants(tree.root_id(), stored)
+        .into_iter()
+        .filter(|summary| !live.contains(&summary.id))
+        .map(stored_row)
+        .collect();
+    asleep.sort_by(|a, b| a.session.cmp(b.session));
+    rows.append(&mut asleep);
+    rows
+}
+
+/// The listed sessions whose parent chain reaches `root`. The listing is the
+/// only map there is, so the walk goes no further than it is long — which is
+/// also what stops a chain that points at itself.
+fn descendants<'a>(root: &SessionId, listed: &'a [SessionSummary]) -> Vec<&'a SessionSummary> {
+    listed
+        .iter()
+        .filter(|summary| reaches(root, summary, listed))
+        .collect()
+}
+
+fn reaches(root: &SessionId, summary: &SessionSummary, listed: &[SessionSummary]) -> bool {
+    let of = |summary: &SessionSummary| summary.parent.as_ref().map(|link| link.session.clone());
+    let mut parent = of(summary);
+    for _ in 0..listed.len() {
+        match parent {
+            Some(id) if &id == root => return true,
+            Some(id) => parent = listed.iter().find(|s| s.id == id).and_then(of),
+            None => return false,
+        }
+    }
+    false
+}
+
+/// A session this process has not opened: what it is called, and that it is
+/// not here. What it was doing is the journal's business, not a row's.
+fn stored_row(summary: &SessionSummary) -> Row<'_> {
+    Row {
+        session: &summary.id,
+        name: name_of(summary),
+        status: Some(Status::Stored),
+        attention: false,
+    }
+}
+
 /// What a person calls a session: the title a plugin gave it — a sub-agent's
 /// name — else the directory it works in.
 pub fn name(state: &SessionState) -> String {
-    state
-        .summary
+    name_of(&state.summary)
+}
+
+fn name_of(summary: &SessionSummary) -> String {
+    summary
         .title
         .clone()
-        .unwrap_or_else(|| directory(&state.summary.cwd))
+        .unwrap_or_else(|| directory(&summary.cwd))
 }
 
 /// The last segment of a path.
@@ -242,6 +311,9 @@ pub fn activity(state: &SessionState) -> Option<String> {
         Status::Running => Some(format!("Running{} {spent}", theme::ellipsis())),
         Status::Done => Some(format!("Done ({spent} · {}s)", seconds(state))),
         Status::Idle => Some(format!("Starting{}", theme::ellipsis())),
+        // A row under a transcript is a session this attachment carries;
+        // `Status::of` reads a live state and never answers this.
+        Status::Stored => None,
     }
 }
 
@@ -327,7 +399,7 @@ pub fn bullet_style(status: Option<Status>, attention: bool) -> ratatui::style::
     match status {
         Some(Status::Running) => theme::presence(),
         Some(Status::Done) => theme::good(),
-        Some(Status::Idle) | None => theme::dim(),
+        Some(Status::Idle) | Some(Status::Stored) | None => theme::dim(),
     }
 }
 
@@ -371,11 +443,24 @@ mod tests {
         assert_eq!(tree.rows().len(), 1, "and the tree is the root alone");
     }
 
+    /// A session chosen before its head frames arrive — a stored child being
+    /// reopened. The root stays on the screen, but the keyboard already
+    /// belongs to the one that was chosen, so a line typed meanwhile is
+    /// refused rather than sent to the root.
     #[test]
-    fn an_unknown_session_is_never_shown() {
+    fn a_session_the_tree_has_not_heard_of_is_waited_for_not_forgotten() {
         let mut tree = Tree::new(state());
         tree.show(&child_id());
-        assert_eq!(tree.view(), tree.root_id());
+        assert_eq!(&tree.viewed().summary.id, tree.root_id());
+        assert!(tree.viewing().is_none(), "there is nothing to paint yet");
+        assert_eq!(tree.view(), &child_id(), "and the keyboard is already its");
+
+        tree.apply(&child_frame(1, announced("reviewer")));
+        assert_eq!(
+            tree.viewing().map(name).as_deref(),
+            Some("reviewer"),
+            "the row turns live in place"
+        );
     }
 
     #[test]
@@ -505,6 +590,109 @@ mod tests {
             ],
             "the root first, then the rest in id order"
         );
+    }
+
+    // ---- the merged roster (M31) ----------------------------------------
+
+    /// The order is the pin: what this attachment carries first, in the order
+    /// it already lists it, then the stored rows by id after them.
+    #[test]
+    fn the_roster_puts_the_tree_first_and_the_stored_rows_after_it_by_id() {
+        let mut tree = Tree::new(state());
+        tree.apply(&child_frame(1, announced("reviewer")));
+        let stored = vec![
+            stored_summary("ses_9", "scout"),
+            stored_summary("ses_3", "archivist"),
+        ];
+        let rows = roster(&tree, &stored);
+        assert_eq!(
+            rows.iter().map(|row| row.name.clone()).collect::<Vec<_>>(),
+            ["project", "reviewer", "archivist", "scout"]
+        );
+        assert_eq!(rows[2].status, Some(Status::Stored));
+        assert_eq!(rows[3].session, &SessionId::from_raw("ses_9"));
+        assert!(
+            !rows[2].attention,
+            "a session that is not here asks nothing"
+        );
+    }
+
+    /// One session, one row. A listing carries the live ones too, and the
+    /// live one is the truth: the stored copy of it is dropped, not shown.
+    #[test]
+    fn a_session_that_is_both_live_and_stored_is_one_row_and_the_live_one() {
+        let mut tree = Tree::new(state());
+        tree.apply(&child_frame(1, announced("reviewer")));
+        tree.apply(&child_frame(2, started("trn_9")));
+        let stored = vec![child_summary("reviewer"), summary()];
+        let rows = roster(&tree, &stored);
+        assert_eq!(rows.len(), 2, "the root and the child, once each");
+        assert_eq!(rows[1].status, Some(Status::Running));
+    }
+
+    /// Only what hangs under this root, however deep: a listing is every
+    /// session the host knows of, and most of them are somebody else's.
+    #[test]
+    fn the_roster_takes_only_the_sessions_whose_parent_chain_reaches_the_root() {
+        let tree = Tree::new(state());
+        let grandchild = SessionSummary {
+            parent: Some(bingo_sdk::ParentLink {
+                session: SessionId::from_raw("ses_3"),
+                item: None,
+            }),
+            ..stored_summary("ses_4", "runner")
+        };
+        let elsewhere = SessionSummary {
+            parent: None,
+            ..stored_summary("ses_8", "another root")
+        };
+        let orphan = SessionSummary {
+            parent: Some(bingo_sdk::ParentLink {
+                session: SessionId::from_raw("ses_8"),
+                item: None,
+            }),
+            ..stored_summary("ses_9", "somebody else's")
+        };
+        let stored = vec![
+            stored_summary("ses_3", "archivist"),
+            grandchild,
+            elsewhere,
+            orphan,
+        ];
+        let rows = roster(&tree, &stored);
+        assert_eq!(
+            rows.iter().map(|row| row.name.clone()).collect::<Vec<_>>(),
+            ["project", "archivist", "runner"],
+            "the chain reaches the root through the child"
+        );
+    }
+
+    /// A listing whose parent links point in a circle must not spin.
+    #[test]
+    fn a_chain_that_never_reaches_the_root_ends_all_the_same() {
+        let tree = Tree::new(state());
+        let link = |id: &str, parent: &str| SessionSummary {
+            parent: Some(bingo_sdk::ParentLink {
+                session: SessionId::from_raw(parent),
+                item: None,
+            }),
+            ..stored_summary(id, id)
+        };
+        let circle = vec![link("ses_5", "ses_6"), link("ses_6", "ses_5")];
+        let rows = roster(&tree, &circle);
+        assert_eq!(rows.len(), 1, "the root alone: {rows:?}");
+    }
+
+    #[test]
+    fn a_stored_row_is_drawn_dim_and_says_that_it_is_stored() {
+        let tree = Tree::new(state());
+        let stored = vec![stored_summary("ses_3", "archivist")];
+        let drawn: Vec<String> = switcher_lines(&roster(&tree, &stored), 1, scene().1)
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        assert_eq!(drawn, ["  project ⏺ idle", "❯ archivist ⏺ stored"]);
+        assert_eq!(bullet_style(Some(Status::Stored), false), theme::dim());
     }
 
     #[test]

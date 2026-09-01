@@ -436,8 +436,32 @@ fn the_switcher_dropdown() {
     frames.push(log_frame(9, log_announced("#design")));
     let tree = spawned_tree(frames);
     let (mut ui, now) = scene();
-    shown(&mut ui, Open::Switcher(Switcher { selected: 2 }), now);
+    shown(
+        &mut ui,
+        Open::Switcher(Switcher {
+            selected: 2,
+            ..Default::default()
+        }),
+        now,
+    );
     both("switcher", &tree, &ui, now);
+}
+
+/// What was spawned in an earlier process is in the store and not here
+/// (M31): its row sits under the live ones, dim, and says so in a word.
+#[test]
+fn the_switcher_lists_what_is_only_in_the_store() {
+    let tree = spawned_tree(busy_child("reviewer"));
+    let (mut ui, now) = scene();
+    shown(
+        &mut ui,
+        Open::Switcher(Switcher {
+            selected: 2,
+            stored: vec![stored_summary("ses_7", "scout")],
+        }),
+        now,
+    );
+    both("switcher_stored", &tree, &ui, now);
 }
 
 /// The quick cycle: `↓` on an empty composer, so the strip has the status

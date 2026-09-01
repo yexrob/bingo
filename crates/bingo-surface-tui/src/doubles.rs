@@ -122,6 +122,8 @@ pub struct TestHost {
     session: Arc<TestSession>,
     /// The mailbox `open(ById)` hands out for the child in the tree.
     child: Arc<TestSession>,
+    /// What `sessions` answers with beyond the root: what the store holds.
+    stored: Vec<SessionSummary>,
     closed: Mutex<Vec<SessionId>>,
 }
 
@@ -129,6 +131,24 @@ impl TestHost {
     pub fn with(frames: Vec<bingo_sdk::Frame>) -> (HostHandle, Arc<TestSession>) {
         let (host, session, _) = Self::tree(frames);
         (host, session)
+    }
+
+    /// A host with sessions in its store that no attachment carries.
+    pub fn with_stored(
+        frames: Vec<bingo_sdk::Frame>,
+        stored: Vec<SessionSummary>,
+    ) -> (HostHandle, Arc<TestSession>) {
+        let session = Arc::new(TestSession {
+            frames,
+            ..Default::default()
+        });
+        let host = TestHost {
+            session: Arc::clone(&session),
+            child: Arc::new(TestSession::default()),
+            stored,
+            closed: Mutex::new(Vec::new()),
+        };
+        (HostHandle(Arc::new(host)), session)
     }
 
     /// A host whose frames arrive `pace` apart: what a storm of deltas looks
@@ -145,6 +165,7 @@ impl TestHost {
         let host = TestHost {
             session: Arc::clone(&session),
             child: Arc::new(TestSession::default()),
+            stored: Vec::new(),
             closed: Mutex::new(Vec::new()),
         };
         (HostHandle(Arc::new(host)), session)
@@ -160,6 +181,7 @@ impl TestHost {
         let host = TestHost {
             session: Arc::clone(&session),
             child: Arc::clone(&child),
+            stored: Vec::new(),
             closed: Mutex::new(Vec::new()),
         };
         (HostHandle(Arc::new(host)), session, child)
@@ -169,7 +191,9 @@ impl TestHost {
 #[async_trait]
 impl HostApi for TestHost {
     async fn sessions(&self, _filter: SessionFilter) -> Result<Vec<SessionSummary>, KernelError> {
-        Ok(vec![summary()])
+        let mut all = vec![summary()];
+        all.extend(self.stored.iter().cloned());
+        Ok(all)
     }
 
     /// The tree's stream comes with the root; a child is opened for its

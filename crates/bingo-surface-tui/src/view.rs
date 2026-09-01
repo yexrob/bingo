@@ -530,7 +530,11 @@ fn help(ui: &Ui, width: usize) -> Vec<Line<'static>> {
 
 /// The `ctrl+g` list: the root and its agents, with what each is doing.
 fn switcher_lines(tree: &Tree, switcher: &Switcher, now: Now) -> Vec<Line<'static>> {
-    tree::switcher_lines(&tree.rows(), switcher.selected, now)
+    tree::switcher_lines(
+        &tree::roster(tree, &switcher.stored),
+        switcher.selected,
+        now,
+    )
 }
 
 fn picker_lines(picker: &Picker) -> Vec<Line<'static>> {
@@ -1332,8 +1336,43 @@ mod tests {
     fn the_switcher_lists_the_root_and_its_agents() {
         let tree = spawned(vec![child_frame(2, opened(child_permission()))]);
         let (mut ui, now) = scene();
-        shown(&mut ui, Open::Switcher(Switcher { selected: 1 }), now);
+        shown(
+            &mut ui,
+            Open::Switcher(Switcher {
+                selected: 1,
+                ..Default::default()
+            }),
+            now,
+        );
         insta::assert_snapshot!(render_tree(&tree, &ui, now));
+    }
+
+    /// M31: the two states of one row. A session the store knows and this
+    /// process does not is listed and marked; when the head frames of the
+    /// session it named arrive, the same row is the reducer's and says what
+    /// it is doing — nothing was moved and nothing was stored twice.
+    #[test]
+    fn a_stored_row_turns_live_in_place_when_its_frames_arrive() {
+        let scout = stored_summary("ses_7", "scout");
+        let (mut ui, now) = scene();
+        shown(
+            &mut ui,
+            Open::Switcher(Switcher {
+                selected: 2,
+                stored: vec![scout.clone()],
+            }),
+            now,
+        );
+        let mut tree = spawned(vec![child_frame(2, started("trn_9"))]);
+        let asleep = render_tree(&tree, &ui, now);
+        assert!(asleep.contains("scout ⏺ stored"), "{asleep}");
+        insta::assert_snapshot!("switcher_row_stored", asleep);
+
+        tree.apply(&woken(1, scout));
+        let awake = render_tree(&tree, &ui, now);
+        assert!(!awake.contains("stored"), "{awake}");
+        assert!(awake.contains("scout ⏺ idle"), "{awake}");
+        insta::assert_snapshot!("switcher_row_live", awake);
     }
 
     /// The quick cycle is the status line's other content, so opening it must
@@ -1415,7 +1454,14 @@ mod tests {
         let root = tree.root_id().clone();
         tree.show(&root);
         let (mut ui, now) = scene();
-        shown(&mut ui, Open::Switcher(Switcher { selected: 1 }), now);
+        shown(
+            &mut ui,
+            Open::Switcher(Switcher {
+                selected: 1,
+                ..Default::default()
+            }),
+            now,
+        );
         insta::assert_snapshot!(render_tree(&tree, &ui, now));
     }
 
