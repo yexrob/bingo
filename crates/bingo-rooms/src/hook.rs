@@ -3,17 +3,22 @@
 //! of every journal, so a post into a room reaches the room's members and what
 //! the room owes for it is chased and shown (ADR-0022 §3–4).
 //!
+//! A journal it watches is also a seat's own: a queue that changed says what
+//! that seat is holding, and a patient seat holding a room's posts too long is
+//! woken for them (ADR-0029 §3).
+//!
 //! Nothing it does waits on the session it observes: what it reads is the
 //! session tree, and what it writes to is another session's queue.
 
 use async_trait::async_trait;
 use bingo_sdk::{
-    ContentPart, Event, Frame, Hook, HookContext, HookMatcher, HookPoint, Item, ItemBody, Origin,
-    Phase, SessionFilter, SessionId,
+    ContentPart, Event, Frame, Hook, HookContext, HookMatcher, HookPoint, Item, ItemBody,
+    KernelError, Origin, Phase, SessionFilter, SessionId,
 };
 use jiff::Timestamp;
 
 use crate::chase::Chaser;
+use crate::deadline::Deadline;
 use crate::name::PARENT;
 use crate::room::Room;
 use crate::roster::Roster;
@@ -24,6 +29,7 @@ use crate::{PLUGIN, mentions, owed, post, room, seat, team};
 pub struct RoomsHook {
     rooms: Roster,
     chaser: Chaser,
+    deadline: Deadline,
 }
 
 #[async_trait]
@@ -53,16 +59,27 @@ impl Hook for RoomsHook {
             Event::SessionUpdated { summary } => {
                 if let Some(room) = self.rooms.register(summary) {
                     self.reckon(&frame.session, &room, cx).await;
+                    self.backlog(&frame.session, &room, cx).await;
                 }
             }
             Event::Extension {
                 plugin,
                 kind,
                 payload,
-            } if plugin == PLUGIN && kind == room::MEMBERS => {
-                self.rooms.set_members(&frame.session, payload)
-            }
+            } if plugin == PLUGIN => self.rooms.extended(&frame.session, kind, payload),
             Event::ItemCompleted { item } => self.item(&frame.session, item, cx).await,
+            // Any session's queue may be holding a room's posts (ADR-0029 §3).
+            Event::QueueChanged { entries, .. } => {
+                self.deadline
+                    .queued(
+                        &cx.host,
+                        &self.rooms,
+                        &frame.session,
+                        entries,
+                        Timestamp::now(),
+                    )
+                    .await
+            }
             _ => {}
         }
     }
@@ -80,9 +97,7 @@ impl RoomsHook {
             }
         };
         for entry in declared {
-            let seated =
-                seat::seat(&cx.host, &cx.session, &cx.cwd, &entry.name, &entry.members).await;
-            if let Err(error) = seated {
+            if let Err(error) = declared_room(cx, &entry).await {
                 tracing::warn!(room = %entry.name, %error, "a declared room was not seated");
             }
         }
@@ -128,6 +143,17 @@ impl RoomsHook {
         self.show(&room.parent, cx).await;
     }
 
+    /// A room this process had not seen before: its patient seats may have
+    /// been holding its posts since before this process started, and a backlog
+    /// found there is nudged once (ADR-0029 §3). The roster comes from the
+    /// room's own snapshot, because the announce itself carries none.
+    async fn backlog(&self, session: &SessionId, room: &Room, cx: &HookContext) {
+        let Some(state) = room::read(&cx.host, session).await else {
+            return;
+        };
+        self.deadline.overdue(&cx.host, &room.seated(&state)).await;
+    }
+
     /// The card on a session: every debt in every room under it, or nothing at
     /// all once the last one closes.
     async fn show(&self, parent: &SessionId, cx: &HookContext) {
@@ -138,6 +164,14 @@ impl RoomsHook {
         }
         owed::publish(&cx.host, parent, owed::view(rows)).await;
     }
+}
+
+/// One room a project declares, seated exactly as `/room <name> [member…]`
+/// would seat it — ears and all.
+async fn declared_room(cx: &HookContext, entry: &team::Entry) -> Result<(), KernelError> {
+    let seats = entry.seats()?;
+    seat::seat(&cx.host, &cx.session, &cx.cwd, &entry.name, &seats).await?;
+    Ok(())
 }
 
 /// Whether this session is a person's own: the one at the top of a tree, and
@@ -158,11 +192,20 @@ async fn is_root(cx: &HookContext) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ear::Seat;
     use crate::room::payload;
     use crate::tests::{Fleet, extension, hook_context, posted, stamped, ts, updated};
     use bingo_sdk::Delivery;
     use serde_json::Value;
     use std::path::{Path, PathBuf};
+
+    /// The seats a roster line asks for: a bare name is live, `~name` listens.
+    fn seats(roster: &[&str]) -> Vec<Seat> {
+        roster
+            .iter()
+            .map(|word| Seat::read(word).expect("a roster word"))
+            .collect()
+    }
 
     /// A root with a reviewer and a scout under it, and a room the hook has
     /// been told about through the frames it would have seen.
@@ -176,8 +219,7 @@ mod tests {
         let cx = hook_context(&room, &fleet, Path::new("/work/project"));
         hook.on_event(&stamped(1, updated(&fleet.summary(&room)), &room), &cx)
             .await;
-        let names: Vec<String> = members.iter().map(|m| m.to_string()).collect();
-        hook.on_event(&stamped(2, extension(payload(&names)), &room), &cx)
+        hook.on_event(&stamped(2, extension(payload(&seats(members))), &room), &cx)
             .await;
         (fleet, root, room, hook)
     }
@@ -212,6 +254,78 @@ mod tests {
         };
         assert_eq!(origin.principal.as_deref(), Some(PARENT));
         assert_eq!(origin.conversation.as_deref(), Some("#design"));
+    }
+
+    /// The ear on the roster decides how the fan-out reaches a seat, end to
+    /// end through the hook (ADR-0029 §1).
+    #[tokio::test]
+    async fn a_patient_seat_is_handed_the_post_without_being_woken() {
+        let (fleet, _, room, hook) = opened(&["reviewer", "~scout"]).await;
+        post_into(&fleet, &hook, &room, Some("reviewer")).await;
+
+        let delivered = fleet.delivered();
+        assert_eq!(delivered.len(), 1);
+        let (to, _, delivery) = &delivered[0];
+        assert_eq!(fleet.summary(to).title.as_deref(), Some("scout"));
+        assert_eq!(*delivery, Delivery::Hold);
+    }
+
+    /// The whole of the deadline through the hook: the seat's queue says what
+    /// it is holding, and the patience says when it is woken for it.
+    #[tokio::test(start_paused = true)]
+    async fn a_seat_holding_a_post_past_its_patience_is_woken_by_the_hook() {
+        let (fleet, root, _, hook) = opened(&["~scout:120"]).await;
+        let scout = fleet.titled("scout").expect("the seat");
+        let cx = hook_context(&scout, &fleet, Path::new("/work/project"));
+        let waiting =
+            crate::tests::queued(&fleet, &scout, &[crate::tests::held("req_1", "#design")]);
+
+        hook.on_event(
+            &stamped(
+                3,
+                Event::QueueChanged {
+                    revision: 1,
+                    entries: waiting,
+                },
+                &scout,
+            ),
+            &cx,
+        )
+        .await;
+        settle().await;
+        assert!(
+            nudges(&fleet).is_empty(),
+            "nothing before the patience is up"
+        );
+
+        tokio::time::advance(std::time::Duration::from_secs(120)).await;
+        settle().await;
+        let nudged = nudges(&fleet);
+        assert_eq!(nudged.len(), 1, "{nudged:?}");
+        assert!(nudged[0].contains("#design"), "{}", nudged[0]);
+        assert!(
+            fleet.delivered().iter().all(|(to, ..)| to != &root),
+            "the holder is not on this roster"
+        );
+    }
+
+    /// A room this process reads for the first time may find a seat already
+    /// holding its posts. It is nudged once — and a reopen is the same room,
+    /// so it is not nudged again for the same backlog.
+    #[tokio::test(start_paused = true)]
+    async fn a_backlog_found_at_the_announce_is_nudged_once() {
+        let (fleet, _, room) = standing(&["~scout:120"]).await;
+        let scout = fleet.titled("scout").expect("the seat");
+        crate::tests::queued(&fleet, &scout, &[crate::tests::held("req_1", "#design")]);
+        let hook = RoomsHook::default();
+
+        announce(&fleet, &hook, &room).await;
+        settle().await;
+        assert_eq!(nudges(&fleet).len(), 1, "{:?}", fleet.delivered());
+
+        announce(&fleet, &hook, &room).await;
+        settle().await;
+        assert_eq!(nudges(&fleet).len(), 1, "a reopen is the same room");
     }
 
     #[tokio::test]
@@ -308,16 +422,15 @@ mod tests {
     async fn standing(members: &[&str]) -> (Fleet, SessionId, SessionId) {
         let fleet = Fleet::default();
         let root = fleet.root();
-        for member in members {
-            fleet.child(&root, member);
+        for seat in seats(members) {
+            fleet.child(&root, &seat.name);
         }
-        let seated: Vec<String> = members.iter().map(|m| m.to_string()).collect();
         let room = seat::seat(
             &fleet.handle(),
             &root,
             Path::new("/work/project"),
             "design",
-            &seated,
+            &seats(members),
         )
         .await
         .expect("a room this crate can open");

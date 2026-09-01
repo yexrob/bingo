@@ -3,12 +3,25 @@
 //! members are the latest `members` extension published into its journal, and
 //! nothing here keeps a copy of either beside them.
 
-use bingo_sdk::{Driver, SessionId, SessionState, SessionSummary};
+use bingo_sdk::{
+    Driver, HostHandle, OpenOptions, SessionId, SessionSelector, SessionState, SessionSummary,
+};
 use serde_json::{Value, json};
 
-/// The one kind this plugin publishes. A payload is the whole of a room's
-/// membership (ADR-0011 §2), so writing it replaces it.
+use crate::ear::{self, Ears, Seat};
+use crate::identity;
+
+/// The one kind this plugin publishes for a room as a whole. A payload is the
+/// whole of a room's membership (ADR-0011 §2), so writing it replaces it.
 pub const MEMBERS: &str = "members";
+
+/// The seats in that payload that are not live, with the patience each asked
+/// for (ADR-0029 §2). A payload without it is an all-live roster.
+pub const LISTENERS: &str = "listeners";
+
+/// The kind one seat's own retuning is published under, before its name: a
+/// register per seat, so no two seats write over each other (ADR-0029 §4).
+pub const EAR: &str = "ear:";
 
 /// The first segment of a room's key; a store key is `owner/path`, and this
 /// plugin owns `rooms`.
@@ -23,6 +36,8 @@ pub struct Room {
     /// children, so a room reaches exactly as far as the tree it sits in.
     pub parent: SessionId,
     pub members: Vec<String>,
+    /// What each of them hears (ADR-0029 §1).
+    pub ears: Ears,
 }
 
 impl Room {
@@ -41,8 +56,22 @@ impl Room {
         Some(Room {
             title: summary.title.clone()?,
             parent: summary.parent.as_ref()?.session.clone(),
+            // A summary says who a room is, never who is in it: the frames
+            // that follow it do.
             members: Vec::new(),
+            ears: Ears::default(),
         })
+    }
+
+    /// The same room, with the roster its own journal has. A summary says who
+    /// a room is, never who is in it, so a reader that has only just met one
+    /// fills it in from the snapshot.
+    pub fn seated(&self, state: &SessionState) -> Room {
+        Room {
+            members: members_of(state),
+            ears: ear::ears_of(state),
+            ..self.clone()
+        }
     }
 }
 
@@ -72,15 +101,58 @@ pub fn members_from(payload: &Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// A membership as it is published: the whole of it, under one key.
-pub fn payload(members: &[String]) -> Value {
-    json!({ MEMBERS: members })
+/// The roster a room now has: its names, each wearing the ear its journal
+/// gives it.
+pub fn roster_of(state: &SessionState) -> Vec<Seat> {
+    let ears = ear::ears_of(state);
+    members_of(state)
+        .into_iter()
+        .map(|name| Seat {
+            ear: ears.of(&name),
+            name,
+        })
+        .collect()
+}
+
+/// A membership as it is published: the whole of it, under one key. A roster
+/// of live seats is written exactly as it was before there were ears.
+pub fn payload(seats: &[Seat]) -> Value {
+    let names: Vec<&str> = seats.iter().map(|seat| seat.name.as_str()).collect();
+    let mut payload = json!({ MEMBERS: names });
+    if let Some(listeners) = ear::listeners_of(seats) {
+        payload[LISTENERS] = listeners;
+    }
+    payload
+}
+
+/// A session as this plugin reads one: its own journal, folded. A session it
+/// cannot read says nothing rather than guessing, which is what every caller
+/// here wants of one.
+pub async fn read(host: &HostHandle, session: &SessionId) -> Option<SessionState> {
+    let opened = host
+        .open(
+            SessionSelector::ById {
+                id: session.clone(),
+            },
+            identity(),
+            OpenOptions::default(),
+        )
+        .await;
+    match opened {
+        Ok(attachment) => Some(attachment.snapshot),
+        Err(error) => {
+            tracing::debug!(%error, %session, "a session that cannot be read says nothing");
+            None
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ear::Ear;
     use crate::tests::{room_summary, summary};
+    use std::time::Duration;
 
     #[test]
     fn a_log_session_keyed_rooms_under_a_parent_is_a_room() {
@@ -89,6 +161,7 @@ mod tests {
         assert_eq!(room.title, "#design");
         assert_eq!(room.parent, parent);
         assert!(room.members.is_empty(), "a summary says nothing of them");
+        assert_eq!(room.ears, Ears::default(), "nor of what they hear");
     }
 
     #[test]
@@ -112,13 +185,53 @@ mod tests {
 
     #[test]
     fn a_membership_round_trips_through_the_payload_it_is_published_as() {
-        let members = ["reviewer", "scout"].map(str::to_string).to_vec();
-        assert_eq!(members_from(&payload(&members)), members);
+        let seats = [Seat::live("reviewer"), Seat::live("scout")];
+        assert_eq!(members_from(&payload(&seats)), ["reviewer", "scout"]);
         assert!(members_from(&json!({})).is_empty());
         assert_eq!(
             members_from(&json!({ "members": ["reviewer", 7] })),
             ["reviewer"],
             "a name is a string"
+        );
+    }
+
+    /// The shape a room opened before there were ears left in its journal —
+    /// a fixture, because this is a persisted payload and not a value this
+    /// process is free to change. Every seat in it hears every post.
+    #[test]
+    fn a_roster_written_before_there_were_ears_reads_all_live() {
+        const OLD: &str = r#"{"members":["reviewer","scout","parent"]}"#;
+        let payload: Value = serde_json::from_str(OLD).expect("a membership payload");
+        assert_eq!(members_from(&payload), ["reviewer", "scout", "parent"]);
+
+        let mut ears = Ears::default();
+        ears.declare(&payload);
+        for member in ["reviewer", "scout", "parent"] {
+            assert_eq!(ears.of(member), Ear::Live, "{member}");
+        }
+    }
+
+    /// A room of live seats is written the way it always was; a patient one
+    /// says so beside the names, and never instead of them.
+    #[test]
+    fn the_payload_names_the_listeners_only_when_a_seat_is_one() {
+        assert_eq!(
+            payload(&[Seat::live("scout")]),
+            json!({ "members": ["scout"] })
+        );
+        let listening = [
+            Seat::live("scout"),
+            Seat {
+                name: "parent".into(),
+                ear: Ear::Patient(Duration::from_secs(120)),
+            },
+        ];
+        assert_eq!(
+            payload(&listening),
+            json!({
+                "members": ["scout", "parent"],
+                "listeners": [{"name": "parent", "patience_s": 120}],
+            })
         );
     }
 }

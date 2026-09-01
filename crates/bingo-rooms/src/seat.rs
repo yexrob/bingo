@@ -9,42 +9,71 @@ use bingo_sdk::{
     Driver, HostHandle, KernelError, OpenOptions, ParentLink, SessionFilter, SessionId,
     SessionSelector, SessionSpec,
 };
+use serde_json::Value;
 
+use crate::ear::{self, Seat};
 use crate::{PLUGIN, identity, name, room};
 
 /// The room of that name under `parent`, opened if there is none; either way
-/// its membership afterwards is exactly `members`, which are names and not
-/// sessions — a role may be seated before anyone holds it.
+/// its roster afterwards is exactly `seats`, which are names and not sessions
+/// — a role may be seated before anyone holds it — each wearing the ear the
+/// door asked for.
 pub async fn seat(
     host: &HostHandle,
     parent: &SessionId,
     cwd: &Path,
     name: &str,
-    members: &[String],
+    seats: &[Seat],
 ) -> Result<SessionId, KernelError> {
     let name = name::check(name)?;
     let title = name::title(name);
     let room = match standing(host, parent, &title).await? {
-        Some(room) => room,
+        Some(room) => {
+            // A roster is declared whole, and the ears with it: what a seat
+            // retuned for itself under the roster before this one is written
+            // over here, so the reseat is the reset lever it is meant to be
+            // (ADR-0029 §4). A room this call is opening has none to clear.
+            clear_retuned(host, &room).await?;
+            room
+        }
         None => open(host, parent, cwd, name, &title).await?,
     };
-    host.extend(&room, PLUGIN, room::MEMBERS, room::payload(members))
+    host.extend(&room, PLUGIN, room::MEMBERS, room::payload(seats))
         .await?;
     Ok(room)
+}
+
+/// Every retuning a standing room carries, cleared. Each is cleared where it
+/// was written — one register per seat — so a `Listen` that lands beside this
+/// call is settled by journal order rather than by clobbering a shared value.
+async fn clear_retuned(host: &HostHandle, room: &SessionId) -> Result<(), KernelError> {
+    let Some(state) = room::read(host, room).await else {
+        return Ok(());
+    };
+    for member in ear::ears_of(&state).retuned() {
+        host.extend(room, PLUGIN, &ear::kind(&member), Value::Null)
+            .await?;
+    }
+    Ok(())
 }
 
 /// What the caller is told once a room is seated: the room, and who is in it.
 /// `/room` and `OpenRoom` are the same act (ADR-0021 §3), so they say the same
 /// thing about it.
-pub(crate) fn receipt(title: &str, members: &[String]) -> String {
-    format!("{title}: {}", roster(members))
+pub(crate) fn receipt(title: &str, seats: &[Seat]) -> String {
+    format!("{title}: {}", roster(seats))
 }
 
-/// Who is in a room, as a person or a model reads it.
-pub(crate) fn roster(members: &[String]) -> String {
-    match members.is_empty() {
+/// Who is in a room, as a person or a model reads it: the names, and the sigil
+/// on the ones that listen rather than answer.
+pub(crate) fn roster(seats: &[Seat]) -> String {
+    match seats.is_empty() {
         true => "nobody yet".to_string(),
-        false => members.join(", "),
+        false => seats
+            .iter()
+            .map(Seat::said)
+            .collect::<Vec<String>>()
+            .join(", "),
     }
 }
 
@@ -103,20 +132,30 @@ async fn open(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ear::Ear;
     use crate::room::Room;
     use crate::tests::Fleet;
 
-    fn members(names: &[&str]) -> Vec<String> {
-        names.iter().map(|n| n.to_string()).collect()
+    fn members(names: &[&str]) -> Vec<Seat> {
+        names.iter().map(|n| Seat::live(n)).collect()
     }
 
     async fn seated(fleet: &Fleet, parent: &SessionId, name: &str, who: &[&str]) -> SessionId {
+        seated_with(fleet, parent, name, &members(who)).await
+    }
+
+    async fn seated_with(
+        fleet: &Fleet,
+        parent: &SessionId,
+        name: &str,
+        seats: &[Seat],
+    ) -> SessionId {
         seat(
             &fleet.handle(),
             parent,
             Path::new("/work/project"),
             name,
-            &members(who),
+            seats,
         )
         .await
         .expect("a room this crate can open")
@@ -169,6 +208,41 @@ mod tests {
         let root = fleet.root();
         let room = seated(&fleet, &root, "design", &[]).await;
         assert!(fleet.members(&room).is_empty());
+    }
+
+    /// The roster carries the ears, and a reseat is the reset lever: what a
+    /// seat retuned for itself is cleared where it was written (ADR-0029 §4).
+    #[tokio::test]
+    async fn a_reseat_declares_the_ears_whole_and_clears_what_a_seat_retuned() {
+        let fleet = Fleet::default();
+        let root = fleet.root();
+        let listening = [
+            Seat::live("scout"),
+            Seat {
+                name: "parent".into(),
+                ear: Ear::Patient(std::time::Duration::from_secs(120)),
+            },
+        ];
+        let room = seated_with(&fleet, &root, "design", &listening).await;
+        assert_eq!(fleet.ears(&room).of("parent"), listening[1].ear);
+
+        fleet
+            .handle()
+            .extend(
+                &room,
+                PLUGIN,
+                &ear::kind("scout"),
+                ear::register(Ear::Patient(ear::FLOOR)),
+            )
+            .await
+            .expect("a seat retunes its own ear");
+        assert_eq!(fleet.ears(&room).of("scout"), Ear::Patient(ear::FLOOR));
+
+        seated(&fleet, &root, "design", &["scout", "parent"]).await;
+        let ears = fleet.ears(&room);
+        assert_eq!(ears.of("scout"), Ear::Live, "the reseat is the reset lever");
+        assert_eq!(ears.of("parent"), Ear::Live);
+        assert!(ears.retuned().is_empty(), "and nothing lingers behind it");
     }
 
     #[tokio::test]
