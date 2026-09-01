@@ -47,17 +47,17 @@ unchanged. One worker; no kernel or sdk change.
 
 ## Exit criteria
 
-- [ ] a rostered holder is woken like any member; no `Hold` remains in
+- [x] a rostered holder is woken like any member; no `Hold` remains in
       `bingo-rooms`; `calls_on` is gone
-- [ ] the author guard still keeps every seat from hearing itself;
+- [x] the author guard still keeps every seat from hearing itself;
       exactly-once fan-out pinned with the holder counted
-- [ ] the composer's pending area draws person entries only; a
+- [x] the composer's pending area draws person entries only; a
       subsystem entry draws nothing; unknown surfaces stay person-loud
       — all four proven on `TestBackend`
-- [ ] the live-holder black-box: a post opens the idle holder's turn,
+- [x] the live-holder black-box: a post opens the idle holder's turn,
       `@parent`'s debt opens and closes, a parentless room unchanged
-- [ ] the words stop promising quiet; pins updated
-- [ ] every gate green (fmt, check, clippy, test, discipline, budget
+- [x] the words stop promising quiet; pins updated
+- [x] every gate green (fmt, check, clippy, test, discipline, budget
       unchanged, deny)
 
 ## Non-goals
@@ -77,3 +77,35 @@ order) and pin turn *behaviour* only where the script makes it
 deterministic, the M20 lesson. R-window — between Wake and the
 barrier a subsystem entry sits in the queue; brick 3 is what keeps
 that window invisible, so land it with brick 1 in one commit.
+
+## Verified (2026-09-01)
+
+- Worker P merged `92c8660` (`15dbf4d` rooms, `564cf20` tui):
+  `delivered` lost the text axis (seven rows over roster x holder x
+  author); `calls_on` deleted; `rg Hold` and `rg calls_on` over
+  `bingo-rooms/src` both empty; the pending area filters through
+  `transcript::quiet` exposed pub(crate) — one list, two readers — and
+  the filter was proven by removing it.
+- Deviations accepted on review: `A_BURST` puts the burst in one model
+  response so the fake provider's run-wide cursor cannot race the
+  holder's woken turn (the deaf test keeps `TWO_POSTS` untouched);
+  `until_the_room_settles` waits for root-and-scout quiescence for the
+  same reason; the burst's turn count is deliberately unpinned (the
+  scheduler's business) and the never-lost invariant pinned instead.
+- Gates on the worker's tree, which is byte-identical to this merge
+  (base `c11b6ea`, quiet machine, load 5.6): fmt / check / clippy OK;
+  bingo-rooms 96, bingo-surface-tui 474; workspace 69 targets, 0
+  failures; discipline / budget (302 unchanged) / deny OK; the PTY
+  smoke's 14 scenes green (terminal bytes changed: the steer rows left
+  the pending band).
+
+## Carried
+
+- The relay black-box (`peers.rs::one_kickoff_post_runs_a_relay_…`)
+  now flakes on a QUIET machine — 2/6 red at base `c11b6ea` with P's
+  work absent, two variants (the parent posts the members' counts
+  itself; the relay stops at the kickoff) — both shapes of the fake
+  provider's run-wide cursor being taken by the wrong waker. M22's
+  Carried said "widen only if it ever flakes quiet"; it has. Filed to
+  its own worker: fix the test's determinism (or teach provider-fake
+  addressed responses), never the assertion.
