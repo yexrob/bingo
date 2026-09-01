@@ -81,6 +81,9 @@ impl SessionStore for JsonlStore {
         journal::append(&dir, frame)?;
         match &frame.event {
             Event::SessionUpdated { summary } => summary::write(&dir, summary),
+            // A message is worth no frame of its own, so the derived file — not
+            // the journal — is what stays fresh between one head and the next.
+            event if event.completes_a_message() => summary::count_message(&dir),
             _ => Ok(()),
         }
     }
@@ -191,6 +194,8 @@ pub(crate) mod tests {
             updated_at: stamp(),
             usage: Usage::default(),
             busy: false,
+            // A session as the kernel leaves one: counted, and nothing said yet.
+            messages: Some(0),
         }
     }
 

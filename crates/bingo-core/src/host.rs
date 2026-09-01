@@ -534,6 +534,10 @@ impl Host {
             updated_at: now,
             usage: Usage::default(),
             busy: false,
+            // A session the kernel has just minted has been counted, and the
+            // count is nought; `None` is only ever a summary older than the
+            // field.
+            messages: Some(0),
         }
     }
 

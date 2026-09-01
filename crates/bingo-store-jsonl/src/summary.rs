@@ -37,19 +37,48 @@ fn read(dir: &Path) -> Option<SessionSummary> {
 }
 
 /// The last `SessionUpdated` in the journal is what the file held, so the
-/// rebuild is the same value and not an older one.
+/// rebuild is the same value and not an older one — except for the count,
+/// which the file kept fresher than any frame did and which the whole journal
+/// therefore has to say again.
 fn rebuild(dir: &Path) -> Result<Option<SessionSummary>, KernelError> {
-    let latest = journal::replay(dir, Seq::ZERO)?
+    let frames = journal::replay(dir, Seq::ZERO)?;
+    let messages = frames
+        .iter()
+        .filter(|frame| frame.event.completes_a_message())
+        .count();
+    let latest = frames
         .into_iter()
         .filter_map(|frame| match frame.event {
             Event::SessionUpdated { summary } => Some(summary),
             _ => None,
         })
-        .next_back();
+        .next_back()
+        .map(|summary| SessionSummary {
+            messages: Some(messages as u64),
+            ..summary
+        });
     if let Some(summary) = &latest {
         write(dir, summary)?;
     }
     Ok(latest)
+}
+
+/// A message landed: the count in the file moves and the journal grows nothing
+/// (ADR-0005 §5 — the derived file is where freshness lives). A file that never
+/// counted, or is gone, is rebuilt from the journal, which already holds this
+/// frame and counts it there; after that the cheap path serves every message.
+pub fn count_message(dir: &Path) -> Result<(), KernelError> {
+    let counted = read(dir).and_then(|summary| Some((summary.messages?, summary)));
+    match counted {
+        Some((messages, summary)) => write(
+            dir,
+            &SessionSummary {
+                messages: Some(messages + 1),
+                ..summary
+            },
+        ),
+        None => rebuild(dir).map(drop),
+    }
 }
 
 /// Every session the filter admits, most recently updated first.
@@ -97,6 +126,143 @@ mod tests {
         let dir = tempfile::tempdir().expect("temp dir");
         journal::create(dir.path(), &session()).expect("create");
         dir
+    }
+
+    fn item(id: &str, body: bingo_sdk::ItemBody) -> bingo_sdk::Item {
+        bingo_sdk::Item {
+            id: bingo_sdk::ItemId::from_raw(id),
+            turn: None,
+            round: 0,
+            status: bingo_sdk::ItemStatus::Completed,
+            started_at: crate::tests::stamp(),
+            completed_at: None,
+            intent: None,
+            body,
+            meta: Default::default(),
+        }
+    }
+
+    fn said(seq: u64, id: &str) -> bingo_sdk::Frame {
+        frame(
+            seq,
+            Event::ItemCompleted {
+                item: item(
+                    id,
+                    bingo_sdk::ItemBody::User {
+                        parts: vec![bingo_sdk::ContentPart::text("hi")],
+                        origin: bingo_sdk::Origin::surface("test"),
+                    },
+                ),
+            },
+        )
+    }
+
+    fn answered(seq: u64, id: &str) -> bingo_sdk::Frame {
+        frame(
+            seq,
+            Event::ItemCompleted {
+                item: item(id, bingo_sdk::ItemBody::Assistant { text: "ok".into() }),
+            },
+        )
+    }
+
+    /// A tool call is work around a message, not a message.
+    fn called(seq: u64, id: &str) -> bingo_sdk::Frame {
+        frame(
+            seq,
+            Event::ItemCompleted {
+                item: item(
+                    id,
+                    bingo_sdk::ItemBody::ToolCall {
+                        call_id: "call_1".into(),
+                        name: "Read".into(),
+                        input: serde_json::Value::Null,
+                        output: None,
+                        progress: None,
+                        duration_ms: None,
+                    },
+                ),
+            },
+        )
+    }
+
+    /// The three that must agree: the file the appends kept, the file a
+    /// rebuild writes, and the journal they both read.
+    fn counted(dir: &Path) -> Option<u64> {
+        of(dir).expect("a summary").and_then(|s| s.messages)
+    }
+
+    #[test]
+    fn the_count_in_the_file_moves_with_a_message_and_the_journal_grows_none() {
+        let dir = planted();
+        write(dir.path(), &summary()).expect("write");
+        journal::append(
+            dir.path(),
+            &frame(1, Event::SessionUpdated { summary: summary() }),
+        )
+        .expect("append");
+        for message in [said(2, "itm_1"), answered(3, "itm_2"), called(4, "itm_3")] {
+            journal::append(dir.path(), &message).expect("append");
+            if message.event.completes_a_message() {
+                count_message(dir.path()).expect("count");
+            }
+        }
+        assert_eq!(counted(dir.path()), Some(2), "an ask and an answer");
+        let frames = journal::replay(dir.path(), Seq::ZERO).expect("replay");
+        assert_eq!(
+            frames
+                .iter()
+                .filter(|f| matches!(f.event, Event::SessionUpdated { .. }))
+                .count(),
+            1,
+            "freshness cost the journal nothing"
+        );
+    }
+
+    #[test]
+    fn a_rebuilt_summary_recounts_the_whole_journal() {
+        let dir = planted();
+        write(dir.path(), &summary()).expect("write");
+        for message in [
+            frame(1, Event::SessionUpdated { summary: summary() }),
+            said(2, "itm_1"),
+            answered(3, "itm_2"),
+            said(4, "itm_3"),
+        ] {
+            journal::append(dir.path(), &message).expect("append");
+        }
+        std::fs::remove_file(layout::summary(dir.path())).expect("remove");
+        assert_eq!(
+            counted(dir.path()),
+            Some(3),
+            "a torn summary comes back true from the journal"
+        );
+    }
+
+    /// The M32 migration, and the whole of it: a file that never counted is
+    /// not started at one — the journal it derives from says the number.
+    #[test]
+    fn a_file_that_never_counted_is_rebuilt_rather_than_guessed() {
+        let dir = planted();
+        let old = SessionSummary {
+            messages: None,
+            ..summary()
+        };
+        write(dir.path(), &old).expect("write");
+        assert_eq!(
+            read(dir.path()).and_then(|s| s.messages),
+            None,
+            "an old file lies about nothing"
+        );
+        for message in [
+            frame(1, Event::SessionUpdated { summary: old }),
+            said(2, "itm_1"),
+            answered(3, "itm_2"),
+        ] {
+            journal::append(dir.path(), &message).expect("append");
+        }
+        count_message(dir.path()).expect("count");
+        assert_eq!(counted(dir.path()), Some(2), "not 1");
     }
 
     #[test]

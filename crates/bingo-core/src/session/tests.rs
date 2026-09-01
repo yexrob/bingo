@@ -9,6 +9,7 @@ use crate::test_support::*;
 
 mod commands;
 mod log;
+mod naming;
 mod peers;
 
 fn who() -> ClientIdentity {
@@ -111,6 +112,9 @@ async fn submit_starts_a_turn_and_streams_it_to_the_end() {
         labels,
         vec![
             "completed:user/completed",
+            // The first ask names a session nobody named; the mint rides one
+            // frame of its own and is never sent again.
+            "SessionUpdated",
             "turnStarted",
             "ack:TurnStarted",
             "started:assistant/running",

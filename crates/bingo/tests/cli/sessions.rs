@@ -76,6 +76,70 @@ fn continue_and_resume_reopen_the_journal_the_last_run_wrote() {
     );
 }
 
+/// What a `/resume` row is read from (M32): the summary beside the journal
+/// names the session by its first ask and counts what was said in it, and
+/// keeps both true across a `--continue`.
+#[test]
+fn a_resumed_session_carries_its_first_ask_and_what_was_said_in_it() {
+    let home = tempfile::tempdir().unwrap();
+    let say = |text: &str| {
+        script(&format!(
+            r#"{{"responses":[{{"steps":[{{"text":"{text}"}}]}}]}}"#
+        ))
+    };
+    let first = say("First.");
+    let out = scripted_run(
+        home.path(),
+        &first,
+        &[],
+        "Fix the parser. It crashes on unicode.",
+    );
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    let dir = home
+        .path()
+        .join(".bingo/data/sessions")
+        .join(frames_of(&out)[0].session.to_string());
+
+    let summary = || -> serde_json::Value {
+        let bytes = std::fs::read(dir.join("summary.json")).expect("a summary beside the journal");
+        serde_json::from_slice(&bytes).expect("json")
+    };
+    assert_eq!(
+        summary()["title"],
+        "Fix the parser",
+        "the first sentence of the first ask, and not the paragraph"
+    );
+    assert_eq!(summary()["messages"], 2, "the ask and the answer");
+
+    let again = say("Second.");
+    let second = scripted_run(home.path(), &again, &["--continue"], "and the lexer");
+    assert_eq!(second.status.code(), Some(0), "stderr: {}", stderr(&second));
+    assert_eq!(summary()["title"], "Fix the parser", "the mint fires once");
+    assert_eq!(summary()["messages"], 4);
+
+    // A summary as it was written before the count existed: it says nothing
+    // rather than a `0`, and the next write earns it the journal's own number
+    // rather than starting again from one.
+    let mut old = summary();
+    old.as_object_mut().expect("an object").remove("messages");
+    std::fs::write(dir.join("summary.json"), old.to_string()).expect("write the old summary");
+    assert_eq!(summary().get("messages"), None);
+
+    let third = say("Third.");
+    let out = scripted_run(home.path(), &third, &["--continue"], "and the printer");
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    assert_eq!(summary()["messages"], 6, "counted from the whole journal");
+
+    // The journal pays nothing for that freshness: one head per segment, and
+    // one for the name the first ask minted.
+    let heads = std::fs::read_to_string(dir.join("journal.jsonl"))
+        .expect("the journal")
+        .lines()
+        .filter(|line| line.contains(r#""type":"sessionUpdated""#))
+        .count();
+    assert_eq!(heads, 4, "three segment heads and the mint, no more");
+}
+
 #[test]
 fn a_session_another_process_holds_cannot_be_continued() {
     let home = tempfile::tempdir().unwrap();

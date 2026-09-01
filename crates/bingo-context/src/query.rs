@@ -37,6 +37,7 @@ impl Asked {
                 updated_at: Timestamp::UNIX_EPOCH,
                 usage: Usage::default(),
                 busy: false,
+                messages: None,
             },
             turn: TurnId::from_raw("trn_test"),
             items: Vec::new(),

@@ -10,6 +10,7 @@ mod mailbox;
 mod queue;
 mod spawn;
 mod subscribers;
+mod title;
 
 use std::collections::HashMap;
 use std::panic::AssertUnwindSafe;
@@ -201,6 +202,33 @@ impl Actor {
         self.publish(event, None).await;
     }
 
+    /// The session's name: the one it was given, else the one its first ask
+    /// earns it. A minted name is a name, so once it is published this reads
+    /// it back like any other and mints nothing further.
+    fn title(&self) -> Option<String> {
+        self.state
+            .summary
+            .title
+            .clone()
+            .or_else(|| title::first_ask(&self.state.items).and_then(title::mint))
+    }
+
+    /// The mint's own `SessionUpdated`, sent once when the first prose lands
+    /// live — the heads of a segment carry it the rest of the time, and no
+    /// item or turn is worth a frame of its own (ADR-0005 §5).
+    async fn mint_title(&mut self) {
+        let minted = self.title();
+        if minted == self.state.summary.title {
+            return;
+        }
+        let summary = SessionSummary {
+            title: minted,
+            updated_at: Timestamp::now(),
+            ..self.state.summary.clone()
+        };
+        self.publish(Event::SessionUpdated { summary }, None).await;
+    }
+
     /// What a barrier may steer the running turn with: the held prose, and
     /// nothing for a turn that is not the one running.
     async fn absorb(&mut self, turn: &TurnId) -> Vec<(IntentId, Input)> {
@@ -216,6 +244,7 @@ impl Actor {
     async fn open(&mut self) -> Starting {
         let summary = SessionSummary {
             busy: false,
+            title: self.title(),
             updated_at: Timestamp::now(),
             ..self.state.summary.clone()
         };
@@ -606,20 +635,35 @@ impl Actor {
             let Input::Text { text, origin, .. } = input else {
                 continue;
             };
-            let item = self.fresh(
-                Some(turn.clone()),
-                Some(intent.clone()),
-                ItemBody::User {
-                    parts: vec![ContentPart::text(text)],
-                    origin,
-                },
-            );
-            ids.push(item.id.clone());
             acks.push(intent.clone());
-            self.publish(Event::ItemCompleted { item }, Some(intent))
-                .await;
+            ids.push(
+                self.journal_prose(Some(turn.clone()), intent, text, origin)
+                    .await,
+            );
         }
         (ids, acks)
+    }
+
+    /// A person's prose enters the journal here and nowhere else, which is why
+    /// the name an unnamed session earns from its first ask is minted at one
+    /// site rather than wherever an item happens to be built.
+    pub(super) async fn journal_prose(
+        &mut self,
+        turn: Option<TurnId>,
+        intent: IntentId,
+        text: String,
+        origin: Origin,
+    ) -> ItemId {
+        let body = ItemBody::User {
+            parts: vec![ContentPart::text(text)],
+            origin,
+        };
+        let item = self.fresh(turn, Some(intent.clone()), body);
+        let id = item.id.clone();
+        self.publish(Event::ItemCompleted { item }, Some(intent))
+            .await;
+        self.mint_title().await;
+        id
     }
 
     async fn ack_turn_started(&mut self, turn: &TurnId, intents: Vec<IntentId>) {

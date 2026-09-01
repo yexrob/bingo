@@ -153,6 +153,9 @@ impl SessionState {
             return Applied::Stale;
         }
         self.seq = frame.seq;
+        if frame.event.completes_a_message() {
+            self.count_a_message();
+        }
         match &frame.event {
             Event::SessionUpdated { summary } => self.session_updated(summary),
             Event::SessionClosed { .. } => self.session_closed(),
@@ -223,6 +226,13 @@ impl SessionState {
                 .insert(kind.to_string(), payload.clone());
         }
         Applied::Signal
+    }
+
+    /// A journal that was never counted starts counting here; what came before
+    /// this fold is lost either way, and a rebuild from the whole journal is
+    /// what puts an old session's true number back.
+    fn count_a_message(&mut self) {
+        self.summary.messages = Some(self.summary.messages.unwrap_or(0) + 1);
     }
 
     fn session_updated(&mut self, summary: &SessionSummary) -> Applied {
@@ -355,6 +365,7 @@ mod tests {
             updated_at: ts(),
             usage: Usage::default(),
             busy: false,
+            messages: None,
         }
     }
 
@@ -380,6 +391,113 @@ mod tests {
             body: ItemBody::Assistant { text: text.into() },
             meta: Default::default(),
         }
+    }
+
+    fn user(id: &str, text: &str) -> Item {
+        Item {
+            body: ItemBody::User {
+                parts: vec![ContentPart::text(text)],
+                origin: Origin::surface("tui"),
+            },
+            ..assistant(id, "", ItemStatus::Completed)
+        }
+    }
+
+    fn tool_call(id: &str) -> Item {
+        Item {
+            body: ItemBody::ToolCall {
+                call_id: "call_1".into(),
+                name: "Read".into(),
+                input: Value::Null,
+                output: None,
+                progress: None,
+                duration_ms: None,
+            },
+            ..assistant(id, "", ItemStatus::Completed)
+        }
+    }
+
+    /// One item, three frames on its way to done: the count moves once.
+    #[test]
+    fn a_message_is_counted_where_it_is_completed_and_only_there() {
+        let mut st = SessionState::new(summary());
+        assert_eq!(st.summary.messages, None, "a summary that never counted");
+        st.apply(&frame(
+            1,
+            Event::ItemCompleted {
+                item: user("itm_1", "fix the parser"),
+            },
+        ));
+        let running = assistant("itm_2", "", ItemStatus::Running);
+        st.apply(&frame(
+            2,
+            Event::ItemStarted {
+                item: running.clone(),
+            },
+        ));
+        st.apply(&frame(3, Event::ItemUpdated { item: running }));
+        st.apply(&frame(
+            4,
+            Event::ItemCompleted {
+                item: assistant("itm_2", "done", ItemStatus::Completed),
+            },
+        ));
+        st.apply(&frame(
+            5,
+            Event::ItemCompleted {
+                item: tool_call("itm_3"),
+            },
+        ));
+        assert_eq!(
+            st.summary.messages,
+            Some(2),
+            "an ask and an answer; the tool call between them is not a message"
+        );
+    }
+
+    /// The head of a new segment carries the count the last one reached, so a
+    /// resumed session does not start again from nought.
+    #[test]
+    fn a_session_frame_hands_the_count_on() {
+        let mut st = SessionState::new(summary());
+        st.apply(&frame(
+            1,
+            Event::ItemCompleted {
+                item: user("itm_1", "one"),
+            },
+        ));
+        let head = SessionSummary {
+            messages: st.summary.messages,
+            ..summary()
+        };
+        st.apply(&frame(2, Event::SessionUpdated { summary: head }));
+        assert_eq!(st.summary.messages, Some(1));
+        st.apply(&frame(
+            3,
+            Event::ItemCompleted {
+                item: user("itm_2", "two"),
+            },
+        ));
+        assert_eq!(st.summary.messages, Some(2));
+    }
+
+    #[test]
+    fn only_prose_and_answers_are_messages() {
+        assert!(user("itm_1", "hi").body.is_message());
+        assert!(
+            assistant("itm_2", "hello", ItemStatus::Completed)
+                .body
+                .is_message()
+        );
+        assert!(!tool_call("itm_3").body.is_message());
+        assert!(
+            !ItemBody::Notice {
+                level: Level::Info,
+                code: "X".into(),
+                text: "x".into(),
+            }
+            .is_message()
+        );
     }
 
     #[test]

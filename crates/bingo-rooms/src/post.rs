@@ -15,7 +15,7 @@ use bingo_sdk::{
 
 use crate::SURFACE;
 use crate::mentions::{self, Owed};
-use crate::name::{self, PARENT};
+use crate::name;
 use crate::room::Room;
 
 /// Everyone the post reaches, told who wrote it and where.
@@ -100,7 +100,7 @@ async fn holder_of(host: &HostHandle, room: &Room) -> Option<String> {
     }
     let sessions = host.sessions(SessionFilter::default()).await.ok()?;
     let seat = sessions.into_iter().find(|s| s.id == room.parent)?;
-    Some(seat.title.unwrap_or_else(|| PARENT.to_string()))
+    Some(name::signed_by(&seat))
 }
 
 /// The session a member name means: the one the room hangs under for `parent`
@@ -179,6 +179,7 @@ fn origin(author: &str, room: &str) -> Origin {
 mod tests {
     use super::*;
     use crate::ear::{self, Ear, Ears, Seat};
+    use crate::name::PARENT;
     use crate::room;
     use crate::tests::Fleet;
 

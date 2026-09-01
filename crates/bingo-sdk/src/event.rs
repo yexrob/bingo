@@ -176,6 +176,14 @@ impl Event {
                 | Event::Lagged { .. }
         )
     }
+
+    /// The one rule for `SessionSummary::messages`: a message is counted where
+    /// it is finished, so the fold, the store's append and a summary rebuilt
+    /// from the whole journal reach the same number however many times the
+    /// item was updated on the way there.
+    pub fn completes_a_message(&self) -> bool {
+        matches!(self, Event::ItemCompleted { item } if item.body.is_message())
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -398,6 +406,15 @@ pub enum ItemBody {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         label: Option<String>,
     },
+}
+
+impl ItemBody {
+    /// What a person reads as a message: their own prose and the model's
+    /// answers. A tool call, a receipt, a notice is the work around a message
+    /// rather than one, and counting it would make a busy session look chatty.
+    pub fn is_message(&self) -> bool {
+        matches!(self, ItemBody::User { .. } | ItemBody::Assistant { .. })
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -669,6 +686,12 @@ pub struct SessionSummary {
     pub usage: Usage,
     #[serde(default)]
     pub busy: bool,
+    /// How many messages have been said in this session, by
+    /// [`Event::completes_a_message`]. `None` is "never counted" — a summary
+    /// written before the field existed — and must be shown as nothing rather
+    /// than as a `0` it does not mean.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub messages: Option<u64>,
 }
 
 /// Configuration as a client sees it: the kernel's keys and each plugin's claimed slice.
@@ -754,6 +777,7 @@ mod tests {
             updated_at: ts(),
             usage: Usage::default(),
             busy: false,
+            messages: None,
         };
         let frames = vec![
             frame(
