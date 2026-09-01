@@ -68,17 +68,17 @@ dependencies; budget unchanged; no kernel or sdk change.
 
 ## Exit criteria
 
-- [ ] ears fold from roster + EAR deltas, one reader, one constant;
+- [x] ears fold from roster + EAR deltas, one reader, one constant;
       old flat rosters read all-live (fixture)
-- [ ] delivery: live Wake, patient Hold, `@name` pierces, `@all` does
+- [x] delivery: live Wake, patient Hold, `@name` pierces, `@all` does
       not, author guard + exactly-once with mixed ears
-- [ ] deadline: paused-clock proof of one nudge per patience, backlog
+- [x] deadline: paused-clock proof of one nudge per patience, backlog
       absorbed first, standby brief never arms it, announce re-derives
       and nudges an overdue backlog once
-- [ ] `Listen`: own seat only, dead band refused in words, EAR delta
+- [x] `Listen`: own seat only, dead band refused in words, EAR delta
       journaled, reseat clears it
-- [ ] three doors declare ears; receipts and `/room` show them
-- [ ] black-box scenarios green; every gate green (fmt, check, clippy,
+- [x] three doors declare ears; receipts and `/room` show them
+- [x] black-box scenarios green; every gate green (fmt, check, clippy,
       test, discipline, budget unchanged, deny)
 
 ## Non-goals
@@ -97,3 +97,47 @@ reuse `mentions::named` against the real roster, not a one-name
 roster (the `calls_on` mistake M24 deleted; do not rebuild it).
 R-syntax — `~name:secs` collides with nothing today but the parser
 must refuse `~parent:15` with the dead-band words, not clamp.
+
+## Verified (2026-09-01)
+
+- Worker Q merged `73d07e2` (`149581f`): `ear.rs`, `deadline.rs`,
+  `listen.rs` new. The delivery table pins live Wake / patient Hold /
+  `@name` pierces via `mentions::named` against the real roster /
+  `@all` pierces none, author guard and exactly-once with mixed ears;
+  the dead band is refused in words; the back-compat fixture reads a
+  flat roster all-live, and an all-live payload stays byte-identical.
+- Deviations accepted on review: retunings are per-seat `ear:<name>`
+  registers, not one EAR kind — `SessionState::apply` folds extensions
+  latest-wins per (plugin, kind) and republishes by key order on
+  reopen, so one kind could carry only one seat and an order-dependent
+  fold would drop retunings; a reseat clears by writing each standing
+  register empty (replace-whole preserved). `ear_of` was not built:
+  `ears_of(state).of(name)` is the one reader. The deadline re-derives
+  from the room's snapshot at announce (the announce carries no
+  roster), and `Ears::patient()` short-circuits so an all-live room
+  costs the deadline nothing.
+- Nine paused-clock deadline tests, no wall waits; the standby guard
+  pinned twice (surface `room` plus a signature: an agents-surface
+  brief arms nothing, and a nudge — unsigned — never chases itself).
+  Black-box: a `~parent` room's posts land with the root at 0 turns,
+  then the person's next line absorbs both in room order; `@parent`
+  pierces a 600 s ear and the debt opens and closes; `Listen` lands an
+  `ear:scout` register in the room's journal.
+- Gates on the worker tree (`149581f`, load 11–14) and integrated on
+  main at `73d07e2` with worker R's merge in (load 14–28): fmt /
+  check / clippy OK; bingo-rooms 140; workspace 0 failures (cli 130,
+  11.4 s); discipline ok (`Listen` added to the tool regex); budget
+  302 unchanged; deny ok.
+
+## Carried
+
+- A resumed seat's announce-time backlog can be a phantom:
+  `SessionState.queue` is folded from the previous process's
+  `QueueChanged` frames and the kernel does not restore the actor
+  queue on resume, so the one overdue nudge per room per process may
+  wake a seat that holds nothing. Bounded and harmless — the seat is
+  behind on the room's journal either way; kernel behaviour, revisit
+  only if resume semantics change.
+- The relay flake worker Q hit twice under load was the pre-fix defect
+  at its base `e8a6a7`; worker R's addressed responses merged first
+  and the integrated run is green.
