@@ -27,10 +27,12 @@ By default the room hangs under you, so the agents you started are the ones \
 who hear it; with `shared: true` it hangs under the agent that started you \
 instead, so your peers hear it. Members are names, not sessions: a name \
 nobody holds yet is kept and skipped at delivery until someone does. Name \
-`parent` among the members to hear the room yourself: every post reaches you \
-quietly, costing you no turn until something else opens one, and a post that \
-says `@parent` wakes you at once and is owed an answer. Opening a room that \
-already stands replaces who is in it rather than opening a second one.";
+`parent` among the members to hear the room yourself: every post reaches you as \
+it lands — read at your next stop while you work, or opening a turn of its own \
+when you are idle — and one that says `@parent` is owed an answer. A chatty \
+room spends your attention that way, so leave `parent` off one that should not. \
+Opening a room that already stands replaces who is in it rather than opening a \
+second one.";
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct OpenRoomArgs {
@@ -400,8 +402,15 @@ mod tests {
             DESCRIPTION.contains("`parent` among the members"),
             "{DESCRIPTION}"
         );
-        assert!(DESCRIPTION.contains("quietly"), "{DESCRIPTION}");
-        assert!(DESCRIPTION.contains("`@parent` wakes you"), "{DESCRIPTION}");
+        assert!(DESCRIPTION.contains("as it lands"), "{DESCRIPTION}");
+        assert!(
+            DESCRIPTION.contains("`@parent` is owed an answer"),
+            "{DESCRIPTION}"
+        );
+        assert!(
+            DESCRIPTION.contains("spends your attention"),
+            "the cost is said, not hidden: {DESCRIPTION}"
+        );
     }
 
     #[test]
