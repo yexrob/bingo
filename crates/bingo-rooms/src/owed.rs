@@ -136,6 +136,15 @@ mod tests {
         assert_eq!(column(&[mention(Owed::Room, 0)], at(0)), "@all 0s");
     }
 
+    /// A rostered holder is a debtor like any other, shown by the name
+    /// everyone in the room uses for it (ADR-0028).
+    #[test]
+    fn the_holder_owes_by_the_name_its_members_call_it() {
+        let open = [member(crate::name::PARENT, 0)];
+        assert_eq!(column(&open, at(60)), "parent 1m");
+        assert_eq!(rows("#design", &open)[0][1], "parent");
+    }
+
     #[test]
     fn the_card_is_a_row_per_debt_and_nothing_at_all_when_none_stand() {
         let open = [member("scout", 60), member("reviewer", 0)];

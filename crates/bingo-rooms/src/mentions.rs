@@ -13,7 +13,7 @@ use bingo_sdk::{
 };
 use jiff::Timestamp;
 
-use crate::name::PARENT;
+use crate::name::{PARENT, same};
 use crate::{identity, room};
 
 /// The sigil that calls on the room rather than on anyone in it. Reserved: a
@@ -182,9 +182,13 @@ fn is_member(who: &str, members: &[String]) -> bool {
     members.iter().any(|member| same(member, who))
 }
 
-/// Two names, as a room compares them: the same word in any case.
-fn same(a: &str, b: &str) -> bool {
-    a.to_lowercase() == b.to_lowercase()
+/// Whether a post calls on one name. It is the matcher above, asked for a
+/// delivery mode rather than for a debt (ADR-0028 §3), so `@parent` is read
+/// exactly as every other mention is; `@all` calls on the room and names
+/// nobody, so it answers `false` for any name.
+pub(crate) fn calls_on(text: &str, name: &str) -> bool {
+    let roster = [name.to_string()];
+    named(text, &roster).contains(&Owed::Member(name.to_string()))
 }
 
 /// The first line of a post, clipped: what a nudge quotes back.
@@ -355,6 +359,48 @@ mod tests {
             post(3, "reviewer", "both, then"),
         ];
         assert!(owed(&posts).is_empty());
+    }
+
+    /// ADR-0028 §3: a rostered holder is a member to the fold, and the seat's
+    /// own post — a root holder's signs `parent` — closes what it owes.
+    #[test]
+    fn the_holder_on_the_roster_owes_and_answers_like_any_member() {
+        let seated = ["scout".to_string(), PARENT.to_string()];
+        let asked = [post(1, "scout", "@parent what does the build say?")];
+        assert_eq!(
+            mentions(&asked, &seated)[0].owed_by,
+            Owed::Member(PARENT.into())
+        );
+
+        let answered = [
+            post(1, "scout", "@parent what does the build say?"),
+            post(2, PARENT, "it is green"),
+        ];
+        assert!(
+            mentions(&answered, &seated).is_empty(),
+            "the seat's own post closes what it owes"
+        );
+        assert!(
+            mentions(&asked, &["scout".to_string()]).is_empty(),
+            "off the roster, `@parent` opens nothing (ADR-0028 §4)"
+        );
+    }
+
+    /// The delivery-mode read of the same matcher (ADR-0028 §3).
+    #[test]
+    fn a_post_calls_on_a_name_by_the_one_matcher() {
+        let table = [
+            ("@parent look", true),
+            ("hey @PARENT!", true),
+            ("line one\n@parent", true),
+            ("mail@parent", false),
+            ("@parenting", false),
+            ("@all stand-up in five", false),
+            ("the parent said so", false),
+        ];
+        for (text, calls) in table {
+            assert_eq!(calls_on(text, PARENT), calls, "{text:?}");
+        }
     }
 
     #[test]

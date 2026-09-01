@@ -6,8 +6,20 @@ use bingo_sdk::{ErrorCode, KernelError};
 
 /// The word a child uses for the session that spawned it. A post whose author
 /// left no principal came from the person's own session, and that is what the
-/// members of the room call it.
+/// members of the room call it. On a roster it names the room's own holder
+/// (ADR-0028 §1): no agent may take the name, so nothing else can mean it.
 pub const PARENT: &str = "parent";
+
+/// Two names, as a room compares them: the same word in any case. Every reader
+/// of a name — the mention fold, the roster, the fan-out — comes through here.
+pub fn same(a: &str, b: &str) -> bool {
+    a.to_lowercase() == b.to_lowercase()
+}
+
+/// Whether a name on a roster means the session the room hangs under.
+pub fn is_holder(member: &str) -> bool {
+    same(member, PARENT)
+}
 
 /// A name a room can be opened under.
 pub fn check(name: &str) -> Result<&str, KernelError> {
@@ -45,5 +57,14 @@ mod tests {
     #[test]
     fn a_room_wears_its_name_as_a_channel() {
         assert_eq!(title("design"), "#design");
+    }
+
+    #[test]
+    fn a_name_is_the_same_word_in_any_case_and_parent_is_the_holder_s() {
+        assert!(same("reviewer", "Reviewer"));
+        assert!(!same("reviewer", "reviewers"));
+        assert!(is_holder("parent"));
+        assert!(is_holder("PARENT"));
+        assert!(!is_holder("parents"), "a name of its own");
     }
 }

@@ -1,18 +1,19 @@
 //! Fanning a post out. A room answers nobody, so what a post does is reach
 //! everyone else in it: every member but its author, found by title among the
-//! other children of the session the room hangs under. The room's parent is
-//! not one of those, so a person's own session is never written to by their
-//! own room.
+//! other children of the session the room hangs under — and, when the roster
+//! names `parent`, that session itself (ADR-0028). A holder off the roster is
+//! still not written to: a room reaches into the tree, not up out of it.
 
 use bingo_sdk::{
-    Delivery, Driver, HostHandle, Input, IntentId, KernelError, Origin, SessionFilter,
+    Delivery, Driver, HostHandle, Input, IntentId, KernelError, Origin, SessionFilter, SessionId,
     SessionSummary,
 };
 
-use crate::SURFACE;
+use crate::name::{self, PARENT};
 use crate::room::Room;
+use crate::{SURFACE, mentions};
 
-/// Every member but the author, told who wrote it and where.
+/// Everyone the post reaches, told who wrote it and where.
 pub async fn fan_out(
     host: &HostHandle,
     room: &Room,
@@ -25,26 +26,83 @@ pub async fn fan_out(
             ..SessionFilter::default()
         })
         .await?;
-    for member in room.audience(author) {
-        let Some(target) = seat_of(&siblings, member) else {
+    let holder = holder_of(host, room).await;
+    for (member, delivery) in delivered(room, holder.as_deref(), author, text) {
+        let Some(target) = seat(room, &siblings, member) else {
             tracing::debug!(room = %room.title, member, "nobody here answers to that name");
             continue;
         };
         let input = Input::text(text, origin(author, &room.title));
-        host.deliver(&target.id, IntentId::mint(), input, Delivery::Wake)
+        host.deliver(&target, IntentId::mint(), input, delivery)
             .await?;
     }
     Ok(())
 }
 
-/// The session a member name means: a sibling of the room by that title, and
-/// never another room — a `Log` session answers nobody, so a post into one
-/// would echo rather than arrive. A nudge (ADR-0022 §3) looks a member up
-/// through this too, so the two agree on who is there to hear it.
-pub(crate) fn seat_of<'a>(
-    siblings: &'a [SessionSummary],
-    member: &str,
-) -> Option<&'a SessionSummary> {
+/// Who a post reaches and how each of them hears it (ADR-0028 §2–3): every
+/// member but its author wakes, as ever, and a rostered holder is handed it
+/// `Hold` — queued at no turn's cost — unless the post calls on it by name.
+pub(crate) fn delivered<'a>(
+    room: &'a Room,
+    holder: Option<&str>,
+    author: &str,
+    text: &str,
+) -> Vec<(&'a str, Delivery)> {
+    room.members
+        .iter()
+        .filter_map(|member| heard(member, holder, author, text).map(|how| (member.as_str(), how)))
+        .collect()
+}
+
+/// How one seat on the roster hears a post, or nothing at all when it is not
+/// delivered: nobody is ever handed their own.
+fn heard(member: &str, holder: Option<&str>, author: &str, text: &str) -> Option<Delivery> {
+    if !name::is_holder(member) {
+        return (member != author).then_some(Delivery::Wake);
+    }
+    // The holder's guard is the seat's signing name (ADR-0028 §5): a root
+    // holder signs `parent` — the person at the composer and the root's model
+    // alike — and an agent holder its title, and a seat is one author. R-shadow:
+    // a member deliberately titled with that name shadows the holder here and
+    // the holder does not hear that post; sibling naming forbids a duplicate
+    // beside the room, so the collision costs a deliberate act and is accepted.
+    let holder = holder?;
+    if name::same(holder, author) {
+        return None;
+    }
+    match mentions::calls_on(text, PARENT) {
+        true => Some(Delivery::Wake),
+        false => Some(Delivery::Hold),
+    }
+}
+
+/// The name a rostered holder's posts sign, or nothing when the roster does
+/// not seat it — which is every room that did not ask for one, and so the host
+/// is not read for them at all.
+async fn holder_of(host: &HostHandle, room: &Room) -> Option<String> {
+    if !room.members.iter().any(|member| name::is_holder(member)) {
+        return None;
+    }
+    let sessions = host.sessions(SessionFilter::default()).await.ok()?;
+    let seat = sessions.into_iter().find(|s| s.id == room.parent)?;
+    Some(seat.title.unwrap_or_else(|| PARENT.to_string()))
+}
+
+/// The session a member name means: the one the room hangs under for `parent`
+/// — nothing beside a room is titled that, so the roster's own word is the
+/// whole address — and otherwise a sibling of the room by that title. A nudge
+/// (ADR-0022 §3) looks a member up through this too, so the two agree on who
+/// is there to hear it.
+pub(crate) fn seat(room: &Room, siblings: &[SessionSummary], member: &str) -> Option<SessionId> {
+    if name::is_holder(member) {
+        return Some(room.parent.clone());
+    }
+    seat_of(siblings, member).map(|summary| summary.id.clone())
+}
+
+/// A sibling of the room by title, and never another room — a `Log` session
+/// answers nobody, so a post into one would echo rather than arrive.
+fn seat_of<'a>(siblings: &'a [SessionSummary], member: &str) -> Option<&'a SessionSummary> {
     siblings
         .iter()
         .find(|s| s.driver != Driver::Log && s.title.as_deref() == Some(member))
@@ -65,7 +123,6 @@ fn origin(author: &str, room: &str) -> Origin {
 mod tests {
     use super::*;
     use crate::tests::Fleet;
-    use bingo_sdk::SessionId;
 
     /// A root with a room, a reviewer and a scout under it.
     fn tree(members: &[&str]) -> (Fleet, SessionId, Room) {
@@ -85,6 +142,97 @@ mod tests {
         match input {
             Input::Text { text, origin, .. } => (text, origin),
             _ => panic!("a post is text"),
+        }
+    }
+
+    /// A roster and nothing else: what the decision below is made of.
+    fn roster(members: &[&str]) -> Room {
+        Room {
+            title: "#design".into(),
+            parent: SessionId::from_raw("ses_root"),
+            members: members.iter().map(|m| m.to_string()).collect(),
+        }
+    }
+
+    /// The whole of ADR-0028 §2–3 and §5, as one table. A holder is on the
+    /// roster or it is not; when it is, the text decides whether it is woken,
+    /// and the seat's signing name decides whether it is written to at all.
+    #[test]
+    fn members_wake_and_a_rostered_holder_holds_unless_it_is_called_on() {
+        let plain = roster(&["reviewer", "scout"]);
+        let seated = roster(&["reviewer", "scout", PARENT]);
+        let table = [
+            (
+                &plain,
+                Some(PARENT),
+                "reviewer",
+                "look again",
+                vec![("scout", Delivery::Wake)],
+            ),
+            (
+                &plain,
+                Some(PARENT),
+                PARENT,
+                "@parent look again",
+                vec![("reviewer", Delivery::Wake), ("scout", Delivery::Wake)],
+            ),
+            (
+                &seated,
+                Some(PARENT),
+                "reviewer",
+                "look again",
+                vec![("scout", Delivery::Wake), (PARENT, Delivery::Hold)],
+            ),
+            (
+                &seated,
+                Some(PARENT),
+                "reviewer",
+                "@parent look",
+                vec![("scout", Delivery::Wake), (PARENT, Delivery::Wake)],
+            ),
+            (
+                &seated,
+                Some(PARENT),
+                "reviewer",
+                "@all stand-up",
+                vec![("scout", Delivery::Wake), (PARENT, Delivery::Hold)],
+            ),
+            (
+                &seated,
+                Some(PARENT),
+                PARENT,
+                "@parent look",
+                vec![("reviewer", Delivery::Wake), ("scout", Delivery::Wake)],
+            ),
+            (
+                &seated,
+                Some("reviewer"),
+                "scout",
+                "look again",
+                vec![("reviewer", Delivery::Wake), (PARENT, Delivery::Hold)],
+            ),
+            (
+                &seated,
+                Some("reviewer"),
+                "reviewer",
+                "@parent look",
+                vec![("scout", Delivery::Wake)],
+            ),
+            (
+                &seated,
+                None,
+                "reviewer",
+                "@parent look",
+                vec![("scout", Delivery::Wake)],
+            ),
+        ];
+        for (room, holder, author, text, expected) in table {
+            assert_eq!(
+                delivered(room, holder, author, text),
+                expected,
+                "{holder:?} holds {:?}, {author} wrote {text:?}",
+                room.members
+            );
         }
     }
 
@@ -146,5 +294,106 @@ mod tests {
             fleet.delivered().iter().all(|(to, ..)| to != &root),
             "a room reaches into the tree, not up out of it"
         );
+    }
+
+    /// The roster names the holder, so the holder hears the room — quietly.
+    #[tokio::test]
+    async fn a_rostered_holder_is_handed_the_post_and_opens_no_turn_for_it() {
+        let (fleet, root, room) = tree(&["reviewer", PARENT]);
+        fan_out(&fleet.handle(), &room, "reviewer", "the build is green")
+            .await
+            .expect("a post");
+
+        let delivered = fleet.delivered();
+        assert_eq!(delivered.len(), 1, "{delivered:?}");
+        let (to, input, delivery) = &delivered[0];
+        assert_eq!(to, &root, "the session the room hangs under");
+        assert_eq!(*delivery, Delivery::Hold);
+        let (text, origin) = said(input);
+        assert_eq!(text, "the build is green");
+        assert_eq!(origin.principal.as_deref(), Some("reviewer"));
+        assert_eq!(origin.conversation.as_deref(), Some("#design"));
+    }
+
+    #[tokio::test]
+    async fn a_post_that_calls_on_the_holder_wakes_it() {
+        let (fleet, root, room) = tree(&["reviewer", PARENT]);
+        fan_out(&fleet.handle(), &room, "reviewer", "@parent which one?")
+            .await
+            .expect("a post");
+
+        let delivered = fleet.delivered();
+        assert_eq!(delivered.len(), 1, "{delivered:?}");
+        assert_eq!(delivered[0].0, root);
+        assert_eq!(delivered[0].2, Delivery::Wake);
+    }
+
+    /// ADR-0028 §5: the holder's seat is one author, and a root holder's posts
+    /// — the person's own and its model's alike — sign `parent`.
+    #[tokio::test]
+    async fn a_rostered_holder_never_hears_its_own_post() {
+        let (fleet, root, room) = tree(&["reviewer", PARENT]);
+        fan_out(&fleet.handle(), &room, PARENT, "@parent hello team")
+            .await
+            .expect("a post");
+        assert!(
+            fleet.delivered().iter().all(|(to, ..)| to != &root),
+            "the holder was handed its own post: {:?}",
+            fleet.delivered()
+        );
+    }
+
+    /// An agent-held room: the holder signs its title, and that is the guard.
+    #[tokio::test]
+    async fn an_agent_holder_hears_the_room_but_not_itself() {
+        let fleet = Fleet::default();
+        let root = fleet.root();
+        let reviewer = fleet.child(&root, "reviewer");
+        let helper = fleet.child(&reviewer, "helper");
+        let room = Room {
+            title: "#design".into(),
+            parent: reviewer.clone(),
+            members: ["helper", PARENT].map(str::to_string).to_vec(),
+        };
+        let host = fleet.handle();
+
+        fan_out(&host, &room, "helper", "found it")
+            .await
+            .expect("a post");
+        let delivered = fleet.delivered();
+        assert_eq!(delivered.len(), 1, "{delivered:?}");
+        assert_eq!(delivered[0].0, reviewer);
+        assert_eq!(delivered[0].2, Delivery::Hold);
+
+        fan_out(&host, &room, "reviewer", "look again")
+            .await
+            .expect("a post");
+        assert_eq!(
+            fleet.delivered().len(),
+            2,
+            "only the helper heard the holder's own post"
+        );
+        assert_eq!(fleet.delivered()[1].0, helper);
+    }
+
+    /// Every delivery is one delivery: the holder is counted with the rest
+    /// (ADR-0025 §5).
+    #[tokio::test]
+    async fn each_seat_is_written_to_once_per_post() {
+        let (fleet, _, room) = tree(&["reviewer", "scout", PARENT]);
+        fan_out(&fleet.handle(), &room, "reviewer", "@parent stand-up")
+            .await
+            .expect("a post");
+
+        let mut seats: Vec<String> = fleet
+            .delivered()
+            .iter()
+            .map(|(to, ..)| to.to_string())
+            .collect();
+        let count = seats.len();
+        seats.sort();
+        seats.dedup();
+        assert_eq!(seats.len(), count, "one delivery per seat: {seats:?}");
+        assert_eq!(count, 2, "the scout and the holder");
     }
 }
