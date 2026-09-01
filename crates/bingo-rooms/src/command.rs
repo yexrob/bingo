@@ -3,20 +3,23 @@
 use async_trait::async_trait;
 use bingo_sdk::{
     ArgSpec, Command, CommandContext, CommandOutcome, CommandSpec, HostHandle, KernelError,
-    OpenOptions, SessionFilter, SessionId, SessionSelector, SessionState, View,
+    SessionFilter, SessionId, View,
 };
 use jiff::Timestamp;
 
+use crate::ear::Seat;
 use crate::room::{self, Room};
-use crate::{identity, mentions, name, owed, seat};
+use crate::{mentions, name, owed, seat};
 
 const HEADERS: [&str; 3] = ["room", "members", "owed"];
 
 /// What a session with no rooms in it is told, which is also where a person
-/// meets the holder's seat (ADR-0028).
+/// meets the holder's seat (ADR-0028) and the ear it can wear (ADR-0029).
 const NONE: &str = "no rooms here; `/room <name> [member…]` opens one — name \
 `parent` among the members to hear every post yourself as it lands, and to owe \
-an answer to one that says `@parent`";
+an answer to one that says `@parent`. Write a member `~name` to seat a patient \
+ear instead: its posts wait for that seat's next turn, and `~name:120` says how \
+long they may wait";
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct RoomCommand;
@@ -42,10 +45,10 @@ impl Command for RoomCommand {
         let Some(name) = words.next() else {
             return list(cx).await;
         };
-        let members: Vec<String> = words.map(str::to_string).collect();
-        seat::seat(&cx.host, &cx.session, &cx.cwd, name, &members).await?;
+        let seats: Vec<Seat> = words.map(Seat::read).collect::<Result<_, _>>()?;
+        seat::seat(&cx.host, &cx.session, &cx.cwd, name, &seats).await?;
         Ok(CommandOutcome::Applied {
-            message: Some(seat::receipt(&name::title(name), &members)),
+            message: Some(seat::receipt(&name::title(name), &seats)),
         })
     }
 }
@@ -61,12 +64,16 @@ async fn list(cx: &CommandContext) -> Result<CommandOutcome, KernelError> {
     let now = Timestamp::now();
     let mut rows = Vec::with_capacity(rooms.len());
     for (id, room) in rooms {
-        let read = read(&cx.host, &id).await;
-        let members = read.as_ref().map(room::members_of).unwrap_or_default();
+        let read = room::read(&cx.host, &id).await;
+        let seats = read.as_ref().map(room::roster_of).unwrap_or_default();
         let open = read.as_ref().map(mentions::of_state).unwrap_or_default();
         rows.push(vec![
             room.title,
-            members.join(", "),
+            seats
+                .iter()
+                .map(Seat::said)
+                .collect::<Vec<String>>()
+                .join(", "),
             owed::column(&open, now),
         ]);
     }
@@ -93,22 +100,6 @@ async fn under(
         .into_iter()
         .filter_map(|child| Room::of(&child).map(|room| (child.id, room)))
         .collect())
-}
-
-/// A room as its own journal has it: who is in it, and what its posts owe.
-/// Both are read where they live rather than from the hook's fold, so `/room`
-/// answers from the one fact and a room a hook never saw a frame of still
-/// says what it has. A room that cannot be read says nothing rather than
-/// guessing.
-async fn read(host: &HostHandle, room: &SessionId) -> Option<SessionState> {
-    let opened = host
-        .open(
-            SessionSelector::ById { id: room.clone() },
-            identity(),
-            OpenOptions::default(),
-        )
-        .await;
-    opened.ok().map(|attachment| attachment.snapshot)
 }
 
 #[cfg(test)]
@@ -205,12 +196,61 @@ mod tests {
         );
     }
 
-    /// What a person is told naming `parent` gets them (ADR-0028 §1–3).
+    /// The `~` door, end to end: the roster takes it, the journal keeps it,
+    /// and the receipt and the listing both show it (ADR-0029 §2).
+    #[tokio::test]
+    async fn a_member_under_the_sigil_is_seated_with_a_patient_ear() {
+        let fleet = Fleet::default();
+        let root = fleet.root();
+        fleet.child(&root, "scout");
+        assert_eq!(
+            typed(&fleet, &root, "design scout ~parent:120").await,
+            CommandOutcome::Applied {
+                message: Some("#design: scout, ~parent(120s)".into())
+            }
+        );
+
+        let room = fleet.titled("#design").expect("the room was opened");
+        assert_eq!(fleet.members(&room), ["scout", "parent"]);
+        assert_eq!(
+            fleet.ears(&room).of("parent"),
+            crate::ear::Ear::Patient(std::time::Duration::from_secs(120))
+        );
+
+        let CommandOutcome::View {
+            view: View::Table { rows, .. },
+        } = typed(&fleet, &root, "").await
+        else {
+            panic!("a roster is a table");
+        };
+        assert_eq!(rows[0][1], "scout, ~parent(120s)");
+    }
+
+    #[tokio::test]
+    async fn a_patience_under_the_floor_is_refused_and_opens_nothing() {
+        let fleet = Fleet::default();
+        let root = fleet.root();
+        let error = RoomCommand
+            .run("design ~parent:15", &command_context(&root, &fleet))
+            .await
+            .expect_err("the dead band");
+        assert_eq!(error.code, bingo_sdk::ErrorCode::InvalidInput);
+        assert!(
+            error.message.contains("under thirty seconds of patience"),
+            "{error}"
+        );
+        assert!(fleet.created().is_empty(), "nothing was opened");
+    }
+
+    /// What a person is told naming `parent` gets them (ADR-0028 §1–3), and
+    /// what the sigil beside a name does (ADR-0029 §2).
     #[test]
     fn the_listing_says_what_seating_the_holder_gets_you() {
         assert!(NONE.contains("`parent` among the members"), "{NONE}");
         assert!(NONE.contains("as it lands"), "{NONE}");
         assert!(NONE.contains("`@parent`"), "{NONE}");
+        assert!(NONE.contains("`~name`"), "{NONE}");
+        assert!(NONE.contains("`~name:120`"), "{NONE}");
     }
 
     #[tokio::test]

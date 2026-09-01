@@ -19,6 +19,12 @@
 //! closes, one bounded chaser nudges whoever stays silent, and `/room` and a
 //! card on the room's parent show what stands.
 //!
+//! Every seat has an ear (ADR-0029): patience 0 is a live one — every post
+//! wakes it, the default — and thirty seconds or more a patient one, whose
+//! posts wait for the seat's next turn and wake it once when they have waited
+//! long enough. The three doors declare it, `Listen` retunes your own, and
+//! `@name` pierces either.
+//!
 //! Nothing here keeps a roster or a debt beside the journal: what the hook
 //! holds in memory is a fold of the frames it saw, `/room` reads a membership
 //! back out of the room it belongs to, and the mentions are derived from the
@@ -26,7 +32,10 @@
 
 mod chase;
 mod command;
+mod deadline;
+mod ear;
 mod hook;
+mod listen;
 mod mentions;
 mod name;
 mod owed;
@@ -47,7 +56,9 @@ use bingo_sdk::{
 };
 
 pub use command::RoomCommand;
+pub use ear::{Ear, Listener, Seat};
 pub use hook::RoomsHook;
+pub use listen::ListenTool;
 pub use room::Room;
 pub use seat::seat;
 pub use team::{Entry, TeamError};
@@ -64,7 +75,7 @@ static MANIFEST: PluginManifest = PluginManifest {
     id: PLUGIN,
     version: env!("CARGO_PKG_VERSION"),
     sdk: "^0.1",
-    provides: &["command:room", "hook:rooms", "tool:OpenRoom"],
+    provides: &["command:room", "hook:rooms", "tool:OpenRoom", "tool:Listen"],
     requires: &[],
     // Who sits in which room is a project's file, not a person's settings.
     config: None,
@@ -98,6 +109,7 @@ impl Plugin for RoomsPlugin {
             Arc::new(RoomsHook::default()) as Arc<dyn Hook>
         ));
         registrar.add(Contribution::Tool(Arc::new(OpenRoomTool) as Arc<dyn Tool>));
+        registrar.add(Contribution::Tool(Arc::new(ListenTool) as Arc<dyn Tool>));
         Ok(())
     }
 }
@@ -115,7 +127,7 @@ mod plugin_tests {
         assert_eq!(MANIFEST.id, "bingo.rooms");
         assert_eq!(
             MANIFEST.provides,
-            ["command:room", "hook:rooms", "tool:OpenRoom"]
+            ["command:room", "hook:rooms", "tool:OpenRoom", "tool:Listen"]
         );
         assert!(MANIFEST.requires.is_empty());
         assert!(MANIFEST.config.is_none());
@@ -133,5 +145,6 @@ mod plugin_tests {
         assert!(matches!(&contributions[0], Contribution::Command(c) if c.spec().name == "room"));
         assert!(matches!(&contributions[1], Contribution::Hook(h) if h.id() == "rooms"));
         assert!(matches!(&contributions[2], Contribution::Tool(t) if t.spec().name == "OpenRoom"));
+        assert!(matches!(&contributions[3], Contribution::Tool(t) if t.spec().name == "Listen"));
     }
 }

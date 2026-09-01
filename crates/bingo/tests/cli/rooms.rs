@@ -267,6 +267,21 @@ fn with_a_room(home: &Path, members: &str) {
     .unwrap();
 }
 
+/// The same project, with the holder seated on a patient ear instead of a
+/// live one (ADR-0029 §2): it is handed every post and woken by none of them.
+fn with_a_listening_room(home: &Path, listeners: &str) {
+    let bingo = home.join(".bingo");
+    std::fs::create_dir_all(&bingo).unwrap();
+    std::fs::write(
+        bingo.join("team.json"),
+        format!(
+            r#"{{"roles":[{{"name":"scout"}}],
+                "rooms":[{{"name":"design","members":["scout"],"listeners":{listeners}}}]}}"#
+        ),
+    )
+    .unwrap();
+}
+
 /// The binary as a host drives it: person messages one line at a time, so a
 /// run outlives its first turn, and every session's frames on stdout.
 fn hosting(home: &Path, script: &tempfile::NamedTempFile) -> Command {
@@ -350,6 +365,32 @@ fn until(complaint: &str, done: impl Fn() -> bool) {
 fn until_posted(home: &Path, n: usize) {
     until("the room was never posted into", || {
         room_dir(home).is_some_and(|dir| posts(&frames_at(&dir)).len() >= n)
+    });
+}
+
+/// The room mail a session is holding, as its own journal says. A queue that
+/// changed is a durable frame, so what a patient seat is holding can be read
+/// without waking it (ADR-0029 §1).
+fn holding(dir: &Path) -> usize {
+    frames_at(dir)
+        .iter()
+        .rev()
+        .find_map(|frame| match &frame.event {
+            Event::QueueChanged { entries, .. } => Some(
+                entries
+                    .iter()
+                    .filter(|entry| entry.origin.surface == "room")
+                    .count(),
+            ),
+            _ => None,
+        })
+        .unwrap_or(0)
+}
+
+/// Wait until the holder is holding `n` of the room's posts, unwoken.
+fn until_held(home: &Path, n: usize) {
+    until("the room's posts never reached the holder's queue", || {
+        root_dir(home).is_some_and(|dir| holding(&dir) >= n)
     });
 }
 
@@ -557,4 +598,156 @@ fn a_room_that_does_not_seat_the_holder_leaves_it_deaf() {
         [("what did they say?".to_string(), None)],
         "a room reaches into the tree, not up out of it"
     );
+}
+
+// ---- the ear on every seat (ADR-0029) --------------------------------------
+
+/// ADR-0029 §1, end to end: a patient holder is handed every post and woken by
+/// none of them. The person writes only to the scout, so any turn the holder
+/// runs is one a post opened — and the whole point is that it runs none until
+/// the person speaks to it, and then reads the room first.
+#[test]
+fn a_patient_holder_is_handed_the_posts_and_reads_them_at_its_next_turn() {
+    let home = tempfile::tempdir().unwrap();
+    with_a_listening_room(home.path(), r#"["parent"]"#);
+    let script = script(A_BURST);
+    let mut host = Host::start(&mut hosting(home.path(), &script));
+
+    host.prompt("@scout post what you found in #design");
+    until_posted(home.path(), 2);
+    until_held(home.path(), 2);
+
+    let root = root_dir(home.path()).expect("a root session");
+    assert_eq!(
+        turns(&frames_at(&root)),
+        0,
+        "a patient seat was woken by a post: {:?}",
+        heard(&root)
+    );
+
+    host.prompt("what did they say?");
+    let ended = host.finish();
+    assert_eq!(ended.code, Some(0), "stderr: {}", ended.err);
+
+    assert_eq!(
+        heard(&root),
+        [
+            ("the build is green".to_string(), Some("scout".to_string())),
+            ("and the tests pass".to_string(), Some("scout".to_string())),
+            ("what did they say?".to_string(), None),
+        ],
+        "the held posts were absorbed in the room's order, ahead of the person's line"
+    );
+    assert_eq!(
+        turns(&frames_at(&root)),
+        1,
+        "and all of it in the one turn the person opened"
+    );
+}
+
+/// ADR-0029 §5: obligation pierces every ear. The same roster, and a post that
+/// calls the holder by name wakes it at once and opens the ordinary debt.
+#[test]
+fn a_post_that_calls_on_a_patient_holder_wakes_it_at_once() {
+    let home = tempfile::tempdir().unwrap();
+    with_a_listening_room(home.path(), r#"[{"name":"parent","patience_s":600}]"#);
+    let script = script(CALLED_ON);
+    let mut host = Host::start(&mut hosting(home.path(), &script));
+
+    host.prompt("@scout ask me in #design");
+    until_heard(home.path(), 1);
+    until_the_room_settles(home.path());
+    host.prompt("answer them");
+    let ended = host.finish();
+    assert_eq!(ended.code, Some(0), "stderr: {}", ended.err);
+
+    let root = root_dir(home.path()).expect("a root session");
+    assert_eq!(
+        heard(&root).first(),
+        Some(&(
+            "@parent which one ships?".to_string(),
+            Some("scout".to_string())
+        )),
+        "the mention pierced the patient ear: {:?}",
+        heard(&root)
+    );
+    assert_eq!(
+        turns(&frames_at(&root)),
+        2,
+        "the post's own turn, and then the person's"
+    );
+
+    let cards = cards(&ended.lines);
+    let owing = cards
+        .iter()
+        .position(|card| card["rows"][0][1] == "parent")
+        .unwrap_or_else(|| panic!("the holder never owed anything: {cards:?}"));
+    assert_eq!(cards[owing]["rows"][0][0], "#design");
+    assert_eq!(
+        cards.last(),
+        Some(&serde_json::Value::Null),
+        "the holder's own post closed it: {cards:?}"
+    );
+}
+
+/// One tool call, and the room's journal keeps what the seat asked for.
+const RETUNES: &str = r##"{"responses":[
+    {"steps":[{"toolCall":{"name":"Listen","input":{"room":"design","patience_s":300}}}]},
+    {"steps":[{"text":"listening"}]},
+    {"steps":[{"text":"listening"}]},
+    {"steps":[{"text":"listening"}]}
+]}"##;
+
+/// ADR-0029 §4: a member retunes its own seat and the room's journal keeps it
+/// as a register of its own, beside the roster that declared the seat.
+#[test]
+fn a_member_listens_and_the_room_s_journal_says_what_it_now_hears() {
+    let home = tempfile::tempdir().unwrap();
+    with_a_room(home.path(), r#"["scout"]"#);
+    let script = script(RETUNES);
+    let mut cmd = hosting(home.path(), &script);
+    cmd.args(["--allowed-tools", "Listen"]);
+    let mut host = Host::start(&mut cmd);
+
+    host.prompt("@scout listen to #design");
+    until("the seat never said how it listens", || {
+        room_dir(home.path()).is_some_and(|dir| !ears(&frames_at(&dir)).is_empty())
+    });
+    let ended = host.finish();
+    assert_eq!(ended.code, Some(0), "stderr: {}", ended.err);
+
+    let room = room_dir(home.path()).expect("the room was opened");
+    assert_eq!(
+        ears(&frames_at(&room)),
+        [("ear:scout".to_string(), 300)],
+        "one register, for the seat that asked and no other"
+    );
+
+    let scout = scout_dir(home.path()).expect("the resident scout");
+    let told = tool_result(&frames_at(&scout), "Listen");
+    assert!(!told.is_error, "{}", text_of(&told));
+    let said = text_of(&told);
+    assert!(said.contains("#design"), "{said}");
+    assert!(
+        said.contains("300s"),
+        "the receipt names the ear it now wears: {said}"
+    );
+}
+
+/// The ears a room's journal holds: this plugin's `ear:` registers, with the
+/// patience each of them stores.
+fn ears(frames: &[Frame]) -> Vec<(String, u64)> {
+    frames
+        .iter()
+        .filter_map(|frame| match &frame.event {
+            Event::Extension {
+                plugin,
+                kind,
+                payload,
+            } if plugin == "bingo.rooms" && kind.starts_with("ear:") => {
+                Some((kind.clone(), payload["patience_s"].as_u64()?))
+            }
+            _ => None,
+        })
+        .collect()
 }

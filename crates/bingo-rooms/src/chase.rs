@@ -16,19 +16,17 @@ use std::collections::BTreeMap;
 use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 
-use bingo_sdk::{
-    CancellationToken, Delivery, HostHandle, Input, IntentId, ItemId, Origin, SessionFilter,
-    SessionId,
-};
+use bingo_sdk::{CancellationToken, HostHandle, ItemId, SessionId};
 use jiff::Timestamp;
 
-use crate::SURFACE;
 use crate::mentions::Mention;
 use crate::post;
 use crate::room::Room;
 
-/// How long a member has to answer before the first nudge, and between them.
-const PATIENCE: Duration = Duration::from_secs(300);
+/// How long a member has to answer before the first nudge, and between them —
+/// and, with no second constant for it, how long a patient seat may hold a
+/// room's posts before the deadline wakes it (ADR-0029 §2).
+pub(crate) const PATIENCE: Duration = Duration::from_secs(300);
 
 /// How many nudges a debt is worth in the process that heard it asked.
 const NUDGES: u8 = 3;
@@ -122,11 +120,17 @@ fn arm(host: &HostHandle, room: &Room, mention: &Mention, now: Timestamp) -> Can
 /// process heard asked waits the full patience and is worth three; one already
 /// overdue when the fold first read it is nudged now, and once.
 fn budget(at: Timestamp, now: Timestamp) -> (Duration, u8) {
-    let waited = Duration::from_secs(u64::try_from(now.duration_since(at).as_secs()).unwrap_or(0));
-    match PATIENCE.checked_sub(waited) {
+    match PATIENCE.checked_sub(waited(at, now)) {
         Some(left) if !left.is_zero() => (left, NUDGES),
         _ => (Duration::ZERO, OVERDUE),
     }
+}
+
+/// How long something has stood, as far as the clock goes forwards: a clock
+/// that went backwards has waited no time at all. Every wait in this crate is
+/// measured here.
+pub(crate) fn waited(at: Timestamp, now: Timestamp) -> Duration {
+    Duration::from_secs(u64::try_from(now.duration_since(at).as_secs()).unwrap_or(0))
 }
 
 /// The timer itself. It sleeps, nudges, and sleeps again until its nudges are
@@ -152,36 +156,17 @@ async fn chase(
 
 /// One nudge, into the member's own queue. A member whose seat is gone is
 /// skipped the way a post skips one: a room reaches as far as the tree it sits
-/// in, and no further.
+/// in, and no further. A debt owed by `parent` is nudged at the session the
+/// room hangs under, which is where the lookup lands it (ADR-0028).
 async fn nudge(host: &HostHandle, room: &Room, mention: &Mention) {
     let Some(member) = mention.owed_by.chased() else {
         return;
     };
-    let Some(seat) = seat(host, room, member).await else {
+    let Some(seat) = post::seat_of(host, room, member).await else {
         tracing::debug!(room = %room.title, member, "a nudge found nobody of that name");
         return;
     };
-    let input = Input::text(said(room, mention), origin(&room.title));
-    let sent = host
-        .deliver(&seat, IntentId::mint(), input, Delivery::Wake)
-        .await;
-    if let Err(error) = sent {
-        tracing::debug!(room = %room.title, member, %error, "a nudge did not arrive");
-    }
-}
-
-/// The session a member name means now. A nudge looks a member up the way a
-/// post does, so the two agree on who is there to hear it — a debt owed by
-/// `parent` included, which is the session the room hangs under (ADR-0028).
-async fn seat(host: &HostHandle, room: &Room, member: &str) -> Option<SessionId> {
-    let siblings = host
-        .sessions(SessionFilter {
-            parent: Some(room.parent.clone()),
-            ..SessionFilter::default()
-        })
-        .await
-        .ok()?;
-    post::seat(room, &siblings, member)
+    post::nudge(host, &seat, &room.title, said(room, mention)).await;
 }
 
 /// What a nudge says: where it was asked, who asked, and what they asked.
@@ -192,22 +177,13 @@ fn said(room: &Room, mention: &Mention) -> String {
     )
 }
 
-/// Where a nudge comes from: the room, and nobody in it. The fold reads it as
-/// `[in #design]`, which a post — always signed — never reads as.
-fn origin(room: &str) -> Origin {
-    Origin {
-        surface: SURFACE.into(),
-        principal: None,
-        conversation: Some(room.to_string()),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::SURFACE;
     use crate::mentions::Owed;
     use crate::tests::Fleet;
-    use bingo_sdk::Input;
+    use bingo_sdk::{Delivery, Input};
 
     /// A room with a scout in it, and the fold's word that the scout owes.
     fn asked(members: &[&str]) -> (Fleet, SessionId, Room, Mention) {
@@ -221,6 +197,7 @@ mod tests {
             title: "#design".into(),
             parent: root,
             members: members.iter().map(|m| m.to_string()).collect(),
+            ears: Default::default(),
         };
         (fleet, id, room, mention(Owed::Member("scout".into())))
     }

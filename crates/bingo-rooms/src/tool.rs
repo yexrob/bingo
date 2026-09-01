@@ -15,6 +15,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
 
+use crate::ear::{self, Listener, Seat};
 use crate::placement::{self, Placement};
 use crate::{name, seat};
 
@@ -30,9 +31,11 @@ nobody holds yet is kept and skipped at delivery until someone does. Name \
 `parent` among the members to hear the room yourself: every post reaches you as \
 it lands — read at your next stop while you work, or opening a turn of its own \
 when you are idle — and one that says `@parent` is owed an answer. A chatty \
-room spends your attention that way, so leave `parent` off one that should not. \
-Opening a room that already stands replaces who is in it rather than opening a \
-second one.";
+room spends your attention that way, so leave `parent` off one that should not, \
+or name it in `listeners` instead: a listening seat is handed the posts without \
+being woken by them, reads them whole at its next turn, and is woken once when \
+they have waited its patience. Opening a room that already stands replaces who \
+is in it rather than opening a second one.";
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct OpenRoomArgs {
@@ -42,14 +45,22 @@ pub struct OpenRoomArgs {
     /// Who is in it, by name — the names `SpawnAgent` gave back, or the roles
     /// of the team. Nobody, by default.
     pub members: Option<Vec<String>>,
+    /// Which of them listen rather than answer: a name for the default
+    /// patience of 300 seconds, or `{"name": "parent", "patience_s": 120}` for
+    /// its own. A name here need not also be in `members`.
+    pub listeners: Option<Vec<Listener>>,
     /// Hang the room under the agent that started you, so your peers hear it,
     /// instead of under you. `false` by default.
     pub shared: Option<bool>,
 }
 
 impl OpenRoomArgs {
-    fn members(&self) -> Vec<String> {
-        self.members.clone().unwrap_or_default()
+    /// The roster it asks for, ears and all.
+    fn seats(&self) -> Result<Vec<Seat>, KernelError> {
+        ear::seats(
+            &self.members.clone().unwrap_or_default(),
+            &self.listeners.clone().unwrap_or_default(),
+        )
     }
 
     fn placement(&self) -> Placement {
@@ -63,12 +74,12 @@ impl OpenRoomArgs {
 /// written `OpenRoom(#design:*)` then covers that room whoever is in it, and
 /// `OpenRoom(#design under the caller:*)` covers only the unprivileged
 /// placement.
-fn card(name: &str, placement: Placement, members: &[String]) -> String {
+fn card(name: &str, placement: Placement, seats: &[Seat]) -> String {
     format!(
         "{} {} with {}",
         name::title(name.trim()),
         placement.phrase(),
-        seat::roster(members)
+        seat::roster(seats)
     )
 }
 
@@ -90,11 +101,9 @@ impl Tool for OpenRoomTool {
 
     fn subjects(&self, input: &Value, _cwd: &Path) -> Vec<Subject> {
         serde_json::from_value::<OpenRoomArgs>(input.clone())
-            .map(|args| {
-                vec![Subject::Name {
-                    name: card(&args.name, args.placement(), &args.members()),
-                }]
-            })
+            .ok()
+            .and_then(|args| Some(card(&args.name, args.placement(), &args.seats().ok()?)))
+            .map(|name| vec![Subject::Name { name }])
             .unwrap_or_default()
     }
 
@@ -102,16 +111,13 @@ impl Tool for OpenRoomTool {
         let args: OpenRoomArgs =
             serde_json::from_value(input).map_err(|e| ToolError::InvalidInput(e.to_string()))?;
         let name = name::check(&args.name).map_err(refused)?;
-        let members = args.members();
+        let seats = args.seats().map_err(refused)?;
         let caller = own(&cx.host, &cx.session).await.map_err(refused)?;
         let parent = placement::under(&caller, args.placement()).map_err(refused)?;
-        seat::seat(&cx.host, &parent, &cx.cwd, name, &members)
+        seat::seat(&cx.host, &parent, &cx.cwd, name, &seats)
             .await
             .map_err(refused)?;
-        Ok(ToolOutput::text(seat::receipt(
-            &name::title(name),
-            &members,
-        )))
+        Ok(ToolOutput::text(seat::receipt(&name::title(name), &seats)))
     }
 }
 
@@ -395,6 +401,57 @@ mod tests {
         );
     }
 
+    /// The structured door onto the same dial `/room ~name` is: a name for the
+    /// default patience, a number for its own (ADR-0029 §2).
+    #[tokio::test]
+    async fn listeners_seat_a_patient_ear_and_the_receipt_says_so() {
+        let (fleet, _, reviewer, _) = tree();
+        let out = opened(
+            &fleet,
+            &reviewer,
+            json!({
+                "name": "design",
+                "members": ["helper"],
+                "listeners": ["parent", {"name": "watcher", "patience_s": 120}],
+            }),
+        )
+        .await
+        .expect("a room with listeners in it");
+        assert_eq!(
+            out.parts[0].as_text(),
+            Some("#design: helper, ~parent(300s), ~watcher(120s)")
+        );
+
+        let id = fleet.titled("#design").expect("the room");
+        assert_eq!(fleet.members(&id), ["helper", "parent", "watcher"]);
+        let ears = fleet.ears(&id);
+        assert_eq!(ears.of("helper"), crate::ear::Ear::Live);
+        assert_eq!(
+            ears.of("parent"),
+            crate::ear::Ear::Patient(crate::chase::PATIENCE)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_patience_under_the_floor_is_refused_and_opens_nothing() {
+        let (fleet, _, reviewer, _) = tree();
+        let error = opened(
+            &fleet,
+            &reviewer,
+            json!({"name": "design", "listeners": [{"name": "parent", "patience_s": 15}]}),
+        )
+        .await
+        .expect_err("the dead band");
+        let ToolError::InvalidInput(message) = error else {
+            panic!("the wrong kind of refusal");
+        };
+        assert!(
+            message.contains("under thirty seconds of patience"),
+            "{message}"
+        );
+        assert!(fleet.created().is_empty(), "nothing was opened");
+    }
+
     /// Where a model meets ADR-0028: the pattern is in the tool's own words.
     #[test]
     fn the_description_says_what_naming_the_holder_gets_you() {
@@ -411,6 +468,10 @@ mod tests {
             DESCRIPTION.contains("spends your attention"),
             "the cost is said, not hidden: {DESCRIPTION}"
         );
+        assert!(
+            DESCRIPTION.contains("name it in `listeners` instead"),
+            "the other end of the dial is offered where the cost is: {DESCRIPTION}"
+        );
     }
 
     #[test]
@@ -420,6 +481,7 @@ mod tests {
         assert_eq!(spec.input_schema["required"], json!(["name"]));
         let properties = &spec.input_schema["properties"];
         assert!(properties["members"].is_object(), "{properties}");
+        assert!(properties["listeners"].is_object(), "{properties}");
         assert!(properties["shared"].is_object(), "{properties}");
     }
 }

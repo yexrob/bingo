@@ -39,11 +39,32 @@ impl Roster {
             .collect()
     }
 
-    /// The whole of a known room's membership, as its journal now has it.
-    pub fn set_members(&self, session: &SessionId, payload: &Value) {
-        if let Some(room) = self.rooms().get_mut(session) {
-            room.members = room::members_from(payload);
+    /// One of this plugin's frames in a room's journal: the whole of its
+    /// membership, or one seat's own ear. Nothing else it publishes is a
+    /// room's business.
+    pub fn extended(&self, session: &SessionId, kind: &str, payload: &Value) {
+        let mut rooms = self.rooms();
+        let Some(room) = rooms.get_mut(session) else {
+            return;
+        };
+        match kind.strip_prefix(room::EAR) {
+            Some(member) => room.ears.retune(member, payload),
+            None if kind == room::MEMBERS => {
+                room.members = room::members_from(payload);
+                room.ears.declare(payload);
+            }
+            None => {}
         }
+    }
+
+    /// The rooms of that title this process has seen: where a post held in a
+    /// seat's queue says it came from (ADR-0029 §3).
+    pub fn titled(&self, title: &str) -> Vec<Room> {
+        self.rooms()
+            .values()
+            .filter(|room| room.title == title)
+            .cloned()
+            .collect()
     }
 
     /// The room a session is, for a caller that is about to await: a copy, so
@@ -60,11 +81,12 @@ impl Roster {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::room::payload;
+    use crate::ear::{self, Ear, Seat};
+    use crate::room::{MEMBERS, payload};
     use crate::tests::{room_summary, summary};
 
     fn members(names: [&str; 2]) -> Value {
-        payload(&names.map(str::to_string))
+        payload(&names.map(Seat::live))
     }
 
     #[test]
@@ -74,15 +96,38 @@ mod tests {
         let roster = Roster::default();
 
         assert!(roster.register(&announced).is_some(), "a room this new");
-        roster.set_members(&announced.id, &members(["reviewer", "scout"]));
+        roster.extended(&announced.id, MEMBERS, &members(["reviewer", "scout"]));
         assert_eq!(roster.register(&announced), None, "and not again");
 
         let room = roster.get(&announced.id).expect("still one room");
         assert_eq!(room.title, "#design");
         assert_eq!(room.members, ["reviewer", "scout"]);
         assert_eq!(roster.rooms().len(), 1, "a reopen is the same room");
+        assert_eq!(roster.titled("#design"), std::slice::from_ref(&room));
         assert_eq!(roster.under(&parent), [(announced.id, room)]);
         assert!(roster.under(&SessionId::from_raw("ses_other")).is_empty());
+        assert!(roster.titled("#standup").is_empty());
+    }
+
+    /// The two frames a room's ears come in, folded by the one arm that reads
+    /// them: the roster declares, and a seat retunes its own.
+    #[test]
+    fn a_seat_s_own_ear_is_folded_beside_the_roster_that_declared_it() {
+        let parent = SessionId::from_raw("ses_root");
+        let announced = room_summary("ses_design", &parent, "design");
+        let roster = Roster::default();
+        roster.register(&announced);
+
+        roster.extended(&announced.id, MEMBERS, &members(["reviewer", "scout"]));
+        roster.extended(
+            &announced.id,
+            &ear::kind("scout"),
+            &ear::register(Ear::Patient(ear::FLOOR)),
+        );
+
+        let room = roster.get(&announced.id).expect("the room");
+        assert_eq!(room.ears.of("scout"), Ear::Patient(ear::FLOOR));
+        assert_eq!(room.ears.of("reviewer"), Ear::Live);
     }
 
     #[test]
@@ -92,7 +137,7 @@ mod tests {
         let roster = Roster::default();
 
         roster.register(&agent);
-        roster.set_members(&agent.id, &members(["a", "b"]));
+        roster.extended(&agent.id, MEMBERS, &members(["a", "b"]));
         assert_eq!(roster.get(&agent.id), None);
     }
 }

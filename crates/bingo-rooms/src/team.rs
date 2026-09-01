@@ -5,17 +5,32 @@
 
 use std::path::{Path, PathBuf};
 
+use bingo_sdk::KernelError;
 use serde::Deserialize;
+
+use crate::ear::{self, Listener, Seat};
 
 const DIR: &str = ".bingo";
 const FILE: &str = "team.json";
 
-/// One room a project declares.
+/// One room a project declares: who is in it, and which of them listen rather
+/// than answer (ADR-0029 §2).
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 pub struct Entry {
     pub name: String,
     #[serde(default)]
     pub members: Vec<String>,
+    #[serde(default)]
+    pub listeners: Vec<Listener>,
+}
+
+impl Entry {
+    /// The roster it declares: its members, live unless its listeners say
+    /// otherwise. A patience nobody can hold is refused here, as at every
+    /// other door.
+    pub fn seats(&self) -> Result<Vec<Seat>, KernelError> {
+        ear::seats(&self.members, &self.listeners)
+    }
 }
 
 /// Only the key this plugin owns; serde drops the rest of the file.
@@ -90,7 +105,52 @@ mod tests {
             [Entry {
                 name: "design".into(),
                 members: ["reviewer", "scout"].map(str::to_string).to_vec(),
+                listeners: Vec::new(),
             }]
+        );
+    }
+
+    /// The same door as `/room ~parent` and `OpenRoom`'s listeners, said in a
+    /// file: a name alone takes the default patience, and a number asks for
+    /// its own.
+    #[test]
+    fn a_declared_room_says_which_of_them_listen() {
+        let (_home, cwd) = project(
+            "work",
+            r#"{"rooms": [{
+                "name": "design",
+                "members": ["scout"],
+                "listeners": ["parent", {"name": "reviewer", "patience_s": 120}]
+            }]}"#,
+        );
+        let declared = rooms(&cwd).expect("a team file");
+        assert_eq!(
+            declared[0].seats().expect("a roster"),
+            [
+                Seat::live("scout"),
+                Seat {
+                    name: "parent".into(),
+                    ear: crate::ear::Ear::Patient(std::time::Duration::from_secs(300)),
+                },
+                Seat {
+                    name: "reviewer".into(),
+                    ear: crate::ear::Ear::Patient(std::time::Duration::from_secs(120)),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_patience_nobody_can_hold_is_refused_where_it_is_declared() {
+        let (_home, cwd) = project(
+            "work",
+            r#"{"rooms": [{"name": "design", "listeners": [{"name": "parent", "patience_s": 15}]}]}"#,
+        );
+        let declared = rooms(&cwd).expect("a team file");
+        let refused = declared[0].seats().expect_err("the dead band");
+        assert!(
+            refused.message.contains("under thirty seconds of patience"),
+            "{refused}"
         );
     }
 

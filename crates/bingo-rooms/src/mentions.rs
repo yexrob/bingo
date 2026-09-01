@@ -7,14 +7,11 @@
 //! there and so are the answers, so there is nothing to store beside them and
 //! the next process re-derives exactly what this one had.
 
-use bingo_sdk::{
-    ContentPart, HostHandle, Item, ItemBody, ItemId, OpenOptions, SessionId, SessionSelector,
-    SessionState,
-};
+use bingo_sdk::{ContentPart, HostHandle, Item, ItemBody, ItemId, SessionId, SessionState};
 use jiff::Timestamp;
 
 use crate::name::{PARENT, same};
-use crate::{identity, room};
+use crate::room;
 
 /// The sigil that calls on the room rather than on anyone in it. Reserved: a
 /// member of this name is still the room's `@all`.
@@ -134,8 +131,9 @@ fn opened(post: &Post, members: &[String]) -> Vec<Mention> {
 
 /// Who a post calls on: `@name` at a word boundary, matched case-insensitively
 /// against the room's members. `mail@user` is an address rather than a call,
-/// and a name nobody in the room has asks nothing of anybody.
-fn named(text: &str, members: &[String]) -> Vec<Owed> {
+/// and a name nobody in the room has asks nothing of anybody. The delivery asks
+/// this too (ADR-0029 §5) — one matcher, against the one roster.
+pub(crate) fn named(text: &str, members: &[String]) -> Vec<Owed> {
     let chars: Vec<char> = text.chars().collect();
     let mut found: Vec<Owed> = Vec::new();
     for (i, c) in chars.iter().enumerate() {
@@ -202,20 +200,11 @@ pub fn of_state(state: &SessionState) -> Vec<Mention> {
 /// The same, read from the room itself. A room this process cannot read owes
 /// nothing here: a debt is only ever what the journal says it is.
 pub async fn of_room(host: &HostHandle, room: &SessionId) -> Vec<Mention> {
-    let opened = host
-        .open(
-            SessionSelector::ById { id: room.clone() },
-            identity(),
-            OpenOptions::default(),
-        )
-        .await;
-    match opened {
-        Ok(attachment) => of_state(&attachment.snapshot),
-        Err(error) => {
-            tracing::debug!(%error, %room, "a room that cannot be read owes nothing");
-            Vec::new()
-        }
-    }
+    room::read(host, room)
+        .await
+        .as_ref()
+        .map(of_state)
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
