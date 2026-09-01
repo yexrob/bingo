@@ -289,11 +289,14 @@ fn a_stale_post_bounces_with_what_it_missed_and_lands_on_the_retry() {
 
 /// The same shape, with a question standing in the room. Nothing a bounce
 /// touches reaches the mention ledger, because the ledger is a fold of the
-/// room's posts and a bounced post never became one.
+/// room's posts and a bounced post never became one. The holder stays off the
+/// roster — seated, it would absorb the room and post level (ADR-0028) — so
+/// the standing question is the room's `@all`, which no post of the root's
+/// can close: the root is not a member.
 const STALE_ANSWER: &str = r##"{"responses":[
     {"steps":[{"toolCall":{"name":"SendMessage","input":{"to":"#design","text":"morning"}}}]},
     {"steps":[{"toolCall":{"name":"SpawnAgent","input":{"name":"scout","prompt":"ask in #design","background":false}}}]},
-    {"steps":[{"toolCall":{"name":"SendMessage","input":{"to":"#design","text":"@parent what does the build say?"}}}]},
+    {"steps":[{"toolCall":{"name":"SendMessage","input":{"to":"#design","text":"@all what does the build say?"}}}]},
     {"steps":[{"text":"asked"}]},
     {"steps":[{"toolCall":{"name":"SendMessage","input":{"to":"#design","text":"@scout the answer is 42"}}}]},
     {"steps":[{"toolCall":{"name":"SendMessage","input":{"to":"#design","text":"@scout the answer is 42"}}}]},
@@ -307,7 +310,7 @@ fn a_bounced_post_neither_opens_nor_answers_a_mention_debt() {
     let home = tempfile::tempdir().unwrap();
     with_team(
         home.path(),
-        r#"{"rooms":[{"name":"design","members":["scout","parent"]}]}"#,
+        r#"{"rooms":[{"name":"design","members":["scout"]}]}"#,
     );
     let out = run_json(home.path(), &script(STALE_ANSWER), "answer the scout");
     assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
@@ -319,7 +322,7 @@ fn a_bounced_post_neither_opens_nor_answers_a_mention_debt() {
     };
     assert!(bounced.is_error, "the root had not read the question");
     assert!(
-        text_of(bounced).contains("scout: @parent what does the build say?"),
+        text_of(bounced).contains("scout: @all what does the build say?"),
         "{}",
         text_of(bounced)
     );
@@ -339,13 +342,13 @@ fn a_bounced_post_neither_opens_nor_answers_a_mention_debt() {
     let owed = owed(&out);
     assert_eq!(
         owed.first().map(String::as_str),
-        Some("parent"),
+        Some("@all"),
         "the scout's question opened a debt: {owed:?}"
     );
     assert_eq!(
         owed.last().map(String::as_str),
-        Some("scout"),
-        "only the post that landed answered it and asked again: {owed:?}"
+        Some("@all"),
+        "neither the bounce nor a non-member's landed post closed it: {owed:?}"
     );
 }
 
