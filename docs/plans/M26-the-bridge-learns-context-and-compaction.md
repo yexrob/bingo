@@ -52,18 +52,18 @@ budget unchanged.
 
 ## Exit criteria
 
-- [ ] wire fixtures pin `context/contribute` and `compactor/compact`;
+- [x] wire fixtures pin `context/contribute` and `compactor/compact`;
       schema regenerated; `PROTOCOL` bumped; the method-count pin
       derives from the schema
-- [ ] `ContextSource`/`CompactorSource` registered and resolved at the
+- [x] `ContextSource`/`CompactorSource` registered and resolved at the
       tool sources' one point; registry arms table-tested
-- [ ] handshake declares contributors (with placement) and compactors;
+- [x] handshake declares contributors (with placement) and compactors;
       an undeclared kind is refused in words
-- [ ] proxies work end to end with a scripted child: the piece lands
+- [x] proxies work end to end with a scripted child: the piece lands
       with origin `contributor:<id>`; compaction runs remote
-- [ ] deadlines: a late contributor drops with a notice on a paused
+- [x] deadlines: a late contributor drops with a notice on a paused
       clock; a late compactor fails the call
-- [ ] every gate green (fmt, check, clippy, test, discipline, budget
+- [x] every gate green (fmt, check, clippy, test, discipline, budget
       unchanged, deny)
 
 ## Non-goals
@@ -81,3 +81,55 @@ own fixture, not a second `ContextQuery`; host reach is ADR-0031's
 lane, not this one's. R-one-point — resolving the new sources anywhere
 but the tool sources' point is the ADR-0011 debt. R-io — registration
 stays synchronous and I/O-free; only `start` touches processes.
+
+## Verified
+
+2026-09-01, load average 11.9 (a busy machine; no test here waits on a
+wall clock — the two deadline tests run on a paused one).
+
+```
+$ cargo fmt --all -- --check
+clean
+$ cargo check --workspace --all-targets --locked
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 6.03s
+$ cargo clippy --workspace --all-targets --locked -- -D warnings
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.50s
+$ cargo test --workspace --locked
+69 × test result: ok; 0 failed
+$ scripts/check_discipline.sh
+dependency direction ok / kernel names no tool / cohesion ok
+discipline ok
+$ scripts/budget.sh
+dependencies (unique, normal): 302 (max  302)
+budget ok
+$ cargo deny check
+advisories ok, bans ok, licenses ok, sources ok
+```
+
+What each criterion rests on:
+
+- the wire: `wire::tests::the_round_crosses_without_the_host_the_query_carries`,
+  `a_compaction_is_asked_for_with_the_reason_the_trait_speaks`,
+  `a_piece_crosses_as_the_sdk_writes_it`;
+  `schema::tests::the_committed_schema_names_every_method_and_every_notification`
+  reads the count off `schema/plugin.json`, where ADR-0015's literal was.
+- one resolution point: `turn::late::Late::gather`, the only caller of
+  the three sets' `gather`/`resolve`;
+  `turn::tests::a_source_contributor_speaks_when_the_turn_starts_with_its_own_origin`
+  (origin `contributor:notes`),
+  `a_source_strategy_compacts_when_nothing_in_process_holds_the_slot`,
+  `host::registry::tests::a_late_source_of_every_kind_is_kept_where_the_turn_reads_it`.
+- the handshake: `tests/plugin.rs::a_plugin_s_contributor_speaks_at_the_placement_it_declared`,
+  `a_plugin_s_compaction_strategy_answers_a_compaction`,
+  `a_declaration_this_host_cannot_read_refuses_the_handshake_in_words`.
+- deadlines, on `tokio::test(start_paused)`:
+  `contributor::tests::a_contributor_past_its_deadline_contributes_nothing_and_says_whose`,
+  `compactor::tests::a_compactor_past_its_deadline_fails_the_call`.
+
+Two decisions the plan left open, taken here: the compactor slot keeps
+its first-wins rule, so a source's strategy runs only where nothing
+in-process holds the slot (a `tracing::debug!` says when one is unused,
+as the registry already does for a shadowed command); and a remote
+contributor's kernel-visible id is `<plugin>:<declared>`, so two plugins
+may both declare `notes` and the transcript's origin still says which
+one wrote.
