@@ -591,6 +591,9 @@ impl Run {
         });
     }
 
+    /// The `/resume` picker's candidates. The cut to the card's size happens
+    /// after the roots are kept, not in the filter: a project full of agents
+    /// must not crowd the person's own sessions off the card.
     fn list_sessions(&mut self) {
         let host = self.host.clone();
         let filter = SessionFilter {
@@ -598,9 +601,22 @@ impl Run {
                 &self.session.tree.root().summary.cwd,
             )),
             parent: None,
-            limit: Some(RECENT),
+            limit: None,
         };
-        self.spawn(async move { host.sessions(filter).await.map(Reply::Sessions) });
+        self.spawn(async move {
+            host.sessions(filter)
+                .await
+                .map(|sessions| Reply::Sessions(Self::recent_roots(sessions)))
+        });
+    }
+
+    /// The person's own sessions, newest first as the host answers: a child
+    /// or a room hangs under a root and is reached through it — the switcher
+    /// (M31) — never resumed on its own.
+    fn recent_roots(mut sessions: Vec<SessionSummary>) -> Vec<SessionSummary> {
+        sessions.retain(|session| session.parent.is_none());
+        sessions.truncate(RECENT);
+        sessions
     }
 
     /// What the switcher lists besides the tree: everything the host knows of,
@@ -1026,6 +1042,28 @@ mod tests {
         assert_eq!(ended.exit, Exit { code: 0 });
         let screen = harness.recorder.last();
         assert!(screen.contains("scout ⏺ stored"), "{screen}");
+    }
+
+    /// A child and a room hang under a root and are reached through it —
+    /// the switcher — so the `/resume` picker never offers one, and the cut
+    /// to the card's size happens after they are gone.
+    #[test]
+    fn the_resume_picker_offers_roots_and_never_a_child_or_a_room() {
+        let mut sessions = vec![summary(), stored_summary("ses_7", "scout")];
+        sessions.extend((0..RECENT).map(|at| SessionSummary {
+            id: SessionId::from_raw(format!("ses_r{at}")),
+            ..summary()
+        }));
+        let offered = Run::recent_roots(sessions);
+        assert_eq!(offered.len(), RECENT, "the cut comes after the keep");
+        assert!(
+            offered.iter().all(|s| s.parent.is_none()),
+            "only the person's own sessions are offered"
+        );
+        assert!(
+            !offered.iter().any(|s| s.id == SessionId::from_raw("ses_7")),
+            "the child was never a candidate"
+        );
     }
 
     #[tokio::test]
