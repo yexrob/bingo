@@ -274,9 +274,9 @@ pub fn config(
         tools: crate::turn::ToolSet::fixed(tools),
         policy: Arc::new(crate::gate::DefaultPolicy),
         hooks: vec![],
-        contributors: vec![],
+        contributors: Default::default(),
         compaction: Arc::new(crate::turn::Breaker::default()),
-        compactor: None,
+        compactor: Default::default(),
         budget: crate::turn::TurnBudget::default(),
         env: Arc::new(Env {
             home: "/tmp".into(),
@@ -561,6 +561,95 @@ impl CommandSource for ScriptedCommandSource {
     }
     async fn commands(&self, _: &std::path::Path) -> Vec<Arc<dyn Command>> {
         self.commands.clone()
+    }
+}
+
+/// A contributor with one user piece to its name, so a test can watch a piece
+/// land in the transcript with the origin its id earns it.
+pub struct FixedContributor {
+    id: String,
+    placement: Placement,
+    text: String,
+}
+
+/// One contributor that adds `"<id> said so"` at the start of every round.
+pub fn fixed_contributor(id: &str) -> Arc<dyn ContextContributor> {
+    Arc::new(FixedContributor {
+        id: id.to_string(),
+        placement: Placement::RoundStart,
+        text: format!("{id} said so"),
+    })
+}
+
+#[async_trait]
+impl ContextContributor for FixedContributor {
+    fn id(&self) -> &str {
+        &self.id
+    }
+    fn placement(&self) -> Placement {
+        self.placement
+    }
+    async fn contribute(&self, _: ContextQuery<'_>) -> Result<Vec<ContextPiece>, ContextError> {
+        Ok(vec![ContextPiece::User {
+            parts: vec![ContentPart::text(self.text.clone())],
+            label: self.id.clone(),
+        }])
+    }
+}
+
+/// A context source a test fills after the fact, so a turn can see
+/// contributors arrive (ADR-0009).
+pub struct ScriptedContextSource {
+    id: String,
+    contributors: Mutex<Vec<Arc<dyn ContextContributor>>>,
+}
+
+impl ScriptedContextSource {
+    pub fn new(id: &str) -> Arc<Self> {
+        Arc::new(Self {
+            id: id.to_string(),
+            contributors: Mutex::new(Vec::new()),
+        })
+    }
+
+    pub fn set(&self, contributors: Vec<Arc<dyn ContextContributor>>) {
+        *self.contributors.lock().unwrap() = contributors;
+    }
+}
+
+#[async_trait]
+impl ContextSource for ScriptedContextSource {
+    fn id(&self) -> &str {
+        &self.id
+    }
+    async fn contributors(&self) -> Vec<Arc<dyn ContextContributor>> {
+        self.contributors.lock().unwrap().clone()
+    }
+}
+
+/// A compactor source with a fixed answer.
+pub struct ScriptedCompactorSource {
+    compactors: Vec<Arc<dyn Compactor>>,
+}
+
+impl ScriptedCompactorSource {
+    pub fn new(compactors: Vec<Arc<ScriptedCompactor>>) -> Arc<Self> {
+        Arc::new(Self {
+            compactors: compactors
+                .into_iter()
+                .map(|c| c as Arc<dyn Compactor>)
+                .collect(),
+        })
+    }
+}
+
+#[async_trait]
+impl CompactorSource for ScriptedCompactorSource {
+    fn id(&self) -> &str {
+        "scripted"
+    }
+    async fn compactors(&self) -> Vec<Arc<dyn Compactor>> {
+        self.compactors.clone()
     }
 }
 

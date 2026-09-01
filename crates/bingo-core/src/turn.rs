@@ -10,6 +10,7 @@
 
 mod config;
 mod contributors;
+mod late;
 mod ruler;
 mod stream;
 
@@ -19,7 +20,9 @@ use async_trait::async_trait;
 use bingo_sdk::*;
 use jiff::Timestamp;
 
-pub use config::{Breaker, ModelChoice, ToolSet, TurnBudget, TurnConfig};
+pub use config::{Breaker, ModelChoice, TurnBudget, TurnConfig};
+use late::Late;
+pub use late::{CompactorSet, ContributorSet, ToolSet};
 use ruler::Ruler;
 use stream::Streamed;
 pub use stream::{MAX_RETRY_DELAY, MAX_SERVER_RETRY_DELAY, backoff};
@@ -80,8 +83,9 @@ struct Turn<'a> {
     host: &'a dyn TurnHost,
     id: TurnId,
     cancel: CancellationToken,
-    /// The tools this turn may call, gathered once when it started (ADR-0009).
-    tools: Vec<Arc<dyn Tool>>,
+    /// The tools, contributors and strategy this turn runs with, resolved once
+    /// when it started (ADR-0009).
+    late: Late,
     items: Vec<Item>,
     round: u32,
     retries: u32,
@@ -134,8 +138,8 @@ pub async fn run_turn(cfg: &TurnConfig, run: TurnRun, host: &dyn TurnHost) -> Tu
         provider: Some(model.provider.clone()),
         model: Some(model.id.clone()),
     };
-    let (tools, shadowed) = cfg.tools.gather().await;
-    for name in shadowed {
+    let late = Late::gather(cfg).await;
+    for name in &late.shadowed {
         host.emit(Event::Notice {
             level: Level::Warn,
             code: "TOOL_SHADOWED".into(),
@@ -149,7 +153,7 @@ pub async fn run_turn(cfg: &TurnConfig, run: TurnRun, host: &dyn TurnHost) -> Tu
         host,
         id: run.turn,
         cancel: run.cancel,
-        tools,
+        late,
         items,
         round: 0,
         retries: 0,
@@ -190,7 +194,7 @@ impl Turn<'_> {
     /// One manual compaction, then done. What it bought or did not is said
     /// on the stream, as for any other compaction.
     async fn compact_only(&mut self, instructions: Option<String>) -> TurnStatus {
-        let Some(compactor) = self.cfg.compactor.clone() else {
+        let Some(compactor) = self.late.compactor.clone() else {
             return TurnStatus::Failed {
                 error: KernelError::new(
                     ErrorCode::InvalidInput,
@@ -279,7 +283,7 @@ impl Turn<'_> {
             capabilities: &self.model.capabilities,
             cwd: &self.cfg.cwd,
         };
-        let gathered = contributors::gather(&self.cfg.contributors, want, query).await;
+        let gathered = contributors::gather(&self.late.contributors, want, query).await;
         for (id, e) in gathered.failed {
             self.warn("CONTRIBUTOR_FAILED", format!("{id}: {e}"));
         }
@@ -299,7 +303,7 @@ impl Turn<'_> {
     }
 
     fn tool_specs(&self) -> Vec<ToolSpec> {
-        self.tools.iter().map(|t| t.spec()).collect()
+        self.late.tools.iter().map(|t| t.spec()).collect()
     }
 
     fn measure(&mut self, system: &[SystemBlock], messages: &[Message]) -> ContextUsage {
@@ -410,7 +414,7 @@ impl Turn<'_> {
     /// A threshold compaction, unless the breaker says the last three bought
     /// nothing; then the turn goes on and the person is told.
     async fn try_compact(&mut self, usage: ContextUsage) -> bool {
-        let Some(compactor) = self.cfg.compactor.clone() else {
+        let Some(compactor) = self.late.compactor.clone() else {
             return false;
         };
         if self.cfg.compaction.tripped() {
@@ -618,6 +622,7 @@ impl Turn<'_> {
         let mut calls = Vec::with_capacity(finished.tool_calls.len());
         for (item_id, call) in &finished.tool_calls {
             let tool = self
+                .late
                 .tools
                 .iter()
                 .find(|t| t.spec().name == call.name)

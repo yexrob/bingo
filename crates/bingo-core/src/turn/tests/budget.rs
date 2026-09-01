@@ -172,7 +172,7 @@ async fn a_summary_that_shrinks_nothing_is_discarded_billed_and_counted() {
     let provider = ScriptedProvider::new(vec![Script::Events(text("ok"))]);
     let compactor = ScriptedCompactor::new(vec![ScriptedCompactor::cut("itm_t2", 8_000, 9_000)]);
     let mut cfg = config(provider.clone(), vec![]);
-    cfg.compactor = Some(compactor.clone());
+    cfg.compactor = CompactorSet::fixed(Some(compactor.clone()));
     cfg.model
         .as_mut()
         .expect("a model")
@@ -223,7 +223,7 @@ async fn three_useless_summaries_trip_the_breaker_and_one_good_one_resets_it() {
         ScriptedCompactor::cut("itm_t8", 8_000, 2_000),
     ]);
     let mut cfg = config(provider, vec![]);
-    cfg.compactor = Some(compactor.clone());
+    cfg.compactor = CompactorSet::fixed(Some(compactor.clone()));
     cfg.model
         .as_mut()
         .expect("a model")
@@ -275,7 +275,7 @@ async fn an_overflow_passes_the_failures_on_and_retries_once() {
     ]);
     let compactor = ScriptedCompactor::new(vec![ScriptedCompactor::cut("itm_t10", 9_000, 3_000)]);
     let mut cfg = config(provider.clone(), vec![]);
-    cfg.compactor = Some(compactor.clone());
+    cfg.compactor = CompactorSet::fixed(Some(compactor.clone()));
     cfg.compaction.failed();
     cfg.compaction.failed();
     cfg.compaction.failed();
