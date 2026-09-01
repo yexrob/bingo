@@ -90,6 +90,10 @@ it.
 
 ## Verified
 
+Integrated on main at `d609e28` (2026-09-01, load 16–36): every gate
+green, 69 targets 0 failures on `--no-fail-fast`, budget 302, deny
+ok. The notice-drain carried item moved into M30's notice brick.
+
 Worker run, all gates green on the first try, 1-minute load 6.6–9.1
 (no timing-sensitive family failed; nothing was rerun):
 

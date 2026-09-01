@@ -46,6 +46,13 @@ actually runnable.
    An ended call, or another connection's, is refused in words.
 5. **`notice`** — no allowance; rides the bridge's existing notice
    path under the plugin's name; level clamped to the sane set.
+   M29 carried the path's defect here: `Notices` drains inside
+   `PluginTool::call`, so in a session whose plugin serves no tool a
+   queued notice is logged but unsaid. Give the channel a drain that
+   does not wait for a tool call (the bridge holds the host at
+   start); a hook's `HOOK_UNANSWERED` and this door's notices ride
+   the same fixed drain — one channel, one drain, said when it
+   happens.
 6. **The activation key** (the M26 Carried) — a settings key naming
    the active compaction strategy; the slot resolves to the named id
    wherever it lives (in-process or a source's), else today's
