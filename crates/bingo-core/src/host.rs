@@ -878,7 +878,18 @@ impl HostApi for Host {
     }
 
     fn service_any(&self, key: &str) -> Option<Arc<dyn Any + Send + Sync>> {
-        self.registry.services.get(key).cloned()
+        self.registry.services.value(key)
+    }
+
+    fn service_wire(&self, key: &str) -> Option<Arc<dyn WireService>> {
+        self.registry.services.wire(key)
+    }
+
+    fn open_service(&self, key: &str, wire: Arc<dyn WireService>) -> Result<(), KernelError> {
+        self.registry
+            .services
+            .open(key, wire)
+            .map_err(|why| KernelError::new(ErrorCode::InvalidInput, why))
     }
 }
 

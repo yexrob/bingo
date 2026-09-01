@@ -17,6 +17,7 @@ pub mod model;
 pub mod plugin;
 pub mod policy;
 pub mod provider;
+pub mod service;
 pub mod state;
 pub mod store;
 pub mod surface;
@@ -42,6 +43,9 @@ pub use plugin::{
 };
 pub use policy::{Decision, PermissionPolicy, PolicyInput, Reason, Verdict};
 pub use provider::{AuthStatus, LoginMethod, ModelInfo, Provider};
+/// `Service` and `Services` stay behind `service::`: the kernel has a bundle
+/// of its own by that name, and a glob import must not make either ambiguous.
+pub use service::{ServiceError, ServiceHandle, WireService};
 pub use state::{Applied, LiveTurn, Retry, SessionState};
 pub use store::SessionStore;
 pub use surface::{Exit, Surface, SurfaceKind, SurfaceOptions};

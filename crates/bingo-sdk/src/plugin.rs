@@ -17,6 +17,7 @@ use crate::hook::Hook;
 use crate::host::HostHandle;
 use crate::policy::PermissionPolicy;
 use crate::provider::Provider;
+use crate::service::WireService;
 use crate::store::SessionStore;
 use crate::surface::Surface;
 use crate::tool::{Env, Tool};
@@ -146,10 +147,14 @@ pub enum Contribution {
     Compactor(Arc<dyn Compactor>),
     /// Compaction strategies resolved late, ditto.
     Compactors(Arc<dyn CompactorSource>),
-    /// A typed value other plugins may look up by key (`service:<key>` in the manifest).
+    /// A typed value other plugins may look up by key (`service:<key>` in the
+    /// manifest), and — when its owner opened one — the wire face that lets a
+    /// process call it. Two faces of one live object; without the second the
+    /// service does not exist across a process line (ADR-0031 §3).
     Service {
         key: String,
         value: Arc<dyn Any + Send + Sync>,
+        wire: Option<Arc<dyn WireService>>,
     },
 }
 

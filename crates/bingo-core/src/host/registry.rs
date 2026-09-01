@@ -1,12 +1,12 @@
 //! Everything the loaded plugins contributed, in one place. A slot with a
 //! single holder — the policy, the store, the compactor — refuses a second.
 
-use std::any::Any;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use std::collections::BTreeMap;
 
+use bingo_sdk::service::{Service, Services};
 use bingo_sdk::*;
 use serde_json::{Map, Value};
 
@@ -63,7 +63,12 @@ pub struct Registry {
     /// Strategies that arrive after I/O; one is the turn's only where the slot
     /// above is free.
     pub compactor_sources: Vec<Arc<dyn CompactorSource>>,
-    pub services: HashMap<String, Arc<dyn Any + Send + Sync>>,
+    /// One entry per key, holding both faces of one live object: the typed
+    /// value a consumer downcasts, and the wire face a process reaches when
+    /// the owner opened one (ADR-0031 §1). A service an external process
+    /// declares lands here after its handshake, which is why the map is
+    /// locked rather than filled once.
+    pub services: Services,
     pub plugins: Vec<PluginStatus>,
 }
 
@@ -163,7 +168,9 @@ impl Registry {
                 self.compactor_sources.push(source);
                 Ok(())
             }
-            Contribution::Service { key, value } => self.add_service(key, value),
+            Contribution::Service { key, value, wire } => {
+                self.services.add(key, Service { value, wire })
+            }
         }
         .map_err(conflict)
     }
@@ -233,18 +240,6 @@ impl Registry {
             return Err("a compactor is already registered".into());
         }
         self.compactor = Some(compactor);
-        Ok(())
-    }
-
-    fn add_service(
-        &mut self,
-        key: String,
-        value: Arc<dyn Any + Send + Sync>,
-    ) -> Result<(), String> {
-        if self.services.contains_key(&key) {
-            return Err(format!("service {key} is already registered"));
-        }
-        self.services.insert(key, value);
         Ok(())
     }
 

@@ -13,9 +13,10 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::error::KernelError;
+use crate::error::{ErrorCode, KernelError};
 use crate::event::*;
 use crate::ids::{IntentId, InteractionId, ItemId, Seq, SessionId, TurnId};
+use crate::service::WireService;
 use crate::state::SessionState;
 
 pub type FrameStream = Pin<Box<dyn Stream<Item = Frame> + Send>>;
@@ -330,6 +331,27 @@ pub trait HostApi: Send + Sync {
     fn gateway_events(&self) -> GatewayStream;
 
     fn service_any(&self, key: &str) -> Option<Arc<dyn Any + Send + Sync>>;
+
+    /// The other face of the same entry: what a process's `service/call` is
+    /// served by, when the service's owner opened one (ADR-0031 §3). A
+    /// service with no wire face does not exist across a process line, and a
+    /// host that keeps no services has none at all.
+    fn service_wire(&self, _key: &str) -> Option<Arc<dyn WireService>> {
+        None
+    }
+
+    /// Put a service in the registry that could not be there when the plugins
+    /// registered — one an external process declared, which nothing knows
+    /// until its handshake has answered (ADR-0009 §1, ADR-0031 §4). The two
+    /// faces are built from the one object: `service::<ServiceHandle>(key)`
+    /// reaches it from in here, `service/call` from another process. A key
+    /// that is taken stays its first owner's, and says so.
+    fn open_service(&self, key: &str, _wire: Arc<dyn WireService>) -> Result<(), KernelError> {
+        Err(KernelError::new(
+            ErrorCode::Internal,
+            format!("this host keeps no services: {key}"),
+        ))
+    }
 }
 
 #[derive(Clone)]
