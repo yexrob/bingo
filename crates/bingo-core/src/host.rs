@@ -30,7 +30,8 @@ use crate::prompt::{self, PromptInput};
 use crate::session::{self, Mailbox};
 use crate::settings::{self, Claim, Layer, Merged, SettingsError};
 use crate::turn::{
-    CompactorSet, ContributorSet, ModelChoice, ProviderSet, ToolSet, TurnBudget, TurnConfig,
+    CompactorSet, ContributorSet, HookSet, ModelChoice, ProviderSet, ToolSet, TurnBudget,
+    TurnConfig,
 };
 
 /// Gateway events buffered per subscriber before the oldest is dropped.
@@ -592,7 +593,10 @@ impl Host {
                 .policy
                 .clone()
                 .unwrap_or_else(|| Arc::new(DefaultPolicy)),
-            hooks: self.registry.hooks.clone(),
+            hooks: HookSet {
+                fixed: self.registry.hooks.clone(),
+                sources: self.registry.hook_sources.clone(),
+            },
             contributors: ContributorSet {
                 fixed: self.registry.contributors.clone(),
                 sources: self.registry.context_sources.clone(),

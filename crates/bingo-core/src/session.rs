@@ -35,8 +35,7 @@ pub use spawn::{head_summary, resume, spawn};
 pub use subscribers::SUBSCRIBER_CAPACITY;
 use subscribers::Subscribers;
 
-use crate::gate::hook_applies;
-use crate::turn::{TurnConfig, TurnKind, TurnOutcome, TurnRun, run_turn};
+use crate::turn::{HookSet, TurnConfig, TurnKind, TurnOutcome, TurnRun, run_turn};
 
 /// How long a stopping actor waits for the work it spawned after its turns
 /// (ADR-0008 §7) before it lets go.
@@ -226,7 +225,11 @@ impl Actor {
         self.refresh_config().await;
         self.recover().await;
         let cx = self.hook_context();
-        Box::pin(run_session_hooks(self.session_hook_set(), Phase::Start, cx))
+        Box::pin(run_session_hooks(
+            self.config.hooks.clone(),
+            Phase::Start,
+            cx,
+        ))
     }
 
     /// While the start hooks run the session answers its summary and holds
@@ -287,41 +290,29 @@ impl Actor {
         }
     }
 
-    fn session_hook_set(&self) -> Vec<Arc<dyn Hook>> {
-        self.config
-            .hooks
-            .iter()
-            .filter(|h| hook_applies(&h.matcher(), HookPoint::Session, None))
-            .cloned()
-            .collect()
-    }
-
-    /// The end-of-session hooks, off the stopping actor's path.
+    /// The end-of-session hooks, off the stopping actor's path. The set is
+    /// asked inside the task: a source answers after I/O, and the actor that
+    /// is stopping must not wait on one.
     fn session_hooks(&self, phase: Phase) {
-        let hooks = self.session_hook_set();
-        if hooks.is_empty() {
+        if self.config.hooks.is_empty() {
             return;
         }
         let cx = self.hook_context();
-        self.tracker.spawn(run_session_hooks(hooks, phase, cx));
+        self.tracker
+            .spawn(run_session_hooks(self.config.hooks.clone(), phase, cx));
     }
 
     /// One ordered task feeds every frame but the deltas to the hooks that
     /// observe the session; publishing never waits on them.
     fn observe_journal(&mut self) {
-        let hooks: Vec<Arc<dyn Hook>> = self
-            .config
-            .hooks
-            .iter()
-            .filter(|h| hook_applies(&h.matcher(), HookPoint::Event, None))
-            .cloned()
-            .collect();
-        if hooks.is_empty() {
+        if self.config.hooks.is_empty() {
             return;
         }
+        let set = self.config.hooks.clone();
         let (tx, mut rx) = mpsc::unbounded_channel::<(Frame, HookContext)>();
         self.observed = Some(tx);
         self.tracker.spawn(async move {
+            let hooks = set.at(HookPoint::Event, None).await;
             while let Some((frame, cx)) = rx.recv().await {
                 for hook in &hooks {
                     hook.on_event(&frame, &cx).await;
@@ -713,22 +704,16 @@ impl Actor {
     /// The turn-end hooks run after the terminal event (ADR-0008 §7), on a
     /// task the actor waits for before it stops.
     fn after_turn(&self, turn: TurnId, items: Vec<Item>) {
-        let hooks: Vec<Arc<dyn Hook>> = self
-            .config
-            .hooks
-            .iter()
-            .filter(|h| hook_applies(&h.matcher(), HookPoint::Turn, None))
-            .cloned()
-            .collect();
-        if hooks.is_empty() {
+        if self.config.hooks.is_empty() {
             return;
         }
+        let set = self.config.hooks.clone();
         let cx = HookContext {
             turn: Some(turn.clone()),
             ..self.hook_context()
         };
         self.tracker.spawn(async move {
-            for hook in hooks {
+            for hook in set.at(HookPoint::Turn, None).await {
                 hook.on_turn(Phase::End, &turn, &items, &cx).await;
             }
         });
@@ -761,8 +746,8 @@ impl Actor {
     }
 }
 
-async fn run_session_hooks(hooks: Vec<Arc<dyn Hook>>, phase: Phase, cx: HookContext) {
-    for hook in hooks {
+async fn run_session_hooks(hooks: HookSet, phase: Phase, cx: HookContext) {
+    for hook in hooks.at(HookPoint::Session, None).await {
         hook.on_session(phase, &cx).await;
     }
 }

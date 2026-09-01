@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use bingo_sdk::*;
 
-use super::late::{CompactorSet, ContributorSet, ToolSet};
+use super::late::{CompactorSet, ContributorSet, HookSet, ToolSet};
 use crate::models::Learned;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -78,7 +78,9 @@ pub struct TurnConfig {
     pub system: Vec<SystemBlock>,
     pub tools: ToolSet,
     pub policy: Arc<dyn PermissionPolicy>,
-    pub hooks: Vec<Arc<dyn Hook>>,
+    /// The one place the kernel's hooks come from, registered and late alike;
+    /// every point asks this set and no other list (ADR-0032 §1).
+    pub hooks: HookSet,
     pub contributors: ContributorSet,
     pub compactor: CompactorSet,
     pub budget: TurnBudget,

@@ -147,6 +147,28 @@ impl ProviderSource for ScriptedProviderSource {
     }
 }
 
+/// A hook source with a fixed answer, so a test can watch a hook that arrived
+/// after I/O take its place among the registered ones (ADR-0032 §1).
+pub struct ScriptedHookSource {
+    hooks: Vec<Arc<dyn Hook>>,
+}
+
+impl ScriptedHookSource {
+    pub fn new(hooks: Vec<Arc<dyn Hook>>) -> Arc<Self> {
+        Arc::new(Self { hooks })
+    }
+}
+
+#[async_trait]
+impl HookSource for ScriptedHookSource {
+    fn id(&self) -> &str {
+        "scripted"
+    }
+    async fn hooks(&self) -> Vec<Arc<dyn Hook>> {
+        self.hooks.clone()
+    }
+}
+
 /// A compactor source with a fixed answer.
 pub struct ScriptedCompactorSource {
     compactors: Vec<Arc<dyn Compactor>>,

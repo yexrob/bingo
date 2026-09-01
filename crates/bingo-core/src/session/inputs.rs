@@ -10,7 +10,6 @@ use serde_json::json;
 use super::commands;
 use super::queue::Unit;
 use super::{Actor, validate};
-use crate::gate::hook_applies;
 use crate::turn::TurnKind;
 
 impl Actor {
@@ -115,14 +114,7 @@ impl Actor {
             return self.reject(intent, ErrorCode::InvalidInput, message).await;
         }
         let cx = self.hook_context();
-        let hooks: Vec<Arc<dyn Hook>> = self
-            .config
-            .hooks
-            .iter()
-            .filter(|h| hook_applies(&h.matcher(), HookPoint::Submit, None))
-            .cloned()
-            .collect();
-        for hook in hooks {
+        for hook in self.config.hooks.at(HookPoint::Submit, None).await {
             match hook.on_submit(&mut input, &cx).await {
                 HookOutcome::Continue | HookOutcome::Ask { .. } => {}
                 HookOutcome::Deny { reason } | HookOutcome::Block { reason } => {

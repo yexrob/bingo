@@ -193,10 +193,10 @@ fn pair() -> (Mailbox, Mailbox, Arc<ScriptedProvider>) {
         move |_| {
             let mut cfg = config(provider, vec![], routes.clone());
             cfg.host = routes.handle();
-            cfg.hooks = vec![Arc::new(RedirectHook {
+            cfg.hooks = HookSet::fixed(vec![Arc::new(RedirectHook {
                 name: "b".into(),
                 to,
-            })];
+            })]);
             Arc::new(cfg)
         }
     });
@@ -244,10 +244,10 @@ async fn a_redirect_to_a_session_that_is_gone_is_rejected() {
     let a = spawn(summary("ses_a"), None, Services::none(), move |_| {
         let mut cfg = config(provider, vec![], routes.clone());
         cfg.host = routes.handle();
-        cfg.hooks = vec![Arc::new(RedirectHook {
+        cfg.hooks = HookSet::fixed(vec![Arc::new(RedirectHook {
             name: "ghost".into(),
             to: SessionId::from_raw("ses_ghost"),
-        })];
+        })]);
         Arc::new(cfg)
     });
     let (mut state, mut events) = a.attach().await.unwrap();

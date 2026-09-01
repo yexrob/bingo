@@ -154,7 +154,7 @@ async fn a_resumed_session_restates_its_extensions_for_the_observers() {
     let second = resume(journal, None, Services::none(), move |_| {
         let mut cfg = config(provider, vec![], Arc::new(NoHost));
         cfg.model = None;
-        cfg.hooks = vec![observer as Arc<dyn Hook>];
+        cfg.hooks = HookSet::fixed(vec![observer as Arc<dyn Hook>]);
         Arc::new(cfg)
     })
     .unwrap();
