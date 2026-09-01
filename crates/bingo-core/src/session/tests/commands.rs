@@ -299,7 +299,7 @@ async fn turn_end_hooks_run_after_the_completion_is_published() {
     let fired = hook.fired.clone();
     let mailbox = spawn(summary("ses_1"), None, Services::none(), |_| {
         let mut cfg = config(provider, vec![], Arc::new(NoHost));
-        cfg.hooks = vec![hook];
+        cfg.hooks = HookSet::fixed(vec![hook]);
         Arc::new(cfg)
     });
     let (mut state, mut events) = mailbox.attach().await.unwrap();
@@ -380,7 +380,7 @@ async fn session_and_journal_hooks_observe_without_delaying_anything() {
     let hook = RecordingHook::new(true);
     let mailbox = spawn(summary("ses_1"), None, Services::none(), |_| {
         let mut cfg = config(provider, vec![], Arc::new(NoHost));
-        cfg.hooks = vec![hook.clone()];
+        cfg.hooks = HookSet::fixed(vec![hook.clone()]);
         Arc::new(cfg)
     });
     let (mut state, mut events) = mailbox.attach().await.unwrap();

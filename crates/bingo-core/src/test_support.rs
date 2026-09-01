@@ -12,8 +12,8 @@ use serde_json::{Value, json};
 mod late;
 mod peers;
 pub use late::{
-    ScriptedCommandSource, ScriptedCompactorSource, ScriptedContextSource, ScriptedProviderSource,
-    ScriptedToolSource, fixed_contributor,
+    ScriptedCommandSource, ScriptedCompactorSource, ScriptedContextSource, ScriptedHookSource,
+    ScriptedProviderSource, ScriptedToolSource, fixed_contributor,
 };
 pub use peers::{RedirectHook, RoutingHost};
 
@@ -296,7 +296,7 @@ pub fn config(
         }],
         tools: crate::turn::ToolSet::fixed(tools),
         policy: Arc::new(crate::gate::DefaultPolicy),
-        hooks: vec![],
+        hooks: crate::turn::HookSet::default(),
         contributors: Default::default(),
         compaction: Arc::new(crate::turn::Breaker::default()),
         compactor: Default::default(),

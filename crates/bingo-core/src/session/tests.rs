@@ -641,7 +641,7 @@ async fn a_start_hook_finishes_before_the_first_turn_opens() {
     let hook = slow.clone();
     let mailbox = spawn(summary("ses_1"), None, Services::none(), move |_| {
         let mut cfg = config(provider, vec![], Arc::new(NoHost));
-        cfg.hooks = vec![hook as Arc<dyn Hook>];
+        cfg.hooks = HookSet::fixed(vec![hook as Arc<dyn Hook>]);
         Arc::new(cfg)
     });
     mailbox.submit(IntentId::mint(), Input::text("hi", Origin::surface("test")));

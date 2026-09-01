@@ -7,8 +7,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use bingo_sdk::{
-    Command, CommandSource, Compactor, CompactorSource, ContextContributor, ContextSource,
-    Provider, ProviderSource, Tool, ToolSource,
+    Command, CommandSource, Compactor, CompactorSource, ContextContributor, ContextSource, Hook,
+    HookSource, Provider, ProviderSource, Tool, ToolSource,
 };
 
 use crate::manager::Manager;
@@ -99,6 +99,27 @@ impl CompactorSource for PluginCompactors {
 
     async fn compactors(&self) -> Vec<Arc<dyn Compactor>> {
         self.manager.compactors().await
+    }
+}
+
+pub struct PluginHooks {
+    manager: Arc<Manager>,
+}
+
+impl PluginHooks {
+    pub fn new(manager: Arc<Manager>) -> Self {
+        Self { manager }
+    }
+}
+
+#[async_trait]
+impl HookSource for PluginHooks {
+    fn id(&self) -> &str {
+        ID
+    }
+
+    async fn hooks(&self) -> Vec<Arc<dyn Hook>> {
+        self.manager.hooks().await
     }
 }
 

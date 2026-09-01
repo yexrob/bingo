@@ -125,6 +125,15 @@ pub trait CompactorSource: Send + Sync {
     async fn compactors(&self) -> Vec<Arc<dyn Compactor>>;
 }
 
+/// Hooks that exist only after I/O — an external process's, once it has
+/// answered the handshake. Read wherever the kernel reads its hooks, which is
+/// the one place they are resolved (ADR-0009 §1, ADR-0030 §2, ADR-0032 §1).
+#[async_trait]
+pub trait HookSource: Send + Sync {
+    fn id(&self) -> &str;
+    async fn hooks(&self) -> Vec<Arc<dyn Hook>>;
+}
+
 /// What a plugin hands the host. One enum so the in-process path and a future
 /// out-of-process bridge share one representation.
 pub enum Contribution {
@@ -136,6 +145,8 @@ pub enum Contribution {
     Providers(Arc<dyn ProviderSource>),
     Policy(Arc<dyn PermissionPolicy>),
     Hook(Arc<dyn Hook>),
+    /// Hooks resolved late, from a source that does its I/O elsewhere.
+    Hooks(Arc<dyn HookSource>),
     Context(Arc<dyn ContextContributor>),
     /// Contributors resolved late, from a source that does its I/O elsewhere.
     Contexts(Arc<dyn ContextSource>),
@@ -167,6 +178,7 @@ impl fmt::Debug for Contribution {
             Contribution::Providers(s) => write!(f, "Providers({})", s.id()),
             Contribution::Policy(p) => write!(f, "Policy({})", p.id()),
             Contribution::Hook(h) => write!(f, "Hook({})", h.id()),
+            Contribution::Hooks(s) => write!(f, "Hooks({})", s.id()),
             Contribution::Context(c) => write!(f, "Context({})", c.id()),
             Contribution::Contexts(s) => write!(f, "Contexts({})", s.id()),
             Contribution::Command(c) => write!(f, "Command({})", c.spec().name),

@@ -30,7 +30,8 @@ use crate::prompt::{self, PromptInput};
 use crate::session::{self, Mailbox};
 use crate::settings::{self, Claim, Layer, Merged, SettingsError};
 use crate::turn::{
-    CompactorSet, ContributorSet, ModelChoice, ProviderSet, ToolSet, TurnBudget, TurnConfig,
+    CompactorSet, ContributorSet, HookSet, ModelChoice, ProviderSet, ToolSet, TurnBudget,
+    TurnConfig,
 };
 
 /// Gateway events buffered per subscriber before the oldest is dropped.
@@ -225,7 +226,7 @@ impl Host {
         let weak: Weak<dyn HostApi> = self.weak.clone();
         session::Services {
             commands: self.registry.commands.clone(),
-            command_sources: self.registry.command_sources.clone(),
+            command_sources: self.registry.sources.commands.clone(),
             host: weak,
         }
     }
@@ -376,7 +377,7 @@ impl Host {
     pub async fn providers(&self) -> Vec<Arc<dyn Provider>> {
         ProviderSet {
             fixed: self.registry.providers.clone(),
-            sources: self.registry.provider_sources.clone(),
+            sources: self.registry.sources.providers.clone(),
         }
         .gather()
         .await
@@ -584,7 +585,7 @@ impl Host {
             system,
             tools: ToolSet {
                 fixed: self.tools_for(spec.tools.as_deref()),
-                sources: self.registry.tool_sources.clone(),
+                sources: self.registry.sources.tools.clone(),
                 only: spec.tools.clone(),
             },
             policy: self
@@ -592,15 +593,18 @@ impl Host {
                 .policy
                 .clone()
                 .unwrap_or_else(|| Arc::new(DefaultPolicy)),
-            hooks: self.registry.hooks.clone(),
+            hooks: HookSet {
+                fixed: self.registry.hooks.clone(),
+                sources: self.registry.sources.hooks.clone(),
+            },
             contributors: ContributorSet {
                 fixed: self.registry.contributors.clone(),
-                sources: self.registry.context_sources.clone(),
+                sources: self.registry.sources.contexts.clone(),
             },
             compaction: Arc::new(crate::turn::Breaker::default()),
             compactor: CompactorSet {
                 fixed: self.registry.compactor.clone(),
-                sources: self.registry.compactor_sources.clone(),
+                sources: self.registry.sources.compactors.clone(),
             },
             budget: self.config.budget,
             env: Arc::new(self.config.env.clone()),

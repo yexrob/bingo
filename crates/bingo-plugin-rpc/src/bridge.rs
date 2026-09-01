@@ -19,8 +19,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bingo_sdk::{
-    Command as SdkCommand, CommandSpec, Compactor, ContextContributor, HostHandle, Provider, Tool,
-    ToolSpec,
+    Command as SdkCommand, CommandSpec, Compactor, ContextContributor, Hook, HostHandle, Provider,
+    Tool, ToolSpec,
 };
 use serde_json::Value;
 use tokio::sync::Mutex;
@@ -32,14 +32,15 @@ use crate::completions::Completions;
 use crate::connection::Connection;
 use crate::contributor::RemoteContributor;
 use crate::deadline;
+use crate::hook::RemoteHook;
 use crate::manifest::Entry;
 use crate::notice::{Notice, Notices};
 use crate::provider::RemoteProvider;
 use crate::service::{Hub, RemoteService, ServiceCalls};
 use crate::tool::PluginTool;
 use crate::wire::{
-    CompactorSpec, ContributorSpec, HostEnv, InitializeParams, InitializeResult, PROTOCOL,
-    ProviderSpec, ServiceSpec, name,
+    CompactorSpec, ContributorSpec, HookSpec, HostEnv, InitializeParams, InitializeResult,
+    PROTOCOL, ProviderSpec, ServiceSpec, name,
 };
 
 /// The wait before a second consecutive attempt, doubling to [`BACKOFF_MAX`].
@@ -66,6 +67,7 @@ struct Live {
     contributors: Vec<ContributorSpec>,
     compactors: Vec<CompactorSpec>,
     providers: Vec<ProviderSpec>,
+    hooks: Vec<HookSpec>,
     services: BTreeMap<String, ServiceSpec>,
 }
 
@@ -291,6 +293,24 @@ impl Bridge {
             .collect()
     }
 
+    /// The hooks of a living process, and nothing when there is none.
+    pub async fn hooks(self: &Arc<Self>) -> Vec<Arc<dyn Hook>> {
+        let Some(live) = self.ready().await else {
+            return Vec::new();
+        };
+        live.hooks
+            .iter()
+            .map(|spec| {
+                Arc::new(RemoteHook::new(
+                    &self.name,
+                    spec.clone(),
+                    Arc::clone(&live.connection),
+                    Arc::clone(&self.notices),
+                )) as Arc<dyn Hook>
+            })
+            .collect()
+    }
+
     /// End the process, and leave nothing that would respawn it.
     pub async fn stop(&self) {
         let mut state = self.state.lock().await;
@@ -398,6 +418,7 @@ impl Bridge {
                 contributors: result.contributors,
                 compactors: result.compactors,
                 providers: result.providers,
+                hooks: result.hooks,
                 services: result.services,
             }),
             Ok(Err(why)) => {
@@ -462,6 +483,7 @@ impl Bridge {
                 contributors: Vec::new(),
                 compactors: Vec::new(),
                 providers: Vec::new(),
+                hooks: Vec::new(),
                 services: BTreeMap::new(),
             }));
         }
@@ -496,6 +518,7 @@ mod tests {
             contributors: Vec::new(),
             compactors: Vec::new(),
             providers: Vec::new(),
+            hooks: Vec::new(),
             services: Default::default(),
         }
     }

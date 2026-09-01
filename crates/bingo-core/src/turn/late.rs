@@ -10,11 +10,15 @@
 //! [`ProviderSet`] is gathered where a provider is resolved instead — a model
 //! is chosen when a session opens, when `/model` rewrites it and when a
 //! catalogue is read, never per round — and the host reads it at that one
-//! point.
+//! point. [`HookSet`] is asked at each of the kernel's own hook points, which
+//! is where hooks have always been read: a session opening, a submission, a
+//! turn's edges, a call at the gate.
 
 use std::sync::Arc;
 
 use bingo_sdk::*;
+
+use crate::gate::hook_applies;
 
 /// The tools a session may call: the ones registered up front, the sources
 /// that answer late, and the names the session is limited to.
@@ -90,6 +94,54 @@ impl ContributorSet {
             contributors.extend(source.contributors().await);
         }
         contributors
+    }
+}
+
+/// The hooks a session runs: the registered ones, then every source's. Order
+/// is composition order — a source's hooks join the end of the registered
+/// list, and a bridge hook composes with an in-process one exactly as two
+/// in-process hooks compose (ADR-0032 §2).
+///
+/// Two hooks may share an id, as two contributors may: they are run, never
+/// looked up by name.
+#[derive(Clone, Default)]
+pub struct HookSet {
+    pub fixed: Vec<Arc<dyn Hook>>,
+    pub sources: Vec<Arc<dyn HookSource>>,
+}
+
+impl HookSet {
+    pub fn fixed(hooks: Vec<Arc<dyn Hook>>) -> Self {
+        Self {
+            fixed: hooks,
+            sources: Vec::new(),
+        }
+    }
+
+    /// Whether anything could answer at all. A session with no hook anywhere
+    /// skips the machinery rather than gathering an empty list.
+    pub fn is_empty(&self) -> bool {
+        self.fixed.is_empty() && self.sources.is_empty()
+    }
+
+    pub async fn gather(&self) -> Vec<Arc<dyn Hook>> {
+        let mut hooks = self.fixed.clone();
+        for source in &self.sources {
+            hooks.extend(source.hooks().await);
+        }
+        hooks
+    }
+
+    /// The hooks that claim this point, for this tool where the point has one.
+    /// The matcher is the cheap skip: a hook that does not want this point is
+    /// never asked, and for a hook that lives in another process that means
+    /// the event never crosses the pipe.
+    pub async fn at(&self, point: HookPoint, tool: Option<&str>) -> Vec<Arc<dyn Hook>> {
+        self.gather()
+            .await
+            .into_iter()
+            .filter(|hook| hook_applies(&hook.matcher(), point, tool))
+            .collect()
     }
 }
 
@@ -287,6 +339,88 @@ mod tests {
         ) -> Result<ModelStream, ProviderError> {
             unreachable!("this double runs no turn")
         }
+    }
+
+    /// A hook that is nothing but an id and what it claims.
+    struct Claims(&'static str, HookMatcher);
+
+    #[async_trait::async_trait]
+    impl Hook for Claims {
+        fn id(&self) -> &str {
+            self.0
+        }
+        fn matcher(&self) -> HookMatcher {
+            self.1.clone()
+        }
+    }
+
+    fn claims(id: &'static str, points: Vec<HookPoint>) -> Arc<dyn Hook> {
+        Arc::new(Claims(id, HookMatcher { points, tool: None }))
+    }
+
+    fn claims_tool(id: &'static str, tool: &str) -> Arc<dyn Hook> {
+        let matcher = HookMatcher {
+            points: vec![HookPoint::BeforeTool],
+            tool: Some(tool.to_string()),
+        };
+        Arc::new(Claims(id, matcher))
+    }
+
+    #[tokio::test]
+    async fn a_source_s_hooks_join_the_registered_ones_in_order() {
+        let set = HookSet {
+            fixed: vec![claims("early", vec![])],
+            sources: vec![crate::test_support::ScriptedHookSource::new(vec![claims(
+                "late",
+                vec![],
+            )])],
+        };
+        assert_eq!(hook_ids(&set.gather().await), ["early", "late"]);
+    }
+
+    /// The cheap skip, which is also what keeps an unmatched event off a
+    /// plugin's pipe: a hook that does not claim the point is not asked.
+    #[tokio::test]
+    async fn a_point_asks_only_the_hooks_that_claim_it() {
+        let set = HookSet::fixed(vec![
+            claims("everything", vec![]),
+            claims("submits", vec![HookPoint::Submit]),
+            claims("watches", vec![HookPoint::Event]),
+        ]);
+        assert_eq!(
+            hook_ids(&set.at(HookPoint::Submit, None).await),
+            ["everything", "submits"]
+        );
+        assert_eq!(
+            hook_ids(&set.at(HookPoint::Event, None).await),
+            ["everything", "watches"]
+        );
+    }
+
+    /// The same skip by tool name, which is what an external hook declaring
+    /// one tool rests on: the call it did not claim never reaches it, so for a
+    /// hook on the far side of a pipe it never crosses.
+    #[tokio::test]
+    async fn a_call_a_hook_did_not_claim_never_reaches_it() {
+        let set = HookSet::fixed(vec![claims_tool("guard", "Bash")]);
+        assert_eq!(
+            hook_ids(&set.at(HookPoint::BeforeTool, Some("Bash")).await),
+            ["guard"]
+        );
+        assert!(
+            set.at(HookPoint::BeforeTool, Some("Read")).await.is_empty(),
+            "another tool's call is not this hook's to see"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_session_with_no_hook_anywhere_is_empty() {
+        assert!(HookSet::default().is_empty());
+        assert!(HookSet::default().gather().await.is_empty());
+    }
+
+    fn hook_ids(hooks: &[Arc<dyn Hook>]) -> Vec<String> {
+        hooks.iter().map(|h| h.id().to_string()).collect()
     }
 
     #[tokio::test]

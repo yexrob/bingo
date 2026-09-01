@@ -16,6 +16,7 @@
 mod harness;
 
 mod context;
+mod hooks;
 mod lifecycle;
 mod provider;
 mod service;

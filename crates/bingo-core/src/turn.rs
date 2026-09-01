@@ -22,7 +22,7 @@ use jiff::Timestamp;
 
 pub use config::{Breaker, ModelChoice, TurnBudget, TurnConfig};
 use late::Late;
-pub use late::{CompactorSet, ContributorSet, ProviderSet, ToolSet};
+pub use late::{CompactorSet, ContributorSet, HookSet, ProviderSet, ToolSet};
 use ruler::Ruler;
 use stream::Streamed;
 pub use stream::{MAX_RETRY_DELAY, MAX_SERVER_RETRY_DELAY, backoff};
@@ -164,7 +164,7 @@ pub async fn run_turn(cfg: &TurnConfig, run: TurnRun, host: &dyn TurnHost) -> Tu
         usage: Usage::default(),
         hook_cx,
     };
-    for hook in turn.hooks(HookPoint::Turn) {
+    for hook in turn.hooks(HookPoint::Turn).await {
         hook.on_turn(Phase::Start, &turn.id, &turn.items, &turn.hook_cx)
             .await;
     }
@@ -218,13 +218,9 @@ impl Turn<'_> {
         TurnStatus::Completed
     }
 
-    fn hooks(&self, point: HookPoint) -> Vec<Arc<dyn Hook>> {
-        self.cfg
-            .hooks
-            .iter()
-            .filter(|h| hook_applies(&h.matcher(), point, None))
-            .cloned()
-            .collect()
+    /// The hooks that claim this point, asked of the one set the config holds.
+    async fn hooks(&self, point: HookPoint) -> Vec<Arc<dyn Hook>> {
+        self.cfg.hooks.at(point, None).await
     }
 
     fn fresh(&self, body: ItemBody, status: ItemStatus) -> Item {
@@ -484,7 +480,7 @@ impl Turn<'_> {
 
     /// A `Stop` hook may push the turn into another round instead of ending it.
     async fn stop_hooks(&mut self) -> Step {
-        for hook in self.hooks(HookPoint::Stop) {
+        for hook in self.hooks(HookPoint::Stop).await {
             if let HookOutcome::Block { reason } = hook.on_stop(&self.hook_cx).await {
                 self.user_piece(
                     vec![ContentPart::text(reason)],
@@ -547,7 +543,7 @@ impl Turn<'_> {
         usage: ContextUsage,
     ) -> bool {
         let started = std::time::Instant::now();
-        for hook in self.hooks(HookPoint::Compact) {
+        for hook in self.hooks(HookPoint::Compact).await {
             hook.on_compact(Phase::Start, &self.hook_cx).await;
         }
         let cx = CompactContext {
@@ -561,7 +557,7 @@ impl Turn<'_> {
             keep_budget: self.ruler.lines.keep,
         };
         let outcome = compactor.compact(cx, reason).await;
-        for hook in self.hooks(HookPoint::Compact) {
+        for hook in self.hooks(HookPoint::Compact).await {
             hook.on_compact(Phase::End, &self.hook_cx).await;
         }
         match outcome {
@@ -620,6 +616,9 @@ impl Turn<'_> {
 
     async fn gate(&mut self, finished: &Finished) -> Vec<PendingCall> {
         let mut calls = Vec::with_capacity(finished.tool_calls.len());
+        // Asked once for the round: the gate does the per-tool matching, and
+        // a source is read no more often than the hooks it answers with.
+        let hooks = self.cfg.hooks.gather().await;
         for (item_id, call) in &finished.tool_calls {
             let tool = self
                 .late
@@ -639,7 +638,7 @@ impl Turn<'_> {
                     call: call.clone(),
                     tool: tool.clone(),
                     policy: self.cfg.policy.as_ref(),
-                    hooks: &self.cfg.hooks,
+                    hooks: &hooks,
                     hook_cx: &self.hook_cx,
                 },
                 &prompter,
@@ -726,6 +725,7 @@ impl Turn<'_> {
     /// Let the `AfterTool` hooks see each result; one of them may stop the turn.
     async fn after_tool_hooks(&self, outcomes: &[executor::Outcome]) -> bool {
         let mut stop_after = false;
+        let hooks = self.cfg.hooks.gather().await;
         for o in outcomes {
             let Some(item) = self.items.iter().find(|i| i.id == o.item) else {
                 continue;
@@ -744,9 +744,7 @@ impl Turn<'_> {
                 name: name.clone(),
                 input: input.clone(),
             };
-            for hook in self
-                .cfg
-                .hooks
+            for hook in hooks
                 .iter()
                 .filter(|h| hook_applies(&h.matcher(), HookPoint::AfterTool, Some(name)))
             {

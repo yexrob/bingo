@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "bingo plugin",
-  "protocol": 4,
+  "protocol": 5,
   "$defs": {
     "Action": {
       "type": "object",
@@ -42,6 +42,127 @@
         "action"
       ],
       "description": "A button: the surface fires `Input::Action` with `action` (ADR-0008 §1)."
+    },
+    "Answer": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "allowOnce"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "scope": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "allowSession"
+            }
+          },
+          "required": [
+            "kind",
+            "scope"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "feedback": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "kind": {
+              "type": "string",
+              "const": "deny"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "ids": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "kind": {
+              "type": "string",
+              "const": "choice"
+            }
+          },
+          "required": [
+            "kind",
+            "ids"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "text": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "text"
+            }
+          },
+          "required": [
+            "kind",
+            "text"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "confirm"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "cancel"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        }
+      ]
+    },
+    "AnswerSpec": {
+      "type": "string",
+      "enum": [
+        "allowOnce",
+        "allowSession",
+        "deny",
+        "choice",
+        "text",
+        "confirm",
+        "cancel"
+      ]
     },
     "ArgSpec": {
       "oneOf": [
@@ -89,6 +210,81 @@
             "source"
           ],
           "description": "Completed from a catalog kind the command validates against."
+        }
+      ]
+    },
+    "CancelReason": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "turnEnded",
+            "interrupted",
+            "sessionClosed",
+            "expired",
+            "superseded"
+          ]
+        },
+        {
+          "type": "string",
+          "const": "commandEnded",
+          "description": "The holding command that asked has finished (ADR-0012 §5)."
+        }
+      ]
+    },
+    "CloseReason": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "client"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "shutdown"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "deleted"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "message": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "error"
+            }
+          },
+          "required": [
+            "kind",
+            "message"
+          ]
         }
       ]
     },
@@ -463,6 +659,20 @@
         "value"
       ]
     },
+    "ConfigView": {
+      "type": "object",
+      "properties": {
+        "kernel": {
+          "default": null
+        },
+        "plugins": {
+          "type": "object",
+          "additionalProperties": true,
+          "default": {}
+        }
+      },
+      "description": "Configuration as a client sees it: the kernel's keys and each plugin's claimed slice."
+    },
     "ContentPart": {
       "oneOf": [
         {
@@ -742,6 +952,25 @@
         "deny"
       ]
     },
+    "DeltaKind": {
+      "oneOf": [
+        {
+          "type": "string",
+          "const": "text",
+          "description": "Append to assistant text."
+        },
+        {
+          "type": "string",
+          "const": "reasoning",
+          "description": "Append to reasoning text."
+        },
+        {
+          "type": "string",
+          "const": "tail",
+          "description": "Replace the progress tail of a running tool call."
+        }
+      ]
+    },
     "Driver": {
       "oneOf": [
         {
@@ -814,6 +1043,574 @@
       ],
       "description": "The process to spawn."
     },
+    "ErrorCode": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "SESSION_NOT_FOUND",
+            "SESSION_LOCKED",
+            "SESSION_CLOSED",
+            "INTERACTION_CLOSED",
+            "NOT_READY",
+            "STALE_GENERATION",
+            "NOT_INITIALIZED",
+            "INVALID_INPUT",
+            "PERMISSION_DENIED",
+            "TOOL_NOT_FOUND",
+            "TOOL_FAILED",
+            "PROVIDER_UNAVAILABLE",
+            "AUTH_REQUIRED",
+            "RATE_LIMITED",
+            "CONTEXT_OVERFLOW",
+            "TIMEOUT",
+            "OFFLINE",
+            "SERVER_ERROR",
+            "TURN_LOST",
+            "TURN_BUDGET_EXHAUSTED",
+            "INTERNAL"
+          ]
+        },
+        {
+          "type": "string",
+          "const": "STORAGE",
+          "description": "The store could not read or write; the disk, not the kernel."
+        }
+      ]
+    },
+    "Event": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "summary": {
+              "$ref": "#/$defs/SessionSummary"
+            },
+            "type": {
+              "type": "string",
+              "const": "sessionUpdated"
+            }
+          },
+          "required": [
+            "type",
+            "summary"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "reason": {
+              "$ref": "#/$defs/CloseReason"
+            },
+            "type": {
+              "type": "string",
+              "const": "sessionClosed"
+            }
+          },
+          "required": [
+            "type",
+            "reason"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "turn": {
+              "$ref": "#/$defs/TurnId"
+            },
+            "inputs": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/ItemId"
+              }
+            },
+            "origin": {
+              "$ref": "#/$defs/TurnOrigin"
+            },
+            "type": {
+              "type": "string",
+              "const": "turnStarted"
+            }
+          },
+          "required": [
+            "type",
+            "turn",
+            "inputs",
+            "origin"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "turn": {
+              "$ref": "#/$defs/TurnId"
+            },
+            "attempt": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "max": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "delayMs": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "dropped": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/ItemId"
+              }
+            },
+            "reason": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "turnRetrying"
+            }
+          },
+          "required": [
+            "type",
+            "turn",
+            "attempt",
+            "max",
+            "delayMs",
+            "dropped",
+            "reason"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "turn": {
+              "$ref": "#/$defs/TurnId"
+            },
+            "usage": {
+              "$ref": "#/$defs/Usage"
+            },
+            "context": {
+              "$ref": "#/$defs/ContextUsage"
+            },
+            "type": {
+              "type": "string",
+              "const": "turnUsage"
+            }
+          },
+          "required": [
+            "type",
+            "turn",
+            "usage",
+            "context"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "turn": {
+              "$ref": "#/$defs/TurnId"
+            },
+            "status": {
+              "$ref": "#/$defs/TurnStatus"
+            },
+            "usage": {
+              "$ref": "#/$defs/Usage"
+            },
+            "type": {
+              "type": "string",
+              "const": "turnCompleted"
+            }
+          },
+          "required": [
+            "type",
+            "turn",
+            "status",
+            "usage"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "item": {
+              "$ref": "#/$defs/Item"
+            },
+            "type": {
+              "type": "string",
+              "const": "itemStarted"
+            }
+          },
+          "required": [
+            "type",
+            "item"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "item": {
+              "$ref": "#/$defs/ItemId"
+            },
+            "n": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "kind": {
+              "$ref": "#/$defs/DeltaKind"
+            },
+            "data": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "itemDelta"
+            }
+          },
+          "required": [
+            "type",
+            "item",
+            "n",
+            "kind",
+            "data"
+          ],
+          "description": "Ephemeral. `ItemCompleted` is authoritative over every delta before it."
+        },
+        {
+          "type": "object",
+          "properties": {
+            "item": {
+              "$ref": "#/$defs/Item"
+            },
+            "type": {
+              "type": "string",
+              "const": "itemUpdated"
+            }
+          },
+          "required": [
+            "type",
+            "item"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "item": {
+              "$ref": "#/$defs/Item"
+            },
+            "type": {
+              "type": "string",
+              "const": "itemCompleted"
+            }
+          },
+          "required": [
+            "type",
+            "item"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "revision": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "entries": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/QueueEntry"
+              }
+            },
+            "type": {
+              "type": "string",
+              "const": "queueChanged"
+            }
+          },
+          "required": [
+            "type",
+            "revision",
+            "entries"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "interaction": {
+              "$ref": "#/$defs/Interaction"
+            },
+            "type": {
+              "type": "string",
+              "const": "interactionOpened"
+            }
+          },
+          "required": [
+            "type",
+            "interaction"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "$ref": "#/$defs/InteractionId"
+            },
+            "answer": {
+              "$ref": "#/$defs/Answer"
+            },
+            "by": {
+              "$ref": "#/$defs/ResolvedBy"
+            },
+            "type": {
+              "type": "string",
+              "const": "interactionResolved"
+            }
+          },
+          "required": [
+            "type",
+            "id",
+            "answer",
+            "by"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "$ref": "#/$defs/InteractionId"
+            },
+            "reason": {
+              "$ref": "#/$defs/CancelReason"
+            },
+            "type": {
+              "type": "string",
+              "const": "interactionCancelled"
+            }
+          },
+          "required": [
+            "type",
+            "id",
+            "reason"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "intent": {
+              "$ref": "#/$defs/IntentId"
+            },
+            "outcome": {
+              "$ref": "#/$defs/IntentOutcome"
+            },
+            "type": {
+              "type": "string",
+              "const": "intentAck"
+            }
+          },
+          "required": [
+            "type",
+            "intent",
+            "outcome"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "generation": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "boundary": {
+              "$ref": "#/$defs/ItemId"
+            },
+            "summary": {
+              "$ref": "#/$defs/ItemId"
+            },
+            "kept": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/ItemId"
+              }
+            },
+            "type": {
+              "type": "string",
+              "const": "compacted"
+            }
+          },
+          "required": [
+            "type",
+            "generation",
+            "boundary",
+            "summary",
+            "kept"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "generation": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "toTurn": {
+              "$ref": "#/$defs/TurnId"
+            },
+            "dropped": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/ItemId"
+              }
+            },
+            "filesRestored": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "type": {
+              "type": "string",
+              "const": "rewound"
+            }
+          },
+          "required": [
+            "type",
+            "generation",
+            "toTurn",
+            "dropped",
+            "filesRestored"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "config": {
+              "$ref": "#/$defs/ConfigView"
+            },
+            "type": {
+              "type": "string",
+              "const": "configChanged"
+            }
+          },
+          "required": [
+            "type",
+            "config"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "catalogChanged"
+            }
+          },
+          "required": [
+            "type",
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "level": {
+              "$ref": "#/$defs/Level"
+            },
+            "code": {
+              "type": "string"
+            },
+            "text": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "notice"
+            }
+          },
+          "required": [
+            "type",
+            "level",
+            "code",
+            "text"
+          ],
+          "description": "Ephemeral. Transcript-worthy notices are `ItemBody::Notice`."
+        },
+        {
+          "type": "object",
+          "properties": {
+            "plugin": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string"
+            },
+            "payload": true,
+            "type": {
+              "type": "string",
+              "const": "extension"
+            }
+          },
+          "required": [
+            "type",
+            "plugin",
+            "kind",
+            "payload"
+          ],
+          "description": "A plugin-owned resource changed (roster, room, task…). The kernel does not enumerate these."
+        },
+        {
+          "type": "object",
+          "properties": {
+            "plugin": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string"
+            },
+            "payload": true,
+            "type": {
+              "type": "string",
+              "const": "signal"
+            }
+          },
+          "required": [
+            "type",
+            "plugin",
+            "kind",
+            "payload"
+          ],
+          "description": "Ephemeral. A plugin's live state (ADR-0013 §2): the latest payload per\n`(plugin, kind)` is the whole of it; `Null` removes it; none survives a resume."
+        },
+        {
+          "type": "object",
+          "properties": {
+            "from": {
+              "$ref": "#/$defs/Seq"
+            },
+            "to": {
+              "$ref": "#/$defs/Seq"
+            },
+            "type": {
+              "type": "string",
+              "const": "lagged"
+            }
+          },
+          "required": [
+            "type",
+            "from",
+            "to"
+          ],
+          "description": "Ephemeral, transport only: this subscriber missed `from..=to`; re-read the journal."
+        }
+      ]
+    },
     "FinishReason": {
       "type": "object",
       "properties": {
@@ -830,6 +1627,490 @@
       "required": [
         "unified"
       ]
+    },
+    "Frame": {
+      "type": "object",
+      "properties": {
+        "seq": {
+          "$ref": "#/$defs/Seq"
+        },
+        "ts": {
+          "type": "string"
+        },
+        "session": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "cause": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/IntentId"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The client intent this frame answers or results from, when there is one."
+        },
+        "event": {
+          "$ref": "#/$defs/Event"
+        }
+      },
+      "required": [
+        "seq",
+        "ts",
+        "session",
+        "event"
+      ]
+    },
+    "HookDecideParams": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Which of the hooks the handshake declared is deciding."
+        },
+        "site": {
+          "$ref": "#/$defs/HookSite"
+        }
+      },
+      "required": [
+        "id",
+        "site"
+      ],
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "point": {
+              "type": "string",
+              "const": "submit"
+            },
+            "payload": {
+              "type": "object",
+              "properties": {
+                "input": {
+                  "$ref": "#/$defs/Input"
+                }
+              },
+              "required": [
+                "input"
+              ]
+            }
+          },
+          "required": [
+            "point",
+            "payload"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "point": {
+              "type": "string",
+              "const": "beforeTool"
+            },
+            "payload": {
+              "type": "object",
+              "properties": {
+                "call": {
+                  "$ref": "#/$defs/ToolCall"
+                }
+              },
+              "required": [
+                "call"
+              ]
+            }
+          },
+          "required": [
+            "point",
+            "payload"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "point": {
+              "type": "string",
+              "const": "afterTool"
+            },
+            "payload": {
+              "type": "object",
+              "properties": {
+                "call": {
+                  "$ref": "#/$defs/ToolCall"
+                },
+                "output": {
+                  "$ref": "#/$defs/ToolOutput"
+                }
+              },
+              "required": [
+                "call",
+                "output"
+              ]
+            }
+          },
+          "required": [
+            "point",
+            "payload"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "point": {
+              "type": "string",
+              "const": "stop"
+            }
+          },
+          "required": [
+            "point"
+          ]
+        }
+      ],
+      "description": "One decision, asked for and waited on."
+    },
+    "HookDecideResult": {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "$ref": "#/$defs/HookOutcome"
+        },
+        "value": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HookValue"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "outcome"
+      ],
+      "description": "What the hook decided, and what it rewrote if the point owned anything.\n\nThe outcome crosses as the sdk writes it: there is no `Allow` in the type,\nso the wire cannot say one (ADR-0032 §4). A hook that only watches this\npoint answers `continue` and nothing else."
+    },
+    "HookObserveParams": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Which of the hooks the handshake declared is watching."
+        },
+        "site": {
+          "$ref": "#/$defs/HookSite"
+        }
+      },
+      "required": [
+        "id",
+        "site"
+      ],
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "point": {
+              "type": "string",
+              "const": "turn"
+            },
+            "payload": {
+              "type": "object",
+              "properties": {
+                "phase": {
+                  "$ref": "#/$defs/Phase"
+                },
+                "turn": {
+                  "$ref": "#/$defs/TurnId"
+                },
+                "items": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/$defs/Item"
+                  },
+                  "default": []
+                }
+              },
+              "required": [
+                "phase",
+                "turn"
+              ]
+            }
+          },
+          "required": [
+            "point",
+            "payload"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "point": {
+              "type": "string",
+              "const": "compact"
+            },
+            "payload": {
+              "type": "object",
+              "properties": {
+                "phase": {
+                  "$ref": "#/$defs/Phase"
+                }
+              },
+              "required": [
+                "phase"
+              ]
+            }
+          },
+          "required": [
+            "point",
+            "payload"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "point": {
+              "type": "string",
+              "const": "session"
+            },
+            "payload": {
+              "type": "object",
+              "properties": {
+                "phase": {
+                  "$ref": "#/$defs/Phase"
+                }
+              },
+              "required": [
+                "phase"
+              ]
+            }
+          },
+          "required": [
+            "point",
+            "payload"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "point": {
+              "type": "string",
+              "const": "event"
+            },
+            "payload": {
+              "type": "object",
+              "properties": {
+                "frame": {
+                  "$ref": "#/$defs/Frame"
+                }
+              },
+              "required": [
+                "frame"
+              ]
+            }
+          },
+          "required": [
+            "point",
+            "payload"
+          ]
+        }
+      ],
+      "description": "Kernel → plugin: one observation point happened. Nothing is awaited."
+    },
+    "HookOutcome": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "continue"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "reason": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "deny"
+            }
+          },
+          "required": [
+            "kind",
+            "reason"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "reason": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "ask"
+            }
+          },
+          "required": [
+            "kind",
+            "reason"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "reason": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "block"
+            }
+          },
+          "required": [
+            "kind",
+            "reason"
+          ],
+          "description": "`after_tool`: end the turn after this round. `on_stop`: loop once more with the reason."
+        },
+        {
+          "type": "object",
+          "properties": {
+            "session": {
+              "$ref": "#/$defs/SessionId"
+            },
+            "kind": {
+              "type": "string",
+              "const": "redirect"
+            }
+          },
+          "required": [
+            "kind",
+            "session"
+          ],
+          "description": "`on_submit`: deliver to another session instead."
+        }
+      ],
+      "description": "What a hook decided. There is no `Allow`: a hook tightens what happens or\nstands aside, and nothing here can widen a permission the policy refused."
+    },
+    "HookPoint": {
+      "type": "string",
+      "enum": [
+        "submit",
+        "beforeTool",
+        "afterTool",
+        "stop",
+        "turn",
+        "compact",
+        "session",
+        "event"
+      ]
+    },
+    "HookSite": {
+      "type": "object",
+      "properties": {
+        "session": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "turn": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TurnId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "cwd": {
+          "type": "string"
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "session",
+        "cwd"
+      ],
+      "description": "Where a hook is standing, as a process that is not in the host can read it.\n\nThe serializable projection of the sdk's `HookContext` (ADR-0030 §5): which\nsession, which turn if any, where it works and what model answers it. The\nhost handle and the provider stay on this side — an external hook reads\nwhere it is, it does not reach the host."
+    },
+    "HookSpec": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "The name this process knows the hook by; `hook/decide` and\n`hook/observe` carry it back. The kernel sees it prefixed by the\nplugin's own name."
+        },
+        "points": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/HookPoint"
+          },
+          "description": "Empty wants every point.",
+          "default": []
+        },
+        "tool": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Anchored regex on the tool name for the tool points."
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "description": "A hook a process says it has, and the matcher it is claimed with.\n\nThe matcher is the sdk's own, declared once: the kernel's cheap skip runs\non this side, so an event this matcher rules out never crosses the pipe at\nall (ADR-0032 §1). A declaration that names no point wants every point, as\nan in-process hook's empty matcher does."
+    },
+    "HookValue": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "input": {
+              "$ref": "#/$defs/Input"
+            },
+            "kind": {
+              "type": "string",
+              "const": "input"
+            }
+          },
+          "required": [
+            "kind",
+            "input"
+          ],
+          "description": "`submit`'s input, as the hook would have it."
+        },
+        {
+          "type": "object",
+          "properties": {
+            "call": {
+              "$ref": "#/$defs/ToolCall"
+            },
+            "kind": {
+              "type": "string",
+              "const": "call"
+            }
+          },
+          "required": [
+            "kind",
+            "call"
+          ],
+          "description": "`beforeTool`'s call, as the hook would have it."
+        }
+      ],
+      "description": "The value a hook rewrote, in the one shape the point that owns it takes.\nA point that owns no mutable argument has no variant here, so a rewrite\nanywhere else is refused by the shape rather than by a check."
     },
     "HostEnv": {
       "type": "object",
@@ -928,6 +2209,13 @@
           },
           "default": []
         },
+        "hooks": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/HookSpec"
+          },
+          "default": []
+        },
         "services": {
           "type": "object",
           "additionalProperties": {
@@ -944,13 +2232,321 @@
       ],
       "description": "What the process says it is and what it contributes. Everything here is a\nclaim: the tools it names are registered untrusted (ADR-0015 §4)."
     },
+    "Input": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "text": {
+              "type": "string"
+            },
+            "attachments": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": []
+            },
+            "origin": {
+              "$ref": "#/$defs/Origin"
+            },
+            "kind": {
+              "type": "string",
+              "const": "text"
+            }
+          },
+          "required": [
+            "kind",
+            "text",
+            "origin"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "action": {
+              "$ref": "#/$defs/Action"
+            },
+            "kind": {
+              "type": "string",
+              "const": "action"
+            }
+          },
+          "required": [
+            "kind",
+            "action"
+          ]
+        }
+      ],
+      "description": "The one submission entry. The kernel parses `/`, `!` and `@` in text and\ndecides turn, queue, steer or deliver; a client never chooses."
+    },
     "IntentId": {
       "type": "string",
       "description": "A client-minted write id; the outcome arrives as `IntentAck`."
     },
+    "IntentOutcome": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "turn": {
+              "$ref": "#/$defs/TurnId"
+            },
+            "kind": {
+              "type": "string",
+              "const": "turnStarted"
+            }
+          },
+          "required": [
+            "kind",
+            "turn"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "position": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "kind": {
+              "type": "string",
+              "const": "queued"
+            }
+          },
+          "required": [
+            "kind",
+            "position"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "result": true,
+            "kind": {
+              "type": "string",
+              "const": "applied"
+            }
+          },
+          "required": [
+            "kind",
+            "result"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "error": {
+              "$ref": "#/$defs/KernelError"
+            },
+            "kind": {
+              "type": "string",
+              "const": "rejected"
+            }
+          },
+          "required": [
+            "kind",
+            "error"
+          ]
+        }
+      ]
+    },
+    "Interaction": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/InteractionId"
+        },
+        "session": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "turn": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TurnId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "item": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ItemId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "openedAt": {
+          "type": "string"
+        },
+        "guardUntil": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Keyboard approvals before this instant are rejected with `NOT_READY`."
+        },
+        "expiresAt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kind": {
+          "$ref": "#/$defs/InteractionKind"
+        },
+        "answers": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AnswerSpec"
+          },
+          "description": "Exactly the answers the kernel will accept."
+        }
+      },
+      "required": [
+        "id",
+        "session",
+        "openedAt",
+        "kind",
+        "answers"
+      ]
+    },
     "InteractionId": {
       "type": "string",
       "description": "A pending question or permission, answered once by id."
+    },
+    "InteractionKind": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "tool": {
+              "type": "string"
+            },
+            "summary": {
+              "type": "string"
+            },
+            "preview": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Preview"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "sessionScope": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The rule `AllowSession` would install, when one would silence the prompt."
+            },
+            "kind": {
+              "type": "string",
+              "const": "permission"
+            }
+          },
+          "required": [
+            "kind",
+            "tool",
+            "summary"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "question": {
+              "type": "string"
+            },
+            "header": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "A short tag a surface may show before the question (`Auth method`)."
+            },
+            "options": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/QuestionOption"
+              }
+            },
+            "freeText": {
+              "type": "boolean",
+              "default": false
+            },
+            "multi": {
+              "type": "boolean",
+              "default": false
+            },
+            "kind": {
+              "type": "string",
+              "const": "question"
+            }
+          },
+          "required": [
+            "kind",
+            "question",
+            "options"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "title": {
+              "type": "string"
+            },
+            "detail": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "confirm"
+            }
+          },
+          "required": [
+            "kind",
+            "title",
+            "detail"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "provider": {
+              "type": "string"
+            },
+            "flow": {
+              "$ref": "#/$defs/LoginFlow"
+            },
+            "kind": {
+              "type": "string",
+              "const": "login"
+            }
+          },
+          "required": [
+            "kind",
+            "provider",
+            "flow"
+          ]
+        }
+      ]
+    },
+    "InterruptReason": {
+      "type": "string",
+      "enum": [
+        "userCancel",
+        "newInput",
+        "shutdown",
+        "budget"
+      ]
     },
     "Item": {
       "type": "object",
@@ -1337,12 +2933,80 @@
         "interrupted"
       ]
     },
+    "KernelError": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "$ref": "#/$defs/ErrorCode"
+        },
+        "message": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "message"
+      ],
+      "description": "An error as it appears on the wire and in the journal."
+    },
     "Level": {
       "type": "string",
       "enum": [
         "info",
         "warn",
         "error"
+      ]
+    },
+    "LoginFlow": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "url": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "browser"
+            }
+          },
+          "required": [
+            "kind",
+            "url"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "url": {
+              "type": "string"
+            },
+            "code": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "device"
+            }
+          },
+          "required": [
+            "kind",
+            "url",
+            "code"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "paste"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        }
       ]
     },
     "Manifest": {
@@ -1808,6 +3472,13 @@
       ],
       "description": "Where a child hangs in the tree: its parent, and the tool call that\nspawned it when one did (ADR-0011 §3)."
     },
+    "Phase": {
+      "type": "string",
+      "enum": [
+        "start",
+        "end"
+      ]
+    },
     "Placement": {
       "oneOf": [
         {
@@ -1856,6 +3527,62 @@
         }
       ],
       "description": "When a contributor speaks. Serializable because a contributor may live in\nanother process: it declares its placement once, over the bridge."
+    },
+    "Preview": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "unified": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "diff"
+            }
+          },
+          "required": [
+            "kind",
+            "unified"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "command": {
+              "type": "string"
+            },
+            "cwd": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "command"
+            }
+          },
+          "required": [
+            "kind",
+            "command",
+            "cwd"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "url": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "url"
+            }
+          },
+          "required": [
+            "kind",
+            "url"
+          ]
+        }
+      ]
     },
     "ProviderCancelParams": {
       "type": "object",
@@ -2126,12 +3853,116 @@
       },
       "description": "The close. A stream that ran to its `finish` event answers with nothing; one\nthat broke answers with the error the trait speaks, so the kernel's retry\nladder reads the same kind it reads from an in-process provider."
     },
+    "QuestionOption": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "label"
+      ]
+    },
+    "QueueEntry": {
+      "type": "object",
+      "properties": {
+        "intent": {
+          "$ref": "#/$defs/IntentId"
+        },
+        "position": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "preview": {
+          "type": "string"
+        },
+        "steerable": {
+          "type": "boolean"
+        },
+        "origin": {
+          "$ref": "#/$defs/Origin"
+        }
+      },
+      "required": [
+        "intent",
+        "position",
+        "preview",
+        "steerable",
+        "origin"
+      ]
+    },
+    "ResolvedBy": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "surface": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "client"
+            }
+          },
+          "required": [
+            "kind",
+            "name",
+            "surface"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "kernel"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "policy"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        }
+      ]
+    },
     "Role": {
       "type": "string",
       "enum": [
         "user",
         "assistant"
       ]
+    },
+    "Seq": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0,
+      "description": "Position of a frame in a session's journal. Durable frames are gapless;\nclients only require monotonic order."
     },
     "ServiceCallParams": {
       "type": "object",
@@ -2301,6 +4132,24 @@
       ],
       "description": "The one styling hook a plugin has; the surface owns the colour."
     },
+    "ToolCall": {
+      "type": "object",
+      "properties": {
+        "callId": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "input": true
+      },
+      "required": [
+        "callId",
+        "name",
+        "input"
+      ],
+      "description": "A call the model asked for, before or after the gate."
+    },
     "ToolCallParams": {
       "type": "object",
       "properties": {
@@ -2451,6 +4300,78 @@
     "TurnId": {
       "type": "string",
       "description": "One run of the turn loop, closed exactly once."
+    },
+    "TurnOrigin": {
+      "oneOf": [
+        {
+          "type": "string",
+          "const": "submit",
+          "description": "A client submitted while the session was idle."
+        },
+        {
+          "type": "string",
+          "const": "queue",
+          "description": "Drained from the queue when the previous turn ended."
+        },
+        {
+          "type": "string",
+          "const": "peer",
+          "description": "Another session posted into this one."
+        },
+        {
+          "type": "string",
+          "const": "auto",
+          "description": "The kernel or a plugin opened the turn with no prose."
+        }
+      ]
+    },
+    "TurnStatus": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "completed"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "error": {
+              "$ref": "#/$defs/KernelError"
+            },
+            "kind": {
+              "type": "string",
+              "const": "failed"
+            }
+          },
+          "required": [
+            "kind",
+            "error"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "reason": {
+              "$ref": "#/$defs/InterruptReason"
+            },
+            "kind": {
+              "type": "string",
+              "const": "interrupted"
+            }
+          },
+          "required": [
+            "kind",
+            "reason"
+          ]
+        }
+      ]
     },
     "UnifiedFinish": {
       "type": "string",
@@ -2869,6 +4790,14 @@
       "result": {
         "$ref": "#/$defs/ServiceCallResult"
       }
+    },
+    "hook/decide": {
+      "params": {
+        "$ref": "#/$defs/HookDecideParams"
+      },
+      "result": {
+        "$ref": "#/$defs/HookDecideResult"
+      }
     }
   },
   "notifications": {
@@ -2890,6 +4819,11 @@
     "provider/cancel": {
       "params": {
         "$ref": "#/$defs/ProviderCancelParams"
+      }
+    },
+    "hook/observe": {
+      "params": {
+        "$ref": "#/$defs/HookObserveParams"
       }
     }
   }

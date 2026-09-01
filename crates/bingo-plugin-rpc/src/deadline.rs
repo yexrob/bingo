@@ -18,6 +18,15 @@ pub const HANDSHAKE: Duration = Duration::from_secs(10);
 /// deadline was missed. The turn never waits on a dead process.
 pub const CONTRIBUTE: Duration = Duration::from_secs(3);
 
+/// How long a hook has to decide. Short, because `submit` and `beforeTool`
+/// sit on hot paths and a matched event pays this on every crossing: the
+/// handshake matcher keeps the unmatched ones at no cost, and this bounds the
+/// rest. Past it the hook never gets to decide — hooks-shell's precedent — and
+/// the host goes on with a notice naming it (ADR-0032 §5). Longer than a
+/// contributor's, because a hook that consults something is answering one
+/// event rather than filling one round.
+pub const HOOK: Duration = Duration::from_secs(5);
+
 /// How long a compaction has. The longest, because a strategy that asks a
 /// model of its own is paying for a whole response — the provider crates wait
 /// this long for one too. Past it the call fails with the error the trait
@@ -47,7 +56,8 @@ mod tests {
     /// The order is the point: the hot path waits least, the model waits most.
     #[test]
     fn the_hot_path_has_the_shortest_deadline_of_them_all() {
-        assert!(CONTRIBUTE < HANDSHAKE);
+        assert!(CONTRIBUTE < HOOK);
+        assert!(HOOK < HANDSHAKE);
         assert!(HANDSHAKE < SERVICE);
         assert!(SERVICE < COMPACT);
         assert!(

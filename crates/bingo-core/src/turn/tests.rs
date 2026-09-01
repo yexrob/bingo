@@ -115,7 +115,7 @@ fn config(provider: Arc<ScriptedProvider>, tools: Vec<Arc<dyn Tool>>) -> TurnCon
         }],
         tools: ToolSet::fixed(tools),
         policy: Arc::new(DefaultPolicy),
-        hooks: vec![],
+        hooks: HookSet::default(),
         contributors: ContributorSet::default(),
         compaction: Arc::new(crate::turn::Breaker::default()),
         compactor: CompactorSet::default(),
@@ -729,9 +729,9 @@ async fn a_hook_that_asks_opens_a_permission_with_its_reason_and_allow_runs_the_
         Script::Events(text("done")),
     ]);
     let mut cfg = config(provider, vec![Arc::new(EchoTool { read_only: true })]);
-    cfg.hooks = vec![Arc::new(AskingHook {
+    cfg.hooks = HookSet::fixed(vec![Arc::new(AskingHook {
         reason: "why".into(),
-    })];
+    })]);
     let host = RecordingHost::new();
     host.answers.lock().unwrap().push_back(Answer::AllowOnce);
     let outcome = run(&cfg, &host, CancellationToken::new()).await;
@@ -749,6 +749,83 @@ async fn a_hook_that_asks_opens_a_permission_with_its_reason_and_allow_runs_the_
     );
 }
 
+/// A hook that decides nothing and only writes down that it was asked.
+struct OrderingHook {
+    id: String,
+    seen: Arc<Mutex<Vec<String>>>,
+}
+
+impl OrderingHook {
+    fn new(id: &str, seen: &Arc<Mutex<Vec<String>>>) -> Arc<Self> {
+        Arc::new(Self {
+            id: id.to_string(),
+            seen: Arc::clone(seen),
+        })
+    }
+}
+
+#[async_trait]
+impl Hook for OrderingHook {
+    fn id(&self) -> &str {
+        &self.id
+    }
+    fn matcher(&self) -> HookMatcher {
+        HookMatcher {
+            points: vec![HookPoint::BeforeTool],
+            tool: None,
+        }
+    }
+    async fn before_tool(&self, _: &mut ToolCall, _: &HookContext) -> HookOutcome {
+        self.seen.lock().unwrap().push(self.id.clone());
+        HookOutcome::Continue
+    }
+}
+
+/// Run one turn whose round calls a tool, so this set's `before_tool` hooks
+/// are asked; what they wrote down is the test's answer.
+async fn gate_one_call(hooks: HookSet) {
+    let provider = ScriptedProvider::new(vec![
+        Script::Events(tool_call("Echo", json!({ "v": 1 }))),
+        Script::Events(text("done")),
+    ]);
+    let mut cfg = config(provider, vec![Arc::new(EchoTool { read_only: true })]);
+    cfg.hooks = hooks;
+    run(&cfg, &RecordingHost::new(), CancellationToken::new()).await;
+}
+
+/// R-order, pinned rather than assumed: a hook that arrived from a source is
+/// asked exactly where a second registered hook would have been asked. The two
+/// compositions are run and the two orders compared, so nothing here rests on
+/// reading `gather`.
+#[tokio::test]
+async fn a_source_s_hook_composes_where_a_second_registered_hook_would() {
+    let in_process = Arc::new(Mutex::new(Vec::new()));
+    gate_one_call(HookSet::fixed(vec![
+        OrderingHook::new("first", &in_process),
+        OrderingHook::new("second", &in_process),
+    ]))
+    .await;
+
+    let mixed = Arc::new(Mutex::new(Vec::new()));
+    gate_one_call(HookSet {
+        fixed: vec![OrderingHook::new("first", &mixed)],
+        sources: vec![ScriptedHookSource::new(vec![OrderingHook::new(
+            "second", &mixed,
+        )])],
+    })
+    .await;
+
+    let (in_process, mixed) = (
+        in_process.lock().unwrap().clone(),
+        mixed.lock().unwrap().clone(),
+    );
+    assert_eq!(in_process, ["first", "second"]);
+    assert_eq!(
+        mixed, in_process,
+        "a late hook takes a registered one's place"
+    );
+}
+
 #[tokio::test]
 async fn compaction_hooks_bracket_the_cut() {
     let provider = ScriptedProvider::new(vec![]);
@@ -758,7 +835,7 @@ async fn compaction_hooks_bracket_the_cut() {
             "itm_none", 9_000, 100,
         )])));
     let hook = RecordingHook::new(false);
-    cfg.hooks = vec![hook.clone()];
+    cfg.hooks = HookSet::fixed(vec![hook.clone()]);
     let host = RecordingHost::new();
     run_turn(
         &cfg,

@@ -40,29 +40,42 @@ impl PluginStatus {
     }
 }
 
+/// Everything that arrives after I/O (ADR-0009 §1), one list per kind, each
+/// read where that kind is resolved.
+///
+/// They sit together because a source is the one contribution the composition
+/// never arbitrates: it holds no slot, takes no name, and two of a kind are
+/// both welcome. What the registry has to judge is above; what it only carries
+/// is here.
+#[derive(Default)]
+pub struct Sources {
+    /// Read when a turn starts.
+    pub tools: Vec<Arc<dyn ToolSource>>,
+    /// Read when a name is not in `commands`.
+    pub commands: Vec<Arc<dyn CommandSource>>,
+    /// Read where a model is chosen (ADR-0030 §2).
+    pub providers: Vec<Arc<dyn ProviderSource>>,
+    /// Read when a turn starts.
+    pub contexts: Vec<Arc<dyn ContextSource>>,
+    /// One is the turn's only where the registered slot is free.
+    pub compactors: Vec<Arc<dyn CompactorSource>>,
+    /// Read wherever the kernel reads its hooks (ADR-0032 §1).
+    pub hooks: Vec<Arc<dyn HookSource>>,
+}
+
 #[derive(Default)]
 pub struct Registry {
     pub tools: Vec<Arc<dyn Tool>>,
-    /// Tools that arrive after I/O, read when a turn starts (ADR-0009).
-    pub tool_sources: Vec<Arc<dyn ToolSource>>,
     pub providers: Vec<Arc<dyn Provider>>,
-    /// Providers that arrive after I/O, read where a model is chosen
-    /// (ADR-0009, ADR-0030 §2).
-    pub provider_sources: Vec<Arc<dyn ProviderSource>>,
     pub policy: Option<Arc<dyn PermissionPolicy>>,
     pub hooks: Vec<Arc<dyn Hook>>,
     pub contributors: Vec<Arc<dyn ContextContributor>>,
-    /// Contributors that arrive after I/O, read when a turn starts (ADR-0009).
-    pub context_sources: Vec<Arc<dyn ContextSource>>,
     pub commands: Vec<Arc<dyn Command>>,
-    /// Commands that arrive after I/O, read when a name is not in `commands`.
-    pub command_sources: Vec<Arc<dyn CommandSource>>,
     pub surfaces: Vec<Arc<dyn Surface>>,
     pub store: Option<Arc<dyn SessionStore>>,
     pub compactor: Option<Arc<dyn Compactor>>,
-    /// Strategies that arrive after I/O; one is the turn's only where the slot
-    /// above is free.
-    pub compactor_sources: Vec<Arc<dyn CompactorSource>>,
+    /// Everything registered before its I/O has happened.
+    pub sources: Sources,
     /// One entry per key, holding both faces of one live object: the typed
     /// value a consumer downcasts, and the wire face a process reaches when
     /// the owner opened one (ADR-0031 §1). A service an external process
@@ -135,12 +148,12 @@ impl Registry {
         match contribution {
             Contribution::Tool(tool) => self.add_tool(tool),
             Contribution::Tools(source) => {
-                self.tool_sources.push(source);
+                self.sources.tools.push(source);
                 Ok(())
             }
             Contribution::Provider(provider) => self.add_provider(provider),
             Contribution::Providers(source) => {
-                self.provider_sources.push(source);
+                self.sources.providers.push(source);
                 Ok(())
             }
             Contribution::Policy(policy) => self.set_policy(policy),
@@ -148,24 +161,28 @@ impl Registry {
                 self.hooks.push(hook);
                 Ok(())
             }
+            Contribution::Hooks(source) => {
+                self.sources.hooks.push(source);
+                Ok(())
+            }
             Contribution::Context(contributor) => {
                 self.contributors.push(contributor);
                 Ok(())
             }
             Contribution::Contexts(source) => {
-                self.context_sources.push(source);
+                self.sources.contexts.push(source);
                 Ok(())
             }
             Contribution::Command(command) => self.add_command(command),
             Contribution::Commands(source) => {
-                self.command_sources.push(source);
+                self.sources.commands.push(source);
                 Ok(())
             }
             Contribution::Surface(surface) => self.add_surface(surface),
             Contribution::Store(store) => self.set_store(store),
             Contribution::Compactor(compactor) => self.set_compactor(compactor),
             Contribution::Compactors(source) => {
-                self.compactor_sources.push(source);
+                self.sources.compactors.push(source);
                 Ok(())
             }
             Contribution::Service { key, value, wire } => {
@@ -398,6 +415,16 @@ mod tests {
         }
     }
 
+    #[async_trait::async_trait]
+    impl HookSource for Nothing {
+        fn id(&self) -> &str {
+            "nothing"
+        }
+        async fn hooks(&self) -> Vec<Arc<dyn Hook>> {
+            Vec::new()
+        }
+    }
+
     /// Every kind that arrives after I/O lands in the list named for it, and a
     /// second one is welcome: a source holds no slot.
     /// One row of the table: a source to register, and where it must land.
@@ -409,23 +436,27 @@ mod tests {
         let table: Vec<(Source, Kept)> = vec![
             (
                 || Contribution::Tools(Arc::new(Nothing)),
-                |registry| registry.tool_sources.len(),
+                |registry| registry.sources.tools.len(),
             ),
             (
                 || Contribution::Commands(Arc::new(Nothing)),
-                |registry| registry.command_sources.len(),
+                |registry| registry.sources.commands.len(),
             ),
             (
                 || Contribution::Contexts(Arc::new(Nothing)),
-                |registry| registry.context_sources.len(),
+                |registry| registry.sources.contexts.len(),
             ),
             (
                 || Contribution::Compactors(Arc::new(Nothing)),
-                |registry| registry.compactor_sources.len(),
+                |registry| registry.sources.compactors.len(),
             ),
             (
                 || Contribution::Providers(Arc::new(Nothing)),
-                |registry| registry.provider_sources.len(),
+                |registry| registry.sources.providers.len(),
+            ),
+            (
+                || Contribution::Hooks(Arc::new(Nothing)),
+                |registry| registry.sources.hooks.len(),
             ),
         ];
         for (contribute, count) in table {
