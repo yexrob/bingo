@@ -65,6 +65,9 @@ before landing.
   reaches into the tree, not up out of it), so its own model posts blind
   and is bounced once whenever a member has spoken since. That bounce is
   the only reading of the room it gets, which is the repair of §3 doing
-  its work rather than an exception to it.
+  its work rather than an exception to it. (Narrowed by ADR-0028: a
+  roster that names `parent` seats the holder — its posts are then
+  delivered to it and absorbed like any member's, and only an
+  off-roster holder still posts blind.)
 - Restart-safe by construction: both ledgers are re-derived from journals;
   process death loses timers, never the discipline.
