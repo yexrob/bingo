@@ -695,25 +695,28 @@ mod tests {
                 read(&path, out);
                 continue;
             }
-            let file = path.file_name().expect("a named file").to_string_lossy();
-            if path.extension().is_none_or(|e| e != "rs")
-                || file == "doubles.rs"
-                || file == "motion.rs"
-                || file == "painted.rs"
-                || file == "screens.rs"
-                || file == "test_support.rs"
-                || file == "tests.rs"
-                || file == "theme.rs"
-            {
-                continue;
-            }
-            let text = std::fs::read_to_string(&path).expect("a readable source");
-            let code = text.split("#[cfg(test)]").next().unwrap_or_default();
             let name = path
                 .strip_prefix("src")
                 .unwrap_or(&path)
                 .to_string_lossy()
                 .into_owned();
+            if path.extension().is_none_or(|e| e != "rs")
+                || matches!(
+                    name.as_str(),
+                    "doubles.rs"
+                        | "motion.rs"
+                        | "painted.rs"
+                        | "screens.rs"
+                        | "screens/colours.rs"
+                        | "test_support.rs"
+                        | "tests.rs"
+                        | "theme.rs"
+                )
+            {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).expect("a readable source");
+            let code = text.split("#[cfg(test)]").next().unwrap_or_default();
             out.push((name, code.to_string()));
         }
     }
