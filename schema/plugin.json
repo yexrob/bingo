@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "bingo plugin",
-  "protocol": 2,
+  "protocol": 3,
   "$defs": {
     "Action": {
       "type": "object",
@@ -757,6 +757,36 @@
       ],
       "description": "What a session does with what it is told (ADR-0011 §1)."
     },
+    "Effort": {
+      "type": "string",
+      "enum": [
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xHigh",
+        "max"
+      ],
+      "description": "Reasoning effort, in the vocabulary providers converge on."
+    },
+    "EndpointCapabilities": {
+      "type": "object",
+      "properties": {
+        "images": {
+          "type": "boolean",
+          "default": false
+        },
+        "countTokens": {
+          "type": "boolean",
+          "default": false
+        },
+        "caching": {
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "description": "What an endpoint does with a request, as only the provider can know:\nwhether image parts reach the model, whether tokens can be counted ahead,\nwhether prefixes are cached. The model's own facts — window, output\nbudget, reasoning, vision — are the kernel catalogue's (ADR-0004)."
+    },
     "Entry": {
       "type": "object",
       "properties": {
@@ -783,6 +813,23 @@
         "command"
       ],
       "description": "The process to spawn."
+    },
+    "FinishReason": {
+      "type": "object",
+      "properties": {
+        "unified": {
+          "$ref": "#/$defs/UnifiedFinish"
+        },
+        "raw": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "unified"
+      ]
     },
     "HostEnv": {
       "type": "object",
@@ -871,6 +918,13 @@
           "type": "array",
           "items": {
             "$ref": "#/$defs/CompactorSpec"
+          },
+          "default": []
+        },
+        "providers": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ProviderSpec"
           },
           "default": []
         }
@@ -1307,6 +1361,31 @@
       ],
       "description": "What one directory under `plugins/` declares about itself.\n\nUnknown keys are kept rather than refused: a manifest written for a later\nhost must still start on this one."
     },
+    "Message": {
+      "type": "object",
+      "properties": {
+        "role": {
+          "$ref": "#/$defs/Role"
+        },
+        "parts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ContentPart"
+          }
+        },
+        "providerOptions": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        }
+      },
+      "required": [
+        "role",
+        "parts"
+      ]
+    },
     "ModelCapabilities": {
       "type": "object",
       "properties": {
@@ -1342,6 +1421,338 @@
         "maxOutput"
       ],
       "description": "What a turn may assume about its model: the kernel's resolution of the\nuser's settings, the catalogue, the server's corrections and the\nendpoint's facts (ADR-0004). The ruler and the gate read this."
+    },
+    "ModelEvent": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "warnings": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": []
+            },
+            "type": {
+              "type": "string",
+              "const": "streamStart"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "model": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "type": "string",
+              "const": "responseMetadata"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "textStart"
+            }
+          },
+          "required": [
+            "type",
+            "id"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "delta": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "textDelta"
+            }
+          },
+          "required": [
+            "type",
+            "id",
+            "delta"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "textEnd"
+            }
+          },
+          "required": [
+            "type",
+            "id"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "reasoningStart"
+            }
+          },
+          "required": [
+            "type",
+            "id"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "delta": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "reasoningDelta"
+            }
+          },
+          "required": [
+            "type",
+            "id",
+            "delta"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "providerMetadata": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "object",
+                "additionalProperties": true
+              }
+            },
+            "type": {
+              "type": "string",
+              "const": "reasoningEnd"
+            }
+          },
+          "required": [
+            "type",
+            "id"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "toolInputStart"
+            }
+          },
+          "required": [
+            "type",
+            "id",
+            "name"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "delta": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "toolInputDelta"
+            }
+          },
+          "required": [
+            "type",
+            "id",
+            "delta"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "toolInputEnd"
+            }
+          },
+          "required": [
+            "type",
+            "id"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "input": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "toolCall"
+            }
+          },
+          "required": [
+            "type",
+            "id",
+            "name",
+            "input"
+          ],
+          "description": "The complete call. `input` is the raw JSON text; the loop parses it once."
+        },
+        {
+          "type": "object",
+          "properties": {
+            "usage": {
+              "$ref": "#/$defs/Usage"
+            },
+            "finishReason": {
+              "$ref": "#/$defs/FinishReason"
+            },
+            "type": {
+              "type": "string",
+              "const": "finish"
+            }
+          },
+          "required": [
+            "type",
+            "usage",
+            "finishReason"
+          ]
+        }
+      ],
+      "description": "Provider stream events. Never published; the accumulator folds them into items."
+    },
+    "ModelInfo": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "display": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id"
+      ]
+    },
+    "ModelRequest": {
+      "type": "object",
+      "properties": {
+        "model": {
+          "type": "string"
+        },
+        "maxTokens": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "system": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SystemBlock"
+          }
+        },
+        "messages": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Message"
+          }
+        },
+        "tools": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ToolSpec"
+          }
+        },
+        "reasoning": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Effort"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "providerOptions": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        }
+      },
+      "required": [
+        "model",
+        "maxTokens",
+        "system",
+        "messages",
+        "tools"
+      ]
     },
     "Origin": {
       "type": "object",
@@ -1437,6 +1848,282 @@
         }
       ],
       "description": "When a contributor speaks. Serializable because a contributor may live in\nanother process: it declares its placement once, over the bridge."
+    },
+    "ProviderCancelParams": {
+      "type": "object",
+      "properties": {
+        "call": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "call"
+      ],
+      "description": "Kernel → plugin: nobody is reading this stream any more — the turn was\ninterrupted, or whoever asked let go. A process that ignores it is slow, not\nbroken: the host stops reading either way, and the stream's idle deadline is\nwhat keeps a silent one from holding a turn open."
+    },
+    "ProviderDeltaParams": {
+      "type": "object",
+      "properties": {
+        "call": {
+          "type": "string"
+        },
+        "event": {
+          "$ref": "#/$defs/ModelEvent"
+        }
+      },
+      "required": [
+        "call",
+        "event"
+      ],
+      "description": "Plugin → kernel, while a stream runs: one event, for one stream."
+    },
+    "ProviderError": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "message": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "auth"
+            }
+          },
+          "required": [
+            "kind",
+            "message"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "retryAfterMs": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0
+            },
+            "kind": {
+              "type": "string",
+              "const": "rateLimited"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "message": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "contextOverflow"
+            }
+          },
+          "required": [
+            "kind",
+            "message"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "status": {
+              "type": "integer",
+              "format": "uint16",
+              "minimum": 0,
+              "maximum": 65535
+            },
+            "message": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "server"
+            }
+          },
+          "required": [
+            "kind",
+            "status",
+            "message"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "message": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "request"
+            }
+          },
+          "required": [
+            "kind",
+            "message"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "message": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "transport"
+            }
+          },
+          "required": [
+            "kind",
+            "message"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "message": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "stream"
+            }
+          },
+          "required": [
+            "kind",
+            "message"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "timeout"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "message": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "unsupported"
+            }
+          },
+          "required": [
+            "kind",
+            "message"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "message": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "config"
+            }
+          },
+          "required": [
+            "kind",
+            "message"
+          ]
+        }
+      ]
+    },
+    "ProviderSpec": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "family": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "models": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ModelInfo"
+          },
+          "default": []
+        },
+        "endpoint": {
+          "$ref": "#/$defs/EndpointCapabilities",
+          "default": {
+            "images": false,
+            "countTokens": false,
+            "caching": false
+          }
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "description": "A model provider a process says it serves, and the whole of what the host\nbelieves about it. The id is the one a person types (`--provider <id>`,\n`/model <id>/<model>`), `family` is the catalogue shelf its models are filed\nunder (ADR-0017; the id itself by default, as the sdk trait does), and\n`models` is what it serves — the answer to `Provider::models`, given once\nhere so that asking costs no call.\n\n`endpoint` is what this endpoint does with a request for one of *those*\nmodels. A model the declaration does not name gets nothing: no images, no\ntoken counting, no caching (ADR-0015 §4)."
+    },
+    "ProviderStreamParams": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Which of the providers the handshake declared is being asked."
+        },
+        "call": {
+          "type": "string"
+        },
+        "request": {
+          "$ref": "#/$defs/ModelRequest"
+        }
+      },
+      "required": [
+        "id",
+        "call",
+        "request"
+      ],
+      "description": "One model response, asked for. The request crosses as the sdk writes it —\nsystem blocks, messages, tools and all — because a provider that cannot read\nthe whole request cannot answer it.\n\n`call` names this stream. Every [`ProviderDeltaParams`] carries it back and\n[`ProviderCancelParams`] stops it by it, so two streams running on one pipe\nnever interleave."
+    },
+    "ProviderStreamResult": {
+      "type": "object",
+      "properties": {
+        "error": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderError"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "description": "The close. A stream that ran to its `finish` event answers with nothing; one\nthat broke answers with the error the trait speaks, so the kernel's retry\nladder reads the same kind it reads from an in-process provider."
+    },
+    "Role": {
+      "type": "string",
+      "enum": [
+        "user",
+        "assistant"
+      ]
     },
     "SessionId": {
       "type": "string",
@@ -1717,6 +2404,17 @@
     "TurnId": {
       "type": "string",
       "description": "One run of the turn loop, closed exactly once."
+    },
+    "UnifiedFinish": {
+      "type": "string",
+      "enum": [
+        "stop",
+        "length",
+        "toolCalls",
+        "contentFilter",
+        "error",
+        "other"
+      ]
     },
     "Usage": {
       "type": "object",
@@ -2108,6 +2806,14 @@
       "result": {
         "$ref": "#/$defs/CompactorCompactResult"
       }
+    },
+    "provider/stream": {
+      "params": {
+        "$ref": "#/$defs/ProviderStreamParams"
+      },
+      "result": {
+        "$ref": "#/$defs/ProviderStreamResult"
+      }
     }
   },
   "notifications": {
@@ -2119,6 +2825,16 @@
     "tool/cancel": {
       "params": {
         "$ref": "#/$defs/ToolCancelParams"
+      }
+    },
+    "provider/delta": {
+      "params": {
+        "$ref": "#/$defs/ProviderDeltaParams"
+      }
+    },
+    "provider/cancel": {
+      "params": {
+        "$ref": "#/$defs/ProviderCancelParams"
       }
     }
   }

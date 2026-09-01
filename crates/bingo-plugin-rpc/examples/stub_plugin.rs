@@ -131,6 +131,7 @@ fn handshake(options: &Options) -> Value {
             placement: Placement::RoundStart,
         }],
         compactors: vec![CompactorSpec { id: "cut".into() }],
+        providers: Vec::new(),
     };
     let mut declared = serde_json::to_value(result).unwrap_or(Value::Null);
     // Written last, over the typed one: the point of `--placement` is to say

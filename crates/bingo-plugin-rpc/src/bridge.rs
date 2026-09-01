@@ -365,6 +365,7 @@ mod tests {
             commands: Vec::new(),
             contributors: Vec::new(),
             compactors: Vec::new(),
+            providers: Vec::new(),
         }
     }
 
