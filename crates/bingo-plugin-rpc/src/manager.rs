@@ -10,10 +10,10 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::{Arc, OnceLock};
 
-use bingo_sdk::{Command, Compactor, ContextContributor, Env, Provider, Tool};
+use bingo_sdk::{Command, Compactor, ContextContributor, Env, HostHandle, Provider, Tool};
 use serde_json::Value;
 
-use crate::bridge::Bridge;
+use crate::bridge::{Bridge, Setting};
 use crate::discovery::{self, Found};
 use crate::notice::Notices;
 use crate::wire::HostEnv;
@@ -59,9 +59,12 @@ impl Manager {
     /// when the last of them has answered or given up, so the first turn of a
     /// session has whatever they contribute; with nothing discovered it does
     /// nothing at all.
-    pub async fn start(&self, cwd: &Path) {
+    pub async fn start(&self, cwd: &Path, host: HostHandle) {
         let found = discovery::discover(&discovery::dirs(&self.env, cwd), &self.notices);
-        let bridges: Vec<Arc<Bridge>> = found.into_iter().map(|f| self.bridge(f)).collect();
+        let bridges: Vec<Arc<Bridge>> = found
+            .into_iter()
+            .map(|f| self.bridge(f, host.clone()))
+            .collect();
         if self.bridges.set(bridges).is_err() {
             return;
         }
@@ -123,16 +126,19 @@ impl Manager {
         self.bridges.get().map(Vec::as_slice).unwrap_or_default()
     }
 
-    fn bridge(&self, found: Found) -> Arc<Bridge> {
+    fn bridge(&self, found: Found, host: HostHandle) -> Arc<Bridge> {
         let config = self.settings.get(&found.name).cloned().unwrap_or_default();
         Arc::new(Bridge::new(
             found.name,
             found.root.clone(),
             found.manifest.entry.rooted(&found.root),
             config,
-            HostEnv::from(&self.env),
-            self.env.data_dir.clone(),
-            Arc::clone(&self.notices),
+            Setting {
+                env: HostEnv::from(&self.env),
+                data_dir: self.env.data_dir.clone(),
+                notices: Arc::clone(&self.notices),
+                host,
+            },
         ))
     }
 }
@@ -157,7 +163,9 @@ mod tests {
     async fn a_home_and_a_project_with_no_plugins_directory_start_quietly() {
         let home = tempfile::tempdir().expect("a home");
         let manager = Manager::new(Env::rooted(home.path()), BTreeMap::new());
-        manager.start(home.path()).await;
+        manager
+            .start(home.path(), bingo_sdk::testing::NoHost::handle())
+            .await;
         assert!(manager.names().is_empty());
         assert!(manager.notices().drain().is_empty());
     }

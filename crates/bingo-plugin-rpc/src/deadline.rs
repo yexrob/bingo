@@ -24,6 +24,14 @@ pub const CONTRIBUTE: Duration = Duration::from_secs(3);
 /// already speaks, and the kernel's breaker counts it like any other failure.
 pub const COMPACT: Duration = Duration::from_secs(60);
 
+/// How long one `service/call` has. Longer than the handshake, because a
+/// service is a plugin asking another plugin to do work of an unknown shape —
+/// a lookup, a write, a whole model response — and shorter than a compaction,
+/// because nothing here is waiting on a model of the host's. It is also the
+/// only floor under a ring: two services calling each other hang until this
+/// runs out, and the error names the plugin that did not answer (ADR-0031).
+pub const SERVICE: Duration = Duration::from_secs(30);
+
 /// How long a running stream may say nothing. The longest, because it bounds
 /// one silence and not a whole response: a model that thinks before its first
 /// token is quiet for a long while, and cutting a legitimate stream off is
@@ -40,7 +48,8 @@ mod tests {
     #[test]
     fn the_hot_path_has_the_shortest_deadline_of_them_all() {
         assert!(CONTRIBUTE < HANDSHAKE);
-        assert!(HANDSHAKE < COMPACT);
+        assert!(HANDSHAKE < SERVICE);
+        assert!(SERVICE < COMPACT);
         assert!(
             COMPACT < PROVIDER_IDLE,
             "a whole compaction is bounded more tightly than one silence"

@@ -7,13 +7,20 @@
 //! attempt on its own task. Consecutive failures back off, so a plugin whose
 //! command no longer exists costs one spawn per turn at first and then almost
 //! nothing.
+//!
+//! A service is the one contribution that is published rather than answered
+//! for: the registry is the router (ADR-0031 §4), so a declared service is put
+//! there once, under a handle that asks this bridge for the live connection on
+//! every call — which is what keeps a respawn from needing a second entry.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use bingo_sdk::{
-    Command as SdkCommand, CommandSpec, Compactor, ContextContributor, Provider, Tool, ToolSpec,
+    Command as SdkCommand, CommandSpec, Compactor, ContextContributor, HostHandle, Provider, Tool,
+    ToolSpec,
 };
 use serde_json::Value;
 use tokio::sync::Mutex;
@@ -28,10 +35,11 @@ use crate::deadline;
 use crate::manifest::Entry;
 use crate::notice::{Notice, Notices};
 use crate::provider::RemoteProvider;
+use crate::service::{Hub, RemoteService, ServiceCalls};
 use crate::tool::PluginTool;
 use crate::wire::{
     CompactorSpec, ContributorSpec, HostEnv, InitializeParams, InitializeResult, PROTOCOL,
-    ProviderSpec, name,
+    ProviderSpec, ServiceSpec, name,
 };
 
 /// The wait before a second consecutive attempt, doubling to [`BACKOFF_MAX`].
@@ -58,6 +66,7 @@ struct Live {
     contributors: Vec<ContributorSpec>,
     compactors: Vec<CompactorSpec>,
     providers: Vec<ProviderSpec>,
+    services: BTreeMap<String, ServiceSpec>,
 }
 
 #[derive(Default)]
@@ -69,6 +78,22 @@ struct State {
     next_attempt: Option<Instant>,
     /// An attempt is in flight, so a second reader starts no second process.
     starting: bool,
+    /// Service keys this bridge has already offered the registry. The handle
+    /// it published outlives the process, so a respawn publishes nothing and
+    /// a refused key is reported once rather than on every attempt.
+    published: BTreeSet<String>,
+}
+
+/// The setting every bridge shares: where the host lives, where a process's
+/// log goes, where notices wait until something can say them, and the host
+/// itself — which is both the router a service call goes through and where a
+/// declared service is published.
+#[derive(Clone)]
+pub struct Setting {
+    pub env: HostEnv,
+    pub data_dir: PathBuf,
+    pub notices: Arc<Notices>,
+    pub host: HostHandle,
 }
 
 /// Everything about one plugin that does not change, and the one thing that does.
@@ -82,6 +107,9 @@ pub struct Bridge {
     env: HostEnv,
     data_dir: PathBuf,
     notices: Arc<Notices>,
+    /// Where this plugin's own `service/call` is routed, and where the
+    /// services it declares are published (ADR-0031 §4).
+    host: HostHandle,
     /// One per plugin, not one per command object: a command object is built
     /// afresh on every source read.
     completions: Arc<Completions>,
@@ -103,18 +131,17 @@ impl Bridge {
         root: PathBuf,
         entry: Entry,
         config: Value,
-        env: HostEnv,
-        data_dir: PathBuf,
-        notices: Arc<Notices>,
+        setting: Setting,
     ) -> Self {
         Self {
             name: name.into(),
             root,
             entry,
             config,
-            env,
-            data_dir,
-            notices,
+            env: setting.env,
+            data_dir: setting.data_dir,
+            notices: setting.notices,
+            host: setting.host,
             completions: Arc::new(Completions::default()),
             state: Mutex::new(State::default()),
         }
@@ -127,12 +154,53 @@ impl Bridge {
     /// Spawn and shake hands now, waiting for the outcome. `Plugin::start`
     /// does this so the first turn of a session has the plugin's tools;
     /// a respawn does it on a task of its own.
-    pub async fn connect(&self) {
+    ///
+    /// Whatever services the process declared are published after the process
+    /// is filed, so a call that arrives at once finds a bridge that is ready.
+    pub async fn connect(self: &Arc<Self>) {
         if !self.claim().await {
             return;
         }
         let outcome = self.handshake().await;
+        let declared = outcome
+            .as_ref()
+            .ok()
+            .map(|live| live.services.clone())
+            .unwrap_or_default();
         self.file(outcome).await;
+        self.publish(declared).await;
+    }
+
+    /// Put every service this process declared where the registry routes it,
+    /// once per key. The handle asks this bridge for the live connection on
+    /// every call, so it stays the right answer across a death and a respawn.
+    async fn publish(self: &Arc<Self>, services: BTreeMap<String, ServiceSpec>) {
+        for (key, spec) in services {
+            if !self.claim_key(&key).await {
+                continue;
+            }
+            let service = RemoteService::new(&self.name, &key, spec, Arc::downgrade(self));
+            if let Err(why) = self.host.open_service(&key, Arc::new(service)) {
+                self.notices.push(Notice::warn(
+                    "SERVICE_TAKEN",
+                    format!(
+                        "the {} plugin's service {key} is not available: {why}",
+                        self.name
+                    ),
+                ));
+            }
+        }
+    }
+
+    /// Whether this key is this bridge's to offer for the first time.
+    async fn claim_key(&self, key: &str) -> bool {
+        self.state.lock().await.published.insert(key.to_string())
+    }
+
+    /// The pipe a service call goes out on, and a respawn on its way when
+    /// there is none.
+    pub async fn connection(self: &Arc<Self>) -> Option<Arc<Connection>> {
+        self.ready().await.map(|live| Arc::clone(&live.connection))
     }
 
     /// The tools of a living process, and nothing when there is none.
@@ -308,13 +376,17 @@ impl Bridge {
         }
     }
 
-    /// Spawn, ask what it is, and believe only that it answered.
+    /// Spawn, ask what it is, and believe only that it answered. The process
+    /// can call a service from its first line, so whoever serves those is in
+    /// place before the handshake goes out.
     async fn handshake(&self) -> Result<Live, String> {
+        let hub: Arc<dyn ServiceCalls> = Arc::new(Hub::new(&self.name, self.host.clone()));
         let connection = Arc::new(Connection::spawn(
             &self.name,
             &self.entry,
             &self.root,
             &self.data_dir,
+            Some(hub),
         )?);
         let answered =
             tokio::time::timeout(deadline::HANDSHAKE, self.initialize(&connection)).await;
@@ -326,6 +398,7 @@ impl Bridge {
                 contributors: result.contributors,
                 compactors: result.compactors,
                 providers: result.providers,
+                services: result.services,
             }),
             Ok(Err(why)) => {
                 connection.stop().await;
@@ -357,6 +430,42 @@ impl Bridge {
             serde_json::from_value(answer).map_err(|e| format!("initialize: {e}"))?;
         check_protocol(&result)?;
         Ok(result)
+    }
+}
+
+#[cfg(test)]
+impl Bridge {
+    /// A bridge already holding one process, for a test that needs a pipe and
+    /// not a spawn: everything a handshake would have said is empty.
+    pub(crate) fn live(name: &str, connection: Arc<Connection>) -> Arc<Self> {
+        let bridge = Bridge::new(
+            name,
+            PathBuf::new(),
+            Entry {
+                command: String::new(),
+                args: Vec::new(),
+                env: Default::default(),
+            },
+            Value::Null,
+            Setting {
+                env: HostEnv::from(&bingo_sdk::Env::rooted("/nowhere")),
+                data_dir: PathBuf::new(),
+                notices: Arc::new(Notices::default()),
+                host: bingo_sdk::testing::NoHost::handle(),
+            },
+        );
+        if let Ok(mut state) = bridge.state.try_lock() {
+            state.live = Some(Arc::new(Live {
+                connection,
+                tools: Vec::new(),
+                commands: Vec::new(),
+                contributors: Vec::new(),
+                compactors: Vec::new(),
+                providers: Vec::new(),
+                services: BTreeMap::new(),
+            }));
+        }
+        Arc::new(bridge)
     }
 }
 

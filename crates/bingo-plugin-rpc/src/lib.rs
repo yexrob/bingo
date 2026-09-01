@@ -31,6 +31,7 @@ pub mod manifest;
 pub mod notice;
 pub mod provider;
 pub mod schema;
+pub mod service;
 pub mod source;
 pub mod tool;
 pub mod wire;
@@ -46,7 +47,7 @@ use bingo_sdk::{
     Plugin, PluginError, PluginManifest, ProviderSource, Registrar, ToolSource,
 };
 
-pub use bridge::Bridge;
+pub use bridge::{Bridge, Setting};
 pub use command::PluginCommand;
 pub use compactor::RemoteCompactor;
 pub use config::Settings;
@@ -55,6 +56,7 @@ pub use contributor::{RemoteContributor, contributor_id};
 pub use manager::Manager;
 pub use manifest::{Entry, Manifest};
 pub use provider::RemoteProvider;
+pub use service::{Hub, RemoteService, ServiceCalls};
 pub use source::{
     ID, PluginCommands, PluginCompactors, PluginContributors, PluginProviders, PluginTools,
 };
@@ -124,11 +126,11 @@ impl Plugin for PluginRpcPlugin {
     /// local and the person installed it, so the first turn having its tools
     /// is worth the wait a plugin costs — and a host with no plugins waits for
     /// nothing at all.
-    async fn start(&self, _host: HostHandle) -> Result<(), PluginError> {
+    async fn start(&self, host: HostHandle) -> Result<(), PluginError> {
         let Some(manager) = self.manager.get() else {
             return Ok(());
         };
-        manager.start(&project_dir()).await;
+        manager.start(&project_dir(), host).await;
         Ok(())
     }
 

@@ -12,7 +12,7 @@ use crate::error::{ErrorCode, KernelError};
 use crate::event::*;
 use crate::host::*;
 use crate::ids::{IntentId, SessionId};
-use crate::service::{Services, WireService};
+use crate::service::{Service, Services, WireService};
 
 /// A host every call to which is an error: what a test hands a tool or a
 /// hook that must never reach the host.
@@ -95,6 +95,15 @@ pub struct ServiceHost(Services);
 impl ServiceHost {
     pub fn handle() -> HostHandle {
         HostHandle(Arc::new(ServiceHost::default()))
+    }
+
+    /// A host holding one service with a typed face and no wire face: what a
+    /// test needs to say that crossing is the owner's choice (ADR-0031 §3).
+    pub fn holding(key: &str, value: Arc<dyn Any + Send + Sync>) -> HostHandle {
+        let host = ServiceHost::default();
+        // A fresh map refuses nothing: `add` only refuses a key it already has.
+        let _ = host.0.add(key.to_string(), Service { value, wire: None });
+        HostHandle(Arc::new(host))
     }
 }
 
