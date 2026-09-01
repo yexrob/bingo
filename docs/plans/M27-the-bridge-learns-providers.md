@@ -95,8 +95,13 @@ type is refused in review.
 
 ## Verified
 
-2026-09-01, load average 7–12 (a busy machine; nothing here waits on a
-wall clock — the idle deadline is proven on a paused one).
+Integrated on main at `3688bed` (2026-09-01, load 15–36): every gate
+green, workspace 0 failures (plugin-rpc 185 + 81 + 21, cli 130),
+budget 302 unchanged, deny ok.
+
+Worker run: 2026-09-01, load average 7–12 (a busy machine; nothing
+here waits on a wall clock — the idle deadline is proven on a paused
+one).
 
 ```
 $ cargo fmt --all -- --check
