@@ -23,7 +23,7 @@ use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use bingo_sdk::ModelEvent;
+use bingo_sdk::{ModelEvent, ToolHost};
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
@@ -102,6 +102,23 @@ fn served(method: &str) -> bool {
     method == name::SERVICE_CALL
 }
 
+/// One tool call this process is running: where its progress line goes, and
+/// the host it is a call of.
+///
+/// Both are the same fact — that the call is live — so they are one entry.
+/// The host is what a question on this call is put through (ADR-0033 §3): the
+/// call's own asking machinery, which is every in-process tool's too.
+struct Running {
+    tail: UnboundedSender<String>,
+    call: Arc<dyn ToolHost>,
+}
+
+impl std::fmt::Debug for Running {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Running")
+    }
+}
+
 /// Where a reply and a progress line go, whether the process is still there
 /// to send either, and who answers the one thing it may ask.
 #[derive(Debug, Default)]
@@ -110,7 +127,7 @@ struct Router {
     /// Set by whoever first reports the death, so it is reported once.
     announced: AtomicBool,
     waiting: Mutex<HashMap<Id, oneshot::Sender<Reply>>>,
-    running: Mutex<HashMap<String, UnboundedSender<String>>>,
+    running: Mutex<HashMap<String, Running>>,
     streaming: Mutex<HashMap<String, Sender<ModelEvent>>>,
     serving: Option<Serving>,
 }
@@ -120,7 +137,7 @@ impl Router {
         self.waiting.lock().unwrap_or_else(|held| held.into_inner())
     }
 
-    fn running(&self) -> MutexGuard<'_, HashMap<String, UnboundedSender<String>>> {
+    fn running(&self) -> MutexGuard<'_, HashMap<String, Running>> {
         self.running.lock().unwrap_or_else(|held| held.into_inner())
     }
 
@@ -186,10 +203,10 @@ impl Router {
     }
 
     fn progress(&self, params: ToolProgressParams) {
-        if let Some(sink) = self.running().get(&params.call_id) {
+        if let Some(running) = self.running().get(&params.call_id) {
             // A call that has already answered still has its sink until the
             // guard drops; a send nobody reads is not a problem.
-            let _ = sink.send(params.tail);
+            let _ = running.tail.send(params.tail);
         }
     }
 
@@ -333,13 +350,32 @@ impl Connection {
         }
     }
 
-    /// Route this call's `tool/progress` lines to `sink` until the guard drops.
-    pub fn watch(self: &Arc<Self>, call_id: &str, sink: UnboundedSender<String>) -> Watch {
-        self.router.running().insert(call_id.to_string(), sink);
+    /// File this call as running until the guard drops: its `tool/progress`
+    /// lines go to `sink`, and a question it asks goes to `call`.
+    pub fn watch(
+        self: &Arc<Self>,
+        call_id: &str,
+        sink: UnboundedSender<String>,
+        call: Arc<dyn ToolHost>,
+    ) -> Watch {
+        self.router
+            .running()
+            .insert(call_id.to_string(), Running { tail: sink, call });
         Watch {
             router: Arc::clone(&self.router),
             call_id: call_id.to_string(),
         }
+    }
+
+    /// The host to put a question through for a call this process is running,
+    /// and nothing for one that has ended or was never this process's
+    /// (ADR-0033 §3). The map is this connection's, so another connection's
+    /// call is simply not in it.
+    pub fn asking(&self, call_id: &str) -> Option<Arc<dyn ToolHost>> {
+        self.router
+            .running()
+            .get(call_id)
+            .map(|running| Arc::clone(&running.call))
     }
 
     /// Route this stream's `provider/delta` events to `sink` until the guard
@@ -522,7 +558,13 @@ mod tests {
             ..Router::default()
         };
         let (sender, mut tail) = tokio::sync::mpsc::unbounded_channel();
-        router.running().insert("call_1".to_string(), sender);
+        router.running().insert(
+            "call_1".to_string(),
+            Running {
+                tail: sender,
+                call: crate::testing::Silent::cancelling(),
+            },
+        );
         router.line(
             "noisy",
             r#"{"jsonrpc":"2.0","method":"tool/progress","params":{"callId":"call_1","tail":"half way"}}"#,

@@ -10,13 +10,17 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::{Arc, OnceLock};
 
-use bingo_sdk::{Command, Compactor, ContextContributor, Env, Hook, HostHandle, Provider, Tool};
+use bingo_sdk::{
+    CancellationToken, Command, Compactor, ContextContributor, Env, Hook, HostHandle, Provider,
+    Tool,
+};
 use serde_json::Value;
 
 use crate::bridge::{Bridge, Setting};
 use crate::discovery::{self, Found};
-use crate::notice::Notices;
-use crate::wire::HostEnv;
+use crate::doors::{Caller, Doors};
+use crate::notice::{self, Notices};
+use crate::wire::{HostEnv, host};
 
 /// The bridges, and what they were built from.
 pub struct Manager {
@@ -24,6 +28,11 @@ pub struct Manager {
     /// Each plugin's own settings slice, by plugin name.
     settings: BTreeMap<String, Value>,
     notices: Arc<Notices>,
+    /// The host's own service, built here so every bridge hands its process a
+    /// face of the one object (ADR-0033 §1).
+    doors: Arc<Doors>,
+    /// Stops the one notice drain when the host does.
+    stop: CancellationToken,
     bridges: OnceLock<Vec<Arc<Bridge>>>,
 }
 
@@ -37,10 +46,13 @@ impl std::fmt::Debug for Manager {
 
 impl Manager {
     pub fn new(env: Env, settings: BTreeMap<String, Value>) -> Self {
+        let notices = Arc::new(Notices::default());
         Self {
             env,
             settings,
-            notices: Arc::new(Notices::default()),
+            doors: Doors::new(Arc::clone(&notices)),
+            notices,
+            stop: CancellationToken::new(),
             bridges: OnceLock::new(),
         }
     }
@@ -68,6 +80,8 @@ impl Manager {
         if self.bridges.set(bridges).is_err() {
             return;
         }
+        self.open_doors(&host);
+        self.say(host);
         let mut connecting = tokio::task::JoinSet::new();
         for bridge in self.bridges() {
             let bridge = Arc::clone(bridge);
@@ -125,9 +139,36 @@ impl Manager {
     }
 
     pub async fn shutdown(&self) {
+        self.stop.cancel();
         for bridge in self.bridges() {
             bridge.stop().await;
         }
+    }
+
+    /// The host's own service, in the registry under its reserved key, before
+    /// any process is spawned: a plugin can call it from its first line, and
+    /// no plugin can publish under the key because it is taken (ADR-0033 §1).
+    /// The face here is bound to this process itself; each connection's hub
+    /// holds the face bound to it.
+    ///
+    /// A host that keeps no registry at all is a line in the log and not a
+    /// notice: every process still reaches these doors through its own hub, so
+    /// there is nothing for a person to do about it.
+    fn open_doors(&self, host: &HostHandle) {
+        if let Err(why) = host.open_service(host::KEY, self.doors.face(Caller::Host)) {
+            tracing::debug!(key = host::KEY, %why, "the host's own service is not in the registry");
+        }
+    }
+
+    /// The one drain (ADR-0033 §4): from here on a notice is said when it
+    /// happens, without waiting for a tool call — which is the defect M29
+    /// carried, and why nothing else drains this channel.
+    fn say(&self, host: HostHandle) {
+        tokio::spawn(notice::drain(
+            Arc::clone(&self.notices),
+            host,
+            self.stop.clone(),
+        ));
     }
 
     fn bridges(&self) -> &[Arc<Bridge>] {
@@ -145,6 +186,7 @@ impl Manager {
                 env: HostEnv::from(&self.env),
                 data_dir: self.env.data_dir.clone(),
                 notices: Arc::clone(&self.notices),
+                doors: Arc::clone(&self.doors),
                 host,
             },
         ))

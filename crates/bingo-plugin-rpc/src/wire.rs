@@ -33,11 +33,11 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use bingo_sdk::{
-    CommandOutcome, CommandSpec, CompactContext, CompactReason, Compaction, Completion,
+    Answer, CommandOutcome, CommandSpec, CompactContext, CompactReason, Compaction, Completion,
     ContextPiece, ContextQuery, ContextUsage, EndpointCapabilities, Env, Frame, HookContext,
-    HookMatcher, HookOutcome, Input, Item, ModelCapabilities, ModelEvent, ModelInfo, ModelRequest,
-    Phase, Placement, ProviderError, SessionId, SessionSummary, ToolCall, ToolOutput, ToolSpec,
-    TurnId,
+    HookMatcher, HookOutcome, Input, InteractionKind, Item, Level, ModelCapabilities, ModelEvent,
+    ModelInfo, ModelRequest, Phase, Placement, ProviderError, SessionId, SessionSummary, ToolCall,
+    ToolOutput, ToolSpec, TurnId,
 };
 use schemars::{JsonSchema, Schema, SchemaGenerator};
 use serde::{Deserialize, Serialize};
@@ -425,6 +425,88 @@ pub struct ServiceCallResult {
     #[serde(default)]
     pub result: Value,
 }
+
+/// The one service the host itself answers, and the doors it opens
+/// (ADR-0033 §1).
+///
+/// None of these is a wire method: a process reaches them with
+/// [`name::SERVICE_CALL`] under this key, exactly as it reaches a service
+/// another plugin declared, and the host is one more service in the registry.
+/// The handshake says nothing about them — a service is discovered by calling
+/// it.
+pub mod host {
+    /// The key the host's own service is registered under. Reserved: a plugin
+    /// that declares it is refused the way any second claimant is.
+    pub const KEY: &str = "bingo.host";
+    /// Put a question to the person, on the crossing that is already running.
+    pub const ASK: &str = "ask";
+    /// Say one line to the person, at any time.
+    pub const NOTICE: &str = "notice";
+}
+
+/// `bingo.host.ask`: a question from the process, on one of its running calls.
+///
+/// The call names the crossing and is the whole of the grant: the bridge
+/// already tracks running calls, an ended one is not there to ask on, and
+/// another connection's is not this caller's to reach (ADR-0033 §3 as
+/// amended). Nothing is minted for it.
+///
+/// The question is the sdk's own `InteractionKind`, so the person is asked by
+/// the machinery every in-process tool's question rides. Only a question
+/// crosses: a permission, a confirmation or a login is the host's own to open,
+/// and a grant is never Allow-shaped.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct HostAskParams {
+    /// The `callId` this process was given in [`name::TOOL_CALL`].
+    pub call: String,
+    pub question: InteractionKind,
+}
+
+/// What the person answered, as the sdk writes it — including the cancel that
+/// is an answer.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct HostAskResult {
+    pub answer: Answer,
+}
+
+/// `bingo.host.notice`: one line for the person, under the plugin's own name.
+///
+/// The one door that is scoped by nothing (ADR-0033 §4): it spends nothing but
+/// a line, so it needs no crossing to belong to. The level is the kernel's own
+/// three and nothing else can be written; an omitted one is the quietest.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct HostNoticeParams {
+    #[serde(default = "quietest")]
+    pub level: Level,
+    pub message: String,
+}
+
+fn quietest() -> Level {
+    Level::Info
+}
+
+/// A notice is told, not asked: there is nothing to answer with.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct HostNoticeResult {}
+
+/// The doors, in one table: the schema walks it and [`crate::doors`]
+/// dispatches on it, so the set a caller is told about is the set it can call.
+pub static HOST_METHODS: &[Method] = &[
+    (
+        host::ASK,
+        schema_of::<HostAskParams>,
+        schema_of::<HostAskResult>,
+    ),
+    (
+        host::NOTICE,
+        schema_of::<HostNoticeParams>,
+        schema_of::<HostNoticeResult>,
+    ),
+];
 
 /// A hook a process says it has, and the matcher it is claimed with.
 ///
@@ -1062,6 +1144,123 @@ mod tests {
             .expect("it serialises"),
             json!({ "result": "hello" })
         );
+    }
+
+    // ------------------------------------------------------ the host's own doors
+
+    /// The `ask` line: the running call that is the whole of the grant, and
+    /// the sdk's own question beside it. Nothing else — no allowance, no
+    /// session, no turn — because the call names the crossing already.
+    #[test]
+    fn an_ask_carries_the_running_call_and_the_sdk_s_own_question() {
+        let params = HostAskParams {
+            call: "call_1".into(),
+            question: InteractionKind::Question {
+                question: "Which branch?".into(),
+                header: Some("Release".into()),
+                options: vec![bingo_sdk::QuestionOption {
+                    id: "0".into(),
+                    label: "main".into(),
+                    description: None,
+                }],
+                free_text: true,
+                multi: false,
+            },
+        };
+        let wire = serde_json::to_value(&params).expect("an ask serialises");
+        assert_eq!(wire["call"], json!("call_1"));
+        assert_eq!(wire["question"]["kind"], json!("question"));
+        assert_eq!(wire["question"]["freeText"], json!(true));
+        assert_eq!(
+            serde_json::from_value::<HostAskParams>(wire).expect("and parses"),
+            params
+        );
+    }
+
+    /// The answer comes back as the sdk writes it, cancel included: a person
+    /// who answered nothing has answered.
+    #[test]
+    fn an_answer_crosses_as_the_sdk_writes_it() {
+        assert_eq!(
+            serde_json::to_value(HostAskResult {
+                answer: Answer::Text {
+                    text: "main".into()
+                },
+            })
+            .expect("an answer serialises"),
+            json!({ "answer": { "kind": "text", "text": "main" } })
+        );
+        let cancelled: HostAskResult =
+            serde_json::from_value(json!({ "answer": { "kind": "cancel" } })).expect("and parses");
+        assert_eq!(cancelled.answer, Answer::Cancel);
+    }
+
+    /// The verdict plane is not a door (ADR-0033 Consequences): the shape a
+    /// process writes can carry a permission prompt's words, so the door
+    /// refuses one — `doors` proves that. What is pinned here is that no
+    /// answer to it is Allow-shaped by accident: the only Allow a person can
+    /// give is to a permission, which is the one kind the door will not open.
+    #[test]
+    fn a_process_may_write_a_question_and_the_door_is_what_refuses_the_rest() {
+        let permission: HostAskParams = serde_json::from_value(json!({
+            "call": "call_1",
+            "question": { "kind": "permission", "tool": "Bash", "summary": "rm -rf /" }
+        }))
+        .expect("the shape parses; the door is what refuses it");
+        assert!(matches!(
+            permission.question,
+            InteractionKind::Permission { .. }
+        ));
+    }
+
+    /// A notice is told, not asked: a level from the kernel's three, a line,
+    /// and an answer with nothing in it.
+    #[test]
+    fn a_notice_carries_a_level_and_a_line_and_answers_nothing() {
+        let params = HostNoticeParams {
+            level: Level::Warn,
+            message: "the index is stale".into(),
+        };
+        let wire = serde_json::to_value(&params).expect("a notice serialises");
+        assert_eq!(
+            wire,
+            json!({ "level": "warn", "message": "the index is stale" })
+        );
+        assert_eq!(
+            serde_json::from_value::<HostNoticeParams>(wire).expect("and parses"),
+            params
+        );
+        assert_eq!(
+            serde_json::to_value(HostNoticeResult {}).expect("it serialises"),
+            json!({})
+        );
+    }
+
+    /// The set is the kernel's three and nothing else can be written; a
+    /// notice that names no level is the quietest one.
+    #[test]
+    fn a_level_outside_the_kernel_s_three_is_not_a_notice_at_all() {
+        let quiet: HostNoticeParams =
+            serde_json::from_value(json!({ "message": "nothing much" })).expect("a notice");
+        assert_eq!(quiet.level, Level::Info);
+        for shouted in ["fatal", "critical", "WARN", "debug"] {
+            assert!(
+                serde_json::from_value::<HostNoticeParams>(
+                    json!({ "level": shouted, "message": "x" })
+                )
+                .is_err(),
+                "{shouted} was read as a level"
+            );
+        }
+    }
+
+    /// The doors are one table, as the methods are: what the schema tells a
+    /// plugin author is what `doors` dispatches on.
+    #[test]
+    fn the_host_speaks_two_doors_and_no_more() {
+        let named: Vec<&str> = HOST_METHODS.iter().map(|door| door.0).collect();
+        assert_eq!(named, [host::ASK, host::NOTICE]);
+        assert_eq!(host::KEY, "bingo.host");
     }
 
     /// What a service declaration is: the methods by name, and the schema of

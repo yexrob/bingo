@@ -5,8 +5,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use bingo_sdk::{
-    CancellationToken, EndpointCapabilities, HostHandle, ModelCapabilities, ModelRequest,
-    ModelStream, Provider, ProviderError, SessionSummary, TurnId,
+    Answer, AnswerSpec, CancellationToken, EndpointCapabilities, HostHandle, InteractionKind,
+    ItemBody, ItemId, KernelError, ModelCapabilities, ModelRequest, ModelStream, Prompter,
+    Provider, ProviderError, SessionSummary, ToolHost, TurnId,
 };
 
 use crate::connection::Connection;
@@ -80,6 +81,34 @@ impl Provider for NoProvider {
         Err(ProviderError::Unsupported {
             message: "this test has no model".into(),
         })
+    }
+}
+
+/// A call that is running and nothing more: it takes a progress line, records
+/// nothing, and answers every question the same way. What a test files as
+/// running when what it is testing is the filing, not the answering.
+pub struct Silent(pub Answer);
+
+impl Silent {
+    /// A call whose person always cancels.
+    pub fn cancelling() -> Arc<dyn ToolHost> {
+        Arc::new(Silent(Answer::Cancel))
+    }
+}
+
+#[async_trait]
+impl Prompter for Silent {
+    async fn ask(&self, _: InteractionKind, _: Vec<AnswerSpec>) -> Result<Answer, KernelError> {
+        Ok(self.0.clone())
+    }
+}
+
+#[async_trait]
+impl ToolHost for Silent {
+    fn progress(&self, _item: &ItemId, _tail: String) {}
+
+    async fn record(&self, _body: ItemBody) -> Result<ItemId, KernelError> {
+        Ok(ItemId::from_raw("itm_silent"))
     }
 }
 

@@ -143,10 +143,8 @@ async fn an_unknown_method_is_answered_with_the_set_the_service_speaks() {
 #[tokio::test]
 async fn a_second_plugin_claiming_the_same_key_is_reported_and_the_first_keeps_it() {
     let started = started_with(&[("store", &[]), ("twin", &[])]).await;
-    let said = started.manager.notices().drain();
-    assert_eq!(said.len(), 1, "{said:?}");
-    assert_eq!(said[0].code, "SERVICE_TAKEN");
-    assert!(said[0].text.contains("kv"), "{}", said[0].text);
+    let (_, text) = started.heard("SERVICE_TAKEN").await;
+    assert!(text.contains("kv"), "{text}");
     assert!(
         started.host.service::<ServiceHandle>("kv").is_some(),
         "the key is still served by whoever claimed it first"

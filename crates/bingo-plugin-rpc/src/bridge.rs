@@ -32,6 +32,7 @@ use crate::completions::Completions;
 use crate::connection::Connection;
 use crate::contributor::RemoteContributor;
 use crate::deadline;
+use crate::doors::{Caller, Doors};
 use crate::hook::RemoteHook;
 use crate::manifest::Entry;
 use crate::notice::{Notice, Notices};
@@ -87,14 +88,15 @@ struct State {
 }
 
 /// The setting every bridge shares: where the host lives, where a process's
-/// log goes, where notices wait until something can say them, and the host
-/// itself — which is both the router a service call goes through and where a
-/// declared service is published.
+/// log goes, where notices wait until the drain says them, the host's own
+/// service, and the host itself — which is both the router a service call goes
+/// through and where a declared service is published.
 #[derive(Clone)]
 pub struct Setting {
     pub env: HostEnv,
     pub data_dir: PathBuf,
     pub notices: Arc<Notices>,
+    pub doors: Arc<Doors>,
     pub host: HostHandle,
 }
 
@@ -109,6 +111,9 @@ pub struct Bridge {
     env: HostEnv,
     data_dir: PathBuf,
     notices: Arc<Notices>,
+    /// The host's own service, which this bridge's process reaches through a
+    /// face bound to it (ADR-0033 §1).
+    doors: Arc<Doors>,
     /// Where this plugin's own `service/call` is routed, and where the
     /// services it declares are published (ADR-0031 §4).
     host: HostHandle,
@@ -143,6 +148,7 @@ impl Bridge {
             env: setting.env,
             data_dir: setting.data_dir,
             notices: setting.notices,
+            doors: setting.doors,
             host: setting.host,
             completions: Arc::new(Completions::default()),
             state: Mutex::new(State::default()),
@@ -398,9 +404,15 @@ impl Bridge {
 
     /// Spawn, ask what it is, and believe only that it answered. The process
     /// can call a service from its first line, so whoever serves those is in
-    /// place before the handshake goes out.
-    async fn handshake(&self) -> Result<Live, String> {
-        let hub: Arc<dyn ServiceCalls> = Arc::new(Hub::new(&self.name, self.host.clone()));
+    /// place before the handshake goes out — including the host's own doors,
+    /// wearing the face bound to this bridge.
+    async fn handshake(self: &Arc<Self>) -> Result<Live, String> {
+        let caller = Caller::plugin(&self.name, Arc::downgrade(self));
+        let hub: Arc<dyn ServiceCalls> = Arc::new(Hub::new(
+            &self.name,
+            self.host.clone(),
+            self.doors.face(caller),
+        ));
         let connection = Arc::new(Connection::spawn(
             &self.name,
             &self.entry,
@@ -472,6 +484,7 @@ impl Bridge {
                 env: HostEnv::from(&bingo_sdk::Env::rooted("/nowhere")),
                 data_dir: PathBuf::new(),
                 notices: Arc::new(Notices::default()),
+                doors: Doors::new(Arc::new(Notices::default())),
                 host: bingo_sdk::testing::NoHost::handle(),
             },
         );
