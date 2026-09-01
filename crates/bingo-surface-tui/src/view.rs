@@ -6,7 +6,7 @@
 //!
 //! `draw` is pure of everything but the frame it paints.
 
-use bingo_sdk::{Driver, LiveTurn, SessionState};
+use bingo_sdk::{Driver, LiveTurn, Origin, SessionState};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
@@ -19,7 +19,7 @@ use crate::tree::{self, Tree};
 use crate::ui::{Card, Open, Picker, Switcher, Ui};
 use crate::{
     composer as prompt, cycle, dialog, keys, layers, pager, panel, rail, rewind, search, select,
-    status, theme, views, wrap,
+    status, theme, transcript, views, wrap,
 };
 
 /// How tall the composer box may grow before it scrolls internally.
@@ -401,21 +401,37 @@ fn render_transcript(
 }
 
 /// The rows between the transcript and the input box: what the turn is doing,
-/// and whatever is queued behind it.
+/// and whatever the person has queued behind it.
 fn activity(state: &SessionState, now: Now) -> Vec<Line<'static>> {
     let mut out: Vec<Line<'static>> = working(state, now).into_iter().collect();
-    out.extend(state.queue.iter().map(|entry| {
-        Line::from(Span::styled(
-            format!("{} {}", theme::user(), entry.preview),
-            theme::dim(),
-        ))
-    }));
+    out.extend(
+        state
+            .queue
+            .iter()
+            .filter(|entry| pending(&entry.origin))
+            .map(|entry| {
+                Line::from(Span::styled(
+                    format!("{} {}", theme::user(), entry.preview),
+                    theme::dim(),
+                ))
+            }),
+    );
     // A blank row between the transcript and these, as between any two blocks
     // (§3): they are not the tail of what was said, they are what is going on.
     if !out.is_empty() {
         out.insert(0, Line::default());
     }
     out
+}
+
+/// Whether a queued input is a message the person is waiting to send. A
+/// subsystem's entry — a room's post, a spawn's brief, a job reporting in — is
+/// a steer in flight rather than something pending (ADR-0028), so it is drawn
+/// nowhere here; the turn that absorbs it shows it in the transcript as the
+/// quiet notice it is. The boundary is the transcript's own set, so an unknown
+/// surface fails to the loud, person's side in both places alike.
+fn pending(origin: &Origin) -> bool {
+    !transcript::quiet(origin)
 }
 
 /// `✻ Simmering… (esc to interrupt · 4s · ↓ 1.2k tokens)` — but only once the
@@ -1036,6 +1052,91 @@ mod tests {
         ]);
         let (ui, now) = mid_turn();
         insta::assert_snapshot!(render(&state, &ui, now));
+    }
+
+    /// A queue as the kernel published it, each entry labelled by the surface
+    /// that put it there.
+    fn queue_frame(seq: u64, entries: &[(&str, &str)]) -> bingo_sdk::Frame {
+        frame(
+            seq,
+            Event::QueueChanged {
+                revision: seq,
+                entries: entries
+                    .iter()
+                    .enumerate()
+                    .map(|(i, (surface, preview))| QueueEntry {
+                        intent: bingo_sdk::IntentId::from_raw(format!("req_{i}")),
+                        position: i as u32,
+                        preview: (*preview).to_string(),
+                        steerable: true,
+                        origin: bingo_sdk::Origin::surface(*surface),
+                    })
+                    .collect(),
+            },
+        )
+    }
+
+    /// The band under the transcript, drawn from a queue of `(surface,
+    /// preview)`. The turn has only just started, so nothing but the queue asks
+    /// for a row: what the band holds is what the queue put there.
+    fn band(entries: &[(&str, &str)]) -> String {
+        let (ui, now) = scene();
+        render(
+            &folded(vec![frame(1, started("trn_1")), queue_frame(2, entries)]),
+            &ui,
+            now,
+        )
+    }
+
+    /// ADR-0028: the pending area is the person's own queue and nothing else.
+    /// A subsystem's entry is a steer in flight — it is drawn nowhere, and the
+    /// transcript shows it as a quiet notice once the turn absorbs it — while a
+    /// surface the quiet set has never heard of stays on the person's side.
+    #[test]
+    fn the_pending_area_draws_only_what_the_person_queued() {
+        let mine = band(&[("tui", "also fix the docs")]);
+        assert!(mine.contains("> also fix the docs"), "{mine}");
+
+        let steer = band(&[("room", "the build is green")]);
+        assert_eq!(
+            steer,
+            band(&[]),
+            "a steer in flight draws nothing at all, not even the blank row it \
+             would have been spaced from the transcript by"
+        );
+
+        let both = band(&[("room", "the build is green"), ("tui", "also fix the docs")]);
+        assert!(both.contains("> also fix the docs"), "{both}");
+        assert!(!both.contains("the build is green"), "{both}");
+
+        let unknown = band(&[("brand-new", "who knows")]);
+        assert!(
+            unknown.contains("> who knows"),
+            "a surface nobody has judged is the person's: {unknown}"
+        );
+    }
+
+    /// The rows the band asks for, which the screen above cannot show: a blank
+    /// spacer among a region of blanks looks like nothing either way. A steer
+    /// in flight costs not even that row — the band is empty, so the frame
+    /// gives it nothing — while a person's entry brings the row and the air
+    /// above it (§3).
+    #[test]
+    fn a_steer_in_flight_asks_the_frame_for_no_row_at_all() {
+        let (_, now) = scene();
+        let rows = |entries: &[(&str, &str)]| {
+            activity(
+                &folded(vec![frame(1, started("trn_1")), queue_frame(2, entries)]),
+                now,
+            )
+            .len()
+        };
+        assert_eq!(rows(&[("room", "the build is green")]), 0);
+        assert_eq!(
+            rows(&[("tui", "also fix the docs")]),
+            2,
+            "the row and its air"
+        );
     }
 
     #[test]

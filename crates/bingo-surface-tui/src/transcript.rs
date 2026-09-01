@@ -227,7 +227,10 @@ fn returns(body: Vec<Line<'static>>, rows: &Rows<'_>) -> Vec<Line<'static>> {
 /// nobody can undo by reading harder.
 const QUIET_SURFACES: &[&str] = &["agent", "bash", "room", "schedule"];
 
-fn quiet(origin: &Origin) -> bool {
+/// Whether a delivery is the machinery reporting in. The composer's pending
+/// area asks the same question of what is still queued (ADR-0028), so the set
+/// stays one list read from two places rather than two lists to keep in step.
+pub(crate) fn quiet(origin: &Origin) -> bool {
     QUIET_SURFACES.contains(&origin.surface.as_str())
 }
 

@@ -15,8 +15,8 @@ const HEADERS: [&str; 3] = ["room", "members", "owed"];
 /// What a session with no rooms in it is told, which is also where a person
 /// meets the holder's seat (ADR-0028).
 const NONE: &str = "no rooms here; `/room <name> [member…]` opens one — name \
-`parent` among the members to hear every post yourself, quietly, and be woken \
-by one that says `@parent`";
+`parent` among the members to hear every post yourself as it lands, and to owe \
+an answer to one that says `@parent`";
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct RoomCommand;
@@ -209,7 +209,7 @@ mod tests {
     #[test]
     fn the_listing_says_what_seating_the_holder_gets_you() {
         assert!(NONE.contains("`parent` among the members"), "{NONE}");
-        assert!(NONE.contains("quietly"), "{NONE}");
+        assert!(NONE.contains("as it lands"), "{NONE}");
         assert!(NONE.contains("`@parent`"), "{NONE}");
     }
 

@@ -312,24 +312,29 @@ fn turns(frames: &[Frame]) -> usize {
         .count()
 }
 
-/// How many of a room's posts wait in a session's queue: the entries of the
-/// last queue change it journaled. A delivery is journaled where it lands, so
-/// this is a fact of the run rather than of the clock.
-fn queued(dir: &Path, room: &str) -> usize {
-    frames_at(dir)
+/// The turns a session finished, however they ended.
+fn ended(frames: &[Frame]) -> usize {
+    frames
         .iter()
-        .filter_map(|frame| match &frame.event {
-            Event::QueueChanged { entries, .. } => Some(entries.clone()),
-            _ => None,
+        .filter(|frame| matches!(frame.event, Event::TurnCompleted { .. }))
+        .count()
+}
+
+/// Whether a session is still thinking: a turn started that has not ended.
+fn busy(dir: &Path) -> bool {
+    let frames = frames_at(dir);
+    turns(&frames) > ended(&frames)
+}
+
+/// The resident scout's session, whatever key it was seated under.
+fn scout_dir(home: &Path) -> Option<PathBuf> {
+    dirs(home).into_iter().find(|dir| {
+        summary_of(dir).is_some_and(|summary| {
+            summary["key"]
+                .as_str()
+                .is_some_and(|key| key.ends_with("/scout"))
         })
-        .next_back()
-        .map(|entries| {
-            entries
-                .iter()
-                .filter(|entry| entry.origin.conversation.as_deref() == Some(room))
-                .count()
-        })
-        .unwrap_or(0)
+    })
 }
 
 /// Wait for something the run wrote down. Every gate here is a file the run
@@ -342,27 +347,32 @@ fn until(complaint: &str, done: impl Fn() -> bool) {
     }
 }
 
-fn until_queued(home: &Path, room: &str, n: usize) {
-    until("the room's posts never reached the holder's queue", || {
-        root_dir(home).is_some_and(|dir| queued(&dir, room) >= n)
-    });
-}
-
 fn until_posted(home: &Path, n: usize) {
     until("the room was never posted into", || {
         room_dir(home).is_some_and(|dir| posts(&frames_at(&dir)).len() >= n)
     });
 }
 
-/// Wait until the holder has finished a turn: the one the post that called on
-/// it opened, before the person asks anything else of it.
-fn until_the_holder_has_answered(home: &Path) {
+/// Wait until the holder has heard `n` of the room's posts. A delivery is
+/// journaled where it is absorbed, so this is a fact of the run rather than of
+/// the clock.
+fn until_heard(home: &Path, n: usize) {
+    until("the room's posts never reached the holder", || {
+        root_dir(home).is_some_and(|dir| heard(&dir).len() >= n)
+    });
+}
+
+/// Wait until the holder has answered the room and nobody is still thinking.
+/// The fake provider hands its responses out in one run-wide sequence, so a
+/// prompt sent while the scout is mid-turn would take the response written for
+/// the holder.
+fn until_the_room_settles(home: &Path) {
     until("the post never opened a turn on the holder", || {
-        root_dir(home).is_some_and(|dir| {
-            frames_at(&dir)
-                .iter()
-                .any(|frame| matches!(frame.event, Event::TurnCompleted { .. }))
-        })
+        let (Some(root), Some(scout)) = (root_dir(home), scout_dir(home)) else {
+            return false;
+        };
+        let frames = frames_at(&root);
+        ended(&frames) > 0 && turns(&frames) == ended(&frames) && !busy(&scout)
     });
 }
 
@@ -391,7 +401,9 @@ fn cards(lines: &[serde_json::Value]) -> Vec<serde_json::Value> {
 }
 
 /// The person writes to the scout, not to the root (`@name` in the composer,
-/// ADR-0010 §2), so the root runs no turn at all while the room fills up.
+/// ADR-0010 §2), and the roster this script is run against leaves the holder
+/// out — so the root hears none of it and runs no turn while the room fills up,
+/// which is what its one scenario is about.
 const TWO_POSTS: &str = r##"{"responses":[
     {"steps":[{"toolCall":{"name":"SendMessage","input":{"to":"#design","text":"the build is green"}}}]},
     {"steps":[{"toolCall":{"name":"SendMessage","input":{"to":"#design","text":"and the tests pass"}}}]},
@@ -399,37 +411,53 @@ const TWO_POSTS: &str = r##"{"responses":[
     {"steps":[{"text":"they say it is green"}]}
 ]}"##;
 
-/// ADR-0028 §2 end to end: `parent` on the roster seats the room's own holder.
-/// The posts reach it `Hold` — it runs no turn for them — and the next thing
-/// to open one, a person speaking, absorbs them in journal order ahead of what
-/// was said to it.
+/// A burst of two: both posts belong to one model response, so the room fills
+/// without the script's run-wide cursor racing the holder's woken turn for the
+/// call that makes them. Every response after it is the same word, so whoever
+/// asks next — the scout finishing, the holder waking — is answered harmlessly.
+const A_BURST: &str = r##"{"responses":[
+    {"steps":[
+        {"toolCall":{"name":"SendMessage","input":{"to":"#design","text":"the build is green"}}},
+        {"toolCall":{"name":"SendMessage","input":{"to":"#design","text":"and the tests pass"}}}
+    ]},
+    {"steps":[{"text":"posted"}]},
+    {"steps":[{"text":"posted"}]},
+    {"steps":[{"text":"posted"}]},
+    {"steps":[{"text":"posted"}]},
+    {"steps":[{"text":"posted"}]},
+    {"steps":[{"text":"posted"}]}
+]}"##;
+
+/// ADR-0028 §2 as amended, end to end: `parent` on the roster seats the room's
+/// own holder, and a post wakes it like any other seat. The person writes only
+/// to the scout, so every turn the holder runs is one a post opened and the
+/// post is the first thing in it. How many turns a burst costs is the
+/// scheduler's business and is deliberately not pinned; what is pinned is that
+/// nothing is lost and the order is the room's.
 #[test]
-fn a_rostered_holder_hears_the_room_quietly_and_the_next_turn_absorbs_it() {
+fn a_rostered_holder_is_woken_by_a_post_and_reads_it_first() {
     let home = tempfile::tempdir().unwrap();
     with_a_room(home.path(), r#"["scout","parent"]"#);
-    let script = script(TWO_POSTS);
+    let script = script(A_BURST);
     let mut host = Host::start(&mut hosting(home.path(), &script));
 
     host.prompt("@scout post what you found in #design");
-    until_queued(home.path(), "#design", 2);
-    host.prompt("what did they say?");
+    until_heard(home.path(), 2);
     let ended = host.finish();
     assert_eq!(ended.code, Some(0), "stderr: {}", ended.err);
 
     let root = root_dir(home.path()).expect("a root session");
     assert_eq!(
-        turns(&frames_at(&root)),
-        1,
-        "the holder ran no turn while the room talked"
-    );
-    assert_eq!(
         heard(&root),
         [
             ("the build is green".to_string(), Some("scout".to_string())),
             ("and the tests pass".to_string(), Some("scout".to_string())),
-            ("what did they say?".to_string(), None),
         ],
-        "the room was absorbed in journal order, ahead of the person's message"
+        "every post reached the holder, in the room's order, and nothing else did"
+    );
+    assert!(
+        turns(&frames_at(&root)) > 0,
+        "a post opened a turn on a holder nobody prompted"
     );
 }
 
@@ -445,12 +473,15 @@ const CALLED_ON: &str = r##"{"responses":[
     {"steps":[{"toolCall":{"name":"SendMessage","input":{"to":"#design","text":"the second one"}}}]},
     {"steps":[{"text":"answered"}]},
     {"steps":[{"text":"answered"}]},
+    {"steps":[{"text":"answered"}]},
+    {"steps":[{"text":"answered"}]},
     {"steps":[{"text":"answered"}]}
 ]}"##;
 
-/// ADR-0028 §3: `@parent` is the urgent bypass. The post wakes the holder at
-/// once — the turn it opens reads the post first — and opens an ordinary
-/// mention debt that the holder's own next post closes.
+/// ADR-0028 §3: `@parent` is obligation and nothing else. The post wakes the
+/// holder because every post does — the turn it opens reads the post first —
+/// and the name opens an ordinary mention debt that the holder's own next post
+/// closes.
 #[test]
 fn a_post_that_calls_on_the_holder_wakes_it_and_is_owed_an_answer() {
     let home = tempfile::tempdir().unwrap();
@@ -459,7 +490,7 @@ fn a_post_that_calls_on_the_holder_wakes_it_and_is_owed_an_answer() {
     let mut host = Host::start(&mut hosting(home.path(), &script));
 
     host.prompt("@scout ask me in #design");
-    until_the_holder_has_answered(home.path());
+    until_the_room_settles(home.path());
     host.prompt("answer them");
     let ended = host.finish();
     assert_eq!(ended.code, Some(0), "stderr: {}", ended.err);
