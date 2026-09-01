@@ -146,14 +146,7 @@ impl Actor {
                 .reject(intent, ErrorCode::InvalidInput, "a log records text")
                 .await;
         };
-        let body = ItemBody::User {
-            parts: vec![ContentPart::text(text)],
-            origin,
-        };
-        let item = self.fresh(None, Some(intent.clone()), body);
-        let id = item.id.clone();
-        self.publish(Event::ItemCompleted { item }, Some(intent.clone()))
-            .await;
+        let id = self.journal_prose(None, intent.clone(), text, origin).await;
         self.applied(intent, json!({ "item": id })).await;
     }
 

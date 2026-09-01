@@ -21,6 +21,17 @@ pub fn is_holder(member: &str) -> bool {
     same(member, PARENT)
 }
 
+/// The name a seat's posts sign with: its own title where it has one to be
+/// addressed by, and `parent` for a session nobody spawned. Having no parent
+/// is the fact; having no title used to stand in for it, and stopped being
+/// able to when a session's first ask began naming it (M32).
+pub fn signed_by(seat: &bingo_sdk::SessionSummary) -> String {
+    match seat.parent.is_some() {
+        true => seat.title.clone().unwrap_or_else(|| PARENT.to_string()),
+        false => PARENT.to_string(),
+    }
+}
+
 /// A name a room can be opened under.
 pub fn check(name: &str) -> Result<&str, KernelError> {
     let name = name.trim();

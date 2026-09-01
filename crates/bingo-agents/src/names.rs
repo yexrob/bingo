@@ -189,12 +189,16 @@ pub async fn parent(host: &HostHandle, session: &SessionId) -> Result<SessionSum
     pick(&all, &link.session).cloned()
 }
 
-/// How the caller signs a message: its own name, or `parent` for a session
-/// that has no title, which is what a child calls whoever spawned it.
+/// How the caller signs a message: its own name, or `parent` for the session
+/// nobody spawned, which is what a child calls whoever spawned it. Having no
+/// parent is the fact here; having no title used to stand in for it, and
+/// stopped being able to when a session's first ask began naming it (M32).
 pub async fn speaker(host: &HostHandle, session: &SessionId) -> String {
     match own(host, session).await {
-        Ok(summary) => summary.title.unwrap_or_else(|| PARENT.to_string()),
-        Err(_) => PARENT.to_string(),
+        Ok(summary) if summary.parent.is_some() => {
+            summary.title.unwrap_or_else(|| PARENT.to_string())
+        }
+        _ => PARENT.to_string(),
     }
 }
 
