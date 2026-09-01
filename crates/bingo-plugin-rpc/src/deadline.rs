@@ -24,14 +24,26 @@ pub const CONTRIBUTE: Duration = Duration::from_secs(3);
 /// already speaks, and the kernel's breaker counts it like any other failure.
 pub const COMPACT: Duration = Duration::from_secs(60);
 
+/// How long a running stream may say nothing. The longest, because it bounds
+/// one silence and not a whole response: a model that thinks before its first
+/// token is quiet for a long while, and cutting a legitimate stream off is
+/// worse than waiting. Past it the stream yields the timeout the kernel already
+/// retries on, so a process that ignored `provider/cancel`, wedged, or went
+/// quiet without closing its pipe cannot hold a turn open.
+pub const PROVIDER_IDLE: Duration = Duration::from_secs(120);
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     /// The order is the point: the hot path waits least, the model waits most.
     #[test]
-    fn the_hot_path_has_the_shortest_deadline_of_the_three() {
+    fn the_hot_path_has_the_shortest_deadline_of_them_all() {
         assert!(CONTRIBUTE < HANDSHAKE);
         assert!(HANDSHAKE < COMPACT);
+        assert!(
+            COMPACT < PROVIDER_IDLE,
+            "a whole compaction is bounded more tightly than one silence"
+        );
     }
 }

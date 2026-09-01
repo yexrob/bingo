@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bingo_sdk::{
-    Command as SdkCommand, CommandSpec, Compactor, ContextContributor, Tool, ToolSpec,
+    Command as SdkCommand, CommandSpec, Compactor, ContextContributor, Provider, Tool, ToolSpec,
 };
 use serde_json::Value;
 use tokio::sync::Mutex;
@@ -27,9 +27,11 @@ use crate::contributor::RemoteContributor;
 use crate::deadline;
 use crate::manifest::Entry;
 use crate::notice::{Notice, Notices};
+use crate::provider::RemoteProvider;
 use crate::tool::PluginTool;
 use crate::wire::{
-    CompactorSpec, ContributorSpec, HostEnv, InitializeParams, InitializeResult, PROTOCOL, name,
+    CompactorSpec, ContributorSpec, HostEnv, InitializeParams, InitializeResult, PROTOCOL,
+    ProviderSpec, name,
 };
 
 /// The wait before a second consecutive attempt, doubling to [`BACKOFF_MAX`].
@@ -55,6 +57,7 @@ struct Live {
     commands: Vec<CommandSpec>,
     contributors: Vec<ContributorSpec>,
     compactors: Vec<CompactorSpec>,
+    providers: Vec<ProviderSpec>,
 }
 
 #[derive(Default)]
@@ -203,6 +206,23 @@ impl Bridge {
             .collect()
     }
 
+    /// The providers of a living process, and nothing when there is none.
+    pub async fn providers(self: &Arc<Self>) -> Vec<Arc<dyn Provider>> {
+        let Some(live) = self.ready().await else {
+            return Vec::new();
+        };
+        live.providers
+            .iter()
+            .map(|spec| {
+                Arc::new(RemoteProvider::new(
+                    &self.name,
+                    spec.clone(),
+                    Arc::clone(&live.connection),
+                )) as Arc<dyn Provider>
+            })
+            .collect()
+    }
+
     /// End the process, and leave nothing that would respawn it.
     pub async fn stop(&self) {
         let mut state = self.state.lock().await;
@@ -305,6 +325,7 @@ impl Bridge {
                 commands: result.commands,
                 contributors: result.contributors,
                 compactors: result.compactors,
+                providers: result.providers,
             }),
             Ok(Err(why)) => {
                 connection.stop().await;

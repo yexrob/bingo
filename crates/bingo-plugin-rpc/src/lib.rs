@@ -8,10 +8,10 @@
 //! author who cannot read Rust reads that file and nothing else.
 //!
 //! Registration is synchronous and does no I/O, so the plugin contributes one
-//! source per kind — tools, commands, contributors, compaction strategies —
-//! rather than the things themselves (ADR-0009 §1, ADR-0030 §2); `start` reads
-//! the two layers and shakes hands with what it finds. With nothing discovered
-//! the whole crate is inert.
+//! source per kind — tools, commands, contributors, compaction strategies,
+//! providers — rather than the things themselves (ADR-0009 §1, ADR-0030 §2);
+//! `start` reads the two layers and shakes hands with what it finds. With
+//! nothing discovered the whole crate is inert.
 //!
 //! Nothing a process says about itself is believed: a bridge tool's traits are
 //! the fail-closed default, so the gate asks about every call (ADR-0015 §4).
@@ -29,6 +29,7 @@ pub mod discovery;
 pub mod manager;
 pub mod manifest;
 pub mod notice;
+pub mod provider;
 pub mod schema;
 pub mod source;
 pub mod tool;
@@ -42,7 +43,7 @@ use std::sync::{Arc, OnceLock};
 use async_trait::async_trait;
 use bingo_sdk::{
     CommandSource, CompactorSource, ConfigClaim, ContextSource, Contribution, HostHandle, Merge,
-    Plugin, PluginError, PluginManifest, Registrar, ToolSource,
+    Plugin, PluginError, PluginManifest, ProviderSource, Registrar, ToolSource,
 };
 
 pub use bridge::Bridge;
@@ -53,7 +54,10 @@ pub use connection::{Connection, log_path};
 pub use contributor::{RemoteContributor, contributor_id};
 pub use manager::Manager;
 pub use manifest::{Entry, Manifest};
-pub use source::{ID, PluginCommands, PluginCompactors, PluginContributors, PluginTools};
+pub use provider::RemoteProvider;
+pub use source::{
+    ID, PluginCommands, PluginCompactors, PluginContributors, PluginProviders, PluginTools,
+};
 pub use tool::{PluginTool, tool_name};
 pub use wire::PROTOCOL;
 
@@ -66,6 +70,7 @@ static MANIFEST: PluginManifest = PluginManifest {
         "commands:plugin-rpc",
         "context:plugin-rpc",
         "compactor:plugin-rpc",
+        "provider:plugin-rpc",
     ],
     requires: &[],
     config: Some(ConfigClaim {
@@ -78,7 +83,7 @@ fn schema() -> schemars::Schema {
     schemars::schema_for!(Settings)
 }
 
-/// Registers the two sources, and spawns the discovered plugins on `start`.
+/// Registers one source per kind, and spawns the discovered plugins on `start`.
 #[derive(Debug, Default)]
 pub struct PluginRpcPlugin {
     /// Built in `register`, where the settings are, and used by `start` and
@@ -106,6 +111,9 @@ impl Plugin for PluginRpcPlugin {
         ));
         registrar.add(Contribution::Compactors(
             Arc::new(PluginCompactors::new(Arc::clone(&manager))) as Arc<dyn CompactorSource>,
+        ));
+        registrar.add(Contribution::Providers(
+            Arc::new(PluginProviders::new(Arc::clone(&manager))) as Arc<dyn ProviderSource>,
         ));
         self.manager
             .set(manager)
@@ -158,7 +166,8 @@ mod tests {
                 "tools:plugin-rpc",
                 "commands:plugin-rpc",
                 "context:plugin-rpc",
-                "compactor:plugin-rpc"
+                "compactor:plugin-rpc",
+                "provider:plugin-rpc"
             ]
         );
         assert!(MANIFEST.requires.is_empty());
@@ -175,13 +184,14 @@ mod tests {
             .register(&mut registrar)
             .expect("register");
         let contributions = registrar.into_contributions();
-        assert_eq!(contributions.len(), 4);
+        assert_eq!(contributions.len(), 5);
         for contribution in &contributions {
             let id = match contribution {
                 Contribution::Tools(source) => source.id(),
                 Contribution::Commands(source) => source.id(),
                 Contribution::Contexts(source) => source.id(),
                 Contribution::Compactors(source) => source.id(),
+                Contribution::Providers(source) => source.id(),
                 other => panic!("expected a source, got {other:?}"),
             };
             assert_eq!(id, ID);

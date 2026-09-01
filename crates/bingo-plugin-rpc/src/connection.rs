@@ -1,10 +1,15 @@
 //! One spawned plugin process, and the line loop that talks to it.
 //!
 //! The reader owns the child's stdout and nothing else: it hands each reply to
-//! whoever is waiting for that id and each `tool/progress` to whoever is
-//! running that call. When the pipe closes it fails every waiting request at
-//! once, so a call whose process died returns instead of hanging — a bridge
-//! tool's `Interrupt` is `Block`, and nothing else would ever wake it.
+//! whoever is waiting for that id, each `tool/progress` to whoever is running
+//! that call, and each `provider/delta` to whoever is reading that stream. When
+//! the pipe closes it fails every waiting request at once, so a call whose
+//! process died returns instead of hanging — a bridge tool's `Interrupt` is
+//! `Block`, and nothing else would ever wake it.
+//!
+//! A stream's queue is bounded, and the reader waits on it: a process that
+//! writes faster than a turn reads blocks on its own pipe rather than growing a
+//! queue in this one.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -12,17 +17,18 @@ use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
+use bingo_sdk::ModelEvent;
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
-use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::mpsc::{Sender, UnboundedSender};
 use tokio::sync::oneshot;
 
 use crate::codec::{
     Id, Message, Notification, Outcome, Request, Response, RpcError, TRANSPORT_ERROR,
 };
 use crate::manifest::Entry;
-use crate::wire::{ToolProgressParams, name};
+use crate::wire::{ProviderDeltaParams, ToolProgressParams, name};
 
 /// What a request came back with.
 pub type Reply = Result<Value, RpcError>;
@@ -41,6 +47,7 @@ struct Router {
     announced: AtomicBool,
     waiting: Mutex<HashMap<Id, oneshot::Sender<Reply>>>,
     running: Mutex<HashMap<String, UnboundedSender<String>>>,
+    streaming: Mutex<HashMap<String, Sender<ModelEvent>>>,
 }
 
 impl Router {
@@ -52,10 +59,18 @@ impl Router {
         self.running.lock().unwrap_or_else(|held| held.into_inner())
     }
 
-    fn line(&self, plugin: &str, line: &str) {
+    fn streaming(&self) -> MutexGuard<'_, HashMap<String, Sender<ModelEvent>>> {
+        self.streaming
+            .lock()
+            .unwrap_or_else(|held| held.into_inner())
+    }
+
+    async fn line(&self, plugin: &str, line: &str) {
         match serde_json::from_str::<Message>(line) {
             Ok(Message::Response(response)) => self.response(plugin, response),
-            Ok(Message::Notification(notification)) => self.notification(plugin, notification),
+            Ok(Message::Notification(notification)) => {
+                self.notification(plugin, notification).await
+            }
             Ok(Message::Request(request)) => {
                 tracing::warn!(plugin, method = %request.method, "a plugin asked, which it may not");
             }
@@ -82,14 +97,17 @@ impl Router {
         }
     }
 
-    fn notification(&self, plugin: &str, notification: Notification) {
-        if notification.method != name::TOOL_PROGRESS {
-            tracing::debug!(plugin, method = %notification.method, "an unknown notification");
-            return;
-        }
-        match serde_json::from_value::<ToolProgressParams>(notification.params) {
-            Ok(params) => self.progress(params),
-            Err(error) => tracing::warn!(plugin, %error, "a progress line that is not one"),
+    async fn notification(&self, plugin: &str, notification: Notification) {
+        match notification.method.as_str() {
+            name::TOOL_PROGRESS => match serde_json::from_value(notification.params) {
+                Ok(params) => self.progress(params),
+                Err(error) => tracing::warn!(plugin, %error, "a progress line that is not one"),
+            },
+            name::PROVIDER_DELTA => match serde_json::from_value(notification.params) {
+                Ok(params) => self.delta(params).await,
+                Err(error) => tracing::warn!(plugin, %error, "a delta that is not an event"),
+            },
+            other => tracing::debug!(plugin, method = other, "an unknown notification"),
         }
     }
 
@@ -98,6 +116,17 @@ impl Router {
             // A call that has already answered still has its sink until the
             // guard drops; a send nobody reads is not a problem.
             let _ = sink.send(params.tail);
+        }
+    }
+
+    /// One event, to the one stream it names. The queue is bounded, so this
+    /// waits when a process outruns the turn reading it — the pipe is where the
+    /// backlog belongs. A stream nobody is reading any more has no sink, and
+    /// its events go nowhere.
+    async fn delta(&self, params: ProviderDeltaParams) {
+        let sink = self.streaming().get(&params.call).cloned();
+        if let Some(sink) = sink {
+            let _ = sink.send(params.event).await;
         }
     }
 
@@ -112,6 +141,7 @@ impl Router {
             )));
         }
         self.running().clear();
+        self.streaming().clear();
     }
 }
 
@@ -226,6 +256,22 @@ impl Connection {
         }
     }
 
+    /// Route this stream's `provider/delta` events to `sink` until the guard
+    /// drops. Two streams on one pipe are two routes, told apart by `call`.
+    pub fn watch_stream(self: &Arc<Self>, call: &str, sink: Sender<ModelEvent>) -> StreamWatch {
+        self.router.streaming().insert(call.to_string(), sink);
+        StreamWatch {
+            router: Arc::clone(&self.router),
+            call: call.to_string(),
+        }
+    }
+
+    /// A name for one stream on this pipe, unique while the process lives. The
+    /// counter is the request ids', so one process mints one series.
+    pub fn next_call(&self) -> String {
+        format!("call-{}", self.next_id.fetch_add(1, Ordering::Relaxed))
+    }
+
     /// End the process. The host is closing, or the plugin refused the
     /// handshake and will never be spoken to again.
     pub async fn stop(&self) {
@@ -259,12 +305,24 @@ impl Drop for Watch {
     }
 }
 
+/// Removes a stream's delta route when nobody is reading it any more.
+pub struct StreamWatch {
+    router: Arc<Router>,
+    call: String,
+}
+
+impl Drop for StreamWatch {
+    fn drop(&mut self) {
+        self.router.streaming().remove(&self.call);
+    }
+}
+
 /// The reader: every line the process writes, until it writes no more.
 async fn pump(plugin: String, stdout: ChildStdout, router: Arc<Router>) {
     let mut lines = BufReader::new(stdout).lines();
     loop {
         match lines.next_line().await {
-            Ok(Some(line)) => router.line(&plugin, &line),
+            Ok(Some(line)) => router.line(&plugin, &line).await,
             Ok(None) => break,
             Err(error) => {
                 tracing::warn!(plugin, %error, "the plugin's output could not be read");
@@ -369,8 +427,10 @@ mod tests {
             alive: AtomicBool::new(true),
             ..Router::default()
         };
-        router.line("noisy", "this is not json");
-        router.line("noisy", r#"{"jsonrpc":"2.0","id":1,"result":{}}"#);
+        router.line("noisy", "this is not json").await;
+        router
+            .line("noisy", r#"{"jsonrpc":"2.0","id":1,"result":{}}"#)
+            .await;
         assert!(router.alive.load(Ordering::Acquire));
     }
 
@@ -385,15 +445,75 @@ mod tests {
         router.line(
             "noisy",
             r#"{"jsonrpc":"2.0","method":"tool/progress","params":{"callId":"call_1","tail":"half way"}}"#,
-        );
+        ).await;
         router.line(
             "noisy",
             r#"{"jsonrpc":"2.0","method":"tool/progress","params":{"callId":"call_2","tail":"nobody"}}"#,
-        );
+        ).await;
         assert_eq!(tail.recv().await.as_deref(), Some("half way"));
         assert!(
             tail.try_recv().is_err(),
             "the other call's line went nowhere"
         );
+    }
+
+    fn delta(call: &str, text: &str) -> String {
+        format!(
+            r#"{{"jsonrpc":"2.0","method":"provider/delta","params":{{"call":"{call}","event":{{"type":"textDelta","id":"b1","delta":"{text}"}}}}}}"#
+        )
+    }
+
+    /// The defect the `call` key exists to make impossible: two streams on one
+    /// pipe, and neither sees the other's events.
+    #[tokio::test]
+    async fn a_delta_reaches_the_stream_it_names_and_no_other() {
+        let router = Router {
+            alive: AtomicBool::new(true),
+            ..Router::default()
+        };
+        let (one, mut first) = tokio::sync::mpsc::channel(4);
+        let (two, mut second) = tokio::sync::mpsc::channel(4);
+        router.streaming().insert("call-1".to_string(), one);
+        router.streaming().insert("call-2".to_string(), two);
+        router.line("noisy", &delta("call-1", "mine")).await;
+        router.line("noisy", &delta("call-2", "yours")).await;
+        router.line("noisy", &delta("call-3", "nobody's")).await;
+        assert_eq!(
+            first.recv().await,
+            Some(ModelEvent::TextDelta {
+                id: "b1".into(),
+                delta: "mine".into()
+            })
+        );
+        assert_eq!(
+            second.recv().await,
+            Some(ModelEvent::TextDelta {
+                id: "b1".into(),
+                delta: "yours".into()
+            })
+        );
+        assert!(first.try_recv().is_err() && second.try_recv().is_err());
+    }
+
+    /// The pipe closed: a stream waiting on it is woken by the sink going,
+    /// exactly as a waiting request is woken by its error.
+    #[tokio::test]
+    async fn a_process_that_ends_ends_every_stream_it_was_feeding() {
+        let router = Router {
+            alive: AtomicBool::new(true),
+            ..Router::default()
+        };
+        let (sender, mut events) = tokio::sync::mpsc::channel(4);
+        router.streaming().insert("call-1".to_string(), sender);
+        router.closed();
+        assert_eq!(events.recv().await, None);
+    }
+
+    #[tokio::test]
+    async fn one_process_mints_one_series_of_stream_names() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let connection = Connection::spawn("quiet", &entry("cat", &[]), dir.path(), dir.path())
+            .expect("`cat` exists on every unix");
+        assert_ne!(connection.next_call(), connection.next_call());
     }
 }
