@@ -97,6 +97,24 @@ pub trait CommandSource: Send + Sync {
     async fn commands(&self, cwd: &Path) -> Vec<Arc<dyn Command>>;
 }
 
+/// Contributors that exist only after I/O — an external process's, once it has
+/// answered the handshake. Read when a turn starts, beside the tool sources
+/// (ADR-0009 §1, ADR-0030 §2).
+#[async_trait]
+pub trait ContextSource: Send + Sync {
+    fn id(&self) -> &str;
+    async fn contributors(&self) -> Vec<Arc<dyn ContextContributor>>;
+}
+
+/// Compaction strategies that exist only after I/O. Read when a turn starts;
+/// the slot holds one, so a source's strategy is the turn's only where nothing
+/// in-process already holds it.
+#[async_trait]
+pub trait CompactorSource: Send + Sync {
+    fn id(&self) -> &str;
+    async fn compactors(&self) -> Vec<Arc<dyn Compactor>>;
+}
+
 /// What a plugin hands the host. One enum so the in-process path and a future
 /// out-of-process bridge share one representation.
 pub enum Contribution {
@@ -107,12 +125,16 @@ pub enum Contribution {
     Policy(Arc<dyn PermissionPolicy>),
     Hook(Arc<dyn Hook>),
     Context(Arc<dyn ContextContributor>),
+    /// Contributors resolved late, from a source that does its I/O elsewhere.
+    Contexts(Arc<dyn ContextSource>),
     Command(Arc<dyn Command>),
     /// Commands resolved late, from a source that does its I/O elsewhere.
     Commands(Arc<dyn CommandSource>),
     Surface(Arc<dyn Surface>),
     Store(Arc<dyn SessionStore>),
     Compactor(Arc<dyn Compactor>),
+    /// Compaction strategies resolved late, ditto.
+    Compactors(Arc<dyn CompactorSource>),
     /// A typed value other plugins may look up by key (`service:<key>` in the manifest).
     Service {
         key: String,
@@ -129,11 +151,13 @@ impl fmt::Debug for Contribution {
             Contribution::Policy(p) => write!(f, "Policy({})", p.id()),
             Contribution::Hook(h) => write!(f, "Hook({})", h.id()),
             Contribution::Context(c) => write!(f, "Context({})", c.id()),
+            Contribution::Contexts(s) => write!(f, "Contexts({})", s.id()),
             Contribution::Command(c) => write!(f, "Command({})", c.spec().name),
             Contribution::Commands(s) => write!(f, "Commands({})", s.id()),
             Contribution::Surface(s) => write!(f, "Surface({})", s.id()),
             Contribution::Store(_) => write!(f, "Store"),
             Contribution::Compactor(_) => write!(f, "Compactor"),
+            Contribution::Compactors(s) => write!(f, "Compactors({})", s.id()),
             Contribution::Service { key, .. } => write!(f, "Service({key})"),
         }
     }

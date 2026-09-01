@@ -259,7 +259,7 @@ async fn a_compaction_turn_compacts_and_closes_and_is_refused_while_a_turn_runs(
     let compactor = ScriptedCompactor::new(vec![ScriptedCompactor::cut("itm_none", 9_000, 100)]);
     let mailbox = spawn(summary("ses_1"), None, Services::none(), |_| {
         let mut cfg = config(provider, vec![], Arc::new(NoHost));
-        cfg.compactor = Some(compactor);
+        cfg.compactor = crate::turn::CompactorSet::fixed(Some(compactor));
         Arc::new(cfg)
     });
     let (mut state, mut events) = mailbox.attach().await.unwrap();

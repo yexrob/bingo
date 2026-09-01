@@ -136,7 +136,7 @@ impl Turn<'_> {
             // the forced microcompact either way (ADR-0006).
             self.overflow_compacted = true;
             self.announce_retry(&error, dropped, 0);
-            if let Some(compactor) = self.cfg.compactor.clone() {
+            if let Some(compactor) = self.late.compactor.clone() {
                 self.compact(
                     compactor.as_ref(),
                     CompactReason::Overflow {

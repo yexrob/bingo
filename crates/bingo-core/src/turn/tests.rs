@@ -116,9 +116,9 @@ fn config(provider: Arc<ScriptedProvider>, tools: Vec<Arc<dyn Tool>>) -> TurnCon
         tools: ToolSet::fixed(tools),
         policy: Arc::new(DefaultPolicy),
         hooks: vec![],
-        contributors: vec![],
+        contributors: ContributorSet::default(),
         compaction: Arc::new(crate::turn::Breaker::default()),
-        compactor: None,
+        compactor: CompactorSet::default(),
         budget: TurnBudget::default(),
         env: Arc::new(Env {
             home: "/tmp".into(),
@@ -659,6 +659,69 @@ async fn a_source_tool_is_gathered_when_the_turn_starts_and_a_duplicate_is_dropp
     );
 }
 
+/// Where every user item this turn recorded came from.
+fn origins(host: &RecordingHost) -> Vec<String> {
+    host.events()
+        .into_iter()
+        .filter_map(|e| match e {
+            Event::ItemCompleted { item } => match item.body {
+                ItemBody::User { origin, .. } => Some(origin.surface),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect()
+}
+
+/// The same point as the tool sources', for the same reason: a contributor a
+/// process only names after its handshake still speaks in the first turn after
+/// it, and its piece carries the origin its id earns it.
+#[tokio::test]
+async fn a_source_contributor_speaks_when_the_turn_starts_with_its_own_origin() {
+    let provider =
+        ScriptedProvider::new(vec![Script::Events(text("a")), Script::Events(text("b"))]);
+    let source = ScriptedContextSource::new("bridge");
+    let mut cfg = config(provider, vec![]);
+    cfg.contributors = ContributorSet {
+        fixed: vec![],
+        sources: vec![source.clone()],
+    };
+    let host = RecordingHost::new();
+    run(&cfg, &host, CancellationToken::new()).await;
+    assert!(origins(&host).is_empty(), "the source had nothing yet");
+
+    source.set(vec![fixed_contributor("notes")]);
+    let host = RecordingHost::new();
+    run(&cfg, &host, CancellationToken::new()).await;
+    assert_eq!(origins(&host), ["contributor:notes"]);
+}
+
+#[tokio::test]
+async fn a_source_strategy_compacts_when_nothing_in_process_holds_the_slot() {
+    let provider = ScriptedProvider::new(vec![]);
+    let compactor = ScriptedCompactor::new(vec![ScriptedCompactor::cut("itm_none", 9_000, 100)]);
+    let mut cfg = config(provider, vec![]);
+    cfg.compactor = CompactorSet {
+        fixed: None,
+        sources: vec![ScriptedCompactorSource::new(vec![compactor.clone()])],
+    };
+    let host = RecordingHost::new();
+    run_turn(
+        &cfg,
+        TurnRun {
+            turn: TurnId::from_raw("trn_1"),
+            history: history("hello"),
+            generation: 0,
+            cancel: CancellationToken::new(),
+            kind: TurnKind::Compact { instructions: None },
+        },
+        &host,
+    )
+    .await;
+    assert_eq!(compactor.calls.lock().unwrap().len(), 1);
+    assert!(host.kinds().contains(&"compacted".to_string()));
+}
+
 #[tokio::test]
 async fn a_hook_that_asks_opens_a_permission_with_its_reason_and_allow_runs_the_tool() {
     let provider = ScriptedProvider::new(vec![
@@ -690,9 +753,10 @@ async fn a_hook_that_asks_opens_a_permission_with_its_reason_and_allow_runs_the_
 async fn compaction_hooks_bracket_the_cut() {
     let provider = ScriptedProvider::new(vec![]);
     let mut cfg = config(provider, vec![]);
-    cfg.compactor = Some(ScriptedCompactor::new(vec![ScriptedCompactor::cut(
-        "itm_none", 9_000, 100,
-    )]));
+    cfg.compactor =
+        CompactorSet::fixed(Some(ScriptedCompactor::new(vec![ScriptedCompactor::cut(
+            "itm_none", 9_000, 100,
+        )])));
     let hook = RecordingHook::new(false);
     cfg.hooks = vec![hook.clone()];
     let host = RecordingHost::new();

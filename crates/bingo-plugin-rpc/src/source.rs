@@ -1,12 +1,15 @@
-//! The two contributions the kernel reads when it needs the set (ADR-0009 §1):
-//! one tool source and one command source for every plugin at once, because
-//! what a plugin contributes is not known until its process has answered.
+//! The contributions the kernel reads when it needs the set (ADR-0009 §1): one
+//! source per kind, for every plugin at once, because what a plugin
+//! contributes is not known until its process has answered.
 
 use std::path::Path;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use bingo_sdk::{Command, CommandSource, Tool, ToolSource};
+use bingo_sdk::{
+    Command, CommandSource, Compactor, CompactorSource, ContextContributor, ContextSource, Tool,
+    ToolSource,
+};
 
 use crate::manager::Manager;
 
@@ -54,5 +57,47 @@ impl CommandSource for PluginCommands {
     /// once, at start, and is the same one wherever a `/name` is typed.
     async fn commands(&self, _cwd: &Path) -> Vec<Arc<dyn Command>> {
         self.manager.commands().await
+    }
+}
+
+pub struct PluginContributors {
+    manager: Arc<Manager>,
+}
+
+impl PluginContributors {
+    pub fn new(manager: Arc<Manager>) -> Self {
+        Self { manager }
+    }
+}
+
+#[async_trait]
+impl ContextSource for PluginContributors {
+    fn id(&self) -> &str {
+        ID
+    }
+
+    async fn contributors(&self) -> Vec<Arc<dyn ContextContributor>> {
+        self.manager.contributors().await
+    }
+}
+
+pub struct PluginCompactors {
+    manager: Arc<Manager>,
+}
+
+impl PluginCompactors {
+    pub fn new(manager: Arc<Manager>) -> Self {
+        Self { manager }
+    }
+}
+
+#[async_trait]
+impl CompactorSource for PluginCompactors {
+    fn id(&self) -> &str {
+        ID
+    }
+
+    async fn compactors(&self) -> Vec<Arc<dyn Compactor>> {
+        self.manager.compactors().await
     }
 }

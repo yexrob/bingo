@@ -5,13 +5,22 @@
 use std::path::Path;
 
 use async_trait::async_trait;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 
 use crate::event::{ContextUsage, Item, SessionSummary};
 use crate::host::HostHandle;
 use crate::ids::TurnId;
 use crate::model::{ContentPart, ModelCapabilities, SystemBlock};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// When a contributor speaks. Serializable because a contributor may live in
+/// another process: it declares its placement once, over the bridge.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum Placement {
     /// A system block, recomputed per request; lower `order` first.
     System { order: i32 },
@@ -35,7 +44,15 @@ pub struct ContextQuery<'a> {
     pub cwd: &'a Path,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+/// What a contributor adds. Serializable for the same reason a placement is:
+/// a piece written in another process crosses as it is, never as a copy of
+/// itself the bridge invented.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum ContextPiece {
     System(SystemBlock),
     /// Recorded as a user item with `Origin { surface: "contributor:<id>" }`, so

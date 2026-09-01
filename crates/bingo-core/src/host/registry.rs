@@ -49,12 +49,17 @@ pub struct Registry {
     pub policy: Option<Arc<dyn PermissionPolicy>>,
     pub hooks: Vec<Arc<dyn Hook>>,
     pub contributors: Vec<Arc<dyn ContextContributor>>,
+    /// Contributors that arrive after I/O, read when a turn starts (ADR-0009).
+    pub context_sources: Vec<Arc<dyn ContextSource>>,
     pub commands: Vec<Arc<dyn Command>>,
     /// Commands that arrive after I/O, read when a name is not in `commands`.
     pub command_sources: Vec<Arc<dyn CommandSource>>,
     pub surfaces: Vec<Arc<dyn Surface>>,
     pub store: Option<Arc<dyn SessionStore>>,
     pub compactor: Option<Arc<dyn Compactor>>,
+    /// Strategies that arrive after I/O; one is the turn's only where the slot
+    /// above is free.
+    pub compactor_sources: Vec<Arc<dyn CompactorSource>>,
     pub services: HashMap<String, Arc<dyn Any + Send + Sync>>,
     pub plugins: Vec<PluginStatus>,
 }
@@ -135,6 +140,10 @@ impl Registry {
                 self.contributors.push(contributor);
                 Ok(())
             }
+            Contribution::Contexts(source) => {
+                self.context_sources.push(source);
+                Ok(())
+            }
             Contribution::Command(command) => self.add_command(command),
             Contribution::Commands(source) => {
                 self.command_sources.push(source);
@@ -143,6 +152,10 @@ impl Registry {
             Contribution::Surface(surface) => self.add_surface(surface),
             Contribution::Store(store) => self.set_store(store),
             Contribution::Compactor(compactor) => self.set_compactor(compactor),
+            Contribution::Compactors(source) => {
+                self.compactor_sources.push(source);
+                Ok(())
+            }
             Contribution::Service { key, value } => self.add_service(key, value),
         }
         .map_err(conflict)
@@ -327,6 +340,87 @@ mod tests {
     fn loaded(plugins: Vec<Box<dyn Plugin>>) -> Registry {
         Registry::load(&plugins, &BTreeMap::new(), &Env::rooted("/nowhere"))
             .expect("nothing here fails to register")
+    }
+
+    /// A source of every late kind, answering with nothing — which is never
+    /// wrong (ADR-0009 §1) and is all this table asks of it.
+    struct Nothing;
+
+    #[async_trait::async_trait]
+    impl ToolSource for Nothing {
+        fn id(&self) -> &str {
+            "nothing"
+        }
+        async fn tools(&self) -> Vec<Arc<dyn Tool>> {
+            Vec::new()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl CommandSource for Nothing {
+        fn id(&self) -> &str {
+            "nothing"
+        }
+        async fn commands(&self, _: &std::path::Path) -> Vec<Arc<dyn Command>> {
+            Vec::new()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ContextSource for Nothing {
+        fn id(&self) -> &str {
+            "nothing"
+        }
+        async fn contributors(&self) -> Vec<Arc<dyn ContextContributor>> {
+            Vec::new()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl CompactorSource for Nothing {
+        fn id(&self) -> &str {
+            "nothing"
+        }
+        async fn compactors(&self) -> Vec<Arc<dyn Compactor>> {
+            Vec::new()
+        }
+    }
+
+    /// Every kind that arrives after I/O lands in the list named for it, and a
+    /// second one is welcome: a source holds no slot.
+    /// One row of the table: a source to register, and where it must land.
+    type Source = fn() -> Contribution;
+    type Kept = fn(&Registry) -> usize;
+
+    #[test]
+    fn a_late_source_of_every_kind_is_kept_where_the_turn_reads_it() {
+        let table: Vec<(Source, Kept)> = vec![
+            (
+                || Contribution::Tools(Arc::new(Nothing)),
+                |registry| registry.tool_sources.len(),
+            ),
+            (
+                || Contribution::Commands(Arc::new(Nothing)),
+                |registry| registry.command_sources.len(),
+            ),
+            (
+                || Contribution::Contexts(Arc::new(Nothing)),
+                |registry| registry.context_sources.len(),
+            ),
+            (
+                || Contribution::Compactors(Arc::new(Nothing)),
+                |registry| registry.compactor_sources.len(),
+            ),
+        ];
+        for (contribute, count) in table {
+            let mut registry = Registry::default();
+            for _ in 0..2 {
+                registry
+                    .add("test.late", contribute())
+                    .expect("a source never conflicts");
+            }
+            assert_eq!(count(&registry), 2, "{:?}", contribute());
+        }
     }
 
     /// The bug this module had: dependency correctness hung on the bin's

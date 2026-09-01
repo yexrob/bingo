@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "bingo plugin",
-  "protocol": 1,
+  "protocol": 2,
   "$defs": {
     "Action": {
       "type": "object",
@@ -265,6 +265,187 @@
         "family"
       ]
     },
+    "CompactReason": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "threshold"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "message": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "overflow"
+            }
+          },
+          "required": [
+            "kind",
+            "message"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "instructions": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "kind": {
+              "type": "string",
+              "const": "manual"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        }
+      ],
+      "description": "Why a compaction was asked for. Serializable because a strategy may live in\nanother process: the reason crosses the bridge as it is."
+    },
+    "Compaction": {
+      "type": "object",
+      "properties": {
+        "summary": {
+          "type": "string"
+        },
+        "boundary": {
+          "$ref": "#/$defs/ItemId"
+        },
+        "kept": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ItemId"
+          },
+          "default": []
+        },
+        "before": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "after": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "usage": {
+          "$ref": "#/$defs/Usage",
+          "description": "What the summary cost. A strategy that spends no tokens says nothing.",
+          "default": {
+            "inputTokens": 0,
+            "outputTokens": 0,
+            "cacheReadTokens": 0,
+            "cacheWriteTokens": 0,
+            "reasoningTokens": 0
+          }
+        }
+      },
+      "required": [
+        "summary",
+        "boundary",
+        "before",
+        "after"
+      ],
+      "description": "The result: a summary, the boundary before which items are replaced, the\nitems before it to keep anyway, and what the summary cost. The kernel\naccepts it only when `after < before`; the cost is billed either way."
+    },
+    "CompactorCompactParams": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Which of the compactors the handshake declared is being asked."
+        },
+        "context": {
+          "$ref": "#/$defs/CompactorContext"
+        },
+        "reason": {
+          "$ref": "#/$defs/CompactReason"
+        }
+      },
+      "required": [
+        "id",
+        "context",
+        "reason"
+      ]
+    },
+    "CompactorCompactResult": {
+      "type": "object",
+      "properties": {
+        "compaction": {
+          "$ref": "#/$defs/Compaction"
+        }
+      },
+      "required": [
+        "compaction"
+      ]
+    },
+    "CompactorContext": {
+      "type": "object",
+      "properties": {
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Item"
+          },
+          "default": []
+        },
+        "usage": {
+          "$ref": "#/$defs/ContextUsage"
+        },
+        "capabilities": {
+          "$ref": "#/$defs/ModelCapabilities"
+        },
+        "model": {
+          "type": "string"
+        },
+        "failures": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0,
+          "description": "Consecutive compactions the kernel discarded; at `BREAKER_TRIP` the\nbreaker is tripped and a strategy takes its rung that needs no model."
+        },
+        "keepBudget": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "description": "Tokens of the newest items a cut should leave intact."
+        }
+      },
+      "required": [
+        "usage",
+        "capabilities",
+        "model",
+        "failures",
+        "keepBudget"
+      ],
+      "description": "What a compaction acts on, as a process that is not in the host can read\nit: the sdk's `CompactContext` without what cannot cross — the host's\nprovider and the turn's cancellation token. A remote strategy summarises by\nits own means, or cuts by none."
+    },
+    "CompactorSpec": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "description": "A compaction strategy a process says it has. One field, and the same shape\nas every other declaration: a plugin's answer to \"what do you contribute\"\nreads the same way whatever the kind."
+    },
     "Completion": {
       "type": "object",
       "properties": {
@@ -395,6 +576,164 @@
         }
       ]
     },
+    "ContextContributeParams": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Which of the contributors the handshake declared is being asked."
+        },
+        "query": {
+          "$ref": "#/$defs/ContributeQuery"
+        }
+      },
+      "required": [
+        "id",
+        "query"
+      ]
+    },
+    "ContextContributeResult": {
+      "type": "object",
+      "properties": {
+        "pieces": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ContextPiece"
+          },
+          "description": "A contributor with nothing to add this round says so with an empty\nlist, which is never wrong.",
+          "default": []
+        }
+      }
+    },
+    "ContextPiece": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/SystemBlock",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "system"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "parts": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/ContentPart"
+              }
+            },
+            "label": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "user"
+            }
+          },
+          "required": [
+            "kind",
+            "parts",
+            "label"
+          ],
+          "description": "Recorded as a user item with `Origin { surface: \"contributor:<id>\" }`, so\nthe transcript and the provider cache prefix agree."
+        }
+      ],
+      "description": "What a contributor adds. Serializable for the same reason a placement is:\na piece written in another process crosses as it is, never as a copy of\nitself the bridge invented."
+    },
+    "ContextUsage": {
+      "type": "object",
+      "properties": {
+        "used": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "description": "Tokens the next request would carry, anchored on the server's last count."
+        },
+        "window": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "description": "The input side of the model's window: what is left once the output\nbudget is reserved (ADR-0006)."
+        },
+        "trigger": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "description": "`used` at which the older turns are summarised."
+        }
+      },
+      "required": [
+        "used",
+        "window",
+        "trigger"
+      ],
+      "description": "The one ruler for context: used tokens, the model window, and the point at\nwhich compaction triggers."
+    },
+    "ContributeQuery": {
+      "type": "object",
+      "properties": {
+        "session": {
+          "$ref": "#/$defs/SessionSummary"
+        },
+        "turn": {
+          "$ref": "#/$defs/TurnId"
+        },
+        "round": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Item"
+          },
+          "default": []
+        },
+        "usage": {
+          "$ref": "#/$defs/ContextUsage"
+        },
+        "capabilities": {
+          "$ref": "#/$defs/ModelCapabilities"
+        },
+        "cwd": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "session",
+        "turn",
+        "round",
+        "usage",
+        "capabilities",
+        "cwd"
+      ],
+      "description": "One round, as a process that is not in the host can read it.\n\nThe serializable projection of the sdk's `ContextQuery` (ADR-0030 §5): the\nsession, where it is and what it has said so far. The host handle the\nin-process query carries stays on this side — an external contributor\nreads the round, it does not reach the host."
+    },
+    "ContributorSpec": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "The name this process knows the contributor by; `context/contribute`\ncarries it back. The kernel sees it prefixed by the plugin's own name."
+        },
+        "placement": {
+          "$ref": "#/$defs/Placement"
+        }
+      },
+      "required": [
+        "id",
+        "placement"
+      ],
+      "description": "A contributor a process says it has. Placement is handshake data: which of\nthe three moments this contributor speaks at is asked once, here, and never\nper call. A placement this host does not know refuses the handshake, in\nwords, rather than being guessed at."
+    },
     "DecisionKind": {
       "type": "string",
       "enum": [
@@ -402,6 +741,21 @@
         "allowSession",
         "deny"
       ]
+    },
+    "Driver": {
+      "oneOf": [
+        {
+          "type": "string",
+          "const": "model",
+          "description": "A model answers: every prose input opens a turn."
+        },
+        {
+          "type": "string",
+          "const": "log",
+          "description": "Nothing answers: every input is recorded, and the journal is the point."
+        }
+      ],
+      "description": "What a session does with what it is told (ADR-0011 §1)."
     },
     "Entry": {
       "type": "object",
@@ -505,6 +859,20 @@
             "$ref": "#/$defs/CommandSpec"
           },
           "default": []
+        },
+        "contributors": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ContributorSpec"
+          },
+          "default": []
+        },
+        "compactors": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CompactorSpec"
+          },
+          "default": []
         }
       },
       "required": [
@@ -514,9 +882,73 @@
       ],
       "description": "What the process says it is and what it contributes. Everything here is a\nclaim: the tools it names are registered untrusted (ADR-0015 §4)."
     },
+    "IntentId": {
+      "type": "string",
+      "description": "A client-minted write id; the outcome arrives as `IntentAck`."
+    },
     "InteractionId": {
       "type": "string",
       "description": "A pending question or permission, answered once by id."
+    },
+    "Item": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/ItemId"
+        },
+        "turn": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TurnId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "round": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0,
+          "default": 0
+        },
+        "status": {
+          "$ref": "#/$defs/ItemStatus"
+        },
+        "startedAt": {
+          "type": "string"
+        },
+        "completedAt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "intent": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/IntentId"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The client intent that produced this item, when one did (user items)."
+        },
+        "body": {
+          "$ref": "#/$defs/ItemBody"
+        },
+        "meta": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      },
+      "required": [
+        "id",
+        "status",
+        "startedAt",
+        "body"
+      ]
     },
     "ItemBody": {
       "oneOf": [
@@ -829,6 +1261,20 @@
         }
       ]
     },
+    "ItemId": {
+      "type": "string",
+      "description": "One unit in the transcript order."
+    },
+    "ItemStatus": {
+      "type": "string",
+      "enum": [
+        "pending",
+        "running",
+        "completed",
+        "failed",
+        "interrupted"
+      ]
+    },
     "Level": {
       "type": "string",
       "enum": [
@@ -861,6 +1307,42 @@
       ],
       "description": "What one directory under `plugins/` declares about itself.\n\nUnknown keys are kept rather than refused: a manifest written for a later\nhost must still start on this one."
     },
+    "ModelCapabilities": {
+      "type": "object",
+      "properties": {
+        "contextWindow": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "maxOutput": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "images": {
+          "type": "boolean",
+          "default": false
+        },
+        "reasoning": {
+          "type": "boolean",
+          "default": false
+        },
+        "countTokens": {
+          "type": "boolean",
+          "default": false
+        },
+        "caching": {
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "required": [
+        "contextWindow",
+        "maxOutput"
+      ],
+      "description": "What a turn may assume about its model: the kernel's resolution of the\nuser's settings, the catalogue, the server's corrections and the\nendpoint's facts (ADR-0004). The ruler and the gate read this."
+    },
     "Origin": {
       "type": "object",
       "properties": {
@@ -885,9 +1367,187 @@
       ],
       "description": "Who submitted the input, as every surface records it."
     },
+    "ParentLink": {
+      "type": "object",
+      "properties": {
+        "session": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "item": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ItemId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "session"
+      ],
+      "description": "Where a child hangs in the tree: its parent, and the tool call that\nspawned it when one did (ADR-0011 §3)."
+    },
+    "Placement": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "order": {
+              "type": "integer",
+              "format": "int32"
+            },
+            "kind": {
+              "type": "string",
+              "const": "system"
+            }
+          },
+          "required": [
+            "kind",
+            "order"
+          ],
+          "description": "A system block, recomputed per request; lower `order` first."
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "roundStart"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "description": "A user piece at the start of each round."
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "barrier"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "description": "A user piece after tool results, before the next request."
+        }
+      ],
+      "description": "When a contributor speaks. Serializable because a contributor may live in\nanother process: it declares its placement once, over the bridge."
+    },
     "SessionId": {
       "type": "string",
       "description": "One persisted context: one journal, one actor."
+    },
+    "SessionSummary": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "key": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "title": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "cwd": {
+          "type": "string"
+        },
+        "parent": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ParentLink"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "driver": {
+          "$ref": "#/$defs/Driver",
+          "default": "model"
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "systemExtra": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "What the session was opened with and a resume must give it back:\nthe prompt appended to the kernel's own, and the tool set it is held to."
+        },
+        "tools": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "provider": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "createdAt": {
+          "type": "string"
+        },
+        "updatedAt": {
+          "type": "string"
+        },
+        "usage": {
+          "$ref": "#/$defs/Usage",
+          "default": {
+            "inputTokens": 0,
+            "outputTokens": 0,
+            "cacheReadTokens": 0,
+            "cacheWriteTokens": 0,
+            "reasoningTokens": 0
+          }
+        },
+        "busy": {
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "required": [
+        "id",
+        "cwd",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "SystemBlock": {
+      "type": "object",
+      "properties": {
+        "text": {
+          "type": "string"
+        },
+        "cache": {
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "required": [
+        "text"
+      ],
+      "description": "One cacheable segment of the system prompt."
     },
     "Tone": {
       "oneOf": [
@@ -1057,6 +1717,44 @@
     "TurnId": {
       "type": "string",
       "description": "One run of the turn loop, closed exactly once."
+    },
+    "Usage": {
+      "type": "object",
+      "properties": {
+        "inputTokens": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "outputTokens": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "cacheReadTokens": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "default": 0
+        },
+        "cacheWriteTokens": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "default": 0
+        },
+        "reasoningTokens": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "default": 0
+        }
+      },
+      "required": [
+        "inputTokens",
+        "outputTokens"
+      ],
+      "description": "Token counts as the provider reports them, the three input counts kept\napart: `input_tokens` is what the model read fresh, the cache counts are\nwhat it read from or wrote to a cached prefix. The whole input side is\n`input_total()`."
     },
     "View": {
       "oneOf": [
@@ -1393,6 +2091,22 @@
       },
       "result": {
         "$ref": "#/$defs/CommandCompleteResult"
+      }
+    },
+    "context/contribute": {
+      "params": {
+        "$ref": "#/$defs/ContextContributeParams"
+      },
+      "result": {
+        "$ref": "#/$defs/ContextContributeResult"
+      }
+    },
+    "compactor/compact": {
+      "params": {
+        "$ref": "#/$defs/CompactorCompactParams"
+      },
+      "result": {
+        "$ref": "#/$defs/CompactorCompactResult"
       }
     }
   },

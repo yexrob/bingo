@@ -12,23 +12,25 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use bingo_sdk::{Command as SdkCommand, CommandSpec, Tool, ToolSpec};
+use bingo_sdk::{
+    Command as SdkCommand, CommandSpec, Compactor, ContextContributor, Tool, ToolSpec,
+};
 use serde_json::Value;
 use tokio::sync::Mutex;
 use tokio::time::Instant;
 
 use crate::command::PluginCommand;
+use crate::compactor::RemoteCompactor;
 use crate::completions::Completions;
 use crate::connection::Connection;
+use crate::contributor::RemoteContributor;
+use crate::deadline;
 use crate::manifest::Entry;
 use crate::notice::{Notice, Notices};
 use crate::tool::PluginTool;
-use crate::wire::{HostEnv, InitializeParams, InitializeResult, PROTOCOL, name};
-
-/// How long a process has to spawn and answer `initialize`. A plugin is a
-/// local process the person installed; one that cannot say what it is in this
-/// long is broken, and waiting longer only delays the session.
-pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+use crate::wire::{
+    CompactorSpec, ContributorSpec, HostEnv, InitializeParams, InitializeResult, PROTOCOL, name,
+};
 
 /// The wait before a second consecutive attempt, doubling to [`BACKOFF_MAX`].
 pub const BACKOFF_BASE: Duration = Duration::from_secs(1);
@@ -51,6 +53,8 @@ struct Live {
     connection: Arc<Connection>,
     tools: Vec<ToolSpec>,
     commands: Vec<CommandSpec>,
+    contributors: Vec<ContributorSpec>,
+    compactors: Vec<CompactorSpec>,
 }
 
 #[derive(Default)]
@@ -164,6 +168,41 @@ impl Bridge {
             .collect()
     }
 
+    /// The contributors of a living process, and nothing when there is none.
+    pub async fn contributors(self: &Arc<Self>) -> Vec<Arc<dyn ContextContributor>> {
+        let Some(live) = self.ready().await else {
+            return Vec::new();
+        };
+        live.contributors
+            .iter()
+            .map(|spec| {
+                Arc::new(RemoteContributor::new(
+                    &self.name,
+                    spec.clone(),
+                    Arc::clone(&live.connection),
+                )) as Arc<dyn ContextContributor>
+            })
+            .collect()
+    }
+
+    /// The compaction strategies of a living process, and nothing when there
+    /// is none.
+    pub async fn compactors(self: &Arc<Self>) -> Vec<Arc<dyn Compactor>> {
+        let Some(live) = self.ready().await else {
+            return Vec::new();
+        };
+        live.compactors
+            .iter()
+            .map(|spec| {
+                Arc::new(RemoteCompactor::new(
+                    &self.name,
+                    spec.clone(),
+                    Arc::clone(&live.connection),
+                )) as Arc<dyn Compactor>
+            })
+            .collect()
+    }
+
     /// End the process, and leave nothing that would respawn it.
     pub async fn stop(&self) {
         let mut state = self.state.lock().await;
@@ -257,12 +296,15 @@ impl Bridge {
             &self.root,
             &self.data_dir,
         )?);
-        let answered = tokio::time::timeout(HANDSHAKE_TIMEOUT, self.initialize(&connection)).await;
+        let answered =
+            tokio::time::timeout(deadline::HANDSHAKE, self.initialize(&connection)).await;
         match answered {
             Ok(Ok(result)) => Ok(Live {
                 connection,
                 tools: result.tools,
                 commands: result.commands,
+                contributors: result.contributors,
+                compactors: result.compactors,
             }),
             Ok(Err(why)) => {
                 connection.stop().await;
@@ -272,7 +314,7 @@ impl Bridge {
                 connection.stop().await;
                 Err(format!(
                     "initialize timed out after {}s",
-                    HANDSHAKE_TIMEOUT.as_secs()
+                    deadline::HANDSHAKE.as_secs()
                 ))
             }
         }
@@ -321,6 +363,8 @@ mod tests {
             version: "0.1.0".into(),
             tools: Vec::new(),
             commands: Vec::new(),
+            contributors: Vec::new(),
+            compactors: Vec::new(),
         }
     }
 
@@ -341,8 +385,12 @@ mod tests {
     #[test]
     fn this_host_speaks_one_major_and_refuses_the_rest() {
         assert!(check_protocol(&result(PROTOCOL)).is_ok());
-        let why = check_protocol(&result(2)).expect_err("a later major is refused");
-        assert!(why.contains("protocol 2"), "{why}");
-        assert!(why.contains("speaks 1"), "{why}");
+        let later = PROTOCOL + 1;
+        let why = check_protocol(&result(later)).expect_err("a later major is refused");
+        assert!(why.contains(&format!("protocol {later}")), "{why}");
+        assert!(why.contains(&format!("speaks {PROTOCOL}")), "{why}");
+        let earlier = PROTOCOL - 1;
+        let why = check_protocol(&result(earlier)).expect_err("and so is an earlier one");
+        assert!(why.contains(&format!("protocol {earlier}")), "{why}");
     }
 }

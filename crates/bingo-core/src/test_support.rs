@@ -9,7 +9,12 @@ use bingo_sdk::*;
 use futures::StreamExt;
 use serde_json::{Value, json};
 
+mod late;
 mod peers;
+pub use late::{
+    ScriptedCommandSource, ScriptedCompactorSource, ScriptedContextSource, ScriptedToolSource,
+    fixed_contributor,
+};
 pub use peers::{RedirectHook, RoutingHost};
 
 /// One provider response: events in order; `Hang` never ends after them.
@@ -274,9 +279,9 @@ pub fn config(
         tools: crate::turn::ToolSet::fixed(tools),
         policy: Arc::new(crate::gate::DefaultPolicy),
         hooks: vec![],
-        contributors: vec![],
+        contributors: Default::default(),
         compaction: Arc::new(crate::turn::Breaker::default()),
-        compactor: None,
+        compactor: Default::default(),
         budget: crate::turn::TurnBudget::default(),
         env: Arc::new(Env {
             home: "/tmp".into(),
@@ -513,54 +518,6 @@ impl Hook for GatedHook {
             self.gate.notified().await;
             self.fired.store(true, std::sync::atomic::Ordering::SeqCst);
         }
-    }
-}
-
-/// A tool source a test fills after the fact, so a turn can see tools
-/// arrive (ADR-0009).
-#[derive(Default)]
-pub struct ScriptedToolSource {
-    tools: Mutex<Vec<Arc<dyn Tool>>>,
-}
-
-impl ScriptedToolSource {
-    pub fn new() -> Arc<Self> {
-        Arc::new(Self::default())
-    }
-
-    pub fn set(&self, tools: Vec<Arc<dyn Tool>>) {
-        *self.tools.lock().unwrap() = tools;
-    }
-}
-
-#[async_trait]
-impl ToolSource for ScriptedToolSource {
-    fn id(&self) -> &str {
-        "scripted"
-    }
-    async fn tools(&self) -> Vec<Arc<dyn Tool>> {
-        self.tools.lock().unwrap().clone()
-    }
-}
-
-/// A command source with a fixed table.
-pub struct ScriptedCommandSource {
-    commands: Vec<Arc<dyn Command>>,
-}
-
-impl ScriptedCommandSource {
-    pub fn new(commands: Vec<Arc<dyn Command>>) -> Arc<Self> {
-        Arc::new(Self { commands })
-    }
-}
-
-#[async_trait]
-impl CommandSource for ScriptedCommandSource {
-    fn id(&self) -> &str {
-        "scripted"
-    }
-    async fn commands(&self, _: &std::path::Path) -> Vec<Arc<dyn Command>> {
-        self.commands.clone()
     }
 }
 

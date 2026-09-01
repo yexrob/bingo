@@ -1,10 +1,13 @@
-//! The three methods and the two notifications a plugin process speaks
-//! (ADR-0015 §2): their names, and the shape of what goes in and comes back.
+//! The methods and the two notifications a plugin process speaks (ADR-0015 §2,
+//! ADR-0030 §6): their names, and the shape of what goes in and comes back.
 //!
 //! Every params and result type is an sdk type or a struct of sdk types. The
 //! bridge adds envelopes, never shapes: `ToolSpec`, `CommandSpec`,
-//! `ToolOutput`, `CommandOutcome` and `Completion` cross verbatim, so a plugin
-//! author writes against the kernel's own vocabulary.
+//! `ToolOutput`, `CommandOutcome`, `Completion`, `ContextPiece` and
+//! `Compaction` cross verbatim, so a plugin author writes against the kernel's
+//! own vocabulary. What a process may not hold — the host handle a
+//! `ContextQuery` carries, the provider a `CompactContext` carries — is left
+//! behind by a projection with a name of its own (ADR-0030 §5).
 //!
 //! `METHODS` and `NOTIFICATIONS` are the one table: the schema walks it, and
 //! the host and the example plugin both dispatch on the names in [`name`].
@@ -12,15 +15,19 @@
 use std::path::PathBuf;
 
 use bingo_sdk::{
-    CommandOutcome, CommandSpec, Completion, Env, SessionId, ToolOutput, ToolSpec, TurnId,
+    CommandOutcome, CommandSpec, CompactContext, CompactReason, Compaction, Completion,
+    ContextPiece, ContextQuery, ContextUsage, Env, Item, ModelCapabilities, Placement, SessionId,
+    SessionSummary, ToolOutput, ToolSpec, TurnId,
 };
 use schemars::{JsonSchema, Schema, SchemaGenerator};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// The major the host speaks. A process that answers with another one is
-/// refused rather than guessed at (ADR-0015 §Consequences).
-pub const PROTOCOL: u32 = 1;
+/// refused rather than guessed at (ADR-0015 §Consequences). Two since
+/// ADR-0030 opened context and compaction: a plugin written for one major
+/// says so and is refused, rather than being asked what it cannot answer.
+pub const PROTOCOL: u32 = 2;
 
 /// Every name that travels on the wire, in one place.
 pub mod name {
@@ -32,6 +39,10 @@ pub mod name {
     pub const COMMAND_RUN: &str = "command/run";
     /// Kernel → plugin: what could follow this `/name`'s partial argument.
     pub const COMMAND_COMPLETE: &str = "command/complete";
+    /// Kernel → plugin: what this contributor adds to the round in the query.
+    pub const CONTEXT_CONTRIBUTE: &str = "context/contribute";
+    /// Kernel → plugin: summarise this transcript.
+    pub const COMPACTOR_COMPACT: &str = "compactor/compact";
 
     /// Plugin → kernel: replace a running call's live output line.
     pub const TOOL_PROGRESS: &str = "tool/progress";
@@ -88,6 +99,32 @@ pub struct InitializeResult {
     pub tools: Vec<ToolSpec>,
     #[serde(default)]
     pub commands: Vec<CommandSpec>,
+    #[serde(default)]
+    pub contributors: Vec<ContributorSpec>,
+    #[serde(default)]
+    pub compactors: Vec<CompactorSpec>,
+}
+
+/// A contributor a process says it has. Placement is handshake data: which of
+/// the three moments this contributor speaks at is asked once, here, and never
+/// per call. A placement this host does not know refuses the handshake, in
+/// words, rather than being guessed at.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ContributorSpec {
+    /// The name this process knows the contributor by; `context/contribute`
+    /// carries it back. The kernel sees it prefixed by the plugin's own name.
+    pub id: String,
+    pub placement: Placement,
+}
+
+/// A compaction strategy a process says it has. One field, and the same shape
+/// as every other declaration: a plugin's answer to "what do you contribute"
+/// reads the same way whatever the kind.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct CompactorSpec {
+    pub id: String,
 }
 
 /// One call, named as the plugin named it — the `plugin__<name>__` prefix is
@@ -138,6 +175,103 @@ pub struct CommandCompleteParams {
 pub struct CommandCompleteResult {
     #[serde(default)]
     pub completions: Vec<Completion>,
+}
+
+/// One round, as a process that is not in the host can read it.
+///
+/// The serializable projection of the sdk's `ContextQuery` (ADR-0030 §5): the
+/// session, where it is and what it has said so far. The host handle the
+/// in-process query carries stays on this side — an external contributor
+/// reads the round, it does not reach the host.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ContributeQuery {
+    pub session: SessionSummary,
+    pub turn: TurnId,
+    pub round: u32,
+    #[serde(default)]
+    pub items: Vec<Item>,
+    pub usage: ContextUsage,
+    pub capabilities: ModelCapabilities,
+    pub cwd: PathBuf,
+}
+
+impl From<ContextQuery<'_>> for ContributeQuery {
+    fn from(query: ContextQuery<'_>) -> Self {
+        Self {
+            session: query.session.clone(),
+            turn: query.turn.clone(),
+            round: query.round,
+            items: query.items.to_vec(),
+            usage: *query.usage,
+            capabilities: query.capabilities.clone(),
+            cwd: query.cwd.to_path_buf(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ContextContributeParams {
+    /// Which of the contributors the handshake declared is being asked.
+    pub id: String,
+    pub query: ContributeQuery,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ContextContributeResult {
+    /// A contributor with nothing to add this round says so with an empty
+    /// list, which is never wrong.
+    #[serde(default)]
+    pub pieces: Vec<ContextPiece>,
+}
+
+/// What a compaction acts on, as a process that is not in the host can read
+/// it: the sdk's `CompactContext` without what cannot cross — the host's
+/// provider and the turn's cancellation token. A remote strategy summarises by
+/// its own means, or cuts by none.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct CompactorContext {
+    #[serde(default)]
+    pub items: Vec<Item>,
+    pub usage: ContextUsage,
+    pub capabilities: ModelCapabilities,
+    pub model: String,
+    /// Consecutive compactions the kernel discarded; at `BREAKER_TRIP` the
+    /// breaker is tripped and a strategy takes its rung that needs no model.
+    pub failures: u32,
+    /// Tokens of the newest items a cut should leave intact.
+    pub keep_budget: u64,
+}
+
+impl From<&CompactContext<'_>> for CompactorContext {
+    fn from(cx: &CompactContext<'_>) -> Self {
+        Self {
+            items: cx.items.to_vec(),
+            usage: cx.usage,
+            capabilities: cx.capabilities.clone(),
+            model: cx.model.to_string(),
+            failures: cx.failures,
+            keep_budget: cx.keep_budget,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct CompactorCompactParams {
+    /// Which of the compactors the handshake declared is being asked.
+    pub id: String,
+    pub context: CompactorContext,
+    pub reason: CompactReason,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct CompactorCompactResult {
+    pub compaction: Compaction,
 }
 
 /// Plugin → kernel, while a call runs: the whole of the live output line.
@@ -191,6 +325,16 @@ pub static METHODS: &[Method] = &[
         schema_of::<CommandCompleteParams>,
         schema_of::<CommandCompleteResult>,
     ),
+    (
+        name::CONTEXT_CONTRIBUTE,
+        schema_of::<ContextContributeParams>,
+        schema_of::<ContextContributeResult>,
+    ),
+    (
+        name::COMPACTOR_COMPACT,
+        schema_of::<CompactorCompactParams>,
+        schema_of::<CompactorCompactResult>,
+    ),
 ];
 
 pub static NOTIFICATIONS: &[Notification] = &[
@@ -202,12 +346,6 @@ pub static NOTIFICATIONS: &[Notification] = &[
 mod tests {
     use super::*;
     use serde_json::json;
-
-    #[test]
-    fn the_wire_has_four_methods_and_two_notifications() {
-        assert_eq!(METHODS.len(), 4, "ADR-0015 §3 fixes the method count");
-        assert_eq!(NOTIFICATIONS.len(), 2);
-    }
 
     #[test]
     fn no_name_is_used_twice() {
@@ -276,5 +414,170 @@ mod tests {
         let wire = serde_json::to_value(&result).expect("an outcome serialises");
         assert_eq!(wire["outcome"]["kind"], json!("applied"));
         assert_eq!(wire["outcome"]["message"], json!("counted"));
+    }
+
+    // ------------------------------------------- context and compaction
+
+    fn summary() -> SessionSummary {
+        serde_json::from_value(json!({
+            "id": "ses_1",
+            "cwd": "/work",
+            "createdAt": "2026-01-01T00:00:00Z",
+            "updatedAt": "2026-01-01T00:00:00Z",
+        }))
+        .expect("a session summary")
+    }
+
+    fn capabilities() -> ModelCapabilities {
+        ModelCapabilities {
+            context_window: 200_000,
+            max_output: 8_000,
+            images: false,
+            reasoning: false,
+            count_tokens: false,
+            caching: false,
+        }
+    }
+
+    fn usage() -> ContextUsage {
+        ContextUsage {
+            used: 100,
+            window: 1_000,
+            trigger: 800,
+        }
+    }
+
+    /// The one thing a projection is for: an external contributor reads the
+    /// round, and reaches nothing (ADR-0030 §5).
+    #[test]
+    fn the_round_crosses_without_the_host_the_query_carries() {
+        let (session, turn, host) = (
+            summary(),
+            TurnId::from_raw("trn_1"),
+            bingo_sdk::testing::NoHost::handle(),
+        );
+        let query = ContributeQuery::from(ContextQuery {
+            session: &session,
+            host: &host,
+            turn: &turn,
+            round: 2,
+            items: &[],
+            usage: &usage(),
+            capabilities: &capabilities(),
+            cwd: std::path::Path::new("/work"),
+        });
+        let wire = serde_json::to_value(&query).expect("a round serialises");
+        assert!(wire.get("host").is_none(), "{wire}");
+        assert_eq!(wire["session"]["id"], json!("ses_1"));
+        assert_eq!(wire["round"], json!(2));
+        assert_eq!(wire["usage"]["window"], json!(1_000));
+        assert_eq!(wire["capabilities"]["contextWindow"], json!(200_000));
+        assert_eq!(
+            serde_json::from_value::<ContributeQuery>(wire).expect("and parses"),
+            query
+        );
+    }
+
+    #[test]
+    fn a_declared_contributor_carries_the_placement_it_speaks_at() {
+        let spec: ContributorSpec = serde_json::from_value(json!({
+            "id": "notes",
+            "placement": { "kind": "system", "order": 10 }
+        }))
+        .expect("a contributor declaration");
+        assert_eq!(spec.placement, Placement::System { order: 10 });
+        let round: ContributorSpec = serde_json::from_value(json!({
+            "id": "inbox",
+            "placement": { "kind": "roundStart" }
+        }))
+        .expect("a contributor declaration");
+        assert_eq!(round.placement, Placement::RoundStart);
+    }
+
+    #[test]
+    fn a_placement_this_host_does_not_know_is_refused_in_words() {
+        let why = serde_json::from_value::<ContributorSpec>(json!({
+            "id": "notes",
+            "placement": { "kind": "whenever" }
+        }))
+        .expect_err("there are three placements and no others")
+        .to_string();
+        assert!(why.contains("whenever"), "{why}");
+    }
+
+    #[test]
+    fn a_piece_crosses_as_the_sdk_writes_it() {
+        let result = ContextContributeResult {
+            pieces: vec![ContextPiece::User {
+                parts: vec![bingo_sdk::ContentPart::text("three notes")],
+                label: "notes".into(),
+            }],
+        };
+        let wire = serde_json::to_value(&result).expect("a piece serialises");
+        assert_eq!(wire["pieces"][0]["kind"], json!("user"));
+        assert_eq!(wire["pieces"][0]["parts"][0]["text"], json!("three notes"));
+        assert_eq!(
+            serde_json::from_value::<ContextContributeResult>(wire).expect("and parses"),
+            result
+        );
+    }
+
+    /// A contributor with nothing to add answers with nothing, which is never
+    /// wrong (ADR-0009 §1).
+    #[test]
+    fn a_contributor_may_answer_with_no_pieces_at_all() {
+        let result: ContextContributeResult =
+            serde_json::from_value(json!({})).expect("an empty answer");
+        assert!(result.pieces.is_empty());
+    }
+
+    #[test]
+    fn a_compaction_is_asked_for_with_the_reason_the_trait_speaks() {
+        let params = CompactorCompactParams {
+            id: "cut".into(),
+            context: CompactorContext {
+                items: Vec::new(),
+                usage: usage(),
+                capabilities: capabilities(),
+                model: "m".into(),
+                failures: 1,
+                keep_budget: 250,
+            },
+            reason: CompactReason::Overflow {
+                message: "too long".into(),
+            },
+        };
+        let wire = serde_json::to_value(&params).expect("a compaction request serialises");
+        assert_eq!(wire["context"]["keepBudget"], json!(250));
+        assert_eq!(wire["reason"]["kind"], json!("overflow"));
+        assert_eq!(wire["reason"]["message"], json!("too long"));
+        assert!(
+            wire["context"].get("provider").is_none(),
+            "the provider stays on this side: {wire}"
+        );
+        assert_eq!(
+            serde_json::from_value::<CompactorCompactParams>(wire).expect("and parses"),
+            params
+        );
+    }
+
+    #[test]
+    fn a_compaction_comes_back_as_the_sdk_writes_it() {
+        let result: CompactorCompactResult = serde_json::from_value(json!({
+            "compaction": {
+                "summary": "what happened",
+                "boundary": "itm_7",
+                "before": 900,
+                "after": 300,
+            }
+        }))
+        .expect("a compaction");
+        assert_eq!(result.compaction.boundary.as_str(), "itm_7");
+        assert!(result.compaction.kept.is_empty());
+        assert_eq!(
+            result.compaction.usage,
+            bingo_sdk::Usage::default(),
+            "a strategy that spends nothing says nothing"
+        );
     }
 }

@@ -39,11 +39,14 @@ write your own. In short:
   and stdout. Stdout carries messages and nothing else; stderr goes to
   `<data_dir>/logs/plugin-wordcount.log`.
 - **The handshake** is `initialize {protocol, pluginRoot, config, env}`, and
-  the answer is `{protocol, name, version, tools, commands}`. A `protocol`
-  the host does not speak is refused rather than guessed at.
+  the answer is `{protocol, name, version, tools, commands, contributors,
+  compactors}`. A `protocol` the host does not speak is refused rather than
+  guessed at; declare only the kinds you have, and leave the rest out.
 - **Calls** are `tool/call {callId, name, input, cwd, session, turn}` →
-  `{output}`, `command/run {name, args, cwd, session}` → `{outcome}`, and
-  `command/complete {name, partial, cwd}` → `{completions}`.
+  `{output}`, `command/run {name, args, cwd, session}` → `{outcome}`,
+  `command/complete {name, partial, cwd}` → `{completions}`,
+  `context/contribute {id, query}` → `{pieces}` and
+  `compactor/compact {id, context, reason}` → `{compaction}`.
 - **Notifications**: the plugin may send `tool/progress {callId, tail}` while a
   call runs — it becomes that call's live output line — and the host sends
   `tool/cancel {callId}` when the turn is interrupted. The host still waits for
@@ -55,6 +58,7 @@ drawn by every surface — the table this plugin answers with is one `View`.
 
 ## What is not here
 
-A plugin contributes tools and commands and nothing else in v1. Hooks,
-context contributors, providers, surfaces and stores stay in-process; each
-later kind needs its own line in ADR-0015.
+This plugin ships a tool and a command; the wire also carries context
+contributors and compaction strategies (ADR-0030), each declared at the
+handshake and asked by id. Hooks, policies, surfaces and stores stay
+in-process — the authority plane is not the bridge's to cross.

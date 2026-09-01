@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::{Arc, OnceLock};
 
-use bingo_sdk::{Command, Env, Tool};
+use bingo_sdk::{Command, Compactor, ContextContributor, Env, Tool};
 use serde_json::Value;
 
 use crate::bridge::Bridge;
@@ -89,6 +89,22 @@ impl Manager {
         commands
     }
 
+    pub async fn contributors(&self) -> Vec<Arc<dyn ContextContributor>> {
+        let mut contributors = Vec::new();
+        for bridge in self.bridges() {
+            contributors.extend(bridge.contributors().await);
+        }
+        contributors
+    }
+
+    pub async fn compactors(&self) -> Vec<Arc<dyn Compactor>> {
+        let mut compactors = Vec::new();
+        for bridge in self.bridges() {
+            compactors.extend(bridge.compactors().await);
+        }
+        compactors
+    }
+
     pub async fn shutdown(&self) {
         for bridge in self.bridges() {
             bridge.stop().await;
@@ -122,6 +138,8 @@ mod tests {
         let manager = Manager::new(Env::rooted("/nowhere"), BTreeMap::new());
         assert!(manager.tools().await.is_empty());
         assert!(manager.commands().await.is_empty());
+        assert!(manager.contributors().await.is_empty());
+        assert!(manager.compactors().await.is_empty());
         assert!(manager.names().is_empty());
         manager.shutdown().await;
     }

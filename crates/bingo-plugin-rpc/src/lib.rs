@@ -7,10 +7,11 @@
 //! contract written down, generated from [`wire`] and [`manifest`] — a plugin
 //! author who cannot read Rust reads that file and nothing else.
 //!
-//! Registration is synchronous and does no I/O, so the plugin contributes a
-//! [`ToolSource`] and a [`CommandSource`] rather than tools and commands
-//! (ADR-0009 §1); `start` reads the two layers and shakes hands with what it
-//! finds. With nothing discovered the whole crate is inert.
+//! Registration is synchronous and does no I/O, so the plugin contributes one
+//! source per kind — tools, commands, contributors, compaction strategies —
+//! rather than the things themselves (ADR-0009 §1, ADR-0030 §2); `start` reads
+//! the two layers and shakes hands with what it finds. With nothing discovered
+//! the whole crate is inert.
 //!
 //! Nothing a process says about itself is believed: a bridge tool's traits are
 //! the fail-closed default, so the gate asks about every call (ADR-0015 §4).
@@ -18,9 +19,12 @@
 pub mod bridge;
 pub mod codec;
 pub mod command;
+pub mod compactor;
 pub mod completions;
 pub mod config;
 pub mod connection;
+pub mod contributor;
+pub mod deadline;
 pub mod discovery;
 pub mod manager;
 pub mod manifest;
@@ -30,21 +34,26 @@ pub mod source;
 pub mod tool;
 pub mod wire;
 
+#[cfg(test)]
+mod testing;
+
 use std::sync::{Arc, OnceLock};
 
 use async_trait::async_trait;
 use bingo_sdk::{
-    CommandSource, ConfigClaim, Contribution, HostHandle, Merge, Plugin, PluginError,
-    PluginManifest, Registrar, ToolSource,
+    CommandSource, CompactorSource, ConfigClaim, ContextSource, Contribution, HostHandle, Merge,
+    Plugin, PluginError, PluginManifest, Registrar, ToolSource,
 };
 
 pub use bridge::Bridge;
 pub use command::PluginCommand;
+pub use compactor::RemoteCompactor;
 pub use config::Settings;
 pub use connection::{Connection, log_path};
+pub use contributor::{RemoteContributor, contributor_id};
 pub use manager::Manager;
 pub use manifest::{Entry, Manifest};
-pub use source::{ID, PluginCommands, PluginTools};
+pub use source::{ID, PluginCommands, PluginCompactors, PluginContributors, PluginTools};
 pub use tool::{PluginTool, tool_name};
 pub use wire::PROTOCOL;
 
@@ -52,7 +61,12 @@ static MANIFEST: PluginManifest = PluginManifest {
     id: "bingo.plugin-rpc",
     version: env!("CARGO_PKG_VERSION"),
     sdk: "^0.1",
-    provides: &["tools:plugin-rpc", "commands:plugin-rpc"],
+    provides: &[
+        "tools:plugin-rpc",
+        "commands:plugin-rpc",
+        "context:plugin-rpc",
+        "compactor:plugin-rpc",
+    ],
     requires: &[],
     config: Some(ConfigClaim {
         keys: &[("plugins", Merge::ByName)],
@@ -86,6 +100,12 @@ impl Plugin for PluginRpcPlugin {
         ));
         registrar.add(Contribution::Commands(
             Arc::new(PluginCommands::new(Arc::clone(&manager))) as Arc<dyn CommandSource>,
+        ));
+        registrar.add(Contribution::Contexts(
+            Arc::new(PluginContributors::new(Arc::clone(&manager))) as Arc<dyn ContextSource>,
+        ));
+        registrar.add(Contribution::Compactors(
+            Arc::new(PluginCompactors::new(Arc::clone(&manager))) as Arc<dyn CompactorSource>,
         ));
         self.manager
             .set(manager)
@@ -134,28 +154,37 @@ mod tests {
         assert_eq!(MANIFEST.id, "bingo.plugin-rpc");
         assert_eq!(
             MANIFEST.provides,
-            ["tools:plugin-rpc", "commands:plugin-rpc"]
+            [
+                "tools:plugin-rpc",
+                "commands:plugin-rpc",
+                "context:plugin-rpc",
+                "compactor:plugin-rpc"
+            ]
         );
         assert!(MANIFEST.requires.is_empty());
         let claim = MANIFEST.config.expect("a config claim");
         assert_eq!(claim.keys, [("plugins", Merge::ByName)]);
     }
 
+    /// One source per kind the bridge opens, all answering to the same id:
+    /// registration is synchronous and knows nothing yet (ADR-0009 §1).
     #[test]
-    fn the_plugin_registers_one_tool_source_and_one_command_source() {
+    fn the_plugin_registers_one_source_of_every_kind_it_bridges() {
         let mut registrar = registrar(json!({ "plugins": { "wordcount": {} } }));
         PluginRpcPlugin::default()
             .register(&mut registrar)
             .expect("register");
         let contributions = registrar.into_contributions();
-        assert_eq!(contributions.len(), 2);
-        match &contributions[0] {
-            Contribution::Tools(source) => assert_eq!(source.id(), ID),
-            other => panic!("expected a tool source, got {other:?}"),
-        }
-        match &contributions[1] {
-            Contribution::Commands(source) => assert_eq!(source.id(), ID),
-            other => panic!("expected a command source, got {other:?}"),
+        assert_eq!(contributions.len(), 4);
+        for contribution in &contributions {
+            let id = match contribution {
+                Contribution::Tools(source) => source.id(),
+                Contribution::Commands(source) => source.id(),
+                Contribution::Contexts(source) => source.id(),
+                Contribution::Compactors(source) => source.id(),
+                other => panic!("expected a source, got {other:?}"),
+            };
+            assert_eq!(id, ID);
         }
     }
 

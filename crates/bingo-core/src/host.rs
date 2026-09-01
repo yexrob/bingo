@@ -29,7 +29,7 @@ use crate::models::{self, Learned, ModelCatalog};
 use crate::prompt::{self, PromptInput};
 use crate::session::{self, Mailbox};
 use crate::settings::{self, Claim, Layer, Merged, SettingsError};
-use crate::turn::{ModelChoice, ToolSet, TurnBudget, TurnConfig};
+use crate::turn::{CompactorSet, ContributorSet, ModelChoice, ToolSet, TurnBudget, TurnConfig};
 
 /// Gateway events buffered per subscriber before the oldest is dropped.
 const GATEWAY_CAPACITY: usize = 64;
@@ -578,9 +578,15 @@ impl Host {
                 .clone()
                 .unwrap_or_else(|| Arc::new(DefaultPolicy)),
             hooks: self.registry.hooks.clone(),
-            contributors: self.registry.contributors.clone(),
+            contributors: ContributorSet {
+                fixed: self.registry.contributors.clone(),
+                sources: self.registry.context_sources.clone(),
+            },
             compaction: Arc::new(crate::turn::Breaker::default()),
-            compactor: self.registry.compactor.clone(),
+            compactor: CompactorSet {
+                fixed: self.registry.compactor.clone(),
+                sources: self.registry.compactor_sources.clone(),
+            },
             budget: self.config.budget,
             env: Arc::new(self.config.env.clone()),
             host: self.handle(),
