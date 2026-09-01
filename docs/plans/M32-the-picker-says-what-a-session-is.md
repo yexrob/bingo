@@ -91,6 +91,15 @@ with a test where a title arrives after the first prose. R-truncate
 
 ## Verified
 
+Integrated on main at `3a1d6a9` (2026-09-01): every gate green. The
+first integrated run's one red was a single bingo-core lib test at
+the moment an external load spike crested 83 — the run's own grep
+discarded the name, a gate-template debt now fixed by capturing the
+`failures:` block. The target is green solo at load 69 (204/204,
+twice), and the settling full rerun is green whole: 69 targets, 0
+failures on `--no-fail-fast`, load 54→26. Recorded as machine-load
+flake, not regression. Budget 302, deny ok.
+
 ```
 $ cargo fmt --all -- --check
 fmt: clean
