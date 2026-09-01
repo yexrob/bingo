@@ -7,8 +7,10 @@
 //! One tool, `echo`, whose input says what it should do: answer, send progress
 //! first, read an environment variable, wait for a `tool/cancel`, or end the
 //! process without answering at all — which is what a killed plugin looks like
-//! from the host's side. One command, `stub`. `--protocol N` answers the
-//! handshake with a major this host does not speak.
+//! from the host's side. One command, `stub`, one contributor, `notes`, and
+//! one compaction strategy, `cut`. `--protocol N` answers the handshake with a
+//! major this host does not speak; `--placement <kind>` declares a placement
+//! that may not be one.
 
 use std::io::{BufRead, Write};
 use std::process::ExitCode;
@@ -18,45 +20,64 @@ use bingo_plugin_rpc::codec::{
 };
 use bingo_plugin_rpc::wire::{
     CommandCompleteParams, CommandCompleteResult, CommandRunParams, CommandRunResult,
-    InitializeResult, PROTOCOL, ToolCallParams, ToolCallResult, ToolCancelParams,
-    ToolProgressParams, name,
+    CompactorCompactParams, CompactorCompactResult, CompactorSpec, ContextContributeParams,
+    ContextContributeResult, ContributorSpec, InitializeResult, PROTOCOL, ToolCallParams,
+    ToolCallResult, ToolCancelParams, ToolProgressParams, name,
 };
-use bingo_sdk::{ArgSpec, CommandOutcome, CommandSpec, Completion, ToolOutput, ToolSpec};
+use bingo_sdk::{
+    ArgSpec, CommandOutcome, CommandSpec, CompactReason, Compaction, Completion, ContentPart,
+    ContextPiece, ItemId, Placement, ToolOutput, ToolSpec, Usage,
+};
 use serde_json::{Value, json};
 
 /// Calls waiting for a `tool/cancel` before they answer.
 type Held = Vec<(String, i64)>;
 
+/// What this run of the stub says about itself.
+struct Options {
+    protocol: u32,
+    /// The placement the contributor is declared with, as it is written on
+    /// the wire; a kind that is not one is refused by the host in words.
+    placement: Value,
+}
+
 fn main() -> ExitCode {
-    let protocol = protocol();
+    let options = options();
     let mut held: Held = Vec::new();
     let stdin = std::io::stdin();
     for line in stdin.lock().lines() {
         let Ok(line) = line else {
             break;
         };
-        if !serve(&line, protocol, &mut held) {
+        if !serve(&line, &options, &mut held) {
             break;
         }
     }
     ExitCode::SUCCESS
 }
 
-/// `--protocol N`, for the handshake this host must refuse.
-fn protocol() -> u32 {
+/// `--protocol N` for the handshake this host must refuse, `--placement kind`
+/// for the declaration it must refuse.
+fn options() -> Options {
+    let mut options = Options {
+        protocol: PROTOCOL,
+        placement: json!({ "kind": "roundStart" }),
+    };
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
-        if arg == "--protocol" {
-            return args.next().and_then(|n| n.parse().ok()).unwrap_or(PROTOCOL);
+        match (arg.as_str(), args.next()) {
+            ("--protocol", Some(n)) => options.protocol = n.parse().unwrap_or(PROTOCOL),
+            ("--placement", Some(kind)) => options.placement = json!({ "kind": kind }),
+            _ => {}
         }
     }
-    PROTOCOL
+    options
 }
 
 /// Whether to keep reading.
-fn serve(line: &str, protocol: u32, held: &mut Held) -> bool {
+fn serve(line: &str, options: &Options, held: &mut Held) -> bool {
     match serde_json::from_str::<Message>(line) {
-        Ok(Message::Request(request)) => request_line(request, protocol, held),
+        Ok(Message::Request(request)) => request_line(request, options, held),
         Ok(Message::Notification(notification)) => {
             cancel(&notification.params, held);
             true
@@ -65,12 +86,14 @@ fn serve(line: &str, protocol: u32, held: &mut Held) -> bool {
     }
 }
 
-fn request_line(request: Request, protocol: u32, held: &mut Held) -> bool {
+fn request_line(request: Request, options: &Options, held: &mut Held) -> bool {
     match request.method.as_str() {
-        name::INITIALIZE => answer(request.id, handshake(protocol)),
+        name::INITIALIZE => answer(request.id, handshake(options)),
         name::TOOL_CALL => return call(request.id, request.params, held),
         name::COMMAND_RUN => answer(request.id, run(request.params)),
         name::COMMAND_COMPLETE => answer(request.id, complete(request.params)),
+        name::CONTEXT_CONTRIBUTE => answer(request.id, contribute(request.params)),
+        name::COMPACTOR_COMPACT => answer(request.id, compact(request.params)),
         other => fail(
             request.id,
             RpcError::new(METHOD_NOT_FOUND, format!("no such method: {other}")),
@@ -79,9 +102,9 @@ fn request_line(request: Request, protocol: u32, held: &mut Held) -> bool {
     true
 }
 
-fn handshake(protocol: u32) -> Value {
+fn handshake(options: &Options) -> Value {
     let result = InitializeResult {
-        protocol,
+        protocol: options.protocol,
         name: "stub".into(),
         version: "0.1.0".into(),
         tools: vec![ToolSpec {
@@ -103,10 +126,71 @@ fn handshake(protocol: u32) -> Value {
             instant: true,
             family: "plugin".into(),
         }],
-        contributors: Vec::new(),
-        compactors: Vec::new(),
+        contributors: vec![ContributorSpec {
+            id: "notes".into(),
+            placement: Placement::RoundStart,
+        }],
+        compactors: vec![CompactorSpec { id: "cut".into() }],
     };
-    serde_json::to_value(result).unwrap_or(Value::Null)
+    let mut declared = serde_json::to_value(result).unwrap_or(Value::Null);
+    // Written last, over the typed one: the point of `--placement` is to say
+    // what this crate's own types cannot.
+    declared["contributors"][0]["placement"] = options.placement.clone();
+    declared
+}
+
+/// `notes`: one user piece that says what the round it was asked about held,
+/// so a test can see the query's projection arrive whole.
+fn contribute(params: Value) -> Value {
+    let Ok(params) = serde_json::from_value::<ContextContributeParams>(params) else {
+        return Value::Null;
+    };
+    let said = format!(
+        "{}: round {} of {} with {} items",
+        params.id,
+        params.query.round,
+        params.query.session.id,
+        params.query.items.len()
+    );
+    serde_json::to_value(ContextContributeResult {
+        pieces: vec![ContextPiece::User {
+            parts: vec![ContentPart::text(said)],
+            label: params.id,
+        }],
+    })
+    .unwrap_or(Value::Null)
+}
+
+/// `cut`: a compaction that keeps nothing and claims to halve the context.
+fn compact(params: Value) -> Value {
+    let Ok(params) = serde_json::from_value::<CompactorCompactParams>(params) else {
+        return Value::Null;
+    };
+    let used = params.context.usage.used;
+    serde_json::to_value(CompactorCompactResult {
+        compaction: Compaction {
+            summary: format!("{} cut on {}", params.id, why(&params.reason)),
+            boundary: params
+                .context
+                .items
+                .first()
+                .map(|item| item.id.clone())
+                .unwrap_or_else(|| ItemId::from_raw("itm_none")),
+            kept: Vec::new(),
+            before: used,
+            after: used / 2,
+            usage: Usage::default(),
+        },
+    })
+    .unwrap_or(Value::Null)
+}
+
+fn why(reason: &CompactReason) -> &'static str {
+    match reason {
+        CompactReason::Threshold => "threshold",
+        CompactReason::Overflow { .. } => "overflow",
+        CompactReason::Manual { .. } => "request",
+    }
 }
 
 /// Whether to keep reading: an input of `{"die": true}` ends the process
