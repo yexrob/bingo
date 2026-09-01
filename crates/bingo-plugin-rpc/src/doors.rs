@@ -249,16 +249,23 @@ fn only_a_question(question: InteractionKind) -> Result<InteractionKind, Service
 }
 
 /// The answers the kernel will accept, read off the question rather than
-/// stated a second time beside it. Text is always one of them: a question
-/// nobody can answer in their own words is a question with no way out.
+/// stated a second time beside it: options make a choice answerable, and
+/// `freeText` asks for words. A question that offers neither is answerable in
+/// words anyway — one with no way out is not a question.
 fn answers(question: &InteractionKind) -> Vec<AnswerSpec> {
+    let InteractionKind::Question {
+        options, free_text, ..
+    } = question
+    else {
+        return vec![AnswerSpec::Cancel];
+    };
     let mut specs = Vec::new();
-    if let InteractionKind::Question { options, .. } = question
-        && !options.is_empty()
-    {
+    if !options.is_empty() {
         specs.push(AnswerSpec::Choice);
     }
-    specs.push(AnswerSpec::Text);
+    if *free_text || options.is_empty() {
+        specs.push(AnswerSpec::Text);
+    }
     specs.push(AnswerSpec::Cancel);
     specs
 }
@@ -436,12 +443,22 @@ mod tests {
     fn the_answers_a_question_takes_are_read_off_the_question() {
         let with: InteractionKind =
             serde_json::from_value(question(&["main", "next"])).expect("a question");
+        assert_eq!(answers(&with), [AnswerSpec::Choice, AnswerSpec::Cancel]);
+
+        let mut asked = question(&["main"]);
+        asked["freeText"] = json!(true);
+        let worded: InteractionKind = serde_json::from_value(asked).expect("a question");
         assert_eq!(
-            answers(&with),
+            answers(&worded),
             [AnswerSpec::Choice, AnswerSpec::Text, AnswerSpec::Cancel]
         );
+
         let without: InteractionKind = serde_json::from_value(question(&[])).expect("a question");
-        assert_eq!(answers(&without), [AnswerSpec::Text, AnswerSpec::Cancel]);
+        assert_eq!(
+            answers(&without),
+            [AnswerSpec::Text, AnswerSpec::Cancel],
+            "a question that offers nothing is still answerable"
+        );
     }
 
     /// The unscoped door: no call, no crossing, nothing minted — and the line
