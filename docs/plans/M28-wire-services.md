@@ -92,6 +92,17 @@ constant, build no cycle detector without evidence.
 
 ## Verified
 
+Integrated on main at `aceaa4a` (2026-09-01): the first run had three
+`bingo-auth-oauth` `source::tests` failures with the 1-minute load at
+39–47 — a crate this milestone never touched, green on the worker's
+tree and green again on a full `--no-fail-fast` rerun at load 39
+(69 targets, 0 failed). Recorded as a load-sensitive timing family
+(device-flow polling) beside the TUI wall-clock tests; not a
+regression. All other gates green on the first run: fmt / check /
+clippy, discipline, budget 302, deny.
+
+Worker run:
+
 ```
 $ cargo fmt --all -- --check
 $ cargo check --workspace --all-targets --locked
