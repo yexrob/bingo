@@ -9,8 +9,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use bingo_plugin_rpc::Manager;
 use bingo_sdk::{
-    Answer, AnswerSpec, CancellationToken, Env, InteractionKind, ItemBody, ItemId, KernelError,
-    Prompter, SessionId, Tool, ToolContext, ToolError, ToolHost, ToolOutput, TurnId,
+    Answer, AnswerSpec, CancellationToken, Env, HostHandle, InteractionKind, ItemBody, ItemId,
+    KernelError, Prompter, SessionId, Tool, ToolContext, ToolError, ToolHost, ToolOutput, TurnId,
 };
 use serde_json::{Value, json};
 
@@ -30,31 +30,55 @@ pub fn stub_plugin() -> PathBuf {
     stub
 }
 
-/// A home whose `<config_dir>/plugins/stub` holds a manifest for the example.
-pub fn installed(args: &[&str]) -> tempfile::TempDir {
+/// A home whose `<config_dir>/plugins/<name>` holds a manifest for the
+/// example, once per plugin named, each run with its own arguments.
+pub fn installed(plugins: &[(&str, &[&str])]) -> tempfile::TempDir {
     let home = tempfile::tempdir().expect("a home");
-    let root = home.path().join(".bingo/plugins/stub");
-    std::fs::create_dir_all(&root).expect("a plugin directory");
-    let manifest = json!({
-        "name": "stub",
-        "version": "0.1.0",
-        "entry": {
-            "command": stub_plugin().display().to_string(),
-            "args": args,
-            "env": { "PLUGIN_HOME": "${PLUGIN_ROOT}" }
-        }
-    });
-    std::fs::write(root.join("plugin.json"), manifest.to_string()).expect("a manifest");
+    for (name, args) in plugins {
+        let root = home.path().join(".bingo/plugins").join(name);
+        std::fs::create_dir_all(&root).expect("a plugin directory");
+        let manifest = json!({
+            "name": name,
+            "version": "0.1.0",
+            "entry": {
+                "command": stub_plugin().display().to_string(),
+                "args": args,
+                "env": { "PLUGIN_HOME": "${PLUGIN_ROOT}" }
+            }
+        });
+        std::fs::write(root.join("plugin.json"), manifest.to_string()).expect("a manifest");
+    }
     home
 }
 
-/// A manager over that home, started, with an empty project beside it.
-pub async fn started(args: &[&str]) -> (Arc<Manager>, tempfile::TempDir, tempfile::TempDir) {
-    let home = installed(args);
+/// A started manager, the host its plugins reach, and the directories both
+/// live in — held so they outlive the test.
+pub struct Started {
+    pub manager: Arc<Manager>,
+    pub host: HostHandle,
+    pub home: tempfile::TempDir,
+    pub project: tempfile::TempDir,
+}
+
+/// Those plugins, started over a host that keeps whatever services they open.
+pub async fn started_with(plugins: &[(&str, &[&str])]) -> Started {
+    let home = installed(plugins);
     let project = tempfile::tempdir().expect("a project");
     let manager = Arc::new(Manager::new(Env::rooted(home.path()), BTreeMap::new()));
-    manager.start(project.path()).await;
-    (manager, home, project)
+    let host = bingo_sdk::testing::ServiceHost::handle();
+    manager.start(project.path(), host.clone()).await;
+    Started {
+        manager,
+        host,
+        home,
+        project,
+    }
+}
+
+/// The one stub, started, with a project beside it.
+pub async fn started(args: &[&str]) -> (Arc<Manager>, tempfile::TempDir, tempfile::TempDir) {
+    let started = started_with(&[("stub", args)]).await;
+    (started.manager, started.home, started.project)
 }
 
 pub async fn only_tool(manager: &Manager) -> Arc<dyn Tool> {

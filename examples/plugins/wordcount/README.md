@@ -47,6 +47,11 @@ write your own. In short:
   `command/complete {name, partial, cwd}` → `{completions}`,
   `context/contribute {id, query}` → `{pieces}` and
   `compactor/compact {id, context, reason}` → `{compaction}`.
+- **Services** are the one method that travels both ways: `service/call
+  {key, method, params}` → `{result}`. Declare `services: {"<key>":
+  {"methods": {"<name>": <schema>}}}` in the handshake to serve one, and send
+  the same request to the host to call anybody's — the host routes it, so two
+  plugins pair without knowing of each other.
 - **Notifications**: the plugin may send `tool/progress {callId, tail}` while a
   call runs — it becomes that call's live output line — and the host sends
   `tool/cancel {callId}` when the turn is interrupted. The host still waits for

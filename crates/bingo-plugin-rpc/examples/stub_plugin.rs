@@ -6,27 +6,31 @@
 //!
 //! One tool, `echo`, whose input says what it should do: answer, send progress
 //! first, read an environment variable, wait for a `tool/cancel`, say which
-//! streams have been cancelled, or end the process without answering at all —
-//! which is what a killed plugin looks like from the host's side. One command,
-//! `stub`, one contributor, `notes`, one compaction strategy, `cut`, and one
-//! provider, `stub`, serving `stub-1`: what it streams is decided by the last
-//! user text in the request, so a test scripts a model by writing to it.
+//! streams have been cancelled, ask the host for a service call, or end the
+//! process without answering at all — which is what a killed plugin looks like
+//! from the host's side. One command, `stub`, one contributor, `notes`, one
+//! compaction strategy, `cut`, and one provider, `stub`, serving `stub-1`:
+//! what it streams is decided by the last user text in the request, so a test
+//! scripts a model by writing to it. One service, `kv`, speaking `set` and
+//! `get` over a map this process keeps, so two of these pair through the host.
 //! `--protocol N` answers the handshake with a major this host does not speak;
-//! `--placement <kind>` declares a placement that may not be one.
+//! `--placement <kind>` declares a placement that may not be one;
+//! `--no-service` declares no service at all, which is what a caller is.
 
 use std::collections::BTreeMap;
 use std::io::{BufRead, Write};
 use std::process::ExitCode;
 
 use bingo_plugin_rpc::codec::{
-    INVALID_PARAMS, METHOD_NOT_FOUND, Message, Request, Response, RpcError,
+    INVALID_PARAMS, METHOD_NOT_FOUND, Message, Outcome, Request, Response, RpcError,
 };
 use bingo_plugin_rpc::wire::{
     CommandCompleteParams, CommandCompleteResult, CommandRunParams, CommandRunResult,
     CompactorCompactParams, CompactorCompactResult, CompactorSpec, ContextContributeParams,
     ContextContributeResult, ContributorSpec, InitializeResult, PROTOCOL, ProviderCancelParams,
-    ProviderDeltaParams, ProviderSpec, ProviderStreamParams, ProviderStreamResult, ToolCallParams,
-    ToolCallResult, ToolCancelParams, ToolProgressParams, name,
+    ProviderDeltaParams, ProviderSpec, ProviderStreamParams, ProviderStreamResult,
+    ServiceCallParams, ServiceCallResult, ServiceSpec, ToolCallParams, ToolCallResult,
+    ToolCancelParams, ToolProgressParams, name,
 };
 use bingo_sdk::{
     ArgSpec, CommandOutcome, CommandSpec, CompactReason, Compaction, Completion, ContentPart,
@@ -35,14 +39,30 @@ use bingo_sdk::{
 };
 use serde_json::{Value, json};
 
-/// Calls and streams waiting for a cancel before they answer, and the streams
-/// that were cancelled — which the `echo` tool reads out, so a test can see
-/// that a cancel crossed the pipe at all.
+/// Everything this run of the stub is holding: calls and streams waiting for
+/// a cancel before they answer, the streams that were cancelled — which the
+/// `echo` tool reads out, so a test can see that a cancel crossed the pipe at
+/// all — the little map the `kv` service keeps, and the ids this process
+/// mints for the requests it sends the host.
 #[derive(Default)]
-struct Waiting {
+struct State {
     calls: Vec<(String, i64)>,
     streams: Vec<(String, i64)>,
     cancelled: Vec<String>,
+    store: BTreeMap<String, String>,
+    /// Service calls this process asked the host for, each with the tool call
+    /// that is waiting to say what came back.
+    pending: Vec<(i64, i64)>,
+    asked: i64,
+}
+
+impl State {
+    /// This process's own request ids. The host's ids are its own; a response
+    /// is told from a request by its shape, never by the number.
+    fn next_id(&mut self) -> i64 {
+        self.asked += 1;
+        self.asked
+    }
 }
 
 /// What this run of the stub says about itself.
@@ -51,17 +71,20 @@ struct Options {
     /// The placement the contributor is declared with, as it is written on
     /// the wire; a kind that is not one is refused by the host in words.
     placement: Value,
+    /// Whether it declares the `kv` service. A caller declares none: one key
+    /// has one owner, and the second to claim it is refused.
+    serves: bool,
 }
 
 fn main() -> ExitCode {
     let options = options();
-    let mut waiting = Waiting::default();
+    let mut state = State::default();
     let stdin = std::io::stdin();
     for line in stdin.lock().lines() {
         let Ok(line) = line else {
             break;
         };
-        if !serve(&line, &options, &mut waiting) {
+        if !serve(&line, &options, &mut state) {
             break;
         }
     }
@@ -69,13 +92,18 @@ fn main() -> ExitCode {
 }
 
 /// `--protocol N` for the handshake this host must refuse, `--placement kind`
-/// for the declaration it must refuse.
+/// for the declaration it must refuse, `--no-service` for a run that serves
+/// nothing and only calls.
 fn options() -> Options {
     let mut options = Options {
         protocol: PROTOCOL,
         placement: json!({ "kind": "roundStart" }),
+        serves: true,
     };
-    let mut args = std::env::args().skip(1);
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    options.serves = !args.iter().any(|arg| arg == "--no-service");
+    args.retain(|arg| arg != "--no-service");
+    let mut args = args.into_iter();
     while let Some(arg) = args.next() {
         match (arg.as_str(), args.next()) {
             ("--protocol", Some(n)) => options.protocol = n.parse().unwrap_or(PROTOCOL),
@@ -87,26 +115,31 @@ fn options() -> Options {
 }
 
 /// Whether to keep reading.
-fn serve(line: &str, options: &Options, waiting: &mut Waiting) -> bool {
+fn serve(line: &str, options: &Options, state: &mut State) -> bool {
     match serde_json::from_str::<Message>(line) {
-        Ok(Message::Request(request)) => request_line(request, options, waiting),
+        Ok(Message::Request(request)) => request_line(request, options, state),
         Ok(Message::Notification(notification)) => {
-            notification_line(&notification.method, &notification.params, waiting);
+            notification_line(&notification.method, &notification.params, state);
             true
         }
-        _ => true,
+        Ok(Message::Response(response)) => {
+            came_back(response, state);
+            true
+        }
+        Err(_) => true,
     }
 }
 
-fn request_line(request: Request, options: &Options, waiting: &mut Waiting) -> bool {
+fn request_line(request: Request, options: &Options, state: &mut State) -> bool {
     match request.method.as_str() {
         name::INITIALIZE => answer(request.id, handshake(options)),
-        name::TOOL_CALL => return call(request.id, request.params, waiting),
+        name::TOOL_CALL => return call(request.id, request.params, state),
         name::COMMAND_RUN => answer(request.id, run(request.params)),
         name::COMMAND_COMPLETE => answer(request.id, complete(request.params)),
         name::CONTEXT_CONTRIBUTE => answer(request.id, contribute(request.params)),
         name::COMPACTOR_COMPACT => answer(request.id, compact(request.params)),
-        name::PROVIDER_STREAM => return stream(request.id, request.params, waiting),
+        name::PROVIDER_STREAM => return stream(request.id, request.params, state),
+        name::SERVICE_CALL => served(request.id, request.params, state),
         other => fail(
             request.id,
             RpcError::new(METHOD_NOT_FOUND, format!("no such method: {other}")),
@@ -115,10 +148,10 @@ fn request_line(request: Request, options: &Options, waiting: &mut Waiting) -> b
     true
 }
 
-fn notification_line(method: &str, params: &Value, waiting: &mut Waiting) {
+fn notification_line(method: &str, params: &Value, state: &mut State) {
     match method {
-        name::TOOL_CANCEL => cancel(params, waiting),
-        name::PROVIDER_CANCEL => cancel_stream(params, waiting),
+        name::TOOL_CANCEL => cancel(params, state),
+        name::PROVIDER_CANCEL => cancel_stream(params, state),
         _ => {}
     }
 }
@@ -165,13 +198,115 @@ fn handshake(options: &Options) -> Value {
                 caching: false,
             },
         }],
-        services: BTreeMap::new(),
+        services: declared(options),
     };
     let mut declared = serde_json::to_value(result).unwrap_or(Value::Null);
     // Written last, over the typed one: the point of `--placement` is to say
     // what this crate's own types cannot.
     declared["contributors"][0]["placement"] = options.placement.clone();
     declared
+}
+
+/// `kv`, and the two methods it speaks. A run that serves nothing declares
+/// nothing: one key has one owner, so a caller must not claim it too.
+fn declared(options: &Options) -> BTreeMap<String, ServiceSpec> {
+    if !options.serves {
+        return BTreeMap::new();
+    }
+    let methods = [
+        (
+            "set",
+            json!({ "type": "object", "required": ["key", "value"] }),
+        ),
+        ("get", json!({ "type": "object", "required": ["key"] })),
+    ];
+    BTreeMap::from([(
+        "kv".to_string(),
+        ServiceSpec {
+            methods: methods
+                .into_iter()
+                .map(|(name, schema)| (name.to_string(), schema))
+                .collect(),
+        },
+    )])
+}
+
+/// The host asking this process for its own service: `set {key, value}` writes
+/// and answers nothing, `get {key}` answers what was written or nothing.
+fn served(id: i64, params: Value, state: &mut State) {
+    let Ok(params) = serde_json::from_value::<ServiceCallParams>(params) else {
+        fail(id, RpcError::new(INVALID_PARAMS, "not a service call"));
+        return;
+    };
+    let key = params.params["key"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    let result = match params.method.as_str() {
+        "set" => {
+            let value = params.params["value"].as_str().unwrap_or_default();
+            state.store.insert(key, value.to_string());
+            Value::Null
+        }
+        "get" => state
+            .store
+            .get(&key)
+            .map(|v| json!(v))
+            .unwrap_or(Value::Null),
+        other => {
+            fail(
+                id,
+                RpcError::new(METHOD_NOT_FOUND, format!("kv does not speak {other}")),
+            );
+            return;
+        }
+    };
+    answer(
+        id,
+        serde_json::to_value(ServiceCallResult { result }).unwrap_or(Value::Null),
+    );
+}
+
+/// This process asking the host for a service call. The tool call that wanted
+/// it stays open until the answer arrives: one line is read at a time here, so
+/// nothing may wait inside one.
+fn crossed(asked: &Value, call: i64, state: &mut State) {
+    let id = state.next_id();
+    state.pending.push((id, call));
+    send(&Message::Request(Request::new(
+        id,
+        name::SERVICE_CALL,
+        asked.clone(),
+    )));
+}
+
+/// The host answered a service call this process asked for, so the tool call
+/// waiting on it can say what came back: the result, or the host's refusal in
+/// its own words — which is how a test reads a refusal from the far side.
+fn came_back(response: Response, state: &mut State) {
+    let Some(at) = state
+        .pending
+        .iter()
+        .position(|(asked, _)| Some(*asked) == response.id)
+    else {
+        return;
+    };
+    let (_, call) = state.pending.remove(at);
+    let said = match response.outcome {
+        Outcome::Result(value) => serde_json::from_value::<ServiceCallResult>(value)
+            .map(|answered| said_of(&answered.result))
+            .unwrap_or_else(|error| error.to_string()),
+        Outcome::Error(error) => error.message,
+    };
+    answer(call, output(said));
+}
+
+/// A string as itself, anything else as the JSON it is: a tool answers text.
+fn said_of(value: &Value) -> String {
+    value
+        .as_str()
+        .map(str::to_owned)
+        .unwrap_or_else(|| value.to_string())
 }
 
 /// `notes`: one user piece that says what the round it was asked about held,
@@ -230,7 +365,7 @@ fn why(reason: &CompactReason) -> &'static str {
 
 /// Whether to keep reading: an input of `{"die": true}` ends the process
 /// without answering, which is what a killed plugin looks like from outside.
-fn call(id: i64, params: Value, waiting: &mut Waiting) -> bool {
+fn call(id: i64, params: Value, state: &mut State) -> bool {
     let Ok(params) = serde_json::from_value::<ToolCallParams>(params) else {
         fail(id, RpcError::new(INVALID_PARAMS, "not a tool call"));
         return true;
@@ -242,11 +377,15 @@ fn call(id: i64, params: Value, waiting: &mut Waiting) -> bool {
         notify(&params.call_id, &tail);
     }
     if params.input.get("awaitCancel").is_some() {
-        waiting.calls.push((params.call_id, id));
+        state.calls.push((params.call_id, id));
         return true;
     }
     if params.input.get("cancelled").is_some() {
-        answer(id, output(waiting.cancelled.join(",")));
+        answer(id, output(state.cancelled.join(",")));
+        return true;
+    }
+    if let Some(asked) = params.input.get("call").cloned() {
+        crossed(&asked, id, state);
         return true;
     }
     answer(id, output(said(&params.input)));
@@ -286,34 +425,34 @@ fn output(text: String) -> Value {
     .unwrap_or(Value::Null)
 }
 
-fn cancel(params: &Value, waiting: &mut Waiting) {
+fn cancel(params: &Value, state: &mut State) {
     let Ok(params) = serde_json::from_value::<ToolCancelParams>(params.clone()) else {
         return;
     };
-    let Some(at) = waiting
+    let Some(at) = state
         .calls
         .iter()
         .position(|(call, _)| call == &params.call_id)
     else {
         return;
     };
-    let (_, id) = waiting.calls.remove(at);
+    let (_, id) = state.calls.remove(at);
     answer(id, output("cancelled".to_string()));
 }
 
 /// A stream the host let go of: written down, so the `echo` tool can say the
 /// cancel arrived, and closed if it was one this process was holding open.
-fn cancel_stream(params: &Value, waiting: &mut Waiting) {
+fn cancel_stream(params: &Value, state: &mut State) {
     let Ok(params) = serde_json::from_value::<ProviderCancelParams>(params.clone()) else {
         return;
     };
-    waiting.cancelled.push(params.call.clone());
-    if let Some(at) = waiting
+    state.cancelled.push(params.call.clone());
+    if let Some(at) = state
         .streams
         .iter()
         .position(|(call, _)| call == &params.call)
     {
-        let (_, id) = waiting.streams.remove(at);
+        let (_, id) = state.streams.remove(at);
         close(id, None);
     }
 }
@@ -322,14 +461,14 @@ fn cancel_stream(params: &Value, waiting: &mut Waiting) {
 /// this response is — `hold` answers nothing until it is cancelled, `die` ends
 /// the process mid-stream, `fail` closes with the error the trait speaks, and
 /// anything else is a response. Whether to keep reading.
-fn stream(id: i64, params: Value, waiting: &mut Waiting) -> bool {
+fn stream(id: i64, params: Value, state: &mut State) -> bool {
     let Ok(params) = serde_json::from_value::<ProviderStreamParams>(params) else {
         fail(id, RpcError::new(INVALID_PARAMS, "not a stream"));
         return true;
     };
     let said = asked(&params.request);
     match said.as_str() {
-        "hold" => waiting.streams.push((params.call, id)),
+        "hold" => state.streams.push((params.call, id)),
         "die" => {
             delta(&params.call, ModelEvent::TextStart { id: "b1".into() });
             return false;

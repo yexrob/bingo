@@ -100,7 +100,9 @@ async fn a_plugin_whose_command_is_gone_is_reported_and_contributes_nothing() {
     .expect("a manifest");
     let project = tempfile::tempdir().expect("a project");
     let manager = Manager::new(Env::rooted(home.path()), BTreeMap::new());
-    manager.start(project.path()).await;
+    manager
+        .start(project.path(), bingo_sdk::testing::ServiceHost::handle())
+        .await;
     let said = manager.notices().drain();
     assert_eq!(said.len(), 1, "{said:?}");
     assert_eq!(said[0].code, "PLUGIN_UNAVAILABLE");
