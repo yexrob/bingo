@@ -1,5 +1,11 @@
 //! What a client may choose from: the registry read out as flat entries, one
 //! reader per kind.
+//!
+//! The providers are handed in already resolved — the registered ones and the
+//! sources' both (ADR-0030 §2) — so a plugin's provider is listed by the one
+//! reader that lists every other, and its models by the one that lists theirs.
+
+use std::sync::Arc;
 
 use bingo_sdk::*;
 use serde_json::{Map, Value, json};
@@ -9,12 +15,13 @@ use crate::models::{ModelCatalog, ModelFacts};
 
 pub(super) async fn entries(
     registry: &Registry,
+    resolved: &[Arc<dyn Provider>],
     model: Option<&str>,
     kind: CatalogKind,
 ) -> Vec<CatalogEntry> {
     match kind {
-        CatalogKind::Models => models(registry, model),
-        CatalogKind::Providers => providers(registry),
+        CatalogKind::Models => models(resolved, model),
+        CatalogKind::Providers => providers(resolved),
         CatalogKind::Tools => tools(registry).await,
         CatalogKind::Commands => commands(registry).await,
         CatalogKind::Skills => Vec::new(),
@@ -22,13 +29,12 @@ pub(super) async fn entries(
     }
 }
 
-/// The embedded catalogue's models for each registered provider, plus the
-/// configured one; nothing here asks a provider for its list, which would
-/// be a network call.
-fn models(registry: &Registry, configured: Option<&str>) -> Vec<CatalogEntry> {
+/// The embedded catalogue's models for each provider, plus the configured one;
+/// nothing here asks a provider for its list, which would be a network call
+/// (ADR-0026 §4).
+fn models(resolved: &[Arc<dyn Provider>], configured: Option<&str>) -> Vec<CatalogEntry> {
     let catalogue = ModelCatalog::embedded();
-    registry
-        .providers
+    resolved
         .iter()
         .flat_map(|p| {
             let mut ids: Vec<&str> = configured.into_iter().collect();
@@ -64,9 +70,8 @@ fn model_meta(provider: &str, facts: Option<ModelFacts>) -> Value {
     Value::Object(meta)
 }
 
-fn providers(registry: &Registry) -> Vec<CatalogEntry> {
-    registry
-        .providers
+fn providers(resolved: &[Arc<dyn Provider>]) -> Vec<CatalogEntry> {
+    resolved
         .iter()
         .map(|p| CatalogEntry {
             id: p.id().to_string(),
@@ -165,11 +170,7 @@ mod tests {
     }
 
     fn listed(configured: Option<&str>) -> Vec<CatalogEntry> {
-        let registry = Registry {
-            providers: vec![Arc::new(Endpoint) as Arc<dyn Provider>],
-            ..Registry::default()
-        };
-        models(&registry, configured)
+        models(&[Arc::new(Endpoint) as Arc<dyn Provider>], configured)
     }
 
     fn entry(entries: &[CatalogEntry], id: &str) -> CatalogEntry {

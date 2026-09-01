@@ -17,7 +17,7 @@ pub async fn login(
     provider: &str,
     method: Option<LoginMethod>,
 ) -> Result<String, KernelError> {
-    let provider = host.provider(Some(provider))?;
+    let provider = host.provider(Some(provider)).await?;
     provider
         .login(Arc::new(Terminal), method)
         .await
@@ -25,7 +25,7 @@ pub async fn login(
 }
 
 pub async fn logout(host: &Host, provider: &str) -> Result<String, KernelError> {
-    let provider = host.provider(Some(provider))?;
+    let provider = host.provider(Some(provider)).await?;
     provider
         .logout()
         .await

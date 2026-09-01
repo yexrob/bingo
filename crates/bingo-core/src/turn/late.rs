@@ -2,10 +2,15 @@
 //! contributors and the compaction strategy, each the ones registered up front
 //! plus whatever the sources answer with now.
 //!
-//! This is the one point a late contribution becomes concrete. A kind that
-//! learns to arrive after I/O — a bridge's, an MCP server's — is a set here and
-//! nowhere else: two resolution points would be two answers to "what does this
-//! turn have", which is the debt ADR-0011 forbids.
+//! Every kind that learns to arrive after I/O — a bridge's, an MCP server's —
+//! is a set here and nowhere else: two resolution points would be two answers
+//! to "what does this session have", which is the debt ADR-0011 forbids.
+//!
+//! Three of the sets are gathered by [`Late`] when a turn starts.
+//! [`ProviderSet`] is gathered where a provider is resolved instead — a model
+//! is chosen when a session opens, when `/model` rewrites it and when a
+//! catalogue is read, never per round — and the host reads it at that one
+//! point.
 
 use std::sync::Arc;
 
@@ -88,6 +93,47 @@ impl ContributorSet {
     }
 }
 
+/// The providers a model may be chosen from: the registered ones, then every
+/// source's. An id answers for one provider, so a late one whose id is already
+/// taken is dropped — the registry's own rule for a duplicate, read where the
+/// sources are, because a source cannot refuse a boot that has already happened.
+#[derive(Clone, Default)]
+pub struct ProviderSet {
+    pub fixed: Vec<Arc<dyn Provider>>,
+    pub sources: Vec<Arc<dyn ProviderSource>>,
+}
+
+impl ProviderSet {
+    pub fn fixed(providers: Vec<Arc<dyn Provider>>) -> Self {
+        Self {
+            fixed: providers,
+            sources: Vec::new(),
+        }
+    }
+
+    pub async fn gather(&self) -> Vec<Arc<dyn Provider>> {
+        let mut providers = self.fixed.clone();
+        for source in &self.sources {
+            for provider in source.providers().await {
+                Self::take(&mut providers, source.id(), provider);
+            }
+        }
+        providers
+    }
+
+    fn take(providers: &mut Vec<Arc<dyn Provider>>, source: &str, provider: Arc<dyn Provider>) {
+        if providers.iter().any(|held| held.id() == provider.id()) {
+            tracing::debug!(
+                source,
+                provider = provider.id(),
+                "a provider from a source is unused; one of that id is already registered"
+            );
+            return;
+        }
+        providers.push(provider);
+    }
+}
+
 /// The compaction strategy this turn would use. The slot holds one (ADR-0006
 /// leaves the kernel the ruler and a plugin the strategy), so a source's is the
 /// turn's only where nothing in-process holds it — the registry's first-wins
@@ -155,7 +201,10 @@ impl Late {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{ScriptedCompactor, ScriptedCompactorSource, ScriptedContextSource};
+    use crate::test_support::{
+        ScriptedCompactor, ScriptedCompactorSource, ScriptedContextSource, ScriptedProvider,
+        ScriptedProviderSource,
+    };
 
     fn compaction() -> Compaction {
         Compaction {
@@ -186,6 +235,58 @@ mod tests {
 
     fn ids(contributors: &[Arc<dyn ContextContributor>]) -> Vec<String> {
         contributors.iter().map(|c| c.id().to_string()).collect()
+    }
+
+    /// A provider that arrived after I/O joins the registered ones, and the
+    /// order is the registered ones first: nothing a source answers with can
+    /// take an id the composition already gave away.
+    #[tokio::test]
+    async fn a_source_s_providers_join_the_registered_ones_and_never_shadow_one() {
+        let source = ScriptedProviderSource::new(vec![]);
+        let set = ProviderSet {
+            fixed: vec![ScriptedProvider::new(vec![]) as Arc<dyn Provider>],
+            sources: vec![Arc::clone(&source) as Arc<dyn ProviderSource>],
+        };
+        assert_eq!(provider_ids(&set.gather().await), ["scripted"]);
+
+        source.set(vec![Arc::new(Named("late")) as Arc<dyn Provider>]);
+        assert_eq!(provider_ids(&set.gather().await), ["scripted", "late"]);
+
+        source.set(vec![Arc::new(Named("scripted")) as Arc<dyn Provider>]);
+        assert_eq!(
+            provider_ids(&set.gather().await),
+            ["scripted"],
+            "the registered one keeps its id"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_turn_with_no_provider_anywhere_gathers_none() {
+        assert!(ProviderSet::default().gather().await.is_empty());
+    }
+
+    fn provider_ids(providers: &[Arc<dyn Provider>]) -> Vec<String> {
+        providers.iter().map(|p| p.id().to_string()).collect()
+    }
+
+    /// A provider that is nothing but its id.
+    struct Named(&'static str);
+
+    #[async_trait::async_trait]
+    impl Provider for Named {
+        fn id(&self) -> &str {
+            self.0
+        }
+        fn endpoint(&self, _model: &str) -> EndpointCapabilities {
+            EndpointCapabilities::default()
+        }
+        async fn stream(
+            &self,
+            _request: ModelRequest,
+            _cancel: CancellationToken,
+        ) -> Result<ModelStream, ProviderError> {
+            unreachable!("this double runs no turn")
+        }
     }
 
     #[tokio::test]

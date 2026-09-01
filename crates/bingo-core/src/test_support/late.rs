@@ -119,6 +119,34 @@ impl ContextSource for ScriptedContextSource {
     }
 }
 
+/// A provider source a test fills after the fact, so a model can be chosen
+/// from a provider that arrived after I/O (ADR-0009, ADR-0030 §2).
+pub struct ScriptedProviderSource {
+    providers: Mutex<Vec<Arc<dyn Provider>>>,
+}
+
+impl ScriptedProviderSource {
+    pub fn new(providers: Vec<Arc<dyn Provider>>) -> Arc<Self> {
+        Arc::new(Self {
+            providers: Mutex::new(providers),
+        })
+    }
+
+    pub fn set(&self, providers: Vec<Arc<dyn Provider>>) {
+        *self.providers.lock().unwrap() = providers;
+    }
+}
+
+#[async_trait]
+impl ProviderSource for ScriptedProviderSource {
+    fn id(&self) -> &str {
+        "scripted"
+    }
+    async fn providers(&self) -> Vec<Arc<dyn Provider>> {
+        self.providers.lock().unwrap().clone()
+    }
+}
+
 /// A compactor source with a fixed answer.
 pub struct ScriptedCompactorSource {
     compactors: Vec<Arc<dyn Compactor>>,

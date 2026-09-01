@@ -22,7 +22,7 @@ use jiff::Timestamp;
 
 pub use config::{Breaker, ModelChoice, TurnBudget, TurnConfig};
 use late::Late;
-pub use late::{CompactorSet, ContributorSet, ToolSet};
+pub use late::{CompactorSet, ContributorSet, ProviderSet, ToolSet};
 use ruler::Ruler;
 use stream::Streamed;
 pub use stream::{MAX_RETRY_DELAY, MAX_SERVER_RETRY_DELAY, backoff};

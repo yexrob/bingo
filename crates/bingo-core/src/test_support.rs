@@ -12,8 +12,8 @@ use serde_json::{Value, json};
 mod late;
 mod peers;
 pub use late::{
-    ScriptedCommandSource, ScriptedCompactorSource, ScriptedContextSource, ScriptedToolSource,
-    fixed_contributor,
+    ScriptedCommandSource, ScriptedCompactorSource, ScriptedContextSource, ScriptedProviderSource,
+    ScriptedToolSource, fixed_contributor,
 };
 pub use peers::{RedirectHook, RoutingHost};
 
@@ -27,6 +27,9 @@ pub enum Script {
 pub struct ScriptedProvider {
     responses: Mutex<VecDeque<Script>>,
     requests: Mutex<Vec<ModelRequest>>,
+    /// The catalogue shelf its models are filed under; its own id by default,
+    /// as the sdk trait does.
+    family: Option<String>,
 }
 
 impl ScriptedProvider {
@@ -34,8 +37,20 @@ impl ScriptedProvider {
         Arc::new(Self {
             responses: Mutex::new(responses.into()),
             requests: Mutex::new(vec![]),
+            family: None,
         })
     }
+
+    /// A named instance serving another shape's models (ADR-0017), which is
+    /// how a catalogue finds any model's facts at all.
+    pub fn filed_under(family: &str, responses: Vec<Script>) -> Arc<Self> {
+        Arc::new(Self {
+            responses: Mutex::new(responses.into()),
+            requests: Mutex::new(vec![]),
+            family: Some(family.to_string()),
+        })
+    }
+
     pub fn requests(&self) -> Vec<ModelRequest> {
         self.requests.lock().unwrap().clone()
     }
@@ -45,6 +60,9 @@ impl ScriptedProvider {
 impl Provider for ScriptedProvider {
     fn id(&self) -> &str {
         "scripted"
+    }
+    fn family(&self) -> &str {
+        self.family.as_deref().unwrap_or_else(|| self.id())
     }
     fn endpoint(&self, _: &str) -> EndpointCapabilities {
         EndpointCapabilities::default()

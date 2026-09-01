@@ -46,6 +46,9 @@ pub struct Registry {
     /// Tools that arrive after I/O, read when a turn starts (ADR-0009).
     pub tool_sources: Vec<Arc<dyn ToolSource>>,
     pub providers: Vec<Arc<dyn Provider>>,
+    /// Providers that arrive after I/O, read where a model is chosen
+    /// (ADR-0009, ADR-0030 §2).
+    pub provider_sources: Vec<Arc<dyn ProviderSource>>,
     pub policy: Option<Arc<dyn PermissionPolicy>>,
     pub hooks: Vec<Arc<dyn Hook>>,
     pub contributors: Vec<Arc<dyn ContextContributor>>,
@@ -131,6 +134,10 @@ impl Registry {
                 Ok(())
             }
             Contribution::Provider(provider) => self.add_provider(provider),
+            Contribution::Providers(source) => {
+                self.provider_sources.push(source);
+                Ok(())
+            }
             Contribution::Policy(policy) => self.set_policy(policy),
             Contribution::Hook(hook) => {
                 self.hooks.push(hook);
@@ -386,6 +393,16 @@ mod tests {
         }
     }
 
+    #[async_trait::async_trait]
+    impl ProviderSource for Nothing {
+        fn id(&self) -> &str {
+            "nothing"
+        }
+        async fn providers(&self) -> Vec<Arc<dyn Provider>> {
+            Vec::new()
+        }
+    }
+
     /// Every kind that arrives after I/O lands in the list named for it, and a
     /// second one is welcome: a source holds no slot.
     /// One row of the table: a source to register, and where it must land.
@@ -410,6 +427,10 @@ mod tests {
             (
                 || Contribution::Compactors(Arc::new(Nothing)),
                 |registry| registry.compactor_sources.len(),
+            ),
+            (
+                || Contribution::Providers(Arc::new(Nothing)),
+                |registry| registry.provider_sources.len(),
             ),
         ];
         for (contribute, count) in table {
