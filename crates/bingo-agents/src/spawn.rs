@@ -41,7 +41,8 @@ report back. In the background, which is the default, the call returns the \
 agent's name at once and its reply arrives as a message when it finishes; \
 with `background: false` the call waits and returns the agent's final text. \
 When several agents are to work with each other rather than each report back, \
-seat them instead of tasking them: `OpenRoom` naming the roles, one \
+seat them instead of tasking them: `OpenRoom` naming the roles — and \
+`parent` among them when you want to hear the room yourself — one \
 `standby: true` spawn per role, then a single `SendMessage` to `#room` \
 carrying the kickoff. That one post wakes every member at once and each reads \
 its own brief in the turn it opens; writing to them one at a time instead \
@@ -638,6 +639,11 @@ mod tests {
         );
         assert!(
             DESCRIPTION.contains("one `standby: true` spawn per role"),
+            "{DESCRIPTION}"
+        );
+        // ADR-0028 §4: the seat is explicit, so the pattern has to say it.
+        assert!(
+            DESCRIPTION.contains("`parent` among them when you want to hear the room yourself"),
             "{DESCRIPTION}"
         );
         assert!(
