@@ -20,6 +20,8 @@ pub enum Effect {
     Open(SessionSelector),
     /// Fill the session picker from the host.
     ListSessions,
+    /// Fill the switcher's stored rows from the host: one read per opening.
+    ListStored,
     /// Put a selection on the terminal's own clipboard (OSC 52). The loop
     /// says so when the terminal will not take it.
     Copy(String),

@@ -94,6 +94,29 @@ pub fn child_frame(seq: u64, event: Event) -> Frame {
     }
 }
 
+/// A session under the root that this process has not opened: what a
+/// `sessions` read hands the switcher for its stored rows.
+pub fn stored_summary(id: &str, title: &str) -> SessionSummary {
+    SessionSummary {
+        id: SessionId::from_raw(id),
+        title: Some(title.into()),
+        parent: Some(ParentLink {
+            session: SessionId::from_raw("ses_1"),
+            item: None,
+        }),
+        ..summary()
+    }
+}
+
+/// The head frame a reopened session's stream opens with: the summary the
+/// listing named it by, now on the tree's own stream (ADR-0010 §3).
+pub fn woken(seq: u64, summary: SessionSummary) -> Frame {
+    Frame {
+        session: summary.id.clone(),
+        ..frame(seq, Event::SessionUpdated { summary })
+    }
+}
+
 /// A room under the same root: a session nothing answers, whose journal is
 /// the point (ADR-0011 §1). Its id sorts before the sub-agent's, so a switcher
 /// can show it between two model rows.

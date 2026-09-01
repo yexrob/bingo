@@ -49,6 +49,20 @@ pub fn head_summary(frames: &[Frame]) -> Result<SessionSummary, KernelError> {
     }
 }
 
+/// A journal as a client would hold it: its head, folded with the one reducer
+/// (ADR-0002). What a stored session was doing is read here and nowhere else.
+pub fn replayed(frames: &[Frame]) -> Result<SessionState, KernelError> {
+    Ok(fold(head_summary(frames)?, frames))
+}
+
+fn fold(head: SessionSummary, journal: &[Frame]) -> SessionState {
+    let mut state = SessionState::new(head);
+    for frame in journal {
+        state.apply(frame);
+    }
+    state
+}
+
 fn spawn_with(
     head: SessionSummary,
     journal: Vec<Frame>,
@@ -61,10 +75,7 @@ fn spawn_with(
     let mailbox = Mailbox::new(head.id.clone(), tx, finished);
     let config = config(&mailbox);
     let commands = Commands::new(services, mailbox.clone(), config.cwd.clone());
-    let mut state = SessionState::new(head.clone());
-    for frame in &journal {
-        state.apply(frame);
-    }
+    let mut state = fold(head.clone(), &journal);
     // A `SessionClosed` in the journal ended the last process's segment, not
     // the session: it is open again by being here.
     state.closed = false;

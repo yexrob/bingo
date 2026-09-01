@@ -135,11 +135,15 @@ pub struct Catalogs {
     pub values: commands::Catalogues,
 }
 
-/// The `ctrl+g` switcher over the sessions in the tree. Its rows are derived
-/// from the tree at render time; only the cursor is the surface's own.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+/// The `ctrl+g` switcher over the sessions in the tree and the root's stored
+/// descendants. Its rows are derived at render time; what is the surface's
+/// own is the cursor and the one listing the host answered with when the card
+/// opened — nothing here watches the store.
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Switcher {
     pub selected: usize,
+    /// Empty until the read the opening spawned lands.
+    pub stored: Vec<SessionSummary>,
 }
 
 /// What is over the frame. One at a time: focus moves into a layer and back

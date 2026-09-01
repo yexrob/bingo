@@ -31,7 +31,7 @@ use interactions::Pending;
 pub use mailbox::Mailbox;
 use mailbox::{Msg, TurnMail};
 use queue::Queue;
-pub use spawn::{head_summary, resume, spawn};
+pub use spawn::{head_summary, replayed, resume, spawn};
 pub use subscribers::SUBSCRIBER_CAPACITY;
 use subscribers::Subscribers;
 
