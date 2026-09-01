@@ -4,6 +4,8 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
 use crate::error::KernelError;
@@ -16,11 +18,23 @@ use crate::provider::Provider;
 /// and a strategy takes its rung that needs no model (ADR-0006).
 pub const BREAKER_TRIP: u32 = 3;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// Why a compaction was asked for. Serializable because a strategy may live in
+/// another process: the reason crosses the bridge as it is.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum CompactReason {
     Threshold,
-    Overflow { message: String },
-    Manual { instructions: Option<String> },
+    Overflow {
+        message: String,
+    },
+    Manual {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        instructions: Option<String>,
+    },
 }
 
 pub struct CompactContext<'a> {
@@ -50,13 +64,17 @@ impl std::fmt::Debug for CompactContext<'_> {
 /// The result: a summary, the boundary before which items are replaced, the
 /// items before it to keep anyway, and what the summary cost. The kernel
 /// accepts it only when `after < before`; the cost is billed either way.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct Compaction {
     pub summary: String,
     pub boundary: ItemId,
+    #[serde(default)]
     pub kept: Vec<ItemId>,
     pub before: u64,
     pub after: u64,
+    /// What the summary cost. A strategy that spends no tokens says nothing.
+    #[serde(default)]
     pub usage: Usage,
 }
 

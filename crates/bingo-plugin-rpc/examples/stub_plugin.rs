@@ -103,6 +103,8 @@ fn handshake(protocol: u32) -> Value {
             instant: true,
             family: "plugin".into(),
         }],
+        contributors: Vec::new(),
+        compactors: Vec::new(),
     };
     serde_json::to_value(result).unwrap_or(Value::Null)
 }

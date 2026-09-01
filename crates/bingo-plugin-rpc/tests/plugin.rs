@@ -309,11 +309,11 @@ async fn a_killed_process_leaves_one_notice_empty_sources_and_a_working_respawn(
 
 #[tokio::test]
 async fn an_unknown_protocol_major_refuses_the_handshake_with_a_notice() {
-    let (manager, _home, _project) = started(&["--protocol", "2"]).await;
+    let (manager, _home, _project) = started(&["--protocol", "99"]).await;
     let said = manager.notices().drain();
     assert_eq!(said.len(), 1, "{said:?}");
     assert_eq!(said[0].code, "PLUGIN_UNAVAILABLE");
-    assert!(said[0].text.contains("protocol 2"), "{}", said[0].text);
+    assert!(said[0].text.contains("protocol 99"), "{}", said[0].text);
     assert!(
         manager.tools().await.is_empty(),
         "a plugin whose wire is unknown contributes nothing"

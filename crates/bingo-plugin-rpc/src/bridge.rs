@@ -321,6 +321,8 @@ mod tests {
             version: "0.1.0".into(),
             tools: Vec::new(),
             commands: Vec::new(),
+            contributors: Vec::new(),
+            compactors: Vec::new(),
         }
     }
 
@@ -341,8 +343,12 @@ mod tests {
     #[test]
     fn this_host_speaks_one_major_and_refuses_the_rest() {
         assert!(check_protocol(&result(PROTOCOL)).is_ok());
-        let why = check_protocol(&result(2)).expect_err("a later major is refused");
-        assert!(why.contains("protocol 2"), "{why}");
-        assert!(why.contains("speaks 1"), "{why}");
+        let later = PROTOCOL + 1;
+        let why = check_protocol(&result(later)).expect_err("a later major is refused");
+        assert!(why.contains(&format!("protocol {later}")), "{why}");
+        assert!(why.contains(&format!("speaks {PROTOCOL}")), "{why}");
+        let earlier = PROTOCOL - 1;
+        let why = check_protocol(&result(earlier)).expect_err("and so is an earlier one");
+        assert!(why.contains(&format!("protocol {earlier}")), "{why}");
     }
 }

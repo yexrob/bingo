@@ -111,6 +111,37 @@ mod tests {
         );
     }
 
+    fn keys(table: &Value) -> Vec<String> {
+        table
+            .as_object()
+            .map(|table| table.keys().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// ADR-0015 §3 pinned the wire at four methods with a literal; ADR-0030 §6
+    /// makes the schema the count. What the host speaks is what the committed
+    /// document says it speaks — a method the file does not name is one no
+    /// plugin author can find, however many the table holds.
+    #[test]
+    fn the_committed_schema_names_every_method_and_every_notification() {
+        let file = std::fs::read_to_string(committed()).unwrap_or_default();
+        let document: Value = serde_json::from_str(&file).expect("the committed schema is json");
+        let mut spoken: Vec<String> = METHODS.iter().map(|method| method.0.to_owned()).collect();
+        spoken.sort();
+        let mut named = keys(&document["methods"]);
+        named.sort();
+        assert_eq!(named, spoken);
+        let mut announced: Vec<String> = NOTIFICATIONS
+            .iter()
+            .map(|notification| notification.0.to_owned())
+            .collect();
+        announced.sort();
+        let mut listed = keys(&document["notifications"]);
+        listed.sort();
+        assert_eq!(listed, announced);
+        assert_eq!(document["protocol"], PROTOCOL);
+    }
+
     /// Every key under any `properties`, wherever it sits in the document.
     fn properties(value: &Value, found: &mut Vec<String>) {
         match value {
@@ -200,6 +231,13 @@ mod tests {
             "CommandOutcome",
             "Completion",
             "View",
+            "ContextPiece",
+            "Placement",
+            "SystemBlock",
+            "CompactReason",
+            "Compaction",
+            "Item",
+            "SessionSummary",
         ] {
             assert!(
                 document["$defs"].get(name).is_some(),
