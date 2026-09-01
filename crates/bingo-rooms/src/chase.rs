@@ -171,7 +171,8 @@ async fn nudge(host: &HostHandle, room: &Room, mention: &Mention) {
 }
 
 /// The session a member name means now. A nudge looks a member up the way a
-/// post does, so the two agree on who is there to hear it.
+/// post does, so the two agree on who is there to hear it — a debt owed by
+/// `parent` included, which is the session the room hangs under (ADR-0028).
 async fn seat(host: &HostHandle, room: &Room, member: &str) -> Option<SessionId> {
     let siblings = host
         .sessions(SessionFilter {
@@ -180,7 +181,7 @@ async fn seat(host: &HostHandle, room: &Room, member: &str) -> Option<SessionId>
         })
         .await
         .ok()?;
-    post::seat_of(&siblings, member).map(|summary| summary.id.clone())
+    post::seat(room, &siblings, member)
 }
 
 /// What a nudge says: where it was asked, who asked, and what they asked.
@@ -384,6 +385,21 @@ mod tests {
             fleet.delivered().is_empty(),
             "the sigil named nobody, so nobody is chased"
         );
+    }
+
+    /// A debt owed by a rostered holder is nudged at the session the room
+    /// hangs under, `Wake` like every nudge (ADR-0028).
+    #[tokio::test(start_paused = true)]
+    async fn a_debt_the_holder_owes_is_nudged_at_the_session_the_room_hangs_under() {
+        let (fleet, id, room, _) = asked(&["scout"]);
+        let owed = mention(Owed::Member(crate::name::PARENT.into()));
+        Chaser::default().reconcile(&fleet.handle(), &room, &id, &[owed], fresh());
+        wait(1).await;
+
+        let delivered = fleet.delivered();
+        assert_eq!(delivered.len(), 1, "{delivered:?}");
+        assert_eq!(delivered[0].0, room.parent);
+        assert_eq!(delivered[0].2, Delivery::Wake);
     }
 
     #[tokio::test(start_paused = true)]

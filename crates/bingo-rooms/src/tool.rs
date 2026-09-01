@@ -26,9 +26,11 @@ and say who is in it. Post into it afterwards with `SendMessage` to `#name`. \
 By default the room hangs under you, so the agents you started are the ones \
 who hear it; with `shared: true` it hangs under the agent that started you \
 instead, so your peers hear it. Members are names, not sessions: a name \
-nobody holds yet is kept and skipped at delivery until someone does. Opening \
-a room that already stands replaces who is in it rather than opening a second \
-one.";
+nobody holds yet is kept and skipped at delivery until someone does. Name \
+`parent` among the members to hear the room yourself: every post reaches you \
+quietly, costing you no turn until something else opens one, and a post that \
+says `@parent` wakes you at once and is owed an answer. Opening a room that \
+already stands replaces who is in it rather than opening a second one.";
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct OpenRoomArgs {
@@ -389,6 +391,17 @@ mod tests {
                 .subjects(&json!({ "members": [] }), Path::new("/work"))
                 .is_empty()
         );
+    }
+
+    /// Where a model meets ADR-0028: the pattern is in the tool's own words.
+    #[test]
+    fn the_description_says_what_naming_the_holder_gets_you() {
+        assert!(
+            DESCRIPTION.contains("`parent` among the members"),
+            "{DESCRIPTION}"
+        );
+        assert!(DESCRIPTION.contains("quietly"), "{DESCRIPTION}");
+        assert!(DESCRIPTION.contains("`@parent` wakes you"), "{DESCRIPTION}");
     }
 
     #[test]

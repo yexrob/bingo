@@ -5,9 +5,11 @@
 //! the tree it will hang in.
 
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use bingo_sdk::{ContentPart, InteractionKind, ItemBody, Origin, SessionId};
 
+use super::stream_json::Host;
 use super::*;
 
 /// A team of one: `scout` is seated under the root before its first turn, so
@@ -25,18 +27,26 @@ fn sessions(home: &Path) -> PathBuf {
 /// The directory of the session whose summary carries `key`, or nothing when
 /// the run opened no such session.
 fn session_dir(home: &Path, key: &str) -> Option<PathBuf> {
-    std::fs::read_dir(sessions(home))
-        .ok()?
-        .flatten()
-        .map(|entry| entry.path())
-        .find(|dir| keyed(dir, key))
+    dirs(home).into_iter().find(|dir| keyed(dir, key))
+}
+
+/// Every session directory the run has written so far.
+fn dirs(home: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(sessions(home)) else {
+        return Vec::new();
+    };
+    entries.flatten().map(|entry| entry.path()).collect()
+}
+
+/// A session's summary as it stands on disk, for a test reading a run that is
+/// still going.
+fn summary_of(dir: &Path) -> Option<serde_json::Value> {
+    let text = std::fs::read_to_string(dir.join("summary.json")).ok()?;
+    serde_json::from_str(&text).ok()
 }
 
 fn keyed(dir: &Path, key: &str) -> bool {
-    std::fs::read_to_string(dir.join("summary.json"))
-        .ok()
-        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
-        .is_some_and(|summary| summary["key"] == key)
+    summary_of(dir).is_some_and(|summary| summary["key"] == key)
 }
 
 /// One session's journal, as frames. The first line names the format; a last
@@ -45,7 +55,13 @@ fn keyed(dir: &Path, key: &str) -> bool {
 /// it.
 fn journal(home: &Path, key: &str) -> Vec<Frame> {
     let dir = session_dir(home, key).unwrap_or_else(|| panic!("no session is keyed {key}"));
-    let text = std::fs::read_to_string(dir.join("journal.jsonl")).expect("a journal on disk");
+    frames_at(&dir)
+}
+
+fn frames_at(dir: &Path) -> Vec<Frame> {
+    let Ok(text) = std::fs::read_to_string(dir.join("journal.jsonl")) else {
+        return Vec::new();
+    };
     text.lines()
         .skip(1)
         .filter_map(|line| serde_json::from_str(line).ok())
@@ -231,5 +247,283 @@ fn a_root_asking_to_share_is_refused_in_words_and_opens_nothing() {
     assert!(
         session_dir(home.path(), &format!("rooms/{root}/design")).is_none(),
         "the refusal opened a room anyway"
+    );
+}
+
+// ---- the holder on the roster (ADR-0028) -----------------------------------
+
+/// A project with one room and a resident scout to fill a seat in it. The
+/// scout is seated when the root session opens, so a person can write to it
+/// without the root running a turn to start it.
+fn with_a_room(home: &Path, members: &str) {
+    let bingo = home.join(".bingo");
+    std::fs::create_dir_all(&bingo).unwrap();
+    std::fs::write(
+        bingo.join("team.json"),
+        format!(
+            r#"{{"roles":[{{"name":"scout"}}],"rooms":[{{"name":"design","members":{members}}}]}}"#
+        ),
+    )
+    .unwrap();
+}
+
+/// The binary as a host drives it: person messages one line at a time, so a
+/// run outlives its first turn, and every session's frames on stdout.
+fn hosting(home: &Path, script: &tempfile::NamedTempFile) -> Command {
+    let mut cmd = bingo();
+    cmd.env("BINGO_FAKE_SCRIPT", script.path())
+        .env("HOME", home)
+        .args([
+            "--print",
+            "--input-format",
+            "stream-json",
+            "--output-format",
+            "json",
+            "--cwd",
+        ])
+        .arg(home);
+    cmd
+}
+
+/// The run's root session: the one on disk with nothing above it, which is
+/// the holder of every room this project declares.
+fn root_dir(home: &Path) -> Option<PathBuf> {
+    dirs(home)
+        .into_iter()
+        .find(|dir| summary_of(dir).is_some_and(|summary| summary["parent"].is_null()))
+}
+
+/// The room this project declares, whatever the root's id turned out to be.
+fn room_dir(home: &Path) -> Option<PathBuf> {
+    dirs(home).into_iter().find(|dir| {
+        summary_of(dir).is_some_and(|summary| {
+            summary["key"]
+                .as_str()
+                .is_some_and(|key| key.starts_with("rooms/"))
+        })
+    })
+}
+
+/// The turns a session ran, by how many started.
+fn turns(frames: &[Frame]) -> usize {
+    frames
+        .iter()
+        .filter(|frame| matches!(frame.event, Event::TurnStarted { .. }))
+        .count()
+}
+
+/// How many of a room's posts wait in a session's queue: the entries of the
+/// last queue change it journaled. A delivery is journaled where it lands, so
+/// this is a fact of the run rather than of the clock.
+fn queued(dir: &Path, room: &str) -> usize {
+    frames_at(dir)
+        .iter()
+        .filter_map(|frame| match &frame.event {
+            Event::QueueChanged { entries, .. } => Some(entries.clone()),
+            _ => None,
+        })
+        .next_back()
+        .map(|entries| {
+            entries
+                .iter()
+                .filter(|entry| entry.origin.conversation.as_deref() == Some(room))
+                .count()
+        })
+        .unwrap_or(0)
+}
+
+/// Wait for something the run wrote down. Every gate here is a file the run
+/// owns: a scenario is awaited, never timed.
+fn until(complaint: &str, done: impl Fn() -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while !done() {
+        assert!(Instant::now() < deadline, "{complaint}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn until_queued(home: &Path, room: &str, n: usize) {
+    until("the room's posts never reached the holder's queue", || {
+        root_dir(home).is_some_and(|dir| queued(&dir, room) >= n)
+    });
+}
+
+fn until_posted(home: &Path, n: usize) {
+    until("the room was never posted into", || {
+        room_dir(home).is_some_and(|dir| posts(&frames_at(&dir)).len() >= n)
+    });
+}
+
+/// Wait until the holder has finished a turn: the one the post that called on
+/// it opened, before the person asks anything else of it.
+fn until_the_holder_has_answered(home: &Path) {
+    until("the post never opened a turn on the holder", || {
+        root_dir(home).is_some_and(|dir| {
+            frames_at(&dir)
+                .iter()
+                .any(|frame| matches!(frame.event, Event::TurnCompleted { .. }))
+        })
+    });
+}
+
+/// What a session was told, and who signed it.
+fn heard(dir: &Path) -> Vec<(String, Option<String>)> {
+    posts(&frames_at(dir))
+        .into_iter()
+        .map(|(text, origin)| (text, origin.principal))
+        .collect()
+}
+
+/// The `owed` cards a run published, in order.
+fn cards(lines: &[serde_json::Value]) -> Vec<serde_json::Value> {
+    lines
+        .iter()
+        .filter_map(|line| serde_json::from_value::<Frame>(line.clone()).ok())
+        .filter_map(|frame| match frame.event {
+            Event::Signal {
+                plugin,
+                kind,
+                payload,
+            } if plugin == "bingo.rooms" && kind == "owed" => Some(payload),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The person writes to the scout, not to the root (`@name` in the composer,
+/// ADR-0010 §2), so the root runs no turn at all while the room fills up.
+const TWO_POSTS: &str = r##"{"responses":[
+    {"steps":[{"toolCall":{"name":"SendMessage","input":{"to":"#design","text":"the build is green"}}}]},
+    {"steps":[{"toolCall":{"name":"SendMessage","input":{"to":"#design","text":"and the tests pass"}}}]},
+    {"steps":[{"text":"posted"}]},
+    {"steps":[{"text":"they say it is green"}]}
+]}"##;
+
+/// ADR-0028 §2 end to end: `parent` on the roster seats the room's own holder.
+/// The posts reach it `Hold` — it runs no turn for them — and the next thing
+/// to open one, a person speaking, absorbs them in journal order ahead of what
+/// was said to it.
+#[test]
+fn a_rostered_holder_hears_the_room_quietly_and_the_next_turn_absorbs_it() {
+    let home = tempfile::tempdir().unwrap();
+    with_a_room(home.path(), r#"["scout","parent"]"#);
+    let script = script(TWO_POSTS);
+    let mut host = Host::start(&mut hosting(home.path(), &script));
+
+    host.prompt("@scout post what you found in #design");
+    until_queued(home.path(), "#design", 2);
+    host.prompt("what did they say?");
+    let ended = host.finish();
+    assert_eq!(ended.code, Some(0), "stderr: {}", ended.err);
+
+    let root = root_dir(home.path()).expect("a root session");
+    assert_eq!(
+        turns(&frames_at(&root)),
+        1,
+        "the holder ran no turn while the room talked"
+    );
+    assert_eq!(
+        heard(&root),
+        [
+            ("the build is green".to_string(), Some("scout".to_string())),
+            ("and the tests pass".to_string(), Some("scout".to_string())),
+            ("what did they say?".to_string(), None),
+        ],
+        "the room was absorbed in journal order, ahead of the person's message"
+    );
+}
+
+/// A member calls on the holder by name, and the holder answers. The two
+/// responses either session may take are the same word, so the race between
+/// the scout finishing and the holder waking decides nothing; and the answer
+/// wakes the scout in its turn, so there are spare words for whatever is still
+/// talking when stdin closes.
+const CALLED_ON: &str = r##"{"responses":[
+    {"steps":[{"toolCall":{"name":"SendMessage","input":{"to":"#design","text":"@parent which one ships?"}}}]},
+    {"steps":[{"text":"asked"}]},
+    {"steps":[{"text":"asked"}]},
+    {"steps":[{"toolCall":{"name":"SendMessage","input":{"to":"#design","text":"the second one"}}}]},
+    {"steps":[{"text":"answered"}]},
+    {"steps":[{"text":"answered"}]},
+    {"steps":[{"text":"answered"}]}
+]}"##;
+
+/// ADR-0028 §3: `@parent` is the urgent bypass. The post wakes the holder at
+/// once — the turn it opens reads the post first — and opens an ordinary
+/// mention debt that the holder's own next post closes.
+#[test]
+fn a_post_that_calls_on_the_holder_wakes_it_and_is_owed_an_answer() {
+    let home = tempfile::tempdir().unwrap();
+    with_a_room(home.path(), r#"["scout","parent"]"#);
+    let script = script(CALLED_ON);
+    let mut host = Host::start(&mut hosting(home.path(), &script));
+
+    host.prompt("@scout ask me in #design");
+    until_the_holder_has_answered(home.path());
+    host.prompt("answer them");
+    let ended = host.finish();
+    assert_eq!(ended.code, Some(0), "stderr: {}", ended.err);
+
+    let root = root_dir(home.path()).expect("a root session");
+    assert_eq!(
+        heard(&root).first(),
+        Some(&(
+            "@parent which one ships?".to_string(),
+            Some("scout".to_string())
+        )),
+        "the post opened the holder's first turn: {:?}",
+        heard(&root)
+    );
+    assert_eq!(
+        turns(&frames_at(&root)),
+        2,
+        "the post's turn, and then the person's"
+    );
+
+    let room = room_dir(home.path()).expect("the room was opened");
+    assert_eq!(
+        heard(&room)
+            .into_iter()
+            .map(|(text, _)| text)
+            .collect::<Vec<String>>(),
+        ["@parent which one ships?", "the second one"],
+        "the question and the answer"
+    );
+
+    let cards = cards(&ended.lines);
+    let owing = cards
+        .iter()
+        .position(|card| card["rows"][0][1] == "parent")
+        .unwrap_or_else(|| panic!("the holder never owed anything: {cards:?}"));
+    assert_eq!(cards[owing]["rows"][0][0], "#design");
+    assert_eq!(
+        cards.last(),
+        Some(&serde_json::Value::Null),
+        "the holder's own post closed it: {cards:?}"
+    );
+}
+
+/// ADR-0028 §4: explicit, never default. The same scenario with the holder off
+/// the roster is today's room — it hears nothing of what is said there, and
+/// all its journal holds is what the person said to it.
+#[test]
+fn a_room_that_does_not_seat_the_holder_leaves_it_deaf() {
+    let home = tempfile::tempdir().unwrap();
+    with_a_room(home.path(), r#"["scout"]"#);
+    let script = script(TWO_POSTS);
+    let mut host = Host::start(&mut hosting(home.path(), &script));
+
+    host.prompt("@scout post what you found in #design");
+    until_posted(home.path(), 2);
+    host.prompt("what did they say?");
+    let ended = host.finish();
+    assert_eq!(ended.code, Some(0), "stderr: {}", ended.err);
+
+    let root = root_dir(home.path()).expect("a root session");
+    assert_eq!(turns(&frames_at(&root)), 1);
+    assert_eq!(
+        heard(&root),
+        [("what did they say?".to_string(), None)],
+        "a room reaches into the tree, not up out of it"
     );
 }

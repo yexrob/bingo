@@ -44,15 +44,6 @@ impl Room {
             members: Vec::new(),
         })
     }
-
-    /// Everyone a post reaches: every member but whoever wrote it.
-    pub fn audience<'a>(&'a self, author: &str) -> Vec<&'a str> {
-        self.members
-            .iter()
-            .map(String::as_str)
-            .filter(|member| *member != author)
-            .collect()
-    }
 }
 
 /// Who is in a room, as the room's own journal has it. Every reader — the
@@ -117,17 +108,6 @@ mod tests {
         let mut orphan = room_summary("ses_z", &parent, "design");
         orphan.parent = None;
         assert_eq!(Room::of(&orphan), None, "no tree to reach into");
-    }
-
-    #[test]
-    fn a_post_reaches_everyone_but_its_author() {
-        let room = Room {
-            title: "#design".into(),
-            parent: SessionId::from_raw("ses_root"),
-            members: ["reviewer", "scout"].map(str::to_string).to_vec(),
-        };
-        assert_eq!(room.audience("reviewer"), ["scout"]);
-        assert_eq!(room.audience("parent"), ["reviewer", "scout"]);
     }
 
     #[test]
