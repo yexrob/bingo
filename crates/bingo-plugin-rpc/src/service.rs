@@ -21,6 +21,7 @@ use crate::bridge::Bridge;
 use crate::codec::{INTERNAL_ERROR, INVALID_PARAMS, METHOD_NOT_FOUND, RpcError};
 use crate::connection::Connection;
 use crate::deadline;
+use crate::doors;
 use crate::wire::{ServiceCallParams, ServiceCallResult, ServiceSpec, name};
 
 /// A service one plugin process declared, as the one face the registry holds.
@@ -144,13 +145,20 @@ pub struct Hub {
     /// Who asked; a refusal is worth a line naming them.
     plugin: String,
     host: HostHandle,
+    /// The host's own service, wearing the face bound to this connection
+    /// (ADR-0033 §1). The registry holds the same doors under the same key,
+    /// bound to the host itself; which face answers is what tells one
+    /// process's running calls from another's, and a process must not be able
+    /// to pick.
+    doors: Arc<dyn WireService>,
 }
 
 impl Hub {
-    pub fn new(plugin: &str, host: HostHandle) -> Self {
+    pub fn new(plugin: &str, host: HostHandle, doors: Arc<dyn WireService>) -> Self {
         Self {
             plugin: plugin.to_string(),
             host,
+            doors,
         }
     }
 
@@ -158,6 +166,9 @@ impl Hub {
     /// one whose owner never opened a face. Crossing is the owner's choice
     /// (ADR-0031 §3), and what did not choose it does not exist out there.
     fn wire(&self, key: &str) -> Result<Arc<dyn WireService>, RpcError> {
+        if key == doors::KEY {
+            return Ok(Arc::clone(&self.doors));
+        }
         if let Some(wire) = self.host.service_wire(key) {
             return Ok(wire);
         }
@@ -265,8 +276,11 @@ mod tests {
         assert_eq!(why, "stub: the plugin is gone");
     }
 
+    /// A hub with the host's own doors behind the reserved key, which is what
+    /// a bridge builds; these tests are about the routing, not the doors.
     fn hub(host: HostHandle) -> Hub {
-        Hub::new("caller", host)
+        let doors = crate::doors::Doors::new(Arc::new(crate::notice::Notices::default()));
+        Hub::new("caller", host, doors.face(crate::doors::Caller::Host))
     }
 
     fn asked(key: &str, method: &str) -> Value {

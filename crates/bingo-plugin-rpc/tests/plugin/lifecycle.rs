@@ -4,27 +4,25 @@
 use std::collections::BTreeMap;
 
 use bingo_plugin_rpc::{Manager, log_path};
-use bingo_sdk::{Env, ItemBody, Level, ToolError};
+use bingo_sdk::{Env, Level, ToolError};
 use serde_json::json;
 
-use crate::harness::{call, only_tool, respawned, said, started};
+use crate::harness::{call, only_tool, respawned, said, started, started_with};
 
 /// Nothing a process says about itself is believed beyond what the
 /// declaration must carry: a placement this host cannot read refuses the whole
 /// handshake, in words, rather than being guessed at.
 #[tokio::test]
 async fn a_declaration_this_host_cannot_read_refuses_the_handshake_in_words() {
-    let (manager, _home, _project) = started(&["--placement", "whenever"]).await;
-    let said = manager.notices().drain();
-    assert_eq!(said.len(), 1, "{said:?}");
-    assert_eq!(said[0].code, "PLUGIN_UNAVAILABLE");
-    assert!(said[0].text.contains("whenever"), "{}", said[0].text);
-    assert!(manager.contributors().await.is_empty());
+    let started = started_with(&[("stub", &["--placement", "whenever"])]).await;
+    let (_, text) = started.heard("PLUGIN_UNAVAILABLE").await;
+    assert!(text.contains("whenever"), "{text}");
+    assert!(started.manager.contributors().await.is_empty());
     assert!(
-        manager.tools().await.is_empty(),
+        started.manager.tools().await.is_empty(),
         "a plugin whose declaration is unreadable contributes nothing at all"
     );
-    manager.shutdown().await;
+    started.manager.shutdown().await;
 }
 
 #[tokio::test]
@@ -36,51 +34,61 @@ async fn a_plugin_s_stderr_goes_to_a_log_under_the_data_directory() {
 }
 
 /// The exit criterion of ADR-0015 §5: a dead process answers nothing, says so
-/// once, and is back on the next read.
+/// once, and is back on the next read. The death is said through the host by
+/// the one drain, not by the call that found it (ADR-0033 §4).
 #[tokio::test]
 async fn a_killed_process_leaves_one_notice_empty_sources_and_a_working_respawn() {
-    let (manager, _home, project) = started(&[]).await;
-    let tool = only_tool(&manager).await;
+    let started = started_with(&[("stub", &[])]).await;
+    let manager = &started.manager;
+    let tool = only_tool(manager).await;
 
-    let (recorder, answered) = call(&tool, json!({ "die": true }), project.path()).await;
+    let (_, answered) = call(&tool, json!({ "die": true }), started.project.path()).await;
     let error = answered.expect_err("a process that ended answers nothing");
     assert!(
         matches!(&error, ToolError::Failed(why) if why.starts_with("stub: ")),
         "{error}"
     );
-    let notices = recorder.recorded();
-    assert_eq!(notices.len(), 1, "one death is one notice: {notices:?}");
-    let ItemBody::Notice { level, code, text } = &notices[0] else {
-        panic!("the transcript was given a notice");
-    };
-    assert_eq!(*level, Level::Warn);
-    assert_eq!(code, "PLUGIN_DIED");
+    let (level, text) = started.heard("PLUGIN_DIED").await;
+    assert_eq!(level, Level::Warn);
     assert!(text.contains("stub"), "{text}");
+    assert_eq!(
+        started
+            .listener
+            .all()
+            .iter()
+            .filter(|(_, code, _)| code == "PLUGIN_DIED")
+            .count(),
+        1,
+        "one death is one notice"
+    );
 
     assert!(
         manager.tools().await.is_empty(),
         "a dead plugin's source answers nothing"
     );
-    assert_eq!(respawned(&manager).await.len(), 1, "and it comes back");
+    assert_eq!(respawned(manager).await.len(), 1, "and it comes back");
 
-    let tool = only_tool(&manager).await;
-    let (_, answered) = call(&tool, json!({ "text": "alive again" }), project.path()).await;
+    let tool = only_tool(manager).await;
+    let (_, answered) = call(
+        &tool,
+        json!({ "text": "alive again" }),
+        started.project.path(),
+    )
+    .await;
     assert_eq!(said(&answered.expect("an output")), "alive again");
     manager.shutdown().await;
 }
 
 #[tokio::test]
 async fn an_unknown_protocol_major_refuses_the_handshake_with_a_notice() {
-    let (manager, _home, _project) = started(&["--protocol", "99"]).await;
-    let said = manager.notices().drain();
-    assert_eq!(said.len(), 1, "{said:?}");
-    assert_eq!(said[0].code, "PLUGIN_UNAVAILABLE");
-    assert!(said[0].text.contains("protocol 99"), "{}", said[0].text);
+    let started = started_with(&[("stub", &["--protocol", "99"])]).await;
+    let (_, text) = started.heard("PLUGIN_UNAVAILABLE").await;
+    assert!(text.contains("protocol 99"), "{text}");
     assert!(
-        manager.tools().await.is_empty(),
+        started.manager.tools().await.is_empty(),
         "a plugin whose wire is unknown contributes nothing"
     );
-    manager.shutdown().await;
+    started.manager.shutdown().await;
 }
 
 #[tokio::test]
@@ -99,6 +107,8 @@ async fn a_plugin_whose_command_is_gone_is_reported_and_contributes_nothing() {
     )
     .expect("a manifest");
     let project = tempfile::tempdir().expect("a project");
+    // Over a host with nowhere for a notice to land: the drain keeps the line
+    // rather than losing it, so it is still on the channel to be read here.
     let manager = Manager::new(Env::rooted(home.path()), BTreeMap::new());
     manager
         .start(project.path(), bingo_sdk::testing::ServiceHost::handle())

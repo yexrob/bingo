@@ -149,7 +149,7 @@ async fn an_observation_point_lands_as_a_notification_nobody_waits_on() {
     .await;
     assert_eq!(crossings(&started).await, json!("watch/session,watch/turn"));
     assert!(
-        started.manager.notices().drain().is_empty(),
+        started.said().is_empty(),
         "nothing was awaited, so no deadline was missed"
     );
     started.manager.shutdown().await;
@@ -168,13 +168,12 @@ async fn a_hook_past_its_deadline_never_decides_and_a_notice_names_it() {
         .expect("the deadline is spent on a paused clock, not waited out");
     tokio::time::resume();
     assert_eq!(outcome, HookOutcome::Continue);
-    let said = started.manager.notices().drain();
-    assert_eq!(said.len(), 1, "{said:?}");
-    assert_eq!(said[0].code, "HOOK_UNANSWERED");
+    // The same one drain the notice door rides: a hook's notice reaches the
+    // person through the host, with no tool call anywhere in this test.
+    let (_, text) = started.heard("HOOK_UNANSWERED").await;
     assert!(
-        said[0].text.contains("stub:silent") && said[0].text.contains("within 5s"),
-        "{}",
-        said[0].text
+        text.contains("stub:silent") && text.contains("within 5s"),
+        "{text}"
     );
     assert_eq!(
         crossings(&started).await,

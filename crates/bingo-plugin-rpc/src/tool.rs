@@ -68,7 +68,9 @@ impl PluginTool {
     async fn exchange(&self, params: ToolCallParams, cx: &ToolContext) -> Reply {
         let (sender, mut tail) = tokio::sync::mpsc::unbounded_channel();
         let call_id = params.call_id.clone();
-        let _watch = self.connection.watch(&call_id, sender);
+        let _watch = self
+            .connection
+            .watch(&call_id, sender, Arc::clone(&cx.call));
         let value = match serde_json::to_value(params) {
             Ok(value) => value,
             Err(error) => return Err(RpcError::new(INTERNAL_ERROR, error.to_string())),
@@ -103,21 +105,16 @@ impl PluginTool {
         }
     }
 
-    /// A call is the one place a plugin's notice can reach a transcript: it is
-    /// the only one of this crate's entry points holding a session's own
-    /// recorder. Whatever the bridge has to say is said here, including the
-    /// death this call may just have found.
-    async fn announce(&self, cx: &ToolContext) {
+    /// A call is where a death is usually first noticed: the reply that never
+    /// came is what the pipe closing looks like from here. Saying it is not
+    /// this call's job — the notice goes on the crate's one channel, and the
+    /// one drain says it whether or not any tool is ever called again.
+    fn announce(&self) {
         if self.connection.claim_death() {
             self.notices.push(Notice::warn(
                 "PLUGIN_DIED",
                 format!("the {} plugin process ended; restarting it", self.plugin),
             ));
-        }
-        for notice in self.notices.drain() {
-            if let Err(error) = cx.call.record(notice.body()).await {
-                tracing::debug!(plugin = %self.plugin, %error, "a plugin notice reached no transcript");
-            }
         }
     }
 }
@@ -151,7 +148,7 @@ impl Tool for PluginTool {
 
     async fn call(&self, input: Value, cx: &ToolContext) -> Result<ToolOutput, ToolError> {
         let reply = self.exchange(self.params(input, cx), cx).await;
-        self.announce(cx).await;
+        self.announce();
         self.output(reply)
     }
 }

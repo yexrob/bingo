@@ -28,6 +28,9 @@
 //!
 //! `METHODS` and `NOTIFICATIONS` are the one table: the schema walks it, and
 //! the host and the example plugin both dispatch on the names in [`name`].
+//! What the host's own service takes and answers is not in that table and not
+//! here: it rides inside one `service/call`'s params, so it lives with the
+//! doors that read it ([`crate::doors`]).
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;

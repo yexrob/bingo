@@ -11,6 +11,7 @@ use std::collections::BTreeMap;
 use schemars::{SchemaGenerator, generate::SchemaSettings};
 use serde_json::{Map, Value, json};
 
+use crate::doors;
 use crate::manifest::Manifest;
 use crate::wire::{METHODS, NOTIFICATIONS, PROTOCOL, Ref, schema_of};
 
@@ -22,6 +23,7 @@ pub fn document() -> Value {
     let mut generator = generator();
     let methods = method_table(&mut generator);
     let notifications = notification_table(&mut generator);
+    let opened = table(&mut generator, doors::METHODS);
     for name in UNNAMED {
         name(&mut generator);
     }
@@ -33,6 +35,7 @@ pub fn document() -> Value {
         "manifest": { "$ref": "#/$defs/Manifest" },
         "methods": methods,
         "notifications": notifications,
+        "hostService": { "key": doors::KEY, "methods": opened },
     })
 }
 
@@ -45,8 +48,14 @@ fn generator() -> SchemaGenerator {
 }
 
 fn method_table(generator: &mut SchemaGenerator) -> Map<String, Value> {
+    table(generator, METHODS)
+}
+
+/// One name → `{params, result}` per entry: the wire's methods and the host
+/// service's doors are the same shape, so they are written down the same way.
+fn table(generator: &mut SchemaGenerator, methods: &[crate::wire::Method]) -> Map<String, Value> {
     let mut table = Map::new();
-    for &(name, params, result) in METHODS {
+    for &(name, params, result) in methods {
         let params = params(generator).to_value();
         let result = result(generator).to_value();
         table.insert(
@@ -140,6 +149,26 @@ mod tests {
         listed.sort();
         assert_eq!(listed, announced);
         assert_eq!(document["protocol"], PROTOCOL);
+    }
+
+    /// The host's own service is in the document for the same reason the
+    /// methods are: a door a plugin author cannot find is a door that does not
+    /// exist. It is not a wire method — it is reached through `service/call` —
+    /// so it is written down beside them, not among them.
+    #[test]
+    fn the_committed_schema_names_the_host_s_own_service_and_its_doors() {
+        let file = std::fs::read_to_string(committed()).unwrap_or_default();
+        let document: Value = serde_json::from_str(&file).expect("the committed schema is json");
+        assert_eq!(document["hostService"]["key"], json!(doors::KEY));
+        let mut named = keys(&document["hostService"]["methods"]);
+        named.sort();
+        let mut spoken: Vec<String> = doors::METHODS.iter().map(|d| d.0.to_owned()).collect();
+        spoken.sort();
+        assert_eq!(named, spoken);
+        assert!(
+            !keys(&document["methods"]).iter().any(|m| m == "ask"),
+            "a door is not a wire method"
+        );
     }
 
     /// The pin ADR-0032 §4 rests on. `HookOutcome` has no `Allow`, and the
@@ -249,7 +278,11 @@ mod tests {
         references(&document["manifest"], &mut found);
         references(&document["methods"], &mut found);
         references(&document["notifications"], &mut found);
-        assert_eq!(found.len(), 1 + METHODS.len() * 2 + NOTIFICATIONS.len());
+        references(&document["hostService"], &mut found);
+        assert_eq!(
+            found.len(),
+            1 + (METHODS.len() + doors::METHODS.len()) * 2 + NOTIFICATIONS.len()
+        );
         for reference in found {
             let name = reference
                 .strip_prefix("#/$defs/")

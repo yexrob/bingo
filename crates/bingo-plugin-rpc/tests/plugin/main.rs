@@ -16,6 +16,7 @@
 mod harness;
 
 mod context;
+mod doors;
 mod hooks;
 mod lifecycle;
 mod provider;
