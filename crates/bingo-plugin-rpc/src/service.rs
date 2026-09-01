@@ -19,6 +19,7 @@ use serde_json::Value;
 
 use crate::bridge::Bridge;
 use crate::codec::{INTERNAL_ERROR, INVALID_PARAMS, METHOD_NOT_FOUND, RpcError};
+use crate::connection::Connection;
 use crate::deadline;
 use crate::wire::{ServiceCallParams, ServiceCallResult, ServiceSpec, name};
 
@@ -76,12 +77,12 @@ impl RemoteService {
     /// the one deadline: two services calling each other in a ring hang until
     /// it runs out, which is the floor this design has instead of a cycle
     /// detector.
-    async fn ask(&self, method: &str, params: Value) -> Result<Value, ServiceError> {
+    async fn ask(&self, method: &str, input: Value) -> Result<Value, ServiceError> {
         let connection = self.live().await?;
         let params = ServiceCallParams {
             key: self.key.clone(),
             method: method.to_string(),
-            params,
+            params: input,
         };
         let value = serde_json::to_value(params).map_err(|error| self.failed(error.to_string()))?;
         let answered = tokio::time::timeout(
@@ -104,7 +105,7 @@ impl RemoteService {
 
     /// The pipe this call goes out on, asked for afresh: a plugin that died
     /// and was respawned answers on the connection it has now.
-    async fn live(&self) -> Result<Arc<crate::connection::Connection>, ServiceError> {
+    async fn live(&self) -> Result<Arc<Connection>, ServiceError> {
         let bridge = self
             .bridge
             .upgrade()
