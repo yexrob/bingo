@@ -496,6 +496,7 @@ mod tests {
             contributors: Vec::new(),
             compactors: Vec::new(),
             providers: Vec::new(),
+            hooks: Vec::new(),
             services: Default::default(),
         }
     }

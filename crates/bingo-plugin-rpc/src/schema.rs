@@ -142,6 +142,50 @@ mod tests {
         assert_eq!(document["protocol"], PROTOCOL);
     }
 
+    /// The pin ADR-0032 §4 rests on. `HookOutcome` has no `Allow`, and the
+    /// wire adds none: everything a hook may answer with is in these three
+    /// definitions, and there is no allowing word anywhere in them. (A
+    /// person's own permission answer says `allowOnce` elsewhere in the
+    /// document; that is the gate's vocabulary, which no process writes.)
+    #[test]
+    fn the_outcome_a_hook_writes_has_no_allow_to_say() {
+        let document = document();
+        let kinds: Vec<&str> = document["$defs"]["HookOutcome"]["oneOf"]
+            .as_array()
+            .map(|variants| {
+                variants
+                    .iter()
+                    .filter_map(|v| v["properties"]["kind"]["const"].as_str())
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert_eq!(kinds, ["continue", "deny", "ask", "block", "redirect"]);
+        for name in ["HookOutcome", "HookDecideResult", "HookValue"] {
+            let mut shape = document["$defs"][name].clone();
+            undescribed(&mut shape);
+            let written = shape.to_string().to_lowercase();
+            for spelling in ["allow", "approve", "permit"] {
+                assert!(
+                    !written.contains(spelling),
+                    "{name} spells {spelling}: {written}"
+                );
+            }
+        }
+    }
+
+    /// The shape without the prose about it: a doc comment saying there is no
+    /// `Allow` must not be what makes this test pass.
+    fn undescribed(value: &mut Value) {
+        match value {
+            Value::Object(map) => {
+                map.remove("description");
+                map.values_mut().for_each(undescribed);
+            }
+            Value::Array(items) => items.iter_mut().for_each(undescribed),
+            _ => {}
+        }
+    }
+
     /// Every key under any `properties`, wherever it sits in the document.
     fn properties(value: &Value, found: &mut Vec<String>) {
         match value {
@@ -243,6 +287,12 @@ mod tests {
             "ModelInfo",
             "ProviderError",
             "EndpointCapabilities",
+            "HookPoint",
+            "HookOutcome",
+            "Phase",
+            "Input",
+            "ToolCall",
+            "Frame",
         ] {
             assert!(
                 document["$defs"].get(name).is_some(),

@@ -198,6 +198,7 @@ fn handshake(options: &Options) -> Value {
                 caching: false,
             },
         }],
+        hooks: Vec::new(),
         services: declared(options),
     };
     let mut declared = serde_json::to_value(result).unwrap_or(Value::Null);
