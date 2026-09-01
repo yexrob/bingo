@@ -14,6 +14,7 @@
 //! `--protocol N` answers the handshake with a major this host does not speak;
 //! `--placement <kind>` declares a placement that may not be one.
 
+use std::collections::BTreeMap;
 use std::io::{BufRead, Write};
 use std::process::ExitCode;
 
@@ -164,6 +165,7 @@ fn handshake(options: &Options) -> Value {
                 caching: false,
             },
         }],
+        services: BTreeMap::new(),
     };
     let mut declared = serde_json::to_value(result).unwrap_or(Value::Null);
     // Written last, over the typed one: the point of `--placement` is to say

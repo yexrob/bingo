@@ -15,9 +15,15 @@
 //! closes it. Every delta names the stream it belongs to, so two running at
 //! once never interleave.
 //!
+//! One method travels both ways: `service/call`. The host asks a process for
+//! a service that process serves; a process asks the host for any service
+//! whose owner opened a wire face — and the host, being the router, is how
+//! two processes pair with no pipe between them (ADR-0031 §4).
+//!
 //! `METHODS` and `NOTIFICATIONS` are the one table: the schema walks it, and
 //! the host and the example plugin both dispatch on the names in [`name`].
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use bingo_sdk::{
@@ -31,11 +37,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// The major the host speaks. A process that answers with another one is
-/// refused rather than guessed at (ADR-0015 §Consequences). Three since
-/// ADR-0030 opened context and compaction and then providers: a plugin written
-/// for one major says so and is refused, rather than being asked what it cannot
+/// refused rather than guessed at (ADR-0015 §Consequences). Four since
+/// ADR-0031 opened services, which travel both ways: a plugin written for one
+/// major says so and is refused, rather than being asked what it cannot
 /// answer.
-pub const PROTOCOL: u32 = 3;
+pub const PROTOCOL: u32 = 4;
 
 /// Every name that travels on the wire, in one place.
 pub mod name {
@@ -54,6 +60,11 @@ pub mod name {
     /// Kernel → plugin: stream one model response. The answer is the stream's
     /// close, not its content; the content arrives as [`PROVIDER_DELTA`].
     pub const PROVIDER_STREAM: &str = "provider/stream";
+    /// Either way: one call on one service, by key (ADR-0031 §4). Kernel →
+    /// plugin serves a service that plugin declared; plugin → kernel is the
+    /// one thing a process may ask the host for, and the host routes it to
+    /// whoever holds the key.
+    pub const SERVICE_CALL: &str = "service/call";
 
     /// Plugin → kernel: replace a running call's live output line.
     pub const TOOL_PROGRESS: &str = "tool/progress";
@@ -120,6 +131,26 @@ pub struct InitializeResult {
     pub compactors: Vec<CompactorSpec>,
     #[serde(default)]
     pub providers: Vec<ProviderSpec>,
+    /// The services this process serves, by the key another plugin calls them
+    /// by. A key is global — it is what a consumer writes in `requires` — so
+    /// the declaration is a map and not a list: one answer per key.
+    #[serde(default)]
+    pub services: BTreeMap<String, ServiceSpec>,
+}
+
+/// What one service speaks: a name for every method it answers, and the JSON
+/// Schema of what that method takes.
+///
+/// The schema is for whoever writes the caller — nothing here validates
+/// against it, as nothing validates a manifest's `config` schema — and the
+/// names are the host's: a method the declaration never named is refused
+/// before it crosses, with the set that is named (ADR-0031 §5). A service
+/// that names no method speaks none.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ServiceSpec {
+    #[serde(default)]
+    pub methods: BTreeMap<String, Value>,
 }
 
 /// A contributor a process says it has. Placement is handshake data: which of
@@ -357,6 +388,29 @@ pub struct ProviderCancelParams {
     pub call: String,
 }
 
+/// One call on one service, the same shape whichever way it goes: the key
+/// that names the service, the method, and whatever that method takes.
+///
+/// Neither side reads `params`: it is the service's own contract, written in
+/// the schema the declaration carries, and the bridge is a pipe for it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ServiceCallParams {
+    pub key: String,
+    pub method: String,
+    #[serde(default)]
+    pub params: Value,
+}
+
+/// What the service answered. A service with nothing to say answers `null`,
+/// which is an answer; a service that could not answer fails the call.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ServiceCallResult {
+    #[serde(default)]
+    pub result: Value,
+}
+
 /// Plugin → kernel, while a call runs: the whole of the live output line.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -422,6 +476,11 @@ pub static METHODS: &[Method] = &[
         name::PROVIDER_STREAM,
         schema_of::<ProviderStreamParams>,
         schema_of::<ProviderStreamResult>,
+    ),
+    (
+        name::SERVICE_CALL,
+        schema_of::<ServiceCallParams>,
+        schema_of::<ServiceCallResult>,
     ),
 ];
 
@@ -808,6 +867,94 @@ mod tests {
                 "images": false, "countTokens": false, "caching": false
             }}),
             "an absent family is absent on the wire, never the id repeated"
+        );
+    }
+
+    // ------------------------------------------------------ services, both ways
+
+    /// The same line serves both directions: the host asking a process for a
+    /// service it declared, and a process asking the host for one the host
+    /// routes. There is no second shape, because there is no second lane.
+    #[test]
+    fn a_service_call_is_one_shape_whichever_way_it_travels() {
+        let params = ServiceCallParams {
+            key: "kv".into(),
+            method: "set".into(),
+            params: json!({ "key": "greeting", "value": "hello" }),
+        };
+        let wire = serde_json::to_value(&params).expect("a call serialises");
+        assert_eq!(
+            wire,
+            json!({
+                "key": "kv",
+                "method": "set",
+                "params": { "key": "greeting", "value": "hello" }
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<ServiceCallParams>(wire).expect("and parses"),
+            params,
+            "the host writes what a process writes, and reads what a process reads"
+        );
+    }
+
+    /// A method that takes nothing says nothing, and a service that answers
+    /// nothing says `null` — an answer, and not a failure.
+    #[test]
+    fn a_call_may_take_nothing_and_an_answer_may_be_nothing() {
+        let params: ServiceCallParams =
+            serde_json::from_value(json!({ "key": "kv", "method": "clear" }))
+                .expect("a call with no params");
+        assert_eq!(params.params, Value::Null);
+        let answered: ServiceCallResult = serde_json::from_value(json!({})).expect("an answer");
+        assert_eq!(answered.result, Value::Null);
+        assert_eq!(
+            serde_json::to_value(ServiceCallResult {
+                result: json!("hello")
+            })
+            .expect("it serialises"),
+            json!({ "result": "hello" })
+        );
+    }
+
+    /// What a service declaration is: the methods by name, and the schema of
+    /// each. The names are the host's — it refuses what is not there — and the
+    /// schemas are the caller's to read.
+    #[test]
+    fn a_declared_service_names_the_methods_it_speaks_and_their_schemas() {
+        let result: InitializeResult = serde_json::from_value(json!({
+            "protocol": PROTOCOL,
+            "name": "store",
+            "version": "0.1.0",
+            "services": {
+                "kv": { "methods": {
+                    "set": { "type": "object", "required": ["key", "value"] },
+                    "get": { "type": "object", "required": ["key"] }
+                }}
+            }
+        }))
+        .expect("a handshake that declares a service");
+        let kv = result.services.get("kv").expect("the declared service");
+        assert_eq!(
+            kv.methods.keys().cloned().collect::<Vec<_>>(),
+            ["get", "set"],
+            "a method the declaration never named is one the host refuses"
+        );
+        assert_eq!(kv.methods["get"]["required"], json!(["key"]));
+    }
+
+    /// A process that declares no services declares none: the field is absent
+    /// on the wire, never an empty object nobody wrote.
+    #[test]
+    fn a_process_that_serves_no_service_says_nothing_about_services() {
+        let result: InitializeResult =
+            serde_json::from_value(json!({ "protocol": PROTOCOL, "name": "q", "version": "0" }))
+                .expect("a handshake");
+        assert!(result.services.is_empty());
+        let spec: ServiceSpec = serde_json::from_value(json!({})).expect("a bare declaration");
+        assert!(
+            spec.methods.is_empty(),
+            "and a service that names no method speaks none"
         );
     }
 

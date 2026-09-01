@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "bingo plugin",
-  "protocol": 3,
+  "protocol": 4,
   "$defs": {
     "Action": {
       "type": "object",
@@ -927,6 +927,14 @@
             "$ref": "#/$defs/ProviderSpec"
           },
           "default": []
+        },
+        "services": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/ServiceSpec"
+          },
+          "description": "The services this process serves, by the key another plugin calls them\nby. A key is global — it is what a consumer writes in `requires` — so\nthe declaration is a map and not a list: one answer per key.",
+          "default": {}
         }
       },
       "required": [
@@ -2125,6 +2133,45 @@
         "assistant"
       ]
     },
+    "ServiceCallParams": {
+      "type": "object",
+      "properties": {
+        "key": {
+          "type": "string"
+        },
+        "method": {
+          "type": "string"
+        },
+        "params": {
+          "default": null
+        }
+      },
+      "required": [
+        "key",
+        "method"
+      ],
+      "description": "One call on one service, the same shape whichever way it goes: the key\nthat names the service, the method, and whatever that method takes.\n\nNeither side reads `params`: it is the service's own contract, written in\nthe schema the declaration carries, and the bridge is a pipe for it."
+    },
+    "ServiceCallResult": {
+      "type": "object",
+      "properties": {
+        "result": {
+          "default": null
+        }
+      },
+      "description": "What the service answered. A service with nothing to say answers `null`,\nwhich is an answer; a service that could not answer fails the call."
+    },
+    "ServiceSpec": {
+      "type": "object",
+      "properties": {
+        "methods": {
+          "type": "object",
+          "additionalProperties": true,
+          "default": {}
+        }
+      },
+      "description": "What one service speaks: a name for every method it answers, and the JSON\nSchema of what that method takes.\n\nThe schema is for whoever writes the caller — nothing here validates\nagainst it, as nothing validates a manifest's `config` schema — and the\nnames are the host's: a method the declaration never named is refused\nbefore it crosses, with the set that is named (ADR-0031 §5). A service\nthat names no method speaks none."
+    },
     "SessionId": {
       "type": "string",
       "description": "One persisted context: one journal, one actor."
@@ -2813,6 +2860,14 @@
       },
       "result": {
         "$ref": "#/$defs/ProviderStreamResult"
+      }
+    },
+    "service/call": {
+      "params": {
+        "$ref": "#/$defs/ServiceCallParams"
+      },
+      "result": {
+        "$ref": "#/$defs/ServiceCallResult"
       }
     }
   },
