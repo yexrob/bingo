@@ -1,6 +1,9 @@
 # ADR-0033 — The allowance: a host capability, lent for one crossing
 
-Status: accepted · 2026-09-01 · Plan: M30
+Status: accepted · 2026-09-01 · Plan: M30 · amended 2026-09-01
+(scope: the table and the `complete` door are deferred to demand — no
+external strategy exists to spend through them; `ask` and `notice`,
+which mint nothing, land first as M30)
 
 ## Context
 
