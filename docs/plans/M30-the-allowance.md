@@ -15,10 +15,12 @@ actually runnable.
 1. **The allowance brick, pure first** (new `allowance.rs` in
    plugin-rpc) — the table: `mint(grant) -> id`, `claim(id) ->
    Option<Grant>`, `expire(id)`; `Grant` holds what a crossing lends
-   (`Complete { provider, model, cancel }`, `Ask { call }`). Ids are
-   unguessable enough to not collide, entries die with their
-   crossing, and the table is the bridge's ONE. Table-tested pure:
-   mint/claim/expire, a dead id refused in words, expiry idempotent.
+   (v1: `Complete { provider, model, cancel }` only — a door mints
+   only where its scoping fact exists nowhere else, ADR-0033 §5 as
+   amended). Ids are unguessable enough to not collide, entries die
+   with their crossing, and the table is the bridge's ONE.
+   Table-tested pure: mint/claim/expire, a dead id refused in words,
+   expiry idempotent.
 2. **`bingo.host`, the door service** (new `doors.rs` or in
    `service.rs`) — an in-process `WireService` the bridge registers
    through M28's `open_service` at start; methods `complete`, `ask`,
@@ -34,12 +36,14 @@ actually runnable.
    usage per allowance, and `RemoteCompactor` folds the measured
    usage into the returned `Compaction.usage` — the claim is never
    the ledger; pin that with a lying stub.
-4. **The `ask` door** — `PluginTool`'s call path mints an `Ask` grant
-   keyed to the running call (the bridge already tracks those for
-   progress/cancel); the door routes to the live call's own asking
-   machinery, so the question rides the interaction system every
-   tool's questions ride — no second path. A grant for a call that
-   has ended is refused in words.
+4. **The `ask` door** — takes `{call, question}`; **nothing is
+   minted**: the door validates the call against the bridge's
+   existing running-call map and the calling connection (the call's
+   liveness is the grant — ADR-0033 §3 as amended; a second id for a
+   fact that map already carries is the ADR-0011 debt). It routes to
+   the live call's own asking machinery, so the question rides the
+   interaction system every tool's questions ride — no second path.
+   An ended call, or another connection's, is refused in words.
 5. **`notice`** — no allowance; rides the bridge's existing notice
    path under the plugin's name; level clamped to the sane set.
 6. **The activation key** (the M26 Carried) — a settings key naming
@@ -78,8 +82,8 @@ budget unchanged.
       usage measured by the host and folded into `Compaction.usage`
       (a lying claim does not win); allowance expires with the reply
 - [ ] `ask`: a bridge tool's mid-run question rides the one
-      interaction path and returns the person's answer; a grant for
-      an ended call refused
+      interaction path and returns the person's answer; an ended or
+      foreign call refused in words; nothing minted for it
 - [ ] `notice` surfaces under the plugin's name with no allowance
 - [ ] the activation key selects a source's strategy in the shipped
       composition; a name matching nothing refused in words

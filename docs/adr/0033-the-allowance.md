@@ -37,22 +37,30 @@ and dead when the crossing ends.
    {response}`: minted for `compactor/compact`, routed to the provider
    the session already chose; **usage is measured by the host** and
    folded into the crossing's accounting, so the person sees the spend
-   on the stream and a claim is never the ledger. `ask {allowance,
-   question} → {answer}`: minted for `tool/call` and routed to the
-   live call's own asking machinery — a bridge tool may put a question
-   to the person mid-run exactly the way an in-process tool does, and
-   no second question path exists.
+   on the stream and a claim is never the ledger. `ask {call,
+   question} → {answer}`: **nothing is minted** — the bridge already
+   tracks running calls for progress and cancel, and that liveness is
+   the grant: the call id the plugin holds names the crossing, and an
+   ended call or another connection's is refused in words. The
+   question rides the live call's own asking machinery, exactly the
+   way an in-process tool's does; no second question path exists.
+   (Amended 2026-09-01 in review: the first cut minted an Ask
+   allowance — a second id for a fact the running-call map already
+   carries is the ADR-0011 debt.)
 4. **`notice {level, message}` takes no allowance.** A plugin may tell
    the person something at any time, under its own name, on the
    bridge's existing notice path. It is the one unscoped method; it
    spends nothing but a line.
 5. **The socket for successors** (user-directed): a future capability
    — sessions, deliver, a store read — enters as one more method on
-   `bingo.host` plus one more minting site, each behind its own ADR
-   paragraph naming its scope and its accounting. The key, the table,
-   the validation and the routing are this ADR's and do not change;
-   what is not a method does not exist across the line, so the Hub's
-   promise stands sentence for sentence.
+   `bingo.host` plus one scoping fact, each behind its own ADR
+   paragraph naming its scope and its accounting. **A door mints only
+   where its scoping fact exists nowhere else**; one already carried —
+   a live call, a live crossing — is itself the grant, reused, never
+   re-issued. The key, the table, the validation and the routing are
+   this ADR's and do not change; what is not a method does not exist
+   across the line, so the Hub's promise stands sentence for
+   sentence.
 
 ## Consequences
 
