@@ -328,6 +328,20 @@ pub trait HostApi: Send + Sync {
 
     async fn catalog(&self, kind: CatalogKind) -> Result<Catalog, KernelError>;
 
+    /// Say one line to the person, wherever they are: a transcript notice on
+    /// every session that is open right now. It belongs to no session and no
+    /// call — a plugin process that died, a hook that never decided, a plugin
+    /// saying something of its own — which is why it names none.
+    ///
+    /// A host with nobody listening refuses, so a caller can keep the line and
+    /// say it when somebody is there to read it.
+    async fn notice(&self, _level: Level, _code: &str, _text: &str) -> Result<(), KernelError> {
+        Err(KernelError::new(
+            ErrorCode::Internal,
+            "this host has nobody to say it to",
+        ))
+    }
+
     fn gateway_events(&self) -> GatewayStream;
 
     fn service_any(&self, key: &str) -> Option<Arc<dyn Any + Send + Sync>>;

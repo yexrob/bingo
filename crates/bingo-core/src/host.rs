@@ -868,6 +868,30 @@ impl HostApi for Host {
         })
     }
 
+    /// Every session that is open right now, and no other: a line that belongs
+    /// to nobody in particular must not wake a session that had been put away
+    /// just to hear it. Nobody open is refused, so the caller keeps the line.
+    async fn notice(&self, level: Level, code: &str, text: &str) -> Result<(), KernelError> {
+        let open: Vec<Live> = self.lock().values().cloned().collect();
+        if open.is_empty() {
+            return Err(KernelError::new(
+                ErrorCode::SessionNotFound,
+                "no session is open to say it to",
+            ));
+        }
+        for session in open {
+            let body = ItemBody::Notice {
+                level,
+                code: code.to_string(),
+                text: text.to_string(),
+            };
+            if let Err(error) = session.mailbox.record(body).await {
+                tracing::debug!(%error, code, "a notice reached no transcript");
+            }
+        }
+        Ok(())
+    }
+
     fn gateway_events(&self) -> GatewayStream {
         let rx = self.gateway.subscribe();
         Box::pin(futures::stream::unfold(rx, |mut rx| async move {
