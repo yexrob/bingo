@@ -191,6 +191,7 @@ pub(crate) mod tests {
             updated_at: stamp(),
             usage: Usage::default(),
             busy: false,
+            messages: None,
         }
     }
 

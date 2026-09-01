@@ -130,6 +130,7 @@ mod tests {
             updated_at: ts,
             usage: Usage::default(),
             busy: false,
+            messages: None,
         }
     }
 

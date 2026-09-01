@@ -94,6 +94,7 @@ fn summary() -> SessionSummary {
         updated_at: ts,
         usage: Usage::default(),
         busy: false,
+        messages: None,
     }
 }
 

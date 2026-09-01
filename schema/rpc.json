@@ -2957,6 +2957,15 @@
         "busy": {
           "type": "boolean",
           "default": false
+        },
+        "messages": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0,
+          "description": "How many messages have been said in this session, by\n[`Event::completes_a_message`]. `None` is \"never counted\" — a summary\nwritten before the field existed — and must be shown as nothing rather\nthan as a `0` it does not mean."
         }
       },
       "required": [

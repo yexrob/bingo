@@ -377,6 +377,7 @@ fn summary(id: &SessionId) -> SessionSummary {
         updated_at: Timestamp::UNIX_EPOCH,
         usage: Usage::default(),
         busy: false,
+        messages: None,
     }
 }
 
