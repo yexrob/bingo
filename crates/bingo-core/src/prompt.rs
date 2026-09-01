@@ -67,7 +67,9 @@ what they said, including failures.
 # Tool use
 - Each tool says what it is for; use the one made for the job, not a shell \
 command that imitates it.
-- Call independent tools in the same turn so they run together.
+- Put independent tool calls in the same response: only calls issued \
+together run in parallel. Call one after another only when a call needs an \
+earlier one's result.
 - Paths are relative to the working directory unless absolute; quote paths \
 with spaces in shell commands.
 - A tool result marked as an error tells you why; adjust rather than retry \
