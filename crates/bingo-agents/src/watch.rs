@@ -75,8 +75,13 @@ pub async fn next_reply(
             *attachment = follow(host, &session)
                 .await
                 .map_err(|e| ToolError::Failed(e.message))?;
-            if attachment.snapshot.turn.is_none() {
-                return Ok(last_reply(&attachment.snapshot));
+            // A turn that ended inside the gap is in the fresh snapshot; one
+            // that has not started yet leaves no turn to read, so the watch
+            // goes on rather than reporting an end nothing reached.
+            if attachment.snapshot.turn.is_none()
+                && let Some(reply) = last_reply(&attachment.snapshot)
+            {
+                return Ok(reply);
             }
             continue;
         }
@@ -107,7 +112,14 @@ fn reply_to(state: &SessionState, turn: &TurnId) -> String {
 /// The reply to the last turn, for a child that is already idle when it is
 /// asked: the folded state knows how that turn ended, and its last item
 /// which turn it was.
-pub fn last_reply(state: &SessionState) -> Reply {
+///
+/// `None` when no turn has ever run. A seated member's held brief is
+/// journalled when it is absorbed, not when it is held (ADR-0027), so a
+/// session nothing has woken carries no turn and no items — and calling that
+/// a completed turn with nothing to say would be a lie about a teammate that
+/// has not started. The caller says what is true of it instead.
+pub fn last_reply(state: &SessionState) -> Option<Reply> {
+    let status = state.last_turn.clone()?;
     let text = state
         .items
         .iter()
@@ -115,10 +127,7 @@ pub fn last_reply(state: &SessionState) -> Reply {
         .find_map(|item| item.turn.as_ref())
         .map(|turn| reply_to(state, turn))
         .unwrap_or_default();
-    Reply {
-        status: state.last_turn.clone().unwrap_or(TurnStatus::Completed),
-        text,
-    }
+    Some(Reply { status, text })
 }
 
 /// The background watcher: when the turn this spawn started ends, the child's
@@ -361,7 +370,7 @@ mod tests {
         assert!(attachment.snapshot.turn.is_none(), "the turn ended");
         assert_eq!(
             last_reply(&attachment.snapshot),
-            completed("the diff is fine")
+            Some(completed("the diff is fine"))
         );
     }
 
@@ -373,9 +382,22 @@ mod tests {
         fleet.failed(&child, "no key");
 
         let attachment = follow(&fleet.handle(), &child).await.unwrap();
-        let reply = last_reply(&attachment.snapshot);
+        let reply = last_reply(&attachment.snapshot).expect("a turn it ran");
         assert!(reply.is_error());
         assert_eq!(reply.text, "");
+    }
+
+    /// A session with no turn behind it has no last reply to read: nothing
+    /// has woken it, and its held brief is not in its journal (ADR-0027).
+    #[tokio::test]
+    async fn a_session_no_turn_has_ever_run_in_has_no_reply_at_all() {
+        let fleet = Fleet::default();
+        let root = fleet.root();
+        let seated = fleet.child(&root, "understudy");
+
+        let attachment = follow(&fleet.handle(), &seated).await.unwrap();
+        assert!(attachment.snapshot.turn.is_none(), "no turn is running");
+        assert_eq!(last_reply(&attachment.snapshot), None);
     }
 
     #[test]

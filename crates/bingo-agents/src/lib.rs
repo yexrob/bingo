@@ -10,9 +10,9 @@
 //!   prompt. In the foreground it waits for the child's final text; in the
 //!   background it returns the name and leaves a watcher to wake the parent.
 //! - `SendMessage` wakes an agent — a child, a teammate beside the caller, or
-//!   `parent` — or posts into a room's journal, `WaitAgent` holds until an
-//!   agent is idle, `ListAgents` reads the tree, `ListModels` reads the
-//!   model catalogue.
+//!   `parent` — or posts into a room's journal, `WaitAgent` joins one or
+//!   several agents under one deadline and reads what each said,
+//!   `ListAgents` reads the tree, `ListModels` reads the model catalogue.
 //! - `@name rest` in the composer reaches the child of that name.
 //! - A root session opening in a project with a `.bingo/team.json` seats the
 //!   roles it declares, as children of itself.

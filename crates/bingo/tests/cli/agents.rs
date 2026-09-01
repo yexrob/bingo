@@ -5,8 +5,9 @@
 
 use super::*;
 
-/// The text a completed call to `tool` returned, as the model read it.
-fn tool_output(out: &Output, tool: &str) -> String {
+/// The last completed result of `tool`, as the model read it: the text, and
+/// whether it read it as an error.
+fn tool_result(out: &Output, tool: &str) -> bingo_sdk::ToolOutput {
     frames_of(out)
         .into_iter()
         .filter_map(|f| match f.event {
@@ -18,6 +19,11 @@ fn tool_output(out: &Output, tool: &str) -> String {
         })
         .next_back()
         .unwrap_or_else(|| panic!("no {tool} call completed: {}", stdout(out)))
+}
+
+/// The text a completed call to `tool` returned, as the model read it.
+fn tool_output(out: &Output, tool: &str) -> String {
+    tool_result(out, tool)
         .parts
         .iter()
         .filter_map(bingo_sdk::ContentPart::as_text)
@@ -203,6 +209,21 @@ fn a_wake_that_finds_the_parent_busy_is_never_lost() {
         "the parent never heard the completion: {:?}",
         ended.types()
     );
+}
+
+/// One session's journal as it was written, found by the key its summary
+/// carries: an agent's is `agent/<root>/<name>`. Read for what a session
+/// heard, which no stream of the root's shows.
+fn agent_journal(home: &std::path::Path, key: &str) -> String {
+    let sessions = home.join(".bingo/data/sessions");
+    let dirs = std::fs::read_dir(&sessions).expect("the run wrote its sessions");
+    for dir in dirs.flatten().map(|entry| entry.path()) {
+        let summary = std::fs::read_to_string(dir.join("summary.json")).unwrap_or_default();
+        if summary.contains(&format!("\"{key}\"")) {
+            return std::fs::read_to_string(dir.join("journal.jsonl")).unwrap_or_default();
+        }
+    }
+    panic!("no session is keyed {key}");
 }
 
 /// Every byte journaled under the data dir, for asserting what a session
@@ -412,6 +433,135 @@ fn the_same_roles_come_back_on_continue() {
         "the roles were reopened, not seated again"
     );
     assert_eq!(final_text(&second), "two are seated");
+}
+
+// ---- the join (M23, ADR-0027) ----------------------------------------------
+
+/// Two agents, then one wait for both. Every response up to the wait goes out
+/// in one order: a foreground spawn holds the root until the child's turn has
+/// ended, so neither child is still running when the join begins.
+const JOIN: &str = r#"{"responses":[
+    {"steps":[{"toolCall":{"name":"SpawnAgent","input":{"name":"alpha","prompt":"say who you are","background":false}}}]},
+    {"steps":[{"text":"alpha is done"}]},
+    {"steps":[{"toolCall":{"name":"SpawnAgent","input":{"name":"beta","prompt":"say who you are","background":false}}}]},
+    {"steps":[{"text":"beta is done"}]},
+    {"steps":[{"toolCall":{"name":"WaitAgent","input":{"agents":["beta","alpha"]}}}]},
+    {"steps":[{"text":"both answered"}]}
+]}"#;
+
+#[test]
+fn a_join_hands_back_every_reply_in_the_order_it_was_asked_for() {
+    let home = tempfile::tempdir().unwrap();
+    let out = scripted_run(home.path(), &script(JOIN), &[], "ask them both");
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+
+    let joined = tool_result(&out, "WaitAgent");
+    let text = tool_output(&out, "WaitAgent");
+    assert!(!joined.is_error, "both agents answered: {text}");
+    let beta = text
+        .find("beta is done")
+        .unwrap_or_else(|| panic!("{text}"));
+    let alpha = text
+        .find("alpha is done")
+        .unwrap_or_else(|| panic!("{text}"));
+    assert!(
+        beta < alpha,
+        "the order asked, not the order spawned: {text}"
+    );
+    assert_eq!(final_text(&out), "both answered");
+}
+
+/// One agent that finishes and one that will not, joined under a deadline the
+/// second cannot meet. The spawn and the wait are one round, so the root asks
+/// the provider for nothing between them: the background child takes the
+/// slow response the moment it is woken, and the root's next request comes a
+/// whole deadline later. The delay is fifteen times the deadline, so what the
+/// run asserts does not turn on how fast the machine is.
+const JOIN_DEADLINE: &str = r#"{"responses":[
+    {"steps":[{"toolCall":{"name":"SpawnAgent","input":{"name":"done","prompt":"say the diff is fine","background":false}}}]},
+    {"steps":[{"text":"the diff is fine"}]},
+    {"steps":[
+        {"toolCall":{"name":"SpawnAgent","input":{"name":"slow","prompt":"take your time","background":true}}},
+        {"toolCall":{"name":"WaitAgent","input":{"agents":["done","slow"],"timeout_s":2}}}
+    ]},
+    {"steps":[{"delay":{"ms":30000}},{"text":"eventually"}]},
+    {"steps":[{"text":"one of them is still at it"}]}
+]}"#;
+
+#[test]
+fn a_deadline_names_who_finished_and_who_is_still_working() {
+    let home = tempfile::tempdir().unwrap();
+    let out = run_within(
+        bingo()
+            .env("BINGO_FAKE_SCRIPT", script(JOIN_DEADLINE).path())
+            .env("HOME", home.path())
+            .args(["--print", "--output-format", "json", "--cwd"])
+            .arg(home.path())
+            .arg("wait for both"),
+        Duration::from_secs(60),
+    );
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+
+    let joined = tool_result(&out, "WaitAgent");
+    let text = tool_output(&out, "WaitAgent");
+    assert!(joined.is_error, "one of them did not answer: {text}");
+    assert!(
+        text.contains("the diff is fine"),
+        "the reply that landed is still readable: {text}"
+    );
+    assert!(text.contains("still working after 2s"), "{text}");
+    assert_eq!(final_text(&out), "one of them is still at it");
+}
+
+/// ADR-0027: a seated member's brief is journalled when it is absorbed, so a
+/// member nothing has woken has said nothing and has no turn behind it. The
+/// wait says that, and says it at once — the deadline is never reached,
+/// because there is nothing to wait for.
+const WAIT_ON_A_SEATED_MEMBER: &str = r#"{"responses":[
+    {"steps":[
+        {"toolCall":{"name":"SpawnAgent","input":{"name":"understudy","prompt":"wait for the call","standby":true}}},
+        {"toolCall":{"name":"WaitAgent","input":{"agents":["understudy"],"timeout_s":600}}}
+    ]},
+    {"steps":[{"text":"it has not started"}]}
+]}"#;
+
+#[test]
+fn waiting_on_an_unwoken_member_says_it_is_seated_not_finished() {
+    let home = tempfile::tempdir().unwrap();
+    let out = run_within(
+        bingo()
+            .env("BINGO_FAKE_SCRIPT", script(WAIT_ON_A_SEATED_MEMBER).path())
+            .env("HOME", home.path())
+            .args(["--print", "--output-format", "json", "--cwd"])
+            .arg(home.path())
+            .arg("wait for the understudy"),
+        Duration::from_secs(60),
+    );
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+
+    let joined = tool_result(&out, "WaitAgent");
+    let text = tool_output(&out, "WaitAgent");
+    assert!(joined.is_error, "nothing has been said to read: {text}");
+    assert!(
+        text.contains("is seated and nothing has woken it"),
+        "{text}"
+    );
+    assert!(!text.contains("finished without saying anything"), "{text}");
+    assert!(
+        !text.contains("still working"),
+        "nothing was waited for: {text}"
+    );
+    let root = &frames_of(&out)[0].session;
+    let seated = agent_journal(home.path(), &format!("agent/{root}/understudy"));
+    assert!(
+        !seated.contains(r#""type":"turnStarted""#),
+        "no turn has ever run in it: {seated}"
+    );
+    assert!(
+        !seated.contains(r#""type":"itemCompleted""#),
+        "its brief is held in the queue, not journalled as an item: {seated}"
+    );
+    assert_eq!(final_text(&out), "it has not started");
 }
 
 /// The kernel's depth limit is one, so a child is not offered `SpawnAgent`:
