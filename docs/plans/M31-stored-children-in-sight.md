@@ -89,6 +89,18 @@ child was resumed or the work rerun.
 
 ## Verified
 
+Integrated on main at `2ba3e2c` (2026-09-01): the first integrated
+run's one red target was bingo-auth-oauth's 52-test suite (3 failed
+at load 13–17) — the load-sensitive family M28 recorded, untouched
+by this milestone; green solo (52/52, 3.65s) and green on a full
+`--no-fail-fast` rerun (69 targets, 0 failed). A user-directed
+follow-up landed as `adca1b3`: the `/resume` picker offers only
+roots — a child or a room hangs under a root and is reached through
+the switcher, never resumed on its own; `recent_roots` keeps the
+roots before the cut to the card's size, pinned by unit test. Final
+gates on `adca1b3` all green: 69 targets, 2867 passed, 0 failed,
+budget 302, deny ok, load 12–14.
+
 Gates, on the merge base `5713d10` (load 25.71 before, 33.99 after —
 no timing-sensitive family failed, and the whole suite was run twice
 with the same result):
