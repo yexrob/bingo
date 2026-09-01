@@ -22,4 +22,4 @@ tracing.workspace = true
 [dev-dependencies]
 bingo-sdk = { workspace = true, features = ["testing"] }
 tempfile.workspace = true
-tokio = { workspace = true, features = ["macros", "rt"] }
+tokio = { workspace = true, features = ["macros", "rt", "test-util"] }
