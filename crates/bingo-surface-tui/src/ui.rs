@@ -124,9 +124,9 @@ pub struct Painted {
     pub rail: Vec<(CardId, std::ops::Range<usize>)>,
 }
 
-/// The list of sessions as it was drawn: where its rows are, where its two
-/// columns part, and which row of the list each drawn line is — what a click
-/// on it needs to know. A memo of the draw, like [`Card`].
+/// The list of sessions as it was drawn: where its rows are, and which row of
+/// the list each drawn line is — what a click on it needs to know. A memo of
+/// the draw, like [`Card`].
 #[derive(Clone, Debug, Default)]
 pub struct Listed {
     pub area: ratatui::layout::Rect,
@@ -134,20 +134,11 @@ pub struct Listed {
 }
 
 impl Listed {
-    /// The row a pointer is over: which line of the list it landed on, and
-    /// which of the two columns, decided by the split the frame drew.
-    pub fn at(&self, column: u16, row: u16) -> Option<roster::Cursor> {
+    /// The row a pointer is over: which line of the list it landed on, and the
+    /// cursor that line answers to. A label and a `…` mark answer nobody.
+    pub fn at(&self, row: u16) -> Option<roster::Cursor> {
         let line = row.checked_sub(self.area.y)?;
-        let (left, right) = self.roster.rows.get(usize::from(line))?;
-        let across = self.roster.split.is_some_and(|split| {
-            column
-                .checked_sub(self.area.x)
-                .is_some_and(|at| at >= split)
-        });
-        match across {
-            true => *right,
-            false => *left,
-        }
+        self.roster.rows.get(usize::from(line)).copied().flatten()
     }
 }
 

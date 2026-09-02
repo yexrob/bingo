@@ -1514,12 +1514,9 @@ mod tests {
         insta::assert_snapshot!(screen);
     }
 
-    /// The cursor on a row of the sessions column, by its number.
+    /// The cursor on a row of the list, by its number.
     fn on(at: usize) -> crate::roster::Cursor {
-        crate::roster::Cursor {
-            side: crate::roster::Side::Sessions,
-            at,
-        }
+        crate::roster::Cursor { at }
     }
 
     #[test]
@@ -1646,9 +1643,9 @@ mod tests {
     }
 
     /// A room answers nothing, so it is not among the sessions that do: it
-    /// has the other column, under its own name.
+    /// sits after them, under a label of its own.
     #[test]
-    fn a_room_sits_in_the_list_s_own_column() {
+    fn a_room_sits_under_its_own_label() {
         let mut tree = room(vec![child_frame(1, announced("reviewer"))]);
         let root = tree.root_id().clone();
         tree.show(&root);
@@ -1662,7 +1659,7 @@ mod tests {
             now,
         );
         let screen = render_tree(&tree, &ui, now);
-        assert!(screen.contains("Sessions"), "{screen}");
+        assert!(screen.contains("Agents"), "{screen}");
         assert!(screen.contains("Rooms"), "{screen}");
         assert!(screen.contains("#design"), "{screen}");
         insta::assert_snapshot!(screen);

@@ -10,8 +10,8 @@
 //! Where the window sits is derived from the cursor and nothing else, so
 //! walking a list needs no remembered scroll to keep in step with it.
 //!
-//! [`crate::roster`] draws each of its two columns through this, so the row
-//! the keyboard is on is on the screen whichever column it is in.
+//! [`crate::roster`] draws its one column through this, labels and all, so the
+//! row the keyboard is on is on the screen wherever down the list it is.
 
 use std::ops::Range;
 

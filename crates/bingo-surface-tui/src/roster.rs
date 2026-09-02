@@ -1,13 +1,17 @@
 //! The one list of sessions: what `↓` on an empty composer and `ctrl+g` both
 //! open (design §3 "Teams", 2026-09-02).
 //!
-//! Two columns side by side. On the left the sessions that answer a model —
-//! a room's members among them, never nested under the room, because a member
-//! *is* a session and the list is where a person goes to reach one. On the
-//! right the rooms, whose rows say how big they are and what they are owed.
-//! `↑`/`↓` walk a column and `←`/`→` cross between them; each column keeps its
-//! own cursor in view through [`crate::window`], so the row the keyboard is on
-//! is never off the screen.
+//! One column under two dim labels, the way a chat sidebar is grouped:
+//! `Agents`, and the sessions that answer a model — a room's members among
+//! them, never nested under the room, because a member *is* a session and the
+//! list is where a person goes to reach one; then `Rooms`, and the rooms,
+//! whose rows say how big they are and what they are owed. `↑`/`↓` walk the
+//! whole of it and step over the labels, which are furniture and nowhere to
+//! land.
+//!
+//! One [`crate::window`] over the whole list keeps the row the keyboard is on
+//! in view, with a `…` at an end it cut; a label past that end is simply not
+//! drawn, and one at the window's own edge stays.
 //!
 //! Nothing here is state. Which rows exist is the tree's, what each says is
 //! read off the reducer and the rooms plugin's own payloads at render time,
@@ -24,114 +28,75 @@ use crate::theme;
 use crate::tree::{self, Row, Status, Tree};
 use crate::window;
 
-/// Cells between the two columns.
-const GUTTER: usize = 2;
 /// Cells between a name and what its row says.
 const SAYS_AT: usize = 2;
-/// What each column is called, while there are two of them.
-const SESSIONS: &str = "Sessions";
+/// What each run of the list is called, while there is another beside it.
+const AGENTS: &str = "Agents";
 const ROOMS: &str = "Rooms";
 /// The sigil a seat that listens rather than answers wears, as `/room` writes
 /// one (`~watcher`). It is the glyph, never the colour: the dot's own hue
 /// still says what the session is doing.
 const LISTENS: &str = "~";
 
-/// Which column the keyboard is in.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum Side {
-    #[default]
-    Sessions,
-    Rooms,
-}
-
-impl Side {
-    fn other(self) -> Side {
-        match self {
-            Side::Sessions => Side::Rooms,
-            Side::Rooms => Side::Sessions,
-        }
-    }
-}
-
-/// Where the keyboard is in the list: which column, and how far down it.
+/// Where the keyboard is in the list: how far down the rows it may land on,
+/// the labels between them counting for nothing.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Cursor {
-    pub side: Side,
     pub at: usize,
 }
 
-/// The list split in two, each column in the order the tree lists it.
-pub struct Columns<'r, 'a> {
-    pub sessions: Vec<&'r Row<'a>>,
-    pub rooms: Vec<&'r Row<'a>>,
+/// The list in the two runs it draws as, each under a label of its own.
+pub struct Listing<'r, 'a> {
+    agents: Vec<&'r Row<'a>>,
+    rooms: Vec<&'r Row<'a>>,
 }
 
 /// The sessions that answer a model, then the ones that answer nobody: the
 /// same fact `Status::of` reports, which is what makes a room a room.
-pub fn columns<'r, 'a>(rows: &'r [Row<'a>]) -> Columns<'r, 'a> {
-    let (sessions, rooms) = rows.iter().partition(|row| row.status.is_some());
-    Columns { sessions, rooms }
+pub fn listing<'r, 'a>(rows: &'r [Row<'a>]) -> Listing<'r, 'a> {
+    let (agents, rooms) = rows.iter().partition(|row| row.status.is_some());
+    Listing { agents, rooms }
 }
 
-impl<'r, 'a> Columns<'r, 'a> {
-    fn of(&self, side: Side) -> &[&'r Row<'a>] {
-        match side {
-            Side::Sessions => &self.sessions,
-            Side::Rooms => &self.rooms,
-        }
+impl<'r, 'a> Listing<'r, 'a> {
+    /// The rows the cursor walks, in the order they are drawn.
+    fn walked(&self) -> impl Iterator<Item = &'r Row<'a>> + '_ {
+        self.agents.iter().chain(self.rooms.iter()).copied()
     }
 
-    /// The column a one-column list draws: the cursor's own, unless it is
-    /// empty and the other is not.
-    fn only(&self, cursor: Cursor) -> Side {
-        match self.of(cursor.side).is_empty() {
-            true => cursor.side.other(),
-            false => cursor.side,
-        }
+    fn len(&self) -> usize {
+        self.agents.len() + self.rooms.len()
+    }
+
+    /// Whether the runs are told apart by a label at all: a name over the only
+    /// kind of thing on screen separates nothing.
+    fn labelled(&self) -> bool {
+        !self.agents.is_empty() && !self.rooms.is_empty()
     }
 }
 
 impl Cursor {
     /// Where the session on screen sits in the list, so opening it puts the
     /// keyboard on the row a person is already looking at.
-    pub fn on(columns: &Columns<'_, '_>, session: &SessionId) -> Cursor {
-        [Side::Sessions, Side::Rooms]
-            .into_iter()
-            .find_map(|side| {
-                let at = columns
-                    .of(side)
-                    .iter()
-                    .position(|row| row.session == session)?;
-                Some(Cursor { side, at })
-            })
+    pub fn on(listing: &Listing<'_, '_>, session: &SessionId) -> Cursor {
+        listing
+            .walked()
+            .position(|row| row.session == session)
+            .map(|at| Cursor { at })
             .unwrap_or_default()
     }
 
-    /// The row it names, or nothing at all where its column has none.
-    pub fn row<'r, 'a>(&self, columns: &Columns<'r, 'a>) -> Option<&'r Row<'a>> {
-        columns.of(self.side).get(self.at).copied()
+    /// The row it names, or nothing at all where the list has none.
+    pub fn row<'r, 'a>(&self, listing: &Listing<'r, 'a>) -> Option<&'r Row<'a>> {
+        listing.walked().nth(self.at)
     }
 
-    /// One step along its own column. It stops at either end rather than
-    /// wrapping: the other column is a step sideways, not the next row.
-    pub fn step(self, columns: &Columns<'_, '_>, by: isize) -> Cursor {
-        let last = columns.of(self.side).len().saturating_sub(1) as isize;
+    /// One step down the column, over a label as if it were not there. It
+    /// stops at either end rather than wrapping.
+    pub fn step(self, listing: &Listing<'_, '_>, by: isize) -> Cursor {
+        let last = listing.len().saturating_sub(1) as isize;
         Cursor {
             at: (self.at as isize + by).clamp(0, last).max(0) as usize,
-            ..self
-        }
-    }
-
-    /// Across to the other column, at the nearest row it has. A column with
-    /// nothing in it is nowhere to go.
-    pub fn cross(self, columns: &Columns<'_, '_>) -> Cursor {
-        let side = self.side.other();
-        match columns.of(side).len() {
-            0 => self,
-            len => Cursor {
-                side,
-                at: self.at.min(len - 1),
-            },
         }
     }
 }
@@ -141,13 +106,9 @@ impl Cursor {
 #[derive(Clone, Debug, Default)]
 pub struct Roster {
     pub lines: Vec<Line<'static>>,
-    /// Where the rooms column begins, in cells from the list's left edge;
-    /// `None` while there is only one column.
-    pub split: Option<u16>,
-    /// Per drawn line, the cursor a click on it means — on the left of the
-    /// split and on the right. Nothing for a heading, a `…` mark, or a column
-    /// that ran out of rows.
-    pub rows: Vec<(Option<Cursor>, Option<Cursor>)>,
+    /// Per drawn line, the cursor a click on it means. Nothing for a label or
+    /// a `…` mark, which are furniture and answer nobody.
+    pub rows: Vec<Option<Cursor>>,
 }
 
 /// The list in the room it has. The one renderer: `↓` and `ctrl+g` open the
@@ -160,168 +121,116 @@ pub fn lines(
     room: usize,
     now: Now,
 ) -> Roster {
-    let columns = columns(rows);
-    match columns.sessions.is_empty() || columns.rooms.is_empty() {
-        true => alone(tree, &columns, cursor, width, room, now),
-        false => beside(tree, &columns, cursor, width, room, now),
-    }
+    let listed = listed(tree, &listing(rows), cursor, width, now);
+    let at = walked_line(&listed, cursor);
+    windowed(listed, at, room)
 }
 
-/// One column, the whole width, and no heading over it: a name for the only
-/// thing on screen is furniture that separates nothing.
-fn alone(
+/// Which of the drawn lines the row the keyboard is on became. It is asked of
+/// the lines themselves rather than counted from the labels: a second sum of
+/// where a label falls is a second place to get it wrong.
+fn walked_line(listed: &[(Line<'static>, Option<Cursor>)], cursor: Cursor) -> usize {
+    listed
+        .iter()
+        .position(|(_, of)| *of == Some(cursor))
+        .unwrap_or(0)
+}
+
+/// Every line the list has before the window takes it: each run under its
+/// label, and the cursor each line answers to.
+fn listed(
     tree: &Tree,
-    columns: &Columns<'_, '_>,
+    listing: &Listing<'_, '_>,
     cursor: Cursor,
     width: usize,
-    room: usize,
     now: Now,
-) -> Roster {
-    let side = columns.only(cursor);
-    let at = match side == cursor.side {
-        true => cursor.at,
-        false => 0,
-    };
-    let (lines, which) = column(rendered(tree, columns, side, cursor, width, now), at, room);
-    Roster {
-        lines,
-        split: None,
-        rows: which
+) -> Vec<(Line<'static>, Option<Cursor>)> {
+    let agents = rendered(&listing.agents, 0, cursor, width, |row, column, on| {
+        session_line(tree, row, column, on, now)
+    });
+    let from = listing.agents.len();
+    let rooms = rendered(&listing.rooms, from, cursor, width, |row, column, on| {
+        room_line(tree, row, column, on, now)
+    });
+    let labelled = listing.labelled();
+    let mut out = under(AGENTS, agents, 0, labelled, width);
+    out.extend(under(ROOMS, rooms, from, labelled, width));
+    out
+}
+
+/// One run of the list: its label, where there is another run to tell it from,
+/// and its rows under it, each with the row of the list it is.
+fn under(
+    label: &str,
+    lines: Vec<Line<'static>>,
+    from: usize,
+    labelled: bool,
+    width: usize,
+) -> Vec<(Line<'static>, Option<Cursor>)> {
+    if lines.is_empty() {
+        return Vec::new();
+    }
+    let mut out: Vec<(Line<'static>, Option<Cursor>)> = Vec::new();
+    if labelled {
+        out.push((labelled_line(label, width), None));
+    }
+    out.extend(
+        lines
             .into_iter()
-            .map(|at| (at.map(|at| Cursor { side, at }), None))
-            .collect(),
-    }
+            .enumerate()
+            .map(|(at, line)| (line, Some(Cursor { at: from + at }))),
+    );
+    out
 }
 
-/// Both columns, under their names. The rooms take what their widest row asks
-/// for and no more than half the list; the sessions, whose rows are the long
-/// ones, take the rest.
-fn beside(
-    tree: &Tree,
-    columns: &Columns<'_, '_>,
-    cursor: Cursor,
-    width: usize,
-    room: usize,
-    now: Now,
-) -> Roster {
-    let rooms = rendered(tree, columns, Side::Rooms, cursor, width, now);
-    let right = wanted(&rooms, width);
-    let left = width.saturating_sub(right + GUTTER).max(1);
-    let sessions = rendered(tree, columns, Side::Sessions, cursor, left, now);
-    let heading = room >= 2;
-    let each = room - usize::from(heading);
-    let (kept, which) = column(sessions, walked(cursor, Side::Sessions), each);
-    let (rooms, room_rows) = column(rooms, walked(cursor, Side::Rooms), each);
-    let mut lines = Vec::with_capacity(room);
-    let mut rows = Vec::with_capacity(room);
-    if heading {
-        lines.push(headings(left, right));
-        rows.push((None, None));
-    }
-    for at in 0..kept.len().max(rooms.len()) {
-        lines.push(paired(kept.get(at), rooms.get(at), left, right));
-        rows.push((
-            which.get(at).copied().flatten().map(sits(Side::Sessions)),
-            room_rows.get(at).copied().flatten().map(sits(Side::Rooms)),
-        ));
-    }
-    Roster {
-        lines,
-        split: u16::try_from(left + GUTTER).ok(),
-        rows,
-    }
+/// What a run is called: dim, at the margin the rows are indented from, and
+/// never a row the cursor can be on. The column is what tells a dim label from
+/// a dim row — nothing else in the list starts there but the `❯` itself.
+fn labelled_line(label: &str, width: usize) -> Line<'static> {
+    let spans = vec![Span::styled(label.to_string(), theme::dim())];
+    Line::from(status::clip(spans, width))
 }
 
-fn sits(side: Side) -> impl Fn(usize) -> Cursor {
-    move |at| Cursor { side, at }
-}
-
-/// Where a column's own window is centred: the cursor's row while the keyboard
-/// is in it, else its head — the other column is read, not walked.
-fn walked(cursor: Cursor, side: Side) -> usize {
-    match cursor.side == side {
-        true => cursor.at,
-        false => 0,
-    }
-}
-
-/// One column's rows, as they read before any of them is windowed or clipped.
+/// One run's rows, as they read before the window takes them: each name padded
+/// to its own run's widest, and the line cut to the width the list has.
 fn rendered(
-    tree: &Tree,
-    columns: &Columns<'_, '_>,
-    side: Side,
+    rows: &[&Row<'_>],
+    from: usize,
     cursor: Cursor,
     width: usize,
-    now: Now,
+    line: impl Fn(&Row<'_>, usize, bool) -> Line<'static>,
 ) -> Vec<Line<'static>> {
-    let rows = columns.of(side);
     let name_column = rows.iter().map(|row| row.name.width()).max().unwrap_or(0);
     rows.iter()
         .enumerate()
-        .map(|(at, row)| {
-            let on = cursor.side == side && cursor.at == at;
-            match side {
-                Side::Sessions => session_line(tree, row, name_column, on, now),
-                Side::Rooms => room_line(tree, row, name_column, on, now),
-            }
-        })
+        .map(|(at, row)| line(row, name_column, cursor.at == from + at))
         .map(|line| Line::from(status::clip(line.spans, width)))
         .collect()
 }
 
-/// One column as it is drawn: the run of rows that keeps its cursor in view,
-/// and which row of the list each drawn line is. Both come off the one window,
-/// so the lines and what a click on them means cannot disagree.
-fn column(
-    lines: Vec<Line<'static>>,
-    at: usize,
-    room: usize,
-) -> (Vec<Line<'static>>, Vec<Option<usize>>) {
-    let window = window::of(lines.len(), at, room);
-    let mut which: Vec<Option<usize>> = Vec::new();
+/// The run of lines that keeps the row the keyboard is on in view, and which
+/// row of the list each of them is. Both come off the one window, so the lines
+/// and what a click on them means cannot disagree.
+fn windowed(listed: Vec<(Line<'static>, Option<Cursor>)>, at: usize, room: usize) -> Roster {
+    let window = window::of(listed.len(), at, room);
+    let mut roster = Roster::default();
     if window.above {
-        which.push(None);
+        roster.lines.push(window::cut());
+        roster.rows.push(None);
     }
-    which.extend(window.run.clone().map(Some));
+    for (line, cursor) in listed
+        .into_iter()
+        .skip(window.run.start)
+        .take(window.run.len())
+    {
+        roster.lines.push(line);
+        roster.rows.push(cursor);
+    }
     if window.below {
-        which.push(None);
+        roster.lines.push(window::cut());
+        roster.rows.push(None);
     }
-    (window::around(lines, at, room), which)
-}
-
-/// How wide the rooms column asks to be, and the most it may have.
-fn wanted(rooms: &[Line<'static>], width: usize) -> usize {
-    rooms
-        .iter()
-        .map(Line::width)
-        .chain([ROOMS.width()])
-        .max()
-        .unwrap_or(0)
-        .min(width / 2)
-}
-
-/// The two column names, laid out and cut by the same rule their rows are: a
-/// heading that outgrew its column would be the one row on screen that did.
-fn headings(left: usize, right: usize) -> Line<'static> {
-    let name = |text: &str| Line::from(Span::styled(text.to_string(), theme::dim()));
-    paired(Some(&name(SESSIONS)), Some(&name(ROOMS)), left, right)
-}
-
-/// Two columns' rows on one line: the left padded out to its width, the right
-/// after the gutter. A column that has run out of rows pads to air.
-fn paired(
-    left: Option<&Line<'static>>,
-    right: Option<&Line<'static>>,
-    width: usize,
-    rooms: usize,
-) -> Line<'static> {
-    let spans =
-        |line: Option<&Line<'static>>| line.cloned().map(|line| line.spans).unwrap_or_default();
-    let mut out = status::clip(spans(left), width);
-    let used: usize = out.iter().map(|span| span.content.width()).sum();
-    out.push(Span::raw(" ".repeat(width.saturating_sub(used) + GUTTER)));
-    out.extend(status::clip(spans(right), rooms));
-    Line::from(out)
+    roster
 }
 
 /// A session's row: its dot, its name, and what it is doing.
@@ -343,7 +252,7 @@ fn room_line(tree: &Tree, row: &Row<'_>, name: usize, on: bool, now: Now) -> Lin
     Line::from(spans)
 }
 
-/// The name column: padded to the widest in its own column, and said in weight
+/// The name column: padded to the widest in its own run, and said in weight
 /// rather than hue, so `NO_COLOR` still says which row the keyboard is on.
 fn named(name: &str, column: usize, on: bool) -> Vec<Span<'static>> {
     let style = match on {
@@ -373,8 +282,9 @@ fn dot(row: &Row<'_>, seat: Option<&Seat>) -> Span<'static> {
 }
 
 /// What a session's row says after its name, in the order a narrow column
-/// gives it up: what it is doing, where it sits, what it hears there, what it
-/// owes, whether it wants you — and last of all what it has spent.
+/// gives it up: what it is doing, where it sits, what stands unread there,
+/// what it hears, what it owes, whether it wants you — and last of all what it
+/// has spent.
 ///
 /// The tail is what the clip takes (§10, 2026-08-31: the preview gives way,
 /// never the answers). A count of tools is a thing to glance at; a debt and a
@@ -388,6 +298,9 @@ fn says(
     let mut said = vec![Span::styled(doing(row, state), theme::dim())];
     if let Some(seat) = seat {
         said.push(Span::styled(format!("in {}", seat.room), theme::dim()));
+        if let Some(unread) = seat.unread {
+            said.push(Span::styled(format!("{unread} unread"), theme::dim()));
+        }
         if let Ear::Listening { patience_s } = seat.ear {
             said.push(Span::styled(listening(patience_s), theme::dim()));
         }
@@ -557,17 +470,19 @@ mod tests {
     }
 
     #[test]
-    fn the_sessions_are_one_column_and_the_rooms_the_other() {
+    fn the_agents_come_first_and_the_rooms_under_their_own_label() {
         let drawn = drawn_at(&team(), Cursor::default(), 80, 8);
         assert_eq!(
             drawn,
             vec![
-                "Sessions                                             Rooms",
-                "❯ ⏺ project   what is in this workspace?               #design  2 seats · 1 owed",
-                "  ⏺ reviewer  running · in #design · owes an answe…",
+                "Agents",
+                "❯ ⏺ project   what is in this workspace?",
+                "  ⏺ reviewer  running · in #design · owes an answer · 22m · 3 tools · 1.2k toke…",
                 "  ~ watcher   idle · in #design · listening · 300s",
+                "Rooms",
+                "  #design  2 seats · 1 owed",
             ],
-            "the root first, then the agents, and the rooms beside them"
+            "the root first, then the agents, then the rooms under their label"
         );
     }
 
@@ -577,9 +492,9 @@ mod tests {
     fn a_listening_seat_wears_the_sigil_and_keeps_its_own_colour() {
         let tree = team();
         let rows = tree.rows();
-        let sides = columns(&rows);
-        let watcher = sides
-            .sessions
+        let listed = listing(&rows);
+        let watcher = listed
+            .agents
             .iter()
             .find(|row| row.name == "watcher")
             .expect("the listening seat");
@@ -620,6 +535,19 @@ mod tests {
         );
     }
 
+    /// A member whose cursor is behind the room's head says how much of it
+    /// stands unread, beside the room it stands in (ADR-0034 §2).
+    #[test]
+    fn a_member_behind_the_room_says_how_much_it_has_not_read() {
+        let mut tree = team();
+        tree.apply(&child_frame(12, room_cursor("#design", 6)));
+        let drawn = drawn_at(&tree, Cursor::default(), 120, 8);
+        assert!(
+            drawn[2].contains("in #design · 3 unread ·"),
+            "the room's journal reaches seq 9 and the mark stopped at 6: {drawn:#?}"
+        );
+    }
+
     /// Colour never carries a fact alone (§4): a row that wants a person says
     /// so in words as well as in the hue it pulses.
     #[test]
@@ -651,14 +579,10 @@ mod tests {
     }
 
     #[test]
-    fn one_kind_of_session_alone_is_one_column_with_no_heading() {
+    fn one_kind_of_session_alone_wears_no_label() {
         let tree = folded_tree(busy_child("reviewer"));
         let drawn = drawn_at(&tree, Cursor::default(), 80, 8);
-        assert_eq!(
-            drawn.len(),
-            2,
-            "no heading over the only column: {drawn:#?}"
-        );
+        assert_eq!(drawn.len(), 2, "a label over the only run: {drawn:#?}");
         assert!(drawn[0].starts_with("❯ ⏺ project"), "{drawn:#?}");
     }
 
@@ -666,56 +590,32 @@ mod tests {
 
     fn walk(tree: &Tree, from: Cursor, by: isize) -> Cursor {
         let rows = tree.rows();
-        from.step(&columns(&rows), by)
+        from.step(&listing(&rows), by)
     }
 
     #[test]
-    fn a_column_is_walked_to_its_ends_and_stops_there() {
+    fn the_column_is_walked_to_its_ends_and_stops_there() {
         let tree = team();
         let top = Cursor::default();
         assert_eq!(walk(&tree, top, -1), top, "the first row is the first row");
         assert_eq!(walk(&tree, top, 1).at, 1);
-        let last = Cursor {
-            side: Side::Sessions,
-            at: 2,
-        };
+        let last = Cursor { at: 3 };
         assert_eq!(walk(&tree, last, 1), last, "and the last is the last");
     }
 
+    /// The labels are furniture: the walk goes from the last agent to the
+    /// first room without a step that lands on nothing.
     #[test]
-    fn the_arrows_cross_to_the_other_column_at_the_nearest_row() {
+    fn the_walk_steps_over_the_label_between_the_runs() {
         let tree = team();
         let rows = tree.rows();
-        let sides = columns(&rows);
-        let deep = Cursor {
-            side: Side::Sessions,
-            at: 2,
-        };
+        let listed = listing(&rows);
+        let last_agent = Cursor { at: 2 };
+        let next = last_agent.step(&listed, 1);
         assert_eq!(
-            deep.cross(&sides),
-            Cursor {
-                side: Side::Rooms,
-                at: 0
-            },
-            "the rooms column has one row to land on"
+            next.row(&listed).map(|row| row.name.clone()),
+            Some("#design".to_string())
         );
-        assert_eq!(
-            deep.cross(&sides).cross(&sides),
-            Cursor {
-                side: Side::Sessions,
-                at: 0
-            },
-            "and back to the row of the same number"
-        );
-    }
-
-    #[test]
-    fn a_column_with_nothing_in_it_is_nowhere_to_cross_to() {
-        let tree = folded_tree(busy_child("reviewer"));
-        let rows = tree.rows();
-        let sides = columns(&rows);
-        let at = Cursor::default();
-        assert_eq!(at.cross(&sides), at);
     }
 
     #[test]
@@ -723,83 +623,60 @@ mod tests {
         let mut tree = team();
         tree.show(&log_id());
         let rows = tree.rows();
-        let sides = columns(&rows);
-        assert_eq!(
-            Cursor::on(&sides, tree.view()),
-            Cursor {
-                side: Side::Rooms,
-                at: 0
-            }
-        );
+        let listed = listing(&rows);
+        assert_eq!(Cursor::on(&listed, tree.view()), Cursor { at: 3 });
 
         tree.show(&child_id());
         let rows = tree.rows();
-        let sides = columns(&rows);
-        assert_eq!(
-            Cursor::on(&sides, tree.view()),
-            Cursor {
-                side: Side::Sessions,
-                at: 1
-            }
-        );
+        let listed = listing(&rows);
+        assert_eq!(Cursor::on(&listed, tree.view()), Cursor { at: 1 });
     }
 
     // ---- the window ------------------------------------------------------
 
-    /// The bug this list was drawn through `window::around` for: past the room
-    /// it has, the row the keyboard is on must still be one of the rows drawn.
+    /// The bug this list was drawn through the window for: past the room it
+    /// has, the row the keyboard is on must still be one of the rows drawn.
     #[test]
-    fn a_column_longer_than_its_room_keeps_the_row_the_cursor_is_on() {
+    fn a_list_longer_than_its_room_keeps_the_row_the_cursor_is_on() {
         let mut frames = busy_child("reviewer");
         frames.push(log_frame(8, log_announced("#design")));
         frames
             .extend((20..32).map(|i| agent_frame(i, i, agent_announced(i, &format!("scout {i}")))));
         let tree = folded_tree(frames);
+        // The last agent: the room is the one row under it.
         let at = tree.rows().len() - 2;
-        let drawn = drawn_at(
-            &tree,
-            Cursor {
-                side: Side::Sessions,
-                at,
-            },
-            120,
+        let drawn = drawn_at(&tree, Cursor { at }, 120, 6);
+        assert_eq!(
+            drawn.len(),
             6,
+            "six rows of room, six rows drawn: {drawn:#?}"
         );
-        assert_eq!(drawn.len(), 6, "the heading and five rows: {drawn:#?}");
         assert!(
             drawn.iter().any(|row| row.contains("❯ ⏺ scout 31")),
-            "the last row of the column, with the cursor on it: {drawn:#?}"
+            "the last agent, with the cursor on it: {drawn:#?}"
         );
         assert!(
-            drawn[1].trim_start().starts_with('…'),
+            drawn[0].trim_start().starts_with('…'),
             "and the list says it goes on above: {drawn:#?}"
         );
     }
 
-    /// The other column shows its head while the keyboard is not in it: it is
-    /// there to be read, not walked.
+    /// A label past the end of the window is simply not drawn; the one at the
+    /// window's own top edge stays.
     #[test]
-    fn the_column_the_keyboard_is_not_in_shows_its_head() {
+    fn a_label_outside_the_window_is_not_drawn() {
         let mut frames = busy_child("reviewer");
-        frames.extend((20..26).map(|i| {
-            woken(
-                i,
-                bingo_sdk::SessionSummary {
-                    id: bingo_sdk::SessionId::from_raw(format!("ses_{i}")),
-                    title: Some(format!("#room{i}")),
-                    ..log_summary("#design")
-                },
-            )
-        }));
+        frames.push(log_frame(8, log_announced("#design")));
+        frames
+            .extend((20..32).map(|i| agent_frame(i, i, agent_announced(i, &format!("scout {i}")))));
         let tree = folded_tree(frames);
-        let drawn = drawn_at(&tree, Cursor::default(), 120, 4);
-        assert!(drawn[1].contains("#room20"), "the first room: {drawn:#?}");
+        let deep = drawn_at(&tree, Cursor { at: 10 }, 120, 6);
         assert!(
-            drawn
-                .last()
-                .is_some_and(|row| row.trim_end().ends_with('…')),
-            "and says the rooms go on below: {drawn:#?}"
+            !deep.iter().any(|row| row.trim() == "Agents"),
+            "the label is far above the window: {deep:#?}"
         );
+        let top = drawn_at(&tree, Cursor::default(), 120, 6);
+        assert_eq!(top[0].trim(), "Agents", "and at the head it is drawn");
     }
 
     /// What a click on each drawn line means, taken from the same window the
@@ -810,22 +687,10 @@ mod tests {
         let rows = tree.rows();
         let roster = lines(&tree, &rows, Cursor::default(), 80, 8, scene().1);
         assert_eq!(roster.rows.len(), roster.lines.len());
-        assert_eq!(roster.rows[0], (None, None), "the heading answers nothing");
-        assert_eq!(
-            roster.rows[1],
-            (
-                Some(Cursor {
-                    side: Side::Sessions,
-                    at: 0
-                }),
-                Some(Cursor {
-                    side: Side::Rooms,
-                    at: 0
-                })
-            )
-        );
-        assert_eq!(roster.rows[3].1, None, "the rooms column ran out of rows");
-        assert!(roster.split.is_some());
+        assert_eq!(roster.rows[0], None, "a label answers nothing");
+        assert_eq!(roster.rows[1], Some(Cursor { at: 0 }));
+        assert_eq!(roster.rows[4], None, "and nor does the second label");
+        assert_eq!(roster.rows[5], Some(Cursor { at: 3 }), "the room's own row");
     }
 
     #[test]

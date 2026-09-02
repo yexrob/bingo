@@ -571,7 +571,7 @@ fn toggle_switcher(ui: &mut Ui, tree: &Tree, now: Now) -> Vec<Effect> {
     let rows = tree::roster(tree, &[]);
     ui.layer.show(
         Open::Switcher(Switcher {
-            cursor: roster::Cursor::on(&roster::columns(&rows), tree.view()),
+            cursor: roster::Cursor::on(&roster::listing(&rows), tree.view()),
             stored: Vec::new(),
             // Where the walk started, so `esc` can put it back.
             from: Some(tree.view().clone()),
@@ -581,10 +581,10 @@ fn toggle_switcher(ui: &mut Ui, tree: &Tree, now: Now) -> Vec<Effect> {
     vec![Effect::ListStored]
 }
 
-/// The list owns the keyboard while it is up: `↑`/`↓` walk a column, `←`/`→`
-/// cross to the other, and either way the view goes with the cursor — walking
-/// the list *is* the switch, as the strip's walk was (§3). `⏎` settles on
-/// where the walk landed and `esc` gives back where it started.
+/// The list owns the keyboard while it is up: `↑`/`↓` walk the one column,
+/// labels and all, and the view goes with the cursor — walking the list *is*
+/// the switch, as the strip's walk was (§3). `⏎` settles on where the walk
+/// landed and `esc` gives back where it started.
 fn switcher(ui: &mut Ui, tree: &Tree, key: KeyEvent, now: Now) -> Vec<Effect> {
     match walked(ui, tree, key) {
         Some((cursor, chosen)) => walk_to(ui, tree, cursor, chosen),
@@ -599,14 +599,13 @@ fn walked(ui: &Ui, tree: &Tree, key: KeyEvent) -> Option<(roster::Cursor, Option
         return None;
     };
     let rows = tree::roster(tree, &open.stored);
-    let columns = roster::columns(&rows);
+    let listing = roster::listing(&rows);
     let cursor = match key.code {
-        KeyCode::Up => open.cursor.step(&columns, -1),
-        KeyCode::Down => open.cursor.step(&columns, 1),
-        KeyCode::Left | KeyCode::Right => open.cursor.cross(&columns),
+        KeyCode::Up => open.cursor.step(&listing, -1),
+        KeyCode::Down => open.cursor.step(&listing, 1),
         _ => return None,
     };
-    Some((cursor, cursor.row(&columns).map(|row| row.session.clone())))
+    Some((cursor, cursor.row(&listing).map(|row| row.session.clone())))
 }
 
 /// Put the cursor there and show what it names. A session already on screen
@@ -1008,12 +1007,9 @@ mod tests {
         }
     }
 
-    /// A row of the sessions column, by its number.
+    /// A row of the list, by its number.
     fn at(index: usize) -> Option<roster::Cursor> {
-        Some(roster::Cursor {
-            side: roster::Side::Sessions,
-            at: index,
-        })
+        Some(roster::Cursor { at: index })
     }
 
     fn press(
@@ -1707,10 +1703,10 @@ mod tests {
         assert!(ui.layer.showing(), "and the list stays up to be walked on");
     }
 
-    /// A column is walked to its ends and stops there — the other column is a
-    /// step sideways, so there is nothing to wrap round to.
+    /// The column is walked to its ends and stops there: a list is not a ring,
+    /// and there is nothing past either end to wrap round to.
     #[test]
-    fn a_column_stops_at_its_ends() {
+    fn the_column_stops_at_its_ends() {
         let tree = with_child(vec![]);
         let (mut ui, now) = scene();
         press_tree(&mut ui, &tree, ctrl('g'), now);

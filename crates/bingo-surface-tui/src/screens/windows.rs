@@ -44,10 +44,7 @@ fn crowded_switcher(at: usize) -> (Tree, Ui, Now) {
     shown(
         &mut ui,
         Open::Switcher(Switcher {
-            cursor: crate::roster::Cursor {
-                side: crate::roster::Side::Sessions,
-                at,
-            },
+            cursor: crate::roster::Cursor { at },
             stored,
             ..Default::default()
         }),

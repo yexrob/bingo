@@ -1,6 +1,5 @@
 ---
 source: crates/bingo-surface-tui/src/motion.rs
-assertion_line: 540
 expression: "closing.join(\"\\n\")"
 ---
 "enter        send the message · open the focused block                          "
@@ -15,7 +14,7 @@ expression: "closing.join(\"\\n\")"
 "alt+b/f      move one word                                                      "
 "ctrl+w/u/k   delete word · to line start · to line end                          "
 "pgup/pgdn    scroll the transcript                                              "
-"ctrl+g       the same list · ↑↓ a column · ←→ across                            "
+"ctrl+g       the same list · ↑↓ to walk it                                      "
 "ctrl+t       plugin state (tasks, rooms)                                        "
 "tab          complete the command under the caret                               "
 "shift+tab    cycle permission mode                                              "
@@ -45,7 +44,7 @@ expression: "closing.join(\"\\n\")"
 "alt+b/f      move one word                                                      "
 "ctrl+w/u/k   delete word · to line start · to line end                          "
 "pgup/pgdn    scroll the transcript                                              "
-"ctrl+g       the same list · ↑↓ a column · ←→ across                            "
+"ctrl+g       the same list · ↑↓ to walk it                                      "
 "ctrl+t       plugin state (tasks, rooms)                                        "
 "tab          complete the command under the caret                               "
 "╭──────────────────────────────────────────────────────────────────────────────╮"

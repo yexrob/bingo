@@ -1,5 +1,5 @@
 //! What a room says about a session sitting in it: which room, what its ear
-//! hears there, and what it owes.
+//! hears there, what stands unread and what it owes.
 //!
 //! Nothing here is published and nothing is stored. A seat is composed at
 //! render time from what the rooms plugin already writes — the room's own
@@ -28,6 +28,11 @@ const LISTENERS: &str = "listeners";
 /// The kind one seat's own retuning is published under, before its name
 /// (ADR-0029 §4).
 const EAR: &str = "ear:";
+/// The kind a seat's reading mark is published under, before its room
+/// (ADR-0034 §2). It sits on the member's own session, not the room's.
+const CURSOR: &str = "cursor:";
+/// The `seq` of the room that mark has read up to.
+const SEQ: &str = "seq";
 /// The signal the room's parent carries while any answer is owed.
 const OWED: &str = "owed";
 /// The open debts that signal carries beside the table it draws as, and the
@@ -74,6 +79,11 @@ pub struct Seat {
     /// The room's name, `#design`.
     pub room: String,
     pub ear: Ear,
+    /// How many posts stand after this seat's reading mark (ADR-0034 §2),
+    /// where there is a mark to read and it is behind the room's head. A seat
+    /// at the head has nothing to say, and so has one whose journal carries no
+    /// mark this surface recognises — a guess would be worse than a silence.
+    pub unread: Option<u64>,
     /// The oldest answer it still owes there, where one stands.
     pub owes: Option<Owes>,
 }
@@ -95,8 +105,37 @@ pub fn seat(tree: &Tree, state: &SessionState) -> Option<Seat> {
     Some(Seat {
         room: tree::name(room),
         ear: ear(room, &name),
+        unread: unread(state, room),
         owes: owes(tree, room, &name),
     })
+}
+
+/// What stands unread in the room for this seat: the room's head, which is the
+/// last frame of its journal this attachment carries, less the `seq` the
+/// seat's own mark stopped at.
+fn unread(state: &SessionState, room: &SessionState) -> Option<u64> {
+    let read = read_to(state, &tree::name(room))?;
+    room.seq.0.checked_sub(read).filter(|behind| *behind > 0)
+}
+
+/// The `seq` this session's mark for one room stopped at. A mark is filed
+/// under `cursor:<room>` and names its room in the payload as well; the
+/// payload is what is read, so nothing turns on how the kind was spelled.
+fn read_to(state: &SessionState, room: &str) -> Option<u64> {
+    state
+        .extensions
+        .get(PLUGIN)?
+        .iter()
+        .filter(|(kind, _)| kind.starts_with(CURSOR))
+        .find(|(_, mark)| marks(mark, room))
+        .and_then(|(_, mark)| mark.get(SEQ)?.as_u64())
+}
+
+/// Whether a mark is this room's, as the mark itself says.
+fn marks(mark: &Value, room: &str) -> bool {
+    mark.get(ROOM)
+        .and_then(Value::as_str)
+        .is_some_and(|named| same(named, room))
 }
 
 /// What a room's row says about itself.
@@ -115,7 +154,7 @@ pub fn counts(tree: &Tree, room: &SessionState) -> Counts {
 }
 
 /// The sessions of the tree that answer nobody: a room is a `Log` session, and
-/// that is the same fact the list splits its two columns on.
+/// that is the same fact the list groups its two runs by.
 fn rooms(tree: &Tree) -> impl Iterator<Item = &SessionState> {
     tree.sessions().filter(|state| Status::of(state).is_none())
 }
@@ -333,6 +372,7 @@ mod tests {
             Some(Seat {
                 room: "#design".into(),
                 ear: Ear::Live,
+                unread: None,
                 owes: Some(asked_minutes_ago(22)),
             })
         );
@@ -404,9 +444,46 @@ mod tests {
             Some(Seat {
                 room: "#design".into(),
                 ear: Ear::Live,
+                unread: None,
                 owes: None,
             })
         );
+    }
+
+    /// The one fact "seen" derives from (ADR-0034 §2): the room's head less
+    /// the `seq` the seat's own mark stopped at, and nothing at all once the
+    /// mark has caught up.
+    #[test]
+    fn a_seat_behind_the_rooms_head_counts_what_it_has_not_read() {
+        let mut tree = seated();
+        tree.apply(&child_frame(6, room_cursor("#design", 1)));
+        assert_eq!(
+            of(&tree, "reviewer").and_then(|seat| seat.unread),
+            Some(3),
+            "the room's journal reaches seq 4 and the mark stopped at 1"
+        );
+
+        tree.apply(&child_frame(7, room_cursor("#design", 4)));
+        assert_eq!(of(&tree, "reviewer").and_then(|seat| seat.unread), None);
+    }
+
+    /// A mark says which room it belongs to, and only that room's head is
+    /// counted against it. A payload of another shape leaves the fact out.
+    #[test]
+    fn a_mark_of_another_room_or_another_shape_counts_nothing() {
+        let mut tree = seated();
+        tree.apply(&child_frame(6, room_cursor("#ops", 1)));
+        assert_eq!(of(&tree, "reviewer").and_then(|seat| seat.unread), None);
+
+        tree.apply(&child_frame(
+            7,
+            extended(
+                "bingo.rooms",
+                "cursor:#design",
+                serde_json::json!({"room": "#design", "seq": "the first"}),
+            ),
+        ));
+        assert_eq!(of(&tree, "reviewer").and_then(|seat| seat.unread), None);
     }
 
     #[test]
