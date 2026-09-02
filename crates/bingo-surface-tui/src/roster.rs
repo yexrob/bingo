@@ -372,8 +372,13 @@ fn dot(row: &Row<'_>, seat: Option<&Seat>) -> Span<'static> {
     )
 }
 
-/// What a session's row says after its name: what it is doing, where it sits,
-/// what it hears there and what it owes — in that order, and only what is true.
+/// What a session's row says after its name, in the order a narrow column
+/// gives it up: what it is doing, where it sits, what it hears there, what it
+/// owes, whether it wants you — and last of all what it has spent.
+///
+/// The tail is what the clip takes (§10, 2026-08-31: the preview gives way,
+/// never the answers). A count of tools is a thing to glance at; a debt and a
+/// question are things to act on, so they are drawn where they survive.
 fn says(
     row: &Row<'_>,
     state: Option<&SessionState>,
@@ -396,6 +401,7 @@ fn says(
     if row.attention {
         said.push(Span::styled("needs you".to_string(), theme::attention(now)));
     }
+    said.push(Span::styled(spent(row, state), theme::dim()));
     gap(dotted(said))
 }
 
@@ -406,21 +412,26 @@ fn doing(row: &Row<'_>, state: Option<&SessionState>) -> String {
     let Some(status) = row.status else {
         return String::new();
     };
-    // A row the store answered with has no state here to read.
-    let Some(state) = state else {
-        return status.label().to_string();
-    };
-    match status {
-        Status::Idle => tree::brief(state).unwrap_or_else(|| status.label().to_string()),
-        Status::Stored => status.label().to_string(),
-        Status::Running | Status::Done => spending(status, state),
+    match (status, state) {
+        // A row the store answered with has no state here to read.
+        (_, None) => status.label().to_string(),
+        (Status::Idle, Some(state)) => {
+            tree::brief(state).unwrap_or_else(|| status.label().to_string())
+        }
+        _ => status.label().to_string(),
     }
 }
 
-/// `running · 3 tools · 1.2k tokens · 40s`. The clock is left out where it has
-/// not moved: nothing is learned from `0s`.
-fn spending(status: Status, state: &SessionState) -> String {
-    let mut said = format!("{} · {}", status.label(), tree::spent(state));
+/// `3 tools · 1.2k tokens · 40s`: what a session has spent on its work. A
+/// session that has not started spent nothing worth a column, and the clock is
+/// left out where it has not moved — nothing is learned from `0s`.
+fn spent(row: &Row<'_>, state: Option<&SessionState>) -> String {
+    let Some(state) =
+        state.filter(|_| matches!(row.status, Some(Status::Running) | Some(Status::Done)))
+    else {
+        return String::new();
+    };
+    let mut said = tree::spent(state);
     let seconds = tree::seconds(state);
     if seconds > 0 {
         said.push_str(&format!(" · {seconds}s"));
@@ -542,7 +553,7 @@ mod tests {
             vec![
                 "Sessions                                             Rooms",
                 "❯ ⏺ project   what is in this workspace?               #design  2 seats · 1 owed",
-                "  ⏺ reviewer  running · 3 tools · 1.2k tokens · in…",
+                "  ⏺ reviewer  running · in #design · owes an answe…",
                 "  ~ watcher   idle · in #design · listening · 300s",
             ],
             "the root first, then the agents, and the rooms beside them"
@@ -591,9 +602,10 @@ mod tests {
         );
         assert!(
             drawn[2].contains(
-                "reviewer  running · 3 tools · 1.2k tokens · in #design · owes an answer since 14:02"
+                "reviewer  running · in #design · owes an answer since 14:02 · 3 tools · 1.2k tokens"
             ),
-            "one that has run says what it is doing, and every seat fact after it: {drawn:#?}"
+            "one that has run says what it is doing, then where it sits and what \
+             it owes, and only then what it has spent: {drawn:#?}"
         );
     }
 
