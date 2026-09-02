@@ -22,7 +22,7 @@ use agent_client_protocol_schema::v1::{
     RequestPermissionResponse, ResumeSessionRequest, SessionNotification,
 };
 use async_trait::async_trait;
-use bingo_sdk::{Env, HostHandle, KernelError, Message, ProviderError, SessionId};
+use bingo_sdk::{Env, HostHandle, KernelError, Level, Message, ProviderError, SessionId};
 use serde_json::json;
 use tokio::sync::{Mutex, mpsc};
 
@@ -201,8 +201,14 @@ impl Sessions {
         session: &SessionId,
         history: &[Message],
     ) -> Result<Arc<Link>, ProviderError> {
-        if let Some(link) = self.link(name, session).await {
-            return Ok(link);
+        match self.link(name, session).await {
+            Some(link) if link.connection.is_alive() => return Ok(link),
+            // A child that died between turns is replaced rather than asked:
+            // the next call would only fail as transport. The ladder is
+            // climbed again from the journal's own pointer, so what it lost
+            // is at most one rung, and the person is told (ADR-0035 §3).
+            Some(_) => self.bury(name, session).await,
+            None => {}
         }
         let cwd = self.cwd(session).await?;
         let link = self.open(name, adapter, session, &cwd, history).await?;
@@ -211,6 +217,25 @@ impl Sessions {
             .await
             .insert((name.to_string(), session.clone()), link.clone());
         Ok(link)
+    }
+
+    /// Let go of a dead adapter — dropping the link takes what is left of its
+    /// process group — and say that it went.
+    async fn bury(&self, name: &str, session: &SessionId) {
+        self.links
+            .lock()
+            .await
+            .remove(&(name.to_string(), session.clone()));
+        let Some(host) = self.host.lock().await.clone() else {
+            return;
+        };
+        let _ = host
+            .notice(
+                Level::Warn,
+                "ACP_RESPAWN",
+                &format!("{name} stopped between turns; a new one was started for this session."),
+            )
+            .await;
     }
 
     /// Where the agent works. A session answers its summary even while it is

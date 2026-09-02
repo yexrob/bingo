@@ -8,7 +8,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 
 use agent_client_protocol_schema::rpc::RequestId;
 use agent_client_protocol_schema::v1::{
@@ -53,6 +53,9 @@ pub struct Connection {
     outgoing: mpsc::UnboundedSender<Body>,
     pending: Pending,
     next_id: AtomicI64,
+    /// False once the adapter's stdout has closed — the child is gone, or has
+    /// stopped speaking, and everything after this is a transport error.
+    alive: Arc<AtomicBool>,
     tasks: Vec<JoinHandle<()>>,
 }
 
@@ -73,6 +76,7 @@ impl Connection {
     {
         let (outgoing, queue) = mpsc::unbounded_channel();
         let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
+        let alive = Arc::new(AtomicBool::new(true));
         let tasks = vec![
             tokio::spawn(write_lines(writer, queue)),
             tokio::spawn(read_lines(
@@ -80,14 +84,22 @@ impl Connection {
                 pending.clone(),
                 client,
                 outgoing.clone(),
+                alive.clone(),
             )),
         ];
         Self {
             outgoing,
             pending,
             next_id: AtomicI64::new(1),
+            alive,
             tasks,
         }
+    }
+
+    /// Whether this adapter is still there to be asked. A dead one is not
+    /// retried on: it is replaced (`crate::session`).
+    pub fn is_alive(&self) -> bool {
+        self.alive.load(Ordering::Acquire)
     }
 
     /// Send a request and wait for the answer that carries its id.
@@ -148,6 +160,7 @@ async fn read_lines<R: AsyncRead + Unpin>(
     pending: Pending,
     client: Arc<dyn Client>,
     outgoing: mpsc::UnboundedSender<Body>,
+    alive: Arc<AtomicBool>,
 ) {
     let mut lines = BufReader::new(reader).lines();
     while let Ok(Some(line)) = lines.next_line().await {
@@ -160,6 +173,7 @@ async fn read_lines<R: AsyncRead + Unpin>(
             dispatch(envelope.into_inner(), &pending, &client, &outgoing).await;
         }
     }
+    alive.store(false, Ordering::Release);
     pending.lock().await.clear();
 }
 

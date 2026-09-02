@@ -589,3 +589,45 @@ fn a_permission_question_is_refused_and_one_notice_names_the_row() {
         asked[0]
     );
 }
+
+/// ADR-0035 §3: an adapter that died between turns is replaced, not asked. The
+/// replacement climbs back into the same agent session from the journal's own
+/// pointer, and the person is told a child went.
+#[test]
+fn an_adapter_that_died_between_turns_is_replaced_and_said() {
+    let Some(agent) = fake_agent() else { return };
+    let adapter = Scripted::new(
+        agent,
+        json!({
+            "sessionId": "acp-7",
+            "capabilities": { "resume": true },
+            "turns": [
+                { "updates": [chunk("First.")], "stopReason": "end_turn", "thenExit": true },
+                one_turn(vec![chunk("Second.")])
+            ]
+        }),
+    );
+    let mut host = stream_json::Host::start(&mut adapter.hosted());
+    host.prompt("one");
+    host.until("result");
+    host.prompt("two");
+    let ended = host.finish();
+    assert_eq!(ended.code, Some(0), "stderr: {}", ended.err);
+
+    // The dead child's script starts again from its first turn, so the second
+    // bingo turn is answered "First." by a new agent — which is the point:
+    // it was answered at all.
+    assert_eq!(ended.results().len(), 2, "{:?}", ended.types());
+    assert_eq!(
+        adapter.methods(),
+        [
+            "initialize",
+            "session/new",
+            "session/prompt",
+            "initialize",
+            "session/resume",
+            "session/prompt"
+        ],
+        "a second handshake, and back into the same agent session"
+    );
+}

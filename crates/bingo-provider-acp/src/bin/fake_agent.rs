@@ -25,7 +25,8 @@
 //!       "updates": [ { "sessionUpdate": "agent_message_chunk", "content": {…} } ],
 //!       "stopReason": "end_turn",
 //!       "usage": { "totalTokens": 3, "inputTokens": 2, "outputTokens": 1 },
-//!       "awaitCancel": false
+//!       "awaitCancel": false,
+//!       "thenExit": false
 //!     }
 //!   ]
 //! }
@@ -95,6 +96,10 @@ struct Turn {
     /// something to interrupt.
     #[serde(default)]
     await_cancel: bool,
+    /// The agent answers this turn and then goes, the way a crashed adapter
+    /// does. The next turn must find a new child.
+    #[serde(default)]
+    then_exit: bool,
 }
 
 fn end_turn() -> String {
@@ -254,7 +259,11 @@ impl Agent {
         if let Some(usage) = turn.usage {
             answer["usage"] = usage;
         }
-        self.send(wire::result(id, answer)).await
+        self.send(wire::result(id, answer)).await?;
+        if turn.then_exit {
+            std::process::exit(0);
+        }
+        Ok(())
     }
 
     /// A question the agent puts to the client, and the wait for its answer.
@@ -350,6 +359,7 @@ fn script_turn(turn: &Turn) -> Turn {
         stop_reason: turn.stop_reason.clone(),
         usage: turn.usage.clone(),
         await_cancel: turn.await_cancel,
+        then_exit: turn.then_exit,
     }
 }
 

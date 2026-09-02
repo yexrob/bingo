@@ -85,23 +85,27 @@ events,pool,transcript,provider,config}.rs` + the fake-agent bin;
 
 ## Exit criteria
 
-- [ ] Every message used has a fixture round-trip; `cargo deny check`
-  green; budget 307 with the ADR line.
-- [ ] `--print` through the fake agent: text, thought and an external
+- [x] Every message used has a fixture round-trip; `cargo deny check`
+  green; budget 307 with the ADR line. † The measured number is 308,
+  the member crate included; `scripts/budget.toml` carries the count
+  and the arithmetic.
+- [x] `--print` through the fake agent: text, thought and an external
   tool call land in valid NDJSON, marked `acp.external: true`, and
-  nothing was executed by the loop.
-- [ ] Esc mid-turn sends `session/cancel` and the turn ends with the
+  nothing was executed by the loop. † The mark rides
+  `ItemBody::Reasoning`'s `providerMetadata`, not `ToolCall` — see
+  Verified, "decided beyond the plan".
+- [x] Esc mid-turn sends `session/cancel` and the turn ends with the
   interrupt wording; the child and the agent session survive to
   serve the next turn.
-- [ ] Two turns of one bingo session ride one agent session on one
+- [x] Two turns of one bingo session ride one agent session on one
   child (the fake counts its spawns and its `session/new`s); the
   `bingo.acp` extension is journaled exactly once.
-- [ ] `--continue` against a fake advertising resume / only load /
+- [x] `--continue` against a fake advertising resume / only load /
   neither: each rung proven; on the last, the prompt names the file
   and the file holds the prior fold; a load replay journals nothing.
-- [ ] A scripted `request_permission` is answered with its reject
+- [x] A scripted `request_permission` is answered with its reject
   option, one notice names the config row, and the turn goes on.
-- [ ] `cargo check -p bingo-provider-acp --all-targets --target
+- [x] `cargo check -p bingo-provider-acp --all-targets --target
   x86_64-pc-windows-msvc` (the child spawns, both spellings); every
   gate in AGENTS.md.
 

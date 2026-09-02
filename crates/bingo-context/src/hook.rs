@@ -115,8 +115,8 @@ fn request(model: &str, items: &[Item]) -> ModelRequest {
         messages: vec![Message::text(Role::User, body(items))],
         tools: Vec::new(),
         reasoning: None,
-        // A side question, not the session's turn: there is nothing here for a
-        // person to be asked about.
+        // A side question, not the session's turn: it belongs to no
+        // conversation a stateful provider is keeping.
         session: None,
         provider_options: side_question("memory"),
     }
