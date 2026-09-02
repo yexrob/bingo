@@ -4,6 +4,7 @@
 //! a map of session actors. It knows no plugin by name.
 
 mod catalog;
+mod refresh;
 mod registry;
 mod resume;
 mod tool_host;
@@ -20,6 +21,7 @@ use jiff::Timestamp;
 use serde_json::Value;
 use tokio::sync::broadcast;
 
+pub(crate) use refresh::Refreshed;
 pub use registry::{PluginStatus, Registry};
 use tool_host::SessionToolHost;
 use unavailable::Unavailable;
@@ -209,7 +211,14 @@ impl Host {
             }
         });
         host.start_plugins().await?;
+        refresh::in_background(&host);
         Ok(host)
+    }
+
+    /// Ask every usable provider what it serves and wait for the answers
+    /// (ADR-0026 §4): what each one said, in registration order.
+    pub(crate) async fn refresh_models(self: &Arc<Self>) -> Vec<Refreshed> {
+        refresh::now(self).await
     }
 
     /// Start the enabled plugins in load order; each receives a host handle.
