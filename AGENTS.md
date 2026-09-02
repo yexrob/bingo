@@ -20,11 +20,14 @@ A local coding-agent harness in Rust: a minimal kernel, everything else a plugin
 - **Subtract by default.** Deleting needs no reason; adding does.
 - Tool properties fail closed: an unknown tool is not concurrency-safe, not read-only, and its interrupt behaviour is Block.
 - The kernel owns no feature nouns. `room`, `team`, `hire`, `task`, `experience`, `schedule` do not appear in `bingo-sdk` or `bingo-core`.
+- **Every platform the release ships.** Linux, macOS and Windows all build; the release matrix is the list. A platform-only API is `cfg`-gated together with its counterpart, written in the same change — a process group on unix is a job object on Windows, and a signal a program may answer has no Windows spelling at all, so there it is a kill. The constant, the helper and the test that belong to one platform carry the same gate.
+- **A machine is not the machine.** Assume nothing a developer's box happens to provide: not that a signal exists, not that a wait status is POSIX, not that `TMPDIR` is long, not that a core is free. A test that pins a wall clock, a path length or a scheduling order pins the machine it was written on, and CI is slower, has fewer cores and a shorter temporary path.
 
 ## Verification
 
 - Every change passes `cargo fmt --all -- --check`, `cargo check --workspace --all-targets --locked`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, `cargo test --workspace --locked`, `scripts/check_discipline.sh`, `scripts/budget.sh`.
 - User-visible CLI/RPC behaviour has black-box coverage (exit status, stdout purity, NDJSON validity). Terminal-byte changes have a `TestBackend` test and the PTY smoke.
+- A change that touches a process, a path, a signal or a clock is checked against the other platform before it is called done: `cargo check -p <crate> --all-targets --target x86_64-pc-windows-msvc` finds a unix-only API without a Windows machine. CI's `windows` job is the backstop, not the first look.
 - A milestone is done when its plan's exit criteria are ticked with command output pasted. Unverified work is not called complete; failures are reported as they are.
 
 ## Records
