@@ -22,13 +22,75 @@ use super::pidfile::{self, Record};
 use super::probe::{self, Probe};
 
 /// What a resident process holds for as long as it runs: the pidfile, and the
-/// two signals that end it. Dropping it gives the pidfile back, so it must
-/// outlive `Host::shutdown`.
+/// signals that end it. Dropping it gives the pidfile back, so it must outlive
+/// `Host::shutdown`.
 #[derive(Debug)]
 pub struct Resident {
     _claim: pidfile::Claim,
+    leaving: Leaving,
+}
+
+/// The ways the operating system asks a process to leave, in whichever words
+/// this one uses. Both platforms are registered the same way and answered the
+/// same way; only the names differ, and only in here.
+#[derive(Debug)]
+struct Leaving {
+    /// TERM is what a supervisor and `gateway stop` send; INT is what a person
+    /// at the keyboard sends to a `gateway run` they started in the
+    /// foreground, and it deserves the same clean end.
+    #[cfg(unix)]
     term: tokio::signal::unix::Signal,
+    #[cfg(unix)]
     interrupt: tokio::signal::unix::Signal,
+    /// Windows has no signal to send a process by number. What reaches a
+    /// console program instead is ctrl+c, ctrl+break, or the close event the
+    /// system sends before it takes the process away.
+    #[cfg(windows)]
+    ctrl_c: tokio::signal::windows::CtrlC,
+    #[cfg(windows)]
+    ctrl_break: tokio::signal::windows::CtrlBreak,
+    #[cfg(windows)]
+    ctrl_close: tokio::signal::windows::CtrlClose,
+}
+
+impl Leaving {
+    /// Register for all of them. Once this returns, none of them can kill this
+    /// process where it stands — which is the whole reason it is called before
+    /// the pidfile is written.
+    fn registered() -> Result<Self, KernelError> {
+        Ok(Self {
+            #[cfg(unix)]
+            term: signal(SignalKind::Terminate)?,
+            #[cfg(unix)]
+            interrupt: signal(SignalKind::Interrupt)?,
+            #[cfg(windows)]
+            ctrl_c: windows_signal(tokio::signal::windows::ctrl_c())?,
+            #[cfg(windows)]
+            ctrl_break: windows_signal(tokio::signal::windows::ctrl_break())?,
+            #[cfg(windows)]
+            ctrl_close: windows_signal(tokio::signal::windows::ctrl_close())?,
+        })
+    }
+
+    /// Wait until one of them arrives, and say which. One that arrived while
+    /// the host was still being built is already waiting here.
+    async fn asked(&mut self) -> &'static str {
+        #[cfg(unix)]
+        {
+            tokio::select! {
+                _ = self.term.recv() => "SIGTERM",
+                _ = self.interrupt.recv() => "SIGINT",
+            }
+        }
+        #[cfg(windows)]
+        {
+            tokio::select! {
+                _ = self.ctrl_c.recv() => "ctrl+c",
+                _ = self.ctrl_break.recv() => "ctrl+break",
+                _ = self.ctrl_close.recv() => "the close event",
+            }
+        }
+    }
 }
 
 /// Everything that must be true before a host is built: the directory exists,
@@ -46,8 +108,7 @@ pub fn enter(paths: &Paths, probe: &dyn Probe) -> Result<Resident, KernelError> 
     // which is to kill this process where it stands: no `Drop`, no
     // `Plugin::stop`, and a pidfile nobody gives back. The host is still being
     // built at that point, so the handlers cannot wait for it.
-    let term = signal(SignalKind::Terminate)?;
-    let interrupt = signal(SignalKind::Interrupt)?;
+    let leaving = Leaving::registered()?;
     let path = paths.pidfile();
     if let Some(old) = pidfile::read(&path).map_err(internal)? {
         replace(&path, &old, probe)?;
@@ -61,8 +122,7 @@ pub fn enter(paths: &Paths, probe: &dyn Probe) -> Result<Resident, KernelError> 
     );
     Ok(Resident {
         _claim: claim,
-        term,
-        interrupt,
+        leaving,
     })
 }
 
@@ -129,28 +189,32 @@ impl Resident {
                 tracing::warn!("the channels surface ended on its own");
                 exit
             }
-            _ = self.term.recv() => Ok(leaving("SIGTERM")),
-            _ = self.interrupt.recv() => Ok(leaving("SIGINT")),
+            asked = self.leaving.asked() => Ok(leaving(asked)),
         }
     }
 }
 
-/// The two signals that mean "stop". TERM is what a supervisor and
-/// `gateway stop` send; INT is what a person at the keyboard sends to a
-/// `gateway run` they started in the foreground, and it deserves the same
-/// clean end rather than a killed process and a stale claim.
+/// The two signals that mean "stop", by the numbers only unix has.
+#[cfg(unix)]
 #[derive(Clone, Copy, Debug)]
 enum SignalKind {
     Terminate,
     Interrupt,
 }
 
+#[cfg(unix)]
 fn signal(kind: SignalKind) -> Result<tokio::signal::unix::Signal, KernelError> {
     let kind = match kind {
         SignalKind::Terminate => tokio::signal::unix::SignalKind::terminate(),
         SignalKind::Interrupt => tokio::signal::unix::SignalKind::interrupt(),
     };
     tokio::signal::unix::signal(kind).map_err(|e| internal(format!("listening for a signal: {e}")))
+}
+
+/// The same failure, for the console events Windows registers by name.
+#[cfg(windows)]
+fn windows_signal<T>(registered: std::io::Result<T>) -> Result<T, KernelError> {
+    registered.map_err(|e| internal(format!("listening for a signal: {e}")))
 }
 
 fn leaving(signal: &str) -> Exit {
