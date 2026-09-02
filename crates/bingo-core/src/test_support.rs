@@ -30,25 +30,45 @@ pub struct ScriptedProvider {
     /// The catalogue shelf its models are filed under; its own id by default,
     /// as the sdk trait does.
     family: Option<String>,
+    /// What its endpoint answers `models()` with: a list, or the message a
+    /// broken endpoint fails with. Empty, as the sdk's default is.
+    serves: Mutex<Result<Vec<ModelInfo>, String>>,
 }
 
 impl ScriptedProvider {
     pub fn new(responses: Vec<Script>) -> Arc<Self> {
-        Arc::new(Self {
-            responses: Mutex::new(responses.into()),
-            requests: Mutex::new(vec![]),
-            family: None,
-        })
+        Self::filed(None, responses)
     }
 
     /// A named instance serving another shape's models (ADR-0017), which is
     /// how a catalogue finds any model's facts at all.
     pub fn filed_under(family: &str, responses: Vec<Script>) -> Arc<Self> {
+        Self::filed(Some(family.to_string()), responses)
+    }
+
+    fn filed(family: Option<String>, responses: Vec<Script>) -> Arc<Self> {
         Arc::new(Self {
             responses: Mutex::new(responses.into()),
             requests: Mutex::new(vec![]),
-            family: Some(family.to_string()),
+            family,
+            serves: Mutex::new(Ok(Vec::new())),
         })
+    }
+
+    /// What its endpoint lists from now on.
+    pub fn serves(&self, ids: &[&str]) {
+        *self.serves.lock().unwrap() = Ok(ids
+            .iter()
+            .map(|id| ModelInfo {
+                id: (*id).to_string(),
+                display: None,
+            })
+            .collect());
+    }
+
+    /// An endpoint that cannot be asked from now on.
+    pub fn breaks(&self, message: &str) {
+        *self.serves.lock().unwrap() = Err(message.to_string());
     }
 
     pub fn requests(&self) -> Vec<ModelRequest> {
@@ -66,6 +86,13 @@ impl Provider for ScriptedProvider {
     }
     fn endpoint(&self, _: &str) -> EndpointCapabilities {
         EndpointCapabilities::default()
+    }
+    async fn models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
+        self.serves
+            .lock()
+            .unwrap()
+            .clone()
+            .map_err(|message| ProviderError::Request { message })
     }
     async fn stream(
         &self,

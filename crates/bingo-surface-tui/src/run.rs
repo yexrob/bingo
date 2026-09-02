@@ -14,9 +14,9 @@ use std::time::{Duration, Instant};
 
 use bingo_sdk::{
     Attachment, CatalogKind, ClientIdentity, CloseReason, CommandSpec, Event, Exit, FrameStream,
-    HostHandle, Input, IntentId, IntentOutcome, InterruptScope, KernelError, Level, OpenOptions,
-    SessionFilter, SessionHandle, SessionId, SessionSelector, SessionState, SessionSummary,
-    SurfaceOptions, View,
+    GatewayEvent, GatewayStream, HostHandle, Input, IntentId, IntentOutcome, InterruptScope,
+    KernelError, Level, OpenOptions, SessionFilter, SessionHandle, SessionId, SessionSelector,
+    SessionState, SessionSummary, SurfaceOptions, View,
 };
 use crossterm::event::Event as Term;
 use futures::{Stream, StreamExt};
@@ -40,6 +40,12 @@ const TICK: Duration = clock::FRAME;
 const SLOW_DRAW: Duration = Duration::from_millis(100);
 /// Sessions the `/resume` picker lists.
 const RECENT: usize = 20;
+/// The catalogues whose ids a command's argument may name, by the source name
+/// its `ArgSpec::Catalog` gives.
+const CATALOGUES: &[(&str, CatalogKind)] = &[
+    ("models", CatalogKind::Models),
+    ("providers", CatalogKind::Providers),
+];
 /// What a write says while the mailbox of the session in view is still on its
 /// way: it is refused, never held.
 pub const NOT_YET: &str = "still opening that session — try again";
@@ -147,6 +153,9 @@ pub(crate) async fn drive(
 ) -> Result<Farewell, KernelError> {
     let (tx, mut replies) = mpsc::channel(16);
     let (mut run, mut events) = attach(host, opts, tx).await?;
+    // The host's own stream, beside the session's: what changed for the whole
+    // process rather than for this conversation (ADR-0026 §4).
+    let mut gateway = Some(host.gateway_events());
     loop {
         // `biased`, keys first: a person outranks the machine, and a
         // keystroke is never continuously ready, so checking it first
@@ -166,6 +175,17 @@ pub(crate) async fn drive(
             },
             Some(reply) = replies.recv() => {
                 run.reply(reply, &mut events);
+                Wake::Event
+            },
+            // A handful an hour at most, so it is read before the frames and
+            // starves nothing — and a catalogue rebuilt during a frame storm
+            // does not wait for the storm to end.
+            event = next_gateway(&mut gateway) => {
+                match event {
+                    Some(GatewayEvent::CatalogChanged { kind }) => run.catalog_changed(kind),
+                    Some(_) => {}
+                    None => gateway = None,
+                }
                 Wake::Event
             },
             frame = next_frame(&mut events) => {
@@ -231,6 +251,15 @@ fn older_than_a_frame() -> Instant {
 /// A stream that has ended never wakes the loop again.
 async fn next_frame(events: &mut Option<FrameStream>) -> Option<bingo_sdk::Frame> {
     match events.as_mut() {
+        Some(stream) => stream.next().await,
+        None => std::future::pending().await,
+    }
+}
+
+/// The same for the host's stream: a run whose host has stopped announcing
+/// carries on with the session it already has.
+async fn next_gateway(gateway: &mut Option<GatewayStream>) -> Option<GatewayEvent> {
+    match gateway.as_mut() {
         Some(stream) => stream.next().await,
         None => std::future::pending().await,
     }
@@ -638,8 +667,8 @@ impl Run {
         });
     }
 
-    /// The catalogues are read once: the dropdown ranks them, it does not
-    /// watch them.
+    /// The catalogues are read at start and again whenever the host says one
+    /// of them was rebuilt: the dropdown follows, it does not poll.
     fn fetch_catalogs(&mut self) {
         let host = self.host.clone();
         self.spawn(async move {
@@ -647,20 +676,31 @@ impl Run {
                 .await
                 .map(|c| Reply::Commands(commands::specs_from(&c)))
         });
-        for (source, kind) in [
-            ("models", CatalogKind::Models),
-            ("providers", CatalogKind::Providers),
-        ] {
-            let host = self.host.clone();
-            self.spawn(async move {
-                host.catalog(kind).await.map(|c| {
-                    Reply::Catalogue(
-                        source.to_string(),
-                        c.entries.into_iter().map(|e| e.id).collect(),
-                    )
-                })
-            });
+        for (source, kind) in CATALOGUES {
+            self.fetch_catalogue(source, *kind);
         }
+    }
+
+    /// One catalogue's ids, on the loop's own host-call lane.
+    fn fetch_catalogue(&mut self, source: &'static str, kind: CatalogKind) {
+        let host = self.host.clone();
+        self.spawn(async move {
+            host.catalog(kind).await.map(|c| {
+                Reply::Catalogue(
+                    source.to_string(),
+                    c.entries.into_iter().map(|e| e.id).collect(),
+                )
+            })
+        });
+    }
+
+    /// A catalogue the host rebuilt — a provider's endpoint answered what it
+    /// serves (ADR-0026 §4) — is read again, and only that one.
+    fn catalog_changed(&mut self, kind: CatalogKind) {
+        let Some((source, _)) = CATALOGUES.iter().find(|(_, listed)| *listed == kind) else {
+            return;
+        };
+        self.fetch_catalogue(source, kind);
     }
 
     fn spawn(&self, call: impl Future<Output = Result<Reply, KernelError>> + Send + 'static) {
@@ -1028,6 +1068,42 @@ mod tests {
             vec![Input::text("hi", bingo_sdk::Origin::surface("tui"))]
         );
         assert!(root.submitted().is_empty(), "the root was not written to");
+    }
+
+    /// M35: a provider's endpoint answered what it serves, the host says the
+    /// models catalogue was rebuilt, and the completions follow — on the same
+    /// spawned lane, so no keystroke waited for the kernel.
+    #[tokio::test]
+    async fn the_completions_follow_a_catalogue_the_host_rebuilt() {
+        let mut harness = Harness::new();
+        let (host, _) = TestHost::announcing(vec![bingo_sdk::GatewayEvent::CatalogChanged {
+            kind: CatalogKind::Models,
+        }]);
+        // ctrl+c empties the composer, so ctrl+d can end the run at all.
+        let typing = "/model fake".chars().map(typed);
+        let script: Vec<_> = typing.chain([ctrl('c'), ctrl('d')]).collect();
+        let ended = drive(
+            &host,
+            options(None, harness.home.path()),
+            &mut harness.recorder,
+            keys(script),
+        )
+        .await
+        .expect("the loop ran");
+        assert_eq!(ended.exit, Exit { code: 0 });
+        let offered = |id: &str| {
+            harness
+                .recorder
+                .frames
+                .iter()
+                .any(|frame| frame.contains(id))
+        };
+        assert!(offered("fake-1"), "{}", harness.recorder.last());
+        assert!(
+            offered("fake-2"),
+            "the model the refresh found is offered: {}",
+            harness.recorder.last()
+        );
     }
 
     /// M31 §2: opening the switcher spawns one `sessions` read on the loop's

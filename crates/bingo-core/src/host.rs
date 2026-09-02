@@ -4,6 +4,7 @@
 //! a map of session actors. It knows no plugin by name.
 
 mod catalog;
+mod refresh;
 mod registry;
 mod resume;
 mod tool_host;
@@ -20,12 +21,13 @@ use jiff::Timestamp;
 use serde_json::Value;
 use tokio::sync::broadcast;
 
+pub(crate) use refresh::Refreshed;
 pub use registry::{PluginStatus, Registry};
 use tool_host::SessionToolHost;
 use unavailable::Unavailable;
 
 use crate::gate::DefaultPolicy;
-use crate::models::{self, Learned, ModelCatalog};
+use crate::models::{self, Learned, ModelCatalog, ServedModels};
 use crate::prompt::{self, PromptInput};
 use crate::session::{self, Mailbox};
 use crate::settings::{self, Claim, Layer, Merged, SettingsError};
@@ -101,6 +103,9 @@ pub struct Host {
     gateway: broadcast::Sender<GatewayEvent>,
     /// Windows the servers have corrected since this host started (ADR-0004).
     learned: Arc<Learned>,
+    /// What each endpoint last said it serves, from earlier processes and
+    /// this one's own refresh (ADR-0026 §4).
+    served: Arc<ServedModels>,
     weak: Weak<Host>,
 }
 
@@ -185,6 +190,12 @@ impl Host {
         let learned = Arc::new(Learned::load(
             config.env.data_dir.join("learned-windows.json"),
         ));
+        // Loaded here and never fetched here: what an earlier process cached
+        // is on hand before the first turn, and asking again is the
+        // background's job (ADR-0026 §4).
+        let served = Arc::new(ServedModels::load(
+            config.env.data_dir.join("served-models.json"),
+        ));
         let host = Arc::new_cyclic(|weak| {
             registry.add_builtins(crate::commands::builtins(weak.clone()));
             Host {
@@ -195,11 +206,25 @@ impl Host {
                 sessions: Mutex::new(BTreeMap::new()),
                 gateway,
                 learned,
+                served,
                 weak: weak.clone(),
             }
         });
         host.start_plugins().await?;
+        refresh::in_background(&host);
         Ok(host)
+    }
+
+    /// Ask every usable provider what it serves and wait for the answers
+    /// (ADR-0026 §4): what each one said, in registration order.
+    pub(crate) async fn refresh_models(self: &Arc<Self>) -> Vec<Refreshed> {
+        refresh::now(self).await
+    }
+
+    /// When this provider's endpoint last answered, for a person asking how
+    /// old the list is; `None` if it never has.
+    pub(crate) fn served_at(&self, provider: &str) -> Option<Timestamp> {
+        self.served.get(provider).map(|served| served.fetched)
     }
 
     /// Start the enabled plugins in load order; each receives a host handle.
@@ -512,7 +537,7 @@ impl Host {
         models::resolve(
             self.settings.kernel.models.get(&key),
             self.learned.window(provider.id(), model),
-            ModelCatalog::embedded().lookup(provider.id(), model),
+            ModelCatalog::embedded().facts_for(provider.family(), provider.id(), model),
             provider.endpoint(model),
         )
     }
@@ -878,6 +903,7 @@ impl HostApi for Host {
                 &self.registry,
                 &resolved,
                 self.settings.kernel.model.as_deref(),
+                &self.served,
                 kind,
             )
             .await,

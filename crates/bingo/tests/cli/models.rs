@@ -69,10 +69,12 @@ fn list_models_names_every_provider_its_models_and_its_sign_in_state() {
     let listed = tool_result(&out, "ListModels");
     assert!(!listed.is_error, "{listed:?}");
     let listing = text_of(&listed);
+    // Whether the endpoint has answered yet is the background's business, so
+    // only the part that does not depend on it is pinned here.
     assert!(
         listing
             .lines()
-            .any(|line| line == "fake  no sign-in needed"),
+            .any(|line| line.starts_with("fake  no sign-in needed")),
         "{listing}"
     );
     assert_eq!(
@@ -86,8 +88,8 @@ fn list_models_names_every_provider_its_models_and_its_sign_in_state() {
         assert!(sonnet.contains(fact), "{sonnet}");
     }
     assert!(
-        listing.ends_with("which says nothing about whether it works."),
-        "the listing says where its facts came from: {listing}"
+        listing.ends_with("asked what it serves."),
+        "the listing says where its facts and its ids came from: {listing}"
     );
 }
 
@@ -109,4 +111,62 @@ fn a_spawn_that_names_a_provider_and_a_model_still_lands() {
     let text = text_of(&spawned);
     assert!(!spawned.is_error, "{text}");
     assert!(text.contains("hi from the child"), "{text}");
+}
+
+/// `/models` is the kernel's own listing (ADR-0008 §4): each provider, where
+/// its ids came from and how old that answer is. `/models refresh` asks the
+/// endpoints now and says what came back.
+#[test]
+fn the_models_command_lists_the_catalogue_and_refreshes_on_demand() {
+    let home = tempfile::tempdir().unwrap();
+    let script = script(r#"{"responses":[]}"#);
+    let ask = |line: &str| {
+        run_within(
+            bingo()
+                .env("HOME", home.path())
+                .env("BINGO_FAKE_SCRIPT", script.path())
+                .args(["--print", "--cwd"])
+                .arg(home.path())
+                .arg(line),
+            std::time::Duration::from_secs(20),
+        )
+    };
+
+    let refreshed = ask("/models refresh");
+    assert_eq!(
+        refreshed.status.code(),
+        Some(0),
+        "stderr: {}",
+        stderr(&refreshed)
+    );
+    let counts = stdout(&refreshed);
+    assert!(counts.contains("fake 1 models"), "{counts}");
+
+    let listed = ask("/models");
+    assert_eq!(listed.status.code(), Some(0), "stderr: {}", stderr(&listed));
+    let listing = stdout(&listed);
+    assert!(
+        listing.contains("fake  1 models · from the endpoint · asked just now"),
+        "{listing}"
+    );
+    assert!(listing.contains("\n  fake-1\n"), "{listing}");
+}
+
+/// An argument the command does not take is refused, not guessed at.
+#[test]
+fn models_refuses_an_argument_it_does_not_know() {
+    let home = tempfile::tempdir().unwrap();
+    let script = script(r#"{"responses":[]}"#);
+    let out = run_within(
+        bingo()
+            .env("HOME", home.path())
+            .env("BINGO_FAKE_SCRIPT", script.path())
+            .args(["--print", "--cwd"])
+            .arg(home.path())
+            .arg("/models everything"),
+        std::time::Duration::from_secs(20),
+    );
+    assert_eq!(out.status.code(), Some(1), "stdout: {}", stdout(&out));
+    let err = stderr(&out);
+    assert!(err.contains("unknown argument `everything`"), "{err}");
 }

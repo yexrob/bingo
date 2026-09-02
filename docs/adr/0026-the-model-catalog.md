@@ -38,6 +38,21 @@ Nothing hands any of it to a model.
    snapshot; the live list stays where it is, serving the auth'd flows
    that already use it.
 
+   **Amended (M35).** What was refused is a network call on a reader's
+   path and a second source of *facts*; a cached list of *ids*, fetched
+   in the background and enriched from the one snapshot, is neither —
+   the endpoint owns which ids exist behind its base url (a named
+   instance, ADR-0017, serves its proxy's models and not its wire
+   shape's), and the snapshot still owns what each of them can do. So
+   `catalog(Models)` answers from a per-provider cache under `data_dir`
+   that a task per provider refreshes when it is missing or a day old,
+   never inside a turn, never inside `Host::build` and never for a
+   provider that cannot sign in; the entries say `source: endpoint |
+   catalogue | configured`, a changed list publishes
+   `GatewayEvent::CatalogChanged{Models}`, and `/models refresh` asks
+   now. Nothing writes a proxy's ids into the snapshot, and no fact is
+   ever taken from `/v1/models`.
+
 ## Consequences
 
 - An orchestrator can staff deliberately: list, pick the vision-capable or
