@@ -15,3 +15,4 @@ One record per boundary decision: a trait shape, a wire format, a persisted form
 - [0011 — Log sessions, plugin state in the journal, the host in hand](0011-log-sessions-and-plugin-state.md)
 - [0012 — OAuth credentials: a library tier, one store, login as an interaction](0012-oauth-credentials.md)
 - [0013 — UI as data: one view vocabulary, three lanes, actions](0013-ui-as-data.md)
+- [0034 — The room is read, not delivered](0034-the-room-is-read-not-delivered.md)
