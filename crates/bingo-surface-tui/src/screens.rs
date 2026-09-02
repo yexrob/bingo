@@ -18,6 +18,8 @@ use crate::ui::{Open, Switcher, Ui};
 
 /// Where the colour lands on these same scenes (§4).
 mod colours;
+/// The screens one skill run is read through (§4's skill row).
+mod skills;
 /// The screens a team is read through (§3 "Teams").
 mod teams;
 /// The screens a thought is read through (§4, §6).
@@ -29,6 +31,16 @@ mod windows;
 fn both(name: &str, tree: &Tree, ui: &Ui, now: Now) {
     insta::assert_snapshot!(format!("{name}_80x24"), draw_tree(80, 24, tree, ui, now));
     insta::assert_snapshot!(format!("{name}_120x40"), draw_tree(120, 40, tree, ui, now));
+}
+
+/// One scene in the look a terminal that can draw nothing but ASCII gets
+/// (§7). Written here rather than at each call site so every screen of that
+/// look is named alike, whichever module drew it.
+fn without_glyphs(name: &str, tree: &Tree, ui: &Ui, now: Now) {
+    insta::assert_snapshot!(
+        name.to_string(),
+        in_look(ascii(), || draw_tree(80, 24, tree, ui, now))
+    );
 }
 
 fn item(seq: u64, item: bingo_sdk::Item) -> bingo_sdk::Frame {
@@ -397,37 +409,6 @@ fn quiet_notices() {
     both("quiet_notices", &solo(&folded(reported())), &ui, now);
 }
 
-/// A skill's prompt as the kernel journals it: the line the person typed,
-/// then what the command made of it.
-const SKILL_PROMPT: &str = "/guide the wire format\n\n\
-     Base directory for this skill: ~/.bingo/skills/guide\n\n\
-     Read this before answering a question about bingo itself.\n\n\
-     - the kernel is small, and everything else is a plugin\n\
-     - one ordered event stream, and every surface is a client of it\n\
-     - `--print` is the headless surface, `serve --stdio` the JSON-RPC one\n\
-     - a skill is a directory under `.bingo/skills` with a `SKILL.md` in it\n\n\
-     ARGUMENTS: the wire format";
-
-/// `/guide` typed: the row is the line the person typed and the page the
-/// command produced folds under it — the shape `Skill(guide)`, the model's
-/// own way to the same body, already has.
-#[test]
-fn a_skill_command() {
-    let state = folded(vec![
-        item(1, delivered("itm_1", "command", None, SKILL_PROMPT)),
-        item(
-            2,
-            assistant(
-                "itm_2",
-                "One `Event` enum, one ordered stream per session.",
-                ItemStatus::Completed,
-            ),
-        ),
-    ]);
-    let (ui, now) = scene();
-    both("skill_command", &solo(&state), &ui, now);
-}
-
 #[test]
 fn a_child_row_while_it_runs() {
     let tree = spawned_tree(busy_child("reviewer"));
@@ -660,16 +641,9 @@ fn in_daylight() {
 #[test]
 fn without_the_glyphs() {
     let (ui, now) = scene();
-    let tree = solo(&folded(answered()));
-    insta::assert_snapshot!(
-        "ascii_idle",
-        in_look(ascii(), || draw_tree(80, 24, &tree, &ui, now))
-    );
+    without_glyphs("ascii_idle", &solo(&folded(answered())), &ui, now);
     let (card, ui, now) = asked(permission(Some("Edit(src/)"), Some(long_diff())));
-    insta::assert_snapshot!(
-        "ascii_permission",
-        in_look(ascii(), || draw_tree(80, 24, &card, &ui, now))
-    );
+    without_glyphs("ascii_permission", &card, &ui, now);
 }
 
 // ---- M11e: the content kinds of §5 --------------------------------------

@@ -60,6 +60,43 @@ fn a_tool_rows_bullet_is_the_only_cell_a_colour_is_spent_on() {
     );
 }
 
+/// The skill's mark keeps the bullet's job: the glyph says what kind of row it
+/// is, the colour says what state it is in, and the colour is spent on that one
+/// cell and no other. The two doors are drawn from the one renderer, so both
+/// are asserted here.
+#[test]
+fn a_skill_rows_mark_wears_the_state_and_spends_the_only_colour() {
+    let called = folded(vec![item(
+        1,
+        tool(
+            "itm_1",
+            "Skill",
+            json!({"name": "guide", "arguments": "the wire format"}),
+            Some(ToolOutput::text("Base directory for this skill: /guide")),
+            ItemStatus::Completed,
+        ),
+    )]);
+    let typed = folded(vec![item(
+        1,
+        delivered("itm_1", "command", None, skills::SKILL_PROMPT),
+    )]);
+    let (mut ui, now) = scene();
+    ui.catalogs.commands = skills::skills_in_the_catalogue();
+    for state in [called, typed] {
+        let painted = painted(80, 24, &solo(&state), &ui, now);
+        assert_row_styled(
+            &painted,
+            "Skill(guide)",
+            &[
+                ("❖ ", crate::theme::good()),
+                ("Skill", crate::theme::bold()),
+                ("(guide) the wire format", crate::theme::text()),
+            ],
+        );
+        assert_eq!(painted.coloured("Skill(guide)"), vec!["❖".to_string()]);
+    }
+}
+
 #[test]
 fn a_card_spends_its_colour_on_the_row_the_keyboard_is_on() {
     let (tree, ui, now) = asked(permission(Some("Edit(src/)"), None));

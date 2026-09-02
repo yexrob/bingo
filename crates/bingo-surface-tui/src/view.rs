@@ -443,13 +443,18 @@ fn render_transcript(
     }
     let rows = area.height as usize;
     let mut painted = ui.painted.borrow_mut();
+    let state = tree.viewed();
     painted.height = painted.blocks.sync(
-        tree.viewed(),
+        state,
         &tree.agents(),
-        area.width as usize,
-        &ui.folds,
+        &transcript::Rows::of(
+            state,
+            area.width as usize,
+            &ui.folds,
+            &ui.catalogs.commands,
+            now,
+        ),
         live,
-        now,
     );
     painted.top = ui.scroll.top(painted.height, rows, now.instant);
     let mut shown = painted.blocks.window(painted.top, rows);

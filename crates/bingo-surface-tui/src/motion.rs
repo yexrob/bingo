@@ -59,14 +59,10 @@ fn row(tree: &Tree, ui: &crate::ui::Ui, now: Now, needle: &str) -> String {
 /// where a cue lives before a card dims the world in front of it.
 fn transcript_style(tree: &Tree, now: Now, needle: &str) -> Style {
     let mut blocks = crate::blocks::Blocks::default();
-    let height = blocks.sync(
-        tree.viewed(),
-        &tree.agents(),
-        80,
-        &Folds::new(),
-        Vec::new(),
-        now,
-    );
+    let state = tree.viewed();
+    let folds = Folds::new();
+    let rows = crate::transcript::Rows::of(state, 80, &folds, &[], now);
+    let height = blocks.sync(state, &tree.agents(), &rows, Vec::new());
     blocks
         .window(0, height)
         .iter()
