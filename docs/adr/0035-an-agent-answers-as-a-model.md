@@ -30,7 +30,8 @@ tokio, `Send`).
    loop and a ~15-row method table are written here, in tokio, `Send`.
    The full SDK is refused: a second runtime and a `!Send` thread-hop
    would buy ~300 lines of codec this workspace has twice already.
-   Budget: `max_dependencies` 302 → 307.
+   Budget: `max_dependencies` 302 → 308 (measured; the member crate
+   counts as one).
 3. **One ACP session per bingo session** (stateful — how the protocol
    is consumed everywhere: Zed keeps one session per thread and
    replays nothing). The boundary learns one word: `ModelRequest`
@@ -50,10 +51,15 @@ tokio, `Send`).
    are kept the way plugin processes are kept: spawned lazily,
    `initialize`d once, respawned on death with a notice, killed at
    `stop()`.
-4. **The agent's tool calls are first-class**: `ToolInputStart/…/
-   ToolCall` and a synthetic `ToolResult`, marked `acp.external: true`
-   in `provider_options`; the loop never executes what wears the mark;
-   a surface draws it like any tool row, diffs and terminals included.
+4. **The agent's tool calls arrive whole, not as calls** (amended in
+   the building): a `ModelEvent::ToolCall` is an instruction — the
+   loop would execute it and answer with a second `session/prompt`,
+   wrong twice for a call the agent already ran itself. So the call,
+   its status and its output ride the reasoning item's provider
+   metadata, marked `acp.external: true`: journaled whole, executed
+   never. A surface that wants tool rows for them reads that metadata
+   — a surface slice, no kernel word; until it exists they read as
+   the thought's record.
 5. **Permissions are the agent's own.** The adapter is a whole agent,
    permission machinery included; the row that spawns it says what it
    may do in the adapter's own words (args or env — Claude Code's
