@@ -19,7 +19,8 @@ use bingo_sdk::{Item, ItemBody, ItemId, ItemStatus, Seq, SessionState};
 use ratatui::text::Line;
 
 use crate::clock::{FRAME, Now};
-use crate::fold::{self, Fold, Folds};
+use crate::fold::{self, Fold};
+use crate::skill;
 use crate::transcript::{self, Cue, Rows};
 use crate::tree::Agents;
 use crate::welcome;
@@ -41,14 +42,20 @@ struct Revision {
     /// How much of the block is shown: what `ctrl+o` and a click both set, and
     /// the start its kind has until they do.
     fold: Fold,
+    /// Whether the catalogue calls this run a skill, which decides the row's
+    /// mark and its signature ([`crate::skill`]). The catalogue is fetched
+    /// after the first frames are drawn and read again whenever the host
+    /// rebuilds it, so a block drawn before it landed has to be drawn again.
+    skill: bool,
 }
 
-fn revision(item: &Item, agent: Option<&SessionState>, fold: Fold) -> Revision {
+fn revision(item: &Item, agent: Option<&SessionState>, fold: Fold, skill: bool) -> Revision {
     Revision {
         status: item.status,
         size: size(&item.body),
         agent: agent.map(|child| child.seq),
         fold,
+        skill,
     }
 }
 
@@ -193,34 +200,25 @@ impl Blocks {
         &mut self,
         state: &SessionState,
         agents: &Agents<'_>,
-        width: usize,
-        folds: &Folds,
+        rows: &Rows<'_>,
         live: Vec<Line<'static>>,
-        now: Now,
     ) -> usize {
-        if self.width != width {
+        if self.width != rows.width {
             self.blocks.clear();
-            self.width = width;
+            self.width = rows.width;
         }
-        let rows = Rows {
-            cwd: &state.summary.cwd,
-            width,
-            folds,
-            now,
-            title: state.summary.title.as_deref(),
-        };
-        self.head = welcome::lines(state, width);
+        self.head = welcome::lines(state, rows.width);
         let mut kept = 0;
         let mut previous: Option<&Item> = None;
         for item in &state.items {
-            kept += self.block(kept, item, previous, agents, &rows);
+            kept += self.block(kept, item, previous, agents, rows);
             previous = Some(item);
         }
         // Whatever is left behind the last item was rewound away.
         self.blocks.truncate(kept);
-        self.tail = transcript::failure(state, &rows);
+        self.tail = transcript::failure(state, rows);
         self.live = live;
-        self.moving = self.still_moving(now);
+        self.moving = self.still_moving(rows.now);
         self.height = self.measure();
         self.height
     }
@@ -254,7 +252,12 @@ impl Blocks {
     ) -> usize {
         let now = rows.now.instant;
         let agent = agents.get(&item.id).copied();
-        let revision = revision(item, agent, fold::fold_of(rows.folds, item));
+        let revision = revision(
+            item,
+            agent,
+            fold::fold_of(rows.folds, item),
+            skill::of(item, rows.commands).is_some(),
+        );
         let held = self.blocks.get(at).filter(|entry| entry.id == item.id);
         let same = held.is_some_and(|entry| entry.revision == revision);
         // An item that has only just finished is not yet terminal for this
@@ -465,7 +468,9 @@ mod tests {
     }
 
     fn sync_at(blocks: &mut Blocks, state: &SessionState, width: usize, now: Now) -> usize {
-        blocks.sync(state, &Agents::new(), width, &Folds::new(), Vec::new(), now)
+        let folds = crate::fold::Folds::new();
+        let rows = Rows::of(state, width, &folds, &[], now);
+        blocks.sync(state, &Agents::new(), &rows, Vec::new())
     }
 
     /// The rows the welcome box takes at the top, plus the blank under it.

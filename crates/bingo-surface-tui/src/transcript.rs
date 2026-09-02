@@ -6,8 +6,8 @@
 use std::time::{Duration, Instant};
 
 use bingo_sdk::{
-    ContentPart, DecisionKind, Item, ItemBody, ItemStatus, Origin, SessionState, ToolOutput,
-    TurnStatus, View,
+    CommandSpec, ContentPart, DecisionKind, Item, ItemBody, ItemStatus, Origin, SessionState,
+    ToolOutput, TurnStatus, View,
 };
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
@@ -16,8 +16,9 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::clock::{self, Anim, Now};
 use crate::fold::{self, Fold, Folds};
+use crate::skill::{self, Run};
 use crate::tree::{self, Agents};
-use crate::{markdown, paths, theme, views, wrap};
+use crate::{commands, markdown, paths, theme, views, wrap};
 
 /// How long the comet tail of a block still arriving takes to cool (§6).
 pub const COMET: Duration = Duration::from_millis(180);
@@ -50,11 +51,38 @@ pub struct Rows<'a> {
     /// How much of each block a person opened or shut; everything else wears
     /// its kind's own start ([`crate::fold`]).
     pub folds: &'a Folds,
+    /// The commands catalogue the surface read from the host, which is where a
+    /// `/name` says what family it belongs to — the one way a row can tell a
+    /// skill from another command that answers with a prompt
+    /// ([`crate::skill`]).
+    pub commands: &'a [CommandSpec],
     /// The frame being drawn: what every cue below is a function of.
     pub now: Now,
     /// What the session in view is called. A post says which room it came
     /// from, and the room's own transcript is the one place that says nothing.
     pub title: Option<&'a str>,
+}
+
+impl<'a> Rows<'a> {
+    /// One frame's worth of where a row is: the session in view names itself,
+    /// the surface supplies the room it has, what a person opened, the
+    /// catalogue and the clock.
+    pub fn of(
+        state: &'a SessionState,
+        width: usize,
+        folds: &'a Folds,
+        commands: &'a [CommandSpec],
+        now: Now,
+    ) -> Self {
+        Self {
+            cwd: &state.summary.cwd,
+            width,
+            folds,
+            commands,
+            now,
+            title: state.summary.title.as_deref(),
+        }
+    }
 }
 
 /// Where one block is in its own motion (§6): the clock [`crate::blocks`]
@@ -103,7 +131,7 @@ pub fn item_lines(
     let fold = fold::fold_of(rows.folds, item);
     match &item.body {
         ItemBody::User { parts, origin } => match quiet(origin) {
-            true => notice(parts, origin, item.status, fold, rows),
+            true => notice(item, parts, origin, fold, rows),
             false => user(parts, origin.principal.as_deref(), rows),
         },
         ItemBody::Assistant { text } => assistant(text, item.status, rows, cue),
@@ -173,6 +201,7 @@ fn called(
                 output: output.as_ref(),
                 progress: progress.as_deref(),
                 fold,
+                run: skill::of(item, rows.commands),
             },
             rows,
             cue,
@@ -216,7 +245,19 @@ fn under(
 
 /// What the model says and does.
 fn speaks(style: Style, body: Vec<Line<'static>>, rows: &Rows<'_>) -> Vec<Line<'static>> {
-    let mark = Span::styled(format!("{} ", theme::bullet()), style);
+    marked(theme::bullet(), style, body, rows)
+}
+
+/// A block under a glyph in the bullet's place. The glyph says what kind of
+/// row it is and the style says what state it is in, which is why the two are
+/// separate: a skill's mark still turns `good` when its call comes back.
+fn marked(
+    glyph: &str,
+    style: Style,
+    body: Vec<Line<'static>>,
+    rows: &Rows<'_>,
+) -> Vec<Line<'static>> {
+    let mark = Span::styled(format!("{glyph} "), style);
     under(mark, body, speaks_indent(), rows.measure())
 }
 
@@ -243,16 +284,16 @@ fn returns(body: Vec<Line<'static>>, rows: &Rows<'_>) -> Vec<Line<'static>> {
 /// `command` is the one a person did set in motion, and it is here anyway: a
 /// `/guide` puts a page of skill body in the journal under a line nobody
 /// typed, and drawn as prose it is a wall of somebody else's words on the
-/// person's own bar. The line they *did* type leads the item, so the row says
-/// `⏺ /guide` and folds the page under it — which is what `Skill(guide)`, the
-/// model's way to the same body, already looks like.
+/// person's own bar. It reads as the machinery it is, and where the command
+/// was a skill the row is the run itself — `❖ Skill(guide) …`, the same row
+/// the model's own way to that body draws ([`skill_row`]).
 ///
 /// The set is closed, and this list is the only place it is written down: a
 /// surface nobody has put here is loud. A new subsystem chooses its side by
 /// being added or left out, deliberately, and the cost of each mistake says
 /// which way to lean — a person's own words drawn as machinery is a wrong
 /// nobody can undo by reading harder.
-const QUIET_SURFACES: &[&str] = &["agent", "bash", "command", "room", "schedule"];
+const QUIET_SURFACES: &[&str] = &["agent", "bash", commands::SURFACE, "room", "schedule"];
 
 /// Whether a delivery is the machinery reporting in. The composer's pending
 /// area asks the same question of what is still queued (ADR-0028), so the set
@@ -275,9 +316,9 @@ fn said(parts: &[ContentPart]) -> String {
 /// dim, folded, subordinate. The text already leads with the outcome, so the
 /// first line is the summary and nothing has to be invented for it.
 fn notice(
+    item: &Item,
     parts: &[ContentPart],
     origin: &Origin,
-    status: ItemStatus,
     fold: Fold,
     rows: &Rows<'_>,
 ) -> Vec<Line<'static>> {
@@ -291,19 +332,49 @@ fn notice(
     // text — a command's prompt puts one there — and under a `⎿` it would be
     // a row spent on nothing.
     let rest = rest.trim_start_matches('\n');
-    let mut out = speaks(
-        bullet_style(status, false),
-        vec![headline(
-            head,
-            origin.principal.as_deref(),
-            elsewhere(origin, rows),
-        )],
-        rows,
-    );
+    // A skill is one row however it was asked for, so the typed line gives the
+    // headline up to the run's own signature. The line itself stays in the
+    // item, which is where a rewind reads it back.
+    let style = bullet_style(item.status, false);
+    let mut out = match skill::of(item, rows.commands) {
+        Some(run) => skill_row(run, style, rows),
+        None => speaks(
+            style,
+            vec![headline(
+                head,
+                origin.principal.as_deref(),
+                elsewhere(origin, rows),
+            )],
+            rows,
+        ),
+    };
     if !rest.trim().is_empty() {
         out.extend(returns(kept(plain(rest), fold, OUTPUT_ROWS, None), rows));
     }
     out
+}
+
+/// The row one skill run wears, whichever door it came through: the model's
+/// `Skill(guide)` call and a person's own `/guide` are the same thing
+/// happening, so this is the only place either is drawn (design §4).
+///
+/// The mark is the skill's own glyph in the bullet's place, in the colour the
+/// bullet would have worn: what kind of row it is and what state it is in are
+/// two facts, and each keeps its own carrier.
+fn skill_row(run: Run<'_>, style: Style, rows: &Rows<'_>) -> Vec<Line<'static>> {
+    marked(theme::skill(), style, vec![asked(run, rows)], rows)
+}
+
+/// `Skill(guide) the wire format`: the call as any tool row spells one, then
+/// the free text the skill was given — outside the parentheses, because it is
+/// what the skill reads and not what it is.
+fn asked(run: Run<'_>, rows: &Rows<'_>) -> Line<'static> {
+    let mut line = signature(skill::TOOL, run.name, rows);
+    if !run.args.is_empty() {
+        line.spans
+            .push(Span::styled(format!(" {}", run.args), theme::text()));
+    }
+    line
 }
 
 /// The conversation a delivery says it came from, where saying it tells a
@@ -551,15 +622,22 @@ struct Call<'a> {
     progress: Option<&'a str>,
     /// How much of what came back is shown.
     fold: Fold,
+    /// The skill this call is, when it is one: the row is the run's, not the
+    /// tool's, and what came back still hangs under it.
+    run: Option<Run<'a>>,
 }
 
 fn tool_call(call: Call<'_>, rows: &Rows<'_>, cue: Cue) -> Vec<Line<'static>> {
     let failed = call.status == ItemStatus::Failed || call.output.is_some_and(|o| o.is_error);
-    let mut out = speaks(
-        live_bullet(call.status, failed, rows, cue),
-        vec![signature(call.name, &summarize(call.input), rows)],
-        rows,
-    );
+    let style = live_bullet(call.status, failed, rows, cue);
+    let mut out = match call.run {
+        Some(run) => skill_row(run, style, rows),
+        None => speaks(
+            style,
+            vec![signature(call.name, &summarize(call.input), rows)],
+            rows,
+        ),
+    };
     out.extend(result(&call, rows));
     out
 }
@@ -877,26 +955,51 @@ mod tests {
     /// The same items in a session of that name: a room's own transcript when
     /// the name is the room's.
     fn drawn_in(title: Option<&str>, items: Vec<Item>) -> Vec<String> {
-        let frames = items
-            .into_iter()
-            .enumerate()
-            .map(|(i, item)| frame(i as u64 + 1, Event::ItemCompleted { item }))
-            .collect();
-        let mut state = folded(frames);
+        let mut state = stated(items);
         state.summary.title = title.map(str::to_string);
         rendered(&state)
+    }
+
+    /// The same items in a surface whose catalogue files `guide` under the
+    /// skills, which is how a `/guide` line is known to be one.
+    fn drawn_knowing_the_skill(items: Vec<Item>) -> Vec<String> {
+        rendered_with(&stated(items), &Folds::new(), &catalogue())
+    }
+
+    fn stated(items: Vec<Item>) -> SessionState {
+        folded(
+            items
+                .into_iter()
+                .enumerate()
+                .map(|(i, item)| frame(i as u64 + 1, Event::ItemCompleted { item }))
+                .collect(),
+        )
+    }
+
+    fn catalogue() -> Vec<CommandSpec> {
+        vec![CommandSpec {
+            name: "guide".into(),
+            aliases: Vec::new(),
+            hint: String::new(),
+            args: bingo_sdk::ArgSpec::Free {
+                hint: String::new(),
+            },
+            instant: false,
+            family: "skill".into(),
+        }]
     }
 
     /// The transcript without the welcome box, which `welcome.rs` pins on its
     /// own: these tests are about the grammar under it.
     fn rendered(state: &SessionState) -> Vec<String> {
-        rendered_with(state, &Folds::new())
+        rendered_with(state, &Folds::new(), &[])
     }
 
-    fn rendered_with(state: &SessionState, folds: &Folds) -> Vec<String> {
+    fn rendered_with(state: &SessionState, folds: &Folds, commands: &[CommandSpec]) -> Vec<String> {
         let welcomed = crate::welcome::lines(state, 60).len();
         let mut blocks = crate::blocks::Blocks::default();
-        let height = blocks.sync(state, &Agents::new(), 60, folds, Vec::new(), scene().1);
+        let rows = Rows::of(state, 60, folds, commands, scene().1);
+        let height = blocks.sync(state, &Agents::new(), &rows, Vec::new());
         let mut rows: Vec<String> = blocks
             .window(0, height)
             .iter()
@@ -986,26 +1089,110 @@ mod tests {
         );
     }
 
-    /// A skill typed as `/name args`: the row is the line the person typed —
-    /// the kernel puts it at the head of the prompt — and the page the command
-    /// produced hangs under it, folded, the way `Skill(guide)` already reads.
+    /// A skill's prompt as the kernel journals it: the typed line, then the
+    /// body the command expanded to.
+    fn skill_prompt() -> Item {
+        delivered(
+            "itm_1",
+            "command",
+            None,
+            "/guide the wire format\n\n\
+             Base directory for this skill: /skills/guide\n\n\
+             Read this before answering about bingo itself.",
+        )
+    }
+
+    /// The user-directed rule of 2026-09-02: a skill is one row however it was
+    /// asked for. What the person typed stays in the item — a rewind reads it
+    /// back off there — but the row is the run, and the page it expanded to
+    /// hangs under it as any result does.
     #[test]
-    fn a_commands_prompt_is_the_typed_line_with_its_expansion_under_it() {
+    fn a_typed_skill_reads_as_the_run_it_is() {
         assert_eq!(
-            drawn(vec![delivered(
-                "itm_1",
-                "command",
-                None,
-                "/guide the wire format\n\n\
-                 Base directory for this skill: /skills/guide\n\n\
-                 Read this before answering about bingo itself.",
-            )]),
+            drawn_knowing_the_skill(vec![skill_prompt()]),
+            vec![
+                "❖ Skill(guide) the wire format".to_string(),
+                "  ⎿  Base directory for this skill: /skills/guide".to_string(),
+                String::new(),
+                "     Read this before answering about bingo itself.".to_string(),
+            ],
+        );
+    }
+
+    /// The catalogue is what says a name is a skill. A command it files
+    /// elsewhere — and every command, before the catalogue has landed — keeps
+    /// the row it always had: the line somebody typed.
+    #[test]
+    fn a_command_the_catalogue_calls_no_skill_is_the_line_that_was_typed() {
+        assert_eq!(
+            drawn(vec![skill_prompt()]),
             vec![
                 "⏺ /guide the wire format".to_string(),
                 "  ⎿  Base directory for this skill: /skills/guide".to_string(),
                 String::new(),
                 "     Read this before answering about bingo itself.".to_string(),
             ],
+        );
+    }
+
+    /// The other door, on the same row: the model's own call names the skill
+    /// in `input.name` and hands it `input.arguments`. The row is not written
+    /// out again here — it is asserted to be the one above, which is the whole
+    /// of what "one skill row" means.
+    #[test]
+    fn the_models_own_call_draws_the_same_row() {
+        let called = drawn(vec![tool(
+            "itm_1",
+            "Skill",
+            serde_json::json!({"name": "guide", "arguments": "the wire format"}),
+            Some(ToolOutput::text(
+                "Base directory for this skill: /skills/guide",
+            )),
+            ItemStatus::Completed,
+        )]);
+        assert_eq!(
+            called.first(),
+            drawn_knowing_the_skill(vec![skill_prompt()]).first(),
+            "one run, one row, whichever door it came through",
+        );
+        assert_eq!(
+            called,
+            vec![
+                "❖ Skill(guide) the wire format".to_string(),
+                "  ⎿  Base directory for this skill: /skills/guide".to_string(),
+            ],
+            "the catalogue is not consulted: the call says what it is",
+        );
+    }
+
+    /// A skill asked for with nothing to substitute is the signature alone.
+    #[test]
+    fn a_skill_with_no_arguments_is_the_signature_alone() {
+        assert_eq!(
+            drawn(vec![tool(
+                "itm_1",
+                "Skill",
+                serde_json::json!({"name": "guide"}),
+                None,
+                ItemStatus::Running,
+            )]),
+            vec!["❖ Skill(guide)".to_string()],
+        );
+    }
+
+    /// A call that names no skill is the tool it is: the fallback never
+    /// invents a name for the screen.
+    #[test]
+    fn a_skill_call_that_names_nothing_is_drawn_as_a_tool_row() {
+        assert_eq!(
+            drawn(vec![tool(
+                "itm_1",
+                "Skill",
+                serde_json::json!({"arguments": "the wire format"}),
+                None,
+                ItemStatus::Running,
+            )]),
+            vec!["⏺ Skill(the wire format)".to_string()],
         );
     }
 
@@ -1177,7 +1364,7 @@ mod tests {
         )]);
         let at = |fold| {
             let folds: Folds = [(ItemId::from_raw("itm_1"), fold)].into_iter().collect();
-            rendered_with(&state, &folds)
+            rendered_with(&state, &folds, &[])
         };
         assert_eq!(at(Fold::Shut), vec!["✻ Thought for 3s".to_string()]);
         assert_eq!(
@@ -1303,14 +1490,9 @@ mod tests {
         )]);
         let welcomed = crate::welcome::lines(&state, 160).len();
         let mut blocks = crate::blocks::Blocks::default();
-        let height = blocks.sync(
-            &state,
-            &Agents::new(),
-            160,
-            &Folds::new(),
-            Vec::new(),
-            scene().1,
-        );
+        let folds = Folds::new();
+        let rows = Rows::of(&state, 160, &folds, &[], scene().1);
+        let height = blocks.sync(&state, &Agents::new(), &rows, Vec::new());
         let widest = blocks
             .window(0, height)
             .iter()
@@ -1341,7 +1523,7 @@ mod tests {
         let opened: Folds = [(ItemId::from_raw("itm_1"), Fold::Open)]
             .into_iter()
             .collect();
-        let rows = rendered_with(&state, &opened).join("\n");
+        let rows = rendered_with(&state, &opened, &[]).join("\n");
         assert!(rows.contains("line 9"), "{rows}");
         assert!(!rows.contains("+4 lines"), "{rows}");
     }

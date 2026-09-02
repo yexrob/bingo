@@ -33,6 +33,8 @@
 //!   a room says about the members in it.
 //! - [`window`] is what every list a cursor walks draws when it outgrows its
 //!   room: the rows around the cursor, and a `…` at each end it cut.
+//! - [`skill`] answers whether an item is a skill run and which one, so the
+//!   model's `Skill(guide)` and a person's `/guide` come to the one row.
 //!
 //! # What a person types
 //!
@@ -69,6 +71,7 @@ mod scroll;
 mod search;
 mod seats;
 mod select;
+mod skill;
 mod status;
 mod terminal;
 mod theme;

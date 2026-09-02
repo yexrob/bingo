@@ -84,6 +84,9 @@ pub enum Colors {
 pub struct Glyphs {
     /// What the model says and does, and what a session is.
     pub bullet: &'static str,
+    /// A skill run, in the bullet's place — one cell, so nothing under the row
+    /// shifts.
+    pub skill: &'static str,
     /// What came back.
     pub connector: &'static str,
     /// What you said.
@@ -110,6 +113,7 @@ pub struct Glyphs {
 
 pub const UNICODE: Glyphs = Glyphs {
     bullet: "⏺",
+    skill: "❖",
     connector: "⎿",
     user: ">",
     cursor: "❯",
@@ -128,8 +132,12 @@ pub const UNICODE: Glyphs = Glyphs {
 /// `BINGO_ASCII=1`: the six characters of §7, each doing the job its shape
 /// suggests — `>` says you, `*` is a bullet, `+` sparkles and turns a corner,
 /// `x` crosses a box off, `-` connects and rules, `|` stands a wall up.
+///
+/// A skill spends no seventh character: the row says `Skill(guide)` in words,
+/// so the glyph is what a glance finds and never the only place the fact is.
 pub const ASCII: Glyphs = Glyphs {
     bullet: "*",
+    skill: "*",
     connector: "-",
     user: ">",
     cursor: ">",
@@ -594,6 +602,13 @@ pub fn bullet() -> &'static str {
     glyphs().bullet
 }
 
+/// A skill run, in the bullet's place: `❖ Skill(guide) …` (design §4). The
+/// diamond is not one of the sparkle's four — those are bingo working — and
+/// not a circle, so a skill is found by shape before it is read.
+pub fn skill() -> &'static str {
+    glyphs().skill
+}
+
 /// What came back: `⎿` at column 2, its text at 5.
 pub fn connector() -> &'static str {
     glyphs().connector
@@ -1035,7 +1050,24 @@ mod tests {
             assert_eq!(sparkle(std::time::Duration::ZERO), "+");
             assert_eq!(border().top_left, "+");
             assert_eq!(ellipsis(), "...");
+            assert_eq!(skill(), "*", "and a skill says so in words instead");
         });
+    }
+
+    /// A glyph drawn in the bullet's place takes the bullet's room: the text
+    /// under a row is indented past the mark, not past whichever glyph the row
+    /// happened to draw.
+    #[test]
+    fn a_mark_in_the_bullets_place_is_the_bullets_width() {
+        for look in [
+            Theme {
+                colors: Colors::Ansi,
+                glyphs: &UNICODE,
+            },
+            ascii(),
+        ] {
+            with(look, || assert_eq!(skill().width(), bullet().width()));
+        }
     }
 
     #[test]
