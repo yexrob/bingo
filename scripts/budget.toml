@@ -34,6 +34,14 @@
 # are off, which is what keeps `nu-ansi-term` and the regex stack out. The
 # gateway itself brings nothing else: detaching is `process-wrap` and the
 # service files are text.
-max_dependencies = 302
+# M38 (docs/plans/M38-an-agent-answers-as-a-model.md, ADR-0035 §2) raises
+# 302 → 308 by the measured 6. Five are `agent-client-protocol-schema` and its
+# edges — `anyhow`, `serde_with`, `serde_with_macros`, `unicode-xid`; the sixth
+# is the member `bingo-provider-acp` itself, which this file has always counted
+# as one. The ADR wrote 307 from the research's +5, which measured the crate
+# without the member. The full `agent-client-protocol` SDK was measured at +27,
+# fourteen of them a second async runtime, and refused: the newline-framed
+# JSON-RPC client loop is written in the plugin, in tokio, `Send`.
+max_dependencies = 308
 max_core_check_seconds = 20
 max_target_gb = 5

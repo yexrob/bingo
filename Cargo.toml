@@ -37,6 +37,7 @@ bingo-plugin-rpc = { path = "crates/bingo-plugin-rpc" }
 bingo-experience = { path = "crates/bingo-experience" }
 bingo-channels = { path = "crates/bingo-channels" }
 bingo-schedule = { path = "crates/bingo-schedule" }
+bingo-provider-acp = { path = "crates/bingo-provider-acp" }
 
 tokio = { version = "1.53", default-features = false, features = ["rt-multi-thread", "macros", "sync", "time", "io-util", "io-std", "fs", "process", "signal"] }
 tokio-util = { version = "0.7.19", features = ["codec", "rt"] }
@@ -125,6 +126,12 @@ nucleo-matcher = "0.3"
 # M11e: the terminal's own background, read once at start (OSC 10/11), so the
 # truecolor palette can be the one a person's terminal is already wearing.
 terminal-colorsaurus = "1.0"
+# M38 (docs/plans/M38-an-agent-answers-as-a-model.md, ADR-0035 §2): the ACP
+# message types, pinned exactly as the official SDK pins them. Types only —
+# the newline-framed JSON-RPC client loop is written in `bingo-provider-acp`,
+# in tokio, `Send`. `unstable_end_turn_token_usage` is the only way a turn
+# reports its tokens; every other unstable feature stays off.
+agent-client-protocol-schema = { version = "=1.5.0", features = ["unstable_end_turn_token_usage"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
