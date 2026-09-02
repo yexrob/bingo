@@ -582,6 +582,16 @@ fn openai_without_credentials_names_the_variable_before_any_turn() {
 }
 
 /// The frames a `--output-format json` run wrote to stdout.
+/// Wait for something a run wrote down. Every gate a test awaits this way is a
+/// file the run owns: a scenario is awaited, never timed.
+fn until(complaint: &str, done: impl Fn() -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while !done() {
+        assert!(Instant::now() < deadline, "{complaint}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
 fn frames_of(out: &Output) -> Vec<Frame> {
     stdout(out)
         .lines()

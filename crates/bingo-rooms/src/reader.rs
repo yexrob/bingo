@@ -347,6 +347,64 @@ mod tests {
         );
     }
 
+    /// A reseat is a roster and not a join: the same names again leave every
+    /// cursor where it was, so a restart — which reseats every declared room —
+    /// does not sweep away what a seat has not read yet.
+    #[tokio::test]
+    async fn reseating_the_same_roster_marks_nothing_read() {
+        let (fleet, root, scout, room) = tree(&["scout"]).await;
+        fleet.post(&room, "the build is green", Some("reviewer"), ts());
+        assert_eq!(
+            cursor_of(&fleet, &scout, "#design"),
+            None,
+            "nothing read yet"
+        );
+
+        seat::seat(
+            &fleet.handle(),
+            &root,
+            Path::new("/work/project"),
+            "design",
+            &[Seat::read("scout").expect("a roster word")],
+        )
+        .await
+        .expect("a room this crate can reseat");
+
+        assert_eq!(cursor_of(&fleet, &scout, "#design"), None);
+        assert_eq!(
+            read_by(&fleet, &scout).await,
+            ["[#design, since you last read]\nreviewer: the build is green"],
+            "the post is still there to be read"
+        );
+    }
+
+    /// The fold is one piece however much the room said, and the cursor lands
+    /// on the last of it.
+    #[tokio::test]
+    async fn ten_posts_are_read_as_one_piece_under_one_label() {
+        let (fleet, _, scout, room) = tree(&["scout", "reviewer"]).await;
+        for n in 1..=10 {
+            fleet.post(&room, &format!("post {n}"), Some("reviewer"), ts());
+        }
+
+        let read = read_by(&fleet, &scout).await;
+        let [said] = read.as_slice() else {
+            panic!("one piece, whatever the room said: {read:?}");
+        };
+        assert_eq!(said.lines().count(), 11, "the label and ten posts: {said}");
+        assert!(
+            said.starts_with("[#design, since you last read]\n"),
+            "{said}"
+        );
+        assert!(said.ends_with("\nreviewer: post 10"), "{said}");
+        assert_eq!(
+            cursor_of(&fleet, &scout, "#design"),
+            fleet.state(&room).items.last().map(|item| item.id.clone()),
+            "and the cursor is at the head"
+        );
+        assert!(read_by(&fleet, &scout).await.is_empty());
+    }
+
     /// The piece is a fold of posts, so a room with nothing to say makes none.
     #[test]
     fn a_reading_of_no_posts_is_no_piece_at_all() {

@@ -42,11 +42,13 @@ agent's name at once and its reply arrives as a message when it finishes; \
 with `background: false` the call waits and returns the agent's final text. \
 When several agents are to work with each other rather than each report back, \
 seat them instead of tasking them: `OpenRoom` naming the roles — and \
-`parent` among them when you want to hear the room yourself — one \
+`parent` among them when you want to read the room yourself — one \
 `standby: true` spawn per role, then a single `SendMessage` to `#room` \
-carrying the kickoff. That one post wakes every member at once and each reads \
-its own brief in the turn it opens; writing to them one at a time instead \
-makes you the switchboard every step has to pass back through.";
+carrying the kickoff and naming with `@name` whoever it is for. A member reads \
+its room at the head of its own turn, and being named is what opens that turn \
+now, so one post starts everyone it names and each reads its own brief first; \
+writing to them one at a time instead makes you the switchboard every step has \
+to pass back through.";
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct SpawnArgs {
@@ -63,7 +65,8 @@ pub struct SpawnArgs {
     /// to wait for its reply as the result of this call.
     pub background: Option<bool>,
     /// Seat it silent: the prompt is its standing brief, kept unread, and it
-    /// runs no turn until something wakes it — a post in a room it is in, or
+    /// runs no turn until something wakes it — a post that names it in a room
+    /// it is in, or
     /// a message. Nothing here is told when it finishes. Use it for the
     /// members of a room, so one kickoff post starts all of them at once.
     pub standby: Option<bool>,
@@ -643,11 +646,17 @@ mod tests {
         );
         // ADR-0028 §4: the seat is explicit, so the pattern has to say it.
         assert!(
-            DESCRIPTION.contains("`parent` among them when you want to hear the room yourself"),
+            DESCRIPTION.contains("`parent` among them when you want to read the room yourself"),
+            "{DESCRIPTION}"
+        );
+        // ADR-0034 §3 and §6: the default seat is patient, so the kickoff has
+        // to name whoever it is for.
+        assert!(
+            DESCRIPTION.contains("naming with `@name` whoever it is for"),
             "{DESCRIPTION}"
         );
         assert!(
-            DESCRIPTION.contains("wakes every member at once"),
+            DESCRIPTION.contains("one post starts everyone it names"),
             "{DESCRIPTION}"
         );
         assert!(DESCRIPTION.contains("switchboard"), "{DESCRIPTION}");

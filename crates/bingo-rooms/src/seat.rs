@@ -39,24 +39,41 @@ pub async fn seat(
         }
         None => open(host, parent, cwd, name, &title).await?,
     };
+    let joining = joining(host, &room, seats).await;
     host.extend(&room, PLUGIN, room::MEMBERS, room::payload(seats))
         .await?;
-    start_reading(host, &room, parent, &title, seats).await;
+    start_reading(host, &room, parent, &title, &joining).await;
     Ok(room)
 }
 
-/// Where each seat starts reading (ADR-0034 §2): a seat joins a room at its
+/// The names this call adds to the roster: the ones the room was not already
+/// seating. A reseat is a roster and not a join, so a seat that was already
+/// there keeps reading where it left off — including a seat that has read
+/// nothing yet, whose backlog a restart must not sweep away.
+async fn joining(host: &HostHandle, room: &SessionId, seats: &[Seat]) -> Vec<String> {
+    let held = room::read(host, room)
+        .await
+        .map(|state| room::members_of(&state))
+        .unwrap_or_default();
+    seats
+        .iter()
+        .map(|seat| seat.name.clone())
+        .filter(|seat| !held.iter().any(|member| name::same(member, seat)))
+        .collect()
+}
+
+/// Where a seat joining a room starts reading (ADR-0034 §2): at the room's
 /// head, so what was said before it was seated is not a backlog it owes. Only
-/// a seat that has never read this room is written to — a reseat is a roster,
-/// not a mark-all-read — and a name nobody holds yet is left alone: when its
-/// session opens it starts at the head the room has then, which is the same
-/// rule read off the one fact such a seat does leave behind.
+/// a seat that has never read this room is written to, and a name nobody holds
+/// yet is left alone: when its session opens it starts at the head the room has
+/// then, which is the same rule read off the one fact such a seat does leave
+/// behind.
 async fn start_reading(
     host: &HostHandle,
     id: &SessionId,
     parent: &SessionId,
     title: &str,
-    seats: &[Seat],
+    joining: &[String],
 ) {
     let Some(head) = head_of(host, id).await else {
         return;
@@ -64,10 +81,10 @@ async fn start_reading(
     let room = Room {
         title: title.to_string(),
         parent: parent.clone(),
-        members: seats.iter().map(|seat| seat.name.clone()).collect(),
+        members: joining.to_vec(),
         ears: Default::default(),
     };
-    for member in &room.members {
+    for member in joining {
         if let Some(seat) = post::seat_of(host, &room, member).await {
             open_at(host, &seat, title, &head).await;
         }

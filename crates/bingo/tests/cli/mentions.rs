@@ -9,6 +9,7 @@ use bingo_sdk::{ContentPart, ItemBody, Origin, SessionId};
 use jiff::{SignedDuration, Timestamp};
 use serde_json::{Value, json};
 
+use super::stream_json::Host;
 use super::*;
 
 /// A project with one room in it, seated under the person's own session before
@@ -97,6 +98,15 @@ fn root_of(out: &Output) -> SessionId {
     frames_of(out)[0].session.clone()
 }
 
+/// The session a hosted run resumed: the first journal frame it published.
+fn resumed(lines: &[Value]) -> Option<SessionId> {
+    lines
+        .iter()
+        .filter_map(|line| serde_json::from_value::<Frame>(line.clone()).ok())
+        .map(|frame| frame.session)
+        .next()
+}
+
 /// Every post in a room's journal, an hour older: what the process before this
 /// one would have left behind. Only the items' own stamps move — the age of a
 /// debt is the age of the post that opened it, and nothing else reads them.
@@ -135,6 +145,26 @@ fn owes(table: &str, who: &str) -> bool {
         let digits = rest.chars().take_while(char::is_ascii_digit).count();
         digits > 0 && rest[digits..].starts_with('s')
     })
+}
+
+/// The binary as a host drives it, resuming the session the last run left: the
+/// run outlives its first turn, so a chase that crosses processes is awaited
+/// rather than raced against the exit.
+fn resuming(home: &Path, script: &tempfile::NamedTempFile) -> Command {
+    let mut cmd = bingo();
+    cmd.env("BINGO_FAKE_SCRIPT", script.path())
+        .env("HOME", home)
+        .args([
+            "--print",
+            "--input-format",
+            "stream-json",
+            "--output-format",
+            "json",
+            "--continue",
+            "--cwd",
+        ])
+        .arg(home);
+    cmd
 }
 
 fn run_in(home: &Path, script: &tempfile::NamedTempFile, extra: &[&str], prompt: &str) -> Output {
@@ -193,14 +223,19 @@ fn a_question_left_unanswered_is_chased_when_the_next_process_opens_the_room() {
     );
 
     age_the_posts(home.path(), &format!("rooms/{root}/design"));
-    let again = run_in(
-        home.path(),
-        &script(DONE),
-        &["--continue", "--output-format", "json"],
-        "carry on",
+    let again = script(DONE);
+    let mut host = Host::start(&mut resuming(home.path(), &again));
+    host.prompt("carry on");
+    until("the overdue question was never chased", || {
+        !nudges(home.path(), &root, "scout").is_empty()
+    });
+    let ended = host.finish();
+    assert_eq!(ended.code, Some(0), "stderr: {}", ended.err);
+    assert_eq!(
+        resumed(&ended.lines),
+        Some(root.clone()),
+        "--continue is the same session"
     );
-    assert_eq!(again.status.code(), Some(0), "stderr: {}", stderr(&again));
-    assert_eq!(root_of(&again), root, "--continue is the same session");
 
     let nudged = nudges(home.path(), &root, "scout");
     assert_eq!(

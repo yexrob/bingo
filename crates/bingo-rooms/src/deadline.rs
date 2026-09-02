@@ -259,6 +259,53 @@ mod tests {
         assert!(nudged[0].1.contains("#design"), "{}", nudged[0].1);
     }
 
+    /// The storm the ADR was written against, bounded: four patient members and
+    /// one poster. Nobody is woken before the patience is up, each is woken
+    /// once when it is, and a member the post names is woken at once whatever
+    /// its ear (ADR-0029 §5).
+    #[tokio::test(start_paused = true)]
+    async fn four_patient_members_and_one_poster_cost_one_wake_each_per_patience() {
+        let roster = ["alpha:120", "beta:120", "gamma:120", "delta:120"];
+        let fleet = Fleet::default();
+        let root = fleet.root();
+        for member in ["alpha", "beta", "gamma", "delta"] {
+            fleet.child(&root, member);
+        }
+        let id = fleet.room(&root, "design");
+        let rooms = Roster::default();
+        rooms.register(&fleet.summary(&id));
+        rooms.extended(&id, MEMBERS, &room::payload(&seats(&roster)));
+        let room = rooms.get(&id).expect("the room this process saw");
+        let deadline = Deadline::default();
+        let host = fleet.handle();
+
+        let waiting = post::fan_out(&host, &room, "reviewer", "the build is green")
+            .await
+            .expect("a post this crate can fan out");
+        assert_eq!(waiting, ["alpha", "beta", "gamma", "delta"], "none woken");
+        deadline.waiting(&host, &id, &room, &waiting).await;
+        said(&fleet, &id, "the build is green");
+
+        after(Duration::from_secs(119)).await;
+        assert!(nudges(&fleet).is_empty(), "{:?}", nudges(&fleet));
+
+        after(Duration::from_secs(1)).await;
+        let nudged = nudges(&fleet);
+        assert_eq!(nudged.len(), 4, "one wake each, and only at the deadline");
+        after(Duration::from_secs(600)).await;
+        assert_eq!(nudges(&fleet).len(), 4, "and not again while it stands");
+
+        let named = post::fan_out(&host, &room, "reviewer", "@alpha does it ship?")
+            .await
+            .expect("a post");
+        assert_eq!(
+            named,
+            ["beta", "gamma", "delta"],
+            "the named seat was woken"
+        );
+        assert_eq!(nudges(&fleet).len(), 5);
+    }
+
     /// A second post does not start the patience over: one timer per seat per
     /// room, so a room that keeps talking is still bounded.
     #[tokio::test(start_paused = true)]

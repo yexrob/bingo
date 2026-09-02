@@ -1,6 +1,6 @@
 # ADR-0029 — The ear on every seat
 
-Status: accepted · 2026-09-01 · Plan: M25
+Status: accepted · 2026-09-01 · Plan: M25 · amended 2026-09-03 (M37)
 
 ## Context
 
@@ -22,6 +22,11 @@ turn boundary already coalesces and a queue already holds.
    refused in words: under thirty seconds of patience, take the live
    seat you are describing. There is no seat-kind enum; working and
    listening are readings of one number.
+   (Amended 2026-09-03, ADR-0034 §6: the default is reversed — a bare
+   name is a patient ear at 300 s, and a live one is asked for by the
+   number that says so, `name:0` / `patience_s: 0`. A patient seat holds
+   nothing: it reads the room at its next turn through its cursor, and
+   the deadline wakes it once when the room has stood unread that long.)
 2. **The roster declares the initial ear.** `/room design scout
    ~parent` seats a patient ear at the default; `~parent:120` a custom
    one; `OpenRoom { listeners: [...] }` (a name, or `{name,

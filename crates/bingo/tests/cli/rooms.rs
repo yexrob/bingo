@@ -5,7 +5,6 @@
 //! the tree it will hang in.
 
 use std::path::{Path, PathBuf};
-use std::time::Instant;
 
 use bingo_sdk::{ContentPart, InteractionKind, ItemBody, Origin, SessionId};
 
@@ -120,7 +119,7 @@ fn root_of(out: &Output) -> SessionId {
 const CONVENE: &str = r##"{"responses":[
     {"steps":[{"toolCall":{"name":"SpawnAgent","input":{"name":"reviewer","prompt":"convene the room","background":false}}}]},
     {"steps":[{"toolCall":{"name":"OpenRoom","input":{"name":"design","members":["reviewer","scout"],"shared":true}}}]},
-    {"steps":[{"toolCall":{"name":"SendMessage","input":{"to":"#design","text":"stand-up in five"}}}]},
+    {"steps":[{"toolCall":{"name":"SendMessage","input":{"to":"#design","text":"@scout stand-up in five"}}}]},
     {"steps":[{"text":"done"}]},
     {"steps":[{"text":"done"}]},
     {"steps":[{"text":"done"}]},
@@ -129,10 +128,10 @@ const CONVENE: &str = r##"{"responses":[
 
 /// The whole of ADR-0021 §2, end to end: an agent opens a room under the
 /// session that started it and posts into it, and the peer it named — an agent
-/// it never started and cannot see — reads the post, told which room it came
-/// from and who wrote it.
+/// it never started and cannot see — reads the room at the head of the turn
+/// the post opened, told which room it is and who wrote what.
 #[test]
-fn an_agent_opens_a_shared_room_and_its_peer_hears_the_post() {
+fn an_agent_opens_a_shared_room_and_its_peer_reads_the_post() {
     let home = tempfile::tempdir().unwrap();
     with_a_scout(home.path());
     let script = script(CONVENE);
@@ -167,21 +166,20 @@ fn an_agent_opens_a_shared_room_and_its_peer_hears_the_post() {
     assert!(!opened.is_error, "{}", text_of(&opened));
     assert_eq!(text_of(&opened), "#design: reviewer, scout");
 
-    let scout = journal(home.path(), &format!("agent/{root}/scout"));
-    let post = posts(&scout)
-        .into_iter()
-        .find(|(_, origin)| origin.surface == "room")
-        .unwrap_or_else(|| panic!("the post never reached the peer: {:?}", posts(&scout)));
-    assert_eq!(post.0, "stand-up in five");
+    let scout =
+        session_dir(home.path(), &format!("agent/{root}/scout")).expect("the peer was seated");
+    let read = readings(&scout);
     assert_eq!(
-        post.1.principal.as_deref(),
-        Some("reviewer"),
-        "the peer is told who wrote it"
+        read,
+        ["[#design, since you last read]\nreviewer: @scout stand-up in five"],
+        "the peer read the room once, under its own label and in the author\'s name"
     );
-    assert_eq!(
-        post.1.conversation.as_deref(),
-        Some("#design"),
-        "and which room it came from"
+    assert!(
+        posts(&frames_at(&scout))
+            .iter()
+            .all(|(text, _)| text != "@scout stand-up in five"),
+        "and the post itself was copied into nobody: {:?}",
+        posts(&frames_at(&scout))
     );
 }
 
@@ -254,32 +252,30 @@ fn a_root_asking_to_share_is_refused_in_words_and_opens_nothing() {
 
 /// A project with one room and a resident scout to fill a seat in it. The
 /// scout is seated when the root session opens, so a person can write to it
-/// without the root running a turn to start it.
-fn with_a_room(home: &Path, members: &str) {
+/// without the root running a turn to start it. `listeners` is where a seat
+/// asks for an ear other than the default patient one (ADR-0034 §6).
+fn with_a_room_of(home: &Path, members: &str, listeners: &str) {
     let bingo = home.join(".bingo");
     std::fs::create_dir_all(&bingo).unwrap();
     std::fs::write(
         bingo.join("team.json"),
         format!(
-            r#"{{"roles":[{{"name":"scout"}}],"rooms":[{{"name":"design","members":{members}}}]}}"#
+            r#"{{"roles":[{{"name":"scout"}}],"rooms":[{{"name":"design",
+                "members":{members},"listeners":{listeners}}}]}}"#
         ),
     )
     .unwrap();
 }
 
-/// The same project, with the holder seated on a patient ear instead of a
-/// live one (ADR-0029 §2): it is handed every post and woken by none of them.
+/// The same, with every seat on the ear a bare name asks for.
+fn with_a_room(home: &Path, members: &str) {
+    with_a_room_of(home, members, "[]");
+}
+
+/// The same project, with the holder seated on an ear the roster names
+/// (ADR-0029 §2): `patience_s: 0` is woken by every post as it lands.
 fn with_a_listening_room(home: &Path, listeners: &str) {
-    let bingo = home.join(".bingo");
-    std::fs::create_dir_all(&bingo).unwrap();
-    std::fs::write(
-        bingo.join("team.json"),
-        format!(
-            r#"{{"roles":[{{"name":"scout"}}],
-                "rooms":[{{"name":"design","members":["scout"],"listeners":{listeners}}}]}}"#
-        ),
-    )
-    .unwrap();
+    with_a_room_of(home, r#"["scout"]"#, listeners);
 }
 
 /// The binary as a host drives it: person messages one line at a time, so a
@@ -352,54 +348,39 @@ fn scout_dir(home: &Path) -> Option<PathBuf> {
     })
 }
 
-/// Wait for something the run wrote down. Every gate here is a file the run
-/// owns: a scenario is awaited, never timed.
-fn until(complaint: &str, done: impl Fn() -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(60);
-    while !done() {
-        assert!(Instant::now() < deadline, "{complaint}");
-        std::thread::sleep(Duration::from_millis(20));
-    }
-}
-
 fn until_posted(home: &Path, n: usize) {
     until("the room was never posted into", || {
         room_dir(home).is_some_and(|dir| posts(&frames_at(&dir)).len() >= n)
     });
 }
 
-/// The room mail a session is holding, as its own journal says. A queue that
-/// changed is a durable frame, so what a patient seat is holding can be read
-/// without waking it (ADR-0029 §1).
-fn holding(dir: &Path) -> usize {
-    frames_at(dir)
+/// What a session read of its rooms: the pieces the rooms contributor folded
+/// into the head of a turn (ADR-0034 §4). A contributor\'s piece is journaled
+/// under `contributor:<id>`, so this is exactly the room\'s own reading and
+/// nothing else the session was told.
+fn readings(dir: &Path) -> Vec<String> {
+    posts(&frames_at(dir))
+        .into_iter()
+        .filter(|(_, origin)| origin.surface == "contributor:rooms")
+        .map(|(text, _)| text)
+        .collect()
+}
+
+/// How many posts a set of readings quotes: one line names the room, and every
+/// line under it is a post.
+fn quoted(readings: &[String]) -> usize {
+    readings
         .iter()
-        .rev()
-        .find_map(|frame| match &frame.event {
-            Event::QueueChanged { entries, .. } => Some(
-                entries
-                    .iter()
-                    .filter(|entry| entry.origin.surface == "room")
-                    .count(),
-            ),
-            _ => None,
-        })
-        .unwrap_or(0)
+        .map(|said| said.lines().count().saturating_sub(1))
+        .sum()
 }
 
-/// Wait until the holder is holding `n` of the room's posts, unwoken.
-fn until_held(home: &Path, n: usize) {
-    until("the room's posts never reached the holder's queue", || {
-        root_dir(home).is_some_and(|dir| holding(&dir) >= n)
-    });
-}
-
-/// Wait until the holder has heard `n` of the room's posts. A delivery is
-/// journaled where it is absorbed, so this is a fact of the run rather than of
-/// the clock.
-fn until_heard(home: &Path, n: usize) {
-    until("the room's posts never reached the holder", || {
-        root_dir(home).is_some_and(|dir| heard(&dir).len() >= n)
+/// Wait until the holder has read `n` of the room's posts. A reading is
+/// journaled where it lands, so this is a fact of the run rather than of the
+/// clock.
+fn until_read(home: &Path, n: usize) {
+    until("the room's posts were never read by the holder", || {
+        root_dir(home).is_some_and(|dir| quoted(&readings(&dir)) >= n)
     });
 }
 
@@ -417,10 +398,13 @@ fn until_the_room_settles(home: &Path) {
     });
 }
 
-/// What a session was told, and who signed it.
+/// What a session was told, and who signed it. A reading is the session's own
+/// turn folding a room it sits in (ADR-0034 §4), not something said into it,
+/// so it is not one of these.
 fn heard(dir: &Path) -> Vec<(String, Option<String>)> {
     posts(&frames_at(dir))
         .into_iter()
+        .filter(|(_, origin)| !origin.surface.starts_with("contributor:"))
         .map(|(text, origin)| (text, origin.principal))
         .collect()
 }
@@ -469,32 +453,34 @@ const A_BURST: &str = r##"{"responses":[
     {"steps":[{"text":"posted"}]}
 ]}"##;
 
-/// ADR-0028 §2 as amended, end to end: `parent` on the roster seats the room's
-/// own holder, and a post wakes it like any other seat. The person writes only
-/// to the scout, so every turn the holder runs is one a post opened and the
-/// post is the first thing in it. How many turns a burst costs is the
-/// scheduler's business and is deliberately not pinned; what is pinned is that
-/// nothing is lost and the order is the room's.
+/// ADR-0028 §2 as amended by ADR-0034 §7, end to end: `parent` on the roster
+/// seats the room's own holder, a live one is woken by a post like any other
+/// seat, and the turn it opens reads the room. The person writes only to the
+/// scout, so every turn the holder runs is one a post opened. How many turns a
+/// burst costs is the scheduler's business and is deliberately not pinned;
+/// what is pinned is that nothing is lost and the order is the room's.
 #[test]
-fn a_rostered_holder_is_woken_by_a_post_and_reads_it_first() {
+fn a_rostered_live_holder_is_woken_by_a_post_and_reads_the_room() {
     let home = tempfile::tempdir().unwrap();
-    with_a_room(home.path(), r#"["scout","parent"]"#);
+    with_a_room_of(
+        home.path(),
+        r#"["scout","parent"]"#,
+        r#"[{"name":"parent","patience_s":0}]"#,
+    );
     let script = script(A_BURST);
     let mut host = Host::start(&mut hosting(home.path(), &script));
 
     host.prompt("@scout post what you found in #design");
-    until_heard(home.path(), 2);
+    until_read(home.path(), 2);
     let ended = host.finish();
     assert_eq!(ended.code, Some(0), "stderr: {}", ended.err);
 
     let root = root_dir(home.path()).expect("a root session");
-    assert_eq!(
-        heard(&root),
-        [
-            ("the build is green".to_string(), Some("scout".to_string())),
-            ("and the tests pass".to_string(), Some("scout".to_string())),
-        ],
-        "every post reached the holder, in the room's order, and nothing else did"
+    let read = readings(&root).join("\n");
+    assert!(read.contains("[#design, since you last read]"), "{read}");
+    assert!(
+        read.find("scout: the build is green") < read.find("scout: and the tests pass"),
+        "every post was read, in the room's order: {read}"
     );
     assert!(
         turns(&frames_at(&root)) > 0,
@@ -519,9 +505,9 @@ const CALLED_ON: &str = r##"{"responses":[
     {"steps":[{"text":"answered"}]}
 ]}"##;
 
-/// ADR-0028 §3: `@parent` is obligation and nothing else. The post wakes the
-/// holder because every post does — the turn it opens reads the post first —
-/// and the name opens an ordinary mention debt that the holder's own next post
+/// ADR-0028 §3 and ADR-0034 §3: `@parent` is obligation, and being named is
+/// also what wakes a patient seat. The turn it opens reads the room first, and
+/// the name opens an ordinary mention debt that the holder's own next post
 /// closes.
 #[test]
 fn a_post_that_calls_on_the_holder_wakes_it_and_is_owed_an_answer() {
@@ -538,13 +524,10 @@ fn a_post_that_calls_on_the_holder_wakes_it_and_is_owed_an_answer() {
 
     let root = root_dir(home.path()).expect("a root session");
     assert_eq!(
-        heard(&root).first(),
-        Some(&(
-            "@parent which one ships?".to_string(),
-            Some("scout".to_string())
-        )),
-        "the post opened the holder's first turn: {:?}",
-        heard(&root)
+        readings(&root).first().map(String::as_str),
+        Some("[#design, since you last read]\nscout: @parent which one ships?"),
+        "the post opened the holder's first turn and was read in it: {:?}",
+        readings(&root)
     );
     assert_eq!(
         turns(&frames_at(&root)),
@@ -593,21 +576,23 @@ fn a_room_that_does_not_seat_the_holder_leaves_it_deaf() {
 
     let root = root_dir(home.path()).expect("a root session");
     assert_eq!(turns(&frames_at(&root)), 1);
-    assert_eq!(
-        heard(&root),
-        [("what did they say?".to_string(), None)],
-        "a room reaches into the tree, not up out of it"
+    assert!(
+        readings(&root).is_empty(),
+        "a room reaches into the tree, not up out of it: {:?}",
+        readings(&root)
     );
+    assert_eq!(heard(&root), [("what did they say?".to_string(), None)]);
 }
 
 // ---- the ear on every seat (ADR-0029) --------------------------------------
 
-/// ADR-0029 §1, end to end: a patient holder is handed every post and woken by
-/// none of them. The person writes only to the scout, so any turn the holder
-/// runs is one a post opened — and the whole point is that it runs none until
-/// the person speaks to it, and then reads the room first.
+/// ADR-0029 §1 under ADR-0034 §4, end to end: a patient holder is woken by no
+/// post and reads the room whole at the head of its next turn, whoever opens
+/// it. The person writes only to the scout, so any turn the holder runs is one
+/// a post opened — and the whole point is that it runs none until the person
+/// speaks to it.
 #[test]
-fn a_patient_holder_is_handed_the_posts_and_reads_them_at_its_next_turn() {
+fn a_patient_holder_reads_the_room_at_the_head_of_its_next_turn() {
     let home = tempfile::tempdir().unwrap();
     with_a_listening_room(home.path(), r#"["parent"]"#);
     let script = script(A_BURST);
@@ -615,7 +600,6 @@ fn a_patient_holder_is_handed_the_posts_and_reads_them_at_its_next_turn() {
 
     host.prompt("@scout post what you found in #design");
     until_posted(home.path(), 2);
-    until_held(home.path(), 2);
 
     let root = root_dir(home.path()).expect("a root session");
     assert_eq!(
@@ -630,18 +614,73 @@ fn a_patient_holder_is_handed_the_posts_and_reads_them_at_its_next_turn() {
     assert_eq!(ended.code, Some(0), "stderr: {}", ended.err);
 
     assert_eq!(
+        readings(&root),
+        ["[#design, since you last read]\nscout: the build is green\nscout: and the tests pass"],
+        "both posts, in the room\'s order, in one reading"
+    );
+    assert_eq!(
         heard(&root),
-        [
-            ("the build is green".to_string(), Some("scout".to_string())),
-            ("and the tests pass".to_string(), Some("scout".to_string())),
-            ("what did they say?".to_string(), None),
-        ],
-        "the held posts were absorbed in the room's order, ahead of the person's line"
+        [("what did they say?".to_string(), None)],
+        "and the person\'s own line is the only thing said into it"
     );
     assert_eq!(
         turns(&frames_at(&root)),
         1,
-        "and all of it in the one turn the person opened"
+        "all of it in the one turn the person opened"
+    );
+}
+
+/// One more post into the same room, for the process that resumes it.
+const ONE_MORE: &str = r##"{"responses":[
+    {"steps":[{"toolCall":{"name":"SendMessage","input":{"to":"#design","text":"and it shipped"}}}]},
+    {"steps":[{"text":"posted"}]},
+    {"steps":[{"text":"posted"}]},
+    {"steps":[{"text":"posted"}]},
+    {"steps":[{"text":"posted"}]},
+    {"steps":[{"text":"posted"}]}
+]}"##;
+
+/// ADR-0034 §2 across processes: the cursor is journaled on the member's own
+/// session, so `--continue` finds it and the resumed member reads what landed
+/// after it and nothing it had already read.
+#[test]
+fn a_resumed_member_reads_only_what_its_cursor_left() {
+    let home = tempfile::tempdir().unwrap();
+    with_a_listening_room(home.path(), r#"["parent"]"#);
+
+    let first = script(A_BURST);
+    let mut host = Host::start(&mut hosting(home.path(), &first));
+    host.prompt("@scout post what you found in #design");
+    until_posted(home.path(), 2);
+    host.prompt("what did they say?");
+    let ended = host.finish();
+    assert_eq!(ended.code, Some(0), "stderr: {}", ended.err);
+
+    let root = root_dir(home.path()).expect("a root session");
+    let read = readings(&root);
+    assert_eq!(
+        quoted(&read),
+        2,
+        "the first process read both posts: {read:?}"
+    );
+
+    let again = script(ONE_MORE);
+    let mut resumed = hosting(home.path(), &again);
+    resumed.arg("--continue");
+    let mut host = Host::start(&mut resumed);
+    host.prompt("@scout post the last one");
+    until_posted(home.path(), 3);
+    host.prompt("what did they say now?");
+    let ended = host.finish();
+    assert_eq!(ended.code, Some(0), "stderr: {}", ended.err);
+
+    assert_eq!(
+        readings(&root),
+        [
+            read[0].clone(),
+            "[#design, since you last read]\nscout: and it shipped".to_string(),
+        ],
+        "the resumed member read what landed after its cursor, and no more"
     );
 }
 
@@ -655,7 +694,7 @@ fn a_post_that_calls_on_a_patient_holder_wakes_it_at_once() {
     let mut host = Host::start(&mut hosting(home.path(), &script));
 
     host.prompt("@scout ask me in #design");
-    until_heard(home.path(), 1);
+    until_read(home.path(), 1);
     until_the_room_settles(home.path());
     host.prompt("answer them");
     let ended = host.finish();
@@ -663,13 +702,10 @@ fn a_post_that_calls_on_a_patient_holder_wakes_it_at_once() {
 
     let root = root_dir(home.path()).expect("a root session");
     assert_eq!(
-        heard(&root).first(),
-        Some(&(
-            "@parent which one ships?".to_string(),
-            Some("scout".to_string())
-        )),
+        readings(&root).first().map(String::as_str),
+        Some("[#design, since you last read]\nscout: @parent which one ships?"),
         "the mention pierced the patient ear: {:?}",
-        heard(&root)
+        readings(&root)
     );
     assert_eq!(
         turns(&frames_at(&root)),
