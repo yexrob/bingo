@@ -224,7 +224,14 @@ mod tests {
         let sonnet = entry(&entries, "house/claude-sonnet-4-5");
         assert_eq!(
             keys(&sonnet),
-            ["context", "images", "output", "provider", "reasoning", "source"]
+            [
+                "context",
+                "images",
+                "output",
+                "provider",
+                "reasoning",
+                "source"
+            ]
         );
         assert_eq!(sonnet.meta["provider"], json!("house"));
         assert_eq!(sonnet.meta["source"], json!("catalogue"));

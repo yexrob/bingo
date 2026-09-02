@@ -105,7 +105,10 @@ fn of<'a>(provider: &'a str, models: &'a [CatalogEntry]) -> impl Iterator<Item =
 fn rows(models: &[&CatalogEntry]) -> Vec<String> {
     match models.is_empty() {
         true => vec![format!("  {NOTHING}")],
-        false => models.iter().map(|model| format!("  {}", row(model))).collect(),
+        false => models
+            .iter()
+            .map(|model| format!("  {}", row(model)))
+            .collect(),
     }
 }
 

@@ -41,7 +41,12 @@ async fn offered(host: &Arc<Host>) -> Vec<(String, String)> {
         .unwrap()
         .entries
         .into_iter()
-        .map(|e| (e.label, e.meta["source"].as_str().unwrap_or("?").to_string()))
+        .map(|e| {
+            (
+                e.label,
+                e.meta["source"].as_str().unwrap_or("?").to_string(),
+            )
+        })
         .collect()
 }
 
@@ -146,7 +151,11 @@ async fn the_list_arrives_on_its_own_after_the_host_is_up() {
     let host = host_keeping(dir.path(), &provider).await;
     assert_eq!(
         as_pairs(&once_refreshed(&host).await),
-        [("m", "configured"), ("fake-1", "endpoint"), ("fake-2", "endpoint")]
+        [
+            ("m", "configured"),
+            ("fake-1", "endpoint"),
+            ("fake-2", "endpoint")
+        ]
     );
 }
 
@@ -166,7 +175,11 @@ async fn a_list_one_process_cached_is_what_the_next_one_answers_with() {
     let next = host_keeping(dir.path(), &second).await;
     assert_eq!(
         as_pairs(&offered(&next).await),
-        [("m", "configured"), ("fake-1", "endpoint"), ("fake-2", "endpoint")]
+        [
+            ("m", "configured"),
+            ("fake-1", "endpoint"),
+            ("fake-2", "endpoint")
+        ]
     );
 }
 
@@ -181,7 +194,10 @@ async fn an_endpoint_that_cannot_be_asked_keeps_the_list_it_gave() {
 
     provider.breaks("connection refused");
     let refreshed = host.refresh_models().await;
-    let failure = refreshed[0].answer.clone().expect_err("it could not be asked");
+    let failure = refreshed[0]
+        .answer
+        .clone()
+        .expect_err("it could not be asked");
     assert!(failure.contains("connection refused"), "{failure}");
     assert_eq!(
         as_pairs(&offered(&host).await),
@@ -272,9 +288,12 @@ async fn a_provider_that_cannot_sign_in_is_not_asked() {
         config_dir: dir.path().into(),
         data_dir: dir.path().into(),
     };
-    let host = Host::build(plugins, HostConfig::new(env).with_layer("cli", json!({"model": "m"})))
-        .await
-        .unwrap();
+    let host = Host::build(
+        plugins,
+        HostConfig::new(env).with_layer("cli", json!({"model": "m"})),
+    )
+    .await
+    .unwrap();
     let refreshed = host.refresh_models().await;
     let asked: Vec<&str> = refreshed.iter().map(|r| r.provider.as_str()).collect();
     assert_eq!(asked, ["scripted"]);

@@ -311,7 +311,8 @@ impl HostApi for TestHost {
     }
 
     fn gateway_events(&self) -> GatewayStream {
-        let announcements = std::mem::take(&mut *self.announcements.lock().expect("no poisoned lock"));
+        let announcements =
+            std::mem::take(&mut *self.announcements.lock().expect("no poisoned lock"));
         let announced = Arc::clone(&self.announced);
         Box::pin(futures::stream::iter(announcements).map(move |event| {
             announced.store(true, Ordering::SeqCst);

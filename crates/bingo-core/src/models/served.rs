@@ -244,7 +244,10 @@ mod tests {
         assert!(lists.record("work", vec![info("a")], now));
         assert!(!lists.record("work", vec![info("a")], now), "the same list");
         assert!(lists.record("work", vec![info("a"), info("b")], now));
-        assert!(!lists.record("work", Vec::new(), now), "nothing is not news");
+        assert!(
+            !lists.record("work", Vec::new(), now),
+            "nothing is not news"
+        );
         assert_eq!(
             lists.get("work").map(|s| s.models.len()),
             Some(2),
