@@ -10,6 +10,8 @@
 
 use std::time::{Duration, Instant};
 
+use crate::clock::{self, Anim};
+
 /// How long the transcript takes to reach where a key sent it (§6).
 pub const EASE: Duration = Duration::from_millis(100);
 
@@ -53,10 +55,25 @@ impl Scroll {
 
     /// Move `lines` towards the top of the transcript, or towards its foot
     /// when negative. Reaching the foot is following it again.
+    ///
+    /// A notch adds to where the transcript is *going*, never to where it has
+    /// eased to: a wheel sends its notches far faster than the ease is long,
+    /// and counting from the interpolated position would pay off one notch of
+    /// a burst and drop the rest.
     pub fn by(&mut self, lines: isize, total: usize, rows: usize, now: Instant) {
         let here = self.top(total, rows, now);
-        let want = here.saturating_add_signed(-lines);
+        let want = self.target(total, rows).saturating_add_signed(-lines);
         self.hold(here, want, total, rows, now);
+    }
+
+    /// The line the transcript is easing towards — where [`Scroll::top`] lands
+    /// once the ease is over.
+    fn target(&self, total: usize, rows: usize) -> usize {
+        let bottom = bottom(total, rows);
+        match self {
+            Scroll::Tail => bottom,
+            Scroll::Held { to, .. } => (*to).min(bottom),
+        }
     }
 
     /// The top of the transcript.
@@ -95,15 +112,11 @@ fn bottom(total: usize, rows: usize) -> usize {
     total.saturating_sub(rows)
 }
 
-/// Ease-out cubic: fast away from where it was, gentle into where it lands.
+/// Where the ease has reached: fast away from where it was, gentle into where
+/// it lands.
 fn eased(from: usize, to: usize, since: Instant, now: Instant) -> usize {
-    let elapsed = now.saturating_duration_since(since).as_secs_f64();
-    let t = elapsed / EASE.as_secs_f64();
-    if t >= 1.0 {
-        return to;
-    }
-    let progress = 1.0 - (1.0 - t).powi(3);
-    let travelled = (to as f64 - from as f64) * progress;
+    let progress = clock::ease_out(Anim::new(since, EASE).progress(now));
+    let travelled = (to as f64 - from as f64) * f64::from(progress);
     from.saturating_add_signed(travelled.round() as isize)
 }
 
@@ -150,6 +163,27 @@ mod tests {
         );
         assert!(scroll.moving(now + Duration::from_millis(99)));
         assert!(!scroll.moving(now + EASE));
+    }
+
+    /// A trackpad sends notches far faster than 30 Hz, so most of a burst
+    /// lands while the previous ease is still running. Each one adds to where
+    /// the transcript is going: ten notches of three lines are thirty lines,
+    /// whether they arrive in twenty milliseconds or twenty seconds.
+    #[test]
+    fn a_burst_of_notches_lands_the_whole_of_itself() {
+        let now = Instant::now();
+        let mut scroll = Scroll::default();
+        let mut last = now;
+        for notch in 0..10 {
+            last = now + Duration::from_millis(2 * notch);
+            scroll.by(3, TOTAL, ROWS, last);
+        }
+        assert!(scroll.moving(last), "the last notch is still easing");
+        assert_eq!(
+            at(&scroll, last + EASE),
+            80 - 30,
+            "thirty lines, not the one the ease had time to pay off"
+        );
     }
 
     #[test]
