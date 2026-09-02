@@ -160,20 +160,20 @@ fn what_the_message_tools_answer() {
 /// rows below it.
 #[test]
 fn what_a_room_is_owed() {
-    let owed = View::Table {
-        headers: ["room", "owed", "asked"].map(str::to_string).to_vec(),
-        rows: vec![
-            vec!["#design".into(), "reviewer".into(), "14:02".into()],
-            vec!["#design".into(), "@all".into(), "14:09".into()],
-        ],
-    };
     let state = folded(vec![
         item(1, user("itm_1", "ask the room whether the plan is thin")),
         item(
             2,
             assistant("itm_2", "Asked in #design.", ItemStatus::Completed),
         ),
-        frame(3, signalled("bingo.rooms", "owed", as_payload(owed))),
+        frame(
+            3,
+            signalled(
+                "bingo.rooms",
+                "owed",
+                owed_payload(&[("#design", "reviewer", 22), ("#design", "@all", 15)]),
+            ),
+        ),
     ]);
     let tree = solo(&state);
     let (ui, now) = scene();
@@ -183,9 +183,9 @@ fn what_a_room_is_owed() {
         "the card is titled by its kind: {wide}"
     );
     assert!(
-        wide.contains("#design  reviewer  14…"),
-        "three columns of `owed` are one column wider than the rail, and the \
-         clock time is what folds: {wide}"
+        wide.contains("#design  reviewer"),
+        "two columns fit the rail whole, where three folded the clock \
+         (2026-09-02): {wide}"
     );
     both("owed", &tree, &ui, now);
 }
@@ -220,7 +220,7 @@ fn a_team() -> Tree {
             signalled(
                 "bingo.rooms",
                 "owed",
-                owed_payload(&[("#design", "reviewer", "14:02")]),
+                owed_payload(&[("#design", "reviewer", 22)]),
             ),
         ),
         item(33, user("itm_0", "what is in this workspace?")),
@@ -243,8 +243,8 @@ fn the_roster() {
         "a listening seat wears the sigil and says what it hears: {wide}"
     );
     assert!(
-        wide.contains("owes an answer since 14:02"),
-        "and a debtor says what it owes and when it was asked: {wide}"
+        wide.contains("owes an answer · 22m"),
+        "and a debtor says what it owes and how long it has stood: {wide}"
     );
     assert!(
         wide.contains("#design  2 seats · 1 owed"),
@@ -268,8 +268,8 @@ fn the_roster_spends_colour_only_where_the_design_says() {
         "a heading is furniture, and furniture is dim"
     );
     assert_eq!(
-        painted.coloured("owes an answer since 14:02"),
-        vec!["⏺", "owes an answer since 14:02"],
+        painted.coloured("owes an answer · 22m"),
+        vec!["⏺", "owes an answer · 22m"],
         "the dot for the session at work, the debt for what wants a person, \
          and nothing else on the row"
     );

@@ -9,11 +9,12 @@
 //! own business (ADR-0013 §4): a plugin describes what it knows, and which
 //! rows sit beside which is a decision no plugin gets to make.
 //!
-//! A surface may not import a plugin (ADR-0001), so the four names below are
-//! the whole of the contract between them, and every payload is read as data:
+//! A surface may not import a plugin (ADR-0001), so the names below are the
+//! whole of the contract between them, and every payload is read as data:
 //! a shape this does not recognise leaves the fact out rather than guessing.
 
 use bingo_sdk::SessionState;
+use jiff::Timestamp;
 use serde_json::Value;
 
 use crate::tree::{self, Status, Tree};
@@ -29,6 +30,13 @@ const LISTENERS: &str = "listeners";
 const EAR: &str = "ear:";
 /// The signal the room's parent carries while any answer is owed.
 const OWED: &str = "owed";
+/// The open debts that signal carries beside the table it draws as, and the
+/// fields of one: which room it stands in, who has not answered, and the
+/// moment it was asked (ADR-0022 §4).
+const DEBTS: &str = "debts";
+const ROOM: &str = "room";
+const WHO: &str = "who";
+const AT: &str = "at";
 /// How long a post waits for a patient seat, in both payloads that say it.
 const PATIENCE_S: &str = "patience_s";
 /// The columns of the `owed` table, by the headers it publishes them under.
@@ -47,16 +55,27 @@ pub enum Ear {
     Listening { patience_s: Option<u64> },
 }
 
+/// An answer a seat still owes, as the card it is read from says it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Owes {
+    /// The moment the question was put (`debts[].at`). How long ago that was
+    /// is the row's to say, from the clock the frame is drawn against.
+    Since(Timestamp),
+    /// The clock time a card published before the debts carried their own
+    /// stamps says — `14:02`, with no date beside it. An age would have to
+    /// invent the day and the zone it was written in, so that row says the
+    /// time it was asked at and nothing more.
+    At(String),
+}
+
 /// Where a session sits, as the room it sits in has it.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Seat {
     /// The room's name, `#design`.
     pub room: String,
     pub ear: Ear,
-    /// The clock time an unanswered question was put to it. The signal carries
-    /// the time it was asked at and not how long ago that was, so this is what
-    /// a row can say without inventing a date to subtract from.
-    pub owes_since: Option<String>,
+    /// The oldest answer it still owes there, where one stands.
+    pub owes: Option<Owes>,
 }
 
 /// What a room's own row says: how many seats it has, and how many of them
@@ -76,7 +95,7 @@ pub fn seat(tree: &Tree, state: &SessionState) -> Option<Seat> {
     Some(Seat {
         room: tree::name(room),
         ear: ear(room, &name),
-        owes_since: owes_since(tree, room, &name),
+        owes: owes(tree, room, &name),
     })
 }
 
@@ -168,19 +187,19 @@ fn names(listener: &Value, name: &str) -> bool {
     said.is_some_and(|said| same(said, name))
 }
 
-/// When the oldest answer this seat still owes was asked for. The debts are
-/// published oldest first, so the first row for a name is the one to say.
-fn owes_since(tree: &Tree, room: &SessionState, name: &str) -> Option<String> {
+/// The oldest answer this seat still owes. The debts are published oldest
+/// first, so the first of them for a name is the one to say.
+fn owes(tree: &Tree, room: &SessionState, name: &str) -> Option<Owes> {
     debts(tree, room, &tree::name(room))
         .into_iter()
         .find(|(who, _)| same(who, name))
-        .map(|(_, asked)| asked)
+        .map(|(_, owes)| owes)
 }
 
-/// The open debts of one room: who owes, and when it was asked. They are
-/// signalled onto the room's *parent*, which is where a person looks
+/// The open debts of one room: who owes, and what a row can say about when.
+/// They are signalled onto the room's *parent*, which is where a person looks
 /// (ADR-0022 §4), so this reaches across the tree for them.
-fn debts(tree: &Tree, room: &SessionState, title: &str) -> Vec<(String, String)> {
+fn debts(tree: &Tree, room: &SessionState, title: &str) -> Vec<(String, Owes)> {
     let parent = room.summary.parent.as_ref().map(|link| &link.session);
     let Some(card) = parent
         .and_then(|id| tree.sessions().find(|state| &state.summary.id == id))
@@ -188,13 +207,36 @@ fn debts(tree: &Tree, room: &SessionState, title: &str) -> Vec<(String, String)>
     else {
         return Vec::new();
     };
-    table(&card, title)
+    facts(&card, title).unwrap_or_else(|| table(&card, title))
+}
+
+/// The debts the card carries beside the table it draws as: the moment each
+/// question was put, which is what lets a row say how long it has stood.
+/// `None` where the payload has no debts at all — a card left by a process
+/// that published only the table, whose clock time the fallback reads.
+fn facts(card: &Value, title: &str) -> Option<Vec<(String, Owes)>> {
+    let debts = card.get(DEBTS)?.as_array()?;
+    let said = |debt: &Value, field: &str| debt.get(field)?.as_str().map(str::to_string);
+    Some(
+        debts
+            .iter()
+            .filter(|debt| said(debt, ROOM).is_some_and(|named| same(&named, title)))
+            .filter_map(|debt| Some((said(debt, WHO)?, Owes::Since(asked(debt)?))))
+            .collect(),
+    )
+}
+
+/// The moment a debt was asked, as the payload states it: RFC 3339, the
+/// spelling every timestamp on the wire wears.
+fn asked(debt: &Value) -> Option<Timestamp> {
+    debt.get(AT)?.as_str()?.parse().ok()
 }
 
 /// The `owed` table, read by its own headers rather than by the order its
 /// columns happen to be in: it is a `View::Table` a plugin wrote, not a shape
-/// this surface gets to assume.
-fn table(card: &Value, title: &str) -> Vec<(String, String)> {
+/// this surface gets to assume. Only a card without debts is read this far,
+/// and only such a card has the `asked` column this wants.
+fn table(card: &Value, title: &str) -> Vec<(String, Owes)> {
     let column = |header: &str| {
         card.get("headers")?
             .as_array()?
@@ -214,7 +256,7 @@ fn table(card: &Value, title: &str) -> Vec<(String, String)> {
         .map(|rows| {
             rows.iter()
                 .filter(|row| cell(row, room).is_some_and(|named| same(&named, title)))
-                .filter_map(|row| Some((cell(row, who)?, cell(row, asked)?)))
+                .filter_map(|row| Some((cell(row, who)?, Owes::At(cell(row, asked)?))))
                 .collect()
         })
         .unwrap_or_default()
@@ -263,10 +305,16 @@ mod tests {
             signalled(
                 "bingo.rooms",
                 "owed",
-                owed_payload(&[("#design", "reviewer", "14:02")]),
+                owed_payload(&[("#design", "reviewer", 22)]),
             ),
         ));
         folded_tree(frames)
+    }
+
+    /// The moment a debt `minutes` old was asked at, against the clock every
+    /// scene is drawn with.
+    fn asked_minutes_ago(minutes: i64) -> Owes {
+        Owes::Since(ts() - jiff::SignedDuration::from_mins(minutes))
     }
 
     fn of(tree: &Tree, name: &str) -> Option<Seat> {
@@ -285,7 +333,7 @@ mod tests {
             Some(Seat {
                 room: "#design".into(),
                 ear: Ear::Live,
-                owes_since: Some("14:02".into()),
+                owes: Some(asked_minutes_ago(22)),
             })
         );
         assert_eq!(of(&tree, "project"), None, "the root sits in no room");
@@ -356,7 +404,7 @@ mod tests {
             Some(Seat {
                 room: "#design".into(),
                 ear: Ear::Live,
-                owes_since: None,
+                owes: None,
             })
         );
     }
@@ -371,8 +419,8 @@ mod tests {
         assert_eq!(counts(&tree, room), Counts { seats: 2, owed: 1 });
     }
 
-    /// `owed::rows` is one row per debt; a member that owes twice is one
-    /// debtor, and the oldest of its debts is the one its row says.
+    /// The card is one debt per row; a member that owes twice is one debtor,
+    /// and the oldest of its debts is the one its row says.
     #[test]
     fn a_member_that_owes_twice_is_one_debtor_and_says_the_older() {
         let mut tree = seated();
@@ -381,10 +429,7 @@ mod tests {
             signalled(
                 "bingo.rooms",
                 "owed",
-                owed_payload(&[
-                    ("#design", "reviewer", "14:02"),
-                    ("#design", "reviewer", "14:09"),
-                ]),
+                owed_payload(&[("#design", "reviewer", 22), ("#design", "reviewer", 15)]),
             ),
         ));
         let room = tree
@@ -393,8 +438,8 @@ mod tests {
             .expect("the room");
         assert_eq!(counts(&tree, room).owed, 1);
         assert_eq!(
-            of(&tree, "reviewer").and_then(|seat| seat.owes_since),
-            Some("14:02".into())
+            of(&tree, "reviewer").and_then(|seat| seat.owes),
+            Some(asked_minutes_ago(22))
         );
     }
 
@@ -408,10 +453,31 @@ mod tests {
             signalled(
                 "bingo.rooms",
                 "owed",
-                owed_payload(&[("#ops", "reviewer", "14:02")]),
+                owed_payload(&[("#ops", "reviewer", 22)]),
             ),
         ));
-        assert_eq!(of(&tree, "reviewer").and_then(|seat| seat.owes_since), None);
+        assert_eq!(of(&tree, "reviewer").and_then(|seat| seat.owes), None);
+    }
+
+    /// A card a process before the debts published: the clock time is all it
+    /// has, so that is what the seat carries and what its row will say. This
+    /// is a payload already in people's journals, not a shape this surface is
+    /// free to stop reading.
+    #[test]
+    fn a_card_from_before_the_debts_says_the_clock_time_it_carries() {
+        let mut tree = seated();
+        tree.apply(&frame(
+            6,
+            signalled(
+                "bingo.rooms",
+                "owed",
+                owed_table_payload(&[("#design", "reviewer", "14:02")]),
+            ),
+        ));
+        assert_eq!(
+            of(&tree, "reviewer").and_then(|seat| seat.owes),
+            Some(Owes::At("14:02".into()))
+        );
     }
 
     /// A payload this surface does not recognise leaves the fact out. The
@@ -423,7 +489,7 @@ mod tests {
             6,
             signalled("bingo.rooms", "owed", serde_json::json!({"kind": "text"})),
         ));
-        assert_eq!(of(&tree, "reviewer").and_then(|seat| seat.owes_since), None);
+        assert_eq!(of(&tree, "reviewer").and_then(|seat| seat.owes), None);
 
         tree.apply(&log_frame(
             7,

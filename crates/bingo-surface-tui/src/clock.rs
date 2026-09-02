@@ -57,19 +57,30 @@ impl Now {
     }
 }
 
-/// How long ago, as a person says it. Coarse on purpose: a row that offers a
-/// session to resume has to tell this morning from last week, and nothing it
-/// could say to a tenth of a minute would be read.
-pub fn ago(past: Duration) -> String {
-    const MINUTE: u64 = 60;
-    const HOUR: u64 = 60 * MINUTE;
-    const DAY: u64 = 24 * HOUR;
+const MINUTE: u64 = 60;
+const HOUR: u64 = 60 * MINUTE;
+const DAY: u64 = 24 * HOUR;
+
+/// How long, as a person says it: the largest unit that fits, rounded down.
+/// `40s`, `22m`, `3h`, `2d` — the one place a duration is put into words, so
+/// two rows that say a span say it the same way.
+pub fn span(past: Duration) -> String {
     let seconds = past.as_secs();
     match seconds {
-        ..MINUTE => "just now".to_string(),
-        MINUTE..HOUR => format!("{}m ago", seconds / MINUTE),
-        HOUR..DAY => format!("{}h ago", seconds / HOUR),
-        _ => format!("{}d ago", seconds / DAY),
+        ..MINUTE => format!("{seconds}s"),
+        MINUTE..HOUR => format!("{}m", seconds / MINUTE),
+        HOUR..DAY => format!("{}h", seconds / HOUR),
+        _ => format!("{}d", seconds / DAY),
+    }
+}
+
+/// The same span behind now. Coarser at the near end: a row that offers a
+/// session to resume has to tell this morning from last week, and a count of
+/// seconds there would be read as precision nobody asked for.
+pub fn ago(past: Duration) -> String {
+    match past.as_secs() < MINUTE {
+        true => "just now".to_string(),
+        false => format!("{} ago", span(past)),
     }
 }
 
@@ -176,6 +187,18 @@ mod tests {
 
     fn ms(n: u64) -> Duration {
         Duration::from_millis(n)
+    }
+
+    #[test]
+    fn a_span_is_said_in_the_largest_unit_that_fits() {
+        let secs = |n| span(Duration::from_secs(n));
+        assert_eq!(secs(0), "0s");
+        assert_eq!(secs(59), "59s");
+        assert_eq!(secs(60), "1m");
+        assert_eq!(secs(90), "1m", "rounded down, never up");
+        assert_eq!(secs(22 * 60), "22m");
+        assert_eq!(secs(60 * 60), "1h");
+        assert_eq!(secs(24 * 60 * 60), "1d");
     }
 
     #[test]

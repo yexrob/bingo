@@ -1,13 +1,13 @@
 ---
 source: crates/bingo-surface-tui/src/screens.rs
-assertion_line: 25
+assertion_line: 31
 expression: "draw_tree(120, 40, tree, ui, now)"
 ---
 "                                                                                                    owed                "
-"                                                                                                  room     owed      as…"
-"                                                                                                  ──────────────────────"
-"                                                                                                  #design  reviewer  14…"
-"                                                                                                  #design  @all      14…"
+"                                                                                                  room     owed         "
+"                                                                                                  ─────────────────     "
+"                                                                                                  #design  reviewer     "
+"                                                                                                  #design  @all         "
 "                                                                                                                        "
 "                                                                                                                        "
 "                                                                                                                        "
