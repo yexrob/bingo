@@ -69,16 +69,6 @@ impl Fleet {
         id
     }
 
-    /// When a session came into being. A seat is only ever behind on what its
-    /// room said after it was there to hear it, so a test that seats somebody
-    /// late says so here.
-    pub(crate) fn born(&self, session: &SessionId, at: Timestamp) {
-        let mut sessions = locked(&self.0.sessions);
-        if let Some(live) = sessions.iter_mut().find(|l| &l.summary.id == session) {
-            live.summary.created_at = at;
-        }
-    }
-
     /// A room that already stands under `parent`, as `seat` would have left it.
     pub(crate) fn room(&self, parent: &SessionId, name: &str) -> SessionId {
         let id = SessionId::mint();

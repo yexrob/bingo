@@ -1,8 +1,17 @@
 //! Where a seat has read a room up to (ADR-0034 §2). A post is written once,
-//! into the room's own journal, and what a seat has read of it is one fact on
-//! that seat's own session. Everything that asks "has this seat seen that?" —
-//! the reader at the head of a turn, the patience deadline, the serial rule —
-//! asks this, and nothing keeps a second answer.
+//! into the room's own journal, and what each seat has read of it is one fact
+//! beside the posts: a `cursor:<member>` register in that same journal, a kind
+//! per seat, so two seats reading at once write two facts rather than racing
+//! over one (the `ear:` precedent, ADR-0029 §4). Everything that asks "has this
+//! seat seen that?" — the reader at the head of a turn, the patience deadline,
+//! the serial rule — asks the room, and nothing keeps a second answer.
+//!
+//! The room's journal is where it lives because a room is a `Log` session: it
+//! answers nobody, so reading it costs nothing and takes nothing away. A
+//! member's own session is not like that — a reader that opens one and lets go
+//! is its last client, and closing it under an idle seat loses the very wake
+//! this plugin just sent. So the cursor is kept where it can be read without
+//! touching the seat at all, and a name nobody holds yet can be seated with one.
 //!
 //! ADR-0034 calls the cursor the room's `seq`. A `Seq` addresses a frame, and
 //! the only door onto frames by seq is `events_since`, a stream that never ends
@@ -10,30 +19,23 @@
 //! is the `ItemId` its journal gave it, which a snapshot hands back in order,
 //! so that is what the cursor holds: the same watermark, in the vocabulary the
 //! host actually offers.
-//!
-//! A seat with no cursor has not read the room at all, and starts at the head
-//! the room had when that seat's own session opened: a post fanned out before a
-//! session existed reached nobody, so it is not a backlog that session owes
-//! (ADR-0025 §2). Seating writes the cursor for a seat that is already there,
-//! so a member joining a running room does not inherit its history either.
 
 use bingo_sdk::{HostHandle, ItemId, KernelError, SessionId, SessionState};
-use jiff::Timestamp;
 use serde_json::{Value, json};
 
 use crate::mentions::Post;
-use crate::{PLUGIN, name, room};
+use crate::{PLUGIN, name};
 
-/// The kind a seat's cursor into one room is published under, before that
-/// room's title: a kind per room, so a seat in two of them keeps two cursors
-/// and neither writes over the other (the `ear:` precedent, ADR-0029 §4).
+/// The kind one seat's cursor is published under, before its name.
 pub const CURSOR: &str = "cursor:";
 
 /// The one thing a cursor payload holds.
 const POST: &str = "post";
 
-pub fn kind(room: &str) -> String {
-    format!("{CURSOR}{room}")
+/// A room compares names in any case, so a register is keyed in one spelling
+/// of it — the same rule an ear's register keeps.
+pub fn kind(member: &str) -> String {
+    format!("{CURSOR}{}", member.to_lowercase())
 }
 
 /// What a cursor is published as.
@@ -46,23 +48,24 @@ pub fn stored(payload: &Value) -> Option<ItemId> {
     payload[POST].as_str().map(ItemId::from_raw)
 }
 
-/// Where this seat has read one room up to — what `--continue` finds where the
-/// last process left it, and what a surface counts the unread from.
-pub fn of_state(state: &SessionState, room: &str) -> Option<ItemId> {
-    stored(state.extensions.get(PLUGIN)?.get(&kind(room))?)
+/// Where one seat has read this room up to, as the room's own journal says.
+/// A seat with no register has read none of it.
+pub fn of_state(room: &SessionState, member: &str) -> Option<ItemId> {
+    stored(room.extensions.get(PLUGIN)?.get(&kind(member))?)
 }
 
-/// The posts a seat has not read: the ones after its cursor, or — for a seat
-/// that has none — the ones the room said after that seat came into being.
-pub fn unread<'a>(posts: &'a [Post], cursor: Option<&ItemId>, since: Timestamp) -> &'a [Post] {
-    if let Some(at) = cursor.and_then(|read| posts.iter().position(|post| &post.id == read)) {
-        return &posts[at + 1..];
+/// The posts a seat has not read: the ones after its cursor, and all of them
+/// for a seat that has none.
+pub fn unread<'a>(posts: &'a [Post], cursor: Option<&ItemId>) -> &'a [Post] {
+    let Some(read) = cursor else {
+        return posts;
+    };
+    match posts.iter().position(|post| &post.id == read) {
+        Some(at) => &posts[at + 1..],
+        // A cursor the room does not hold points at nothing it can measure
+        // against, so it says as little as no cursor at all.
+        None => posts,
     }
-    let from = posts
-        .iter()
-        .position(|post| post.at >= since)
-        .unwrap_or(posts.len());
-    &posts[from..]
 }
 
 /// What one seat has not read of one room: the posts it has to read, and the
@@ -76,31 +79,10 @@ pub struct Unread {
 }
 
 impl Unread {
-    /// What a seat has not read of a room, as the two journals say it. A
-    /// session either of them cannot be read of says nothing.
-    pub async fn of(
-        host: &HostHandle,
-        room: &SessionId,
-        title: &str,
-        seat: &SessionId,
-        member: &str,
-    ) -> Unread {
-        let (Some(there), Some(here)) =
-            (room::read(host, room).await, room::read(host, seat).await)
-        else {
-            return Unread::default();
-        };
-        Unread::between(&there, &here, title, member)
-    }
-
-    /// The same, from two snapshots a caller already holds.
-    pub fn between(room: &SessionState, seat: &SessionState, title: &str, member: &str) -> Unread {
+    /// What a seat has not read, from the room's own snapshot and nothing else.
+    pub fn of(room: &SessionState, member: &str) -> Unread {
         let posts: Vec<Post> = room.items.iter().filter_map(Post::of).collect();
-        let unread = unread(
-            &posts,
-            of_state(seat, title).as_ref(),
-            seat.summary.created_at,
-        );
+        let unread = unread(&posts, of_state(room, member).as_ref());
         Unread {
             head: unread.last().map(|post| post.id.clone()),
             posts: unread
@@ -119,18 +101,20 @@ impl Unread {
 /// Move a seat's cursor to a post it has now read.
 pub async fn advance(
     host: &HostHandle,
-    seat: &SessionId,
-    room: &str,
+    room: &SessionId,
+    member: &str,
     post: &ItemId,
 ) -> Result<(), KernelError> {
-    host.extend(seat, PLUGIN, &kind(room), payload(post)).await
+    host.extend(room, PLUGIN, &kind(member), payload(post))
+        .await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tests::{Fleet, posted_item};
-    use bingo_sdk::SessionState;
+    use crate::room;
+    use crate::tests::{Fleet, posted_item, summary};
+    use jiff::Timestamp;
 
     fn post(n: i64, author: &str) -> Post {
         Post {
@@ -149,7 +133,7 @@ mod tests {
     /// — and another crate's serial rule — reads back by hand (ADR-0034 §2).
     #[test]
     fn a_cursor_is_one_post_id_under_a_kind_of_its_own() {
-        assert_eq!(kind("#design"), "cursor:#design");
+        assert_eq!(kind("Scout"), "cursor:scout");
         assert_eq!(
             payload(&ItemId::from_raw("itm_7")),
             json!({ "post": "itm_7" })
@@ -162,78 +146,66 @@ mod tests {
         assert_eq!(stored(&Value::Null), None);
     }
 
-    /// The whole of the split, as one table: after the cursor, or — with none —
-    /// after the seat itself came into being.
+    /// The whole of the split, as one table: what landed after the cursor.
     #[test]
     fn what_is_unread_is_what_landed_after_the_cursor() {
         let posts = [post(1, "scout"), post(2, "reviewer"), post(3, "scout")];
-        let at = |n: i64| Timestamp::from_second(n).expect("a timestamp");
 
         let read_two = ItemId::from_raw("itm_2");
-        assert_eq!(ids(unread(&posts, Some(&read_two), at(0))), ["itm_3"]);
+        assert_eq!(ids(unread(&posts, Some(&read_two))), ["itm_3"]);
         assert!(
-            unread(&posts, Some(&ItemId::from_raw("itm_3")), at(0)).is_empty(),
+            unread(&posts, Some(&ItemId::from_raw("itm_3"))).is_empty(),
             "a seat at the head has nothing to read"
         );
         assert_eq!(
-            ids(unread(&posts, None, at(0))),
+            ids(unread(&posts, None)),
             ["itm_1", "itm_2", "itm_3"],
-            "a seat as old as the room reads all of it"
+            "a seat with no cursor has read none of it"
         );
         assert_eq!(
-            ids(unread(&posts, None, at(2))),
-            ["itm_2", "itm_3"],
-            "and one that arrived later reads only what it was there for"
-        );
-        assert!(
-            unread(&posts, None, at(9)).is_empty(),
-            "a seat newer than every post starts level"
-        );
-        assert_eq!(
-            ids(unread(&posts, Some(&ItemId::from_raw("itm_gone")), at(2))),
-            ["itm_2", "itm_3"],
-            "a cursor the room does not hold falls back to when the seat began"
+            ids(unread(&posts, Some(&ItemId::from_raw("itm_gone")))),
+            ["itm_1", "itm_2", "itm_3"],
+            "and a cursor the room does not hold measures nothing"
         );
     }
 
-    /// A kind per room, so a seat in two of them keeps two cursors and neither
-    /// writes over the other.
+    /// A kind per seat, so a room with two of them keeps two cursors and
+    /// neither writes over the other.
     #[tokio::test]
-    async fn a_seat_s_own_journal_says_where_it_has_read_each_room_up_to() {
+    async fn a_room_s_own_journal_says_where_each_seat_has_read_up_to() {
         let fleet = Fleet::default();
         let root = fleet.root();
-        let scout = fleet.child(&root, "scout");
+        let id = fleet.room(&root, "design");
         let host = fleet.handle();
 
-        advance(&host, &scout, "#design", &ItemId::from_raw("itm_2"))
+        advance(&host, &id, "scout", &ItemId::from_raw("itm_2"))
             .await
             .expect("a cursor this crate can write");
-        advance(&host, &scout, "#standup", &ItemId::from_raw("itm_9"))
+        advance(&host, &id, "Reviewer", &ItemId::from_raw("itm_9"))
             .await
             .expect("a cursor this crate can write");
 
-        let state = room::read(&host, &scout).await.expect("the seat");
-        assert_eq!(of_state(&state, "#design"), Some(ItemId::from_raw("itm_2")));
+        let state = room::read(&host, &id).await.expect("the room");
+        assert_eq!(of_state(&state, "scout"), Some(ItemId::from_raw("itm_2")));
         assert_eq!(
-            of_state(&state, "#standup"),
+            of_state(&state, "reviewer"),
             Some(ItemId::from_raw("itm_9")),
-            "one room's cursor is not another's"
+            "one seat's cursor is not another's, in any case"
         );
-        assert_eq!(of_state(&state, "#elsewhere"), None);
+        assert_eq!(of_state(&state, "nobody"), None);
     }
 
     /// What a seat is handed to read: everyone else's posts after its cursor,
     /// and the head that its own post still moves.
     #[test]
     fn a_seat_reads_the_others_and_its_own_post_still_moves_the_cursor() {
-        let mut room = SessionState::new(crate::tests::summary("ses_room", Some("#design"), None));
+        let mut room = SessionState::new(summary("ses_room", Some("#design"), None));
         room.items = vec![
             posted_item("first", Some("reviewer")),
             posted_item("mine", Some("scout")),
         ];
-        let seat = SessionState::new(crate::tests::summary("ses_scout", Some("scout"), None));
 
-        let unread = Unread::between(&room, &seat, "#design", "scout");
+        let unread = Unread::of(&room, "scout");
         assert_eq!(
             unread
                 .posts

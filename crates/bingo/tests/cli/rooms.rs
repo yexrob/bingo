@@ -348,6 +348,16 @@ fn scout_dir(home: &Path) -> Option<PathBuf> {
     })
 }
 
+/// Wait for something the run wrote down. Every gate here is a file the run
+/// owns: a scenario is awaited, never timed.
+fn until(complaint: &str, done: impl Fn() -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while !done() {
+        assert!(Instant::now() < deadline, "{complaint}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
 fn until_posted(home: &Path, n: usize) {
     until("the room was never posted into", || {
         room_dir(home).is_some_and(|dir| posts(&frames_at(&dir)).len() >= n)
@@ -640,9 +650,9 @@ const ONE_MORE: &str = r##"{"responses":[
     {"steps":[{"text":"posted"}]}
 ]}"##;
 
-/// ADR-0034 §2 across processes: the cursor is journaled on the member's own
-/// session, so `--continue` finds it and the resumed member reads what landed
-/// after it and nothing it had already read.
+/// ADR-0034 §2 across processes: the cursor is journaled in the room, under
+/// the member's name, so a process that resumes the member finds it and reads
+/// what landed after it and nothing it had already read.
 #[test]
 fn a_resumed_member_reads_only_what_its_cursor_left() {
     let home = tempfile::tempdir().unwrap();

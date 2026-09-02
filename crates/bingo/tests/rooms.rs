@@ -1,14 +1,15 @@
 //! Black-box: a room over JSON-RPC (ADR-0011). `/room` opens a session nobody
 //! answers under the person's own; a post into it is recorded there at once
-//! and reaches the member it names, which opens a turn on it as a peer's.
-//! Nothing is fanned back into the room.
+//! and wakes the live seat it names, which opens a turn as a peer's and reads
+//! the room at the head of it (ADR-0034). The post itself is copied nowhere —
+//! not into the member, and nothing is fanned back into the room.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use bingo_sdk::{
-    Activation, Answer, Attachment, Driver, Event, Frame, HostApi, Input, IntentId, IntentOutcome,
-    Interaction, ItemBody, ItemId, OpenOptions, Origin, SessionFilter, SessionId, SessionSelector,
-    SessionState, TurnId, TurnOrigin,
+    Activation, Answer, Attachment, ContentPart, Driver, Event, Frame, HostApi, Input, IntentId,
+    IntentOutcome, Interaction, ItemBody, ItemId, OpenOptions, Origin, SessionFilter, SessionId,
+    SessionSelector, SessionState, TurnId, TurnOrigin,
 };
 use futures::StreamExt;
 
@@ -18,6 +19,11 @@ use support::{LIMIT, Server, ack_for, create, ready, who};
 
 /// The name the room seats, and the agent that holds it.
 const MEMBER: &str = "reviewer";
+
+/// The word that seats it: a live ear, because the default is patient now and
+/// a patient seat reads the room at its next turn rather than at the post
+/// (ADR-0034 §6).
+const SEAT: &str = "reviewer:0";
 
 /// One script serves every session in the process: the fake provider hands its
 /// responses out in the order they are asked for.
@@ -50,12 +56,12 @@ async fn a_post_in_a_room_wakes_its_member_and_is_not_fanned_back() {
     let opened = IntentId::mint();
     tree.handle.submit(
         opened.clone(),
-        Input::text("/room design reviewer", Origin::surface("test")),
+        Input::text(format!("/room design {SEAT}"), Origin::surface("test")),
     );
     let IntentOutcome::Applied { result } = ack_on_root(&mut tree, &root, &opened).await else {
         panic!("opening a room is applied");
     };
-    assert_eq!(result["message"], "#design: reviewer");
+    assert_eq!(result["message"], format!("#design: {SEAT}"));
 
     // The agent that will hold the name, and the root settling once its
     // report has come back.
@@ -86,26 +92,46 @@ async fn a_post_in_a_room_wakes_its_member_and_is_not_fanned_back() {
     };
     assert!(result["item"].is_string(), "{result}");
 
+    // The wake: a nudge from the room and nobody in it, carrying no post
+    // (ADR-0034 §3). It points at what is unread; the posts themselves are
+    // folded into the turn it opens.
     let woken = until_woken(&mut tree, &member).await;
-    let (item, origin) = post_in(&woken);
+    let (item, text, origin) = nudge_in(&woken);
     assert_eq!(origin.surface, "room");
     assert_eq!(
-        origin.principal.as_deref(),
-        Some("parent"),
-        "a post nobody signed came from the session the room hangs under"
+        origin.principal, None,
+        "a wake is signed by nobody, so it opens no debt and counts as no post"
     );
     assert_eq!(origin.conversation.as_deref(), Some("#design"));
+    assert!(
+        !text.contains("hello team"),
+        "the wake carries no post: {text}"
+    );
     let (turn, turn_origin, inputs) = opened_turn(&woken);
     assert_eq!(turn_origin, TurnOrigin::Peer);
     assert_eq!(
         inputs,
         std::slice::from_ref(&item),
-        "the turn runs the post"
+        "the turn runs the nudge"
     );
     assert_eq!(
         item_turn(&woken, &item),
         Some(turn),
-        "the post is the turn's own input"
+        "the nudge is the turn's own input"
+    );
+
+    // And the turn it opened reads the room (ADR-0034 §4): one piece under the
+    // room's label, holding the post the member was never handed a copy of.
+    let ran = until_member_completed(&mut tree, &member).await;
+    let said = user_text(&woken, &ran);
+    assert!(
+        said.iter()
+            .any(|line| line == "[#design, since you last read]\nparent: hello team"),
+        "the member read the room at the head of its turn: {said:?}"
+    );
+    assert!(
+        said.iter().all(|line| line != "hello team"),
+        "and the post itself was copied into it nowhere: {said:?}"
     );
 
     // The room's journal, read back: the person's post and nothing else. A
@@ -123,11 +149,12 @@ async fn a_post_in_a_room_wakes_its_member_and_is_not_fanned_back() {
         after.snapshot.extensions["bingo.rooms"]["members"],
         serde_json::json!({
             "members": ["reviewer"],
+            "listeners": [{"name": "reviewer", "patience_s": 0}],
             "kind": "tree",
-            "nodes": [{"label": "reviewer", "tone": "neutral"}],
+            "nodes": [{"label": "reviewer", "badge": "live", "tone": "neutral"}],
         }),
         "the membership lives in the room's own journal, wearing the tree a \
-         surface draws it as (ADR-0013 §2)"
+         surface draws it as (ADR-0013 §2) and the ear each seat asked for"
     );
     let posts = after
         .snapshot
@@ -167,7 +194,7 @@ async fn a_room_member_that_asks_a_person_is_answered_through_the_root() {
     let opened = IntentId::mint();
     tree.handle.submit(
         opened.clone(),
-        Input::text("/room design reviewer", Origin::surface("test")),
+        Input::text(format!("/room design {SEAT}"), Origin::surface("test")),
     );
     ack_on_root(&mut tree, &root, &opened).await;
     tree.handle.submit(
@@ -376,20 +403,41 @@ async fn until_woken(tree: &mut Attachment, member: &SessionId) -> Vec<Frame> {
     }
 }
 
-/// The post as the member received it: the item, and who it says wrote it.
-fn post_in(frames: &[Frame]) -> (ItemId, Origin) {
+/// The wake as the member received it: the item, what it says, and where it
+/// came from.
+fn nudge_in(frames: &[Frame]) -> (ItemId, String, Origin) {
     frames
         .iter()
         .find_map(|frame| match &frame.event {
             Event::ItemCompleted { item } => match &item.body {
-                ItemBody::User { origin, .. } if origin.conversation.is_some() => {
-                    Some((item.id.clone(), origin.clone()))
+                ItemBody::User { parts, origin } if origin.conversation.is_some() => Some((
+                    item.id.clone(),
+                    parts.iter().filter_map(ContentPart::as_text).collect(),
+                    origin.clone(),
+                )),
+                _ => None,
+            },
+            _ => None,
+        })
+        .expect("a room's wake is a user item in the member's journal")
+}
+
+/// Everything said into the member's own session, in order: the wake, and what
+/// its turn read of the room.
+fn user_text(woken: &[Frame], ran: &[Frame]) -> Vec<String> {
+    woken
+        .iter()
+        .chain(ran)
+        .filter_map(|frame| match &frame.event {
+            Event::ItemCompleted { item } => match &item.body {
+                ItemBody::User { parts, .. } => {
+                    Some(parts.iter().filter_map(ContentPart::as_text).collect())
                 }
                 _ => None,
             },
             _ => None,
         })
-        .expect("a room's post is a user item in the member's journal")
+        .collect()
 }
 
 /// The turn the post opened.

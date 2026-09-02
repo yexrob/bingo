@@ -17,7 +17,7 @@
 use async_trait::async_trait;
 use bingo_sdk::{
     ContentPart, ContextContributor, ContextError, ContextPiece, ContextQuery, Placement,
-    SessionFilter, SessionId, SessionSummary,
+    SessionFilter, SessionId, SessionState, SessionSummary,
 };
 
 use crate::cursor::{self, Unread};
@@ -41,8 +41,8 @@ impl ContextContributor for Reader {
 
     async fn contribute(&self, query: ContextQuery<'_>) -> Result<Vec<ContextPiece>, ContextError> {
         let mut pieces = Vec::new();
-        for (id, room, member) in seated_in(&query).await {
-            if let Some(piece) = read(&query, &id, &room, &member).await {
+        for seat in seated_in(&query).await {
+            if let Some(piece) = read(&query, &seat).await {
                 pieces.push(piece);
             }
         }
@@ -50,25 +50,29 @@ impl ContextContributor for Reader {
     }
 }
 
+/// One room this session sits in, as its own journal has it: which session it
+/// is, what it is called, the name it seats this session under, and the
+/// snapshot both answers were read from.
+struct Seated {
+    id: SessionId,
+    title: String,
+    member: String,
+    state: SessionState,
+}
+
 /// One room, read: everything it said after this seat's cursor, and the cursor
 /// moved to the head of it. A seat level with its room reads nothing and says
 /// nothing.
-async fn read(
-    query: &ContextQuery<'_>,
-    id: &SessionId,
-    room: &Room,
-    member: &str,
-) -> Option<ContextPiece> {
-    let session = &query.session.id;
-    let unread = Unread::of(query.host, id, &room.title, session, member).await;
+async fn read(query: &ContextQuery<'_>, seat: &Seated) -> Option<ContextPiece> {
+    let unread = Unread::of(&seat.state, &seat.member);
     let head = unread.head.as_ref()?;
-    if let Err(error) = cursor::advance(query.host, session, &room.title, head).await {
-        tracing::debug!(room = %room.title, %error, "a seat's cursor did not move");
+    if let Err(error) = cursor::advance(query.host, &seat.id, &seat.member, head).await {
+        tracing::debug!(room = %seat.title, %error, "a seat's cursor did not move");
     }
-    let text = said(&room.title, &unread.posts)?;
+    let text = said(&seat.title, &unread.posts)?;
     Some(ContextPiece::User {
         parts: vec![ContentPart::text(text)],
-        label: room.title.clone(),
+        label: seat.title.clone(),
     })
 }
 
@@ -90,8 +94,10 @@ fn said(title: &str, posts: &[Post]) -> Option<String> {
 
 /// The rooms this session sits in, each with the name it is seated under. A
 /// room is read only if its roster names this seat: a room beside a session it
-/// never seated reaches it not at all.
-async fn seated_in(query: &ContextQuery<'_>) -> Vec<(SessionId, Room, String)> {
+/// never seated reaches it not at all. Only rooms are opened here — a `Log`
+/// session answers nobody, so reading one takes nothing away from it, which is
+/// not true of the seats themselves.
+async fn seated_in(query: &ContextQuery<'_>) -> Vec<Seated> {
     let mut seated = Vec::new();
     for (id, room) in rooms_around(query).await {
         let Some(state) = room::read(query.host, &id).await else {
@@ -100,7 +106,12 @@ async fn seated_in(query: &ContextQuery<'_>) -> Vec<(SessionId, Room, String)> {
         let room = room.seated(&state);
         let called = seated_as(query.session, &room);
         if let Some(member) = room.members.iter().find(|m| name::same(m, &called)) {
-            seated.push((id, room.clone(), member.clone()));
+            seated.push(Seated {
+                id,
+                title: room.title.clone(),
+                member: member.clone(),
+                state,
+            });
         }
     }
     seated
@@ -235,8 +246,14 @@ mod tests {
             .collect()
     }
 
-    fn cursor_of(fleet: &Fleet, seat: &SessionId, room: &str) -> Option<ItemId> {
-        cursor::of_state(&fleet.state(seat), room)
+    /// Where one member has read this room up to, as the room's journal says.
+    fn cursor_of(fleet: &Fleet, room: &SessionId, member: &str) -> Option<ItemId> {
+        cursor::of_state(&fleet.state(room), member)
+    }
+
+    /// The last thing said in a room, which is where a seat level with it is.
+    fn head_of(fleet: &Fleet, room: &SessionId) -> Option<ItemId> {
+        fleet.state(room).items.last().map(|item| item.id.clone())
     }
 
     /// The whole of ADR-0034 §4: everything since the cursor, under one label,
@@ -280,8 +297,8 @@ mod tests {
             ["[#design, since you last read]\nparent: stand-up in five"]
         );
         assert_eq!(
-            cursor_of(&fleet, &scout, "#design"),
-            fleet.state(&room).items.last().map(|item| item.id.clone()),
+            cursor_of(&fleet, &room, "scout"),
+            head_of(&fleet, &room),
             "and its own post still moved the cursor"
         );
     }
@@ -334,8 +351,9 @@ mod tests {
         .await
         .expect("a room this crate can open");
 
-        assert!(
-            cursor_of(&fleet, &scout, "#design").is_some(),
+        assert_eq!(
+            cursor_of(&fleet, &room, "scout"),
+            head_of(&fleet, &room),
             "seated at the head"
         );
         assert!(read_by(&fleet, &scout).await.is_empty());
@@ -354,11 +372,7 @@ mod tests {
     async fn reseating_the_same_roster_marks_nothing_read() {
         let (fleet, root, scout, room) = tree(&["scout"]).await;
         fleet.post(&room, "the build is green", Some("reviewer"), ts());
-        assert_eq!(
-            cursor_of(&fleet, &scout, "#design"),
-            None,
-            "nothing read yet"
-        );
+        assert_eq!(cursor_of(&fleet, &room, "scout"), None, "nothing read yet");
 
         seat::seat(
             &fleet.handle(),
@@ -370,7 +384,7 @@ mod tests {
         .await
         .expect("a room this crate can reseat");
 
-        assert_eq!(cursor_of(&fleet, &scout, "#design"), None);
+        assert_eq!(cursor_of(&fleet, &room, "scout"), None);
         assert_eq!(
             read_by(&fleet, &scout).await,
             ["[#design, since you last read]\nreviewer: the build is green"],
@@ -398,8 +412,8 @@ mod tests {
         );
         assert!(said.ends_with("\nreviewer: post 10"), "{said}");
         assert_eq!(
-            cursor_of(&fleet, &scout, "#design"),
-            fleet.state(&room).items.last().map(|item| item.id.clone()),
+            cursor_of(&fleet, &room, "scout"),
+            head_of(&fleet, &room),
             "and the cursor is at the head"
         );
         assert!(read_by(&fleet, &scout).await.is_empty());
@@ -410,7 +424,7 @@ mod tests {
     fn a_reading_of_no_posts_is_no_piece_at_all() {
         assert_eq!(said("#design", &[]), None);
         let state = SessionState::new(crate::tests::summary("ses_x", None, None));
-        assert_eq!(cursor::of_state(&state, "#design"), None);
+        assert_eq!(cursor::of_state(&state, "scout"), None);
     }
 
     #[test]

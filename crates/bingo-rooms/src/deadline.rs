@@ -4,8 +4,11 @@
 //! patience. The wake is a nudge, and the turn it opens reads the room.
 //!
 //! What it watches is the one fact "behind" is derived from: the seat's cursor
-//! against the room's head. A seat that read the room meanwhile is level when
-//! the timer fires, and is left alone.
+//! against the room's head, both of them in the room's own journal. A seat that
+//! read the room meanwhile is level when the timer fires, and is left alone.
+//! Nothing here opens a seat's own session to find out — a reader that opened
+//! one and let go would be its last client, and closing an idle seat is how a
+//! wake is lost.
 //!
 //! It keeps the chaser's discipline (ADR-0022 §3): one bounded timer per seat
 //! per room, timers die with the process, and a seat this process first finds
@@ -20,7 +23,7 @@ use bingo_sdk::{HostHandle, SessionId};
 use crate::cursor::Unread;
 use crate::ear::Ear;
 use crate::post;
-use crate::room::Room;
+use crate::room::{self, Room};
 
 /// One seat's wait on one room.
 type Waiting = (SessionId, String);
@@ -135,8 +138,10 @@ async fn wake_if_behind(
     member: &str,
     seat: &SessionId,
 ) {
-    let unread = Unread::of(host, id, &room.title, seat, member).await;
-    if unread.is_empty() {
+    let Some(state) = room::read(host, id).await else {
+        return;
+    };
+    if Unread::of(&state, member).is_empty() {
         return;
     }
     post::nudge(host, seat, &room.title, post::unread(&room.title)).await;
@@ -220,7 +225,7 @@ mod tests {
         fleet.post(id, text, Some("reviewer"), ts());
     }
 
-    async fn read_it_all(fleet: &Fleet, id: &SessionId, seat: &SessionId) {
+    async fn read_it_all(fleet: &Fleet, id: &SessionId) {
         let head = room::read(&fleet.handle(), id)
             .await
             .expect("the room")
@@ -229,7 +234,7 @@ mod tests {
             .expect("a post")
             .id
             .clone();
-        cursor::advance(&fleet.handle(), seat, "#design", &head)
+        cursor::advance(&fleet.handle(), id, "scout", &head)
             .await
             .expect("a cursor this crate can write");
     }
@@ -328,14 +333,14 @@ mod tests {
     /// finds its cursor at the head, and says nothing.
     #[tokio::test(start_paused = true)]
     async fn a_seat_that_reads_the_room_before_the_deadline_is_not_nudged() {
-        let (fleet, _, scout, id, room) = tree(&["scout:120"]);
+        let (fleet, _, _, id, room) = tree(&["scout:120"]);
         let deadline = Deadline::default();
         let host = fleet.handle();
         said(&fleet, &id, "the build is green");
         deadline.waiting(&host, &id, &room, &["scout"]).await;
 
         after(Duration::from_secs(60)).await;
-        read_it_all(&fleet, &id, &scout).await;
+        read_it_all(&fleet, &id).await;
 
         after(Duration::from_secs(600)).await;
         assert!(nudges(&fleet).is_empty(), "{:?}", fleet.delivered());
@@ -388,7 +393,7 @@ mod tests {
         assert_eq!(nudged.len(), 1, "{nudged:?}");
         assert_eq!(nudged[0].0, scout);
 
-        read_it_all(&fleet, &id, &scout).await;
+        read_it_all(&fleet, &id).await;
         deadline.overdue(&fleet.handle(), &id, &room).await;
         settle().await;
         assert_eq!(
@@ -411,53 +416,39 @@ mod tests {
         assert!(fleet.delivered().is_empty(), "{:?}", fleet.delivered());
     }
 
-    /// A seat that came into being after everything that was said is not behind
-    /// on any of it (ADR-0025 §2), so nothing wakes it for that.
+    /// A seat seated at the room's head is level with it, so nothing wakes it
+    /// for what was said before it took its place (ADR-0034 §2).
     #[tokio::test(start_paused = true)]
-    async fn a_seat_younger_than_every_post_starts_level() {
-        let fleet = Fleet::default();
-        let root = fleet.root();
-        let id = fleet.room(&root, "design");
+    async fn a_seat_seated_at_the_head_starts_level() {
+        let (fleet, root, scout, id, _) = tree(&["scout:120"]);
         said(&fleet, &id, "said before you were seated");
-        let scout = fleet.child(&root, "scout");
-        fleet.born(&scout, ts() + jiff::SignedDuration::from_secs(60));
-
-        assert_eq!(
-            Unread::of(&fleet.handle(), &id, "#design", &scout, "scout").await,
-            Unread::default()
-        );
+        read_it_all(&fleet, &id).await;
 
         Deadline::default()
             .overdue(&fleet.handle(), &id, &room_of(&root, &["scout:120"]))
             .await;
         settle().await;
         assert!(fleet.delivered().is_empty(), "{:?}", fleet.delivered());
+        assert_ne!(scout, id, "the seat and its room are two sessions");
     }
 
     /// A cursor at the head is the whole of "read": no post of the room is
     /// unread, whoever wrote it.
     #[tokio::test]
     async fn a_cursor_at_the_head_leaves_nothing_unread() {
-        let (fleet, _, scout, id, _) = tree(&["scout:120"]);
+        let (fleet, _, _, id, _) = tree(&["scout:120"]);
         said(&fleet, &id, "the build is green");
         let host = fleet.handle();
-        assert!(
-            !Unread::of(&host, &id, "#design", &scout, "scout")
-                .await
-                .is_empty()
-        );
+        let read = |fleet: &Fleet| Unread::of(&fleet.state(&id), "scout");
+        assert!(!read(&fleet).is_empty());
 
-        read_it_all(&fleet, &id, &scout).await;
-        let unread = Unread::of(&host, &id, "#design", &scout, "scout").await;
+        read_it_all(&fleet, &id).await;
+        let unread = read(&fleet);
         assert!(unread.is_empty(), "{unread:?}");
         assert_eq!(unread.head, None, "and nothing left to move the cursor to");
         assert!(
-            cursor::of_state(
-                &room::read(&host, &scout).await.expect("the seat"),
-                "#design"
-            )
-            .is_some(),
-            "the cursor is on the seat's own session"
+            cursor::of_state(&room::read(&host, &id).await.expect("the room"), "scout").is_some(),
+            "the cursor is a register in the room's own journal"
         );
     }
 }

@@ -5,9 +5,11 @@
 //! of landing.
 //!
 //! Both ledgers are folds of journals, so nothing is stored beside them and a
-//! restart re-derives exactly what the process before it had. What the caller
-//! has read is its cursor into that room (ADR-0034 §2), which is the one fact
-//! "seen" comes from now that a post is written once and copied nowhere.
+//! restart re-derives exactly what the process before it had. How far the
+//! caller has read is the cursor the room keeps under its name (ADR-0034 §2),
+//! which is the one fact "seen" comes from now that a post is written once and
+//! copied nowhere. Both ledgers are read out of the room itself, so a caller
+//! that has yet to hold a seat is judged by the same rule as one that does.
 //!
 //! "Could have seen" is the whole of the rule, so a post that landed before
 //! the caller's session existed is not counted: it was never anybody's to read
@@ -25,7 +27,7 @@ use crate::{names, watch};
 /// and the payload is read as data: a shape this does not recognise says the
 /// caller has read nothing rather than guessing.
 const ROOMS: &str = "bingo.rooms";
-/// The kind one seat's cursor is published under, before the room's title.
+/// The kind one seat's cursor is published under, before its name.
 const CURSOR: &str = "cursor:";
 /// The post that payload names: the last one the seat has read.
 const POST: &str = "post";
@@ -55,7 +57,7 @@ pub async fn bounce(cx: &ToolContext, room: &SessionSummary, speaker: &str) -> O
     let there = watch::follow(&cx.host, &room.id).await.ok()?;
     let here = watch::follow(&cx.host, &cx.session).await.ok()?;
     let awaited = awaited(&there.snapshot, &here.snapshot, speaker);
-    let read = read(&there.snapshot, &awaited, cursor(&here.snapshot, &title));
+    let read = read(&there.snapshot, &awaited, cursor(&there.snapshot, speaker));
     let quoted = quoted(before(&here.snapshot, &cx.item), &title);
     match verdict(awaited, read.max(quoted)) {
         Verdict::Land => None,
@@ -91,9 +93,9 @@ fn post_of(item: &Item) -> Option<Post> {
     })
 }
 
-/// How far the caller's cursor into the room stands: the posts it awaited that
-/// the room holds at or before the one the cursor names (ADR-0034 §5). A seat
-/// with no cursor, or one the room does not hold, has read nothing.
+/// How far the caller's cursor stands: the posts it awaited that the room
+/// holds at or before the one the cursor names (ADR-0034 §5). A seat with no
+/// cursor, or one the room does not hold, has read nothing.
 fn read(room: &SessionState, awaited: &[(usize, Post)], cursor: Option<ItemId>) -> usize {
     let Some(head) = cursor.and_then(|id| room.items.iter().position(|item| item.id == id)) else {
         return 0;
@@ -101,13 +103,14 @@ fn read(room: &SessionState, awaited: &[(usize, Post)], cursor: Option<ItemId>) 
     awaited.iter().filter(|(at, _)| *at <= head).count()
 }
 
-/// Where the caller has read one room up to, as the rooms plugin publishes it
-/// on the caller's own session.
-fn cursor(caller: &SessionState, room: &str) -> Option<ItemId> {
-    let published = caller
+/// Where one member has read this room up to, as the rooms plugin publishes it
+/// in the room's own journal: a register per seat, keyed in one spelling of the
+/// name because a room compares names in any case.
+fn cursor(room: &SessionState, member: &str) -> Option<ItemId> {
+    let published = room
         .extensions
         .get(ROOMS)?
-        .get(&format!("{CURSOR}{room}"))?;
+        .get(&format!("{CURSOR}{}", member.to_lowercase()))?;
     Some(ItemId::from_raw(published.get(POST)?.as_str()?))
 }
 
@@ -317,8 +320,8 @@ mod tests {
         );
     }
 
-    /// The whole of ADR-0034 §5: the cursor on the caller's own session says
-    /// how much of what it awaited it has read, and nothing else does.
+    /// The whole of ADR-0034 §5: the cursor the room keeps under the caller's
+    /// name says how much of what it awaited it has read, and nothing else does.
     #[test]
     fn the_caller_s_cursor_into_the_room_is_the_count_of_what_it_has_read() {
         let room = journal(
@@ -349,17 +352,22 @@ mod tests {
     /// contract between the two crates, written down (ADR-0034 §2).
     #[test]
     fn a_cursor_is_a_post_id_under_the_rooms_plugin_s_own_kind() {
-        let mut caller = journal("scout", 0, Vec::new());
-        assert_eq!(cursor(&caller, "#design"), None);
+        let mut room = journal("#design", 0, Vec::new());
+        assert_eq!(cursor(&room, "scout"), None);
 
-        caller.extensions.insert(
+        room.extensions.insert(
             ROOMS.into(),
-            [("cursor:#design".to_string(), json!({ "post": "itm_7" }))]
+            [("cursor:scout".to_string(), json!({ "post": "itm_7" }))]
                 .into_iter()
                 .collect(),
         );
-        assert_eq!(cursor(&caller, "#design"), Some(ItemId::from_raw("itm_7")));
-        assert_eq!(cursor(&caller, "#standup"), None, "one room is not another");
+        assert_eq!(cursor(&room, "scout"), Some(ItemId::from_raw("itm_7")));
+        assert_eq!(
+            cursor(&room, "Scout"),
+            Some(ItemId::from_raw("itm_7")),
+            "a room compares names in any case"
+        );
+        assert_eq!(cursor(&room, "builder"), None, "one seat is not another");
     }
 
     /// The cut: what a barrier absorbed after the model spoke was not what it
