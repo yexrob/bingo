@@ -87,6 +87,8 @@ pub fn item_lines(
     rows: &Rows<'_>,
     cue: Cue,
 ) -> Vec<Line<'static>> {
+    // Whether this block was opened whole — by `ctrl+o`, or by a click on it.
+    // One set answers for every fold, and it is asked once, here.
     let opened = rows.expanded.contains(&item.id);
     match &item.body {
         ItemBody::User { parts, origin } => match quiet(origin) {
@@ -101,7 +103,7 @@ pub fn item_lines(
         },
         ItemBody::Assistant { text } => assistant(text, item.status, rows, cue),
         ItemBody::Reasoning { .. } => thinking(item, opened, rows),
-        ItemBody::ToolCall { .. } => called(item, agents, rows, cue),
+        ItemBody::ToolCall { .. } => called(item, agents, opened, rows, cue),
         ItemBody::Action { name, args, result } => {
             action(item.status, name, args, result.as_ref(), opened, rows)
         }
@@ -139,7 +141,13 @@ pub fn item_lines(
 
 /// A call that started a session is that session's row; every other call is
 /// its own (design §3: a child is a row where it began).
-fn called(item: &Item, agents: &Agents<'_>, rows: &Rows<'_>, cue: Cue) -> Vec<Line<'static>> {
+fn called(
+    item: &Item,
+    agents: &Agents<'_>,
+    expanded: bool,
+    rows: &Rows<'_>,
+    cue: Cue,
+) -> Vec<Line<'static>> {
     let ItemBody::ToolCall {
         name,
         input,
@@ -159,7 +167,7 @@ fn called(item: &Item, agents: &Agents<'_>, rows: &Rows<'_>, cue: Cue) -> Vec<Li
                 input,
                 output: output.as_ref(),
                 progress: progress.as_deref(),
-                expanded: rows.expanded.contains(&item.id),
+                expanded,
             },
             rows,
             cue,
