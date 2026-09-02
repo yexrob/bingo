@@ -7,8 +7,8 @@ to its cause. After this milestone: the transcript does not shuffle
 by a row for every block that arrives; a thought is readable where
 it happened, and `/think` tells the truth when a model cannot; a
 folded block opens on a click, whatever it holds; `/skill` reads as
-the thing it is, and a skill knows its own directory; a second `esc`
-cuts a tool off instead of waiting for it; and a room's roster, its
+the thing it is, and a skill knows its own directory; one `esc`
+ends a tool instead of waiting for it; and a room's roster, its
 posts and the message tools look designed, not dumped. The traces
 that found each cause are the commit bodies.
 
@@ -68,23 +68,23 @@ Five slices, one worker each on its own branch; A merges before B.
    <dir>` — both paths, one place. A body's relative `scripts/x`
    is then a path the model can resolve. `${BINGO_SKILL_DIR}` stays.
 
-**D — a second esc cuts it off** (`bingo-sdk`, `bingo-core`,
-`bingo-surface-tui`, `bingo-surface-rpc` schema)
+**D — one esc ends the turn** (`bingo-sdk`, `bingo-core`,
+`bingo-surface-tui`; user-directed 2026-09-02: as Claude Code and
+Codex do, no second stage)
 
-1. `Running` holds two tokens: `cancel` and `cut`. `interrupt()` on a
-   turn already cancelled cancels `cut`. No new port method; the ack
-   result carries `{"turn", "stage": "asked" | "cut"}`.
-2. The executor races a `Block` tool against `cut` (a `Cancel` tool
-   against `cancel`, as today). Dropping the future is the cut:
-   Bash's `KillOnDrop` takes the process group, an MCP or plugin-rpc
-   call is abandoned; the item is `Interrupted`.
-3. One new fact on the stream: `Event::TurnStopping { turn, stage }`,
-   folded into `LiveTurn.stopping: Option<Stopping { stage, since }>`.
-   Schema regenerated; print and stream-json ignore it.
-4. The activity row: `✻ Stopping… (esc again to cut it off · 3s)`
-   after the first, `✻ Cutting off…` after the second; `esc` on a
-   stopping turn escalates instead of re-asking. `keys.rs` and the
-   help sheet say so.
+1. The executor races every tool call against the turn's `cancel`
+   token; `Interrupt::Block` ("await it to completion") is gone, and
+   with it the trait, its field, its fail-closed test and the line in
+   AGENTS.md. Dropping the future is the end: Bash's `KillOnDrop`
+   takes the process group, an MCP or plugin-rpc call is abandoned
+   (`tool/cancel` still sent first); the item is `Interrupted`. A
+   background job (ADR-0018) is still never killed by an interrupt.
+2. No new event: `TurnCompleted { Interrupted }` is the truth and
+   now arrives at once.
+3. The activity row answers on the keypress's own frame — a
+   surface-local "asked to stop" flag, the `exit_armed` pattern —
+   reading `✻ Stopping…` until `TurnCompleted` clears it. A fact about
+   the key, not the session.
 
 **E — the room looks like a room** (`bingo-rooms`, `bingo-agents`,
 `bingo-surface-tui`, `tui.md`)
@@ -125,9 +125,9 @@ owed}.rs`, `bingo-agents/src/{message,list}.rs`; `schema/rpc.json`;
   the warning; the level survives a `/model` switch.
 - [ ] C: black-box `/guide` shows `⏺ /guide` folded; rewind restores
   `/guide`; the expansion's first line names the directory.
-- [ ] D: executor test — a `Block` tool that ignores its token ends
-  on `cut` within the test's own timeout; `esc esc` on a running Bash
-  `sleep 30` ends the turn (PTY smoke) and the process is gone.
+- [ ] D: executor test — a tool that ignores its token ends on one
+  `cancel` within the test's own timeout; `esc` on a running Bash
+  `sleep 30` ends the turn and the process is gone (unix probe).
 - [ ] E: snapshots for the receipts, the roster tree, the `in #room`
   headline, the `owed` card; `tui.md` §3 Teams written.
 - [ ] Every gate in AGENTS.md; `cargo check --target
@@ -136,7 +136,7 @@ owed}.rs`, `bingo-agents/src/{message,list}.rs`; `schema/rpc.json`;
 ## Non-goals
 
 Withdrawing a queued input (no dequeue exists; its own ADR).
-Automatic escalation from asked to cut. A members pane (M35). A
+A members pane (M35). A
 `Prompt { echo }` contract change. Images.
 
 ## Risks
