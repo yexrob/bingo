@@ -5,18 +5,25 @@
 ADR-0035 built: a `bingo-provider-acp` plugin whose every configured
 ACP adapter (`acp/claude`, `acp/codex`, …) is a `Provider` instance.
 Types from `agent-client-protocol-schema`; the ndjson JSON-RPC client
-loop is ours, tokio, `Send`. The adapter children are kept the way
-plugin processes are kept — spawned lazily, `initialize`d once,
-restarted on death, killed at `stop()` — while every turn opens a
-fresh session on a warm child and renders the request's own fold to a
-per-turn transcript file the prompt names; the agent reads what it
-needs with its own tools. Its tool calls stream first-class wearing
-`acp.external: true`; permissions are the adapter's own, configured
-on its row, and a stray `session/request_permission` is refused
-closed. The kernel does not change — no new door, no new field.
+loop is ours, tokio, `Send`. One bingo session is one ACP session
+(Zed's shape): `ModelRequest` gains `session: Option<SessionId>`, the
+instance maps it to the agent's `sessionId` journaled once as an
+extension, and restore climbs resume → load (replay swallowed) →
+fresh session + transcript file. The adapter children are kept the
+way plugin processes are kept — spawned lazily, `initialize`d once,
+restarted on death, killed at `stop()`. The agent's tool calls stream
+first-class wearing `acp.external: true`; permissions are the
+adapter's own, configured on its row, and a stray
+`session/request_permission` is refused closed. The kernel changes by
+one field, no door.
 
 ## Bricks, in build order
 
+0. **The request names its session.** `bingo-sdk` `ModelRequest`
+   gains `session: Option<SessionId>` (serde default, absent
+   serializes to nothing, so recorded fixtures stand); core stamps it
+   at the one place requests are built. A test on the stamping; every
+   provider compiles untouched. Nothing else in sdk or core moves.
 1. **The contract.** `agent-client-protocol-schema = "=1.5.0"`
    (budget 302 → 307, the ADR line; `cargo deny check`). `method.rs`:
    a pure table, type ↔ method string, for the ~15 methods used both
@@ -42,23 +49,23 @@ closed. The kernel does not change — no new door, no new field.
    `stop_reason` → `Finish`; usage folded from `usage_update` and the
    end-turn field when present, zero otherwise. Fixture tests per
    update kind.
-5. **The turn's transcript.** `transcript.rs`: a pure render,
-   `&[Message] → markdown` — roles, text, thoughts, the external tool
-   calls — and the turn's file: written to a per-turn temp path,
-   named in the prompt's first line beside the newest user turn,
-   deleted when the stream ends. Fixture tests on the render; a test
-   that the file dies with the turn.
+5. **The session map and the ladder.** `pool.rs`: the kept children
+   (lazy spawn, `initialize` once with capabilities cached, respawn
+   on death with a notice, `stop()` kills all, kill-on-drop the
+   backstop) and the map bingo session → agent session. `session/new`
+   journals the extension (`bingo.acp`, `session:<instance>`) through
+   the plugin's host handle; restore climbs `session/resume`, else
+   `session/load` behind a swallowing flag, else a fresh session
+   whose first prompt names the file `transcript.rs` renders from the
+   request's fold at that moment. Tests against the fake advertising
+   each capability set; one pins that a load replay journals nothing.
 6. **The provider.** `provider.rs`, `config.rs`, registration: one
-   instance per `[providers.acp.<name>]` row. The instance keeps its
-   children: lazy first spawn, `initialize` once per child and its
-   capabilities cached with it, one stream on a child at a time — a
-   concurrent turn takes a second child, idle extras are reaped, a
-   dead child is respawned with a notice, `stop()` kills them all
-   (kill-on-drop stays the backstop). `stream()` takes a warm child,
-   `session/new` → one `session/prompt`, forwards mapped events;
-   `cancel` → the `session/cancel` notification, then awaits the
-   cancelled stop — the child outlives the esc. `models()` empty;
-   auth `NotApplicable`. `request_permission` is answered with its reject
+   instance per `[providers.acp.<name>]` row. `stream()` resolves
+   `request.session` through the map (a request without one gets a
+   one-shot session), holds one `session/prompt`, forwards mapped
+   events; `cancel` → the `session/cancel` notification, then awaits
+   the cancelled stop — the child and the agent session outlive the
+   esc. `models()` empty; auth `NotApplicable`. `request_permission` is answered with its reject
    option and a notice naming the row — the adapter's own permission
    config (args/env on the row) is where yes is said;
    `elicitation/create` declines the same way.
@@ -71,7 +78,8 @@ closed. The kernel does not change — no new door, no new field.
 ## Files
 
 `crates/bingo-provider-acp/src/{lib,method,wire,connection,child,
-events,transcript,provider,config}.rs` + the fake-agent bin;
+events,pool,transcript,provider,config}.rs` + the fake-agent bin;
+`crates/bingo-sdk/src/model.rs` and the one core request-build site;
 `crates/bingo/tests/cli/acp.rs`; `scripts/budget.sh` (the number);
 `Cargo.{toml,lock}`; `AGENTS.md` (one scope); docs for config.
 
@@ -83,12 +91,14 @@ events,transcript,provider,config}.rs` + the fake-agent bin;
   tool call land in valid NDJSON, marked `acp.external: true`, and
   nothing was executed by the loop.
 - [ ] Esc mid-turn sends `session/cancel` and the turn ends with the
-  interrupt wording; the child survives to serve the next turn.
-- [ ] A second turn's prompt names a fresh transcript file holding
-  the first turn word for word, the file is gone when the turn ends,
-  and both turns rode one child (the fake counts its spawns);
-  `--continue` takes no path of its own (the black-box resumes and
-  the next turn's file carries the whole prior fold).
+  interrupt wording; the child and the agent session survive to
+  serve the next turn.
+- [ ] Two turns of one bingo session ride one agent session on one
+  child (the fake counts its spawns and its `session/new`s); the
+  `bingo.acp` extension is journaled exactly once.
+- [ ] `--continue` against a fake advertising resume / only load /
+  neither: each rung proven; on the last, the prompt names the file
+  and the file holds the prior fold; a load replay journals nothing.
 - [ ] A scripted `request_permission` is answered with its reject
   option, one notice names the config row, and the turn goes on.
 - [ ] `cargo check -p bingo-provider-acp --all-targets --target
@@ -99,10 +109,9 @@ events,transcript,provider,config}.rs` + the fake-agent bin;
 
 `bingo-acp` the surface (opposite role, its own milestone). Handing
 our tools over MCP. ACP plans, modes, slash commands, `fs/*`,
-`terminal/*`, the `-http` transport, protocol v2, `session/resume` /
-`session/load`. A prompter door for providers — recorded in the ADR,
-not built. Shipping default adapter rows — configuration belongs to
-the person.
+`terminal/*`, the `-http` transport, protocol v2. A prompter door
+for providers — recorded in the ADR, not built. Shipping default
+adapter rows — configuration belongs to the person.
 
 ## Risks
 
@@ -114,5 +123,7 @@ the person.
 - An adapter may mishandle many sessions across one connection's
   life: when a child misbehaves at `session/new`, the instance falls
   back to a fresh child for that turn and says so.
+- The swallowing flag on a `session/load` replay is load-bearing;
+  its test is the ladder's most important line.
 - codex-acp reports no usage today: zeros are honest, and the ruler
   reads them as unknown, not as free.
