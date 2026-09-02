@@ -96,9 +96,12 @@ impl Window {
 /// open it.
 pub fn lines(item: &Item, width: usize) -> Vec<Line<'static>> {
     let body = match &item.body {
-        ItemBody::Reasoning { text, .. } | ItemBody::Assistant { text } => {
-            markdown::render(text, width)
-        }
+        ItemBody::Assistant { text } => markdown::render(text, width),
+        // A thought that came back empty is a row and nothing else, so `⏎` on
+        // it opens no sheet (`transcript::thought`).
+        ItemBody::Reasoning { .. } => transcript::thought(item)
+            .map(|text| markdown::render(text, width))
+            .unwrap_or_default(),
         ItemBody::ToolCall {
             output: Some(output),
             ..

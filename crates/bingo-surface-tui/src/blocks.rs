@@ -55,10 +55,14 @@ fn revision(item: &Item, agent: Option<&SessionState>, expanded: bool) -> Revisi
     }
 }
 
+/// How much of the body is on the screen. A thought is not here: its row says
+/// `✻ Thinking…` for as long as it streams, whatever the deltas carry, and the
+/// text lands under it when the status turns — which [`Revision::status`]
+/// already answers for. Sizing it by the text would draw the block again for
+/// every delta and show nothing new.
 fn size(body: &ItemBody) -> usize {
     match body {
         ItemBody::Assistant { text } => text.len(),
-        ItemBody::Reasoning { text, .. } => text.len(),
         ItemBody::ToolCall {
             output, progress, ..
         } => {
