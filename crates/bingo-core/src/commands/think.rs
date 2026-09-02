@@ -92,13 +92,13 @@ async fn running_on(host: &Arc<Host>, cx: &CommandContext) -> Option<ModelChoice
 /// The level is still kept, and takes effect the moment `/model` moves to a
 /// model that reasons.
 fn said(level: Option<Effort>, on: Option<&ModelChoice>) -> String {
-    let said = format!("thinking: {}", name(level));
+    let set = format!("thinking: {}", name(level));
     let Some(choice) = on.filter(|choice| level.is_some() && choice.reasoning.is_none()) else {
-        return said;
+        return set;
     };
     let key = models::declared::key(choice.provider.id(), &choice.id);
     format!(
-        "{said} — but {key} does not declare reasoning, so no turn asks for \
+        "{set} — but {key} does not declare reasoning, so no turn asks for \
          it; models.\"{key}\".reasoning = true in settings says otherwise"
     )
 }
