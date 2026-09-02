@@ -11,16 +11,17 @@ use bingo_sdk::*;
 use serde_json::{Map, Value, json};
 
 use super::Registry;
-use crate::models::{ModelCatalog, ModelFacts};
+use crate::models::{ModelCatalog, ModelFacts, Offer, ServedModels, Source, served};
 
 pub(super) async fn entries(
     registry: &Registry,
     resolved: &[Arc<dyn Provider>],
     model: Option<&str>,
+    served: &ServedModels,
     kind: CatalogKind,
 ) -> Vec<CatalogEntry> {
     match kind {
-        CatalogKind::Models => models(resolved, model),
+        CatalogKind::Models => models(resolved, model, served),
         CatalogKind::Providers => providers(resolved),
         CatalogKind::Tools => tools(registry).await,
         CatalogKind::Commands => commands(registry).await,
@@ -29,38 +30,52 @@ pub(super) async fn entries(
     }
 }
 
-/// The embedded catalogue's models for each provider, plus the configured one;
-/// nothing here asks a provider for its list, which would be a network call
-/// (ADR-0026 §4).
-fn models(resolved: &[Arc<dyn Provider>], configured: Option<&str>) -> Vec<CatalogEntry> {
+/// Each provider's ids — the ones its endpoint answered with if it has ever
+/// answered, else the embedded catalogue's for its family — plus the
+/// configured one. Nothing here asks a provider anything: the list was
+/// fetched in the background and cached (ADR-0026 §4).
+fn models(
+    resolved: &[Arc<dyn Provider>],
+    configured: Option<&str>,
+    served: &ServedModels,
+) -> Vec<CatalogEntry> {
     let catalogue = ModelCatalog::embedded();
     resolved
         .iter()
         .flat_map(|p| {
-            let mut ids: Vec<&str> = configured.into_iter().collect();
             // Filed by family, not id: a named instance (ADR-0017) has no
             // models of its own — it serves its wire shape's.
-            ids.extend(
-                catalogue
-                    .models_of(p.family())
-                    .filter(|m| Some(*m) != configured),
-            );
-            ids.into_iter().map(|model| CatalogEntry {
-                id: format!("{}/{model}", p.id()),
-                label: model.to_string(),
-                meta: model_meta(p.id(), catalogue.lookup(p.family(), model)),
-            })
+            let shelf: Vec<&str> = catalogue.models_of(p.family()).collect();
+            let endpoint = served.get(p.id());
+            served::merge(endpoint.as_ref(), &shelf, configured)
+                .into_iter()
+                .map(|offer| entry(p.as_ref(), offer))
+                .collect::<Vec<_>>()
         })
         .collect()
 }
 
-/// What a client is told about one model: the provider that serves it, and
-/// the facts the embedded catalogue holds for it (ADR-0026 §1). A model the
-/// catalogue does not know — a configured override, a private endpoint's id —
-/// carries the provider alone: an absent fact is never guessed.
-fn model_meta(provider: &str, facts: Option<ModelFacts>) -> Value {
+fn entry(provider: &dyn Provider, offer: Offer) -> CatalogEntry {
+    CatalogEntry {
+        id: format!("{}/{}", provider.id(), offer.id),
+        meta: model_meta(
+            provider.id(),
+            offer.source,
+            super::catalogued(provider, &offer.id),
+        ),
+        label: offer.id,
+    }
+}
+
+/// What a client is told about one model: the provider that serves it, who
+/// says it exists there, and the facts the embedded catalogue holds for it
+/// (ADR-0026 §1). A model the catalogue does not know — a configured
+/// override, a private endpoint's id — carries no facts: an absent fact is
+/// never guessed.
+fn model_meta(provider: &str, source: Source, facts: Option<ModelFacts>) -> Value {
     let mut meta = Map::new();
     meta.insert("provider".into(), json!(provider));
+    meta.insert("source".into(), json!(source.as_str()));
     if let Some(facts) = facts {
         meta.insert("context".into(), json!(facts.context_window));
         meta.insert("output".into(), json!(facts.max_output));
@@ -170,7 +185,15 @@ mod tests {
     }
 
     fn listed(configured: Option<&str>) -> Vec<CatalogEntry> {
-        models(&[Arc::new(Endpoint) as Arc<dyn Provider>], configured)
+        listed_with(configured, &ServedModels::default())
+    }
+
+    fn listed_with(configured: Option<&str>, served: &ServedModels) -> Vec<CatalogEntry> {
+        models(
+            &[Arc::new(Endpoint) as Arc<dyn Provider>],
+            configured,
+            served,
+        )
     }
 
     fn entry(entries: &[CatalogEntry], id: &str) -> CatalogEntry {
@@ -201,9 +224,10 @@ mod tests {
         let sonnet = entry(&entries, "house/claude-sonnet-4-5");
         assert_eq!(
             keys(&sonnet),
-            ["context", "images", "output", "provider", "reasoning"]
+            ["context", "images", "output", "provider", "reasoning", "source"]
         );
         assert_eq!(sonnet.meta["provider"], json!("house"));
+        assert_eq!(sonnet.meta["source"], json!("catalogue"));
         assert!(sonnet.meta["context"].is_u64(), "{:?}", sonnet.meta);
         assert!(sonnet.meta["output"].is_u64(), "{:?}", sonnet.meta);
         assert!(sonnet.meta["reasoning"].is_boolean(), "{:?}", sonnet.meta);
@@ -211,14 +235,57 @@ mod tests {
         assert_eq!(sonnet.label, "claude-sonnet-4-5");
     }
 
-    /// A configured id the snapshot never heard of keeps the one fact the
+    /// A configured id the snapshot never heard of keeps the two facts the
     /// kernel knows. Nothing is filled in for it.
     #[test]
     fn a_model_the_catalogue_does_not_know_carries_the_provider_alone() {
         let entries = listed(Some("house-private-1"));
         let private = entry(&entries, "house/house-private-1");
-        assert_eq!(keys(&private), ["provider"]);
-        assert_eq!(private.meta, json!({ "provider": "house" }));
+        assert_eq!(keys(&private), ["provider", "source"]);
+        assert_eq!(
+            private.meta,
+            json!({ "provider": "house", "source": "configured" })
+        );
+    }
+
+    /// Once the endpoint has answered, its ids are the list — the snapshot's
+    /// are not offered beside them — and each one still carries whatever the
+    /// snapshot knows about it, wherever that model is filed.
+    #[test]
+    fn an_endpoint_that_has_answered_says_which_ids_exist_there() {
+        let served = ServedModels::default();
+        served.record(
+            "house",
+            vec![
+                ModelInfo {
+                    id: "claude-sonnet-4-5".into(),
+                    display: None,
+                },
+                ModelInfo {
+                    id: "deepseek-v4-pro".into(),
+                    display: None,
+                },
+            ],
+            jiff::Timestamp::UNIX_EPOCH,
+        );
+        let entries = listed_with(None, &served);
+        assert_eq!(
+            entries.iter().map(|e| e.id.as_str()).collect::<Vec<_>>(),
+            ["house/claude-sonnet-4-5", "house/deepseek-v4-pro"],
+            "the endpoint's list, and only it"
+        );
+        let proxied = entry(&entries, "house/deepseek-v4-pro");
+        assert_eq!(proxied.meta["source"], json!("endpoint"));
+        assert_eq!(
+            proxied.meta["output"],
+            json!(
+                ModelCatalog::embedded()
+                    .lookup("deepseek", "deepseek-v4-pro")
+                    .expect("the snapshot knows it")
+                    .max_output
+            ),
+            "a model the endpoint fronts keeps its maker's facts"
+        );
     }
 
     /// The same facts a lookup returns, unrenamed and unrounded.

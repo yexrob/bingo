@@ -25,7 +25,7 @@ use tool_host::SessionToolHost;
 use unavailable::Unavailable;
 
 use crate::gate::DefaultPolicy;
-use crate::models::{self, Learned, ModelCatalog, ModelFacts};
+use crate::models::{self, Learned, ModelCatalog, ModelFacts, ServedModels};
 use crate::prompt::{self, PromptInput};
 use crate::session::{self, Mailbox};
 use crate::settings::{self, Claim, Layer, Merged, SettingsError};
@@ -101,6 +101,9 @@ pub struct Host {
     gateway: broadcast::Sender<GatewayEvent>,
     /// Windows the servers have corrected since this host started (ADR-0004).
     learned: Arc<Learned>,
+    /// What each endpoint last said it serves, from earlier processes and
+    /// this one's own refresh (ADR-0026 §4).
+    served: Arc<ServedModels>,
     weak: Weak<Host>,
 }
 
@@ -185,6 +188,12 @@ impl Host {
         let learned = Arc::new(Learned::load(
             config.env.data_dir.join("learned-windows.json"),
         ));
+        // Loaded here and never fetched here: what an earlier process cached
+        // is on hand before the first turn, and asking again is the
+        // background's job (ADR-0026 §4).
+        let served = Arc::new(ServedModels::load(
+            config.env.data_dir.join("served-models.json"),
+        ));
         let host = Arc::new_cyclic(|weak| {
             registry.add_builtins(crate::commands::builtins(weak.clone()));
             Host {
@@ -195,6 +204,7 @@ impl Host {
                 sessions: Mutex::new(BTreeMap::new()),
                 gateway,
                 learned,
+                served,
                 weak: weak.clone(),
             }
         });
@@ -878,6 +888,7 @@ impl HostApi for Host {
                 &self.registry,
                 &resolved,
                 self.settings.kernel.model.as_deref(),
+                &self.served,
                 kind,
             )
             .await,
