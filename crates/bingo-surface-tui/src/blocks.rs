@@ -218,6 +218,7 @@ impl Blocks {
             width,
             expanded,
             now,
+            title: state.summary.title.as_deref(),
         };
         self.head = welcome::lines(state, width);
         let mut kept = 0;

@@ -408,6 +408,29 @@ fn a_room_transcript() {
     both("room_transcript", &tree, &ui, now);
 }
 
+/// The same posts where a member reads them. A member's own transcript
+/// carries every conversation it is in, so a post says which one it came
+/// from; a direct message came from nowhere but its sender.
+#[test]
+fn a_room_post_in_a_member_s_own_transcript() {
+    let state = folded(vec![
+        item(1, post("itm_1", "reviewer", "the plan is thin on tests")),
+        item(
+            2,
+            delivered("itm_2", "agent", Some("scout"), "Two nits, else fine."),
+        ),
+    ]);
+    let tree = solo(&state);
+    let (ui, now) = scene();
+    let screen = draw_tree(80, 24, &tree, &ui, now);
+    assert!(screen.contains("⏺ reviewer in #design: the plan"), "{screen}");
+    assert!(
+        screen.contains("⏺ scout: Two nits"),
+        "a direct message names no room: {screen}"
+    );
+    both("room_post", &tree, &ui, now);
+}
+
 #[test]
 fn a_child_row_while_it_runs() {
     let tree = spawned_tree(busy_child("reviewer"));
