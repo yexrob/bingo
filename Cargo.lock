@@ -239,6 +239,7 @@ dependencies = [
  "bingo-mcp",
  "bingo-permissions",
  "bingo-plugin-rpc",
+ "bingo-provider-acp",
  "bingo-provider-anthropic",
  "bingo-provider-fake",
  "bingo-provider-openai",
