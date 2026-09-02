@@ -1,10 +1,8 @@
 ---
-source: crates/bingo-surface-tui/src/view.rs
-assertion_line: 1561
-expression: asleep
+source: crates/bingo-surface-tui/src/screens/teams.rs
+assertion_line: 297
+expression: screen
 ---
-"                                                                                "
-"                                                                                "
 "                                                                                "
 "                                                                                "
 "                                                                                "
@@ -17,12 +15,14 @@ expression: asleep
 "│   cwd: /tmp/project                                                          │"
 "╰──────────────────────────────────────────────────────────────────────────────╯"
 "                                                                                "
-"> have it reviewed                                                              "
+"> what is in this workspace?                                                    "
 "                                                                                "
-"⏺ reviewer(review the diff)                                                     "
-"  ⏺ project   have it reviewed                                                  "
-"  ⏺ reviewer  running · 0 tools · 0 tokens                                      "
-"❯ ⏺ scout     stored                                                            "
+"  owed                                                                          "
+"Sessions                                             Rooms                      "
+"  ⏺ project   what is in this workspace?             ❯ #design  2 seats · 1 owed"
+"  ⏺ reviewer  running · in #design · owes an answe…                             "
+"  ~ watcher   idle · in #design · listening · 300s                              "
+"  ⏺ scout     done · 0 tools · 0 tokens                                         "
 "╭──────────────────────────────────────────────────────────────────────────────╮"
 "│ > ask anything · / for commands · ! for shell                                │"
 "╰──────────────────────────────────────────────────────────────────────────────╯"

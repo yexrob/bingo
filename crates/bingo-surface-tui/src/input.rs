@@ -8,23 +8,19 @@
 use std::path::PathBuf;
 
 use bingo_sdk::{Input, Level, Origin, SessionId, SessionSelector, SessionSpec, SessionState};
-use crossterm::event::{
-    KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
-};
-use ratatui::layout::Position;
+use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 use crate::SURFACE_ID;
 use crate::clock::Now;
 use crate::commands::{self, Local};
 use crate::complete;
-use crate::cycle;
 use crate::effect::Effect;
 use crate::keys;
 use crate::pager;
 use crate::rail::{self, CardId, Pin};
 use crate::rewind::{self, Rewind};
+use crate::roster;
 use crate::search::Search;
-use crate::select::Cell;
 use crate::tree::{self, Tree};
 use crate::ui::{Open, Pending, Switcher, Ui};
 use crate::{panel, permission, views};
@@ -39,8 +35,6 @@ pub const NOTHING_RUNNING: &str = "no shell command is running";
 /// (ADR-0018 §6). A surface may not import a plugin (ADR-0001), so the name is
 /// the whole of the contract between them.
 const PROMOTE: &str = "bash.promote";
-/// Lines one notch of the wheel moves the transcript.
-const WHEEL: isize = 3;
 
 pub fn on_key(ui: &mut Ui, tree: &Tree, key: KeyEvent, now: Now) -> Vec<Effect> {
     if key.kind == KeyEventKind::Release {
@@ -50,9 +44,6 @@ pub fn on_key(ui: &mut Ui, tree: &Tree, key: KeyEvent, now: Now) -> Vec<Effect> 
     // `esc esc` needs no clock: any other key is what says the two were not
     // one gesture.
     ui.esc_armed &= key.code == KeyCode::Esc;
-    if let Some(effects) = cycling(ui, tree, key) {
-        return effects;
-    }
     let state = tree.viewed();
     if let Some(effects) = leaving(ui, state, key, now) {
         return effects;
@@ -124,132 +115,6 @@ fn chorded(key: KeyEvent) -> Option<char> {
         (KeyCode::Char(c), true) => Some(c),
         _ => None,
     }
-}
-
-/// One pure function from a mouse event to a list of effects, against the
-/// frame the last draw left behind: the wheel scrolls, a drag takes a run of
-/// cells, a click lands on a block, on a child's row, or on a card's option.
-pub fn on_mouse(ui: &mut Ui, tree: &Tree, mouse: MouseEvent, now: Now) -> Vec<Effect> {
-    match mouse.kind {
-        MouseEventKind::ScrollUp => scroll(ui, WHEEL, now),
-        MouseEventKind::ScrollDown => scroll(ui, -WHEEL, now),
-        MouseEventKind::Down(MouseButton::Left) => return pressed(ui, tree, mouse, now),
-        MouseEventKind::Drag(MouseButton::Left) => drag(ui, mouse),
-        _ => {}
-    }
-    Vec::new()
-}
-
-/// A press lands on whatever is under it: a card's option answers, a block
-/// takes the focus, opens what is folded under it and starts a run.
-fn pressed(ui: &mut Ui, tree: &Tree, mouse: MouseEvent, now: Now) -> Vec<Effect> {
-    if let Some(index) = card_option(ui, mouse) {
-        return answer(ui, tree, index, now);
-    }
-    if let Some(card) = rail_card(ui, mouse) {
-        ui.focus = Some(card);
-        return Vec::new();
-    }
-    let Some(cell) = transcript_cell(ui, mouse) else {
-        return Vec::new();
-    };
-    let block = ui.painted.borrow().blocks.at(cell.line);
-    // A row that spawned a session is that session's row: `⏎` steps in, and
-    // so does a click.
-    if let Some(session) = block.as_ref().and_then(|item| tree.spawned_by(item)) {
-        return vec![Effect::View(session.clone())];
-    }
-    if let Some(item) = &block {
-        toggle_fold(ui, item);
-    }
-    ui.select.block = block;
-    ui.select.start(cell);
-    Vec::new()
-}
-
-/// A click on a block opens what is folded under it, and a second click folds
-/// it again — a result, a thought, a notice alike. A *key* never means two
-/// directions (§7, M11e); a click on the same row is one gesture, and the
-/// direction it takes is the one the row is not already in.
-///
-/// It fills the set `ctrl+o` fills, so a block is open in one way only.
-fn toggle_fold(ui: &mut Ui, item: &bingo_sdk::ItemId) {
-    if !ui.expanded.remove(item) {
-        ui.expanded.insert(item.clone());
-    }
-}
-
-/// A drag takes the far end of the run with it.
-fn drag(ui: &mut Ui, mouse: MouseEvent) {
-    if let Some(cell) = transcript_cell(ui, mouse) {
-        ui.select.extend(cell);
-    }
-}
-
-/// Which option of the open card the pointer is on.
-fn card_option(ui: &Ui, mouse: MouseEvent) -> Option<usize> {
-    let painted = ui.painted.borrow();
-    let card = painted.card.as_ref()?;
-    let inside = card.area.contains(Position {
-        x: mouse.column,
-        y: mouse.row,
-    });
-    let row = usize::from(mouse.row.checked_sub(card.area.y + 1)?);
-    inside
-        .then(|| card.options.get(row).copied().flatten())
-        .flatten()
-}
-
-/// Answer the open interaction on the option a click landed on.
-fn answer(ui: &mut Ui, tree: &Tree, index: usize, now: Now) -> Vec<Effect> {
-    let Some((_, interaction)) = tree.open_interaction() else {
-        return Vec::new();
-    };
-    ui.dialog.focus = index;
-    ui.dialog.on_key(interaction, mouse_enter(), now)
-}
-
-/// What a click on a card row means: the row it landed on, chosen.
-fn mouse_enter() -> KeyEvent {
-    KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)
-}
-
-/// The rail card under the pointer, when it is over the rail.
-fn rail_card(ui: &Ui, mouse: MouseEvent) -> Option<CardId> {
-    let painted = ui.painted.borrow();
-    let area = painted.regions.rail?;
-    if !area.contains(Position {
-        x: mouse.column,
-        y: mouse.row,
-    }) {
-        return None;
-    }
-    let row = usize::from(mouse.row - area.y);
-    painted
-        .rail
-        .iter()
-        .find(|(_, rows)| rows.contains(&row))
-        .map(|(id, _)| id.clone())
-}
-
-/// The transcript cell under the pointer, when it is over the transcript.
-fn transcript_cell(ui: &Ui, mouse: MouseEvent) -> Option<Cell> {
-    let painted = ui.painted.borrow();
-    let region = painted.regions.transcript;
-    if !region.contains(Position {
-        x: mouse.column,
-        y: mouse.row,
-    }) {
-        return None;
-    }
-    let row = usize::from(mouse.row - region.y);
-    // A short transcript hangs from the foot of its region: the rows above it
-    // are padding and belong to no line.
-    let padding = region.height as usize - painted.height.min(region.height as usize);
-    Some(Cell {
-        line: painted.top + row.checked_sub(padding)?,
-        column: usize::from(mouse.column - region.x),
-    })
 }
 
 /// `ctrl+o` only ever opens further: the first press lifts the fold on the
@@ -671,93 +536,100 @@ fn step(ui: &mut Ui, by: isize, now: Now) {
     ui.scroll.show(hit.line, total, rows, now.instant);
 }
 
-/// The quick cycle's strip owns the arrows while it is up: `←`/`→` walk it,
-/// `↑` and `esc` give the status line back, and every other key gives it back
-/// and then means what it always meant — a letter still lands in the composer
-/// (design §3). `None` says the key was not the strip's.
-fn cycling(ui: &mut Ui, tree: &Tree, key: KeyEvent) -> Option<Vec<Effect>> {
-    if !ui.cycling {
-        return None;
-    }
-    match key.code {
-        KeyCode::Left => Some(walk(tree, -1)),
-        KeyCode::Right => Some(walk(tree, 1)),
-        // The gesture that opened it is not the one that closes it.
-        KeyCode::Down => Some(Vec::new()),
-        KeyCode::Up | KeyCode::Esc => {
-            ui.cycling = false;
-            Some(Vec::new())
-        }
-        _ => {
-            ui.cycling = false;
-            None
-        }
-    }
-}
-
-/// One step along the strip. The view goes with the highlight, so the
-/// transcript changes as a person walks: it is a switch, not a choice (§3).
-fn walk(tree: &Tree, by: isize) -> Vec<Effect> {
-    cycle::step(&tree.rows(), tree.view(), by)
-        .map(|next| vec![Effect::View(next)])
-        .unwrap_or_default()
-}
-
-/// `↓` on an empty composer is the quick cycle's gesture — but only where
-/// there is somewhere to go. Alone in the tree the key keeps the meaning it
-/// has always had rather than putting up a strip of one.
-fn opens_the_cycle(ui: &Ui, tree: &Tree) -> bool {
+/// `↓` on an empty composer is the list's other door — but only where there is
+/// somewhere to go. Alone in the tree the key keeps the meaning it has always
+/// had rather than putting up a list of one.
+fn opens_the_roster(ui: &Ui, tree: &Tree) -> bool {
     ui.composer.is_empty() && tree.rows().len() > 1
 }
 
-/// Open the switcher on the session in view, or close it again. What this
-/// attachment carries is on the card at once; what is only in the store lands
-/// when the read the opening spawns comes back, which is why the card goes up
-/// even where the tree is the root alone.
+/// Open the list on the session in view, or close it again. What this
+/// attachment carries is on the list at once; what is only in the store lands
+/// when the read the opening spawns comes back, which is why it goes up even
+/// where the tree is the root alone.
 fn toggle_switcher(ui: &mut Ui, tree: &Tree, now: Now) -> Vec<Effect> {
     if ui.layer.showing() {
         ui.layer.close(now.instant);
         return Vec::new();
     }
-    let selected = tree
-        .rows()
-        .iter()
-        .position(|row| row.session == tree.view())
-        .unwrap_or(0);
+    let rows = tree::roster(tree, &[]);
     ui.layer.show(
         Open::Switcher(Switcher {
-            selected,
+            cursor: roster::Cursor::on(&roster::columns(&rows), tree.view()),
             stored: Vec::new(),
+            // Where the walk started, so `esc` can put it back.
+            from: Some(tree.view().clone()),
         }),
         now.instant,
     );
     vec![Effect::ListStored]
 }
 
+/// The list owns the keyboard while it is up: `↑`/`↓` walk a column, `←`/`→`
+/// cross to the other, and either way the view goes with the cursor — walking
+/// the list *is* the switch, as the strip's walk was (§3). `⏎` settles on
+/// where the walk landed and `esc` gives back where it started.
 fn switcher(ui: &mut Ui, tree: &Tree, key: KeyEvent, now: Now) -> Vec<Effect> {
+    match walked(ui, tree, key) {
+        Some((cursor, chosen)) => walk_to(ui, tree, cursor, chosen),
+        None => settle(ui, key, now),
+    }
+}
+
+/// Where the arrows move the cursor, and the session that lands under it.
+/// `None` says the key was not one of the list's own.
+fn walked(ui: &Ui, tree: &Tree, key: KeyEvent) -> Option<(roster::Cursor, Option<SessionId>)> {
+    let Open::Switcher(open) = &ui.layer.open else {
+        return None;
+    };
+    let rows = tree::roster(tree, &open.stored);
+    let columns = roster::columns(&rows);
+    let cursor = match key.code {
+        KeyCode::Up => open.cursor.step(&columns, -1),
+        KeyCode::Down => open.cursor.step(&columns, 1),
+        KeyCode::Left | KeyCode::Right => open.cursor.cross(&columns),
+        _ => return None,
+    };
+    Some((cursor, cursor.row(&columns).map(|row| row.session.clone())))
+}
+
+/// Put the cursor there and show what it names. A session already on screen
+/// asks for no switch: the crossfade reports a change of place, and there was
+/// none.
+pub(crate) fn walk_to(
+    ui: &mut Ui,
+    tree: &Tree,
+    cursor: roster::Cursor,
+    chosen: Option<SessionId>,
+) -> Vec<Effect> {
+    if let Open::Switcher(open) = &mut ui.layer.open {
+        open.cursor = cursor;
+    }
+    chosen
+        .filter(|id| id != tree.view())
+        .map(|id| vec![Effect::View(id)])
+        .unwrap_or_default()
+}
+
+/// `⏎` keeps the session the walk landed on — it is already the one on screen,
+/// so settling is only closing the list. `esc` puts back the one it was opened
+/// from.
+fn settle(ui: &mut Ui, key: KeyEvent, now: Now) -> Vec<Effect> {
     let Open::Switcher(open) = &ui.layer.open else {
         return Vec::new();
     };
-    let rows = tree::roster(tree, &open.stored);
-    let last = rows.len().saturating_sub(1);
-    let chosen = rows.get(open.selected).map(|row| row.session.clone());
+    let opened_from = open.from.clone();
     match key.code {
-        KeyCode::Up => move_cursor(ui, |at| at.saturating_sub(1)),
-        KeyCode::Down => move_cursor(ui, |at| (at + 1).min(last)),
-        KeyCode::Esc => ui.layer.close(now.instant),
-        KeyCode::Enter => {
+        KeyCode::Enter => ui.layer.close(now.instant),
+        KeyCode::Esc => {
             ui.layer.close(now.instant);
-            return chosen.map(|id| vec![Effect::View(id)]).unwrap_or_default();
+            return opened_from
+                .map(|id| vec![Effect::View(id)])
+                .unwrap_or_default();
         }
         _ => {}
     }
     Vec::new()
-}
-
-fn move_cursor(ui: &mut Ui, to: impl FnOnce(usize) -> usize) {
-    if let Open::Switcher(open) = &mut ui.layer.open {
-        open.selected = to(open.selected);
-    }
 }
 
 /// The dropdown owns the arrows and the completion keys while it is open.
@@ -834,7 +706,9 @@ fn plain(ui: &mut Ui, tree: &Tree, key: KeyEvent, now: Now) -> Vec<Effect> {
         KeyCode::Enter => return enter(ui, tree, now),
         KeyCode::BackTab => return cycle_mode(ui, tree.viewed(), now),
         KeyCode::Up => history_or_line(ui, Step::Up),
-        KeyCode::Down if opens_the_cycle(ui, tree) => ui.cycling = true,
+        // The list's other door: `↓` on an empty box opens the same list
+        // `ctrl+g` does, with the cursor on the session already in view.
+        KeyCode::Down if opens_the_roster(ui, tree) => return toggle_switcher(ui, tree, now),
         KeyCode::Down => history_or_line(ui, Step::Down),
         KeyCode::PageUp => scroll(ui, ui.page() as isize, now),
         KeyCode::PageDown => scroll(ui, -(ui.page() as isize), now),
@@ -976,6 +850,7 @@ fn edit(ui: &mut Ui, change: impl FnOnce(&mut crate::composer::Composer)) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pointer::{WHEEL, on_mouse};
     use crate::test_support::*;
     use bingo_sdk::{Activation, Answer, SessionId, TurnId, TurnStatus};
     use crossterm::event::KeyCode;
@@ -1109,12 +984,20 @@ mod tests {
         assert!(ui.notices.is_empty(), "and it is silent about it");
     }
 
-    /// The row the switcher's cursor is on, when it is the layer that is open.
-    fn selected(ui: &Ui) -> Option<usize> {
+    /// Where the list's cursor is, when it is the layer that is open.
+    fn selected(ui: &Ui) -> Option<roster::Cursor> {
         match &ui.layer.open {
-            Open::Switcher(switcher) => Some(switcher.selected),
+            Open::Switcher(switcher) => Some(switcher.cursor),
             _ => None,
         }
+    }
+
+    /// A row of the sessions column, by its number.
+    fn at(index: usize) -> Option<roster::Cursor> {
+        Some(roster::Cursor {
+            side: roster::Side::Sessions,
+            at: index,
+        })
     }
 
     fn press(
@@ -1690,12 +1573,13 @@ mod tests {
             vec![Effect::ListStored],
             "the tree is on the card at once and the store is asked for the rest"
         );
-        assert_eq!(selected(&ui), Some(0), "it opens on the session in view");
-        press_tree(&mut ui, &tree, key(KeyCode::Down), now);
+        assert_eq!(selected(&ui), at(0), "it opens on the session in view");
         assert_eq!(
-            press_tree(&mut ui, &tree, key(KeyCode::Enter), now),
-            vec![Effect::View(child_id())]
+            walked_to(&mut ui, &tree, key(KeyCode::Down), now),
+            Some(child_id()),
+            "the walk is the switch"
         );
+        assert!(press_tree(&mut ui, &tree, key(KeyCode::Enter), now).is_empty());
         assert!(!ui.layer.showing());
     }
 
@@ -1738,12 +1622,25 @@ mod tests {
         for _ in 0..2 {
             press_tree(&mut ui, &tree, key(KeyCode::Down), now);
         }
-        assert_eq!(selected(&ui), Some(2), "the stored row is walked to");
-        assert_eq!(
-            press_tree(&mut ui, &tree, key(KeyCode::Enter), now),
-            vec![Effect::View(SessionId::from_raw("ses_7"))]
+        assert_eq!(selected(&ui), at(2), "the stored row is walked to");
+        assert!(
+            press_tree(&mut ui, &tree, key(KeyCode::Enter), now).is_empty(),
+            "the walk already showed it; `⏎` only settles on where it landed"
         );
         assert!(!ui.layer.showing());
+    }
+
+    /// The session a walk switched the view to, when it switched it.
+    fn walked_to(
+        ui: &mut Ui,
+        tree: &Tree,
+        key: crossterm::event::KeyEvent,
+        now: Now,
+    ) -> Option<SessionId> {
+        match press_tree(ui, tree, key, now).first() {
+            Some(Effect::View(id)) => Some(id.clone()),
+            _ => None,
+        }
     }
 
     #[test]
@@ -1752,78 +1649,96 @@ mod tests {
         tree.show(&child_id());
         let (mut ui, now) = scene();
         press_tree(&mut ui, &tree, ctrl('g'), now);
-        assert_eq!(selected(&ui), Some(1));
-        assert_eq!(
-            press_tree(&mut ui, &tree, key(KeyCode::Enter), now),
-            vec![Effect::View(child_id())]
+        assert_eq!(selected(&ui), at(1));
+        assert!(
+            press_tree(&mut ui, &tree, key(KeyCode::Enter), now).is_empty(),
+            "it is already the session on screen, so settling on it asks for nothing"
         );
     }
 
-    // ---- the quick cycle ------------------------------------------------
+    // ---- one list, two doors --------------------------------------------
 
+    /// `↓` on an empty composer opens the same list `ctrl+g` does, and asks
+    /// the store the same question: they are one gesture with two keys, so
+    /// what they leave behind is one state.
     #[test]
-    fn down_on_an_empty_line_puts_up_the_strip_and_the_arrows_switch_the_view() {
+    fn down_on_an_empty_line_opens_the_list_ctrl_g_opens() {
         let tree = with_child(vec![]);
-        let (mut ui, now) = scene();
-        assert!(press_tree(&mut ui, &tree, key(KeyCode::Down), now).is_empty());
-        assert!(ui.cycling, "the strip has the status line");
-        assert!(!ui.layer.showing(), "and nothing is over the frame");
-
+        let (mut down, now) = scene();
+        let (mut chord, _) = scene();
         assert_eq!(
-            press_tree(&mut ui, &tree, key(KeyCode::Right), now),
-            vec![Effect::View(child_id())],
-            "walking is switching: the transcript changes as the highlight moves"
+            press_tree(&mut down, &tree, key(KeyCode::Down), now),
+            vec![Effect::ListStored]
         );
-        assert!(ui.cycling, "and the strip stays up to be walked again");
+        press_tree(&mut chord, &tree, ctrl('g'), now);
+        assert_eq!(down.layer.open, chord.layer.open);
+        assert!(down.layer.showing());
     }
 
-    /// The walk goes round, so one key reaches the other end of a short tree.
+    /// Walking is switching: the transcript changes as the cursor moves, as
+    /// the strip's walk did (§3).
     #[test]
-    fn the_strip_wraps_at_both_ends() {
+    fn walking_the_list_switches_the_view_as_the_cursor_moves() {
         let tree = with_child(vec![]);
         let (mut ui, now) = scene();
         press_tree(&mut ui, &tree, key(KeyCode::Down), now);
         assert_eq!(
-            press_tree(&mut ui, &tree, key(KeyCode::Left), now),
-            vec![Effect::View(child_id())],
-            "back past the first chip is the last one"
+            walked_to(&mut ui, &tree, key(KeyCode::Down), now),
+            Some(child_id()),
+            "the row below the root is the child, and the view goes with it"
         );
+        assert_eq!(selected(&ui), at(1));
+        assert!(ui.layer.showing(), "and the list stays up to be walked on");
     }
 
+    /// A column is walked to its ends and stops there — the other column is a
+    /// step sideways, so there is nothing to wrap round to.
     #[test]
-    fn up_esc_and_typing_all_give_the_status_line_back() {
+    fn a_column_stops_at_its_ends() {
         let tree = with_child(vec![]);
         let (mut ui, now) = scene();
-        let open = |ui: &mut Ui| {
-            press_tree(ui, &tree, key(KeyCode::Down), now);
-        };
-        open(&mut ui);
+        press_tree(&mut ui, &tree, ctrl('g'), now);
         press_tree(&mut ui, &tree, key(KeyCode::Up), now);
-        assert!(!ui.cycling);
-        assert!(ui.composer.is_empty(), "and up recalled nothing on its way");
-
-        open(&mut ui);
-        press_tree(&mut ui, &tree, key(KeyCode::Esc), now);
-        assert!(!ui.cycling);
-        assert!(
-            !ui.esc_armed,
-            "the esc that closed it is not half a gesture"
-        );
-
-        open(&mut ui);
-        press_tree(&mut ui, &tree, typed('h'), now);
-        assert!(!ui.cycling);
-        assert_eq!(ui.composer.text(), "h", "and the letter is typed as ever");
+        assert_eq!(selected(&ui), at(0), "the first row is the first row");
+        for _ in 0..4 {
+            press_tree(&mut ui, &tree, key(KeyCode::Down), now);
+        }
+        assert_eq!(selected(&ui), at(1), "and the last is the last");
     }
 
-    /// `esc` on the strip closes the strip and nothing else: it is the one
-    /// row a person opened, so it is the one thing that press takes away.
+    /// `esc` puts back the session the list was opened from, however far the
+    /// walk went; `⏎` keeps the one it landed on.
     #[test]
-    fn esc_on_the_strip_does_not_reach_the_turn() {
+    fn esc_gives_back_where_the_walk_started_and_enter_keeps_where_it_ended() {
+        let tree = with_child(vec![]);
+        let (mut ui, now) = scene();
+        press_tree(&mut ui, &tree, ctrl('g'), now);
+        walked_to(&mut ui, &tree, key(KeyCode::Down), now);
+        assert_eq!(
+            walked_to(&mut ui, &tree, key(KeyCode::Esc), now),
+            Some(tree.root_id().clone()),
+            "back to the session the list was opened from"
+        );
+        assert!(!ui.layer.showing());
+
+        press_tree(&mut ui, &tree, ctrl('g'), now);
+        walked_to(&mut ui, &tree, key(KeyCode::Down), now);
+        assert!(
+            press_tree(&mut ui, &tree, key(KeyCode::Enter), now).is_empty(),
+            "the walked-to session is already on screen"
+        );
+        assert!(!ui.layer.showing());
+    }
+
+    /// `esc` on the list closes the list and nothing else: it is the one thing
+    /// a person opened, so it is the one thing that press takes away.
+    #[test]
+    fn esc_on_the_list_does_not_reach_the_turn() {
         let tree = with_child(vec![frame(2, started("trn_1"))]);
         let (mut ui, now) = scene();
         press_tree(&mut ui, &tree, key(KeyCode::Down), now);
-        assert!(press_tree(&mut ui, &tree, key(KeyCode::Esc), now).is_empty());
+        press_tree(&mut ui, &tree, key(KeyCode::Esc), now);
+        assert!(!ui.layer.showing());
         assert_eq!(
             press_tree(&mut ui, &tree, key(KeyCode::Esc), now),
             vec![Effect::Interrupt],
@@ -1832,14 +1747,14 @@ mod tests {
     }
 
     #[test]
-    fn down_keeps_its_old_meaning_where_there_is_nowhere_to_cycle_to() {
+    fn down_keeps_its_old_meaning_where_there_is_nowhere_to_walk_to() {
         let (mut ui, now) = scene();
         line(&mut ui, &state(), "the first thing", now);
         press(&mut ui, &state(), key(KeyCode::Up), now);
         assert_eq!(ui.composer.text(), "the first thing");
         press(&mut ui, &state(), key(KeyCode::Down), now);
         assert!(ui.composer.is_empty(), "the walk came back to the draft");
-        assert!(!ui.cycling, "and a session alone put up no strip");
+        assert!(!ui.layer.showing(), "and a session alone opened no list");
     }
 
     #[test]
@@ -1848,7 +1763,7 @@ mod tests {
         let (mut ui, now) = scene();
         write(&mut ui, tree.viewed(), "half a thought", now);
         press_tree(&mut ui, &tree, key(KeyCode::Down), now);
-        assert!(!ui.cycling);
+        assert!(!ui.layer.showing());
     }
 
     #[test]

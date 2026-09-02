@@ -747,10 +747,6 @@ mod tests {
                 "text",
                 &[
                     "composer.rs",
-                    // The session a person is on, in the strip that takes the
-                    // status line: weight rather than hue, so `NO_COLOR` still
-                    // says which of the chips is the one on screen.
-                    "cycle.rs",
                     "dialog.rs",
                     "markdown.rs",
                     "pager.rs",
@@ -758,10 +754,13 @@ mod tests {
                     "preview.rs",
                     "rail.rs",
                     "rewind.rs",
+                    // The row a person is on in the one list of sessions:
+                    // weight rather than hue, so `NO_COLOR` still says which
+                    // row the keyboard is talking to.
+                    "roster.rs",
                     "search.rs",
                     "status.rs",
                     "transcript.rs",
-                    "tree.rs",
                     "view.rs",
                     "views/actions.rs",
                     "views/keyvalue.rs",
@@ -778,7 +777,6 @@ mod tests {
                 "dim",
                 &[
                     "composer.rs",
-                    "cycle.rs",
                     "dialog.rs",
                     "keys.rs",
                     "layers.rs",
@@ -788,6 +786,7 @@ mod tests {
                     "preview.rs",
                     "rail.rs",
                     "rewind.rs",
+                    "roster.rs",
                     "search.rs",
                     "status.rs",
                     "transcript.rs",
@@ -843,7 +842,7 @@ mod tests {
             ("comet", &["transcript.rs"]),
             ("fading", &["status.rs"]),
             ("warming", &["status.rs"]),
-            ("attention", &["status.rs", "transcript.rs", "tree.rs"]),
+            ("attention", &["roster.rs", "status.rs", "transcript.rs"]),
             // Highlighted code reaches the table through one door, so no view
             // has to know that a keyword and the mode badge share a colour.
             ("ink", &["highlight.rs"]),

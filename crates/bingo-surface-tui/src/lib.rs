@@ -12,8 +12,9 @@
 //!   including a panic.
 //! - [`run`] is the loop: `select!` over the keyboard, the frame stream, a
 //!   tick, and the results of the handful of host calls it spawns.
-//! - [`input::on_key`] is pure: it mutates [`ui::Ui`] and returns
-//!   [`effect::Effect`]s, so every binding is a test with no runtime in it.
+//! - [`input::on_key`] and [`pointer::on_mouse`] are pure: they mutate
+//!   [`ui::Ui`] and return [`effect::Effect`]s, so every binding is a test
+//!   with no runtime in it.
 //! - [`frame::regions`] cuts the screen into its regions and [`view::draw`]
 //!   fills them; the transcript is what is left once the input box and the
 //!   status line have taken theirs, so nothing below the transcript moves.
@@ -27,8 +28,9 @@
 //!   [`keys`], [`permission`], [`paths`], [`welcome`] and [`wrap`] are the
 //!   bricks those stand on, and [`theme`] is the one table of tokens and
 //!   glyphs they draw with.
-//! - [`status`] is the one line of furniture, and [`cycle`] is the strip of
-//!   sessions that takes it while `↓` has it open.
+//! - [`status`] is the one line of furniture, and [`roster`] is the one list
+//!   of sessions that `↓` and `ctrl+g` both open, with [`seats`] reading what
+//!   a room says about the members in it.
 //! - [`window`] is what every list a cursor walks draws when it outgrows its
 //!   room: the rows around the cursor, and a `…` at each end it cut.
 //!
@@ -43,7 +45,6 @@ mod clock;
 mod commands;
 mod complete;
 mod composer;
-mod cycle;
 mod dialog;
 mod effect;
 mod frame;
@@ -57,12 +58,15 @@ mod pager;
 mod panel;
 mod paths;
 mod permission;
+mod pointer;
 mod preview;
 mod rail;
 mod rewind;
+mod roster;
 mod run;
 mod scroll;
 mod search;
+mod seats;
 mod select;
 mod status;
 mod terminal;

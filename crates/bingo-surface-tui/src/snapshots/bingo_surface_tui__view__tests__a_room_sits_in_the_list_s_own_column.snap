@@ -1,7 +1,13 @@
 ---
 source: crates/bingo-surface-tui/src/view.rs
-expression: with_strip
+assertion_line: 1667
+expression: screen
 ---
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
 "                                                                                "
 "                                                                                "
 "                                                                                "
@@ -14,15 +20,10 @@ expression: with_strip
 "│                                                                              │"
 "│   /help for help · /login codex to use a subscription                        │"
 "│   cwd: /tmp/project                                                          │"
-"╰──────────────────────────────────────────────────────────────────────────────╯"
-"                                                                                "
-"> have it reviewed                                                              "
-"                                                                                "
-"⏺ reviewer(review the diff)                                                     "
-"  ⎿  Running… 0 tools · 0 tokens                                                "
-"                                                                                "
-"                                                                                "
+"Sessions                                                      Rooms             "
+"  ⏺ project   idle                                              #design  0 seats"
+"❯ ⏺ reviewer  idle                                                              "
 "╭──────────────────────────────────────────────────────────────────────────────╮"
 "│ > ask anything · / for commands · ! for shell                                │"
 "╰──────────────────────────────────────────────────────────────────────────────╯"
-"❯ ⏺ project  ⏺ reviewer                                                         "
+"? for shortcuts                                                           fake-1"

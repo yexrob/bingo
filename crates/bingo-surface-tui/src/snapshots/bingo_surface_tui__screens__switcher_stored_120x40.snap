@@ -1,5 +1,6 @@
 ---
 source: crates/bingo-surface-tui/src/screens.rs
+assertion_line: 29
 expression: "draw_tree(120, 40, tree, ui, now)"
 ---
 "                                                                                                                        "
@@ -35,9 +36,9 @@ expression: "draw_tree(120, 40, tree, ui, now)"
 "> have it reviewed                                                                                                      "
 "                                                                                                                        "
 "⏺ reviewer(review the diff)                                                                                             "
-"  project ⏺ idle                                                                                                        "
-"  reviewer ⏺ running                                                                                                    "
-"❯ scout ⏺ stored                                                                                                        "
+"  ⏺ project   have it reviewed                                                                                          "
+"  ⏺ reviewer  running · 3 tools · 1.2k tokens                                                                           "
+"❯ ⏺ scout     stored                                                                                                    "
 "╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮"
 "│ > ask anything · / for commands · ! for shell                                                                        │"
 "╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯"

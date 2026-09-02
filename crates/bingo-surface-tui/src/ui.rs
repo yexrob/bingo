@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use std::collections::BTreeSet;
 
 use bingo_sdk::{
-    Action, CommandSpec, ItemId, Level, Seq, SessionState, SessionSummary, TurnId, View,
+    Action, CommandSpec, ItemId, Level, Seq, SessionId, SessionState, SessionSummary, TurnId, View,
 };
 
 use crate::blocks::Blocks;
@@ -26,6 +26,7 @@ use crate::layers::{self, Reveal};
 use crate::pager::Pager;
 use crate::rail::{CardId, Pin};
 use crate::rewind::Rewind;
+use crate::roster;
 use crate::scroll::Scroll;
 use crate::search::Search;
 use crate::select::Select;
@@ -115,9 +116,38 @@ pub struct Painted {
     pub top: usize,
     /// The card on the screen, when one is open.
     pub card: Option<Card>,
+    /// The list of sessions on the screen, when it is open.
+    pub list: Option<Listed>,
     /// Where each rail card landed, in the rail's own rows: what a click on
     /// the rail is answered against.
     pub rail: Vec<(CardId, std::ops::Range<usize>)>,
+}
+
+/// The list of sessions as it was drawn: where its rows are, where its two
+/// columns part, and which row of the list each drawn line is — what a click
+/// on it needs to know. A memo of the draw, like [`Card`].
+#[derive(Clone, Debug, Default)]
+pub struct Listed {
+    pub area: ratatui::layout::Rect,
+    pub roster: roster::Roster,
+}
+
+impl Listed {
+    /// The row a pointer is over: which line of the list it landed on, and
+    /// which of the two columns, decided by the split the frame drew.
+    pub fn at(&self, column: u16, row: u16) -> Option<roster::Cursor> {
+        let line = row.checked_sub(self.area.y)?;
+        let (left, right) = self.roster.rows.get(usize::from(line))?;
+        let across = self.roster.split.is_some_and(|split| {
+            column
+                .checked_sub(self.area.x)
+                .is_some_and(|at| at >= split)
+        });
+        match across {
+            true => *right,
+            false => *left,
+        }
+    }
 }
 
 /// A card as it was drawn: where its box is, and which option each of its
@@ -137,15 +167,19 @@ pub struct Catalogs {
     pub values: commands::Catalogues,
 }
 
-/// The `ctrl+g` switcher over the sessions in the tree and the root's stored
-/// descendants. Its rows are derived at render time; what is the surface's
-/// own is the cursor and the one listing the host answered with when the card
-/// opened — nothing here watches the store.
+/// The one list of sessions, opened by `↓` on an empty composer or by
+/// `ctrl+g`. Its rows are derived at render time; what is the surface's own is
+/// where the cursor is, the one listing the host answered with when the list
+/// opened, and where the gesture started — nothing here watches the store.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Switcher {
-    pub selected: usize,
+    pub cursor: roster::Cursor,
     /// Empty until the read the opening spawned lands.
     pub stored: Vec<SessionSummary>,
+    /// The session the list was opened from: what `esc` gives back after a
+    /// walk has switched the view. A fact about the gesture, like
+    /// [`Ui::esc_armed`] — not a second copy of what the tree is showing.
+    pub from: Option<SessionId>,
 }
 
 /// What is over the frame. One at a time: focus moves into a layer and back
@@ -285,10 +319,6 @@ pub struct Ui {
     pub menu: Menu,
     /// `ctrl+f`: the query in the status line's row, while it is there.
     pub search: Option<Search>,
-    /// `↓` on an empty composer: the quick cycle's strip has the status line
-    /// (§3). Which chip it marks is the session the tree is showing, so being
-    /// open is the whole of what there is to remember.
-    pub cycling: bool,
     /// What the transcript is holding: a focused block, a run of cells.
     pub select: Select,
     pub notices: Vec<Notice>,
@@ -349,7 +379,6 @@ impl Ui {
             layer: Layer::shut(now),
             menu: Menu::default(),
             search: None,
-            cycling: false,
             select: Select::default(),
             notices: Vec::new(),
             block: None,

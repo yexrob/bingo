@@ -10,9 +10,8 @@
 //! Where the window sits is derived from the cursor and nothing else, so
 //! walking a list needs no remembered scroll to keep in step with it.
 //!
-//! [`crate::cycle`] does this for the quick cycle's strip, sideways. That one
-//! grows a chip at a time because chips have their own widths; rows are all
-//! one high, so this is arithmetic.
+//! [`crate::roster`] draws each of its two columns through this, so the row
+//! the keyboard is on is on the screen whichever column it is in.
 
 use std::ops::Range;
 

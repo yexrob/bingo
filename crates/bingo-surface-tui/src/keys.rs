@@ -45,8 +45,8 @@ pub const BINDINGS: &[Binding] = &[
         description: "prompt history at the first and last line",
     },
     Binding {
-        keys: "left/right",
-        description: "the session strip · down opens it",
+        keys: "down",
+        description: "walk the sessions (empty box)",
     },
     Binding {
         keys: "ctrl+a/e",
@@ -66,7 +66,7 @@ pub const BINDINGS: &[Binding] = &[
     },
     Binding {
         keys: "ctrl+g",
-        description: "switch to a sub-agent's view",
+        description: "the same list · ↑↓ a column · ←→ across",
     },
     Binding {
         keys: "ctrl+t",

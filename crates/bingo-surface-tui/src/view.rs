@@ -16,9 +16,9 @@ use unicode_width::UnicodeWidthStr;
 use crate::clock::{self, Now};
 use crate::frame::{self, Demand, Regions};
 use crate::tree::{self, Tree};
-use crate::ui::{Card, Open, Picker, Switcher, Ui};
+use crate::ui::{Card, Listed, Open, Picker, Switcher, Ui};
 use crate::{
-    composer as prompt, cycle, dialog, keys, layers, pager, panel, rail, rewind, search, select,
+    composer as prompt, dialog, keys, layers, pager, panel, rail, rewind, roster, search, select,
     status, theme, transcript, views, window, wrap,
 };
 
@@ -120,18 +120,17 @@ fn inner_width(state: &SessionState, width: usize) -> usize {
         .max(1)
 }
 
-/// The one line of furniture: the status line, or what has taken its row —
-/// a search's query, the quick cycle's strip of sessions. All three are one
-/// row, so what a person opens never moves anything above it (§3).
+/// The one line of furniture: the status line, or what has taken its row — a
+/// search's query. Both are one row, so what a person opens never moves
+/// anything above it (§3).
 fn render_status(tree: &Tree, ui: &Ui, frame: &mut Frame, area: Rect, now: Now) {
     if area.height == 0 {
         return;
     }
     let width = area.width as usize;
-    let line = match (ui.search.as_ref(), ui.cycling) {
-        (Some(search), _) => search::row(search),
-        (None, true) => cycle::strip(&tree.rows(), tree.view(), width),
-        (None, false) => status::line(tree, ui, width, now),
+    let line = match ui.search.as_ref() {
+        Some(search) => search::row(search),
+        None => status::line(tree, ui, width, now),
     };
     frame.render_widget(Paragraph::new(vec![line]), area);
 }
@@ -167,7 +166,10 @@ fn layers(tree: &Tree, ui: &Ui, frame: &mut Frame, regions: Regions, now: Now) {
         ]
         .concat(),
     );
-    ui.painted.borrow_mut().card = None;
+    let mut painted = ui.painted.borrow_mut();
+    painted.card = None;
+    painted.list = None;
+    drop(painted);
     match ui.layer.drawn(now) {
         Some(reveal) => layer(tree, ui, frame, above, reveal, width, now),
         None => card(tree, ui, frame, regions, now),
@@ -191,7 +193,9 @@ fn layer(
     match &ui.layer.open {
         Open::Nothing => {}
         // A dropdown above the input box, like the `/` menu: nothing dims.
-        Open::Switcher(switcher) => over(frame, above, switcher_lines(tree, switcher, now, rows)),
+        Open::Switcher(switcher) => {
+            over(frame, above, switcher_lines(tree, ui, switcher, now, above))
+        }
         Open::Help => sheet(frame, above, help(ui, width), reveal),
         Open::Panel => sheet(
             frame,
@@ -598,12 +602,34 @@ fn help(ui: &Ui, width: usize) -> Vec<Line<'static>> {
     out
 }
 
-/// The `ctrl+g` list: the root and its agents, with what each is doing, in the
-/// rows the dropdown has for them.
-fn switcher_lines(tree: &Tree, switcher: &Switcher, now: Now, rows: usize) -> Vec<Line<'static>> {
-    let roster = tree::roster(tree, &switcher.stored);
-    let lines = tree::switcher_lines(&roster, switcher.selected, now);
-    window::around(lines, switcher.selected, rows)
+/// The one list of sessions, in the room the dropdown has for it. Where each
+/// of its rows landed is kept for the pointer, the way a card's options are.
+fn switcher_lines(
+    tree: &Tree,
+    ui: &Ui,
+    switcher: &Switcher,
+    now: Now,
+    above: Rect,
+) -> Vec<Line<'static>> {
+    let rows = tree::roster(tree, &switcher.stored);
+    let drawn = roster::lines(
+        tree,
+        &rows,
+        switcher.cursor,
+        usize::from(above.width),
+        usize::from(above.height),
+        now,
+    );
+    let height = u16::try_from(drawn.lines.len()).unwrap_or(u16::MAX);
+    ui.painted.borrow_mut().list = Some(Listed {
+        area: Rect {
+            y: above.bottom().saturating_sub(height),
+            height,
+            ..above
+        },
+        roster: drawn.clone(),
+    });
+    drawn.lines
 }
 
 /// The `Resume` sheet: its title, and the sessions under it in the rows left.
@@ -1488,6 +1514,14 @@ mod tests {
         insta::assert_snapshot!(screen);
     }
 
+    /// The cursor on a row of the sessions column, by its number.
+    fn on(at: usize) -> crate::roster::Cursor {
+        crate::roster::Cursor {
+            side: crate::roster::Side::Sessions,
+            at,
+        }
+    }
+
     #[test]
     fn the_switcher_lists_the_root_and_its_agents() {
         let tree = spawned(vec![child_frame(2, opened(child_permission()))]);
@@ -1495,7 +1529,7 @@ mod tests {
         shown(
             &mut ui,
             Open::Switcher(Switcher {
-                selected: 1,
+                cursor: on(1),
                 ..Default::default()
             }),
             now,
@@ -1514,39 +1548,46 @@ mod tests {
         shown(
             &mut ui,
             Open::Switcher(Switcher {
-                selected: 2,
+                cursor: on(2),
                 stored: vec![scout.clone()],
+                ..Default::default()
             }),
             now,
         );
         let mut tree = spawned(vec![child_frame(2, started("trn_9"))]);
         let asleep = render_tree(&tree, &ui, now);
-        assert!(asleep.contains("scout ⏺ stored"), "{asleep}");
+        assert!(asleep.contains("⏺ scout"), "{asleep}");
+        assert!(asleep.contains("stored"), "{asleep}");
         insta::assert_snapshot!("switcher_row_stored", asleep);
 
         tree.apply(&woken(1, scout));
         let awake = render_tree(&tree, &ui, now);
         assert!(!awake.contains("stored"), "{awake}");
-        assert!(awake.contains("scout ⏺ idle"), "{awake}");
+        assert!(awake.contains("⏺ scout"), "{awake}");
         insta::assert_snapshot!("switcher_row_live", awake);
     }
 
-    /// The quick cycle is the status line's other content, so opening it must
-    /// move nothing: every row but the last is the row it already was (§3).
+    /// The list is a layer, not a row: it covers the tail of the transcript
+    /// like every dropdown, and the input box and the status line under it do
+    /// not move (§3, layers not reflows).
     #[test]
-    fn the_strip_takes_the_status_lines_row_and_moves_nothing_else() {
+    fn the_list_covers_the_transcript_and_moves_nothing_under_it() {
         let tree = spawned(vec![child_frame(2, started("trn_9"))]);
         let (mut ui, now) = scene();
         let before = render_tree(&tree, &ui, now);
-        ui.cycling = true;
-        let with_strip = render_tree(&tree, &ui, now);
+        shown(&mut ui, Open::Switcher(Switcher::default()), now);
+        let with_list = render_tree(&tree, &ui, now);
 
         let rows = |screen: &str| screen.lines().map(str::to_string).collect::<Vec<_>>();
-        let (was, is) = (rows(&before), rows(&with_strip));
+        let (was, is) = (rows(&before), rows(&with_list));
         assert_eq!(was.len(), is.len(), "the frame keeps its rows");
-        assert_eq!(was[..was.len() - 1], is[..is.len() - 1], "nothing jumps");
-        assert!(is.last().is_some_and(|row| row.contains("⏺ project")));
-        insta::assert_snapshot!(with_strip);
+        assert_eq!(
+            was[was.len() - 4..],
+            is[is.len() - 4..],
+            "the box and the one line of furniture stay where they were"
+        );
+        assert!(is.iter().any(|row| row.contains("❯ ⏺ project")));
+        insta::assert_snapshot!(with_list);
     }
 
     // ---- a session nothing answers --------------------------------------
@@ -1604,8 +1645,10 @@ mod tests {
         insta::assert_snapshot!(screen);
     }
 
+    /// A room answers nothing, so it is not among the sessions that do: it
+    /// has the other column, under its own name.
     #[test]
-    fn a_room_sits_in_the_switcher_with_no_status() {
+    fn a_room_sits_in_the_list_s_own_column() {
         let mut tree = room(vec![child_frame(1, announced("reviewer"))]);
         let root = tree.root_id().clone();
         tree.show(&root);
@@ -1613,12 +1656,16 @@ mod tests {
         shown(
             &mut ui,
             Open::Switcher(Switcher {
-                selected: 1,
+                cursor: on(1),
                 ..Default::default()
             }),
             now,
         );
-        insta::assert_snapshot!(render_tree(&tree, &ui, now));
+        let screen = render_tree(&tree, &ui, now);
+        assert!(screen.contains("Sessions"), "{screen}");
+        assert!(screen.contains("Rooms"), "{screen}");
+        assert!(screen.contains("#design"), "{screen}");
+        insta::assert_snapshot!(screen);
     }
 
     // ---- the plugin-state panel -----------------------------------------

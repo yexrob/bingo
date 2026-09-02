@@ -18,9 +18,7 @@ use bingo_sdk::{
     Applied, Driver, Event, Frame, Interaction, ItemBody, ItemId, SessionId, SessionState,
     SessionSummary,
 };
-use ratatui::text::{Line, Span};
 
-use crate::clock::Now;
 use crate::theme;
 
 /// The child a tool call spawned, by the item that called it. The child's own
@@ -126,6 +124,12 @@ impl Tree {
     /// Root first, then the children in id order.
     pub fn sessions(&self) -> impl Iterator<Item = &SessionState> {
         std::iter::once(&self.root).chain(self.children.values())
+    }
+
+    /// The state of one session this attachment carries. A row the store
+    /// answered with names a session that is not here, and gets `None`.
+    pub fn state(&self, session: &SessionId) -> Option<&SessionState> {
+        self.sessions().find(|state| &state.summary.id == session)
     }
 
     /// Fold a frame into the session it names. A child announces itself with
@@ -260,12 +264,14 @@ fn reaches(root: &SessionId, summary: &SessionSummary, listed: &[SessionSummary]
 }
 
 /// A session this process has not opened: what it is called, and that it is
-/// not here. What it was doing is the journal's business, not a row's.
+/// not here. What it was doing is the journal's business, not a row's — and a
+/// room answers nothing whether it is here or not, so it reports no status
+/// either way and the list puts it where every other room goes.
 fn stored_row(summary: &SessionSummary) -> Row<'_> {
     Row {
         session: &summary.id,
         name: name_of(summary),
-        status: Some(Status::Stored),
+        status: (summary.driver != Driver::Log).then_some(Status::Stored),
         attention: false,
     }
 }
@@ -317,8 +323,30 @@ pub fn activity(state: &SessionState) -> Option<String> {
     }
 }
 
+/// The first thing a session was asked, as a row says it: the opening line of
+/// the first thing put to it — a person's own words at the root, the prompt a
+/// spawn carried in a sub-agent. A session nobody has asked anything says
+/// nothing rather than a placeholder.
+pub fn brief(state: &SessionState) -> Option<String> {
+    state.items.iter().find_map(|item| match &item.body {
+        ItemBody::User { parts, .. } => opening(parts),
+        _ => None,
+    })
+}
+
+/// The first line with something on it, of everything a message said in text.
+fn opening(parts: &[bingo_sdk::ContentPart]) -> Option<String> {
+    parts
+        .iter()
+        .filter_map(bingo_sdk::ContentPart::as_text)
+        .flat_map(|text| text.lines())
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(str::to_string)
+}
+
 /// `3 tools · 1.2k tokens`.
-fn spent(state: &SessionState) -> String {
+pub fn spent(state: &SessionState) -> String {
     let tools = state
         .items
         .iter()
@@ -334,7 +362,7 @@ fn spent(state: &SessionState) -> String {
 
 /// How long it has been at it: the first item it started to the last it
 /// finished, which is the only clock a client has for somebody else's work.
-fn seconds(state: &SessionState) -> i64 {
+pub fn seconds(state: &SessionState) -> i64 {
     let first = state.items.first().map(|item| item.started_at);
     let last = state
         .items
@@ -352,42 +380,6 @@ fn thousands(n: u64) -> String {
         true => n.to_string(),
         false => format!("{:.1}k", n as f64 / 1000.0),
     }
-}
-
-/// The `ctrl+g` dropdown: one row per session in the tree, the one the
-/// keyboard is on marked by the cursor. Which rows exist is the tree's; where
-/// the dropdown is drawn is the frame's.
-pub fn switcher_lines(rows: &[Row<'_>], selected: usize, now: Now) -> Vec<Line<'static>> {
-    rows.iter()
-        .enumerate()
-        .map(|(index, row)| switcher_line(row, index == selected, now))
-        .collect()
-}
-
-fn switcher_line(row: &Row<'_>, selected: bool, now: Now) -> Line<'static> {
-    let name = if selected {
-        theme::text()
-    } else {
-        theme::dim()
-    };
-    let mut spans = vec![
-        theme::cursor_span(selected),
-        Span::styled(row.name.clone(), name),
-    ];
-    if let Some(status) = row.status {
-        spans.push(Span::styled(
-            format!(" {}", theme::bullet()),
-            bullet_style(row.status, row.attention),
-        ));
-        spans.push(Span::styled(format!(" {}", status.label()), theme::dim()));
-    }
-    if row.attention {
-        spans.push(Span::styled(
-            " · needs you".to_string(),
-            theme::attention(now),
-        ));
-    }
-    Line::from(spans)
 }
 
 /// A session's bullet takes the colour a tool row in the same state takes, and
@@ -570,25 +562,51 @@ mod tests {
         assert_eq!(activity(asking).as_deref(), Some("Needs you"));
     }
 
+    /// What a row says of a session that has not run yet: the thing it was
+    /// asked, which is the whole of what there is to know about it.
     #[test]
-    fn the_switcher_lists_one_session_a_row_and_marks_the_one_it_is_on() {
+    fn the_brief_is_the_first_line_of_the_first_thing_a_session_was_asked() {
+        let asked = folded(vec![
+            frame(
+                1,
+                Event::ItemCompleted {
+                    item: user("itm_1", "\n  what is in this workspace?\nand why\n"),
+                },
+            ),
+            frame(
+                2,
+                Event::ItemCompleted {
+                    item: user("itm_2", "write me a note"),
+                },
+            ),
+        ]);
+        assert_eq!(
+            brief(&asked).as_deref(),
+            Some("what is in this workspace?"),
+            "the first ask, and one line of it"
+        );
+        assert_eq!(brief(&state()), None, "a session nobody has asked anything");
+    }
+
+    #[test]
+    fn the_rows_are_the_root_first_and_the_rest_in_id_order() {
         let mut tree = Tree::new(state());
         for frame in busy_child("reviewer") {
             tree.apply(&frame);
         }
         tree.apply(&log_frame(9, log_announced("#design")));
-        let drawn: Vec<String> = switcher_lines(&tree.rows(), 1, scene().1)
-            .iter()
-            .map(ToString::to_string)
+        let named: Vec<(String, Option<Status>)> = tree
+            .rows()
+            .into_iter()
+            .map(|row| (row.name, row.status))
             .collect();
         assert_eq!(
-            drawn,
+            named,
             vec![
-                "  project ⏺ idle".to_string(),
-                "❯ #design".to_string(),
-                "  reviewer ⏺ running".to_string(),
-            ],
-            "the root first, then the rest in id order"
+                ("project".to_string(), Some(Status::Idle)),
+                ("#design".to_string(), None),
+                ("reviewer".to_string(), Some(Status::Running)),
+            ]
         );
     }
 
@@ -684,23 +702,22 @@ mod tests {
     }
 
     #[test]
-    fn a_stored_row_is_drawn_dim_and_says_that_it_is_stored() {
+    fn a_stored_row_is_dim_and_a_stored_room_still_answers_nothing() {
         let tree = Tree::new(state());
-        let stored = vec![stored_summary("ses_3", "archivist")];
-        let drawn: Vec<String> = switcher_lines(&roster(&tree, &stored), 1, scene().1)
-            .iter()
-            .map(ToString::to_string)
-            .collect();
-        assert_eq!(drawn, ["  project ⏺ idle", "❯ archivist ⏺ stored"]);
+        let stored = vec![
+            stored_summary("ses_3", "archivist"),
+            SessionSummary {
+                driver: Driver::Log,
+                ..stored_summary("ses_4", "#design")
+            },
+        ];
+        let rows = roster(&tree, &stored);
+        assert_eq!(rows[1].status, Some(Status::Stored));
+        assert_eq!(
+            rows[2].status, None,
+            "a room answers nothing whether it is here or not, so the list \
+             puts it where every other room goes"
+        );
         assert_eq!(bullet_style(Some(Status::Stored), false), theme::dim());
-    }
-
-    #[test]
-    fn a_switcher_row_that_wants_a_person_says_so_in_words() {
-        let mut tree = Tree::new(state());
-        tree.apply(&child_frame(1, announced("reviewer")));
-        tree.apply(&child_frame(2, opened(child_permission())));
-        let drawn = switcher_lines(&tree.rows(), 0, scene().1);
-        assert_eq!(drawn[1].to_string(), "  reviewer ⏺ idle · needs you");
     }
 }

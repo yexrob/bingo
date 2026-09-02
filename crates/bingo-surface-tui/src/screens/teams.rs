@@ -7,7 +7,10 @@ use bingo_sdk::{ContentPart, Event, Item, ItemStatus, Tone, ToolOutput, TreeNode
 use serde_json::json;
 
 use super::{both, item};
+use crate::roster::{Cursor, Side};
 use crate::test_support::*;
+use crate::tree::Tree;
+use crate::ui::{Open, Switcher};
 
 #[test]
 fn a_room_transcript() {
@@ -185,4 +188,134 @@ fn what_a_room_is_owed() {
          clock time is what folds: {wide}"
     );
     both("owed", &tree, &ui, now);
+}
+
+// ---- the one list of sessions (M36) -------------------------------------
+
+/// A root with three sub-agents, a room two of them sit in — one listening,
+/// one owing an answer — and the room's own debt signalled on the root: one
+/// row of every kind the list has.
+fn a_team() -> Tree {
+    let mut frames = busy_child("reviewer");
+    frames.extend([
+        agent_frame(3, 20, agent_announced(3, "watcher")),
+        agent_frame(4, 21, agent_announced(4, "scout")),
+        agent_frame(4, 22, started("trn_4")),
+        agent_frame(
+            4,
+            23,
+            crate::test_support::completed("trn_4", bingo_sdk::TurnStatus::Completed),
+        ),
+        log_frame(30, log_announced("#design")),
+        log_frame(
+            31,
+            extended(
+                "bingo.rooms",
+                "members",
+                roster_payload(&["reviewer", "watcher"], &[("watcher", 300)]),
+            ),
+        ),
+        frame(
+            32,
+            signalled(
+                "bingo.rooms",
+                "owed",
+                owed_payload(&[("#design", "reviewer", "14:02")]),
+            ),
+        ),
+        item(33, user("itm_0", "what is in this workspace?")),
+    ]);
+    folded_tree(frames)
+}
+
+/// What `↓` on an empty composer and `ctrl+g` both open: the sessions on the
+/// left with what each is doing, where it sits and what it owes, the rooms on
+/// the right with their size and their debts.
+#[test]
+fn the_roster() {
+    let tree = a_team();
+    let (mut ui, now) = scene();
+    shown(&mut ui, Open::Switcher(Switcher::default()), now);
+    let wide = draw_tree(120, 40, &tree, &ui, now);
+    assert!(wide.contains("Sessions"), "{wide}");
+    assert!(
+        wide.contains("~ watcher   idle · in #design · listening · 300s"),
+        "a listening seat wears the sigil and says what it hears: {wide}"
+    );
+    assert!(
+        wide.contains("owes an answer since 14:02"),
+        "and a debtor says what it owes and when it was asked: {wide}"
+    );
+    assert!(
+        wide.contains("#design  2 seats · 1 owed"),
+        "the room's own row is its size and its debts: {wide}"
+    );
+    both("roster", &tree, &ui, now);
+}
+
+/// §4: the list spends a hue on the cursor, on the sessions at work, and on
+/// what wants a person — and on nothing else. Which row the keyboard is on is
+/// said in weight, so `NO_COLOR` loses none of it.
+#[test]
+fn the_roster_spends_colour_only_where_the_design_says() {
+    let tree = a_team();
+    let (mut ui, now) = scene();
+    shown(&mut ui, Open::Switcher(Switcher::default()), now);
+    let painted = crate::painted::painted(120, 40, &tree, &ui, now);
+    assert_eq!(
+        painted.coloured("Sessions"),
+        Vec::<String>::new(),
+        "a heading is furniture, and furniture is dim"
+    );
+    assert_eq!(
+        painted.coloured("owes an answer since 14:02"),
+        vec!["⏺", "owes an answer since 14:02"],
+        "the dot for the session at work, the debt for what wants a person, \
+         and nothing else on the row"
+    );
+}
+
+/// The cursor crosses to the rooms column, and the list still keeps every row
+/// the keyboard could be on in view.
+#[test]
+fn the_roster_with_the_cursor_in_the_rooms_column() {
+    let tree = a_team();
+    let (mut ui, now) = scene();
+    shown(
+        &mut ui,
+        Open::Switcher(Switcher {
+            cursor: Cursor {
+                side: Side::Rooms,
+                at: 0,
+            },
+            ..Default::default()
+        }),
+        now,
+    );
+    let screen = draw_tree(80, 24, &tree, &ui, now);
+    assert!(screen.contains("❯ #design"), "{screen}");
+    insta::assert_snapshot!("roster_in_the_rooms", screen);
+}
+
+/// One list, two doors (§3): `↓` on an empty composer and `ctrl+g` open the
+/// same thing, so the two screens are the same screen — not two renderers that
+/// happen to agree today.
+#[test]
+fn the_two_doors_open_byte_identical_lists() {
+    let tree = a_team();
+    let (mut down, now) = scene();
+    let (mut chord, _) = scene();
+    crate::input::on_key(&mut down, &tree, key(crossterm::event::KeyCode::Down), now);
+    crate::input::on_key(&mut chord, &tree, ctrl('g'), now);
+    for (width, height) in [(80u16, 24u16), (120, 40)] {
+        assert_eq!(
+            draw_tree(width, height, &tree, &down, now),
+            draw_tree(width, height, &tree, &chord, now),
+            "at {width}x{height}"
+        );
+    }
+    assert!(
+        draw_tree(80, 24, &tree, &down, now).contains("❯ ⏺ project"),
+        "and it is the list that both of them opened"
+    );
 }

@@ -631,7 +631,9 @@ fn a_waiting_childs_row_and_its_switcher_line_pulse_with_it() {
     let root = tree.root_id().clone();
     tree.show(&root);
     let switcher = |at: Now| {
-        crate::tree::switcher_lines(&tree.rows(), 0, at)
+        let rows = tree.rows();
+        crate::roster::lines(&tree, &rows, crate::roster::Cursor::default(), 80, 8, at)
+            .lines
             .iter()
             .flat_map(|line| line.spans.clone())
             .find(|span| span.content.contains("needs you"))

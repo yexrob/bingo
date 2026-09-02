@@ -209,6 +209,21 @@ await '? for shortcuts'
 vanish 'shift+tab'
 finish
 
+# The fixture has one session, so `↓` on an empty box rightly keeps its old
+# job (there is nowhere to walk to) and `ctrl+g` is the door that always opens.
+# What this drives is the layer, not the walk: a real terminal draws it, keys
+# reach it, and `esc` gives the frame back.
+step 'ctrl+g opens the one list of sessions and esc closes it'
+start '{"responses":[{"steps":[{"text":"nothing to do"}]}]}'
+keys 'ask me' Enter
+await 'nothing to do'
+keys C-g
+await '❯ ⏺ ask me  done'
+keys Escape
+vanish '❯ ⏺ ask me'
+await '? for shortcuts'
+finish
+
 step 'a permission dialog answered y runs the tool'
 start '{"responses":[
   {"steps":[{"toolCall":{"name":"Write","input":{"file_path":"note.txt","content":"written by the smoke test\n"}}}]},
