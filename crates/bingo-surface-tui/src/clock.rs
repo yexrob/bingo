@@ -104,15 +104,15 @@ impl Anim {
     }
 
     /// Which step of `steps` it is on, from 0 to `steps` — what a reveal
-    /// counts in and what a rise counts down from.
+    /// counts in and what a closing layer counts down from.
     pub fn step(&self, now: Instant, steps: u16) -> u16 {
         let at = self.progress(now) * f32::from(steps);
         (at.floor() as u16).min(steps)
     }
 }
 
-/// Fast away from where it was, gentle into where it lands: what a block's
-/// rise and the transcript's scroll do.
+/// Fast away from where it was, gentle into where it lands: what the
+/// transcript's scroll does.
 pub fn ease_out(t: f32) -> f32 {
     let t = t.clamp(0.0, 1.0);
     1.0 - (1.0 - t).powi(3)

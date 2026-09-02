@@ -294,45 +294,56 @@ fn a_completion_flashes_bold_for_exactly_one_frame() {
 
 // ---- a block arriving ---------------------------------------------------
 
+/// Which row of a screen carries `needle`.
+fn row_of(screen: &str, needle: &str) -> usize {
+    screen
+        .lines()
+        .position(|line| line.contains(needle))
+        .unwrap_or_else(|| panic!("no row carries {needle:?}"))
+}
+
+/// §3's "nothing jumps" outranks §6's cue: a block arriving takes exactly its
+/// own room and the screen holds still from the frame it lands on. The rise
+/// was withdrawn on 2026-09-02 (§10) — it put its two blank rows under the
+/// newest block, which a bottom-anchored viewport turns into the whole
+/// transcript jumping up two rows and walking back over three frames, once
+/// per block.
 #[test]
-fn a_new_block_rises_two_rows_into_place() {
+fn a_new_block_takes_its_own_room_and_walks_nowhere_after_it() {
     let (ui, now) = mid_turn();
-    let before = folded(vec![frame(
+    let mut state = folded(vec![frame(
         1,
         Event::ItemCompleted {
             item: user("itm_1", "first"),
         },
     )]);
-    // The first draw is the transcript a person arrived to; nothing in it has
-    // just arrived, so nothing rises.
-    let settled = screen(&solo(&before), &ui, now);
-    assert!(!settled.ends_with("\n\n"), "{settled}");
+    // The cache is warm after this draw, so the next block is one a person
+    // watches arrive.
+    let settled = screen(&solo(&state), &ui, now);
+    let was = row_of(&settled, "first");
 
-    let mut after = before.clone();
-    after.apply(&frame(
+    state.apply(&frame(
         2,
         Event::ItemCompleted {
             item: assistant("itm_2", "second", ItemStatus::Completed),
         },
     ));
-    let arriving = solo(&after);
-    let rows_below = |at: Now| {
-        screen(&arriving, &ui, at)
-            .lines()
-            .skip_while(|line| !line.contains("second"))
-            .take_while(|line| !line.contains('╭'))
-            .filter(|line| line.trim_matches('"').trim().is_empty())
-            .count()
-    };
-    // Two of the blanks are the reserved activity band (view.rs's demand),
-    // there on every frame; the rise itself contributes 2 → 1 → 0 above them.
-    assert_eq!(rows_below(now), 4, "it enters two rows above its place");
-    assert_eq!(rows_below(later(now, 33)), 3);
+    let arriving = solo(&state);
+    let frames: Vec<String> = [0i64, 33, 66, 99]
+        .iter()
+        .map(|ms| screen(&arriving, &ui, later(now, *ms)))
+        .collect();
     assert_eq!(
-        rows_below(later(now, 66)),
-        2,
-        "and lands on the third frame"
+        row_of(&frames[0], "first"),
+        was - 2,
+        "the row above moves up by the new block and its blank row, no further"
     );
+    for (at, drawn) in frames.iter().enumerate().skip(1) {
+        assert_eq!(
+            drawn, &frames[0],
+            "frame {at} of the arrival draws the same screen"
+        );
+    }
 }
 
 // ---- the activity row ---------------------------------------------------
@@ -654,7 +665,7 @@ fn motion_off_holds_every_cue_at_its_resting_frame() {
     let drawn = row(&tree, &ui, still, "esc to interrupt");
     assert!(drawn.starts_with('✻'), "and holds its first glyph: {drawn}");
 
-    // A live bullet, a tail and a rise are all absent rather than frozen.
+    // A live bullet and a tail are both absent rather than frozen.
     let bash = solo(&folded(running_bash()));
     assert_eq!(
         style_of(&bash, &ui, still, "⏺"),
