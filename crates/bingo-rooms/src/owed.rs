@@ -4,8 +4,8 @@
 
 use bingo_sdk::{HostHandle, SessionId, View};
 use jiff::Timestamp;
-use jiff::tz::TimeZone;
-use serde_json::Value;
+use serde::Serialize;
+use serde_json::{Value, json};
 
 use crate::PLUGIN;
 use crate::mentions::Mention;
@@ -14,7 +14,21 @@ use crate::mentions::Mention;
 /// it, and `Null` is what takes the card away (ADR-0013 §2).
 pub const KIND: &str = "owed";
 
-const HEADERS: [&str; 3] = ["room", "owed", "asked"];
+/// The facts the card rides with, beside the table it draws as.
+const DEBTS: &str = "debts";
+
+const HEADERS: [&str; 2] = ["room", "owed"];
+
+/// One open debt, as the card carries it: the room it stands in, who has not
+/// answered, and the moment it was asked. A reader that knows this signal
+/// takes the age it wants from `at`; the card itself says none, because a
+/// signal republished only when a debt opens or closes cannot keep one true.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct Debt {
+    pub room: String,
+    pub who: String,
+    pub at: Timestamp,
+}
 
 /// The `/room` cell: who owes, oldest first, and how long they have owed it.
 /// A member with two debts is named once, for the older.
@@ -32,25 +46,46 @@ pub fn column(open: &[Mention], now: Timestamp) -> String {
     said.join(", ")
 }
 
-/// One row per open debt in one room, oldest first.
-pub fn rows(title: &str, open: &[Mention]) -> Vec<Vec<String>> {
+/// What one room owes, oldest first: the one mint, from the one fold. A member
+/// with two debts owes twice here, and `column` is where two become one.
+pub fn debts(title: &str, open: &[Mention]) -> Vec<Debt> {
     oldest_first(open)
         .into_iter()
-        .map(|mention| vec![title.to_string(), mention.owed_by.said(), asked(mention.at)])
+        .map(|mention| Debt {
+            room: title.to_string(),
+            who: mention.owed_by.said(),
+            at: mention.at,
+        })
         .collect()
 }
 
 /// The card: a table while anything is owed, and nothing at all once the last
-/// debt closes.
-pub fn view(rows: Vec<Vec<String>>) -> Value {
-    if rows.is_empty() {
+/// debt closes. The debts ride in the same payload as the table drawn from
+/// them, the way a roster does (`room::payload`, ADR-0013 §2) — a surface that
+/// knows only the vocabulary draws the table, and one that knows this signal
+/// reads the facts, without either having to know about the other.
+pub fn view(debts: Vec<Debt>) -> Value {
+    if debts.is_empty() {
         return Value::Null;
     }
+    let mut payload = drawn(&debts);
+    payload[DEBTS] = json!(debts);
+    payload
+}
+
+/// The two columns a person reads on the card: which room, and who has not
+/// answered. The clock left it on 2026-09-02 — three columns were one wider
+/// than the rail, and the age a person wants is the session list's to say from
+/// `at`, drawn as it is asked for rather than as it was published.
+fn drawn(debts: &[Debt]) -> Value {
     let view = View::Table {
         headers: HEADERS.map(str::to_string).to_vec(),
-        rows,
+        rows: debts
+            .iter()
+            .map(|debt| vec![debt.room.clone(), debt.who.clone()])
+            .collect(),
     };
-    serde_json::to_value(view).unwrap_or(Value::Null)
+    serde_json::to_value(view).unwrap_or_default()
 }
 
 /// Put it where a person looks: on the session the room hangs under, which is
@@ -75,14 +110,6 @@ fn age(at: Timestamp, now: Timestamp) -> String {
         60..=3599 => format!("{}m", seconds / 60),
         _ => format!("{}h", seconds / 3600),
     }
-}
-
-/// The clock time a question was asked. A card holds the fact rather than an
-/// age, which would be wrong a second after it was drawn.
-fn asked(at: Timestamp) -> String {
-    at.to_zoned(TimeZone::system())
-        .strftime("%H:%M")
-        .to_string()
 }
 
 #[cfg(test)]
@@ -142,29 +169,44 @@ mod tests {
     fn the_holder_owes_by_the_name_its_members_call_it() {
         let open = [member(crate::name::PARENT, 0)];
         assert_eq!(column(&open, at(60)), "parent 1m");
-        assert_eq!(rows("#design", &open)[0][1], "parent");
+        assert_eq!(debts("#design", &open)[0].who, "parent");
     }
 
+    /// The whole of what a room's parent is signalled, asserted as one value:
+    /// a row per debt, oldest first, and the moment each was asked beside them
+    /// rather than in them. This is a payload other processes have already
+    /// written and this one still reads, so it is a fixture and not a value
+    /// this crate is free to reshape.
     #[test]
-    fn the_card_is_a_row_per_debt_and_nothing_at_all_when_none_stand() {
+    fn the_card_carries_the_table_and_the_debts_it_is_drawn_from() {
         let open = [member("scout", 60), member("reviewer", 0)];
-        let card = view(rows("#design", &open));
-        assert_eq!(card["kind"], "table");
-        assert_eq!(card["headers"], serde_json::json!(HEADERS));
-        let rows = card["rows"].as_array().expect("rows").clone();
-        assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0][0], "#design");
-        assert_eq!(rows[0][1], "reviewer", "oldest first");
-        assert_eq!(rows[1][1], "scout");
+        assert_eq!(
+            view(debts("#design", &open)),
+            serde_json::json!({
+                "kind": "table",
+                "headers": ["room", "owed"],
+                "rows": [["#design", "reviewer"], ["#design", "scout"]],
+                "debts": [
+                    {"room": "#design", "who": "reviewer", "at": "1970-01-01T00:00:00Z"},
+                    {"room": "#design", "who": "scout", "at": "1970-01-01T00:01:00Z"},
+                ],
+            }),
+            "oldest first, in both halves"
+        );
 
         assert_eq!(
-            view(rows_of_nothing()),
+            view(debts("#design", &[])),
             Value::Null,
             "a null payload is what removes the card"
         );
     }
 
-    fn rows_of_nothing() -> Vec<Vec<String>> {
-        rows("#design", &[])
+    /// The table rides beside the facts, so a surface that knows only the
+    /// vocabulary draws the card and neither half has to know about the other.
+    #[test]
+    fn the_card_is_both_a_table_and_the_debts_beside_it() {
+        let card = view(debts("#design", &[member("reviewer", 0)]));
+        let view: View = serde_json::from_value(card).expect("a view a surface can draw");
+        assert_eq!(view.fold(), "room · owed\n#design · reviewer");
     }
 }

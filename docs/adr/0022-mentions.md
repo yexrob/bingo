@@ -38,7 +38,11 @@ a mention store beside the log it was derivable from.
    owes, oldest age). While any mention is open, the hook publishes a
    `View::Table` signal `owed` on the room's parent — the rail card
    appears; `Null` when the last debt closes — the card goes (ADR-0013,
-   the jobs-signal pattern).
+   the jobs-signal pattern). The card names the room and who owes
+   (2026-09-02: the clock left it — a signal republished only when a debt
+   opens or closes cannot keep an age true), and the debts it is drawn from
+   ride beside it in the same payload, so a surface that wants an age says
+   one at draw time from `debts[].at`.
 
 ## Consequences
 
