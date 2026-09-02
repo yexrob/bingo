@@ -6,13 +6,14 @@
 use std::path::Path;
 
 use bingo_sdk::{
-    Driver, HostHandle, KernelError, OpenOptions, ParentLink, SessionFilter, SessionId,
+    Driver, HostHandle, ItemId, KernelError, OpenOptions, ParentLink, SessionFilter, SessionId,
     SessionSelector, SessionSpec,
 };
 use serde_json::Value;
 
 use crate::ear::{self, Seat};
-use crate::{PLUGIN, identity, name, room};
+use crate::room::Room;
+use crate::{PLUGIN, cursor, identity, name, post, room};
 
 /// The room of that name under `parent`, opened if there is none; either way
 /// its roster afterwards is exactly `seats`, which are names and not sessions
@@ -40,7 +41,61 @@ pub async fn seat(
     };
     host.extend(&room, PLUGIN, room::MEMBERS, room::payload(seats))
         .await?;
+    start_reading(host, &room, parent, &title, seats).await;
     Ok(room)
+}
+
+/// Where each seat starts reading (ADR-0034 §2): a seat joins a room at its
+/// head, so what was said before it was seated is not a backlog it owes. Only
+/// a seat that has never read this room is written to — a reseat is a roster,
+/// not a mark-all-read — and a name nobody holds yet is left alone: when its
+/// session opens it starts at the head the room has then, which is the same
+/// rule read off the one fact such a seat does leave behind.
+async fn start_reading(
+    host: &HostHandle,
+    id: &SessionId,
+    parent: &SessionId,
+    title: &str,
+    seats: &[Seat],
+) {
+    let Some(head) = head_of(host, id).await else {
+        return;
+    };
+    let room = Room {
+        title: title.to_string(),
+        parent: parent.clone(),
+        members: seats.iter().map(|seat| seat.name.clone()).collect(),
+        ears: Default::default(),
+    };
+    for member in &room.members {
+        if let Some(seat) = post::seat_of(host, &room, member).await {
+            open_at(host, &seat, title, &head).await;
+        }
+    }
+}
+
+/// The last thing said in a room, which is where a seat joining it starts.
+async fn head_of(host: &HostHandle, room: &SessionId) -> Option<ItemId> {
+    let state = room::read(host, room).await?;
+    state
+        .items
+        .iter()
+        .filter_map(crate::mentions::Post::of)
+        .next_back()
+        .map(|post| post.id)
+}
+
+/// One seat's cursor, written only if it has none.
+async fn open_at(host: &HostHandle, seat: &SessionId, title: &str, head: &ItemId) {
+    let read = room::read(host, seat)
+        .await
+        .and_then(|state| cursor::of_state(&state, title));
+    if read.is_some() {
+        return;
+    }
+    if let Err(error) = cursor::advance(host, seat, title, head).await {
+        tracing::debug!(room = %title, %seat, %error, "a seat was not told where to start reading");
+    }
 }
 
 /// Every retuning a standing room carries, cleared. Each is cleared where it

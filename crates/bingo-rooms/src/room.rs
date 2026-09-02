@@ -204,7 +204,7 @@ mod tests {
 
     #[test]
     fn a_membership_round_trips_through_the_payload_it_is_published_as() {
-        let seats = [Seat::live("reviewer"), Seat::live("scout")];
+        let seats = [Seat::named("reviewer"), Seat::named("scout")];
         assert_eq!(members_from(&payload(&seats)), ["reviewer", "scout"]);
         assert!(members_from(&json!({})).is_empty());
         assert_eq!(
@@ -214,19 +214,20 @@ mod tests {
         );
     }
 
-    /// The shape a room opened before there were ears left in its journal —
-    /// a fixture, because this is a persisted payload and not a value this
-    /// process is free to change. Every seat in it hears every post.
+    /// The shape a roster of bare names leaves in a journal — a fixture,
+    /// because this is a persisted payload and not a value this process is free
+    /// to change. It says nothing about ears, so every seat in it wears the
+    /// default one, which is patient (ADR-0034 §6).
     #[test]
-    fn a_roster_written_before_there_were_ears_reads_all_live() {
-        const OLD: &str = r#"{"members":["reviewer","scout","parent"]}"#;
-        let payload: Value = serde_json::from_str(OLD).expect("a membership payload");
+    fn a_roster_that_names_no_ear_reads_as_the_default_one() {
+        const BARE: &str = r#"{"members":["reviewer","scout","parent"]}"#;
+        let payload: Value = serde_json::from_str(BARE).expect("a membership payload");
         assert_eq!(members_from(&payload), ["reviewer", "scout", "parent"]);
 
         let mut ears = Ears::default();
         ears.declare(&payload);
         for member in ["reviewer", "scout", "parent"] {
-            assert_eq!(ears.of(member), Ear::Live, "{member}");
+            assert_eq!(ears.of(member), Ear::default(), "{member}");
         }
     }
 
@@ -236,14 +237,15 @@ mod tests {
     #[test]
     fn the_payload_carries_the_names_the_listeners_and_the_tree_it_draws_as() {
         assert_eq!(
-            payload(&[Seat::live("scout")]),
+            payload(&[Seat::named("scout")]),
             json!({
                 "members": ["scout"],
                 "kind": "tree",
                 "nodes": [{"label": "scout", "tone": "neutral"}],
-            })
+            }),
+            "a roster of bare names says nothing about ears"
         );
-        let listening = [
+        let asked = [
             Seat::live("scout"),
             Seat {
                 name: "parent".into(),
@@ -251,16 +253,17 @@ mod tests {
             },
         ];
         assert_eq!(
-            payload(&listening),
+            payload(&asked),
             json!({
                 "members": ["scout", "parent"],
-                "listeners": [{"name": "parent", "patience_s": 120}],
+                "listeners": [
+                    {"name": "scout", "patience_s": 0},
+                    {"name": "parent", "patience_s": 120},
+                ],
                 "kind": "tree",
                 "nodes": [
-                    {"label": "scout", "tone": "neutral"},
-                    {"label": "listening", "tone": "neutral", "children": [
-                        {"label": "parent", "badge": "120s", "tone": "neutral"},
-                    ]},
+                    {"label": "scout", "badge": "live", "tone": "neutral"},
+                    {"label": "parent", "badge": "120s", "tone": "neutral"},
                 ],
             })
         );
@@ -275,7 +278,7 @@ mod tests {
     /// same roster and neither has to know about the other.
     #[test]
     fn the_payload_is_both_a_membership_and_a_view() {
-        let seats = [Seat::live("reviewer"), Seat::live("scout")];
+        let seats = [Seat::named("reviewer"), Seat::named("scout")];
         let payload = payload(&seats);
         assert_eq!(members_from(&payload), ["reviewer", "scout"]);
         let view: View = serde_json::from_value(payload).expect("a view a surface can draw");

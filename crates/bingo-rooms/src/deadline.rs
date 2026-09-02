@@ -1,73 +1,63 @@
-//! The patience deadline (ADR-0029 §3). A patient seat reads its room at its
-//! next turn — but nothing promises there will be one, so a post held longer
-//! than the seat's patience wakes it: once, by a nudge, and the woken turn
-//! absorbs the backlog ahead of it because that is the order the queue is in.
+//! The patience deadline (ADR-0029 §3, ADR-0034 §3). A patient seat reads its
+//! room at its next turn — but nothing promises there will be one, so a seat
+//! left behind by a post is woken once when it has been behind for its whole
+//! patience. The wake is a nudge, and the turn it opens reads the room.
 //!
-//! What it watches is the seat's own queue, and only the room mail in it: a
-//! standby brief carries the agents' surface and must never trip this, or
-//! ADR-0027's seat stops being free; a nudge carries no principal, so no nudge
-//! can chase itself.
+//! What it watches is the one fact "behind" is derived from: the seat's cursor
+//! against the room's head. A seat that read the room meanwhile is level when
+//! the timer fires, and is left alone.
 //!
-//! It keeps the chaser's discipline (ADR-0022 §3): one bounded timer per seat,
-//! timers die with the process, and what the next process finds already
-//! waiting is nudged **once**.
+//! It keeps the chaser's discipline (ADR-0022 §3): one bounded timer per seat
+//! per room, timers die with the process, and a seat this process first finds
+//! already behind is nudged **once**.
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::sync::{Mutex, MutexGuard};
+use std::collections::BTreeSet;
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
-use bingo_sdk::{CancellationToken, HostHandle, IntentId, QueueEntry, SessionId};
-use jiff::Timestamp;
+use bingo_sdk::{HostHandle, SessionId};
 
+use crate::cursor::Unread;
 use crate::ear::Ear;
-use crate::name::{self, PARENT};
+use crate::post;
 use crate::room::Room;
-use crate::roster::Roster;
-use crate::{SURFACE, chase, post};
 
-/// One seat's queue as this process has watched it.
-#[derive(Debug, Default)]
-struct Watch {
-    /// When each held post was first seen here. A process cannot know how long
-    /// a post waited before it started, so what it finds already waiting has
-    /// waited from now — the deadline is a bound on the wait it can see.
-    since: BTreeMap<IntentId, Timestamp>,
-    armed: Option<CancellationToken>,
-}
+/// One seat's wait on one room.
+type Waiting = (SessionId, String);
+
+/// The waits this process is timing.
+type Timing = Arc<Mutex<BTreeSet<Waiting>>>;
 
 /// The seats this process is holding a deadline over. Machinery, never a
-/// record: what is held is the kernel's queue to say, and this only remembers
-/// when it first saw it, so that folding the same queue again does not start
-/// the patience over.
+/// record: what a seat has read is its own journal's to say, and this only
+/// remembers which waits are already being timed, so that a room that keeps
+/// talking does not start the patience over.
 #[derive(Debug, Default)]
 pub struct Deadline {
-    seats: Mutex<BTreeMap<SessionId, Watch>>,
+    waiting: Timing,
 }
 
 impl Deadline {
-    /// A seat's queue changed. The room mail in it decides the timer: the
-    /// earliest deadline wins, and a queue holding none of it disarms.
-    pub async fn queued(
-        &self,
-        host: &HostHandle,
-        rooms: &Roster,
-        seat: &SessionId,
-        entries: &[QueueEntry],
-        now: Timestamp,
-    ) {
-        let held = self.held(seat, entries, now);
-        let Some((room, left)) = soonest(host, rooms, seat, &held, now).await else {
-            self.disarm(seat);
-            return;
-        };
-        self.arm(host, seat, room, left);
+    /// The seats a post left waiting. Each gets a timer at its own patience,
+    /// unless one is already running for it: the deadline is on the oldest post
+    /// a seat has not read, so a room that keeps talking is still bounded.
+    pub async fn waiting(&self, host: &HostHandle, id: &SessionId, room: &Room, seats: &[&str]) {
+        for member in seats {
+            let Ear::Patient(patience) = room.ears.of(member) else {
+                continue;
+            };
+            let Some(seat) = post::seat_of(host, room, member).await else {
+                continue;
+            };
+            self.arm(host, id, room, member, seat, patience);
+        }
     }
 
-    /// A room this process had not seen before. Its patient seats may be
-    /// holding posts from before this process started; a backlog found there
-    /// waited out a patience nobody was timing, so it is nudged once and at
-    /// once, the rule for an occurrence missed while nobody was running.
-    pub async fn overdue(&self, host: &HostHandle, room: &Room) {
+    /// A room this process had not seen before. Its patient seats may have been
+    /// behind since before this process started; a seat found behind waited out
+    /// a patience nobody was timing, so it is nudged once and at once, the rule
+    /// for an occurrence missed while nobody was running.
+    pub async fn overdue(&self, host: &HostHandle, id: &SessionId, room: &Room) {
         for member in &room.members {
             if room.ears.of(member).is_live() {
                 continue;
@@ -75,198 +65,91 @@ impl Deadline {
             let Some(seat) = post::seat_of(host, room, member).await else {
                 continue;
             };
-            if holding(host, &seat, &room.title).await {
-                post::nudge(host, &seat, &room.title, said(room)).await;
-            }
+            wake_if_behind(host, id, room, member, &seat).await;
         }
     }
 
-    /// The room mail this seat is holding, and how long each piece has been
-    /// held. Anything the queue no longer carries is forgotten here, so a seat
-    /// that has drained is remembered by nothing.
-    fn held(
+    /// One timer for one seat's wait on one room.
+    fn arm(
         &self,
-        seat: &SessionId,
-        entries: &[QueueEntry],
-        now: Timestamp,
-    ) -> Vec<(Timestamp, String)> {
-        let posts: Vec<(&IntentId, &str)> = entries.iter().filter_map(posted).collect();
-        let mut seats = self.seats();
-        let watch = seats.entry(seat.clone()).or_default();
-        watch
-            .since
-            .retain(|intent, _| posts.iter().any(|(held, _)| *held == intent));
-        posts
-            .into_iter()
-            .map(|(intent, room)| {
-                let since = watch.since.entry(intent.clone()).or_insert(now);
-                (*since, room.to_string())
-            })
-            .collect()
-    }
-
-    /// One timer, replacing whatever this seat had: the queue it was armed
-    /// from is not the queue any more.
-    fn arm(&self, host: &HostHandle, seat: &SessionId, room: Room, left: Duration) {
-        let cancel = CancellationToken::new();
-        let mut seats = self.seats();
-        let watch = seats.entry(seat.clone()).or_default();
-        if let Some(armed) = watch.armed.replace(cancel.clone()) {
-            armed.cancel();
+        host: &HostHandle,
+        id: &SessionId,
+        room: &Room,
+        member: &str,
+        seat: SessionId,
+        patience: Duration,
+    ) {
+        let key = (seat.clone(), room.title.clone());
+        if !self.timed().insert(key) {
+            return;
         }
-        tokio::spawn(wait(host.clone(), seat.clone(), room, left, cancel));
+        tokio::spawn(wait(
+            Wait {
+                host: host.clone(),
+                room: (id.clone(), room.clone()),
+                seat: (seat, member.to_string()),
+                timing: Arc::clone(&self.waiting),
+            },
+            patience,
+        ));
     }
 
-    /// A seat holding nothing of ours is watched by nothing.
-    fn disarm(&self, seat: &SessionId) {
-        if let Some(watch) = self.seats().remove(seat)
-            && let Some(armed) = watch.armed
-        {
-            armed.cancel();
-        }
-    }
-
-    fn seats(&self) -> MutexGuard<'_, BTreeMap<SessionId, Watch>> {
-        self.seats.lock().unwrap_or_else(|held| held.into_inner())
+    /// The waits already being timed. A panic in another task must not strand
+    /// every seat after it.
+    fn timed(&self) -> MutexGuard<'_, BTreeSet<Waiting>> {
+        self.waiting.lock().unwrap_or_else(|held| held.into_inner())
     }
 }
 
-/// The room a queued input is a post from, or nothing for everything else a
-/// queue holds. The surface is the whole discriminator (ADR-0029 §3): a
-/// standby brief is the agents' surface and never arms this, and a nudge — a
-/// delivery nobody signed — is not a post to be chased.
-fn posted(entry: &QueueEntry) -> Option<(&IntentId, &str)> {
-    if entry.origin.surface != SURFACE || entry.origin.principal.is_none() {
-        return None;
-    }
-    Some((&entry.intent, entry.origin.conversation.as_deref()?))
-}
-
-/// The first of this seat's held posts to fall due, and how long there is
-/// until it does. A post from a room this process cannot place, or one whose
-/// seat is live there, is nobody's deadline.
-async fn soonest(
-    host: &HostHandle,
-    rooms: &Roster,
-    seat: &SessionId,
-    held: &[(Timestamp, String)],
-    now: Timestamp,
-) -> Option<(Room, Duration)> {
-    let titles: BTreeSet<&str> = held.iter().map(|(_, title)| title.as_str()).collect();
-    let mut patient: BTreeMap<&str, (Room, Duration)> = BTreeMap::new();
-    for title in titles {
-        if let Some(found) = patience(host, rooms, seat, title).await {
-            patient.insert(title, found);
-        }
-    }
-    held.iter()
-        .filter_map(|(since, title)| {
-            let (room, patience) = patient.get(title.as_str())?;
-            Some((
-                room.clone(),
-                patience.saturating_sub(chase::waited(*since, now)),
-            ))
-        })
-        .min_by_key(|(_, left)| *left)
-}
-
-/// The room a held post came from and how long this seat may hold it: the
-/// rooms of that title this process has seen, and the name this session sits
-/// under on each of them.
-async fn patience(
-    host: &HostHandle,
-    rooms: &Roster,
-    seat: &SessionId,
-    title: &str,
-) -> Option<(Room, Duration)> {
-    for room in rooms.titled(title) {
-        // A room of live seats places no deadline, and asking the tree who
-        // this session is there would be a round-trip for nothing: today's
-        // room costs this module exactly what it cost before there were ears.
-        if !room.ears.patient() {
-            continue;
-        }
-        let Some(member) = seated_as(host, &room, seat).await else {
-            continue;
-        };
-        if let Ear::Patient(patience) = room.ears.of(&member) {
-            return Some((room, patience));
-        }
-    }
-    None
-}
-
-/// The name a session sits under on a room's roster: `parent` for the session
-/// the room hangs under, and its own title for a member beside it.
-async fn seated_as(host: &HostHandle, room: &Room, seat: &SessionId) -> Option<String> {
-    let title = match seat == &room.parent {
-        true => PARENT.to_string(),
-        false => titled(host, room, seat).await?,
-    };
-    room.members
-        .iter()
-        .find(|member| name::same(member, &title))
-        .cloned()
-}
-
-async fn titled(host: &HostHandle, room: &Room, seat: &SessionId) -> Option<String> {
-    post::siblings_of(host, room)
-        .await
-        .ok()?
-        .into_iter()
-        .find(|summary| &summary.id == seat)?
-        .title
-}
-
-/// The timer itself. It sleeps out what is left of the patience and, if the
-/// seat is still holding the room's mail when it wakes, nudges it once — the
-/// queue it re-reads is the live one, so a seat that read the room meanwhile
-/// is left alone.
-async fn wait(
+/// One wait, as the task that times it holds it: which room, which seat, and
+/// the table to take itself out of when it is done.
+struct Wait {
     host: HostHandle,
-    seat: SessionId,
-    room: Room,
-    left: Duration,
-    cancel: CancellationToken,
+    room: (SessionId, Room),
+    seat: (SessionId, String),
+    timing: Timing,
+}
+
+/// The timer itself: it sleeps out the patience and wakes the seat if it is
+/// still behind. What it re-reads is the live pair of journals, so a seat that
+/// read the room meanwhile is left alone — and either way the wait is over, so
+/// the next post left unread arms a new one.
+async fn wait(waiting: Wait, patience: Duration) {
+    tokio::time::sleep(patience).await;
+    let (id, room) = &waiting.room;
+    let (seat, member) = &waiting.seat;
+    wake_if_behind(&waiting.host, id, room, member, seat).await;
+    waiting
+        .timing
+        .lock()
+        .unwrap_or_else(|held| held.into_inner())
+        .remove(&(seat.clone(), room.title.clone()));
+}
+
+/// A seat behind its room, woken for it. Nothing is said of what it missed —
+/// the turn this opens reads the room itself.
+async fn wake_if_behind(
+    host: &HostHandle,
+    id: &SessionId,
+    room: &Room,
+    member: &str,
+    seat: &SessionId,
 ) {
-    tokio::select! {
-        () = cancel.cancelled() => return,
-        () = tokio::time::sleep(left) => {}
+    let unread = Unread::of(host, id, &room.title, seat, member).await;
+    if unread.is_empty() {
+        return;
     }
-    if holding(&host, &seat, &room.title).await {
-        post::nudge(&host, &seat, &room.title, said(&room)).await;
-    }
-}
-
-/// Whether a seat's queue still holds a post from this room.
-async fn holding(host: &HostHandle, seat: &SessionId, title: &str) -> bool {
-    let Some(state) = crate::room::read(host, seat).await else {
-        return false;
-    };
-    state
-        .queue
-        .iter()
-        .filter_map(posted)
-        .any(|(_, room)| room == title)
-}
-
-/// What the nudge says. The posts it is about are already above it — a woken
-/// turn takes the queue in order and this delivery is the last of it — so it
-/// points at them rather than repeating them.
-fn said(room: &Room) -> String {
-    format!(
-        "{} has posts you have not read; they are above this note. \
-         Post in {} if any of it falls to you.",
-        room.title, room.title
-    )
+    post::nudge(host, seat, &room.title, post::unread(&room.title)).await;
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cursor;
     use crate::ear::{Ears, Seat};
     use crate::room::{self, MEMBERS};
-    use crate::tests::{Fleet, briefed, held, nudged, queued};
+    use crate::roster::Roster;
+    use crate::tests::{Fleet, ts};
     use bingo_sdk::{Delivery, Input};
 
     /// The seats a roster line asks for.
@@ -279,19 +162,19 @@ mod tests {
 
     /// A root with a scout under it and a room the roster seats them both in,
     /// as the frames this process saw would have left it.
-    fn tree(roster: &[&str]) -> (Fleet, SessionId, SessionId, Roster) {
+    fn tree(roster: &[&str]) -> (Fleet, SessionId, SessionId, SessionId, Room) {
         let fleet = Fleet::default();
         let root = fleet.root();
         let scout = fleet.child(&root, "scout");
-        let room = fleet.room(&root, "design");
+        let id = fleet.room(&root, "design");
         let rooms = Roster::default();
-        rooms.register(&fleet.summary(&room));
-        rooms.extended(&room, MEMBERS, &room::payload(&seats(roster)));
-        (fleet, root, scout, rooms)
+        rooms.register(&fleet.summary(&id));
+        rooms.extended(&id, MEMBERS, &room::payload(&seats(roster)));
+        let room = rooms.get(&id).expect("the room this process saw");
+        (fleet, root, scout, id, room)
     }
 
-    /// The room as a reader that never saw a frame holds it: the roster, and
-    /// the ears it declared.
+    /// The room as a reader that never saw a frame holds it.
     fn room_of(parent: &SessionId, roster: &[&str]) -> Room {
         let seated = seats(roster);
         let mut ears = Ears::default();
@@ -332,23 +215,36 @@ mod tests {
         }
     }
 
-    fn now() -> Timestamp {
-        Timestamp::UNIX_EPOCH
+    /// A post into the room, and the seat's cursor moved to it.
+    fn said(fleet: &Fleet, id: &SessionId, text: &str) {
+        fleet.post(id, text, Some("reviewer"), ts());
     }
 
-    /// The whole of ADR-0029 §3 on the paused clock: a patient seat holding a
-    /// post is woken once when the post has waited its patience, and not again
-    /// while it holds the same backlog.
+    async fn read_it_all(fleet: &Fleet, id: &SessionId, seat: &SessionId) {
+        let head = room::read(&fleet.handle(), id)
+            .await
+            .expect("the room")
+            .items
+            .last()
+            .expect("a post")
+            .id
+            .clone();
+        cursor::advance(&fleet.handle(), seat, "#design", &head)
+            .await
+            .expect("a cursor this crate can write");
+    }
+
+    /// The whole of ADR-0029 §3 on the paused clock: a seat a post left behind
+    /// is woken once when it has been behind its whole patience, and not again
+    /// while it is behind on the same posts.
     #[tokio::test(start_paused = true)]
-    async fn a_held_post_wakes_the_seat_once_when_it_has_waited_its_patience() {
-        let (fleet, _, scout, rooms) = tree(&["~scout:120"]);
-        let patience = Duration::from_secs(120);
+    async fn a_seat_left_behind_is_woken_once_when_its_patience_is_up() {
+        let (fleet, _, scout, id, room) = tree(&["scout:120"]);
         let deadline = Deadline::default();
-        let host = fleet.handle();
-        let waiting = queued(&fleet, &scout, &[held("req_1", "#design")]);
+        said(&fleet, &id, "the build is green");
 
         deadline
-            .queued(&host, &rooms, &scout, &waiting, now())
+            .waiting(&fleet.handle(), &id, &room, &["scout"])
             .await;
         after(Duration::from_secs(119)).await;
         assert!(
@@ -361,101 +257,51 @@ mod tests {
         assert_eq!(nudged.len(), 1, "{nudged:?}");
         assert_eq!(nudged[0].0, scout);
         assert!(nudged[0].1.contains("#design"), "{}", nudged[0].1);
-        assert!(nudged[0].1.contains("above this note"), "{}", nudged[0].1);
-
-        after(patience).await;
-        after(patience).await;
-        assert_eq!(nudges(&fleet).len(), 1, "one nudge per backlog");
     }
 
-    /// A second post does not start the patience over: the deadline is on the
-    /// oldest thing held, so a room that keeps talking is still bounded.
+    /// A second post does not start the patience over: one timer per seat per
+    /// room, so a room that keeps talking is still bounded.
     #[tokio::test(start_paused = true)]
-    async fn the_deadline_is_the_oldest_held_post_s_and_a_later_one_does_not_move_it() {
-        let (fleet, _, scout, rooms) = tree(&["~scout:120"]);
+    async fn a_later_post_does_not_move_the_deadline_the_first_one_set() {
+        let (fleet, _, _, id, room) = tree(&["scout:120"]);
         let deadline = Deadline::default();
         let host = fleet.handle();
-        let first = queued(&fleet, &scout, &[held("req_1", "#design")]);
-        deadline.queued(&host, &rooms, &scout, &first, now()).await;
+        said(&fleet, &id, "the build is green");
+        deadline.waiting(&host, &id, &room, &["scout"]).await;
 
         after(Duration::from_secs(60)).await;
-        let both = queued(
-            &fleet,
-            &scout,
-            &[held("req_1", "#design"), held("req_2", "#design")],
-        );
-        let later = now() + jiff::SignedDuration::from_secs(60);
-        deadline.queued(&host, &rooms, &scout, &both, later).await;
+        said(&fleet, &id, "and the tests pass");
+        deadline.waiting(&host, &id, &room, &["scout"]).await;
 
         after(Duration::from_secs(60)).await;
         assert_eq!(nudges(&fleet).len(), 1, "the first post's own deadline");
     }
 
     /// The seat read the room before the deadline came due: the timer wakes,
-    /// sees a queue that no longer holds the post, and says nothing.
+    /// finds its cursor at the head, and says nothing.
     #[tokio::test(start_paused = true)]
-    async fn a_seat_that_drains_before_the_deadline_is_not_nudged() {
-        let (fleet, _, scout, rooms) = tree(&["~scout:120"]);
+    async fn a_seat_that_reads_the_room_before_the_deadline_is_not_nudged() {
+        let (fleet, _, scout, id, room) = tree(&["scout:120"]);
         let deadline = Deadline::default();
         let host = fleet.handle();
-        let waiting = queued(&fleet, &scout, &[held("req_1", "#design")]);
-        deadline
-            .queued(&host, &rooms, &scout, &waiting, now())
-            .await;
+        said(&fleet, &id, "the build is green");
+        deadline.waiting(&host, &id, &room, &["scout"]).await;
 
         after(Duration::from_secs(60)).await;
-        let drained = queued(&fleet, &scout, &[]);
-        deadline
-            .queued(&host, &rooms, &scout, &drained, now())
-            .await;
+        read_it_all(&fleet, &id, &scout).await;
 
         after(Duration::from_secs(600)).await;
         assert!(nudges(&fleet).is_empty(), "{:?}", fleet.delivered());
     }
 
-    /// ADR-0027 lives or dies here: a standby brief waits in the same queue,
-    /// under the agents' surface, and nothing in this module may wake it.
+    /// A live seat was woken by the post itself; nothing here is armed for it.
     #[tokio::test(start_paused = true)]
-    async fn a_standby_brief_arms_nothing_however_long_it_waits() {
-        let (fleet, _, scout, rooms) = tree(&["~scout:120"]);
+    async fn a_live_seat_is_nobody_s_deadline() {
+        let (fleet, _, _, id, room) = tree(&["scout:0"]);
         let deadline = Deadline::default();
-        let brief = queued(&fleet, &scout, &[briefed("req_1")]);
+        said(&fleet, &id, "the build is green");
         deadline
-            .queued(&fleet.handle(), &rooms, &scout, &brief, now())
-            .await;
-
-        after(Duration::from_secs(3600)).await;
-        assert!(
-            fleet.delivered().is_empty(),
-            "a standby seat was woken by its own briefing: {:?}",
-            fleet.delivered()
-        );
-    }
-
-    /// A live seat holds a post only because it is busy, and a busy seat reads
-    /// its queue at its next barrier. Nothing to bound, nothing armed.
-    #[tokio::test(start_paused = true)]
-    async fn a_live_seat_s_queue_arms_nothing() {
-        let (fleet, _, scout, rooms) = tree(&["scout"]);
-        let deadline = Deadline::default();
-        let waiting = queued(&fleet, &scout, &[held("req_1", "#design")]);
-        deadline
-            .queued(&fleet.handle(), &rooms, &scout, &waiting, now())
-            .await;
-
-        after(Duration::from_secs(3600)).await;
-        assert!(fleet.delivered().is_empty(), "{:?}", fleet.delivered());
-    }
-
-    /// A nudge is not a post: it carries no principal, so the queue it waits
-    /// in never arms a deadline of its own.
-    #[tokio::test(start_paused = true)]
-    async fn a_nudge_in_the_queue_never_chases_itself() {
-        let (fleet, _, scout, rooms) = tree(&["~scout:120"]);
-        let deadline = Deadline::default();
-        let waiting = queued(&fleet, &scout, &[nudged("req_1", "#design")]);
-        deadline
-            .queued(&fleet.handle(), &rooms, &scout, &waiting, now())
+            .waiting(&fleet.handle(), &id, &room, &["scout"])
             .await;
 
         after(Duration::from_secs(3600)).await;
@@ -466,11 +312,11 @@ mod tests {
     /// roster under the name the room calls it by.
     #[tokio::test(start_paused = true)]
     async fn the_session_the_room_hangs_under_is_a_patient_seat_too() {
-        let (fleet, root, _, rooms) = tree(&["scout", "~parent:120"]);
+        let (fleet, root, _, id, room) = tree(&["scout:0", "parent:120"]);
         let deadline = Deadline::default();
-        let waiting = queued(&fleet, &root, &[held("req_1", "#design")]);
+        said(&fleet, &id, "the build is green");
         deadline
-            .queued(&fleet.handle(), &rooms, &root, &waiting, now())
+            .waiting(&fleet.handle(), &id, &room, &["parent"])
             .await;
 
         after(Duration::from_secs(120)).await;
@@ -480,23 +326,23 @@ mod tests {
     }
 
     /// A room this process reads for the first time may find a seat already
-    /// holding its posts — the queue the last process left. It waited out a
-    /// patience nobody was timing, so it is nudged once, and at once.
+    /// behind — the cursor the last process left. It waited out a patience
+    /// nobody was timing, so it is nudged once, and at once.
     #[tokio::test(start_paused = true)]
-    async fn a_backlog_this_process_finds_already_waiting_is_nudged_once() {
-        let (fleet, root, scout, _) = tree(&["~scout:120"]);
-        queued(&fleet, &scout, &[held("req_1", "#design")]);
-        let room = room_of(&root, &["~scout:120"]);
+    async fn a_seat_this_process_finds_already_behind_is_nudged_once() {
+        let (fleet, root, scout, id, _) = tree(&["scout:120"]);
+        said(&fleet, &id, "the build is green");
+        let room = room_of(&root, &["scout:120"]);
         let deadline = Deadline::default();
 
-        deadline.overdue(&fleet.handle(), &room).await;
+        deadline.overdue(&fleet.handle(), &id, &room).await;
         settle().await;
         let nudged = nudges(&fleet);
         assert_eq!(nudged.len(), 1, "{nudged:?}");
         assert_eq!(nudged[0].0, scout);
 
-        queued(&fleet, &scout, &[]);
-        deadline.overdue(&fleet.handle(), &room).await;
+        read_it_all(&fleet, &id, &scout).await;
+        deadline.overdue(&fleet.handle(), &id, &room).await;
         settle().await;
         assert_eq!(
             nudges(&fleet).len(),
@@ -505,45 +351,66 @@ mod tests {
         );
     }
 
-    /// A live seat is never behind: whatever it holds, it holds because it is
-    /// busy, and a busy seat reads its queue at the next barrier.
+    /// A live seat is never behind: whatever it has not read, it has not read
+    /// because it is busy, and a busy seat reads at its next round.
     #[tokio::test(start_paused = true)]
     async fn a_live_seat_s_backlog_is_nobody_s_deadline() {
-        let (fleet, root, scout, _) = tree(&["scout"]);
-        queued(&fleet, &scout, &[held("req_1", "#design")]);
+        let (fleet, root, _, id, _) = tree(&["scout:0"]);
+        said(&fleet, &id, "the build is green");
         Deadline::default()
-            .overdue(&fleet.handle(), &room_of(&root, &["scout"]))
+            .overdue(&fleet.handle(), &id, &room_of(&root, &["scout:0"]))
             .await;
         settle().await;
         assert!(fleet.delivered().is_empty(), "{:?}", fleet.delivered());
     }
 
-    /// A room nobody has seen a frame of places nothing: the post is held by a
-    /// seat this process cannot name, so nothing is armed for it.
+    /// A seat that came into being after everything that was said is not behind
+    /// on any of it (ADR-0025 §2), so nothing wakes it for that.
     #[tokio::test(start_paused = true)]
-    async fn a_post_from_a_room_this_process_has_not_seen_arms_nothing() {
-        let (fleet, _, scout, _) = tree(&["~scout:120"]);
-        let deadline = Deadline::default();
-        let waiting = queued(&fleet, &scout, &[held("req_1", "#elsewhere")]);
-        deadline
-            .queued(&fleet.handle(), &Roster::default(), &scout, &waiting, now())
-            .await;
+    async fn a_seat_younger_than_every_post_starts_level() {
+        let fleet = Fleet::default();
+        let root = fleet.root();
+        let id = fleet.room(&root, "design");
+        said(&fleet, &id, "said before you were seated");
+        let scout = fleet.child(&root, "scout");
+        fleet.born(&scout, ts() + jiff::SignedDuration::from_secs(60));
 
-        after(Duration::from_secs(3600)).await;
+        assert_eq!(
+            Unread::of(&fleet.handle(), &id, "#design", &scout, "scout").await,
+            Unread::default()
+        );
+
+        Deadline::default()
+            .overdue(&fleet.handle(), &id, &room_of(&root, &["scout:120"]))
+            .await;
+        settle().await;
         assert!(fleet.delivered().is_empty(), "{:?}", fleet.delivered());
     }
 
-    #[test]
-    fn only_a_room_s_own_post_is_a_deadline_s_business() {
-        assert_eq!(
-            posted(&held("req_1", "#design")).map(|(_, room)| room),
-            Some("#design")
+    /// A cursor at the head is the whole of "read": no post of the room is
+    /// unread, whoever wrote it.
+    #[tokio::test]
+    async fn a_cursor_at_the_head_leaves_nothing_unread() {
+        let (fleet, _, scout, id, _) = tree(&["scout:120"]);
+        said(&fleet, &id, "the build is green");
+        let host = fleet.handle();
+        assert!(
+            !Unread::of(&host, &id, "#design", &scout, "scout")
+                .await
+                .is_empty()
         );
-        assert_eq!(posted(&briefed("req_2")), None, "the agents' surface");
-        assert_eq!(
-            posted(&nudged("req_3", "#design")),
-            None,
-            "nobody signed it"
+
+        read_it_all(&fleet, &id, &scout).await;
+        let unread = Unread::of(&host, &id, "#design", &scout, "scout").await;
+        assert!(unread.is_empty(), "{unread:?}");
+        assert_eq!(unread.head, None, "and nothing left to move the cursor to");
+        assert!(
+            cursor::of_state(
+                &room::read(&host, &scout).await.expect("the seat"),
+                "#design"
+            )
+            .is_some(),
+            "the cursor is on the seat's own session"
         );
     }
 }

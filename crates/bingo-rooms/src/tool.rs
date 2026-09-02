@@ -25,17 +25,17 @@ const DESCRIPTION: &str = "\
 Open a room — a conversation whose every member reads what is posted into it — \
 and say who is in it. Post into it afterwards with `SendMessage` to `#name`. \
 By default the room hangs under you, so the agents you started are the ones \
-who hear it; with `shared: true` it hangs under the agent that started you \
-instead, so your peers hear it. Members are names, not sessions: a name \
-nobody holds yet is kept and skipped at delivery until someone does. Name \
-`parent` among the members to hear the room yourself: every post reaches you as \
-it lands — read at your next stop while you work, or opening a turn of its own \
-when you are idle — and one that says `@parent` is owed an answer. A chatty \
-room spends your attention that way, so leave `parent` off one that should not, \
-or name it in `listeners` instead: a listening seat is handed the posts without \
-being woken by them, reads them whole at its next turn, and is woken once when \
-they have waited its patience. Opening a room that already stands replaces who \
-is in it rather than opening a second one.";
+who read it; with `shared: true` it hangs under the agent that started you \
+instead, so your peers read it. Members are names, not sessions: a name \
+nobody holds yet is kept and skipped until someone does. A post is written \
+once, into the room, and every member reads what it has not read yet at the \
+head of its next turn — so a seat is patient by default: it is woken when a \
+post says `@name`, and once when the room has stood unread for 300 seconds. \
+Name it in `listeners` with `patience_s` to say how long it may stand instead, \
+or `patience_s: 0` for a seat every post wakes as it lands. Name `parent` among \
+the members to read the room yourself, and to owe an answer to a post that says \
+`@parent`. Opening a room that already stands replaces who is in it rather than \
+opening a second one.";
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct OpenRoomArgs {
@@ -45,9 +45,11 @@ pub struct OpenRoomArgs {
     /// Who is in it, by name — the names `SpawnAgent` gave back, or the roles
     /// of the team. Nobody, by default.
     pub members: Option<Vec<String>>,
-    /// Which of them listen rather than answer: a name for the default
-    /// patience of 300 seconds, or `{"name": "parent", "patience_s": 120}` for
-    /// its own. A name here need not also be in `members`.
+    /// The seats that hear the room otherwise than a bare name does: `{"name":
+    /// "parent", "patience_s": 120}` may stand unread that long before it is
+    /// woken, and `"patience_s": 0` is woken by every post as it lands. A name
+    /// alone takes the default 300 seconds. A name here need not also be in
+    /// `members`.
     pub listeners: Option<Vec<Listener>>,
     /// Hang the room under the agent that started you, so your peers hear it,
     /// instead of under you. `false` by default.
@@ -206,19 +208,23 @@ mod tests {
         let out = opened(
             &fleet,
             &reviewer,
-            json!({ "name": "design", "members": ["helper"] }),
+            json!({
+                "name": "design",
+                "members": ["helper"],
+                "listeners": [{"name": "helper", "patience_s": 0}],
+            }),
         )
         .await
         .expect("a room this crate can open");
         assert!(!out.is_error);
-        assert_eq!(out.parts[0].as_text(), Some("#design: helper"));
+        assert_eq!(out.parts[0].as_text(), Some("#design: helper:0"));
 
-        let (id, mut room) = room_of(&fleet, "#design");
+        let (id, room) = room_of(&fleet, "#design");
         assert_eq!(room.parent, reviewer, "the caller's own tree");
         assert_eq!(fleet.summary(&id).driver, Driver::Log);
         assert_eq!(fleet.members(&id), ["helper"]);
 
-        room.members = fleet.members(&id);
+        let room = room.seated(&fleet.state(&id));
         post::fan_out(&fleet.handle(), &room, "reviewer", "look again")
             .await
             .expect("a post");
@@ -234,19 +240,24 @@ mod tests {
         let out = opened(
             &fleet,
             &reviewer,
-            json!({ "name": "design", "members": ["reviewer", "scout"], "shared": true }),
+            json!({
+                "name": "design",
+                "members": ["reviewer", "scout"],
+                "listeners": [{"name": "scout", "patience_s": 0}],
+                "shared": true,
+            }),
         )
         .await
         .expect("a room this crate can open");
-        assert_eq!(out.parts[0].as_text(), Some("#design: reviewer, scout"));
+        assert_eq!(out.parts[0].as_text(), Some("#design: reviewer, scout:0"));
 
-        let (id, mut room) = room_of(&fleet, "#design");
+        let (id, room) = room_of(&fleet, "#design");
         assert_eq!(
             room.parent, root,
             "a shared room hangs in the parent's tree"
         );
 
-        room.members = fleet.members(&id);
+        let room = room.seated(&fleet.state(&id));
         post::fan_out(&fleet.handle(), &room, "reviewer", "stand-up in five")
             .await
             .expect("a post");
@@ -385,11 +396,7 @@ mod tests {
                     vec![
                         node("helper", None, vec![]),
                         node("scout", None, vec![]),
-                        node(
-                            "listening",
-                            None,
-                            vec![node("watcher", Some("120s"), vec![])]
-                        ),
+                        node("watcher", Some("120s"), vec![]),
                     ]
                 )]
             })
@@ -472,8 +479,8 @@ mod tests {
         );
     }
 
-    /// The structured door onto the same dial `/room ~name` is: a name for the
-    /// default patience, a number for its own (ADR-0029 §2).
+    /// The structured door onto the same dial `/room name:120` is: a name for
+    /// the default ear, a number for its own (ADR-0029 §2, ADR-0034 §6).
     #[tokio::test]
     async fn listeners_seat_a_patient_ear_and_the_receipt_says_so() {
         let (fleet, _, reviewer, _) = tree();
@@ -483,14 +490,18 @@ mod tests {
             json!({
                 "name": "design",
                 "members": ["helper"],
-                "listeners": ["parent", {"name": "watcher", "patience_s": 120}],
+                "listeners": [
+                    {"name": "helper", "patience_s": 0},
+                    "parent",
+                    {"name": "watcher", "patience_s": 120},
+                ],
             }),
         )
         .await
         .expect("a room with listeners in it");
         assert_eq!(
             out.parts[0].as_text(),
-            Some("#design: helper, ~parent(300s), ~watcher(120s)")
+            Some("#design: helper:0, parent, watcher:120")
         );
 
         let id = fleet.titled("#design").expect("the room");
@@ -523,25 +534,29 @@ mod tests {
         assert!(fleet.created().is_empty(), "nothing was opened");
     }
 
-    /// Where a model meets ADR-0028: the pattern is in the tool's own words.
+    /// Where a model meets ADR-0028 and ADR-0034 §6: the pattern and the
+    /// default are in the tool\'s own words.
     #[test]
     fn the_description_says_what_naming_the_holder_gets_you() {
         assert!(
             DESCRIPTION.contains("`parent` among the members"),
             "{DESCRIPTION}"
         );
-        assert!(DESCRIPTION.contains("as it lands"), "{DESCRIPTION}");
         assert!(
-            DESCRIPTION.contains("`@parent` is owed an answer"),
-            "{DESCRIPTION}"
+            DESCRIPTION.contains("`@parent`"),
+            "the debt is said: {DESCRIPTION}"
         );
         assert!(
-            DESCRIPTION.contains("spends your attention"),
-            "the cost is said, not hidden: {DESCRIPTION}"
+            DESCRIPTION.contains("patient by default"),
+            "the default is said: {DESCRIPTION}"
         );
         assert!(
-            DESCRIPTION.contains("name it in `listeners` instead"),
-            "the other end of the dial is offered where the cost is: {DESCRIPTION}"
+            DESCRIPTION.contains("stood unread for 300 seconds"),
+            "and what it costs to wait: {DESCRIPTION}"
+        );
+        assert!(
+            DESCRIPTION.contains("`patience_s: 0`"),
+            "the other end of the dial is offered: {DESCRIPTION}"
         );
     }
 

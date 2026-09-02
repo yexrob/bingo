@@ -3,9 +3,8 @@
 //! of every journal, so a post into a room reaches the room's members and what
 //! the room owes for it is chased and shown (ADR-0022 §3–4).
 //!
-//! A journal it watches is also a seat's own: a queue that changed says what
-//! that seat is holding, and a patient seat holding a room's posts too long is
-//! woken for them (ADR-0029 §3).
+//! A post it sees fan out leaves some seats waiting, and a seat left behind
+//! its room for its whole patience is woken for it (ADR-0029 §3, ADR-0034 §3).
 //!
 //! Nothing it does waits on the session it observes: what it reads is the
 //! session tree, and what it writes to is another session's queue.
@@ -68,18 +67,6 @@ impl Hook for RoomsHook {
                 payload,
             } if plugin == PLUGIN => self.rooms.extended(&frame.session, kind, payload),
             Event::ItemCompleted { item } => self.item(&frame.session, item, cx).await,
-            // Any session's queue may be holding a room's posts (ADR-0029 §3).
-            Event::QueueChanged { entries, .. } => {
-                self.deadline
-                    .queued(
-                        &cx.host,
-                        &self.rooms,
-                        &frame.session,
-                        entries,
-                        Timestamp::now(),
-                    )
-                    .await
-            }
             _ => {}
         }
     }
@@ -116,20 +103,36 @@ impl RoomsHook {
         let Some(text) = parts.first().and_then(ContentPart::as_text) else {
             return;
         };
-        self.fan_out(&room, origin, text, cx).await;
+        self.fan_out(session, &room, origin, text, cx).await;
         self.reckon(session, &room, cx).await;
     }
 
-    /// Everyone else in the room hears it.
-    async fn fan_out(&self, room: &Room, origin: &Origin, text: &str, cx: &HookContext) {
+    /// Who the post wakes is woken, and who it leaves behind starts waiting:
+    /// the patience of a seat it did not wake is the bound on when that seat
+    /// reads it (ADR-0034 §3).
+    async fn fan_out(
+        &self,
+        session: &SessionId,
+        room: &Room,
+        origin: &Origin,
+        text: &str,
+        cx: &HookContext,
+    ) {
         // A person's own session leaves no principal, and `parent` is what the
         // members of the room call it.
         let author = origin
             .principal
             .clone()
             .unwrap_or_else(|| PARENT.to_string());
-        if let Err(error) = post::fan_out(&cx.host, room, &author, text).await {
-            tracing::warn!(room = %room.title, %error, "a post did not reach every member");
+        match post::fan_out(&cx.host, room, &author, text).await {
+            Ok(waiting) => {
+                self.deadline
+                    .waiting(&cx.host, session, room, &waiting)
+                    .await
+            }
+            Err(error) => {
+                tracing::warn!(room = %room.title, %error, "a post did not wake every member")
+            }
         }
     }
 
@@ -151,7 +154,9 @@ impl RoomsHook {
         let Some(state) = room::read(&cx.host, session).await else {
             return;
         };
-        self.deadline.overdue(&cx.host, &room.seated(&state)).await;
+        self.deadline
+            .overdue(&cx.host, session, &room.seated(&state))
+            .await;
     }
 
     /// The card on a session: every debt in every room under it, or nothing at
@@ -199,7 +204,7 @@ mod tests {
     use serde_json::Value;
     use std::path::{Path, PathBuf};
 
-    /// The seats a roster line asks for: a bare name is live, `~name` listens.
+    /// The seats a roster line asks for: a bare name is patient, `name:0` live.
     fn seats(roster: &[&str]) -> Vec<Seat> {
         roster
             .iter()
@@ -231,8 +236,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_post_reaches_every_member_but_the_one_who_wrote_it() {
-        let (fleet, _, room, hook) = opened(&["reviewer", "scout"]).await;
+    async fn a_post_wakes_every_live_member_but_the_one_who_wrote_it() {
+        let (fleet, _, room, hook) = opened(&["reviewer:0", "scout:0"]).await;
         post_into(&fleet, &hook, &room, Some("reviewer")).await;
 
         let delivered = fleet.delivered();
@@ -242,56 +247,49 @@ mod tests {
         assert_eq!(*delivery, Delivery::Wake);
     }
 
+    /// A post nobody signed came from the session the room hangs under, so a
+    /// rostered holder is not woken for its own — and what the seats that are
+    /// woken get is a nudge, signed by nobody (ADR-0034 §3).
     #[tokio::test]
     async fn a_post_nobody_signed_came_from_the_session_the_room_hangs_under() {
-        let (fleet, _, room, hook) = opened(&["reviewer"]).await;
+        let (fleet, root, room, hook) = opened(&["reviewer:0", "parent:0"]).await;
         post_into(&fleet, &hook, &room, None).await;
 
         let delivered = fleet.delivered();
-        assert_eq!(delivered.len(), 1);
-        let bingo_sdk::Input::Text { origin, .. } = &delivered[0].1 else {
-            panic!("a post is text");
+        assert_eq!(delivered.len(), 1, "{delivered:?}");
+        assert_ne!(delivered[0].0, root, "the holder wrote it");
+        let bingo_sdk::Input::Text { text, origin, .. } = &delivered[0].1 else {
+            panic!("a nudge is text");
         };
-        assert_eq!(origin.principal.as_deref(), Some(PARENT));
+        assert!(!text.contains("hello team"), "{text}");
+        assert_eq!(origin.principal, None);
         assert_eq!(origin.conversation.as_deref(), Some("#design"));
     }
 
-    /// The ear on the roster decides how the fan-out reaches a seat, end to
-    /// end through the hook (ADR-0029 §1).
+    /// The ear on the roster decides whether the post wakes a seat at all, end
+    /// to end through the hook (ADR-0029 §1, ADR-0034 §3).
     #[tokio::test]
-    async fn a_patient_seat_is_handed_the_post_without_being_woken() {
-        let (fleet, _, room, hook) = opened(&["reviewer", "~scout"]).await;
-        post_into(&fleet, &hook, &room, Some("reviewer")).await;
+    async fn a_patient_seat_the_post_does_not_name_is_written_to_not_at_all() {
+        let (fleet, _, room, hook) = opened(&["reviewer:0", "scout"]).await;
+        post_into(&fleet, &hook, &room, None).await;
 
         let delivered = fleet.delivered();
-        assert_eq!(delivered.len(), 1);
-        let (to, _, delivery) = &delivered[0];
-        assert_eq!(fleet.summary(to).title.as_deref(), Some("scout"));
-        assert_eq!(*delivery, Delivery::Hold);
+        assert_eq!(delivered.len(), 1, "{delivered:?}");
+        assert_eq!(
+            fleet.summary(&delivered[0].0).title.as_deref(),
+            Some("reviewer"),
+            "the live seat, and nobody else"
+        );
     }
 
-    /// The whole of the deadline through the hook: the seat's queue says what
-    /// it is holding, and the patience says when it is woken for it.
+    /// The whole of the deadline through the hook: the post leaves the seat
+    /// behind its room, and the patience says when it is woken to read it.
     #[tokio::test(start_paused = true)]
-    async fn a_seat_holding_a_post_past_its_patience_is_woken_by_the_hook() {
-        let (fleet, root, _, hook) = opened(&["~scout:120"]).await;
+    async fn a_seat_a_post_left_behind_is_woken_by_the_hook_at_its_patience() {
+        let (fleet, root, room, hook) = opened(&["scout:120"]).await;
         let scout = fleet.titled("scout").expect("the seat");
-        let cx = hook_context(&scout, &fleet, Path::new("/work/project"));
-        let waiting =
-            crate::tests::queued(&fleet, &scout, &[crate::tests::held("req_1", "#design")]);
 
-        hook.on_event(
-            &stamped(
-                3,
-                Event::QueueChanged {
-                    revision: 1,
-                    entries: waiting,
-                },
-                &scout,
-            ),
-            &cx,
-        )
-        .await;
+        says(&fleet, &hook, &room, Some("reviewer"), "the build is green").await;
         settle().await;
         assert!(
             nudges(&fleet).is_empty(),
@@ -303,20 +301,20 @@ mod tests {
         let nudged = nudges(&fleet);
         assert_eq!(nudged.len(), 1, "{nudged:?}");
         assert!(nudged[0].contains("#design"), "{}", nudged[0]);
+        assert_eq!(fleet.delivered()[0].0, scout);
         assert!(
             fleet.delivered().iter().all(|(to, ..)| to != &root),
             "the holder is not on this roster"
         );
     }
 
-    /// A room this process reads for the first time may find a seat already
-    /// holding its posts. It is nudged once — and a reopen is the same room,
-    /// so it is not nudged again for the same backlog.
+    /// A room this process reads for the first time may find a seat whose
+    /// cursor the last process left behind the head. It is nudged once — and a
+    /// reopen is the same room, so it is not nudged again for the same posts.
     #[tokio::test(start_paused = true)]
     async fn a_backlog_found_at_the_announce_is_nudged_once() {
-        let (fleet, _, room) = standing(&["~scout:120"]).await;
-        let scout = fleet.titled("scout").expect("the seat");
-        crate::tests::queued(&fleet, &scout, &[crate::tests::held("req_1", "#design")]);
+        let (fleet, _, room) = standing(&["scout:120"]).await;
+        fleet.post(&room, "the build is green", Some("reviewer"), ts());
         let hook = RoomsHook::default();
 
         announce(&fleet, &hook, &room).await;
@@ -339,7 +337,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_reopened_room_is_the_same_room_and_keeps_its_members() {
-        let (fleet, _, room, hook) = opened(&["reviewer"]).await;
+        let (fleet, _, room, hook) = opened(&["reviewer:0"]).await;
         let cx = hook_context(&room, &fleet, Path::new("/work/project"));
         hook.on_event(&stamped(8, updated(&fleet.summary(&room)), &room), &cx)
             .await;
@@ -479,6 +477,15 @@ mod tests {
             .collect()
     }
 
+    /// The nudges the chaser sent, which are the ones that quote a debt: the
+    /// deadline's own says only that the room stands unread.
+    fn chases(fleet: &Fleet) -> Vec<String> {
+        nudges(fleet)
+            .into_iter()
+            .filter(|said| said != &post::unread("#design"))
+            .collect()
+    }
+
     #[tokio::test(start_paused = true)]
     async fn a_question_this_process_finds_already_overdue_is_chased_once() {
         let (fleet, _, room) = standing(&["scout"]).await;
@@ -488,13 +495,13 @@ mod tests {
         announce(&fleet, &hook, &room).await;
         settle().await;
 
-        let nudged = nudges(&fleet);
-        assert_eq!(nudged.len(), 1, "{nudged:?}");
-        assert!(nudged[0].contains("#design"), "{}", nudged[0]);
+        let chased = chases(&fleet);
+        assert_eq!(chased.len(), 1, "{chased:?}");
+        assert!(chased[0].contains("#design"), "{}", chased[0]);
         assert!(
-            nudged[0].contains("what does the log say?"),
+            chased[0].contains("what does the log say?"),
             "{}",
-            nudged[0]
+            chased[0]
         );
     }
 
@@ -507,7 +514,7 @@ mod tests {
 
         announce(&fleet, &hook, &room).await;
         settle().await;
-        assert!(nudges(&fleet).is_empty(), "{:?}", fleet.delivered());
+        assert!(chases(&fleet).is_empty(), "{:?}", fleet.delivered());
     }
 
     #[tokio::test(start_paused = true)]
@@ -535,7 +542,7 @@ mod tests {
             "and the moment it was asked, for whoever wants an age: {standing}"
         );
         assert_eq!(*closed, Value::Null, "answered, and the card goes");
-        assert!(nudges(&fleet).is_empty(), "nobody was chased for it");
+        assert!(chases(&fleet).is_empty(), "nobody was chased for it");
     }
 
     #[test]

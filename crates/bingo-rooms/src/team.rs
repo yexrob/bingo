@@ -110,9 +110,9 @@ mod tests {
         );
     }
 
-    /// The same door as `/room ~parent` and `OpenRoom`'s listeners, said in a
-    /// file: a name alone takes the default patience, and a number asks for
-    /// its own.
+    /// The same door as `/room parent:120` and `OpenRoom`'s listeners, said in
+    /// a file: a name alone takes the default ear, and a number asks for its
+    /// own — zero for a seat every post wakes.
     #[test]
     fn a_declared_room_says_which_of_them_listen() {
         let (_home, cwd) = project(
@@ -120,7 +120,8 @@ mod tests {
             r#"{"rooms": [{
                 "name": "design",
                 "members": ["scout"],
-                "listeners": ["parent", {"name": "reviewer", "patience_s": 120}]
+                "listeners": [{"name": "scout", "patience_s": 0}, "parent",
+                              {"name": "reviewer", "patience_s": 120}]
             }]}"#,
         );
         let declared = rooms(&cwd).expect("a team file");

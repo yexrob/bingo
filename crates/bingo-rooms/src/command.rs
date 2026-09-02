@@ -16,10 +16,11 @@ const HEADERS: [&str; 3] = ["room", "members", "owed"];
 /// What a session with no rooms in it is told, which is also where a person
 /// meets the holder's seat (ADR-0028) and the ear it can wear (ADR-0029).
 const NONE: &str = "no rooms here; `/room <name> [member…]` opens one — name \
-`parent` among the members to hear every post yourself as it lands, and to owe \
-an answer to one that says `@parent`. Write a member `~name` to seat a patient \
-ear instead: its posts wait for that seat's next turn, and `~name:120` says how \
-long they may wait";
+`parent` among the members to read the room yourself, and to owe an answer to a \
+post that says `@parent`. A member reads the room at the head of its next turn: \
+a bare `name` is woken when a post says `@name`, and once when the room has \
+stood unread for 300s. Write `name:120` to say how long it may stand instead, \
+or `name:0` for a seat every post wakes as it lands";
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct RoomCommand;
@@ -196,17 +197,18 @@ mod tests {
         );
     }
 
-    /// The `~` door, end to end: the roster takes it, the journal keeps it,
-    /// and the receipt and the listing both show it (ADR-0029 §2).
+    /// The patience door, end to end: the roster takes it, the journal keeps
+    /// it, and the receipt and the listing both show it (ADR-0029 §2). A bare
+    /// name is the default and reads back bare (ADR-0034 §6).
     #[tokio::test]
-    async fn a_member_under_the_sigil_is_seated_with_a_patient_ear() {
+    async fn a_member_with_a_patience_beside_it_is_seated_wearing_that_ear() {
         let fleet = Fleet::default();
         let root = fleet.root();
         fleet.child(&root, "scout");
         assert_eq!(
-            typed(&fleet, &root, "design scout ~parent:120").await,
+            typed(&fleet, &root, "design scout parent:120").await,
             CommandOutcome::Applied {
-                message: Some("#design: scout, ~parent(120s)".into())
+                message: Some("#design: scout, parent:120".into())
             }
         );
 
@@ -216,6 +218,11 @@ mod tests {
             fleet.ears(&room).of("parent"),
             crate::ear::Ear::Patient(std::time::Duration::from_secs(120))
         );
+        assert_eq!(
+            fleet.ears(&room).of("scout"),
+            crate::ear::Ear::default(),
+            "a bare name took the default"
+        );
 
         let CommandOutcome::View {
             view: View::Table { rows, .. },
@@ -223,7 +230,7 @@ mod tests {
         else {
             panic!("a roster is a table");
         };
-        assert_eq!(rows[0][1], "scout, ~parent(120s)");
+        assert_eq!(rows[0][1], "scout, parent:120");
     }
 
     #[tokio::test]
@@ -231,7 +238,7 @@ mod tests {
         let fleet = Fleet::default();
         let root = fleet.root();
         let error = RoomCommand
-            .run("design ~parent:15", &command_context(&root, &fleet))
+            .run("design parent:15", &command_context(&root, &fleet))
             .await
             .expect_err("the dead band");
         assert_eq!(error.code, bingo_sdk::ErrorCode::InvalidInput);
@@ -243,14 +250,14 @@ mod tests {
     }
 
     /// What a person is told naming `parent` gets them (ADR-0028 §1–3), and
-    /// what the sigil beside a name does (ADR-0029 §2).
+    /// what the number beside a name does (ADR-0029 §2, ADR-0034 §6).
     #[test]
     fn the_listing_says_what_seating_the_holder_gets_you() {
         assert!(NONE.contains("`parent` among the members"), "{NONE}");
-        assert!(NONE.contains("as it lands"), "{NONE}");
         assert!(NONE.contains("`@parent`"), "{NONE}");
-        assert!(NONE.contains("`~name`"), "{NONE}");
-        assert!(NONE.contains("`~name:120`"), "{NONE}");
+        assert!(NONE.contains("stood unread for 300s"), "{NONE}");
+        assert!(NONE.contains("`name:120`"), "{NONE}");
+        assert!(NONE.contains("`name:0`"), "{NONE}");
     }
 
     #[tokio::test]
