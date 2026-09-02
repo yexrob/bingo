@@ -1,25 +1,36 @@
 //! The serial room (ADR-0025): a post must follow everything its author could
 //! have seen. Two ledgers are derived at the moment of the call and compared —
-//! the room's own posts against what the caller has read — and a post written
-//! behind the room's head is handed back with what it missed instead of
-//! landing.
+//! the room's own posts against how far the caller has read — and a post
+//! written behind the room's head is handed back with what it missed instead
+//! of landing.
 //!
 //! Both ledgers are folds of journals, so nothing is stored beside them and a
-//! restart re-derives exactly what the process before it had. Neither reads
-//! anything but `Origin` and journal order: what a room is remains the rooms
-//! plugin's business.
+//! restart re-derives exactly what the process before it had. How far the
+//! caller has read is the cursor the room keeps under its name (ADR-0034 §2),
+//! which is the one fact "seen" comes from now that a post is written once and
+//! copied nowhere. Both ledgers are read out of the room itself, so a caller
+//! that has yet to hold a seat is judged by the same rule as one that does.
 //!
 //! "Could have seen" is the whole of the rule, so a post that landed before
-//! the caller's session existed is not counted: it was never fanned out to a
-//! session that was not there, and no author can be behind on it. What landed
-//! afterwards and was not read is what bounces — including a fan-out lost to a
-//! process that was down, which the bounce itself repairs.
+//! the caller's session existed is not counted: it was never anybody's to read
+//! before there was a session to read it, and no author can be behind on it.
+//! What landed afterwards and was not read is what bounces.
 
 use bingo_sdk::{
     ContentPart, Item, ItemBody, ItemId, SessionState, SessionSummary, ToolContext, ToolOutput,
 };
 
 use crate::{names, watch};
+
+/// The plugin whose journal a cursor is read out of. This crate may not import
+/// that one (ADR-0001), so the three names here are the whole of the contract
+/// and the payload is read as data: a shape this does not recognise says the
+/// caller has read nothing rather than guessing.
+const ROOMS: &str = "bingo.rooms";
+/// The kind one seat's cursor is published under, before its name.
+const CURSOR: &str = "cursor:";
+/// The post that payload names: the last one the seat has read.
+const POST: &str = "post";
 
 /// One post, as a room's journal has it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -46,21 +57,25 @@ pub async fn bounce(cx: &ToolContext, room: &SessionSummary, speaker: &str) -> O
     let there = watch::follow(&cx.host, &room.id).await.ok()?;
     let here = watch::follow(&cx.host, &cx.session).await.ok()?;
     let awaited = awaited(&there.snapshot, &here.snapshot, speaker);
-    let seen = seen(&here.snapshot, &cx.item, &title);
-    match verdict(awaited, seen) {
+    let read = read(&there.snapshot, &awaited, cursor(&there.snapshot, speaker));
+    let quoted = quoted(before(&here.snapshot, &cx.item), &title);
+    match verdict(awaited, read.max(quoted)) {
         Verdict::Land => None,
         Verdict::Behind { seen, missed } => Some(ToolOutput::error(said(&title, seen, &missed))),
     }
 }
 
-/// The posts of a room the caller was there to hear: everyone else's, from
-/// the moment its own session opened.
-fn awaited(room: &SessionState, caller: &SessionState, speaker: &str) -> Vec<Post> {
+/// The posts of a room the caller was there to hear, each with where the room
+/// holds it: everyone else's, from the moment its own session opened.
+fn awaited(room: &SessionState, caller: &SessionState, speaker: &str) -> Vec<(usize, Post)> {
     room.items
         .iter()
-        .filter(|item| item.completed_at.unwrap_or(item.started_at) >= caller.summary.created_at)
-        .filter_map(post_of)
-        .filter(|post| post.author != speaker)
+        .enumerate()
+        .filter(|(_, item)| {
+            item.completed_at.unwrap_or(item.started_at) >= caller.summary.created_at
+        })
+        .filter_map(|(at, item)| Some((at, post_of(item)?)))
+        .filter(|(_, post)| post.author != speaker)
         .collect()
 }
 
@@ -78,12 +93,25 @@ fn post_of(item: &Item) -> Option<Post> {
     })
 }
 
-/// How many of the room's posts the caller has read: the ones absorbed into
-/// its own journal, or the ones a bounce already quoted at it, whichever is
-/// the further on (ADR-0025 §3).
-fn seen(caller: &SessionState, cut: &ItemId, room: &str) -> usize {
-    let read = before(caller, cut);
-    absorbed(read, room).max(quoted(read, room))
+/// How far the caller's cursor stands: the posts it awaited that the room
+/// holds at or before the one the cursor names (ADR-0034 §5). A seat with no
+/// cursor, or one the room does not hold, has read nothing.
+fn read(room: &SessionState, awaited: &[(usize, Post)], cursor: Option<ItemId>) -> usize {
+    let Some(head) = cursor.and_then(|id| room.items.iter().position(|item| item.id == id)) else {
+        return 0;
+    };
+    awaited.iter().filter(|(at, _)| *at <= head).count()
+}
+
+/// Where one member has read this room up to, as the rooms plugin publishes it
+/// in the room's own journal: a register per seat, keyed in one spelling of the
+/// name because a room compares names in any case.
+fn cursor(room: &SessionState, member: &str) -> Option<ItemId> {
+    let published = room
+        .extensions
+        .get(ROOMS)?
+        .get(&format!("{CURSOR}{}", member.to_lowercase()))?;
+    Some(ItemId::from_raw(published.get(POST)?.as_str()?))
 }
 
 /// The caller's journal as the model that made this call saw it. What a
@@ -94,20 +122,6 @@ fn before<'a>(caller: &'a SessionState, cut: &ItemId) -> &'a [Item] {
         Some(at) => &caller.items[..at],
         None => &caller.items,
     }
-}
-
-/// The room's posts in the caller's own journal. A nudge carries no principal
-/// and is nobody's post, so it never counts (ADR-0025 §3).
-fn absorbed(items: &[Item], room: &str) -> usize {
-    items
-        .iter()
-        .filter(|item| match &item.body {
-            ItemBody::User { origin, .. } => {
-                origin.conversation.as_deref() == Some(room) && origin.principal.is_some()
-            }
-            _ => false,
-        })
-        .count()
 }
 
 /// The furthest a bounce has already read this room out to the caller. A
@@ -135,13 +149,16 @@ fn text_of(output: &ToolOutput) -> String {
         .collect()
 }
 
-fn verdict(awaited: Vec<Post>, seen: usize) -> Verdict {
+fn verdict(awaited: Vec<(usize, Post)>, seen: usize) -> Verdict {
     if seen >= awaited.len() {
         return Verdict::Land;
     }
     Verdict::Behind {
         seen,
-        missed: awaited[seen..].to_vec(),
+        missed: awaited[seen..]
+            .iter()
+            .map(|(_, post)| post.clone())
+            .collect(),
     }
 }
 
@@ -181,6 +198,12 @@ mod tests {
     use bingo_sdk::{ItemStatus, Origin, Tool, TurnId};
     use jiff::Timestamp;
     use serde_json::json;
+
+    /// A ledger of posts, as `awaited` hands one back: in the order the room
+    /// holds them, from the top of it.
+    fn ledger(posts: &[Post]) -> Vec<(usize, Post)> {
+        posts.iter().cloned().enumerate().collect()
+    }
 
     fn at(second: i64) -> Timestamp {
         Timestamp::from_second(second).expect("a timestamp")
@@ -243,14 +266,14 @@ mod tests {
 
     #[test]
     fn a_caller_level_with_the_room_lands_and_one_behind_it_does_not() {
-        let head = vec![post("scout", "the build is green")];
-        assert_eq!(verdict(head.clone(), 1), Verdict::Land);
+        let head = [post("scout", "the build is green")];
+        assert_eq!(verdict(ledger(&head), 1), Verdict::Land);
         assert_eq!(verdict(Vec::new(), 0), Verdict::Land);
         assert_eq!(
-            verdict(head.clone(), 0),
+            verdict(ledger(&head), 0),
             Verdict::Behind {
                 seen: 0,
-                missed: head
+                missed: head.to_vec()
             }
         );
     }
@@ -271,7 +294,8 @@ mod tests {
         let caller = journal("builder", 5, Vec::new());
         assert_eq!(
             awaited(&room, &caller, "builder"),
-            [post("scout", "yours to read")]
+            [(2, post("scout", "yours to read"))],
+            "and the room still says where it holds it"
         );
     }
 
@@ -292,40 +316,72 @@ mod tests {
         let caller = journal("scout", 0, Vec::new());
         assert_eq!(
             awaited(&room, &caller, "scout"),
-            [post(names::PARENT, "unsigned")]
+            [(0, post(names::PARENT, "unsigned"))]
         );
     }
 
+    /// The whole of ADR-0034 §5: the cursor the room keeps under the caller's
+    /// name says how much of what it awaited it has read, and nothing else does.
     #[test]
-    fn a_room_s_posts_count_and_a_nudge_never_does() {
-        let items = [
-            heard("a post", Some("#design"), Some("scout"), 1),
-            heard("a nudge", Some("#design"), None, 2),
-            heard("another room", Some("#standup"), Some("scout"), 3),
-            heard("a direct message", None, Some("scout"), 4),
-        ];
-        assert_eq!(absorbed(&items, "#design"), 1);
+    fn the_caller_s_cursor_into_the_room_is_the_count_of_what_it_has_read() {
+        let room = journal(
+            "#design",
+            0,
+            vec![
+                heard("the build is green", None, Some("scout"), 1),
+                heard("mine", None, Some("builder"), 2),
+                heard("and the tests pass", None, Some("scout"), 3),
+            ],
+        );
+        let awaited = awaited(&room, &journal("builder", 0, Vec::new()), "builder");
+        assert_eq!(awaited.len(), 2, "its own post is not one it awaits");
+
+        let at = |n: usize| Some(room.items[n].id.clone());
+        assert_eq!(read(&room, &awaited, None), 0, "a seat with no cursor");
+        assert_eq!(read(&room, &awaited, at(0)), 1);
+        assert_eq!(read(&room, &awaited, at(1)), 1, "its own post moved it");
+        assert_eq!(read(&room, &awaited, at(2)), 2);
+        assert_eq!(
+            read(&room, &awaited, Some(ItemId::from_raw("itm_gone"))),
+            0,
+            "a cursor the room does not hold has read nothing"
+        );
+    }
+
+    /// The cursor as the rooms plugin publishes it, read back by hand: the
+    /// contract between the two crates, written down (ADR-0034 §2).
+    #[test]
+    fn a_cursor_is_a_post_id_under_the_rooms_plugin_s_own_kind() {
+        let mut room = journal("#design", 0, Vec::new());
+        assert_eq!(cursor(&room, "scout"), None);
+
+        room.extensions.insert(
+            ROOMS.into(),
+            [("cursor:scout".to_string(), json!({ "post": "itm_7" }))]
+                .into_iter()
+                .collect(),
+        );
+        assert_eq!(cursor(&room, "scout"), Some(ItemId::from_raw("itm_7")));
+        assert_eq!(
+            cursor(&room, "Scout"),
+            Some(ItemId::from_raw("itm_7")),
+            "a room compares names in any case"
+        );
+        assert_eq!(cursor(&room, "builder"), None, "one seat is not another");
     }
 
     /// The cut: what a barrier absorbed after the model spoke was not what it
-    /// wrote against, so it is not counted as read.
+    /// wrote against, so a bounce quoted after it is not counted as read.
     #[test]
     fn only_what_was_journaled_before_the_calling_item_is_read() {
+        let missed = [post("builder", "mind this")];
         let call = result("the call this tool is running under");
         let cut = call.id.clone();
-        let caller = journal(
-            "scout",
-            0,
-            vec![
-                heard("read before the call", Some("#design"), Some("builder"), 1),
-                call,
-                heard("absorbed after it", Some("#design"), Some("builder"), 2),
-            ],
-        );
-        assert_eq!(seen(&caller, &cut, "#design"), 1);
+        let caller = journal("scout", 0, vec![call, result(&said("#design", 0, &missed))]);
+        assert_eq!(quoted(before(&caller, &cut), "#design"), 0);
         assert_eq!(
-            seen(&caller, &ItemId::from_raw("itm_gone"), "#design"),
-            2,
+            quoted(before(&caller, &ItemId::from_raw("itm_gone")), "#design"),
+            1,
             "a cut the journal does not hold cuts nothing"
         );
     }
@@ -344,13 +400,16 @@ mod tests {
         assert_eq!(head_of("#design", "Posted to #design."), None);
     }
 
+    /// A bounce is a reading of the room through the tool-result lane, and the
+    /// cursor does not move until the next turn reads it, so the quote is what
+    /// unlocks the very next attempt.
     #[test]
     fn a_journaled_bounce_counts_as_read_and_unlocks_the_next_attempt() {
         let missed = [post("builder", "mind this")];
         let caller = journal("scout", 0, vec![result(&said("#design", 0, &missed))]);
-        let seen = seen(&caller, &ItemId::from_raw("itm_call"), "#design");
+        let seen = quoted(before(&caller, &ItemId::from_raw("itm_call")), "#design");
         assert_eq!(seen, 1);
-        assert_eq!(verdict(missed.to_vec(), seen), Verdict::Land);
+        assert_eq!(verdict(ledger(&missed), seen), Verdict::Land);
     }
 
     /// End to end through the tool, on a fleet whose room holds a post the

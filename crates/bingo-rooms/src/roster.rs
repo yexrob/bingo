@@ -57,16 +57,6 @@ impl Roster {
         }
     }
 
-    /// The rooms of that title this process has seen: where a post held in a
-    /// seat's queue says it came from (ADR-0029 §3).
-    pub fn titled(&self, title: &str) -> Vec<Room> {
-        self.rooms()
-            .values()
-            .filter(|room| room.title == title)
-            .cloned()
-            .collect()
-    }
-
     /// The room a session is, for a caller that is about to await: a copy, so
     /// no lock is held across one.
     pub fn get(&self, session: &SessionId) -> Option<Room> {
@@ -103,10 +93,8 @@ mod tests {
         assert_eq!(room.title, "#design");
         assert_eq!(room.members, ["reviewer", "scout"]);
         assert_eq!(roster.rooms().len(), 1, "a reopen is the same room");
-        assert_eq!(roster.titled("#design"), std::slice::from_ref(&room));
         assert_eq!(roster.under(&parent), [(announced.id, room)]);
         assert!(roster.under(&SessionId::from_raw("ses_other")).is_empty());
-        assert!(roster.titled("#standup").is_empty());
     }
 
     /// The two frames a room's ears come in, folded by the one arm that reads
@@ -127,7 +115,11 @@ mod tests {
 
         let room = roster.get(&announced.id).expect("the room");
         assert_eq!(room.ears.of("scout"), Ear::Patient(ear::FLOOR));
-        assert_eq!(room.ears.of("reviewer"), Ear::Live);
+        assert_eq!(
+            room.ears.of("reviewer"),
+            Ear::Live,
+            "as the roster seated it"
+        );
     }
 
     #[test]

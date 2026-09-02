@@ -13,9 +13,9 @@ use bingo_sdk::{
     ClientIdentity, CloseReason, CommandContext, ContentPart, Delivery, Driver, Env, ErrorCode,
     Event, Frame, FrameStream, GatewayStream, HistoryChunk, HistoryPage, HookContext, HostApi,
     HostHandle, Input, IntentId, InteractionId, InteractionKind, InterruptScope, Item, ItemBody,
-    ItemId, ItemStatus, KernelError, OpenOptions, Origin, ParentLink, Prompter, QueueEntry, Seq,
-    SessionFilter, SessionHandle, SessionId, SessionPort, SessionSelector, SessionSpec,
-    SessionState, SessionSummary, ToolContext, ToolHost, TurnId, Usage,
+    ItemId, ItemStatus, KernelError, OpenOptions, Origin, ParentLink, Prompter, Seq, SessionFilter,
+    SessionHandle, SessionId, SessionPort, SessionSelector, SessionSpec, SessionState,
+    SessionSummary, ToolContext, ToolHost, TurnId, Usage,
 };
 use jiff::Timestamp;
 use serde_json::Value;
@@ -111,12 +111,12 @@ impl Fleet {
     /// A room's membership as its own journal has it, folded the way any
     /// client would fold it.
     pub(crate) fn members(&self, session: &SessionId) -> Vec<String> {
-        room::members_of(&self.snapshot(session))
+        room::members_of(&self.state(session))
     }
 
     /// What each of them hears, folded the same way.
     pub(crate) fn ears(&self, session: &SessionId) -> crate::ear::Ears {
-        crate::ear::ears_of(&self.snapshot(session))
+        crate::ear::ears_of(&self.state(session))
     }
 
     /// A post into a room, written into its journal the way the kernel writes
@@ -160,7 +160,9 @@ impl Fleet {
             .collect()
     }
 
-    fn snapshot(&self, session: &SessionId) -> SessionState {
+    /// One session as any client would fold it: the frames it has taken, in
+    /// order.
+    pub(crate) fn state(&self, session: &SessionId) -> SessionState {
         let sessions = locked(&self.0.sessions);
         let live = sessions
             .iter()
@@ -234,7 +236,7 @@ impl HostApi for Fleet {
             ));
         }
         Ok(Attachment {
-            snapshot: self.snapshot(&id),
+            snapshot: self.state(&id),
             session: id,
             events: Box::pin(futures::stream::empty()),
             handle: SessionHandle(Arc::new(Deaf)),
@@ -460,64 +462,6 @@ pub(crate) fn extended(kind: &str, payload: Value) -> Event {
         plugin: PLUGIN.into(),
         kind: kind.into(),
         payload,
-    }
-}
-
-/// A seat's queue as the kernel says it now stands, written into its journal
-/// the way the kernel writes it and handed back for the hook to see.
-pub(crate) fn queued(
-    fleet: &Fleet,
-    session: &SessionId,
-    entries: &[QueueEntry],
-) -> Vec<QueueEntry> {
-    fleet.remember(
-        session,
-        Event::QueueChanged {
-            revision: 1,
-            entries: entries.to_vec(),
-        },
-    );
-    entries.to_vec()
-}
-
-/// A post from a room, waiting in a seat's queue because the seat is patient
-/// or busy.
-pub(crate) fn held(intent: &str, room: &str) -> QueueEntry {
-    waiting(
-        intent,
-        Origin {
-            surface: crate::SURFACE.into(),
-            principal: Some("scout".into()),
-            conversation: Some(room.to_string()),
-        },
-    )
-}
-
-/// A standby brief waiting in the same queue (ADR-0027): the agents' surface,
-/// which no deadline here may touch.
-pub(crate) fn briefed(intent: &str) -> QueueEntry {
-    waiting(intent, Origin::surface("agent"))
-}
-
-/// A nudge waiting in the same queue: from the room, signed by nobody.
-pub(crate) fn nudged(intent: &str, room: &str) -> QueueEntry {
-    waiting(
-        intent,
-        Origin {
-            surface: crate::SURFACE.into(),
-            principal: None,
-            conversation: Some(room.to_string()),
-        },
-    )
-}
-
-fn waiting(intent: &str, origin: Origin) -> QueueEntry {
-    QueueEntry {
-        intent: IntentId::from_raw(intent),
-        position: 1,
-        preview: "waiting".into(),
-        steerable: true,
-        origin,
     }
 }
 

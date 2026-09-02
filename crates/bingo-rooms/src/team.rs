@@ -13,8 +13,10 @@ use crate::ear::{self, Listener, Seat};
 const DIR: &str = ".bingo";
 const FILE: &str = "team.json";
 
-/// One room a project declares: who is in it, and which of them listen rather
-/// than answer (ADR-0029 §2).
+/// One room a project declares: who is in it, and which of them hear it
+/// otherwise than a bare name does (ADR-0029 §2, ADR-0034 §6). A name in
+/// `members` alone is a patient seat at 300 seconds; a `listeners` entry of
+/// `{"name": "scout", "patience_s": 0}` is one every post wakes as it lands.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 pub struct Entry {
     pub name: String,
@@ -25,9 +27,9 @@ pub struct Entry {
 }
 
 impl Entry {
-    /// The roster it declares: its members, live unless its listeners say
-    /// otherwise. A patience nobody can hold is refused here, as at every
-    /// other door.
+    /// The roster it declares: its members at the default ear unless its
+    /// listeners say otherwise. A patience nobody can hold is refused here, as
+    /// at every other door.
     pub fn seats(&self) -> Result<Vec<Seat>, KernelError> {
         ear::seats(&self.members, &self.listeners)
     }
@@ -110,9 +112,9 @@ mod tests {
         );
     }
 
-    /// The same door as `/room ~parent` and `OpenRoom`'s listeners, said in a
-    /// file: a name alone takes the default patience, and a number asks for
-    /// its own.
+    /// The same door as `/room parent:120` and `OpenRoom`'s listeners, said in
+    /// a file: a name alone takes the default ear, and a number asks for its
+    /// own — zero for a seat every post wakes.
     #[test]
     fn a_declared_room_says_which_of_them_listen() {
         let (_home, cwd) = project(
@@ -120,7 +122,8 @@ mod tests {
             r#"{"rooms": [{
                 "name": "design",
                 "members": ["scout"],
-                "listeners": ["parent", {"name": "reviewer", "patience_s": 120}]
+                "listeners": [{"name": "scout", "patience_s": 0}, "parent",
+                              {"name": "reviewer", "patience_s": 120}]
             }]}"#,
         );
         let declared = rooms(&cwd).expect("a team file");

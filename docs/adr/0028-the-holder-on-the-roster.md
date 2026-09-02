@@ -1,6 +1,6 @@
 # ADR-0028 — The holder on the roster
 
-Status: accepted · 2026-09-01 · Plan: M23 · amended 2026-09-01 (M24)
+Status: accepted · 2026-09-01 · Plan: M23 · amended 2026-09-01 (M24), 2026-09-03 (M37)
 
 ## Context
 
@@ -38,6 +38,10 @@ vocabulary: `Delivery::Hold` and `Delivery::Wake`.
    remains is tokens and context, and the roster itself is that dial —
    a room that should not spend the holder's attention leaves `parent`
    off it.)
+   (Amended 2026-09-03, ADR-0034 §7: nothing fans to a holder at all —
+   a rostered `parent` is a cursor and an ear like any other seat, and
+   reads the room at the head of its own turn; its transcript shows no
+   post.)
 3. **`@parent` opens an ordinary mention debt** (ADR-0022) against the
    seat, closed by the seat's next post — obligation only, never a
    delivery mode. One delivery per post; the exactly-once pin stands.

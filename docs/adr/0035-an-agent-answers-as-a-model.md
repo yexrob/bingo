@@ -31,20 +31,25 @@ tokio, `Send`).
    The full SDK is refused: a second runtime and a `!Send` thread-hop
    would buy ~300 lines of codec this workspace has twice already.
    Budget: `max_dependencies` 302 → 307.
-3. **Every turn is a fresh session** (stateless, at the user's call):
-   the provider is a pure function of the request, like every other
-   provider. Each `stream()` spawns the adapter, opens one session,
-   sends one `session/prompt` and is done. The request's own folded
-   `messages` are rendered to a transcript file for that turn; the
-   prompt names the file beside the newest user turn, and the agent
-   reads what it needs with its own tools. The file is derived from
-   the request and deleted with the turn, never kept beside anything.
-   Everything that crosses the wire is journaled as `ModelEvent`s —
-   the journal stays the one record every surface and
-   `bingo-experience` read. Nothing else is remembered: no session
-   id, no extension, no resume ladder — `--continue` restores by
-   construction, and compaction and the ruler keep shaping what the
-   agent is handed.
+3. **One ACP session per bingo session** (stateful — how the protocol
+   is consumed everywhere: Zed keeps one session per thread and
+   replays nothing). The boundary learns one word: `ModelRequest`
+   gains `session: Option<SessionId>` — the host names the session it
+   streams for, a fact it already knew; a stateless provider ignores
+   it, and any stateful wire (OpenAI's Responses API as much as ACP)
+   reads the same field. The instance maps it to the agent's
+   `sessionId`, journaled once as an extension (`bingo.acp`,
+   `session:<instance>`): a pointer to the agent's own state, never a
+   copy. `session/prompt` carries only the new turn; everything that
+   crosses the wire is journaled as `ModelEvent`s — the journal stays
+   the one record every surface and `bingo-experience` read. Restore
+   climbs: `session/resume` (no replay — the journal already holds
+   the history); else `session/load`, whose replay is swallowed, not
+   journaled twice; else a fresh session whose first prompt names a
+   transcript file rendered from the fold at that moment. Children
+   are kept the way plugin processes are kept: spawned lazily,
+   `initialize`d once, respawned on death with a notice, killed at
+   `stop()`.
 4. **The agent's tool calls are first-class**: `ToolInputStart/…/
    ToolCall` and a synthetic `ToolResult`, marked `acp.external: true`
    in `provider_options`; the loop never executes what wears the mark;
@@ -70,11 +75,12 @@ tokio, `Send`).
 
 ## Consequences
 
-- The context stays bingo's: an ACP instance reads the fold like any
-  model. The price is the spawn — node starts in whole seconds, and
-  the agent re-reads what it needs each turn; a warm pool of children
-  (processes reused, sessions never) is future work if the price
-  shows.
+- For an ACP session the working context lives with the agent:
+  compaction and the ruler shape only the fallback transcript, and a
+  lost agent-side session degrades one rung with a notice. The kernel
+  changes by one declaration, not by machinery: the request names its
+  session. No prompter door opens; none of this reaches any other
+  provider.
 - The first-tier adapters need `node` on PATH; auth is the adapter's
   own (subscription or key), `AuthStatus::NotApplicable`.
 - Protocol churn arrives as a schema-crate bump the compiler walks us
