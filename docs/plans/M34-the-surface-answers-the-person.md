@@ -116,21 +116,21 @@ owed}.rs`, `bingo-agents/src/{message,list}.rs`; `schema/rpc.json`;
 
 ## Exit criteria
 
-- [ ] A: snapshot of three blocks arriving over three frames — every
+- [x] A: snapshot of three blocks arriving over three frames — every
   row above the newest is byte-identical across the frames.
-- [ ] A: ten wheel notches in a burst scroll thirty lines.
-- [ ] B: `reasoning_inline_80x24` snapshot; `ctrl+o` on a thought
+- [x] A: ten wheel notches in a burst scroll thirty lines.
+- [x] B: `reasoning_inline_80x24` snapshot; `ctrl+o` on a thought
   opens the pager; click toggles a fold in a TestBackend test.
-- [ ] B: `/think high` on `Fake` with `reasoning: false` answers with
+- [x] B: `/think high` on `Fake` with `reasoning: false` answers with
   the warning; the level survives a `/model` switch.
-- [ ] C: black-box `/guide` shows `⏺ /guide` folded; rewind restores
+- [x] C: black-box `/guide` shows `⏺ /guide` folded; rewind restores
   `/guide`; the expansion's first line names the directory.
-- [ ] D: executor test — a tool that ignores its token ends on one
+- [x] D: executor test — a tool that ignores its token ends on one
   `cancel` within the test's own timeout; `esc` on a running Bash
   `sleep 30` ends the turn and the process is gone (unix probe).
-- [ ] E: snapshots for the receipts, the roster tree, the `in #room`
+- [x] E: snapshots for the receipts, the roster tree, the `in #room`
   headline, the `owed` card; `tui.md` §3 Teams written.
-- [ ] Every gate in AGENTS.md; `cargo check --target
+- [x] Every gate in AGENTS.md; `cargo check --target
   x86_64-pc-windows-msvc` for D (a process is touched).
 
 ## Non-goals
@@ -148,3 +148,32 @@ A members pane (M35). A
   solved.
 - C: a client that read `origin.surface == "tui"` to mean "typed"
   now sees `command`; grep every consumer before merging.
+
+## Verified (2026-09-02)
+
+Five worktree branches, merged A→B→C→G→E→F(M35)→D; each ran its
+crate's fmt/clippy/tests before merging, the integrator re-ran the
+crates each merge touched (tui 522, core 233, rooms 142, agents 135,
+bin 137 black-box + suites) and the workspace gates once at the end.
+- A: `a_new_block_takes_its_own_room_and_walks_nowhere_after_it`;
+  `a_burst_of_notches_lands_the_whole_of_itself` (30 lines, not ~10);
+  `tui-smoke.sh` 14/14.
+- B: `reasoning_inline_80x24`; `ctrl_o_lifts_a_thoughts_fold_and_then_
+  opens_it`; `a_click_opens_a_fold_and_a_second_click_folds_it`;
+  `think_owns_up_when_the_model_will_not_reason_and_keeps_the_level`.
+- C: `skill_command_80x24` (`⏺ /guide the wire format` folded);
+  `a_turn_a_command_opened_is_named_by_the_line_that_was_typed`;
+  black-box asserts `origin.surface == "command"` and the base line.
+- D: `an_interrupt_drops_the_call_in_flight_and_skips_the_rest`;
+  `rpc::one_interrupt_ends_the_turn_and_the_command_it_was_running`
+  (grandchild `tick` loop stops, unix); `screens::stopping`; Windows
+  cross-check of core and tool-bash clean.
+- E: `owed_120x40` (first time drawn — the clock column folds at 22
+  cells, recorded); `a_post_names_its_room_everywhere_but_in_the_room`;
+  tui.md §3 "Teams" with three sketched panes.
+- Found on the way, fixed by G (bug, commit body): every picker and
+  the permission card lost the cursor past their room; `window.rs`.
+Carried: `esc` does not fold a click-expanded block (only the pager's
+does); three wall-clock budget tests in the TUI fail under machine
+load and pass on a quiet box; the rail's pinned cards can stack past
+the visible column.

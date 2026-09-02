@@ -4,8 +4,8 @@
 
 use async_trait::async_trait;
 use bingo_sdk::{
-    SessionSummary, Tone, Tool, ToolContext, ToolError, ToolOutput, ToolSpec, ToolTraits,
-    TreeNode, View, input_schema,
+    SessionSummary, Tone, Tool, ToolContext, ToolError, ToolOutput, ToolSpec, ToolTraits, TreeNode,
+    View, input_schema,
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
