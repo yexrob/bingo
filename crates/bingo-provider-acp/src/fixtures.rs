@@ -130,12 +130,38 @@ pub fn cancel_notification() -> Value {
     json!({ "sessionId": "sess_abc123" })
 }
 
+/// `messageId` is a sibling of `content`, not `_meta`, and both first-tier
+/// adapters send it: it is what says two chunks belong to one block.
 pub fn update_agent_message_chunk() -> Value {
     json!({
         "sessionId": "sess_abc123",
         "update": {
             "sessionUpdate": "agent_message_chunk",
-            "content": { "type": "text", "text": "Renaming " }
+            "content": { "type": "text", "text": "Renaming " },
+            "messageId": "msg_1"
+        }
+    })
+}
+
+pub fn update_agent_message_chunk_more() -> Value {
+    json!({
+        "sessionId": "sess_abc123",
+        "update": {
+            "sessionUpdate": "agent_message_chunk",
+            "content": { "type": "text", "text": "the module." },
+            "messageId": "msg_1"
+        }
+    })
+}
+
+/// An adapter that says nothing about which message a chunk belongs to. The
+/// stream must still read as one block rather than one block per chunk.
+pub fn update_agent_message_chunk_unkeyed() -> Value {
+    json!({
+        "sessionId": "sess_abc123",
+        "update": {
+            "sessionUpdate": "agent_message_chunk",
+            "content": { "type": "text", "text": "no id here" }
         }
     })
 }
@@ -150,28 +176,36 @@ pub fn update_agent_thought_chunk() -> Value {
     })
 }
 
-/// A tool call the agent is about to run on its own machine.
+/// A tool call the agent is about to run on its own machine. The shape is
+/// `claude-agent-acp`'s `toolCallNotification()`: a `pending` status, the raw
+/// input, `locations`, and the adapter's own `_meta`.
 pub fn update_tool_call() -> Value {
     json!({
         "sessionId": "sess_abc123",
         "update": {
             "sessionUpdate": "tool_call",
-            "toolCallId": "call_001",
-            "title": "Read src/lib.rs",
+            "toolCallId": "toolu_01Read",
+            "title": "Read src/lib.rs (1 - 50)",
             "kind": "read",
             "status": "pending",
-            "rawInput": { "path": "src/lib.rs" }
+            "content": [],
+            "locations": [{ "path": "/work/repo/src/lib.rs", "line": 1 }],
+            "rawInput": { "file_path": "/work/repo/src/lib.rs", "offset": 1 },
+            "_meta": { "claudeCode": { "toolName": "Read" } }
         }
     })
 }
 
-/// The same call, finished. An update carries only the fields that changed.
+/// The same call, finished. An update names only the fields it changes, and
+/// every field it leaves out means "unchanged" — both first-tier adapters
+/// send partial updates, so a client that replaces rather than merges loses
+/// the title and the kind.
 pub fn update_tool_call_completed() -> Value {
     json!({
         "sessionId": "sess_abc123",
         "update": {
             "sessionUpdate": "tool_call_update",
-            "toolCallId": "call_001",
+            "toolCallId": "toolu_01Read",
             "status": "completed",
             "content": [
                 { "type": "content", "content": { "type": "text", "text": "pub mod wire;" } }
@@ -182,36 +216,43 @@ pub fn update_tool_call_completed() -> Value {
 }
 
 /// An edit reports itself as a diff, which is the whole reason the agent's
-/// calls are worth carrying structurally rather than as prose.
+/// calls are worth carrying structurally rather than as prose. `codex-acp`
+/// hangs its own `_meta.kind` off the block and writes `oldText: null` for a
+/// file it is creating.
 pub fn update_tool_call_diff() -> Value {
     json!({
         "sessionId": "sess_abc123",
         "update": {
             "sessionUpdate": "tool_call_update",
-            "toolCallId": "call_002",
+            "toolCallId": "toolu_02Edit",
             "status": "completed",
             "content": [{
                 "type": "diff",
                 "path": "/work/repo/src/lib.rs",
                 "oldText": "pub mod wire;",
-                "newText": "pub mod envelope;"
+                "newText": "pub mod envelope;",
+                "_meta": { "kind": "update" }
             }],
-            "locations": [{ "path": "/work/repo/src/lib.rs", "line": 1 }]
+            "locations": [{ "path": "/work/repo/src/lib.rs" }]
         }
     })
 }
 
-/// A terminal the agent owns. bingo declared no terminal capability, so this
-/// is a handle to somebody else's process, shown and never joined.
+/// A terminal the agent owns. This client declares no terminal capability, so
+/// the id is a handle to somebody else's process — shown, never joined
+/// (ADR-0035 §6).
 pub fn update_tool_call_terminal() -> Value {
     json!({
         "sessionId": "sess_abc123",
         "update": {
-            "sessionUpdate": "tool_call_update",
-            "toolCallId": "call_003",
+            "sessionUpdate": "tool_call",
+            "toolCallId": "command-123",
             "kind": "execute",
+            "title": "npm test",
             "status": "in_progress",
-            "content": [{ "type": "terminal", "terminalId": "term_1" }]
+            "content": [{ "type": "terminal", "terminalId": "command-123" }],
+            "rawInput": { "command": "npm test", "cwd": "/work/repo" },
+            "_meta": { "terminal_info": { "cwd": "/work/repo", "terminal_id": "command-123" } }
         }
     })
 }
@@ -223,7 +264,7 @@ pub fn update_tool_call_failed() -> Value {
         "sessionId": "sess_abc123",
         "update": {
             "sessionUpdate": "tool_call_update",
-            "toolCallId": "call_004",
+            "toolCallId": "toolu_04Bash",
             "status": "failed",
             "content": [
                 { "type": "content", "content": { "type": "text", "text": "no such file" } }
@@ -249,7 +290,9 @@ pub fn update_from_a_newer_adapter() -> Value {
 }
 
 /// The stable usage notification: the window as the agent sees it, and what
-/// the turn has cost in the agent's own currency.
+/// the turn has cost in the agent's own currency. `cost` is
+/// `claude-agent-acp`'s; `codex-acp` sends `used` and `size` alone, and
+/// `Usage` has no home for money either way.
 pub fn update_usage() -> Value {
     json!({
         "sessionId": "sess_abc123",
@@ -291,22 +334,75 @@ pub fn update_current_mode() -> Value {
     })
 }
 
-/// The one request this client answers. The option ids are the agent's own
-/// and the answer must name one of them back.
+/// The one request this client answers, in `claude-agent-acp`'s spelling. The
+/// option ids are the agent's own and the answer must name one of them back —
+/// which is why the person is shown the agent's options rather than bingo's
+/// allow/deny, and why nothing here matches on `kind` or on position.
 pub fn request_permission() -> Value {
     json!({
         "sessionId": "sess_abc123",
-        "toolCall": { "toolCallId": "call_002", "title": "Edit src/lib.rs", "kind": "edit" },
+        "toolCall": {
+            "toolCallId": "toolu_02Edit",
+            "status": "pending",
+            "title": "Edit src/lib.rs",
+            "kind": "edit",
+            "content": [],
+            "locations": [],
+            "rawInput": { "file_path": "/work/repo/src/lib.rs" }
+        },
         "options": [
-            { "optionId": "allow", "name": "Allow", "kind": "allow_once" },
-            { "optionId": "allow-always", "name": "Always allow", "kind": "allow_always" },
-            { "optionId": "reject", "name": "Reject", "kind": "reject_once" }
-        ]
+            { "optionId": "allow-once", "name": "Yes", "kind": "allow_once" },
+            {
+                "optionId": "allow-with-updates",
+                "name": "Yes, and don't ask again for edits to this file",
+                "kind": "allow_always"
+            },
+            { "optionId": "reject", "name": "No", "kind": "reject_once" }
+        ],
+        "_meta": { "permission": { "version": 1, "title": "Edit src/lib.rs" } }
+    })
+}
+
+/// The same door, in `codex-acp`'s spelling: four options, two of them
+/// rejects, and ids that are nothing like the kinds. An id is the only thing
+/// either adapter will accept back.
+pub fn request_permission_codex() -> Value {
+    json!({
+        "sessionId": "sess_abc123",
+        "toolCall": {
+            "toolCallId": "command-item",
+            "kind": "execute",
+            "status": "pending",
+            "title": "Run command with file reads",
+            "rawInput": { "command": "npm test", "cwd": "/work/repo" },
+            "locations": [{ "path": "/work/repo/src/a.ts" }]
+        },
+        "options": [
+            { "optionId": "allow_once", "name": "Yes, proceed", "kind": "allow_once" },
+            {
+                "optionId": "allow_for_session",
+                "name": "Yes, and don't ask again for this command in this session",
+                "kind": "allow_always"
+            },
+            { "optionId": "decline", "name": "No, continue without running it", "kind": "reject_once" },
+            {
+                "optionId": "cancel",
+                "name": "No, and tell Codex what to do differently",
+                "kind": "reject_once"
+            }
+        ],
+        "_meta": {
+            "permission": {
+                "version": 1,
+                "title": "Run command?",
+                "description": "Needed to verify the changes."
+            }
+        }
     })
 }
 
 pub fn request_permission_selected() -> Value {
-    json!({ "outcome": { "outcome": "selected", "optionId": "allow" } })
+    json!({ "outcome": { "outcome": "selected", "optionId": "allow-once" } })
 }
 
 pub fn request_permission_cancelled() -> Value {

@@ -7,7 +7,9 @@
 pub mod child;
 pub mod connection;
 pub mod error;
+pub mod events;
 #[cfg(test)]
 pub(crate) mod fixtures;
 pub mod method;
+pub mod render;
 pub mod wire;
