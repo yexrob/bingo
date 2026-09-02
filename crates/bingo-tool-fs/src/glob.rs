@@ -260,7 +260,14 @@ mod tests {
     #[tokio::test]
     async fn a_result_over_the_bounds_is_truncated_and_counts_what_is_missing() {
         let dir = tempfile::tempdir().expect("temp dir");
-        let total = 600;
+        // Past the entry bound, not merely the character one. What these lines
+        // cost in characters is the length of a temporary directory's path,
+        // which is a property of the machine and not of the code: macOS hands
+        // out `/var/folders/…`, long enough that 600 short names ran past
+        // `MAX_CHARS`, while a Linux `/tmp` is short enough that they did not
+        // and nothing was truncated at all. Counting past `MAX_RESULTS`
+        // truncates the same way everywhere.
+        let total = MAX_RESULTS + 200;
         for i in 0..total {
             write(dir.path(), &format!("f{i:04}.rs"), "");
         }
