@@ -19,7 +19,7 @@ use crate::tree::{self, Tree};
 use crate::ui::{Card, Open, Picker, Switcher, Ui};
 use crate::{
     composer as prompt, cycle, dialog, keys, layers, pager, panel, rail, rewind, search, select,
-    status, theme, transcript, views, wrap,
+    status, theme, transcript, views, window, wrap,
 };
 
 /// How tall the composer box may grow before it scrolls internally.
@@ -156,7 +156,11 @@ fn layers(tree: &Tree, ui: &Ui, frame: &mut Frame, regions: Regions, now: Now) {
                 .as_ref()
                 .map(|view| views::render(view, width))
                 .unwrap_or_default(),
-            menu(ui, &tree.viewed().summary.cwd),
+            menu(
+                ui,
+                &tree.viewed().summary.cwd,
+                MENU_ROWS.min(usize::from(above.height)),
+            ),
         ]
         .concat(),
     );
@@ -178,24 +182,34 @@ fn layer(
     width: usize,
     now: Now,
 ) {
+    // Every list a cursor walks is drawn in the room the layer has, and no
+    // more of it than that: what is off the window's ends says so (§3).
+    let rows = usize::from(above.height);
     match &ui.layer.open {
         Open::Nothing => {}
         // A dropdown above the input box, like the `/` menu: nothing dims.
-        Open::Switcher(switcher) => over(frame, above, switcher_lines(tree, switcher, now)),
+        Open::Switcher(switcher) => over(frame, above, switcher_lines(tree, switcher, now, rows)),
         Open::Help => sheet(frame, above, help(ui, width), reveal),
         Open::Panel => sheet(
             frame,
             above,
-            panel::lines(tree.viewed(), tree.view(), ui.panel, &ui.pinned, width),
+            panel::lines(
+                tree.viewed(),
+                tree.view(),
+                ui.panel,
+                &ui.pinned,
+                width,
+                rows,
+            ),
             reveal,
         ),
-        Open::Picker(picker) => sheet(frame, above, picker_lines(picker, now), reveal),
+        Open::Picker(picker) => sheet(frame, above, picker_lines(picker, now, rows), reveal),
         Open::Pager(open) => paged(tree, frame, above, open, reveal),
         // A dropdown above the input box, like the switcher's.
         Open::Rewind(card) => over(
             frame,
             above,
-            rewind::lines(&rewind::turns(tree.viewed()), card.selected),
+            rewind::lines(&rewind::turns(tree.viewed()), card.selected, rows),
         ),
     }
 }
@@ -275,8 +289,12 @@ fn card(tree: &Tree, ui: &Ui, frame: &mut Frame, regions: Regions, now: Now) {
             .map(move |wrapped| (wrapped, option))
     })
     .collect();
-    let lines: Vec<Line<'static>> = rows.iter().map(|(line, _)| line.clone()).collect();
     let above = regions.above();
+    // Two border rows and the title the box keeps: what is left is what the
+    // answers have to be walked in.
+    let room = usize::from(above.height).saturating_sub(3);
+    let rows = fitted_answers(rows, ui.dialog.focus, room);
+    let lines: Vec<Line<'static>> = rows.iter().map(|(line, _)| line.clone()).collect();
     // Only a row of the transcript on screen can anchor it: a child's item
     // ids are its own, and would name the wrong row here.
     let anchor = (!asked_elsewhere)
@@ -295,6 +313,50 @@ fn card(tree: &Tree, ui: &Ui, frame: &mut Frame, regions: Regions, now: Now) {
         opening(interaction, now),
         guarded(interaction, now),
     );
+}
+
+/// The card's answers in the room the box has to walk them in: a question with
+/// more options than that keeps the one the cursor is on, and says at which end
+/// it cut the rest. What sits above them is [`layers::card`]'s to give away —
+/// it keeps the title and the newest rows, which is what a permission wants:
+/// the preview gives way, never the answers.
+fn fitted_answers(
+    rows: Vec<(Line<'static>, Option<usize>)>,
+    focus: usize,
+    room: usize,
+) -> Vec<(Line<'static>, Option<usize>)> {
+    let Some(first) = rows.iter().position(|(_, option)| option.is_some()) else {
+        return rows;
+    };
+    let end = rows
+        .iter()
+        .rposition(|(_, option)| option.is_some())
+        .map_or(first, |at| at + 1);
+    // Whatever follows the answers — the mark of one already sent — is drawn
+    // with them, so it is theirs to make room for.
+    let room = room.saturating_sub(rows.len() - end);
+    if end - first <= room {
+        return rows;
+    }
+    let cursor = rows[first..end]
+        .iter()
+        .position(|(_, option)| *option == Some(focus))
+        .unwrap_or(0);
+    let at = window::of(end - first, cursor, room);
+    let mut out: Vec<(Line<'static>, Option<usize>)> = rows[..first].to_vec();
+    if at.above {
+        out.push((window::cut(), None));
+    }
+    out.extend(
+        rows[first + at.run.start..first + at.run.end]
+            .iter()
+            .cloned(),
+    );
+    if at.below {
+        out.push((window::cut(), None));
+    }
+    out.extend(rows[end..].iter().cloned());
+    out
 }
 
 /// Whether the kernel's guard is still down. A card that cannot be answered
@@ -528,36 +590,49 @@ fn help(ui: &Ui, width: usize) -> Vec<Line<'static>> {
     out
 }
 
-/// The `ctrl+g` list: the root and its agents, with what each is doing.
-fn switcher_lines(tree: &Tree, switcher: &Switcher, now: Now) -> Vec<Line<'static>> {
-    tree::switcher_lines(
-        &tree::roster(tree, &switcher.stored),
-        switcher.selected,
-        now,
-    )
+/// The `ctrl+g` list: the root and its agents, with what each is doing, in the
+/// rows the dropdown has for them.
+fn switcher_lines(tree: &Tree, switcher: &Switcher, now: Now, rows: usize) -> Vec<Line<'static>> {
+    let roster = tree::roster(tree, &switcher.stored);
+    let lines = tree::switcher_lines(&roster, switcher.selected, now);
+    window::around(lines, switcher.selected, rows)
 }
 
-fn picker_lines(picker: &Picker, now: Now) -> Vec<Line<'static>> {
+/// The `Resume` sheet: its title, and the sessions under it in the rows left.
+fn picker_lines(picker: &Picker, now: Now, rows: usize) -> Vec<Line<'static>> {
     let mut out = vec![Line::from(Span::styled(
         "Resume".to_string(),
         theme::bold(),
     ))];
-    for (index, session) in picker.sessions.iter().enumerate() {
-        let selected = index == picker.selected;
-        let style = if selected {
-            theme::text()
-        } else {
-            theme::dim()
-        };
-        out.push(Line::from(vec![
-            theme::cursor_span(selected),
-            Span::styled(
-                format!("{}. {}", index + 1, picker_row(session, now)),
-                style,
-            ),
-        ]));
-    }
+    let sessions = picker
+        .sessions
+        .iter()
+        .enumerate()
+        .map(|(index, session)| picker_line(session, index, index == picker.selected, now))
+        .collect();
+    out.extend(window::around(
+        sessions,
+        picker.selected,
+        rows.saturating_sub(out.len()),
+    ));
     out
+}
+
+/// One session as the picker draws it: the number `1-9` answers with, and what
+/// the row says it is.
+fn picker_line(session: &SessionSummary, index: usize, selected: bool, now: Now) -> Line<'static> {
+    let style = if selected {
+        theme::text()
+    } else {
+        theme::dim()
+    };
+    Line::from(vec![
+        theme::cursor_span(selected),
+        Span::styled(
+            format!("{}. {}", index + 1, picker_row(session, now)),
+            style,
+        ),
+    ])
 }
 
 /// What a row says a session is: what it was about, how much was said in it,
@@ -634,13 +709,19 @@ fn placeholder(state: &SessionState) -> String {
     }
 }
 
-fn menu(ui: &Ui, cwd: &str) -> Vec<Line<'static>> {
-    let rows = ui.suggestions(cwd);
-    let selected = ui.menu.selected.min(rows.len().saturating_sub(1));
-    let column = rows.iter().map(|r| r.label.width()).max().unwrap_or(0);
-    rows.iter()
+/// The `/` and `@` dropdown: what the line being typed ranks, in `rows` of
+/// room around the one the cursor is on.
+fn menu(ui: &Ui, cwd: &str, rows: usize) -> Vec<Line<'static>> {
+    let suggestions = ui.suggestions(cwd);
+    let selected = ui.menu.selected.min(suggestions.len().saturating_sub(1));
+    let column = suggestions
+        .iter()
+        .map(|r| r.label.width())
+        .max()
+        .unwrap_or(0);
+    let lines = suggestions
+        .iter()
         .enumerate()
-        .take(MENU_ROWS)
         .map(|(index, row)| {
             let focused = index == selected;
             let style = if focused { theme::text() } else { theme::dim() };
@@ -653,7 +734,8 @@ fn menu(ui: &Ui, cwd: &str) -> Vec<Line<'static>> {
                 ),
             ])
         })
-        .collect()
+        .collect();
+    window::around(lines, selected, rows)
 }
 
 #[cfg(test)]

@@ -1,0 +1,28 @@
+---
+source: crates/bingo-surface-tui/src/screens/windows.rs
+expression: screen.clone()
+---
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"╭──────────────────────────────────────────────────────────────────────────────╮"
+"│ ✻ Welcome to bingo!                                                          │"
+"│                                                                              │"
+"│   /help for help · /login codex to use a subscription                        │"
+"│   cwd: /tmp/project                                                          │"
+"╰──────────────────────────────────────────────────────────────────────────────╯"
+"                                                                                "
+"  …                                                                             "
+"  /plugin-03  what it does                                                      "
+"  /plugin-04  what it does                                                      "
+"  /plugin-05  what it does                                                      "
+"❯ /plugin-06  what it does                                                      "
+"  /plugin-07  what it does                                                      "
+"  /plugin-08  what it does                                                      "
+"  …                                                                             "
+"╭──────────────────────────────────────────────────────────────────────────────╮"
+"│ > /                                                                          │"
+"╰──────────────────────────────────────────────────────────────────────────────╯"
+"                                                                          fake-1"

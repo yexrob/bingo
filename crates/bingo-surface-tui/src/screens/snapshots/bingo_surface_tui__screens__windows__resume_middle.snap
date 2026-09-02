@@ -1,0 +1,28 @@
+---
+source: crates/bingo-surface-tui/src/screens/windows.rs
+expression: screen.clone()
+---
+"Resume                                                                          "
+"  …                                                                             "
+"  5. session 14 · just now                                                      "
+"  6. session 15 · just now                                                      "
+"  7. session 16 · just now                                                      "
+"  8. session 17 · just now                                                      "
+"  9. session 18 · just now                                                      "
+"  10. session 19 · just now                                                     "
+"  11. session 20 · just now                                                     "
+"  12. session 21 · just now                                                     "
+"❯ 13. session 22 · just now                                                     "
+"  14. session 23 · just now                                                     "
+"  15. session 24 · just now                                                     "
+"  16. session 25 · just now                                                     "
+"  17. session 26 · just now                                                     "
+"  18. session 27 · just now                                                     "
+"  19. session 28 · just now                                                     "
+"  20. session 29 · just now                                                     "
+"  21. session 30 · just now                                                     "
+"  …                                                                             "
+"╭──────────────────────────────────────────────────────────────────────────────╮"
+"│ > ask anything · / for commands · ! for shell                                │"
+"╰──────────────────────────────────────────────────────────────────────────────╯"
+"? for shortcuts                                                           fake-1"
