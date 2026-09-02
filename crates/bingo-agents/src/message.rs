@@ -71,7 +71,7 @@ fn card(to: &str, from: &str, driver: Driver) -> View {
 /// When it will be read, in the few cells a card row has for it.
 fn read(driver: Driver) -> &'static str {
     match driver {
-        Driver::Log => "by every member, as it lands",
+        Driver::Log => "at each seat's next turn; an @ wakes now",
         Driver::Model => "as its next turn, or mid-run if it is working",
     }
 }
@@ -233,7 +233,10 @@ mod tests {
                 rows: vec![
                     ("to".into(), "#design".into()),
                     ("from".into(), "parent".into()),
-                    ("read".into(), "by every member, as it lands".into()),
+                    (
+                        "read".into(),
+                        "at each seat's next turn; an @ wakes now".into()
+                    ),
                 ]
             }),
             "a room is read by everyone in it, not taken up as a turn"

@@ -110,7 +110,10 @@ fn posted_to_a_room() -> Item {
         rows: vec![
             ("to".into(), "#design".into()),
             ("from".into(), "parent".into()),
-            ("read".into(), "by every member, as it lands".into()),
+            (
+                "read".into(),
+                "at each seat's next turn; an @ wakes now".into(),
+            ),
         ],
     };
     completed(
@@ -151,7 +154,7 @@ fn what_the_message_tools_answer() {
     assert!(wide.contains("├─ watcher [ 120s ]"), "{wide}");
     assert!(wide.contains("└─ parent [ live ]"), "{wide}");
     assert!(
-        wide.contains("read  by every member, as it lands"),
+        wide.contains("read  at each seat's next turn; an @ wakes now"),
         "{wide}"
     );
     assert!(wide.contains("├─ helper [ busy ]"), "{wide}");
