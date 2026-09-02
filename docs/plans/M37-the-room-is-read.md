@@ -73,7 +73,7 @@ input,pointer,keys}.rs` + snapshots; `docs/adr/{0025,0028,0029}.md`;
 - [x] The relay black-box (`peers.rs`) passes with its assertions
   unchanged; the bounce still says what was missed. †
 - [x] A resumed member (`--continue`) reads only what its cursor left.
-- [ ] `roster_80x24`: `Agents` / `Rooms` labels, one column, cursor
+- [x] `roster_80x24`: `Agents` / `Rooms` labels, one column, cursor
   visible past the room's end; `unread` on a lagging member's row.
 - [x] Every gate in AGENTS.md; no new dependency. (Bricks 1–6; brick 7
   and its `roster_80x24` criterion belong to the surface worker.)
@@ -148,3 +148,24 @@ Not done here: brick 7 (`bingo-surface-tui`), untouched — and its
 no `listeners` entry, the reversed default, now wrong. Flagged for the
 surface worker. No Windows cross-check: nothing here touches a process,
 path, signal or clock.
+
+## Verified — brick 7 and the integration, 2026-09-03
+
+Brick 7 landed in two merges: the one-column labelled list with
+`unread` (built to the plan's member-side cursor before bricks 1–6
+moved it), then the reconciliation slice re-aiming the surface at what
+the plugin ships — `unread` counts the room's `User` items past the
+room-journal `cursor:<member>` watermark; `Ear::default()` is the
+patient ear; `~` re-aimed to mark the live ear (the exception now);
+the `SendMessage` room receipt says "at each seat's next turn; an @
+wakes now". `roster_80x24` shows both labels, `3 unread` on the
+lagging row and `live` on the live one; silences stay silent (no mark,
+foreign shape, watermark gone).
+
+On the merged line, all of it together: `cargo test --workspace
+--locked` 69 suites ok, `clippy -D warnings` clean, `fmt --check`
+clean, `check_discipline.sh` ok, `budget.sh` ok (302/302),
+`tui-smoke.sh` ok. Recorded, not cured: a seat's own unpublished-read
+post counts in its row's `unread` until its next turn (the surface
+does not judge authorship); the live row gives up its tail sooner at
+120-with-rail (§10's stated give).
