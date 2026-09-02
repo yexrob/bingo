@@ -28,6 +28,9 @@ const COMPOSER_ROWS: usize = 10;
 const MENU_ROWS: usize = 8;
 /// How long a turn must have run before it is worth a row of its own (§6).
 const ACTIVITY_AFTER: std::time::Duration = std::time::Duration::from_millis(300);
+/// What the activity row's verb becomes once a person has asked the turn to
+/// stop: bingo's own words are for what it chose to do, and this it did not.
+pub const STOPPING: &str = "Stopping";
 /// One breath of bingo's presence: the sparkle and the box's border (§6).
 const BREATH: std::time::Duration = std::time::Duration::from_millis(1600);
 /// One turn of the sparkle: four glyphs, 150 ms each (§6).
@@ -66,7 +69,7 @@ pub fn draw(tree: &Tree, ui: &Ui, frame: &mut Frame, now: Now) {
     };
     render_transcript(tree, ui, frame, regions.transcript, now, live);
     render_rail(ui, frame, regions.rail, &drawn);
-    render_activity(tree.viewed(), frame, regions.activity, now);
+    render_activity(tree.viewed(), ui, frame, regions.activity, now);
     render_composer(tree.viewed(), ui, frame, regions.composer, now);
     render_status(tree, ui, frame, regions.status, now);
     layers(tree, ui, frame, regions, now);
@@ -81,7 +84,7 @@ fn demand(tree: &Tree, ui: &Ui, width: u16, now: Now, rail: bool) -> Demand {
         // while idle, so a turn starting or ending moves nothing — the
         // bottom-anchored transcript used to bounce by two rows at each end
         // of every stream, which read as flicker (§6: nothing still moves).
-        activity: u16::try_from(activity(state, now).len())
+        activity: u16::try_from(activity(state, ui, now).len())
             .unwrap_or(u16::MAX)
             .max(2),
         rail,
@@ -134,11 +137,11 @@ fn render_status(tree: &Tree, ui: &Ui, frame: &mut Frame, area: Rect, now: Now) 
 }
 
 /// The activity row and whatever is queued behind it.
-fn render_activity(state: &SessionState, frame: &mut Frame, area: Rect, now: Now) {
+fn render_activity(state: &SessionState, ui: &Ui, frame: &mut Frame, area: Rect, now: Now) {
     if area.height == 0 {
         return;
     }
-    frame.render_widget(Paragraph::new(activity(state, now)), area);
+    frame.render_widget(Paragraph::new(activity(state, ui, now)), area);
 }
 
 /// What floats over the frame, in the order it is stacked: the dropdown and a
@@ -464,8 +467,8 @@ fn render_transcript(
 
 /// The rows between the transcript and the input box: what the turn is doing,
 /// and whatever the person has queued behind it.
-fn activity(state: &SessionState, now: Now) -> Vec<Line<'static>> {
-    let mut out: Vec<Line<'static>> = working(state, now).into_iter().collect();
+fn activity(state: &SessionState, ui: &Ui, now: Now) -> Vec<Line<'static>> {
+    let mut out: Vec<Line<'static>> = working(state, ui, now).into_iter().collect();
     out.extend(
         state
             .queue
@@ -499,24 +502,29 @@ fn pending(origin: &Origin) -> bool {
 /// `✻ Simmering… (esc to interrupt · 4s · ↓ 1.2k tokens)` — but only once the
 /// turn has been at it for [`ACTIVITY_AFTER`]: a turn that answers at once
 /// says nothing at all, because a row that flashes reports nothing (§6).
-fn working(state: &SessionState, now: Now) -> Option<Line<'static>> {
+///
+/// A turn a person has asked to stop reads `✻ Stopping… (4s · ↓ 1.2k tokens)`
+/// from the frame the key was pressed and keeps its sparkle and its clock
+/// until `TurnCompleted` takes the row away. The hint goes with the asking:
+/// `esc` has been pressed, and there is nothing further to press.
+fn working(state: &SessionState, ui: &Ui, now: Now) -> Option<Line<'static>> {
     let turn = state.turn.as_ref()?;
     let elapsed = now.past(turn.started_at);
-    if elapsed < ACTIVITY_AFTER {
+    let stopping = ui.stop_asked.as_ref() == Some(&turn.id);
+    // A row that answers a key is never held back by the delay that spares a
+    // fast turn its flash.
+    if elapsed < ACTIVITY_AFTER && !stopping {
         return None;
     }
+    let (verb, hint) = match stopping {
+        true => (STOPPING, ""),
+        false => (verb(&turn.id), "esc to interrupt · "),
+    };
     let mut spans = vec![
         Span::styled(format!("{} ", sparkle(now)), breathing(now)),
+        Span::styled(format!("{verb}{}", theme::ellipsis()), theme::text()),
         Span::styled(
-            format!("{}{}", verb(&turn.id), theme::ellipsis()),
-            theme::text(),
-        ),
-        Span::styled(
-            format!(
-                " (esc to interrupt · {}s{})",
-                elapsed.as_secs(),
-                spent(turn)
-            ),
+            format!(" ({hint}{}s{})", elapsed.as_secs(), spent(turn)),
             theme::dim(),
         ),
     ];
@@ -1222,10 +1230,11 @@ mod tests {
     /// above it (§3).
     #[test]
     fn a_steer_in_flight_asks_the_frame_for_no_row_at_all() {
-        let (_, now) = scene();
+        let (ui, now) = scene();
         let rows = |entries: &[(&str, &str)]| {
             activity(
                 &folded(vec![frame(1, started("trn_1")), queue_frame(2, entries)]),
+                &ui,
                 now,
             )
             .len()

@@ -5,8 +5,8 @@ use std::collections::HashSet;
 
 use async_trait::async_trait;
 use bingo_sdk::{
-    Answer, AnswerSpec, InteractionKind, Interrupt, QuestionOption, Tool, ToolContext, ToolError,
-    ToolOutput, ToolSpec, ToolTraits, input_schema,
+    Answer, AnswerSpec, InteractionKind, QuestionOption, Tool, ToolContext, ToolError, ToolOutput,
+    ToolSpec, ToolTraits, input_schema,
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -188,7 +188,6 @@ impl Tool for AskUserQuestionTool {
             read_only: true,
             concurrency_safe: false,
             trusted: true,
-            interrupt: Interrupt::Cancel,
             ..ToolTraits::default()
         }
     }
@@ -256,7 +255,6 @@ mod tests {
         assert!(spec.input_schema["properties"]["questions"]["description"].is_string());
         let traits = AskUserQuestionTool.traits(&Value::Null);
         assert!(traits.read_only && traits.trusted && !traits.concurrency_safe);
-        assert_eq!(traits.interrupt, Interrupt::Cancel);
         assert!(
             AskUserQuestionTool
                 .subjects(&Value::Null, std::path::Path::new("/"))

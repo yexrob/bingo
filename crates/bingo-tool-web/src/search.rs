@@ -158,7 +158,6 @@ mod tests {
     fn a_search_reads_and_changes_nothing() {
         let traits = tool(Vec::new()).traits(&Value::Null);
         assert!(traits.read_only && traits.concurrency_safe && traits.trusted);
-        assert_eq!(traits.interrupt, bingo_sdk::Interrupt::Cancel);
     }
 
     #[tokio::test]

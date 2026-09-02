@@ -18,7 +18,11 @@ use crate::ids::{ItemId, SessionId, TurnId};
 use crate::model::ToolSpec;
 
 /// What the gate and the executor may assume about a call. Every default is
-/// the unsafe reading: not concurrency-safe, not read-only, finish on interrupt.
+/// the unsafe reading: not concurrency-safe, not read-only, not trusted.
+///
+/// Nothing here says what an interrupt does, because a tool has no say in it:
+/// one `esc` ends the turn and every call in flight is dropped where it
+/// stands (`crate::executor` in the kernel).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ToolTraits {
     pub concurrency_safe: bool,
@@ -26,7 +30,6 @@ pub struct ToolTraits {
     pub destructive: bool,
     /// Targets the working tree; `acceptEdits` mode auto-allows these.
     pub edit: bool,
-    pub interrupt: Interrupt,
     pub result_limit: ResultLimit,
     /// Whether the gate may trust these traits at all. False for MCP tools,
     /// whose `readOnlyHint` is a claim, not a fact.
@@ -40,7 +43,6 @@ impl Default for ToolTraits {
             read_only: false,
             destructive: false,
             edit: false,
-            interrupt: Interrupt::Block,
             result_limit: ResultLimit::Global,
             trusted: false,
         }
@@ -53,7 +55,6 @@ impl ToolTraits {
             concurrency_safe: true,
             read_only: true,
             trusted: true,
-            interrupt: Interrupt::Cancel,
             ..Self::default()
         }
     }
@@ -73,15 +74,6 @@ impl ToolTraits {
             ..Self::default()
         }
     }
-}
-
-/// What the executor does with an in-flight call when the turn is interrupted.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Interrupt {
-    /// Let it finish; a remote write dropped mid-flight is in an unknown state.
-    Block,
-    /// Drop it; nothing outside the process changes.
-    Cancel,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -239,7 +231,7 @@ mod tests {
     fn defaults_fail_closed() {
         let t = ToolTraits::default();
         assert!(!t.concurrency_safe && !t.read_only && !t.trusted);
-        assert_eq!(t.interrupt, Interrupt::Block);
+        assert!(!t.destructive && !t.edit);
     }
 
     #[derive(JsonSchema)]

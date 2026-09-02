@@ -322,7 +322,6 @@ mod tests {
         assert_eq!(traits, ToolTraits::default());
         assert!(!traits.read_only, "an ear is retuned, not read");
         assert!(!traits.concurrency_safe);
-        assert_eq!(traits.interrupt, bingo_sdk::Interrupt::Block);
     }
 
     #[test]

@@ -11,9 +11,9 @@ use std::path::Path;
 
 use async_trait::async_trait;
 use bingo_sdk::{
-    Attachment, CatalogKind, Delivery, ErrorCode, HostHandle, Input, IntentId, Interrupt,
-    KernelError, OpenOptions, ParentLink, SessionId, SessionSelector, SessionSpec, Subject, Tool,
-    ToolContext, ToolError, ToolOutput, ToolSpec, ToolTraits, input_schema,
+    Attachment, CatalogKind, Delivery, ErrorCode, HostHandle, Input, IntentId, KernelError,
+    OpenOptions, ParentLink, SessionId, SessionSelector, SessionSpec, Subject, Tool, ToolContext,
+    ToolError, ToolOutput, ToolSpec, ToolTraits, input_schema,
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -309,7 +309,7 @@ impl Tool for SpawnAgentTool {
     /// Interrupting a foreground spawn drops the wait, not the child: the
     /// session it started keeps running and can still be written to by name.
     fn traits(&self, _input: &Value) -> ToolTraits {
-        crate::traits(Interrupt::Cancel)
+        crate::traits()
     }
 
     fn subjects(&self, input: &Value, _cwd: &Path) -> Vec<Subject> {
@@ -662,7 +662,6 @@ mod tests {
         assert!(spec.input_schema["properties"]["prompt"]["description"].is_string());
         let traits = tool.traits(&Value::Null);
         assert!(traits.read_only && traits.trusted && !traits.concurrency_safe);
-        assert_eq!(traits.interrupt, Interrupt::Cancel);
         assert_eq!(
             tool.subjects(
                 &json!({ "prompt": "p", "agent": "reviewer" }),

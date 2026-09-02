@@ -171,6 +171,94 @@ async fn an_interrupt_reaches_a_running_turn() {
     kernel.shutdown().await.unwrap();
 }
 
+/// The whole of what one `esc` promises, end to end: the turn a person
+/// stopped is over, and the shell command it was waiting on is gone —
+/// grandchildren included, which is what a process group buys and what
+/// `KillOnDrop` on its own would not.
+///
+/// The probe is a file a backgrounded loop writes to: what a killed group
+/// leaves behind is a file that stops growing. Unix only — the `Bash` tool
+/// spawns no shell on Windows at all, so there is nothing there to stop.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn one_interrupt_ends_the_turn_and_the_command_it_was_running() {
+    let dir = tempfile::tempdir().unwrap();
+    let ticks = dir.path().join("ticks");
+    let command = format!(
+        "(while true; do echo tick >> '{}'; sleep 0.05; done) & sleep 30",
+        ticks.display()
+    );
+    let script = serde_json::json!({
+        "responses": [
+            { "steps": [{ "toolCall": { "name": "Bash", "input": { "command": command } } }] },
+            { "steps": [{ "text": "stopped" }] },
+        ]
+    });
+    let mut server = Server::spawn_with(&script.to_string(), &["--dangerously-skip-permissions"]);
+    let kernel = ready(&mut server).await;
+    let mut attachment = kernel
+        .open(create(server.cwd()), who(), OpenOptions::default())
+        .await
+        .unwrap();
+    attachment.handle.submit(
+        IntentId::mint(),
+        Input::text("run it", Origin::surface("test")),
+    );
+    // Wait for the command to be at work rather than for a clock: a loaded
+    // box makes a guess of any fixed wait, and the subject here is a command
+    // that is definitely running.
+    let wrote = wait_for_file(&ticks).await;
+    assert!(wrote > 0, "the command never started");
+
+    let started = std::time::Instant::now();
+    attachment
+        .handle
+        .interrupt(IntentId::mint(), InterruptScope::Head);
+    let frames = until_completed(&mut attachment).await;
+    assert!(
+        matches!(
+            frames.last().map(|f| &f.event),
+            Some(Event::TurnCompleted {
+                status: TurnStatus::Interrupted { .. },
+                ..
+            })
+        ),
+        "{:?}",
+        frames.iter().map(|f| &f.event).collect::<Vec<_>>()
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "the interrupt waited for the command"
+    );
+
+    // Nothing in the group is writing any more, the loop the shell put in the
+    // background included.
+    tokio::time::sleep(SETTLE).await;
+    let after = std::fs::metadata(&ticks).map(|m| m.len()).unwrap_or(0);
+    tokio::time::sleep(SETTLE).await;
+    let later = std::fs::metadata(&ticks).map(|m| m.len()).unwrap_or(0);
+    assert_eq!(after, later, "the process group outlived the interrupt");
+    kernel.shutdown().await.unwrap();
+}
+
+/// Long enough that a killed group has certainly stopped writing, short
+/// enough to wait twice.
+#[cfg(unix)]
+const SETTLE: Duration = Duration::from_millis(400);
+
+/// Poll until the file has something in it, bounded generously.
+#[cfg(unix)]
+async fn wait_for_file(path: &std::path::Path) -> u64 {
+    for _ in 0..400 {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let written = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+        if written > 0 {
+            return written;
+        }
+    }
+    0
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_permission_is_answered_over_the_wire_and_the_tool_runs() {
     let mut server = Server::spawn(

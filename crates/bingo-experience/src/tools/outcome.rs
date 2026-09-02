@@ -6,9 +6,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use bingo_sdk::{
-    Interrupt, Tool, ToolContext, ToolError, ToolOutput, ToolSpec, ToolTraits, input_schema,
-};
+use bingo_sdk::{Tool, ToolContext, ToolError, ToolOutput, ToolSpec, ToolTraits, input_schema};
 use jiff::Timestamp;
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -65,7 +63,6 @@ impl Tool for ExperienceOutcomeTool {
     fn traits(&self, _input: &Value) -> ToolTraits {
         ToolTraits {
             trusted: true,
-            interrupt: Interrupt::Cancel,
             ..ToolTraits::default()
         }
     }

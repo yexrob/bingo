@@ -1,6 +1,12 @@
 //! Runs gated tool calls: consecutive concurrency-safe calls in parallel,
-//! everything else one at a time; an interrupt drops `Cancel` tools, lets
-//! `Block` tools finish, and keeps every completed result.
+//! everything else one at a time; an interrupt drops every call in flight and
+//! keeps every result that had already landed.
+//!
+//! One `esc` is the whole of it. Dropping the future *is* the interrupt: a
+//! `Bash` call takes its process group down with it, an MCP or plugin bridge
+//! abandons the request it was waiting on. A tool has no say in this — a turn
+//! a person stopped must stop, and a call that had already written to the
+//! working tree is not made safe by waiting for it to write more.
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -126,12 +132,14 @@ async fn run_one(pc: &PendingCall, cx: ToolContext, cancel: &CancellationToken) 
             ItemStatus::Failed,
         );
     };
-    let result = match pc.traits.interrupt {
-        Interrupt::Block => tool.call(pc.call.input.clone(), &cx).await,
-        Interrupt::Cancel => tokio::select! {
-            r = tool.call(pc.call.input.clone(), &cx) => r,
-            _ = cancel.cancelled() => Err(ToolError::Cancelled),
-        },
+    // Biased, cancel first: once a person has stopped the turn the call is
+    // never polled again, so what ends it is always the drop and never a
+    // tool's own reading of its token — two ways to end one call would be two
+    // outcomes for one keypress.
+    let result = tokio::select! {
+        biased;
+        _ = cancel.cancelled() => Err(ToolError::Cancelled),
+        r = tool.call(pc.call.input.clone(), &cx) => r,
     };
     match result {
         Ok(mut output) => {
@@ -184,7 +192,6 @@ mod tests {
     struct Echo {
         safe: bool,
         delay_ms: u64,
-        interrupt: Interrupt,
         log: Arc<Mutex<Vec<String>>>,
     }
 
@@ -201,7 +208,6 @@ mod tests {
         fn traits(&self, _: &Value) -> ToolTraits {
             ToolTraits {
                 concurrency_safe: self.safe,
-                interrupt: self.interrupt,
                 trusted: true,
                 ..ToolTraits::default()
             }
@@ -240,7 +246,6 @@ mod tests {
         fn traits(&self, _: &Value) -> ToolTraits {
             ToolTraits {
                 concurrency_safe: true,
-                interrupt: Interrupt::Cancel,
                 trusted: true,
                 ..ToolTraits::default()
             }
@@ -331,13 +336,11 @@ mod tests {
         let slow = Arc::new(Echo {
             safe: true,
             delay_ms: 30,
-            interrupt: Interrupt::Cancel,
             log: log.clone(),
         });
         let fast = Arc::new(Echo {
             safe: true,
             delay_ms: 1,
-            interrupt: Interrupt::Cancel,
             log: log.clone(),
         });
         let cancel = CancellationToken::new();
@@ -382,14 +385,12 @@ mod tests {
             Arc::new(Echo {
                 safe: true,
                 delay_ms,
-                interrupt: Interrupt::Cancel,
                 log: log.clone(),
             })
         };
         let alone = Arc::new(Echo {
             safe: false,
             delay_ms: 1,
-            interrupt: Interrupt::Cancel,
             log: log.clone(),
         });
         let cancel = CancellationToken::new();
@@ -418,7 +419,6 @@ mod tests {
             Arc::new(Echo {
                 safe: true,
                 delay_ms,
-                interrupt: Interrupt::Cancel,
                 log: log.clone(),
             })
         };
@@ -466,7 +466,6 @@ mod tests {
         let after = Arc::new(Echo {
             safe: false,
             delay_ms: 1,
-            interrupt: Interrupt::Cancel,
             log: log.clone(),
         });
         let cancel = CancellationToken::new();
@@ -496,7 +495,6 @@ mod tests {
         let a = Arc::new(Echo {
             safe: false,
             delay_ms: 10,
-            interrupt: Interrupt::Block,
             log: log.clone(),
         });
         let cancel = CancellationToken::new();
@@ -519,7 +517,6 @@ mod tests {
         let a = Arc::new(Echo {
             safe: true,
             delay_ms: 0,
-            interrupt: Interrupt::Cancel,
             log: log.clone(),
         });
         let cancel = CancellationToken::new();
@@ -548,18 +545,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_interrupt_cancels_cancel_tools_blocks_on_block_tools_and_skips_the_rest() {
+    async fn an_interrupt_drops_the_call_in_flight_and_skips_the_rest() {
         let log = Arc::new(Mutex::new(vec![]));
-        let block = Arc::new(Echo {
+        let slow = Arc::new(Echo {
             safe: false,
-            delay_ms: 40,
-            interrupt: Interrupt::Block,
-            log: log.clone(),
-        });
-        let cancellable = Arc::new(Echo {
-            safe: false,
-            delay_ms: 40,
-            interrupt: Interrupt::Cancel,
+            delay_ms: 30_000,
             log: log.clone(),
         });
         let cancel = CancellationToken::new();
@@ -570,27 +560,82 @@ mod tests {
         });
         let out = execute(
             vec![
-                pending(1, block, Gate::Allowed),
-                pending(2, cancellable.clone(), Gate::Allowed),
-                pending(3, cancellable, Gate::Allowed),
+                pending(1, slow.clone(), Gate::Allowed),
+                pending(2, slow.clone(), Gate::Allowed),
+                pending(3, slow, Gate::Allowed),
             ],
             &cancel,
             |_| cx(&cancel),
             |_| {},
         )
         .await;
-        assert_eq!(
-            out[0].status,
-            ItemStatus::Completed,
-            "a Block tool finishes"
+        assert!(
+            out.iter().all(|o| o.status == ItemStatus::Interrupted),
+            "the one in flight goes with the ones that never started: {out:?}"
         );
-        assert_eq!(
-            out[1].status,
-            ItemStatus::Interrupted,
-            "nothing after the interrupt runs"
+        assert!(
+            log.lock().unwrap().is_empty(),
+            "not one of them reached its own end"
         );
-        assert_eq!(out[2].status, ItemStatus::Interrupted);
-        assert_eq!(log.lock().unwrap().as_slice(), ["1"]);
+    }
+
+    /// A tool that never looks at its token: the only thing that can end it is
+    /// dropping the future, which is what the interrupt does. Its own bound is
+    /// what proves the executor did not wait for the call.
+    struct Deaf {
+        never: Arc<tokio::sync::Notify>,
+    }
+
+    #[async_trait]
+    impl Tool for Deaf {
+        fn spec(&self) -> ToolSpec {
+            ToolSpec {
+                name: "Deaf".into(),
+                description: String::new(),
+                input_schema: json!({}),
+                meta: Default::default(),
+            }
+        }
+        fn traits(&self, _: &Value) -> ToolTraits {
+            ToolTraits::default()
+        }
+        async fn call(&self, _: Value, _cx: &ToolContext) -> Result<ToolOutput, ToolError> {
+            self.never.notified().await;
+            Ok(ToolOutput::text("nobody ever notifies this"))
+        }
+    }
+
+    #[tokio::test]
+    async fn a_tool_that_ignores_its_token_still_ends_on_the_interrupt() {
+        let tool = Arc::new(Deaf {
+            never: Arc::new(tokio::sync::Notify::new()),
+        });
+        let traits = tool.traits(&json!({}));
+        let call = PendingCall {
+            item: ItemId::from_raw("i1"),
+            call: ToolCall {
+                call_id: "c1".into(),
+                name: "Deaf".into(),
+                input: json!({}),
+            },
+            tool: Some(tool),
+            traits,
+            gate: Gate::Allowed,
+        };
+        let cancel = CancellationToken::new();
+        let c2 = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            c2.cancel();
+        });
+        let out = tokio::time::timeout(
+            MEET_BOUND,
+            execute(vec![call], &cancel, |_| cx(&cancel), |_| {}),
+        )
+        .await
+        .expect("the interrupt ended it without the tool's help");
+        assert_eq!(out[0].status, ItemStatus::Interrupted);
+        assert_eq!(out[0].output.parts[0].as_text(), Some(INTERRUPTED_MARKER));
     }
 
     #[test]

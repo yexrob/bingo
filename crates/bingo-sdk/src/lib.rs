@@ -50,8 +50,8 @@ pub use state::{Applied, LiveTurn, Retry, SessionState};
 pub use store::SessionStore;
 pub use surface::{Exit, Surface, SurfaceKind, SurfaceOptions};
 pub use tool::{
-    Env, Interrupt, ResultLimit, Subject, Tool, ToolCall, ToolContext, ToolError, ToolHost,
-    ToolTraits, input_schema,
+    Env, ResultLimit, Subject, Tool, ToolCall, ToolContext, ToolError, ToolHost, ToolTraits,
+    input_schema,
 };
 pub use view::{ActionItem, Tone, TreeNode, View};
 

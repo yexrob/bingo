@@ -9,8 +9,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use bingo_sdk::{
-    Interrupt, ResultLimit, Subject, Tool, ToolContext, ToolError, ToolOutput, ToolSpec,
-    ToolTraits, input_schema,
+    ResultLimit, Subject, Tool, ToolContext, ToolError, ToolOutput, ToolSpec, ToolTraits,
+    input_schema,
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -65,7 +65,6 @@ impl Tool for BashOutputTool {
             read_only: true,
             trusted: true,
             concurrency_safe: true,
-            interrupt: Interrupt::Cancel,
             result_limit: ResultLimit::SelfBounded,
             ..ToolTraits::default()
         }
@@ -231,7 +230,6 @@ mod tests {
         let tool = BashOutputTool::new(Arc::new(Jobs::new()));
         let traits = tool.traits(&Value::Null);
         assert!(traits.read_only && traits.trusted && traits.concurrency_safe);
-        assert_eq!(traits.interrupt, Interrupt::Cancel);
         assert_eq!(traits.result_limit, ResultLimit::SelfBounded);
         assert_eq!(tool.spec().name, "BashOutput");
         assert_eq!(

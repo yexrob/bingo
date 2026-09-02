@@ -4,8 +4,8 @@
 
 use async_trait::async_trait;
 use bingo_sdk::{
-    Interrupt, SessionSummary, Tone, Tool, ToolContext, ToolError, ToolOutput, ToolSpec,
-    ToolTraits, TreeNode, View, input_schema,
+    SessionSummary, Tone, Tool, ToolContext, ToolError, ToolOutput, ToolSpec, ToolTraits,
+    TreeNode, View, input_schema,
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -129,7 +129,7 @@ impl Tool for ListAgentsTool {
     }
 
     fn traits(&self, _input: &Value) -> ToolTraits {
-        crate::traits(Interrupt::Cancel)
+        crate::traits()
     }
 
     /// The arguments are ignored: a listing has none, and a model that sends

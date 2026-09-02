@@ -61,34 +61,35 @@ impl PluginTool {
         }
     }
 
-    /// Send the call, pass every progress line on as it arrives, and pass the
-    /// turn's interrupt down as `tool/cancel` — the call is still awaited,
-    /// because a bridge tool's `Interrupt` is `Block` and a write dropped
-    /// mid-flight is in an unknown state.
+    /// Send the call and pass every progress line on as it arrives. There is
+    /// no branch here for the turn's interrupt: an interrupt drops this future
+    /// where it stands (`bingo_core::executor`), so what tells the plugin is
+    /// [`Abandons`]'s drop, which is the one thing that always runs.
     async fn exchange(&self, params: ToolCallParams, cx: &ToolContext) -> Reply {
         let (sender, mut tail) = tokio::sync::mpsc::unbounded_channel();
         let call_id = params.call_id.clone();
         let _watch = self
             .connection
             .watch(&call_id, sender, Arc::clone(&cx.call));
+        let mut abandons = Abandons {
+            connection: Arc::clone(&self.connection),
+            call_id: call_id.clone(),
+            answered: false,
+        };
         let value = match serde_json::to_value(params) {
             Ok(value) => value,
             Err(error) => return Err(RpcError::new(INTERNAL_ERROR, error.to_string())),
         };
         let answered = self.connection.request(name::TOOL_CALL, value);
         tokio::pin!(answered);
-        let mut cancelled = false;
         loop {
             tokio::select! {
                 biased;
                 Some(line) = tail.recv() => cx.progress(line),
-                () = cx.cancel.cancelled(), if !cancelled => {
-                    cancelled = true;
-                    self.connection
-                        .notify(name::TOOL_CANCEL, json!({ "callId": call_id }))
-                        .await;
+                reply = &mut answered => {
+                    abandons.settled();
+                    return reply;
                 }
-                reply = &mut answered => return reply,
             }
         }
     }
@@ -115,6 +116,44 @@ impl PluginTool {
                 "PLUGIN_DIED",
                 format!("the {} plugin process ended; restarting it", self.plugin),
             ));
+        }
+    }
+}
+
+/// Says `tool/cancel` when the kernel stops waiting for a call before the
+/// plugin answered it.
+///
+/// It is a courtesy and not a guarantee. What ends a call here is the future
+/// being dropped, and nothing waits to see what the plugin does with the
+/// notice: the plugin's own process may still be running the call, writing
+/// files, holding a lock. Whether it stops is the plugin's to decide — the
+/// kernel's promise is only that the turn a person stopped has stopped.
+struct Abandons {
+    connection: Arc<Connection>,
+    call_id: String,
+    answered: bool,
+}
+
+impl Abandons {
+    /// The plugin answered; there is nothing left to abandon.
+    fn settled(&mut self) {
+        self.answered = true;
+    }
+}
+
+impl Drop for Abandons {
+    fn drop(&mut self) {
+        if self.answered {
+            return;
+        }
+        // A drop cannot wait, and the notice is worth more than the order.
+        let (connection, call_id) = (Arc::clone(&self.connection), self.call_id.clone());
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                connection
+                    .notify(name::TOOL_CANCEL, json!({ "callId": call_id }))
+                    .await;
+            });
         }
     }
 }

@@ -4,10 +4,11 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use bingo_sdk::{CancellationToken, CommandContext, CommandOutcome, Interrupt, SessionId};
+use bingo_plugin_rpc::Manager;
+use bingo_sdk::{CancellationToken, CommandContext, CommandOutcome, SessionId};
 use serde_json::json;
 
-use crate::harness::{Recorder, call, context, only_tool, said, started};
+use crate::harness::{CALL_ID, Recorder, call, context, only_tool, said, started};
 
 #[tokio::test]
 async fn a_plugin_s_tools_are_named_for_it_and_are_untrusted() {
@@ -22,7 +23,6 @@ async fn a_plugin_s_tools_are_named_for_it_and_are_untrusted() {
         "nothing a process says about itself is a fact"
     );
     assert!(!traits.read_only && !traits.concurrency_safe);
-    assert_eq!(traits.interrupt, Interrupt::Block);
     manager.shutdown().await;
 }
 
@@ -86,29 +86,43 @@ async fn a_progress_notification_becomes_the_call_s_live_output_line() {
     manager.shutdown().await;
 }
 
-/// A bridge tool's `Interrupt` is `Block`: the interrupt is passed down as
-/// `tool/cancel` and the call is still awaited, because a write dropped
-/// mid-flight is in an unknown state.
+/// The calls this process was told to stop, as it read them off the pipe. A
+/// drop cannot wait for the notice it sends, so a test that asks about one
+/// polls.
+async fn cancelled(manager: &Manager, cwd: &std::path::Path) -> String {
+    for _ in 0..300 {
+        let tool = only_tool(manager).await;
+        let (_, answered) = call(&tool, json!({ "cancelled": true }), cwd).await;
+        let seen = said(&answered.expect("an output"));
+        if !seen.is_empty() {
+            return seen;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!("the process was never told to stop");
+}
+
+/// An interrupt is the kernel letting the call go where it stands: nobody
+/// reads the answer any more, and `tool/cancel` goes out from the drop. What
+/// the process then does about it is the process's own affair — it may still
+/// be running the call, and nothing here waits to find out.
 #[tokio::test]
-async fn an_interrupt_reaches_the_plugin_and_the_call_still_answers() {
+async fn a_dropped_call_tells_the_plugin_it_is_no_longer_waited_for() {
     let (manager, _home, project) = started(&[]).await;
     let tool = only_tool(&manager).await;
     let recorder = Arc::new(Recorder::default());
-    let cancel = CancellationToken::new();
-    let cx = context(Arc::clone(&recorder), project.path(), cancel.clone());
-    let running = tool.call(json!({ "awaitCancel": true }), &cx);
-    tokio::pin!(running);
-    // The call is in flight and the stub is holding it; only the cancel frees it.
+    let cx = context(recorder, project.path(), CancellationToken::new());
+    // Boxed rather than pinned in place: this test's whole point is letting
+    // the future go, and a `tokio::pin!` handle drops the borrow, not the
+    // future.
+    let mut running = Box::pin(tool.call(json!({ "awaitCancel": true }), &cx));
+    // The call is in flight and the stub is holding it: nothing answers it.
     let held = tokio::time::timeout(Duration::from_millis(200), &mut running).await;
     assert!(
         held.is_err(),
         "the stub answers nothing until it is cancelled"
     );
-    cancel.cancel();
-    let output = tokio::time::timeout(Duration::from_secs(5), running)
-        .await
-        .expect("the cancel reached the plugin")
-        .expect("an output");
-    assert_eq!(said(&output), "cancelled");
+    drop(running);
+    assert_eq!(cancelled(&manager, project.path()).await, CALL_ID);
     manager.shutdown().await;
 }

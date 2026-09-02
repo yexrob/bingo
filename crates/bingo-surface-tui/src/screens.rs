@@ -95,6 +95,28 @@ fn streaming() {
     both("streaming", &solo(&state), &ui, now);
 }
 
+/// The same running command, one `esc` later. The row is the only thing that
+/// moved: the verb says what is happening, the hint is gone because the key it
+/// named has been pressed, and the sparkle and the clock carry on until the
+/// kernel's `TurnCompleted` takes the whole row away.
+#[test]
+fn stopping() {
+    let state = folded(vec![
+        frame(1, started("trn_1")),
+        started_tool(
+            2,
+            running_tool(
+                "itm_1",
+                "Bash",
+                "   Compiling bingo-sdk v0.1.0\n   Compiling bingo-core v0.1.0\n   Compiling bingo-surface-tui v0.1.0",
+            ),
+        ),
+    ]);
+    let (mut ui, now) = mid_turn();
+    ui.stop_asked = Some(TurnId::from_raw("trn_1"));
+    both("stopping", &solo(&state), &ui, now);
+}
+
 #[test]
 fn tool_running() {
     let state = folded(vec![

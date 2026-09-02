@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use bingo_sdk::{
-    Interrupt, SessionId, Subject, Tool, ToolContext, ToolError, ToolOutput, ToolSpec, ToolTraits,
+    SessionId, Subject, Tool, ToolContext, ToolError, ToolOutput, ToolSpec, ToolTraits,
     input_schema,
 };
 use schemars::JsonSchema;
@@ -192,7 +192,7 @@ impl Tool for WaitAgentTool {
 
     /// Interrupting the turn drops the wait, never the agents.
     fn traits(&self, _input: &Value) -> ToolTraits {
-        crate::traits(Interrupt::Cancel)
+        crate::traits()
     }
 
     /// One subject per agent, by the name the call wrote: an ask a rule could
@@ -487,7 +487,6 @@ mod tests {
         assert!(tool.spec().input_schema.get("$schema").is_none());
         let traits = tool.traits(&Value::Null);
         assert!(traits.read_only && traits.trusted && !traits.concurrency_safe);
-        assert_eq!(traits.interrupt, Interrupt::Cancel);
         assert_eq!(
             tool.subjects(&json!({ "agents": ["reviewer", "scout"] }), Path::new("/")),
             [

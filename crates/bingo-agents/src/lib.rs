@@ -42,8 +42,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use bingo_sdk::{
-    Command, Contribution, Hook, Interrupt, Plugin, PluginError, PluginManifest, Registrar, Tool,
-    ToolTraits,
+    Command, Contribution, Hook, Plugin, PluginError, PluginManifest, Registrar, Tool, ToolTraits,
 };
 
 pub use command::AgentsCommand;
@@ -83,12 +82,11 @@ static MANIFEST: PluginManifest = PluginManifest {
 /// gated in the child, so trusting these traits costs a person nothing.
 /// None is concurrency-safe — a spawn and a message that raced would agree on
 /// neither a name nor an order.
-pub(crate) fn traits(interrupt: Interrupt) -> ToolTraits {
+pub(crate) fn traits() -> ToolTraits {
     ToolTraits {
         read_only: true,
         trusted: true,
         concurrency_safe: false,
-        interrupt,
         ..ToolTraits::default()
     }
 }
@@ -200,11 +198,8 @@ mod plugin_tests {
 
     #[test]
     fn every_tool_is_read_only_trusted_and_alone() {
-        for interrupt in [Interrupt::Cancel, Interrupt::Block] {
-            let traits = traits(interrupt);
-            assert!(traits.read_only && traits.trusted);
-            assert!(!traits.concurrency_safe && !traits.destructive && !traits.edit);
-            assert_eq!(traits.interrupt, interrupt);
-        }
+        let traits = traits();
+        assert!(traits.read_only && traits.trusted);
+        assert!(!traits.concurrency_safe && !traits.destructive && !traits.edit);
     }
 }

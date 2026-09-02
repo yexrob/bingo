@@ -102,7 +102,7 @@ impl Tool for MessageTool {
     }
 
     fn traits(&self, _input: &Value) -> ToolTraits {
-        crate::traits(bingo_sdk::Interrupt::Block)
+        crate::traits()
     }
 
     fn subjects(&self, input: &Value, _cwd: &Path) -> Vec<Subject> {
