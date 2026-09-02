@@ -424,28 +424,38 @@ fn turns(frames: &[Frame]) -> usize {
 /// parent is not in the room and no member is ever told what the person said,
 /// so neither can take the other's turn however the two races land.
 ///
-/// Within the members the race still decides nothing, and now that is all it
-/// can do: each round of three responses — the last poster's wrap-up and the
-/// two members its post woke — carries exactly one post, and every one of the
-/// three has read the room's head, so whichever takes it lands it. The
-/// parent's tail is a delay long enough to hold the run open while a relay
-/// that takes milliseconds runs; it is a liveness bound, not a bet on who
-/// asks first.
+/// Within the members the race decides nothing, because the response that
+/// posts the next number is addressed to a session that has *read* the last
+/// one. That is what `when` is for. A post the fan-out has delivered but whose
+/// target was mid-turn sits in that session's queue, not in its journal, and a
+/// room is serial (ADR-0025): a post written from behind the head is handed
+/// back rather than landed. Deal `count 2` to a session in that state and the
+/// number is refused and gone, the relay has nothing left awake, and the count
+/// stops — which is a true thing about a room, wrongly blamed on the room by a
+/// script that let any of three sessions carry the post. Matching each round on
+/// the previous number is the same precondition the serial rule enforces, so
+/// the deck can no longer deal a post to a session that would be refused.
+///
+/// The parent's tail is a delay long enough to hold the run open while the
+/// relay runs; it is a liveness bound, not a bet on who asks first.
 const RELAY: &str = r##"{"responses":[
     {"when":{"contains":"seat the relay"},"steps":[{"toolCall":{"name":"SpawnAgent","input":{"name":"alpha","prompt":"You count in #relay: when a post hands you a number, post the next one.","standby":true}}}]},
     {"when":{"contains":"seat the relay"},"steps":[{"toolCall":{"name":"SpawnAgent","input":{"name":"beta","prompt":"You count in #relay: when a post hands you a number, post the next one.","standby":true}}}]},
     {"when":{"contains":"seat the relay"},"steps":[{"toolCall":{"name":"SpawnAgent","input":{"name":"gamma","prompt":"You count in #relay: when a post hands you a number, post the next one.","standby":true}}}]},
-    {"when":{"contains":"seat the relay"},"steps":[{"toolCall":{"name":"SendMessage","input":{"to":"#relay","text":"count to 3, starting at 1"}}}]},
+    {"when":{"contains":"seat the relay"},"steps":[{"toolCall":{"name":"SendMessage","input":{"to":"#relay","text":"start the count"}}}]},
     {"when":{"contains":"seat the relay"},"steps":[{"delay":{"ms":5000}},{"text":"they have it"}]},
-    {"when":{"contains":"in #relay]"},"steps":[{"toolCall":{"name":"SendMessage","input":{"to":"#relay","text":"1"}}}]},
+    {"when":{"contains":"start the count"},"steps":[{"toolCall":{"name":"SendMessage","input":{"to":"#relay","text":"count 1"}}}]},
+    {"when":{"contains":"count 1"},"steps":[{"toolCall":{"name":"SendMessage","input":{"to":"#relay","text":"count 2"}}}]},
+    {"when":{"contains":"count 2"},"steps":[{"toolCall":{"name":"SendMessage","input":{"to":"#relay","text":"count 3"}}}]},
     {"when":{"contains":"in #relay]"},"steps":[{"text":"not mine"}]},
     {"when":{"contains":"in #relay]"},"steps":[{"text":"not mine"}]},
-    {"when":{"contains":"in #relay]"},"steps":[{"toolCall":{"name":"SendMessage","input":{"to":"#relay","text":"2"}}}]},
     {"when":{"contains":"in #relay]"},"steps":[{"text":"not mine"}]},
     {"when":{"contains":"in #relay]"},"steps":[{"text":"not mine"}]},
-    {"when":{"contains":"in #relay]"},"steps":[{"toolCall":{"name":"SendMessage","input":{"to":"#relay","text":"3"}}}]},
     {"when":{"contains":"in #relay]"},"steps":[{"text":"not mine"}]},
     {"when":{"contains":"in #relay]"},"steps":[{"text":"not mine"}]},
+    {"when":{"contains":"in #relay]"},"steps":[{"text":"done"}]},
+    {"when":{"contains":"in #relay]"},"steps":[{"text":"done"}]},
+    {"when":{"contains":"in #relay]"},"steps":[{"text":"done"}]},
     {"when":{"contains":"in #relay]"},"steps":[{"text":"done"}]},
     {"when":{"contains":"in #relay]"},"steps":[{"text":"done"}]},
     {"when":{"contains":"in #relay]"},"steps":[{"text":"done"}]},
@@ -472,7 +482,7 @@ fn one_kickoff_post_runs_a_relay_the_parent_never_dispatches() {
 
     assert_eq!(
         posts(home.path(), &root, "relay"),
-        ["count to 3, starting at 1", "1", "2", "3"],
+        ["start the count", "count 1", "count 2", "count 3"],
         "one post per round, and the count reached three"
     );
     assert_eq!(
@@ -487,7 +497,7 @@ fn one_kickoff_post_runs_a_relay_the_parent_never_dispatches() {
         assert!(brief.starts_with("You count in #relay"), "{heard:?}");
         assert_eq!(origin.conversation, None, "the brief came from the spawn");
         assert_eq!(
-            heard[1].0, "count to 3, starting at 1",
+            heard[1].0, "start the count",
             "the kickoff followed the brief it was read with: {heard:?}"
         );
     }
