@@ -29,7 +29,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --workspace --all-targets --locked
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      - run: cargo test --workspace --locked
+      # Half the runner's vCPUs: the gateway and peers suites spawn real
+      # subprocesses, so each test thread can cost more than one core, and
+      # the shared runner has fewer to begin with than a developer's machine.
+      - run: cargo test --workspace --locked -- --test-threads=2
   tui-smoke:
     strategy:
       fail-fast: false
