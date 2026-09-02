@@ -5,14 +5,15 @@
 ADR-0035 built: a `bingo-provider-acp` plugin whose every configured
 ACP adapter (`acp/claude`, `acp/codex`, …) is a `Provider` instance.
 Types from `agent-client-protocol-schema`; the ndjson JSON-RPC client
-loop is ours, tokio, `Send`. The provider is stateless: every turn
-spawns the adapter, opens one session, renders the request's own fold
-to a per-turn transcript file the prompt names, and the agent reads
-what it needs with its own tools. Its tool calls stream first-class
-wearing `acp.external: true`; permissions are the adapter's own,
-configured on its row, and a stray `session/request_permission` is
-refused closed. The kernel does not change — no new door, no new
-field.
+loop is ours, tokio, `Send`. The adapter children are kept the way
+plugin processes are kept — spawned lazily, `initialize`d once,
+restarted on death, killed at `stop()` — while every turn opens a
+fresh session on a warm child and renders the request's own fold to a
+per-turn transcript file the prompt names; the agent reads what it
+needs with its own tools. Its tool calls stream first-class wearing
+`acp.external: true`; permissions are the adapter's own, configured
+on its row, and a stray `session/request_permission` is refused
+closed. The kernel does not change — no new door, no new field.
 
 ## Bricks, in build order
 
@@ -48,12 +49,16 @@ field.
    deleted when the stream ends. Fixture tests on the render; a test
    that the file dies with the turn.
 6. **The provider.** `provider.rs`, `config.rs`, registration: one
-   instance per `[providers.acp.<name>]` row; `stream()` spawns the
-   adapter, `initialize` → `session/new` → one `session/prompt`,
-   forwards mapped events; `cancel` → the `session/cancel`
-   notification, then awaits the cancelled stop; the child dies with
-   the stream. Capabilities from `initialize`; `models()` empty; auth
-   `NotApplicable`. `request_permission` is answered with its reject
+   instance per `[providers.acp.<name>]` row. The instance keeps its
+   children: lazy first spawn, `initialize` once per child and its
+   capabilities cached with it, one stream on a child at a time — a
+   concurrent turn takes a second child, idle extras are reaped, a
+   dead child is respawned with a notice, `stop()` kills them all
+   (kill-on-drop stays the backstop). `stream()` takes a warm child,
+   `session/new` → one `session/prompt`, forwards mapped events;
+   `cancel` → the `session/cancel` notification, then awaits the
+   cancelled stop — the child outlives the esc. `models()` empty;
+   auth `NotApplicable`. `request_permission` is answered with its reject
    option and a notice naming the row — the adapter's own permission
    config (args/env on the row) is where yes is said;
    `elicitation/create` declines the same way.
@@ -78,11 +83,12 @@ events,transcript,provider,config}.rs` + the fake-agent bin;
   tool call land in valid NDJSON, marked `acp.external: true`, and
   nothing was executed by the loop.
 - [ ] Esc mid-turn sends `session/cancel` and the turn ends with the
-  interrupt wording; the child is gone with the turn.
+  interrupt wording; the child survives to serve the next turn.
 - [ ] A second turn's prompt names a fresh transcript file holding
-  the first turn word for word, and the file is gone when the turn
-  ends; `--continue` takes no path of its own (the black-box resumes
-  and the next turn's file carries the whole prior fold).
+  the first turn word for word, the file is gone when the turn ends,
+  and both turns rode one child (the fake counts its spawns);
+  `--continue` takes no path of its own (the black-box resumes and
+  the next turn's file carries the whole prior fold).
 - [ ] A scripted `request_permission` is answered with its reject
   option, one notice names the config row, and the turn goes on.
 - [ ] `cargo check -p bingo-provider-acp --all-targets --target
@@ -94,19 +100,19 @@ events,transcript,provider,config}.rs` + the fake-agent bin;
 `bingo-acp` the surface (opposite role, its own milestone). Handing
 our tools over MCP. ACP plans, modes, slash commands, `fs/*`,
 `terminal/*`, the `-http` transport, protocol v2, `session/resume` /
-`session/load`. A warm pool of adapter children (processes reused,
-sessions never) — waits for a measured need. A prompter door for
-providers — recorded in the ADR, not built. Shipping default adapter
-rows — configuration belongs to the person.
+`session/load`. A prompter door for providers — recorded in the ADR,
+not built. Shipping default adapter rows — configuration belongs to
+the person.
 
 ## Risks
 
 - The `=1.5.0` pin: a schema bump is deliberate and the compiler
   walks the mapping; recorded fixtures catch silent shape drift.
-- Adapters are node children; a dropped turn must kill the whole
-  process group or the npx tree lingers (M34-D's lesson).
-- The spawn is the latency: node starts in whole seconds, every
-  turn. The live smoke measures it; the warm pool waits for the
-  number, not for a feeling.
+- Adapters are node children; when one goes (stop, death, fallback)
+  the whole process group must go with it or the npx tree lingers
+  (M34-D's lesson).
+- An adapter may mishandle many sessions across one connection's
+  life: when a child misbehaves at `session/new`, the instance falls
+  back to a fresh child for that turn and says so.
 - codex-acp reports no usage today: zeros are honest, and the ruler
   reads them as unknown, not as free.

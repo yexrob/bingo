@@ -31,16 +31,20 @@ tokio, `Send`).
    The full SDK is refused: a second runtime and a `!Send` thread-hop
    would buy ~300 lines of codec this workspace has twice already.
    Budget: `max_dependencies` 302 → 307.
-3. **Every turn is a fresh session** (stateless, at the user's call):
-   the provider is a pure function of the request, like every other
-   provider. Each `stream()` spawns the adapter, opens one session,
-   sends one `session/prompt` and is done. The request's own folded
+3. **Every turn is a fresh session on a kept child** (stateless where
+   it counts): the provider is a pure function of the request, like
+   every other provider. The instance keeps its adapter children the
+   way the workspace keeps any external process (bingo-plugin-rpc's
+   pattern): spawned lazily, `initialize`d once, restarted when they
+   die, killed at `stop()`. A child is maintained; a conversation is
+   not — each `stream()` opens a fresh session on a warm child, sends
+   one `session/prompt` and closes it, so any child serves any turn
+   and no request needs to say whose it is. The request's own folded
    `messages` are rendered to a transcript file for that turn; the
    prompt names the file beside the newest user turn, and the agent
-   reads what it needs with its own tools. The file is derived from
-   the request and deleted with the turn, never kept beside anything.
-   Everything that crosses the wire is journaled as `ModelEvent`s —
-   the journal stays the one record every surface and
+   reads what it needs with its own tools. The file dies with the
+   turn. Everything that crosses the wire is journaled as
+   `ModelEvent`s — the journal stays the one record every surface and
    `bingo-experience` read. Nothing else is remembered: no session
    id, no extension, no resume ladder — `--continue` restores by
    construction, and compaction and the ruler keep shaping what the
@@ -71,10 +75,10 @@ tokio, `Send`).
 ## Consequences
 
 - The context stays bingo's: an ACP instance reads the fold like any
-  model. The price is the spawn — node starts in whole seconds, and
-  the agent re-reads what it needs each turn; a warm pool of children
-  (processes reused, sessions never) is future work if the price
-  shows.
+  model. The price left is the reading — the agent re-reads what it
+  needs each turn; the node start is paid once per child, not per
+  turn. A child serves one stream at a time; a concurrent turn takes
+  a second child, and idle extras are reaped.
 - The first-tier adapters need `node` on PATH; auth is the adapter's
   own (subscription or key), `AuthStatus::NotApplicable`.
 - Protocol churn arrives as a schema-crate bump the compiler walks us
