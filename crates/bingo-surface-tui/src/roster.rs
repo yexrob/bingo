@@ -33,10 +33,12 @@ const SAYS_AT: usize = 2;
 /// What each run of the list is called, while there is another beside it.
 const AGENTS: &str = "Agents";
 const ROOMS: &str = "Rooms";
-/// The sigil a seat that listens rather than answers wears, as `/room` writes
-/// one (`~watcher`). It is the glyph, never the colour: the dot's own hue
-/// still says what the session is doing.
-const LISTENS: &str = "~";
+/// The sigil a seat that wakes on every post wears. Listening is what a seat
+/// does unless its roster asked otherwise (ADR-0034 §6), so the glyph is spent
+/// on the seat that is the exception — the one a storm would go through. It is
+/// the glyph, never the colour: the dot's own hue still says what the session
+/// is doing.
+const LIVE: &str = "~";
 
 /// Where the keyboard is in the list: how far down the rows it may land on,
 /// the labels between them counting for nothing.
@@ -265,16 +267,16 @@ fn named(name: &str, column: usize, on: bool) -> Vec<Span<'static>> {
     )]
 }
 
-/// The dot a session's row wears, and the sigil a listening seat wears
-/// instead. The colour is the roster's own either way, so the glyph adds a
-/// fact rather than replacing one.
+/// The dot a session's row wears, and the sigil a live seat wears instead. The
+/// colour is the roster's own either way, so the glyph adds a fact rather than
+/// replacing one.
 fn dot(row: &Row<'_>, seat: Option<&Seat>) -> Span<'static> {
-    let listening = matches!(seat.map(|seat| seat.ear), Some(Ear::Listening { .. }));
-    let glyph = match listening {
-        true => LISTENS,
+    let live = matches!(seat.map(|seat| seat.ear), Some(Ear::Live));
+    let glyph = match live {
+        true => LIVE,
         false => theme::bullet(),
     };
-    let cell = theme::bullet().width().max(LISTENS.width());
+    let cell = theme::bullet().width().max(LIVE.width());
     Span::styled(
         format!("{glyph}{} ", " ".repeat(cell.saturating_sub(glyph.width()))),
         tree::bullet_style(row.status, row.attention),
@@ -301,9 +303,7 @@ fn says(
         if let Some(unread) = seat.unread {
             said.push(Span::styled(format!("{unread} unread"), theme::dim()));
         }
-        if let Ear::Listening { patience_s } = seat.ear {
-            said.push(Span::styled(listening(patience_s), theme::dim()));
-        }
+        said.push(Span::styled(heard(seat.ear), theme::dim()));
         if let Some(owes) = seat.owes {
             said.push(Span::styled(owed(&owes, now), theme::attention(now)));
         }
@@ -363,12 +363,17 @@ fn owed(owes: &Owes, now: Now) -> String {
     }
 }
 
-/// How a seat hears its room, where it is not the live ear every seat has by
-/// default. A patience the roster named without one is the word alone.
-fn listening(patience_s: Option<u64>) -> String {
-    match patience_s {
-        Some(seconds) => format!("listening · {seconds}s"),
-        None => "listening".to_string(),
+/// How a seat hears its room, where that is worth a word at all. The patient
+/// ear with no patience beside it is the one a bare name asks for (ADR-0034
+/// §6), and a word on every row says nothing about any of them; the two ears a
+/// roster had to ask for are the two worth saying.
+fn heard(ear: Ear) -> String {
+    match ear {
+        Ear::Live => "live".to_string(),
+        Ear::Listening {
+            patience_s: Some(seconds),
+        } => format!("listening · {seconds}s"),
+        Ear::Listening { patience_s: None } => String::new(),
     }
 }
 
@@ -428,8 +433,9 @@ mod tests {
     use super::*;
     use crate::test_support::*;
 
-    /// A root, two sub-agents seated in a room — one of them listening, one
-    /// owing an answer — and the room itself: one row of every kind there is.
+    /// A root, two sub-agents seated in a room — one on the live ear it asked
+    /// for and owing an answer, one on a patience of its own — and the room
+    /// itself: one row of every kind there is.
     fn team() -> Tree {
         let mut frames = busy_child("reviewer");
         frames.extend([
@@ -440,7 +446,10 @@ mod tests {
                 extended(
                     "bingo.rooms",
                     "members",
-                    roster_payload(&["reviewer", "watcher"], &[("watcher", 300)]),
+                    roster_payload(
+                        &["reviewer", "watcher"],
+                        &[("reviewer", 0), ("watcher", 600)],
+                    ),
                 ),
             ),
             frame(
@@ -458,6 +467,11 @@ mod tests {
                 },
             ),
         ]);
+        // The posts a reading mark has to stand behind.
+        frames.extend(
+            (1..=4u64)
+                .map(|n| posted(9 + n, &format!("itm_p{n}"), "watcher", &format!("post {n}"))),
+        );
         folded_tree(frames)
     }
 
@@ -477,8 +491,8 @@ mod tests {
             vec![
                 "Agents",
                 "❯ ⏺ project   what is in this workspace?",
-                "  ⏺ reviewer  running · in #design · owes an answer · 22m · 3 tools · 1.2k toke…",
-                "  ~ watcher   idle · in #design · listening · 300s",
+                "  ~ reviewer  running · in #design · live · owes an answer · 22m · 3 tools · 1.…",
+                "  ⏺ watcher   idle · in #design · listening · 600s",
                 "Rooms",
                 "  #design  2 seats · 1 owed",
             ],
@@ -486,24 +500,43 @@ mod tests {
         );
     }
 
-    /// The glyph says a seat listens; the colour goes on saying what the
-    /// session is doing, so neither fact is spent on the other.
+    /// The glyph says a seat wakes on every post; the colour goes on saying
+    /// what the session is doing, so neither fact is spent on the other.
     #[test]
-    fn a_listening_seat_wears_the_sigil_and_keeps_its_own_colour() {
+    fn a_live_seat_wears_the_sigil_and_keeps_its_own_colour() {
         let tree = team();
         let rows = tree.rows();
         let listed = listing(&rows);
-        let watcher = listed
+        let reviewer = listed
             .agents
             .iter()
-            .find(|row| row.name == "watcher")
-            .expect("the listening seat");
+            .find(|row| row.name == "reviewer")
+            .expect("the live seat");
         let glyph = dot(
-            watcher,
-            seats::seat(&tree, tree.state(watcher.session).expect("it")).as_ref(),
+            reviewer,
+            seats::seat(&tree, tree.state(reviewer.session).expect("it")).as_ref(),
         );
         assert!(glyph.content.starts_with('~'), "{glyph:?}");
-        assert_eq!(glyph.style, tree::bullet_style(watcher.status, false));
+        assert_eq!(glyph.style, tree::bullet_style(reviewer.status, false));
+    }
+
+    /// The ear nearly every seat wears is the one no row says (ADR-0034 §6):
+    /// a glyph and a word spent on the norm would say nothing about any row.
+    #[test]
+    fn a_seat_on_the_default_ear_says_nothing_about_what_it_hears() {
+        let tree = folded_tree(vec![
+            child_frame(1, announced("reviewer")),
+            log_frame(2, log_announced("#design")),
+            log_frame(
+                3,
+                extended("bingo.rooms", "members", roster_payload(&["reviewer"], &[])),
+            ),
+        ]);
+        let drawn = drawn_at(&tree, Cursor::default(), 80, 8);
+        assert_eq!(
+            drawn[2], "  ⏺ reviewer  idle · in #design",
+            "the plain dot and the room, and not a word about the ear: {drawn:#?}"
+        );
     }
 
     #[test]
@@ -528,23 +561,23 @@ mod tests {
         );
         assert!(
             drawn[2].contains(
-                "reviewer  running · in #design · owes an answer · 22m · 3 tools · 1.2k tokens"
+                "reviewer  running · in #design · live · owes an answer · 22m · 3 tools · 1.2k tokens"
             ),
             "one that has run says what it is doing, then where it sits and what \
              it owes, and only then what it has spent: {drawn:#?}"
         );
     }
 
-    /// A member whose cursor is behind the room's head says how much of it
+    /// A member whose mark is behind the room's head says how much of it
     /// stands unread, beside the room it stands in (ADR-0034 §2).
     #[test]
     fn a_member_behind_the_room_says_how_much_it_has_not_read() {
         let mut tree = team();
-        tree.apply(&child_frame(12, room_cursor("#design", 6)));
+        tree.apply(&log_frame(14, room_cursor("reviewer", "itm_p1")));
         let drawn = drawn_at(&tree, Cursor::default(), 120, 8);
         assert!(
             drawn[2].contains("in #design · 3 unread ·"),
-            "the room's journal reaches seq 9 and the mark stopped at 6: {drawn:#?}"
+            "the room holds four posts and the mark stopped at the first: {drawn:#?}"
         );
     }
 

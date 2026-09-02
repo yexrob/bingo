@@ -80,8 +80,9 @@ fn completed(id: &str, name: &str, input: serde_json::Value, out: Option<ToolOut
     tool(id, name, input, out, ItemStatus::Completed)
 }
 
-/// `OpenRoom`: the room, its live seats, and the ones that listen under a node
-/// of their own — five rows, which is exactly what a result keeps.
+/// `OpenRoom`: the room and a node per seat, badged with the ear it asked for
+/// where that is not the default one a bare name takes (ADR-0034 §6) — five
+/// rows, which is exactly what a result keeps.
 fn opened_a_room() -> Item {
     let seats = View::Tree {
         nodes: vec![seat(
@@ -90,7 +91,8 @@ fn opened_a_room() -> Item {
             vec![
                 leaf("helper", None),
                 leaf("scout", None),
-                seat("listening", None, vec![leaf("watcher", Some("120s"))]),
+                leaf("watcher", Some("120s")),
+                leaf("parent", Some("live")),
             ],
         )],
     };
@@ -98,7 +100,7 @@ fn opened_a_room() -> Item {
         "itm_1",
         "OpenRoom",
         json!({"name": "design", "members": ["helper", "scout"]}),
-        answered_with("#design: helper, scout, ~watcher(120s)", seats),
+        answered_with("#design: helper, scout, watcher:120, parent:0", seats),
     )
 }
 
@@ -146,7 +148,8 @@ fn what_the_message_tools_answer() {
     let tree = solo(&state);
     let (ui, now) = scene();
     let wide = draw_tree(120, 40, &tree, &ui, now);
-    assert!(wide.contains("└─ watcher [ 120s ]"), "{wide}");
+    assert!(wide.contains("├─ watcher [ 120s ]"), "{wide}");
+    assert!(wide.contains("└─ parent [ live ]"), "{wide}");
     assert!(
         wide.contains("read  by every member, as it lands"),
         "{wide}"
@@ -192,9 +195,10 @@ fn what_a_room_is_owed() {
 
 // ---- the one list of sessions (M36) -------------------------------------
 
-/// A root with three sub-agents, a room two of them sit in — one listening,
-/// one owing an answer, one behind the room's head — and the room's own debt
-/// signalled on the root: one row of every kind the list has.
+/// A root with three sub-agents, a room two of them sit in — one on the live
+/// ear it asked for, owing an answer and behind the room's head, one on a
+/// patience of its own — and the room's own debt signalled on the root: one
+/// row of every kind the list has.
 fn a_team() -> Tree {
     let mut frames = busy_child("reviewer");
     frames.extend([
@@ -212,7 +216,10 @@ fn a_team() -> Tree {
             extended(
                 "bingo.rooms",
                 "members",
-                roster_payload(&["reviewer", "watcher"], &[("watcher", 300)]),
+                roster_payload(
+                    &["reviewer", "watcher"],
+                    &[("reviewer", 0), ("watcher", 600)],
+                ),
             ),
         ),
         frame(
@@ -224,9 +231,17 @@ fn a_team() -> Tree {
             ),
         ),
         item(33, user("itm_0", "what is in this workspace?")),
-        // The room's journal reaches seq 31; this seat stopped reading at 28.
-        child_frame(34, room_cursor("#design", 28)),
     ]);
+    frames.extend((1..=4u64).map(|n| {
+        posted(
+            31 + n,
+            &format!("itm_p{n}"),
+            "watcher",
+            &format!("post {n}"),
+        )
+    }));
+    // Four posts stand in the room; this seat stopped reading at the first.
+    frames.push(log_frame(36, room_cursor("reviewer", "itm_p1")));
     folded_tree(frames)
 }
 
@@ -242,8 +257,12 @@ fn the_roster() {
     assert!(wide.contains("Agents"), "{wide}");
     assert!(wide.contains("Rooms"), "{wide}");
     assert!(
-        wide.contains("~ watcher   idle · in #design · listening · 300s"),
-        "a listening seat wears the sigil and says what it hears: {wide}"
+        wide.contains("~ reviewer  running · in #design · 3 unread · live"),
+        "a live seat wears the sigil and says so: {wide}"
+    );
+    assert!(
+        wide.contains("⏺ watcher   idle · in #design · listening · 600s"),
+        "a patience the roster asked for is said in seconds: {wide}"
     );
     assert!(
         wide.contains("owes an answer · 22m"),
@@ -276,9 +295,10 @@ fn the_roster_spends_colour_only_where_the_design_says() {
     );
     assert_eq!(
         painted.coloured("owes an answer · 22m"),
-        vec!["⏺", "owes an answer · 22m"],
-        "the dot for the session at work, the debt for what wants a person, \
-         and nothing else on the row"
+        vec!["~", "owes an answer · 22m"],
+        "the sigil in the dot's place for the session at work — it took the \
+         glyph and none of the hue — the debt for what wants a person, and \
+         nothing else on the row"
     );
 }
 

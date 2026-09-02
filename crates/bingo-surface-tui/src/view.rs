@@ -1684,7 +1684,9 @@ mod tests {
     }
 
     /// The roster a room publishes, spelled as `bingo-rooms` publishes it: the
-    /// names a reader parses and the tree a surface draws, in one payload.
+    /// names a reader parses and the tree a surface draws, in one payload. A
+    /// node per seat, badged only where the ear is not the default one a bare
+    /// name asks for (ADR-0034 §6).
     fn members() -> Event {
         extended(
             "bingo.rooms",
@@ -1694,9 +1696,7 @@ mod tests {
                 "kind": "tree",
                 "nodes": [
                     {"label": "reviewer", "tone": "neutral"},
-                    {"label": "listening", "tone": "neutral", "children": [
-                        {"label": "scout", "badge": "300s", "tone": "neutral"},
-                    ]},
+                    {"label": "scout", "badge": "live", "tone": "neutral"},
                 ],
             }),
         )

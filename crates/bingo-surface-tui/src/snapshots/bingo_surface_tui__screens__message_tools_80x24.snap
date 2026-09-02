@@ -1,6 +1,5 @@
 ---
 source: crates/bingo-surface-tui/src/screens.rs
-assertion_line: 24
 expression: "draw_tree(80, 24, tree, ui, now)"
 ---
 "│   cwd: /tmp/project                                                          │"
@@ -10,8 +9,8 @@ expression: "draw_tree(80, 24, tree, ui, now)"
 "  ⎿  └─ #design                                                                 "
 "        ├─ helper                                                               "
 "        ├─ scout                                                                "
-"        └─ listening                                                            "
-"           └─ watcher [ 120s ]                                                  "
+"        ├─ watcher [ 120s ]                                                     "
+"        └─ parent [ live ]                                                      "
 "                                                                                "
 "⏺ SendMessage(#design)                                                          "
 "  ⎿  to    #design                                                              "
