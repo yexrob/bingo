@@ -386,8 +386,15 @@ impl Sessions {
         transcript::write(&self.env.data_dir.join("acp"), session, history).ok()
     }
 
+    /// The pointer is written when it is news. A restore that got back into
+    /// the session the journal already named has nothing to add, and a second
+    /// copy of a fact the stream already carries is not a record, it is noise.
     async fn journal(&self, session: &SessionId, adapter: &str, acp: &str) {
+        let known = self.known_id(session, adapter).await;
         self.remember(session, adapter, acp).await;
+        if known.as_deref() == Some(acp) {
+            return;
+        }
         let Some(host) = self.host.lock().await.clone() else {
             return;
         };

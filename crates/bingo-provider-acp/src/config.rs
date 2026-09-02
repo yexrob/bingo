@@ -9,6 +9,36 @@
 //! say, so the rules `bingo-provider-anthropic` settles for its instances
 //! (ADR-0017 §§1–3) are the rules here — one word, no `/`, never a name the
 //! build already answers to.
+//!
+//! Two rows, as a person writes them in `settings.json`:
+//!
+//! ```json
+//! {
+//!   "acp": {
+//!     "adapters": {
+//!       "claude": {
+//!         "command": "npx",
+//!         "args": ["-y", "@agentclientprotocol/claude-agent-acp",
+//!                  "--permission-mode", "acceptEdits"]
+//!       },
+//!       "codex-acp": {
+//!         "command": "npx",
+//!         "args": ["-y", "@agentclientprotocol/codex-acp"],
+//!         "env": { "CODEX_APPROVAL_POLICY": "on-request" },
+//!         "enabled": false
+//!       }
+//!     }
+//!   }
+//! }
+//! ```
+//!
+//! `bingo --provider claude --model agent` then runs a turn through it. The
+//! model name is bingo's label for the conversation and never crosses: the
+//! agent picks its own. Login is the adapter's own (`claude login`, `codex
+//! login`), and so is permission: what the agent may do is said in *its*
+//! words, on its row — the `--permission-mode` and `CODEX_APPROVAL_POLICY`
+//! above — because bingo refuses a `session/request_permission` rather than
+//! standing a second gate in front of the agent's own (ADR-0035 §5).
 
 use std::collections::{BTreeMap, BTreeSet};
 

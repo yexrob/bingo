@@ -242,7 +242,7 @@ impl Host {
         }));
     }
 
-    fn interrupt(&mut self) {
+    pub(crate) fn interrupt(&mut self) {
         self.send(&json!({
             "type": "control_request",
             "request_id": "req_host_1",
