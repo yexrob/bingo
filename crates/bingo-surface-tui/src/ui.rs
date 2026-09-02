@@ -10,7 +10,9 @@ use std::time::{Duration, Instant};
 
 use std::collections::BTreeSet;
 
-use bingo_sdk::{Action, CommandSpec, ItemId, Level, Seq, SessionState, SessionSummary, View};
+use bingo_sdk::{
+    Action, CommandSpec, ItemId, Level, Seq, SessionState, SessionSummary, TurnId, View,
+};
 
 use crate::blocks::Blocks;
 use crate::clock::{Anim, FRAME, Now};
@@ -305,6 +307,12 @@ pub struct Ui {
     pub expanded: BTreeSet<ItemId>,
     /// When ctrl+c was pressed on an empty composer.
     pub armed: Option<Instant>,
+    /// The turn this surface has asked to stop, so the activity row answers
+    /// the key on the very frame it was pressed (§7). The kernel decides what
+    /// an interrupt does and its `TurnCompleted` is the end of the story; this
+    /// is a fact about the keypress, not a copy of session state, and it is
+    /// kept by turn id so it can never speak for the turn after this one.
+    pub stop_asked: Option<TurnId>,
     /// An `esc` closed nothing, so the next one is the second of `esc esc`.
     /// It needs no clock: any other key clears it.
     pub esc_armed: bool,
@@ -351,6 +359,7 @@ impl Ui {
             pending: None,
             expanded: BTreeSet::new(),
             armed: None,
+            stop_asked: None,
             esc_armed: false,
             catalogs: Catalogs::default(),
             opening: false,

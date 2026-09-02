@@ -379,6 +379,66 @@ fn the_activity_row_says_a_verb_a_clock_and_what_the_turn_has_said() {
     );
 }
 
+/// The answer to the key, on the key's own frame. The row keeps everything
+/// that says the turn is still alive — the sparkle breathes, the clock ticks —
+/// and loses only the hint, whose key has just been pressed.
+#[test]
+fn a_turn_asked_to_stop_says_so_and_keeps_its_sparkle_and_its_clock() {
+    let state = folded(vec![frame(1, started("trn_1"))]);
+    let tree = solo(&state);
+    let (mut ui, now) = scene();
+    ui.stop_asked = Some(bingo_sdk::TurnId::from_raw("trn_1"));
+    let row = |ms| row(&tree, &ui, later(now, ms), crate::view::STOPPING);
+    assert_eq!(row(4_000), "✻ Stopping… (4s)");
+    // The sparkle is at another of its four glyphs a second later, which is
+    // the point: the row is still alive while it winds down.
+    assert!(
+        row(5_000).ends_with(" Stopping… (5s)"),
+        "the clock ticks on: {}",
+        row(5_000)
+    );
+    assert!(
+        !row(4_000).contains("esc to interrupt"),
+        "the key it named has been pressed"
+    );
+    let (working, _) = scene();
+    assert_eq!(
+        leading_style(&tree, &ui, later(now, 4_000), crate::view::STOPPING),
+        leading_style(&turning(), &working, later(now, 4_000), "esc to interrupt"),
+        "the sparkle is bingo's presence either way"
+    );
+}
+
+/// The row that answers a key is never held back by the delay that spares a
+/// fast turn its flash: a person who pressed `esc` at 40 ms must see it.
+#[test]
+fn stopping_outruns_the_activity_row_s_own_delay() {
+    let state = folded(vec![frame(1, started("trn_1"))]);
+    let tree = solo(&state);
+    let (mut ui, now) = scene();
+    assert!(
+        !screen(&tree, &ui, later(now, 40)).contains("esc to interrupt"),
+        "a turn this young says nothing on its own"
+    );
+    ui.stop_asked = Some(bingo_sdk::TurnId::from_raw("trn_1"));
+    assert!(
+        screen(&tree, &ui, later(now, 40)).contains(crate::view::STOPPING),
+        "but the answer to a key is not a cue, and does not wait"
+    );
+}
+
+/// The flag is a fact about one keypress and one turn. The turn after it is
+/// another turn, and reads as one.
+#[test]
+fn the_next_turn_is_not_the_one_that_was_stopped() {
+    let state = folded(vec![frame(1, started("trn_2"))]);
+    let (mut ui, now) = scene();
+    ui.stop_asked = Some(bingo_sdk::TurnId::from_raw("trn_1"));
+    let drawn = screen(&solo(&state), &ui, later(now, 4_000));
+    assert!(drawn.contains("esc to interrupt"), "{drawn}");
+    assert!(!drawn.contains(crate::view::STOPPING), "{drawn}");
+}
+
 #[test]
 fn every_verb_is_one_of_bingos_own() {
     let words = [

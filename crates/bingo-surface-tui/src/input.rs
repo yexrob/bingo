@@ -406,7 +406,7 @@ fn interrupt_or_exit(ui: &mut Ui, state: &SessionState, now: Now) -> Vec<Effect>
         armed: ui.exit_armed(now.instant),
     };
     match keys::interrupt(pressed) {
-        keys::Interrupt::Turn => return vec![Effect::Interrupt],
+        keys::Interrupt::Turn => return ask_to_stop(ui, state),
         keys::Interrupt::Clear => {
             ui.composer.clear();
             ui.edited();
@@ -437,11 +437,23 @@ fn escape(ui: &mut Ui, tree: &Tree, now: Now) -> Vec<Effect> {
         Some(keys::Escape::Sheet) => ui.layer.close(now.instant),
         Some(keys::Escape::Card) => return cancel(ui, tree, now),
         Some(keys::Escape::Dropdown) => ui.menu.dismissed = true,
-        Some(keys::Escape::Interrupt) => return vec![Effect::Interrupt],
+        Some(keys::Escape::Interrupt) => return ask_to_stop(ui, tree.viewed()),
         // The stack was empty, so this `esc` is one of `esc esc`.
         None => twice(ui, tree, now),
     }
     Vec::new()
+}
+
+/// Stop the turn, and remember on this frame that it was asked to.
+///
+/// The kernel decides what an interrupt does and its `TurnCompleted` ends the
+/// story; but the actor's mailbox is first in, first out and may be mid-await,
+/// so a row that waited for the kernel to answer would read as a dropped key
+/// (§7). This is the same answer-the-key-now rule the armed `ctrl+c` hint
+/// already follows — a fact about the keypress, not a copy of session state.
+fn ask_to_stop(ui: &mut Ui, state: &SessionState) -> Vec<Effect> {
+    ui.stop_asked = state.turn.as_ref().map(|turn| turn.id.clone());
+    vec![Effect::Interrupt]
 }
 
 /// `esc esc` on an empty composer opens the rewind picker (design §3). The
@@ -938,7 +950,7 @@ fn edit(ui: &mut Ui, change: impl FnOnce(&mut crate::composer::Composer)) {
 mod tests {
     use super::*;
     use crate::test_support::*;
-    use bingo_sdk::{Activation, Answer, SessionId, TurnStatus};
+    use bingo_sdk::{Activation, Answer, SessionId, TurnId, TurnStatus};
     use crossterm::event::KeyCode;
 
     /// A session whose own directory has two files a mention could name.
@@ -1332,6 +1344,29 @@ mod tests {
             vec![Effect::Interrupt],
             "then the running turn"
         );
+    }
+
+    /// Both keys that stop a turn leave the same mark, and it names the turn
+    /// they stopped: the activity row reads it on this very frame, and the
+    /// turn after this one is somebody else's business.
+    #[test]
+    fn stopping_a_turn_marks_the_turn_it_stopped() {
+        for stop in [key(KeyCode::Esc), ctrl('c')] {
+            let (mut ui, now) = scene();
+            assert_eq!(ui.stop_asked, None);
+            assert_eq!(press(&mut ui, &busy(), stop, now), vec![Effect::Interrupt]);
+            assert_eq!(ui.stop_asked, Some(TurnId::from_raw("trn_1")));
+        }
+    }
+
+    /// An `esc` that closed a layer is not an interrupt, and marks nothing.
+    #[test]
+    fn an_esc_that_closes_something_stops_no_turn() {
+        let (mut ui, now) = scene();
+        let busy = busy();
+        write(&mut ui, &busy, "/he", now);
+        assert!(press(&mut ui, &busy, key(KeyCode::Esc), now).is_empty());
+        assert_eq!(ui.stop_asked, None, "the dropdown closed, the turn ran on");
     }
 
     // ---- the dialogs ----------------------------------------------------
