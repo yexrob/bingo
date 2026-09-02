@@ -13,12 +13,13 @@
 use bingo_sdk::{CommandSpec, ContentPart, ItemBody, SessionState, TurnId};
 use ratatui::text::{Line, Span};
 
-use crate::theme;
+use crate::{theme, window};
 
 /// The command a chosen row runs.
 pub const COMMAND: &str = "rewind";
 
-/// How many turns the card lists: the same eight rows the `/` menu offers.
+/// How many turns the card shows at once: the same eight rows the `/` menu
+/// offers. A longer list is windowed under the cursor, not cut off at eight.
 const ROWS: usize = 8;
 
 /// The card's own state. Which turns it lists is read from the session.
@@ -99,25 +100,39 @@ pub fn line(turn: &Turn) -> String {
 }
 
 /// The card: a title, because unlike the switcher's its rows do not say what
-/// they are, then one row per turn with what it dropped.
-pub fn lines(turns: &[Turn], selected: usize) -> Vec<Line<'static>> {
+/// they are, then one row per turn with what it dropped. `room` is what the
+/// card has to draw in; the turns take [`ROWS`] of what is left under the
+/// title, and window themselves when there are more of them than that.
+pub fn lines(turns: &[Turn], selected: usize, room: usize) -> Vec<Line<'static>> {
     let mut out = vec![Line::from(Span::styled(
         "Rewind to".to_string(),
         theme::text().patch(theme::bold()),
     ))];
-    out.extend(turns.iter().take(ROWS).enumerate().map(|(at, turn)| {
-        let focused = at == selected;
-        let style = match focused {
-            true => theme::text(),
-            false => theme::dim(),
-        };
-        Line::from(vec![
-            theme::cursor_span(focused),
-            Span::styled(turn.label(), style),
-            Span::styled(dropped(turn.items), theme::dim()),
-        ])
-    }));
+    let rows = turns
+        .iter()
+        .enumerate()
+        .map(|(at, turn)| row(turn, at == selected))
+        .collect();
+    out.extend(window::around(
+        rows,
+        selected,
+        room.saturating_sub(out.len()).min(ROWS),
+    ));
     out
+}
+
+/// One turn as the card draws it: what was asked, and what going back to it
+/// would take with it.
+fn row(turn: &Turn, focused: bool) -> Line<'static> {
+    let style = match focused {
+        true => theme::text(),
+        false => theme::dim(),
+    };
+    Line::from(vec![
+        theme::cursor_span(focused),
+        Span::styled(turn.label(), style),
+        Span::styled(dropped(turn.items), theme::dim()),
+    ])
 }
 
 /// What going back to a turn would take with it.
@@ -128,9 +143,10 @@ fn dropped(items: usize) -> String {
     }
 }
 
-/// How many rows the card can be walked through.
+/// How many rows the card can be walked through: every turn there is. The
+/// card windows them (§3), so the walk is no longer stopped at what fits.
 pub fn rows(turns: &[Turn]) -> usize {
-    turns.len().min(ROWS)
+    turns.len()
 }
 
 #[cfg(test)]
@@ -206,7 +222,7 @@ mod tests {
     #[test]
     fn the_card_marks_the_row_the_keyboard_is_on() {
         let turns = turns(&transcript());
-        let drawn: Vec<String> = lines(&turns, 1)
+        let drawn: Vec<String> = lines(&turns, 1, 20)
             .iter()
             .map(|line| line.to_string())
             .collect();

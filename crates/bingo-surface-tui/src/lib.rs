@@ -29,6 +29,8 @@
 //!   glyphs they draw with.
 //! - [`status`] is the one line of furniture, and [`cycle`] is the strip of
 //!   sessions that takes it while `↓` has it open.
+//! - [`window`] is what every list a cursor walks draws when it outgrows its
+//!   room: the rows around the cursor, and a `…` at each end it cut.
 //!
 //! # What a person types
 //!
@@ -71,6 +73,7 @@ mod ui;
 mod view;
 mod views;
 mod welcome;
+mod window;
 mod wrap;
 
 use std::sync::Arc;

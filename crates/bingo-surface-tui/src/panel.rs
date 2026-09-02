@@ -16,8 +16,8 @@ use ratatui::text::{Line, Span};
 use serde_json::Value;
 
 use crate::rail::{CardId, Pin};
-use crate::theme;
 use crate::views::{self, MISSING};
+use crate::{theme, window};
 
 /// What a session with no plugin state says.
 pub const NOTHING: &str = "nothing to show";
@@ -42,27 +42,33 @@ pub fn rows(state: &SessionState) -> Vec<CardId> {
 }
 
 /// The sheet: every kind, its view under it, and the cursor on the one `⏎`
-/// would pin.
+/// would pin. A sheet with more in it than `room` starts at the row the cursor
+/// is on, so what it names is read with the view that belongs to it.
 pub fn lines(
     state: &SessionState,
     session: &SessionId,
     cursor: usize,
     pinned: &BTreeSet<Pin>,
     width: usize,
+    room: usize,
 ) -> Vec<Line<'static>> {
     let rows = rows(state);
     if rows.is_empty() {
         return vec![Line::from(Span::styled(NOTHING.to_string(), theme::dim()))];
     }
     let mut out = Vec::new();
+    let mut at_cursor = 0;
     for (at, id) in rows.iter().enumerate() {
         if !out.is_empty() {
             out.push(Line::default());
         }
+        if at == cursor {
+            at_cursor = out.len();
+        }
         out.push(heading(id, at == cursor, is_pinned(pinned, session, id)));
         out.extend(body(state, id, width));
     }
-    out
+    window::onward(out, at_cursor, room)
 }
 
 fn body(state: &SessionState, id: &CardId, width: usize) -> Vec<Line<'static>> {
@@ -174,6 +180,9 @@ mod tests {
             .join("\n")
     }
 
+    /// The room a sheet at 80×24 has, which is more than these fixtures fill.
+    const ROOM: usize = 20;
+
     fn sheet(state: &SessionState) -> Vec<String> {
         lines(
             state,
@@ -181,6 +190,7 @@ mod tests {
             0,
             &BTreeSet::new(),
             60,
+            ROOM,
         )
         .iter()
         .map(|line| line.to_string().trim_end().to_string())
@@ -321,9 +331,9 @@ mod tests {
                 kind: "tasks".into(),
             },
         }]);
-        let here = lines(&state, &SessionId::from_raw("ses_1"), 0, &pinned, 60);
+        let here = lines(&state, &SessionId::from_raw("ses_1"), 0, &pinned, 60, ROOM);
         assert!(here[0].to_string().contains(PINNED), "{:?}", here[0]);
-        let elsewhere = lines(&state, &child_id(), 0, &pinned, 60);
+        let elsewhere = lines(&state, &child_id(), 0, &pinned, 60, ROOM);
         assert!(!elsewhere[0].to_string().contains(PINNED));
     }
 }

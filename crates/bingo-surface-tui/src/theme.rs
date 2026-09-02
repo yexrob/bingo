@@ -802,6 +802,9 @@ mod tests {
                     "views/table.rs",
                     "views/tree.rs",
                     "welcome.rs",
+                    // The `…` that says a list a cursor walks goes on past
+                    // the end of its window: a hint, as the strip's is.
+                    "window.rs",
                 ],
             ),
             (

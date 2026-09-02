@@ -1,0 +1,28 @@
+---
+source: crates/bingo-surface-tui/src/screens/windows.rs
+expression: screen.clone()
+---
+"  …                                                                             "
+"  scout 21 ⏺ stored                                                             "
+"  scout 22 ⏺ stored                                                             "
+"  scout 23 ⏺ stored                                                             "
+"  scout 24 ⏺ stored                                                             "
+"  scout 25 ⏺ stored                                                             "
+"  scout 26 ⏺ stored                                                             "
+"  scout 27 ⏺ stored                                                             "
+"  scout 28 ⏺ stored                                                             "
+"  scout 29 ⏺ stored                                                             "
+"  scout 30 ⏺ stored                                                             "
+"  scout 31 ⏺ stored                                                             "
+"  scout 32 ⏺ stored                                                             "
+"  scout 33 ⏺ stored                                                             "
+"  scout 34 ⏺ stored                                                             "
+"  scout 35 ⏺ stored                                                             "
+"  scout 36 ⏺ stored                                                             "
+"  scout 37 ⏺ stored                                                             "
+"  scout 38 ⏺ stored                                                             "
+"❯ scout 39 ⏺ stored                                                             "
+"╭──────────────────────────────────────────────────────────────────────────────╮"
+"│ > ask anything · / for commands · ! for shell                                │"
+"╰──────────────────────────────────────────────────────────────────────────────╯"
+"1 running                                                                 fake-1"

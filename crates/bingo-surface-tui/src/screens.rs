@@ -18,6 +18,8 @@ use crate::ui::{Open, Switcher, Ui};
 
 /// Where the colour lands on these same scenes (§4).
 mod colours;
+/// What a list a cursor walks draws when it outgrows its room (§3).
+mod windows;
 
 /// One scene, at the two sizes every layout rule is written for.
 fn both(name: &str, tree: &Tree, ui: &Ui, now: Now) {
