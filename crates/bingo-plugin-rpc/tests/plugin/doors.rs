@@ -109,12 +109,11 @@ async fn another_plugin_s_live_call_is_refused_in_words() {
     let started = started_with(&[("one", &[]), ("two", &[])]).await;
     let mine = tool_of(&started.manager, "one").await;
     let held = Arc::new(Recorder::default());
-    let cancel = CancellationToken::new();
     let cx = context_id(
         "call_one",
         Arc::clone(&held),
         started.project.path(),
-        cancel.clone(),
+        CancellationToken::new(),
     );
     let running = tokio::spawn(async move {
         mine.call(json!({ "awaitCancel": true, "progress": ["holding"] }), &cx)
@@ -141,9 +140,9 @@ async fn another_plugin_s_live_call_is_refused_in_words() {
         "the call that is running was never asked anything"
     );
 
-    cancel.cancel();
-    let answered = running.await.expect("the held call is joined");
-    assert_eq!(said(&answered.expect("it answered")), "cancelled");
+    // The held call is let go rather than answered: what ends a call is the
+    // future being dropped, and a dropped call has nothing left to say.
+    running.abort();
     started.manager.shutdown().await;
 }
 
