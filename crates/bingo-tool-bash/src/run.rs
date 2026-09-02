@@ -13,10 +13,13 @@
 //! into an answer. A promotion keeps the [`Running`] instead of concluding it:
 //! the same process and the same pipes go to the job table (ADR-0018 §6).
 //!
-//! POSIX only in M1 (the plan's non-goals put Windows dialects in M6). A Windows
-//! port replaces two things and nothing else: [`shell`], which would resolve
-//! `powershell -Command`, and the process group in [`spawn`], which would become
-//! `process-wrap`'s job object.
+//! The Windows port of this module was two things. The process group in
+//! [`spawn`] is done: it is `process-wrap`'s job object there, and the crate
+//! compiles and links for `x86_64-pc-windows-msvc`. [`shell`] is not — it
+//! still resolves `/bin/bash` or `/bin/sh` and hands the command to `-c`, so
+//! on Windows every command fails to spawn. Which dialect a Windows bingo
+//! writes, and what the model is told it is writing, is the M6 question the
+//! plan's non-goals hold; nothing here decides it.
 
 use std::path::Path;
 use std::process::{ExitStatus, Stdio};
@@ -24,7 +27,11 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use bingo_sdk::{CancellationToken, ToolContext, ToolError};
-use process_wrap::tokio::{ChildWrapper, CommandWrap, KillOnDrop, ProcessGroup};
+#[cfg(windows)]
+use process_wrap::tokio::JobObject;
+#[cfg(unix)]
+use process_wrap::tokio::ProcessGroup;
+use process_wrap::tokio::{ChildWrapper, CommandWrap, KillOnDrop};
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::Command;
 use tokio::sync::Mutex;
@@ -40,6 +47,10 @@ const DRAIN: Duration = Duration::from_secs(2);
 
 /// `SIGTERM`, the signal a program is given the chance to answer before the
 /// one it cannot. POSIX fixes the number; nothing here needs libc for it.
+///
+/// Unix only: Windows has no signal a process may answer, so there a job
+/// object is ended rather than asked (see `supervise::end_it`).
+#[cfg(unix)]
 pub const TERM: i32 = 15;
 
 /// The shell every command runs under. `bash` is what the tool is named after
@@ -143,7 +154,13 @@ fn spawn(command: &str, cwd: &Path) -> Result<Box<dyn ChildWrapper>, ToolError> 
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let mut wrapped = CommandWrap::from(shell_command);
+    // One handle for the whole tree, so a kill takes what the shell started
+    // and not just the shell. The two platforms spell that differently: a
+    // process group on unix, a job object on Windows.
+    #[cfg(unix)]
     wrapped.wrap(ProcessGroup::leader());
+    #[cfg(windows)]
+    wrapped.wrap(JobObject);
     wrapped.wrap(KillOnDrop);
     wrapped
         .spawn()

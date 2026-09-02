@@ -24,7 +24,9 @@ use crate::notify::{self, Conditions, Notice};
 use crate::run::{self, Running};
 use crate::sink::Sink;
 
-/// How long a `SIGTERM`ed group has to leave on its own terms.
+/// How long a `SIGTERM`ed group has to leave on its own terms. Unix only:
+/// nothing is asked on Windows, so nothing there waits to be answered.
+#[cfg(unix)]
 const GRACE: Duration = Duration::from_secs(2);
 
 /// How often a watched job's new output is read for a condition.
@@ -101,11 +103,23 @@ async fn wait_out(
 
 /// `SIGTERM` first, so a program that cleans up after itself gets to; the
 /// signal it cannot answer only once the grace is spent.
+#[cfg(unix)]
 async fn end_it(child: &mut Box<dyn ChildWrapper>) -> State {
     let _ = child.signal(run::TERM);
     if let Ok(Ok(status)) = tokio::time::timeout(GRACE, child.wait()).await {
         return state_of(status);
     }
+    run::kill(child).await;
+    State::Killed
+}
+
+/// The same end, on a platform with no signal to ask with.
+///
+/// Windows has nothing a process may answer and decline: a job object is
+/// ended, not asked. Waiting a grace first would buy the program no chance to
+/// clean up, only a slower kill, so the kill is the whole of it.
+#[cfg(windows)]
+async fn end_it(child: &mut Box<dyn ChildWrapper>) -> State {
     run::kill(child).await;
     State::Killed
 }
@@ -424,6 +438,9 @@ mod tests {
         assert_eq!(scan.look(Path::new("/no/such/job.log")).await, None);
     }
 
+    /// Unix only: the raw wait status this reads is a POSIX encoding, and
+    /// Windows has no signal to be killed by in the first place.
+    #[cfg(unix)]
     #[test]
     fn a_signalled_process_has_no_code_of_its_own() {
         use std::os::unix::process::ExitStatusExt;
