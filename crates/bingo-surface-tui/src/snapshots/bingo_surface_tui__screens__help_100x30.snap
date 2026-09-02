@@ -1,10 +1,9 @@
 ---
 source: crates/bingo-surface-tui/src/screens.rs
-assertion_line: 625
 expression: "draw_sized(100, 30, &state, &ui, now)"
 ---
 "enter        send the message · open the focused…  pgup/pgdn    scroll the transcript               "
-"shift+enter  newline (ctrl+j · alt+enter · \ ent…  ctrl+g       the same list · ↑↓ a column · ←→ ac…"
+"shift+enter  newline (ctrl+j · alt+enter · \ ent…  ctrl+g       the same list · ↑↓ to walk it       "
 "esc          sheet → card → dropdown → interrupt   ctrl+t       plugin state (tasks, rooms)         "
 "esc esc      rewind to an earlier turn             tab          complete the command under the caret"
 "ctrl+c       interrupt · clear input · twice to …  shift+tab    cycle permission mode               "

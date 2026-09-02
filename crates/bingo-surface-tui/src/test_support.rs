@@ -144,6 +144,17 @@ pub fn roster_payload(members: &[&str], listeners: &[(&str, u64)]) -> Value {
     payload
 }
 
+/// A seat's reading mark, spelled the way `bingo-rooms` journals one on the
+/// *member's* own session (ADR-0034 §2): the `seq` of the room it has read up
+/// to, filed under the room it belongs to and naming it again in the payload.
+pub fn room_cursor(room: &str, seq: u64) -> Event {
+    extended(
+        "bingo.rooms",
+        &format!("cursor:{room}"),
+        json!({"room": room, "seq": seq}),
+    )
+}
+
 /// What a room's parent is signalled while any answer is owed (ADR-0022 §4):
 /// the two columns a card draws and the debts it is drawn from, oldest first.
 /// A debt is given as the minutes it has stood at [`ts`], which is the clock

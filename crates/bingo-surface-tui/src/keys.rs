@@ -66,7 +66,7 @@ pub const BINDINGS: &[Binding] = &[
     },
     Binding {
         keys: "ctrl+g",
-        description: "the same list · ↑↓ a column · ←→ across",
+        description: "the same list · ↑↓ to walk it",
     },
     Binding {
         keys: "ctrl+t",

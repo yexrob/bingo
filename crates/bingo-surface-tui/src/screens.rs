@@ -476,12 +476,9 @@ fn a_child_transcript() {
     both("child_transcript", &tree, &ui, now);
 }
 
-/// The cursor on a row of the sessions column, by its number.
+/// The cursor on a row of the list, by its number.
 fn on(at: usize) -> crate::roster::Cursor {
-    crate::roster::Cursor {
-        side: crate::roster::Side::Sessions,
-        at,
-    }
+    crate::roster::Cursor { at }
 }
 
 #[test]

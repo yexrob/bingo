@@ -1,6 +1,5 @@
 ---
 source: crates/bingo-surface-tui/src/view.rs
-assertion_line: 1667
 expression: screen
 ---
 "                                                                                "
@@ -18,11 +17,11 @@ expression: screen
 "╭──────────────────────────────────────────────────────────────────────────────╮"
 "│ ✻ Welcome to bingo!                                                          │"
 "│                                                                              │"
-"│   /help for help · /login codex to use a subscription                        │"
-"│   cwd: /tmp/project                                                          │"
-"Sessions                                                      Rooms             "
-"  ⏺ project   idle                                              #design  0 seats"
+"Agents                                                                          "
+"  ⏺ project   idle                                                              "
 "❯ ⏺ reviewer  idle                                                              "
+"Rooms                                                                           "
+"  #design  0 seats                                                              "
 "╭──────────────────────────────────────────────────────────────────────────────╮"
 "│ > ask anything · / for commands · ! for shell                                │"
 "╰──────────────────────────────────────────────────────────────────────────────╯"

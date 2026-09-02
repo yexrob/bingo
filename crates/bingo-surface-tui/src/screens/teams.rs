@@ -7,7 +7,7 @@ use bingo_sdk::{ContentPart, Event, Item, ItemStatus, Tone, ToolOutput, TreeNode
 use serde_json::json;
 
 use super::{both, item};
-use crate::roster::{Cursor, Side};
+use crate::roster::Cursor;
 use crate::test_support::*;
 use crate::tree::Tree;
 use crate::ui::{Open, Switcher};
@@ -193,8 +193,8 @@ fn what_a_room_is_owed() {
 // ---- the one list of sessions (M36) -------------------------------------
 
 /// A root with three sub-agents, a room two of them sit in — one listening,
-/// one owing an answer — and the room's own debt signalled on the root: one
-/// row of every kind the list has.
+/// one owing an answer, one behind the room's head — and the room's own debt
+/// signalled on the root: one row of every kind the list has.
 fn a_team() -> Tree {
     let mut frames = busy_child("reviewer");
     frames.extend([
@@ -224,20 +224,23 @@ fn a_team() -> Tree {
             ),
         ),
         item(33, user("itm_0", "what is in this workspace?")),
+        // The room's journal reaches seq 31; this seat stopped reading at 28.
+        child_frame(34, room_cursor("#design", 28)),
     ]);
     folded_tree(frames)
 }
 
-/// What `↓` on an empty composer and `ctrl+g` both open: the sessions on the
-/// left with what each is doing, where it sits and what it owes, the rooms on
-/// the right with their size and their debts.
+/// What `↓` on an empty composer and `ctrl+g` both open: one column under two
+/// labels — the sessions that answer a model with what each is doing, where it
+/// sits and what it owes, then the rooms with their size and their debts.
 #[test]
 fn the_roster() {
     let tree = a_team();
     let (mut ui, now) = scene();
     shown(&mut ui, Open::Switcher(Switcher::default()), now);
     let wide = draw_tree(120, 40, &tree, &ui, now);
-    assert!(wide.contains("Sessions"), "{wide}");
+    assert!(wide.contains("Agents"), "{wide}");
+    assert!(wide.contains("Rooms"), "{wide}");
     assert!(
         wide.contains("~ watcher   idle · in #design · listening · 300s"),
         "a listening seat wears the sigil and says what it hears: {wide}"
@@ -245,6 +248,10 @@ fn the_roster() {
     assert!(
         wide.contains("owes an answer · 22m"),
         "and a debtor says what it owes and how long it has stood: {wide}"
+    );
+    assert!(
+        wide.contains("in #design · 3 unread"),
+        "a seat behind the room's head says how much of it it has not read: {wide}"
     );
     assert!(
         wide.contains("#design  2 seats · 1 owed"),
@@ -263,9 +270,9 @@ fn the_roster_spends_colour_only_where_the_design_says() {
     shown(&mut ui, Open::Switcher(Switcher::default()), now);
     let painted = crate::painted::painted(120, 40, &tree, &ui, now);
     assert_eq!(
-        painted.coloured("Sessions"),
+        painted.coloured("Agents"),
         Vec::<String>::new(),
-        "a heading is furniture, and furniture is dim"
+        "a label is furniture, and furniture is dim"
     );
     assert_eq!(
         painted.coloured("owes an answer · 22m"),
@@ -275,19 +282,17 @@ fn the_roster_spends_colour_only_where_the_design_says() {
     );
 }
 
-/// The cursor crosses to the rooms column, and the list still keeps every row
-/// the keyboard could be on in view.
+/// The walk goes on past the last agent onto the rooms, stepping over the
+/// label between them; the list still keeps every row the keyboard could be on
+/// in view.
 #[test]
-fn the_roster_with_the_cursor_in_the_rooms_column() {
+fn the_roster_with_the_cursor_on_a_room() {
     let tree = a_team();
     let (mut ui, now) = scene();
     shown(
         &mut ui,
         Open::Switcher(Switcher {
-            cursor: Cursor {
-                side: Side::Rooms,
-                at: 0,
-            },
+            cursor: Cursor { at: 4 },
             ..Default::default()
         }),
         now,

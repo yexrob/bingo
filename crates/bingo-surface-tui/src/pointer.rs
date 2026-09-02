@@ -125,13 +125,13 @@ fn mouse_enter() -> KeyEvent {
 }
 
 /// The row of the list under the pointer, against the frame the last draw
-/// left: which line it landed on and which of the two columns.
+/// left: which line it landed on, and what that line is a row of.
 fn listed_row(ui: &Ui, mouse: MouseEvent) -> Option<roster::Cursor> {
     if !ui.layer.captures() {
         return None;
     }
     let painted = ui.painted.borrow();
-    painted.list.as_ref()?.at(mouse.column, mouse.row)
+    painted.list.as_ref()?.at(mouse.row)
 }
 
 /// The session a row of the list names.
@@ -141,7 +141,7 @@ fn under(ui: &Ui, tree: &Tree, cursor: roster::Cursor) -> Option<SessionId> {
     };
     let rows = tree::roster(tree, &open.stored);
     cursor
-        .row(&roster::columns(&rows))
+        .row(&roster::listing(&rows))
         .map(|row| row.session.clone())
 }
 

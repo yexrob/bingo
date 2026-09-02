@@ -1,6 +1,5 @@
 ---
 source: crates/bingo-surface-tui/src/screens.rs
-assertion_line: 31
 expression: "draw_tree(120, 40, tree, ui, now)"
 ---
 "                                                                                                    owed                "
@@ -32,13 +31,13 @@ expression: "draw_tree(120, 40, tree, ui, now)"
 "╭──────────────────────────────────────────────────────────────────────────────────────────────╮                        "
 "│ ✻ Welcome to bingo!                                                                          │                        "
 "│                                                                                              │                        "
-"│   /help for help · /login codex to use a subscription                                        │                        "
-"│   cwd: /tmp/project                                                                          │                        "
-"Sessions                                                             Rooms                                              "
-"❯ ⏺ project   what is in this workspace?                               #design  2 seats · 1 owed                        "
-"  ⏺ reviewer  running · in #design · owes an answer · 22m · 3 tool…                                                     "
+"Agents                                                                                                                  "
+"❯ ⏺ project   what is in this workspace?                                                                                "
+"  ⏺ reviewer  running · in #design · 3 unread · owes an answer · 22m · 3 tools · 1.2k tokens                            "
 "  ~ watcher   idle · in #design · listening · 300s                                                                      "
 "  ⏺ scout     done · 0 tools · 0 tokens                                                                                 "
+"Rooms                                                                                                                   "
+"  #design  2 seats · 1 owed                                                                                             "
 "╭──────────────────────────────────────────────────────────────────────────────────────────────╮                        "
 "│ > ask anything · / for commands · ! for shell                                                │                        "
 "╰──────────────────────────────────────────────────────────────────────────────────────────────╯                        "
