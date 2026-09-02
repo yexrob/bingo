@@ -63,7 +63,7 @@ vanish() {
 # A reply of eighty numbered rows: more transcript than the screen holds.
 # They are list items, so markdown keeps them one to a row.
 long_reply() {
-  local text i
+  local text="" i
   for i in $(seq 1 80); do text="$text- line $i\\n"; done
   printf '{"responses":[{"steps":[{"text":"%s"}]}]}' "$text"
 }
