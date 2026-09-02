@@ -121,7 +121,7 @@ A terminal moves in three ways — a glyph changes, a row appears or leaves, bri
 | moment | cue | rhythm |
 |---|---|---|
 | presence | the activity row's `✻` sparkles `✻ ✢ ✶ ✽` and breathes between 65 % and 100 % while a turn runs; the input box border glows in step; neither exists when idle | 150 ms per glyph, 1.6 s breath |
-| thinking | `✻ Thinking…` dim italic, then decays to `✻ Thought for 2s` as the next block starts | — |
+| thinking | `✻ Thinking…` dim italic, then decays to `✻ Thought for 2s` — bringing what was thought with it — as the next block starts; nothing moves while it streams, so the row is drawn once whatever the deltas carry | — |
 | streaming | text after a `⏺` grows in place with a **comet tail**: the last eight cells fade from `presence`'s glow to `text` | per frame, tail 180 ms |
 | tool running | the row's `⏺` pulses `presence` ↔ glow; three dim `⎿` tail rows that scroll up as they arrive | 1.2 s pulse |
 | tool done | the `⏺` turns `good` (or `bad`) with one bold frame; the tail folds into `⎿ … +N lines (ctrl+o to expand)` | 33 ms flash |
