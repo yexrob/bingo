@@ -91,14 +91,17 @@ impl Attached {
     }
 }
 
-/// Why the loop woke, and so how soon what it did has to be on the screen.
-/// A keystroke echoes on the very next frame; the kernel's own frames are
-/// folded as fast as they arrive and drawn on the animation clock, so a
-/// thousand deltas a second cost thirty draws and not a thousand (§6).
+/// Why the loop woke, and so whether what it did is drawn now or on the next
+/// frame. Everything that happens — a keystroke, a reply, a frame from the
+/// kernel — is folded as fast as it arrives and drawn on the animation clock,
+/// so a thousand deltas or a trackpad's thousand notches a second cost thirty
+/// draws and not a thousand (§6). What is owed is never owed for longer than
+/// one tick: an event that is not drawn where it happens arms the frame
+/// boundary, and the boundary is the wake that always draws.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Wake {
-    Echo,
-    Fold,
+    Event,
+    Frame,
 }
 
 struct Run {
@@ -159,20 +162,20 @@ pub(crate) async fn drive(
                     Some(event) => run.terminal_event(event),
                     None => run.exit = Some(Exit { code: 0 }),
                 }
-                Wake::Echo
+                Wake::Event
             },
             Some(reply) = replies.recv() => {
                 run.reply(reply, &mut events);
-                Wake::Echo
+                Wake::Event
             },
             frame = next_frame(&mut events) => {
                 match frame {
                     Some(frame) => run.frame(&frame, screen)?,
                     None => events = None,
                 }
-                Wake::Fold
+                Wake::Event
             },
-            () = tick(run.animating(Now::real()), run.painted + TICK) => Wake::Echo,
+            () = tick(run.animating(Now::real()), run.painted + TICK) => Wake::Frame,
         };
         let now = Now::real();
         run.ui.expire(now);
@@ -264,8 +267,10 @@ impl Run {
     /// breathes, a block is still settling, the transcript eases where a key
     /// sent it, a layer is arriving or leaving, a notice is holding the status
     /// line until its time is up, an armed exit is holding its hint — or
-    /// frames arrived faster than they can be drawn and the newest of them is
-    /// not on the screen yet.
+    /// something happened faster than it can be drawn and what it did is not
+    /// on the screen yet. That last one is what holds the promise a person
+    /// feels: an event held at the gate leaves `behind` set, so the frame
+    /// boundary is armed and draws it within one tick.
     ///
     /// Every clock here is read at the instant that frame was drawn, not at
     /// this one: a draw costs time, and an animation whose remaining frames
@@ -294,7 +299,7 @@ impl Run {
         exit: Exit,
         now: Now,
     ) -> Result<Farewell, KernelError> {
-        self.paint(screen, Wake::Echo, now)?;
+        self.paint(screen, Wake::Frame, now)?;
         let root = self.session.tree.root_id().clone();
         let _ = self.host.close(&root, CloseReason::Client).await;
         Ok(Farewell {
@@ -311,11 +316,12 @@ impl Run {
         self.ui.painted.borrow().blocks.tail(rows)
     }
 
-    /// Draw, unless the frame this one would replace is younger than one tick
-    /// and nobody is waiting on it: a person's own keystroke is never held
-    /// back, and the kernel's own pace is not the screen's.
+    /// Draw, unless the frame on the screen is younger than one tick: what
+    /// happened is held until the frame boundary instead, which `animating`
+    /// then owes and [`tick`] wakes for. Neither the kernel's pace nor a
+    /// trackpad's is the screen's, and nothing waits longer than a frame.
     fn paint(&mut self, screen: &mut dyn Screen, wake: Wake, now: Now) -> Result<(), KernelError> {
-        if wake == Wake::Fold && now.since(self.painted) < TICK {
+        if wake == Wake::Event && now.since(self.painted) < TICK {
             self.behind = true;
             return Ok(());
         }
@@ -1108,10 +1114,11 @@ mod tests {
         .expect("the loop ran");
         assert_eq!(
             harness.recorder.frames.len(),
-            6,
-            "one frame for each of the four things that happened at the start, \
-             one for the keystroke and one on the way out — and none at all \
-             for the four seconds of waiting between them"
+            4,
+            "one frame for the first of the four things that happened at the \
+             start and one at the frame boundary for the three that landed \
+             inside it, one for the keystroke and one on the way out — and \
+             none at all for the four seconds of waiting between them"
         );
     }
 
@@ -1293,6 +1300,54 @@ mod tests {
         );
     }
 
+    /// The same budget from the other side: a trackpad sends its notches far
+    /// faster than the screen can draw them, and a terminal event is not a
+    /// reason to paint out of turn. Where the notches take the transcript is
+    /// `scroll.rs`'s own test; what this one watches is the cost.
+    #[tokio::test(start_paused = true)]
+    async fn a_storm_of_wheel_events_costs_one_draw_a_frame_and_no_more() {
+        let mut harness = Harness::new();
+        let frames: Vec<_> = (1..=30)
+            .map(|i| {
+                frame(
+                    i,
+                    Event::ItemCompleted {
+                        item: assistant(
+                            &format!("itm_{i}"),
+                            &format!("answer {i}"),
+                            ItemStatus::Completed,
+                        ),
+                    },
+                )
+            })
+            .collect();
+        let (host, _) = TestHost::with(frames);
+        // A thousand notches a second, for a second, and then the way out.
+        let mut script: Vec<Term> = (0..1_000)
+            .map(|_| Term::Mouse(wheel(true, 10, 5)))
+            .collect();
+        script.push(Term::Key(ctrl('d')));
+        drive(
+            &host,
+            options(None, harness.home.path()),
+            &mut harness.recorder,
+            terminal_events(script, Duration::from_millis(1)),
+        )
+        .await
+        .expect("the loop ran");
+        let drawn = harness.recorder.frames.len();
+        assert!(
+            (10..=40).contains(&drawn),
+            "a second of notches is about thirty frames, not a thousand: {drawn}"
+        );
+        assert!(
+            !harness.recorder.last().contains("answer 30"),
+            "and the transcript is somewhere else than the foot it started at: \
+             {}",
+            harness.recorder.last()
+        );
+    }
+
     #[tokio::test]
     async fn leaving_hands_the_last_screenful_of_the_transcript_back() {
         let mut harness = Harness::new();
@@ -1336,7 +1391,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn a_copied_selection_reaches_the_terminals_own_clipboard() {
         let mut harness = Harness::new();
         // Enough transcript to scroll back through.
@@ -1350,7 +1405,10 @@ mod tests {
                 )
             })
             .collect();
-        // Read back, take the first line, copy it.
+        // Read back, take the first line, copy it. A key acts on the frame the
+        // person pressing it is looking at, so each press gets one of its own:
+        // the loop draws at most once a tick, and what the keys read — the
+        // transcript's height, the rows it was given — is what that draw left.
         let script = vec![
             key(KeyCode::PageUp),
             typed('v'),
@@ -1358,7 +1416,15 @@ mod tests {
             typed('y'),
             ctrl('d'),
         ];
-        harness.go(frames, script, None).await;
+        let (host, _) = TestHost::with(frames);
+        drive(
+            &host,
+            options(None, harness.home.path()),
+            &mut harness.recorder,
+            keys_after(TICK + Duration::from_millis(5), script),
+        )
+        .await
+        .expect("the loop ran");
         // What is inside the run is `select`'s to say; what the loop owes is
         // one OSC 52 sequence, out of band, carrying it as base64.
         let [copied] = harness.recorder.copies.as_slice() else {
