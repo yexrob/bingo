@@ -1,6 +1,9 @@
-//! What a skill's body becomes once the arguments are in it. Pure: one
-//! left-to-right pass, so a value that itself contains `$1` is inserted as
-//! text and never expanded again.
+//! What a skill's body becomes once the arguments are in it: the line that
+//! says where the skill lives, then the body. Pure: one left-to-right pass, so
+//! a value that itself contains `$1` is inserted as text and never expanded
+//! again.
+
+use std::path::Path;
 
 use crate::skill::Skill;
 
@@ -11,6 +14,31 @@ const SKILL_DIR: &str = "${BINGO_SKILL_DIR}";
 /// The placeholder for the whole argument text.
 const ARGUMENTS: &str = "ARGUMENTS";
 
+/// What the line before the body says.
+const BASE: &str = "Base directory for this skill:";
+
+/// One expansion: where the skill lives, then its body with the placeholders
+/// filled in. Both paths a skill reaches the model by — the `/name` command
+/// and the `Skill` tool — come through here, so neither can forget the
+/// directory.
+pub fn expand(skill: &Skill, args: &str) -> String {
+    match base_directory(&skill.dir) {
+        Some(line) => format!("{line}\n\n{}", filled(skill, args)),
+        None => filled(skill, args),
+    }
+}
+
+/// The line a body's relative paths are relative to. A body written for Claude
+/// Code says `scripts/check.sh` and leans on the same sentence being there;
+/// without it the path resolves against the session's directory, which is
+/// somewhere else. A bundled skill lives in the binary and names nothing.
+fn base_directory(dir: &Path) -> Option<String> {
+    match dir.as_os_str().is_empty() {
+        true => None,
+        false => Some(format!("{BASE} {}", dir.display())),
+    }
+}
+
 /// The body with its placeholders filled in.
 ///
 /// `$ARGUMENTS` is everything the person or the model typed after the name;
@@ -18,7 +46,7 @@ const ARGUMENTS: &str = "ARGUMENTS";
 /// `arguments:` is the word at its position. An indexed placeholder with no
 /// word at its position is left alone, a named one becomes empty, and anything
 /// else beginning with `$` is not a placeholder and is left as it is.
-pub fn expand(skill: &Skill, args: &str) -> String {
+fn filled(skill: &Skill, args: &str) -> String {
     let args = args.trim();
     let values = Values::of(skill, args);
     let (mut text, received) = substitute(&skill.body, &values);
@@ -156,7 +184,9 @@ mod tests {
         )
     }
 
-    /// The substitution table, one row per rule.
+    /// The substitution table, one row per rule. The base line is
+    /// [`expand`]'s and is asserted on its own below, so the table stays
+    /// about the placeholders.
     #[test]
     fn the_substitution_table() {
         let rows: [(&str, &str, &str); 10] = [
@@ -184,26 +214,26 @@ mod tests {
             ("empty: [$ARGUMENTS]", "", "empty: []"),
         ];
         for (body, args, want) in rows {
-            assert_eq!(expand(&skill(body), args), want, "body {body:?}");
+            assert_eq!(filled(&skill(body), args), want, "body {body:?}");
         }
     }
 
     #[test]
     fn a_declared_name_is_the_word_at_its_position() {
         let s = named("Fix $issue on $branch.", "[issue, branch]");
-        assert_eq!(expand(&s, "42 main"), "Fix 42 on main.");
+        assert_eq!(filled(&s, "42 main"), "Fix 42 on main.");
     }
 
     #[test]
     fn a_declared_name_with_no_word_at_its_position_becomes_empty() {
         let s = named("Fix $issue on $branch.", "[issue, branch]");
-        assert_eq!(expand(&s, "42"), "Fix 42 on .");
+        assert_eq!(filled(&s, "42"), "Fix 42 on .");
     }
 
     #[test]
     fn a_value_that_looks_like_a_placeholder_is_inserted_as_text() {
         assert_eq!(
-            expand(&skill("Summarise $1"), "$ARGUMENTS"),
+            filled(&skill("Summarise $1"), "$ARGUMENTS"),
             "Summarise $ARGUMENTS"
         );
     }
@@ -211,20 +241,20 @@ mod tests {
     #[test]
     fn arguments_no_placeholder_asked_for_are_appended_not_dropped() {
         assert_eq!(
-            expand(&skill("Do the thing."), "with care"),
+            filled(&skill("Do the thing."), "with care"),
             "Do the thing.\n\nARGUMENTS: with care"
         );
     }
 
     #[test]
     fn a_body_that_used_its_arguments_gets_nothing_appended() {
-        assert_eq!(expand(&skill("Do $1."), "now"), "Do now.");
+        assert_eq!(filled(&skill("Do $1."), "now"), "Do now.");
     }
 
     #[test]
     fn an_indexed_placeholder_that_matched_nothing_does_not_count_as_used() {
         assert_eq!(
-            expand(&skill("Do $2."), "now"),
+            filled(&skill("Do $2."), "now"),
             "Do $2.\n\nARGUMENTS: now",
             "the word the person typed must reach the model somehow"
         );
@@ -233,28 +263,42 @@ mod tests {
     #[test]
     fn a_named_placeholder_counts_even_when_it_expands_to_nothing() {
         let s = named("Fix $issue.", "[issue]");
-        assert_eq!(expand(&s, ""), "Fix .");
+        assert_eq!(filled(&s, ""), "Fix .");
     }
 
     #[test]
     fn a_placeholder_glued_to_a_word_is_not_a_placeholder() {
-        assert_eq!(expand(&skill("$1abc"), "x"), "$1abc\n\nARGUMENTS: x");
+        assert_eq!(filled(&skill("$1abc"), "x"), "$1abc\n\nARGUMENTS: x");
         assert_eq!(
-            expand(&skill("$ARGUMENTSX"), "x"),
+            filled(&skill("$ARGUMENTSX"), "x"),
             "$ARGUMENTSX\n\nARGUMENTS: x"
+        );
+    }
+
+    /// The whole of an expansion: the directory, a blank line, the body. A
+    /// body's `scripts/check.sh` means nothing without the first line.
+    #[test]
+    fn an_expansion_says_where_the_skill_lives_before_its_body() {
+        assert_eq!(
+            expand(&skill("Run scripts/check.sh on $1.\n"), "main"),
+            "Base directory for this skill: /skills/t\n\nRun scripts/check.sh on main.\n"
         );
     }
 
     #[test]
     fn a_bundled_skill_has_no_directory_to_name() {
         let s = Skill::parse("guide", PathBuf::new(), "at [${BINGO_SKILL_DIR}]");
-        assert_eq!(expand(&s, ""), "at []");
+        assert_eq!(
+            expand(&s, ""),
+            "at []",
+            "a skill in the binary is nowhere on disk, so it says nothing"
+        );
     }
 
     #[test]
     fn the_whole_argument_text_keeps_its_inner_spacing() {
         assert_eq!(
-            expand(&skill("$ARGUMENTS"), "  two   words  "),
+            filled(&skill("$ARGUMENTS"), "  two   words  "),
             "two   words"
         );
     }
