@@ -17,8 +17,8 @@ use bingo_sdk::{SessionId, SessionState};
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
-use crate::clock::Now;
-use crate::seats::{self, Ear, Seat};
+use crate::clock::{self, Now};
+use crate::seats::{self, Ear, Owes, Seat};
 use crate::status;
 use crate::theme;
 use crate::tree::{self, Row, Status, Tree};
@@ -391,11 +391,8 @@ fn says(
         if let Ear::Listening { patience_s } = seat.ear {
             said.push(Span::styled(listening(patience_s), theme::dim()));
         }
-        if let Some(since) = seat.owes_since {
-            said.push(Span::styled(
-                format!("owes an answer since {since}"),
-                theme::attention(now),
-            ));
+        if let Some(owes) = seat.owes {
+            said.push(Span::styled(owed(&owes, now), theme::attention(now)));
         }
     }
     if row.attention {
@@ -437,6 +434,20 @@ fn spent(row: &Row<'_>, state: Option<&SessionState>) -> String {
         said.push_str(&format!(" · {seconds}s"));
     }
     said
+}
+
+/// What a seat owes, as its row says it: how long the answer has stood,
+/// counted at draw time from the moment the card carries — the card cannot
+/// count it, because it is republished only when a debt opens or closes.
+///
+/// A card from before the debts carried their own stamps has only the clock
+/// time the question was asked at (`14:02`) and no date under it, so that row
+/// says the time rather than an age it would have to invent.
+fn owed(owes: &Owes, now: Now) -> String {
+    match owes {
+        Owes::Since(at) => format!("owes an answer · {}", clock::span(now.past(*at))),
+        Owes::At(asked) => format!("owes an answer since {asked}"),
+    }
 }
 
 /// How a seat hears its room, where it is not the live ear every seat has by
@@ -524,7 +535,7 @@ mod tests {
                 signalled(
                     "bingo.rooms",
                     "owed",
-                    owed_payload(&[("#design", "reviewer", "14:02")]),
+                    owed_payload(&[("#design", "reviewer", 22)]),
                 ),
             ),
             frame(
@@ -602,7 +613,7 @@ mod tests {
         );
         assert!(
             drawn[2].contains(
-                "reviewer  running · in #design · owes an answer since 14:02 · 3 tools · 1.2k tokens"
+                "reviewer  running · in #design · owes an answer · 22m · 3 tools · 1.2k tokens"
             ),
             "one that has run says what it is doing, then where it sits and what \
              it owes, and only then what it has spent: {drawn:#?}"

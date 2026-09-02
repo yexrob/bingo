@@ -1,6 +1,6 @@
 ---
 source: crates/bingo-surface-tui/src/screens.rs
-assertion_line: 24
+assertion_line: 30
 expression: "draw_tree(80, 24, tree, ui, now)"
 ---
 "                                                                                "
@@ -17,10 +17,10 @@ expression: "draw_tree(80, 24, tree, ui, now)"
 "⏺ Asked in #design.                                                             "
 "                                                                                "
 "  owed                                                                          "
-"room     owed      asked                                                        "
-"────────────────────────                                                        "
-"#design  reviewer  14:02                                                        "
-"#design  @all      14:09                                                        "
+"room     owed                                                                   "
+"─────────────────                                                               "
+"#design  reviewer                                                               "
+"#design  @all                                                                   "
 "                                                                                "
 "                                                                                "
 "╭──────────────────────────────────────────────────────────────────────────────╮"

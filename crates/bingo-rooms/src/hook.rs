@@ -157,12 +157,12 @@ impl RoomsHook {
     /// The card on a session: every debt in every room under it, or nothing at
     /// all once the last one closes.
     async fn show(&self, parent: &SessionId, cx: &HookContext) {
-        let mut rows = Vec::new();
+        let mut debts = Vec::new();
         for (id, room) in self.rooms.under(parent) {
             let open = mentions::of_room(&cx.host, &id).await;
-            rows.extend(owed::rows(&room.title, &open));
+            debts.extend(owed::debts(&room.title, &open));
         }
-        owed::publish(&cx.host, parent, owed::view(rows)).await;
+        owed::publish(&cx.host, parent, owed::view(debts)).await;
     }
 }
 
@@ -528,6 +528,12 @@ mod tests {
         assert_eq!(standing["kind"], "table");
         assert_eq!(standing["rows"][0][0], "#design");
         assert_eq!(standing["rows"][0][1], "scout");
+        assert_eq!(standing["debts"][0]["room"], "#design");
+        assert_eq!(standing["debts"][0]["who"], "scout");
+        assert!(
+            standing["debts"][0]["at"].is_string(),
+            "and the moment it was asked, for whoever wants an age: {standing}"
+        );
         assert_eq!(*closed, Value::Null, "answered, and the card goes");
         assert!(nudges(&fleet).is_empty(), "nobody was chased for it");
     }

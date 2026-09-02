@@ -145,8 +145,35 @@ pub fn roster_payload(members: &[&str], listeners: &[(&str, u64)]) -> Value {
 }
 
 /// What a room's parent is signalled while any answer is owed (ADR-0022 §4):
-/// one row per open debt, oldest first.
-pub fn owed_payload(rows: &[(&str, &str, &str)]) -> Value {
+/// the two columns a card draws and the debts it is drawn from, oldest first.
+/// A debt is given as the minutes it has stood at [`ts`], which is the clock
+/// every scene here is drawn against.
+pub fn owed_payload(debts: &[(&str, &str, i64)]) -> Value {
+    let mut payload = as_payload(View::Table {
+        headers: ["room", "owed"].map(str::to_string).to_vec(),
+        rows: debts
+            .iter()
+            .map(|(room, who, _)| vec![room.to_string(), who.to_string()])
+            .collect(),
+    });
+    payload["debts"] = json!(
+        debts
+            .iter()
+            .map(|(room, who, minutes)| json!({
+                "room": room,
+                "who": who,
+                "at": (ts() - jiff::SignedDuration::from_mins(*minutes)).to_string(),
+            }))
+            .collect::<Vec<_>>()
+    );
+    payload
+}
+
+/// The same card as the process before the debts carried their own stamps
+/// published it: three columns, the clock time the question was asked at in
+/// the third, and no debts beside them. A shape already in people's journals,
+/// so the surface still reads it.
+pub fn owed_table_payload(rows: &[(&str, &str, &str)]) -> Value {
     as_payload(View::Table {
         headers: ["room", "owed", "asked"].map(str::to_string).to_vec(),
         rows: rows
