@@ -35,6 +35,7 @@ fn request() -> ModelRequest {
         messages: vec![Message::text(Role::User, "hello")],
         tools: Vec::new(),
         reasoning: None,
+        session: None,
         provider_options: Default::default(),
     }
 }

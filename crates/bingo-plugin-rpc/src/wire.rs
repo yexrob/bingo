@@ -874,6 +874,7 @@ mod tests {
             )],
             tools: Vec::new(),
             reasoning: None,
+            session: None,
             provider_options: Default::default(),
         }
     }

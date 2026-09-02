@@ -41,6 +41,7 @@ mod tests {
             messages: Vec::new(),
             tools: Vec::new(),
             reasoning: None,
+            session: None,
             provider_options: Default::default(),
         }
     }

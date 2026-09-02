@@ -1,0 +1,38 @@
+[package]
+name = "bingo-provider-acp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "Agent Client Protocol adapters as model providers"
+
+[lints]
+workspace = true
+
+[dependencies]
+bingo-sdk.workspace = true
+# ADR-0035 §2: the message types are the contract; the transport is ours. The
+# schema crate alone is +5 crates where the full SDK is +27, fourteen of them a
+# second async runtime whose futures are `!Send`.
+agent-client-protocol-schema.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+futures.workspace = true
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+schemars.workspace = true
+process-wrap.workspace = true
+jiff.workspace = true
+
+[dev-dependencies]
+bingo-sdk = { workspace = true, features = ["testing"] }
+tempfile.workspace = true
+
+# The scripted ACP agent the contract tests drive: Rust, so CI needs no node.
+[[bin]]
+name = "bingo-fake-acp-agent"
+path = "src/bin/fake_agent.rs"

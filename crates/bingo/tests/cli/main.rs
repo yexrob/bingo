@@ -604,6 +604,7 @@ fn scripted_run(
         .arg(prompt))
 }
 
+mod acp;
 mod agents;
 mod batch;
 mod board;

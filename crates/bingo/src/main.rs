@@ -22,6 +22,7 @@ use bingo_hooks_shell::ShellHooksPlugin;
 use bingo_mcp::McpPlugin;
 use bingo_permissions::PermissionsPlugin;
 use bingo_plugin_rpc::PluginRpcPlugin;
+use bingo_provider_acp::AcpPlugin;
 use bingo_provider_anthropic::AnthropicPlugin;
 use bingo_provider_fake::{FakePlugin, FakeProvider, Script};
 use bingo_provider_openai::OpenAiPlugin;
@@ -581,6 +582,7 @@ fn plugins(demo_ui: bool) -> Result<Vec<Box<dyn Plugin>>, KernelError> {
     all.extend([
         Box::new(AnthropicPlugin) as Box<dyn Plugin>,
         Box::new(OpenAiPlugin),
+        Box::new(AcpPlugin::default()),
         Box::new(PermissionsPlugin),
         Box::new(ShellHooksPlugin),
         Box::new(JsonlStorePlugin::default()),

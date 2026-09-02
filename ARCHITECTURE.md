@@ -8,7 +8,7 @@ bingo (bin)                     composes Vec<Box<dyn Plugin>>, picks a Surface
 │                               · permission gate · tool executor · plugin host · ContextUsage ruler
 │                               · ContextView::fold (journal → provider messages)
 ├── plugins (each its own crate, depends on bingo-sdk and the libraries only)
-│   providers   bingo-provider-fake · -anthropic · -openai (openai + codex)
+│   providers   bingo-provider-fake · -anthropic · -openai (openai + codex) · -acp (an agent as a model)
 │   tools       bingo-tool-fs · bingo-tool-bash · bingo-tool-web · bingo-mcp · bingo-agents
 │   policy      bingo-permissions · bingo-hooks-shell
 │   session     bingo-store-jsonl (journal + index) · bingo-context (compactor + memory)

@@ -30,6 +30,7 @@ fn ask(said: &str, tools: Vec<ToolSpec>) -> ModelRequest {
         messages: vec![Message::text(Role::User, said)],
         tools,
         reasoning: None,
+        session: None,
         provider_options: Default::default(),
     }
 }

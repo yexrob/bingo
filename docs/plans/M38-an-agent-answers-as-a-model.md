@@ -85,23 +85,27 @@ events,pool,transcript,provider,config}.rs` + the fake-agent bin;
 
 ## Exit criteria
 
-- [ ] Every message used has a fixture round-trip; `cargo deny check`
-  green; budget 307 with the ADR line.
-- [ ] `--print` through the fake agent: text, thought and an external
+- [x] Every message used has a fixture round-trip; `cargo deny check`
+  green; budget 307 with the ADR line. † The measured number is 308,
+  the member crate included; `scripts/budget.toml` carries the count
+  and the arithmetic.
+- [x] `--print` through the fake agent: text, thought and an external
   tool call land in valid NDJSON, marked `acp.external: true`, and
-  nothing was executed by the loop.
-- [ ] Esc mid-turn sends `session/cancel` and the turn ends with the
+  nothing was executed by the loop. † The mark rides
+  `ItemBody::Reasoning`'s `providerMetadata`, not `ToolCall` — see
+  Verified, "decided beyond the plan".
+- [x] Esc mid-turn sends `session/cancel` and the turn ends with the
   interrupt wording; the child and the agent session survive to
   serve the next turn.
-- [ ] Two turns of one bingo session ride one agent session on one
+- [x] Two turns of one bingo session ride one agent session on one
   child (the fake counts its spawns and its `session/new`s); the
   `bingo.acp` extension is journaled exactly once.
-- [ ] `--continue` against a fake advertising resume / only load /
+- [x] `--continue` against a fake advertising resume / only load /
   neither: each rung proven; on the last, the prompt names the file
   and the file holds the prior fold; a load replay journals nothing.
-- [ ] A scripted `request_permission` is answered with its reject
+- [x] A scripted `request_permission` is answered with its reject
   option, one notice names the config row, and the turn goes on.
-- [ ] `cargo check -p bingo-provider-acp --all-targets --target
+- [x] `cargo check -p bingo-provider-acp --all-targets --target
   x86_64-pc-windows-msvc` (the child spawns, both spellings); every
   gate in AGENTS.md.
 
@@ -127,3 +131,97 @@ adapter rows — configuration belongs to the person.
   its test is the ladder's most important line.
 - codex-acp reports no usage today: zeros are honest, and the ruler
   reads them as unknown, not as free.
+
+## Verified — bricks 0–7, 2026-09-03
+
+Gates, in the worktree: `cargo fmt --all -- --check` clean; `cargo
+clippy --workspace --all-targets --locked -- -D warnings` no
+diagnostic; `cargo test -p bingo-provider-acp --locked` → 78 unit + 6
+integration `ok, 0 failed`; `cargo test --workspace --locked` exit 0,
+73 targets, 3128 passed, 0 failed (`bingo --test cli` 145, of which 7
+are `acp::`); `scripts/check_discipline.sh` → `dependency direction ok`
+/ `kernel names no tool` / `cohesion ok` / `discipline ok`, no new
+warn; `scripts/budget.sh` → `dependencies (unique, normal): 308 (max
+308)`, `budget ok` — the soft `target/debug` warning is a worktree that
+built the workspace twice, not a dependency; `cargo deny check` →
+`advisories ok, bans ok, licenses ok, sources ok`; `cargo check -p
+bingo-provider-acp --all-targets --target x86_64-pc-windows-msvc` →
+`Finished` (the job object compiles beside the process group).
+
+Criteria, and where each is proven. Every wire claim is read from the
+scripted agent's own log of what it received, not from what the client
+believes it sent; the black-box is `crates/bingo/tests/cli/acp.rs`,
+through the real binary.
+
+- Fixtures: `method::tests` round-trips every message the plugin sends
+  or reads, `elicitation/create` and its decline included.
+- The turn: `a_turn_through_an_adapter_streams_text_thought_and_the_
+  agents_own_call` — `Hello there.` as an assistant item, the thought
+  as an unmarked reasoning item, the agent's call as a reasoning item
+  whose `providerMetadata.acp.external` is `true`, no `toolCall` item
+  at all, and `["initialize", "session/new", "session/prompt"]` on the
+  wire.
+- Interrupt: `an_interrupt_cancels_the_turn_and_the_child_serves_the_
+  next_one` — `session/cancel` between two prompts on one child, the
+  first result an error, the second answered.
+- One session, one child: `two_turns_of_one_session_ride_one_child_and_
+  one_agent_session` (one `initialize`, one `session/new`, two prompts)
+  and `the_agents_session_id_is_journaled_once_as_an_extension`.
+- The ladder: `the_restore_ladder_climbs_resume_then_load_then_a_file`
+  — one conversation across four runs whose adapter changes what it can
+  restore; resume says nothing, load says `ACP_RESTORE` and its replay
+  reaches no item, the fresh rung's prompt names the file and the file
+  holds the fold and nothing the journal never had.
+- Permission: `a_permission_question_is_refused_and_one_notice_names_
+  the_row` — the agent gets `optionId: reject` back, one `ACP_ASKED`
+  notice naming `acp.adapters.scripted`, and the turn finishes.
+- Death: `an_adapter_that_died_between_turns_is_replaced_and_said`.
+
+Decided beyond the plan:
+
+- **The agent's tool call rides `ReasoningEnd`, not `ToolCall`.**
+  ADR-0035 §4 asks for `ToolInputStart/…/ToolCall` and a synthetic
+  `ToolResult` wearing `acp.external`, with "the loop never executes
+  what wears the mark". Neither is reachable without kernel changes
+  this milestone forbids: `ModelEvent::ToolCall` carries no
+  `provider_options` to wear a mark in, there is no `ToolResult`
+  variant, and a non-empty `tool_calls` sends `Turn::decide` into
+  another round — a second `session/prompt` for a turn the agent
+  already finished. So the mark went where the kernel already carries
+  provider-private data to the journal untouched: `ReasoningEnd`'s
+  `provider_metadata` holds the call whole (id, kind, status, title,
+  locations, content, raw input and output), and its text is what a
+  person reads. Nothing is executed, no second prompt is sent, and
+  flipping this to `ToolCall` the day the kernel learns the mark is one
+  match arm in `events.rs`. **The ADR's §4 wants amending to say so.**
+- **Permissions are refused, not asked** (ADR-0035 §5 as settled):
+  `refusal.rs` picks the agent's own `reject_once`, else
+  `reject_always`, else `Cancelled`; `elicitation/create` gets
+  `{"action": "decline"}`. The notice is said **once per adapter
+  session**, not once per question — an agent may ask on every call it
+  makes, and the same line twenty times is not a clearer line.
+- **`unstable_elicitation` joins the schema features.** The decline is
+  then the protocol's own word rather than a JSON shape invented here.
+  It adds no dependency; the budget is unmoved.
+- **The pointer is journaled only when it is news.** A restore that got
+  back into the session the journal already named writes nothing —
+  "journaled once" is exact, not approximate.
+- **A dead adapter is replaced, not retried.** The plan's brick 5 asked
+  for it and the code did not do it: a link stayed in the map after its
+  child died, and the next turn failed as transport. `Connection::
+  is_alive` and `Sessions::bury` close that, with an `ACP_RESPAWN`
+  notice.
+- **The budget line is 308, not the ADR's 307.** The research measured
+  the schema crate's five edges without counting the member crate,
+  which this file has always counted as one. `scripts/budget.toml`
+  carries the arithmetic. **The ADR's §2 number wants amending.**
+- **No settings manual to write into.** This repository has no
+  user-facing config document; the worked pair of rows lives in
+  `config.rs`'s module doc, where the key is claimed, and the live
+  runbook is `scripts/acp-smoke.md` beside `feishu-smoke.md`.
+
+Not done here: `bingo-acp` the surface (a non-goal, its own milestone).
+The live smoke is written, not run — it needs `node` and a login.
+`--print` under a real `esc` is not exercised: an interrupt reaches a
+headless run as the stream-json control request, which is what the
+black-box drives; the TUI's key is unchanged and untested here.
