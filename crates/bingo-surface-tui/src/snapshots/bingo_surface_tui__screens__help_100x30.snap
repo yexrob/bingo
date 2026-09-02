@@ -1,15 +1,16 @@
 ---
 source: crates/bingo-surface-tui/src/screens.rs
+assertion_line: 625
 expression: "draw_sized(100, 30, &state, &ui, now)"
 ---
 "enter        send the message · open the focused…  pgup/pgdn    scroll the transcript               "
-"shift+enter  newline (ctrl+j · alt+enter · \ ent…  ctrl+g       switch to a sub-agent's view        "
+"shift+enter  newline (ctrl+j · alt+enter · \ ent…  ctrl+g       the same list · ↑↓ a column · ←→ ac…"
 "esc          sheet → card → dropdown → interrupt   ctrl+t       plugin state (tasks, rooms)         "
 "esc esc      rewind to an earlier turn             tab          complete the command under the caret"
 "ctrl+c       interrupt · clear input · twice to …  shift+tab    cycle permission mode               "
 "ctrl+d       exit on an empty input                1-9 · y/a/n  answer the open dialog              "
 "up/down      prompt history at the first and las…  ctrl+e       expand the dialog's preview         "
-"left/right   the session strip · down opens it     ctrl+o       expand the latest result · again fo…"
+"down         walk the sessions (empty box)         ctrl+o       expand the latest result · again fo…"
 "ctrl+a/e     start / end of the line (home · end)  ctrl+b       background the running command      "
 "alt+b/f      move one word                         / · !        run a command · run a shell line    "
 "ctrl+w/u/k   delete word · to line start · to li…  ?            toggle this panel                   "
