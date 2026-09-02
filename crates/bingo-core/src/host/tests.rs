@@ -8,6 +8,7 @@ use crate::test_support::*;
 
 mod commands;
 mod login;
+mod models;
 mod policy;
 mod providers;
 mod resume;
