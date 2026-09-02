@@ -124,6 +124,19 @@ fn aged_line(line: &str, at: &str) -> String {
     frame.to_string()
 }
 
+/// Whether the `owed` column says `who` owes, and for how long: `scout 12s`.
+///
+/// The number is elapsed wall-clock, so only its shape is asserted. Pinning a
+/// particular one — `scout 0s` — makes the assertion a bet that the run that
+/// opened the debt and the run that lists it land inside the same second, and
+/// a loaded machine loses that bet while the behaviour under test is intact.
+fn owes(table: &str, who: &str) -> bool {
+    table.split(&format!("{who} ")).skip(1).any(|rest| {
+        let digits = rest.chars().take_while(char::is_ascii_digit).count();
+        digits > 0 && rest[digits..].starts_with('s')
+    })
+}
+
 fn run_in(home: &Path, script: &tempfile::NamedTempFile, extra: &[&str], prompt: &str) -> Output {
     run_within(
         bingo()
@@ -275,10 +288,7 @@ fn the_room_table_names_who_owes_an_answer() {
     assert!(table.contains("room"), "{table}");
     assert!(table.contains("owed"), "the column is there: {table}");
     assert!(table.contains("#design"), "{table}");
-    assert!(
-        table.contains("scout 0s"),
-        "who owes, and since when: {table}"
-    );
+    assert!(owes(&table, "scout"), "who owes, and since when: {table}");
     assert!(
         table.contains("@all"),
         "the room owes an answer too: {table}"
