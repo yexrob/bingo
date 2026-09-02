@@ -423,12 +423,122 @@ fn a_room_post_in_a_member_s_own_transcript() {
     let tree = solo(&state);
     let (ui, now) = scene();
     let screen = draw_tree(80, 24, &tree, &ui, now);
-    assert!(screen.contains("⏺ reviewer in #design: the plan"), "{screen}");
+    assert!(
+        screen.contains("⏺ reviewer in #design: the plan"),
+        "{screen}"
+    );
     assert!(
         screen.contains("⏺ scout: Two nits"),
         "a direct message names no room: {screen}"
     );
     both("room_post", &tree, &ui, now);
+}
+
+/// A tool that drew for a person as well as answering the model.
+fn answered_with(text: &str, view: View) -> Option<ToolOutput> {
+    Some(ToolOutput {
+        parts: vec![ContentPart::text(text)],
+        is_error: false,
+        display: Some(view),
+    })
+}
+
+fn seat(
+    label: &str,
+    badge: Option<&str>,
+    children: Vec<bingo_sdk::TreeNode>,
+) -> bingo_sdk::TreeNode {
+    bingo_sdk::TreeNode {
+        label: label.into(),
+        badge: badge.map(str::to_string),
+        tone: bingo_sdk::Tone::Neutral,
+        children,
+    }
+}
+
+/// What the three tools a team is run through now answer (ADR-0013 §2): the
+/// seats `OpenRoom` took, `SendMessage`'s receipt, and `ListAgents`' roster.
+/// The values are spelled here because a surface may not depend on a plugin —
+/// what this asserts is the drawing, and `bingo-rooms` and `bingo-agents`
+/// assert the values.
+#[test]
+fn what_the_message_tools_answer() {
+    let state = folded(vec![
+        item(
+            1,
+            tool(
+                "itm_1",
+                "OpenRoom",
+                json!({"name": "design", "members": ["helper", "scout"]}),
+                answered_with(
+                    "#design: helper, scout, ~watcher(120s)",
+                    View::Tree {
+                        nodes: vec![seat(
+                            "#design",
+                            None,
+                            vec![
+                                seat("helper", None, Vec::new()),
+                                seat("scout", None, Vec::new()),
+                                seat(
+                                    "listening",
+                                    None,
+                                    vec![seat("watcher", Some("120s"), Vec::new())],
+                                ),
+                            ],
+                        )],
+                    },
+                ),
+                ItemStatus::Completed,
+            ),
+        ),
+        item(
+            2,
+            tool(
+                "itm_2",
+                "SendMessage",
+                json!({"to": "#design", "text": "look again"}),
+                answered_with(
+                    "Posted to #design.",
+                    View::KeyValue {
+                        rows: vec![
+                            ("to".into(), "#design".into()),
+                            ("from".into(), "parent".into()),
+                            ("read".into(), "by every member, as it lands".into()),
+                        ],
+                    },
+                ),
+                ItemStatus::Completed,
+            ),
+        ),
+        item(
+            3,
+            tool(
+                "itm_3",
+                "ListAgents",
+                json!({}),
+                answered_with(
+                    "helper  ses_2  busy",
+                    View::Tree {
+                        nodes: vec![
+                            seat("helper", Some("busy"), Vec::new()),
+                            seat("scout", Some("idle"), Vec::new()),
+                        ],
+                    },
+                ),
+                ItemStatus::Completed,
+            ),
+        ),
+    ]);
+    let tree = solo(&state);
+    let (ui, now) = scene();
+    let wide = draw_tree(120, 40, &tree, &ui, now);
+    assert!(wide.contains("└─ watcher [ 120s ]"), "{wide}");
+    assert!(
+        wide.contains("read  by every member, as it lands"),
+        "{wide}"
+    );
+    assert!(wide.contains("├─ helper [ busy ]"), "{wide}");
+    both("message_tools", &tree, &ui, now);
 }
 
 /// What a room is owed, on the session it hangs under (ADR-0022 §4): a live
@@ -454,7 +564,10 @@ fn what_a_room_is_owed() {
     let tree = solo(&state);
     let (ui, now) = scene();
     let wide = draw_tree(120, 40, &tree, &ui, now);
-    assert!(wide.contains("owed"), "the card is titled by its kind: {wide}");
+    assert!(
+        wide.contains("owed"),
+        "the card is titled by its kind: {wide}"
+    );
     assert!(
         wide.contains("#design  reviewer  14…"),
         "three columns of `owed` are one column wider than the rail, and the \
