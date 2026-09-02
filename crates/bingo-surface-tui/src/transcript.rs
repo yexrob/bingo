@@ -87,16 +87,25 @@ pub fn item_lines(
     rows: &Rows<'_>,
     cue: Cue,
 ) -> Vec<Line<'static>> {
+    // Whether this block was opened whole — by `ctrl+o`, or by a click on it.
+    // One set answers for every fold, and it is asked once, here.
+    let opened = rows.expanded.contains(&item.id);
     match &item.body {
         ItemBody::User { parts, origin } => match quiet(origin) {
-            true => notice(parts, origin.principal.as_deref(), item.status, rows),
+            true => notice(
+                parts,
+                origin.principal.as_deref(),
+                item.status,
+                opened,
+                rows,
+            ),
             false => user(parts, origin.principal.as_deref(), rows),
         },
         ItemBody::Assistant { text } => assistant(text, item.status, rows, cue),
-        ItemBody::Reasoning { .. } => thinking(item),
-        ItemBody::ToolCall { .. } => called(item, agents, rows, cue),
+        ItemBody::Reasoning { .. } => thinking(item, opened, rows),
+        ItemBody::ToolCall { .. } => called(item, agents, opened, rows, cue),
         ItemBody::Action { name, args, result } => {
-            action(item.status, name, args, result.as_ref(), rows)
+            action(item.status, name, args, result.as_ref(), opened, rows)
         }
         ItemBody::Compaction { before, after, .. } => vec![rule(
             &format!("context compacted ({before} → {after} tokens)"),
@@ -132,7 +141,13 @@ pub fn item_lines(
 
 /// A call that started a session is that session's row; every other call is
 /// its own (design §3: a child is a row where it began).
-fn called(item: &Item, agents: &Agents<'_>, rows: &Rows<'_>, cue: Cue) -> Vec<Line<'static>> {
+fn called(
+    item: &Item,
+    agents: &Agents<'_>,
+    expanded: bool,
+    rows: &Rows<'_>,
+    cue: Cue,
+) -> Vec<Line<'static>> {
     let ItemBody::ToolCall {
         name,
         input,
@@ -152,7 +167,7 @@ fn called(item: &Item, agents: &Agents<'_>, rows: &Rows<'_>, cue: Cue) -> Vec<Li
                 input,
                 output: output.as_ref(),
                 progress: progress.as_deref(),
-                expanded: rows.expanded.contains(&item.id),
+                expanded,
             },
             rows,
             cue,
@@ -258,6 +273,7 @@ fn notice(
     parts: &[ContentPart],
     principal: Option<&str>,
     status: ItemStatus,
+    expanded: bool,
     rows: &Rows<'_>,
 ) -> Vec<Line<'static>> {
     let text = said(parts);
@@ -276,7 +292,10 @@ fn notice(
         rows,
     );
     if !rest.trim().is_empty() {
-        out.extend(returns(cut(plain(rest), OUTPUT_ROWS, None), rows));
+        out.extend(returns(
+            kept(plain(rest), expanded, OUTPUT_ROWS, None),
+            rows,
+        ));
     }
     out
 }
@@ -401,25 +420,59 @@ fn cooling(back: usize, age: f32) -> Style {
     theme::comet((age + behind).min(1.0))
 }
 
-/// `✻ Thinking…` while it lasts, `✻ Thought for 2s` once it is over.
-fn thinking(item: &Item) -> Vec<Line<'static>> {
-    let (text, style) = match item.completed_at {
-        Some(end) => (
-            format!(
-                "Thought for {}s",
-                end.duration_since(item.started_at).as_secs().max(0)
-            ),
-            theme::dim(),
-        ),
-        None => (
+/// `✻ Thinking…` while it lasts; `✻ Thought for 2s` once it is over, with what
+/// was thought under it — dim, folded at [`OUTPUT_ROWS`] like any other result,
+/// and opened by the same `ctrl+o`.
+///
+/// A thought is only readable where it happened. While it streams the row says
+/// the same thing whatever arrives, which is why [`crate::blocks`] does not
+/// revise the block per delta: the text lands whole when the thinking is over.
+fn thinking(item: &Item, expanded: bool, rows: &Rows<'_>) -> Vec<Line<'static>> {
+    let Some(end) = item.completed_at else {
+        return vec![sparkled(
             format!("Thinking{}", theme::ellipsis()),
             theme::dim().patch(theme::italic()),
-        ),
+        )];
     };
-    vec![Line::from(vec![
+    let mut out = vec![sparkled(
+        format!("Thought for {}", took(end.duration_since(item.started_at))),
+        theme::dim(),
+    )];
+    if let Some(text) = thought(item) {
+        out.extend(returns(
+            kept(plain(text), expanded, OUTPUT_ROWS, Some(EXPAND)),
+            rows,
+        ));
+    }
+    out
+}
+
+/// The `✻` and what it says beside it.
+fn sparkled(text: String, style: Style) -> Line<'static> {
+    Line::from(vec![
         Span::styled(format!("{} ", theme::spark()), theme::dim()),
         Span::styled(text, style),
-    ])]
+    ])
+}
+
+/// How long a thought took, as a person reads a clock: something that happened
+/// took some time, so under a second is `<1s` and never `0s`.
+fn took(span: jiff::SignedDuration) -> String {
+    match span.as_secs() {
+        seconds if seconds < 1 => "<1s".to_string(),
+        seconds => format!("{seconds}s"),
+    }
+}
+
+/// What a thought has under it: what was thought. `None` for one that came
+/// back empty — Anthropic's redacted thinking, an OpenAI turn the provider
+/// summarised nothing of — which draws the row alone, folds nothing, opens
+/// nothing and so promises nothing.
+pub fn thought(item: &Item) -> Option<&str> {
+    match &item.body {
+        ItemBody::Reasoning { text, .. } if !text.trim().is_empty() => Some(text),
+        _ => None,
+    }
 }
 
 /// One tool call, as much of it as there is yet.
@@ -515,10 +568,7 @@ fn folded(output: &ToolOutput, expanded: bool, width: usize) -> Vec<Line<'static
         Some(view) => (views::render(view, width), OUTPUT_ROWS),
         None => (plain(&text_of(output)), OUTPUT_ROWS),
     };
-    match expanded {
-        true => rows,
-        false => fold(rows, limit),
-    }
+    kept(rows, expanded, limit, Some(EXPAND))
 }
 
 /// Everything a result says, with nothing folded away: what the pager opens
@@ -561,13 +611,24 @@ fn text_of(output: &ToolOutput) -> String {
         .join("\n")
 }
 
-/// The first rows, then how many were left out and what opens them.
-fn fold(rows: Vec<Line<'static>>, limit: usize) -> Vec<Line<'static>> {
-    cut(rows, limit, Some(EXPAND))
+/// What a block shows under its row: everything when it was opened — by
+/// `ctrl+o` or by a click on it — else the first rows and how many were left
+/// out. One set answers for every fold, so a block is open in one way only.
+fn kept(
+    rows: Vec<Line<'static>>,
+    expanded: bool,
+    limit: usize,
+    opens: Option<&str>,
+) -> Vec<Line<'static>> {
+    match expanded {
+        true => rows,
+        false => cut(rows, limit, opens),
+    }
 }
 
-/// The same cut, for what no key opens: `ctrl+o` reaches a result, so a block
-/// that is not one says how much it kept back and promises nothing.
+/// The first rows, then how many were left out and what opens them. `opens` is
+/// `None` for what no key reaches: `ctrl+o` reaches a result, so a block that
+/// is not one says how much it kept back and promises nothing.
 fn cut(rows: Vec<Line<'static>>, limit: usize, opens: Option<&str>) -> Vec<Line<'static>> {
     let hidden = rows.len().saturating_sub(limit);
     let mut out: Vec<Line<'static>> = rows.into_iter().take(limit).collect();
@@ -629,6 +690,7 @@ fn action(
     name: &str,
     args: &Value,
     result: Option<&Value>,
+    expanded: bool,
     rows: &Rows<'_>,
 ) -> Vec<Line<'static>> {
     let mut out = speaks(
@@ -637,7 +699,10 @@ fn action(
         rows,
     );
     if let Some(result) = result {
-        out.extend(returns(fold(plain(&as_text(result)), OUTPUT_ROWS), rows));
+        out.extend(returns(
+            kept(plain(&as_text(result)), expanded, OUTPUT_ROWS, Some(EXPAND)),
+            rows,
+        ));
     }
     out
 }
@@ -956,21 +1021,76 @@ mod tests {
         );
     }
 
+    /// A thought, once it is one: how long it took, and what it was.
+    fn thought_item(text: &str, seconds: i64) -> Item {
+        let mut item = item(
+            "itm_1",
+            ItemStatus::Completed,
+            ItemBody::Reasoning {
+                text: text.into(),
+                provider_metadata: Default::default(),
+            },
+        );
+        item.completed_at = Some(ts() + jiff::SignedDuration::from_secs(seconds));
+        item
+    }
+
     #[test]
-    fn thinking_decays_into_what_it_took() {
+    fn thinking_decays_into_what_it_took_and_what_was_thought() {
         let running = item(
             "itm_1",
             ItemStatus::Running,
             ItemBody::Reasoning {
-                text: "…".into(),
+                text: "the manifest".into(),
                 provider_metadata: Default::default(),
             },
         );
-        let mut done = running.clone();
-        done.status = ItemStatus::Completed;
-        done.completed_at = Some(ts() + jiff::SignedDuration::from_secs(2));
-        assert_eq!(drawn(vec![running]), vec!["✻ Thinking…".to_string()]);
-        assert_eq!(drawn(vec![done]), vec!["✻ Thought for 2s".to_string()]);
+        assert_eq!(
+            drawn(vec![running]),
+            vec!["✻ Thinking…".to_string()],
+            "a thought still being had says only that it is being had"
+        );
+        assert_eq!(
+            drawn(vec![thought_item("The manifest first.", 2)]),
+            vec![
+                "✻ Thought for 2s".to_string(),
+                "  ⎿  The manifest first.".to_string(),
+            ],
+            "and once it is over it is readable where it happened"
+        );
+    }
+
+    /// Under a second is a moment, not no time at all.
+    #[test]
+    fn a_thought_shorter_than_a_second_says_so() {
+        assert_eq!(took(jiff::SignedDuration::from_millis(400)), "<1s");
+        assert_eq!(took(jiff::SignedDuration::from_secs(1)), "1s");
+        assert_eq!(took(jiff::SignedDuration::from_secs(-1)), "<1s");
+    }
+
+    /// The same fold a result wears, and the same key.
+    #[test]
+    fn a_long_thought_folds_and_opens_with_the_key_a_result_does() {
+        let text: String = (1..=9).map(|i| format!("step {i}\n")).collect();
+        let drawn = drawn(vec![thought_item(&text, 3)]);
+        assert_eq!(drawn[0], "✻ Thought for 3s");
+        assert_eq!(drawn.len(), OUTPUT_ROWS + 2);
+        assert_eq!(
+            drawn.last().map(String::as_str),
+            Some("     … +4 lines (ctrl+o to expand)")
+        );
+    }
+
+    /// Redacted thinking, or a turn the provider summarised nothing of: the
+    /// row alone, with no fold under it and no key promised.
+    #[test]
+    fn an_empty_thought_is_the_row_and_nothing_else() {
+        assert_eq!(
+            drawn(vec![thought_item("", 1)]),
+            vec!["✻ Thought for 1s".to_string()],
+        );
+        assert_eq!(thought(&thought_item("   \n", 1)), None);
+        assert_eq!(thought(&thought_item("why", 1)), Some("why"));
     }
 
     #[test]
