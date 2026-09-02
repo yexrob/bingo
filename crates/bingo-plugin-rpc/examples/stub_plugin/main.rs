@@ -6,7 +6,7 @@
 //!
 //! One tool, `echo`, whose input says what it should do: answer, send progress
 //! first, read an environment variable, wait for a `tool/cancel`, say which
-//! streams have been cancelled, ask the host for a service call, or end the
+//! calls and streams have been cancelled, ask the host for a service call, or end the
 //! process without answering at all — which is what a killed plugin looks like
 //! from the host's side. One command, `stub`, one contributor, `notes`, one
 //! compaction strategy, `cut`, and one provider, `stub`, serving `stub-1`:
@@ -46,10 +46,11 @@ use serde_json::{Value, json};
 mod hooks;
 
 /// Everything this run of the stub is holding: calls and streams waiting for
-/// a cancel before they answer, the streams that were cancelled — which the
-/// `echo` tool reads out, so a test can see that a cancel crossed the pipe at
-/// all — the little map the `kv` service keeps, and the ids this process
-/// mints for the requests it sends the host.
+/// a cancel before they answer, the calls and streams that were cancelled —
+/// which the `echo` tool reads out, so a test can see that a cancel crossed
+/// the pipe at all, even one whose answer nobody is waiting for any more —
+/// the little map the `kv` service keeps, and the ids this process mints for
+/// the requests it sends the host.
 #[derive(Default)]
 struct State {
     calls: Vec<(String, i64)>,
@@ -468,6 +469,7 @@ fn cancel(params: &Value, state: &mut State) {
     let Ok(params) = serde_json::from_value::<ToolCancelParams>(params.clone()) else {
         return;
     };
+    state.cancelled.push(params.call_id.clone());
     let Some(at) = state
         .calls
         .iter()

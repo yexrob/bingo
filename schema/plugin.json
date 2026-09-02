@@ -4259,7 +4259,7 @@
       "required": [
         "callId"
       ],
-      "description": "Kernel → plugin: this call's turn was interrupted. The host keeps waiting\nfor the answer — a bridge tool's `Interrupt` is `Block` — so a process that\nignores this is slow, not broken."
+      "description": "Kernel → plugin: this call's turn was interrupted, and nobody is waiting\nfor the answer any more. The host has already let the call go, so a process\nthat ignores this is not holding anything up — it is only doing work whose\nresult will be thrown away."
     },
     "ToolOutput": {
       "type": "object",

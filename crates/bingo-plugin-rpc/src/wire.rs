@@ -563,9 +563,10 @@ pub struct ToolProgressParams {
     pub tail: String,
 }
 
-/// Kernel → plugin: this call's turn was interrupted. The host keeps waiting
-/// for the answer — a bridge tool's `Interrupt` is `Block` — so a process that
-/// ignores this is slow, not broken.
+/// Kernel → plugin: this call's turn was interrupted, and nobody is waiting
+/// for the answer any more. The host has already let the call go, so a process
+/// that ignores this is not holding anything up — it is only doing work whose
+/// result will be thrown away.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolCancelParams {

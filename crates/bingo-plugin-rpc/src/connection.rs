@@ -4,8 +4,8 @@
 //! whoever is waiting for that id, each `tool/progress` to whoever is running
 //! that call, and each `provider/delta` to whoever is reading that stream. When
 //! the pipe closes it fails every waiting request at once, so a call whose
-//! process died returns instead of hanging — a bridge tool's `Interrupt` is
-//! `Block`, and nothing else would ever wake it.
+//! process died returns instead of hanging — nothing else would wake it but a
+//! person stopping the turn.
 //!
 //! A stream's queue is bounded, and the reader waits on it: a process that
 //! writes faster than a turn reads blocks on its own pipe rather than growing a
