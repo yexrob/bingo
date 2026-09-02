@@ -12,7 +12,9 @@ use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use bingo_sdk::{ErrorCode, KernelError};
-use process_wrap::tokio::{ChildWrapper, CommandWrap, ProcessSession};
+#[cfg(unix)]
+use process_wrap::tokio::ProcessSession;
+use process_wrap::tokio::{ChildWrapper, CommandWrap};
 
 use super::paths::Paths;
 use super::pidfile::Record;
@@ -137,7 +139,14 @@ fn spawn(paths: &Paths, forward: &Forward) -> Result<Box<dyn ChildWrapper>, Kern
     let mut wrapped = CommandWrap::from(command);
     // A session, not merely a group: the gateway must survive the terminal
     // that started it, and it must never be sent the terminal's own signals.
+    #[cfg(unix)]
     wrapped.wrap(ProcessSession);
+    // Windows has no session to leave, and a child there already outlives the
+    // parent that spawned it, so the detach is the default and nothing is
+    // wrapped. It does still share the console it was started from, which a
+    // `DETACHED_PROCESS` creation flag would sever — that needs the `windows`
+    // crate's own types, which is a dependency this has not earned yet.
+
     wrapped
         .spawn()
         .map_err(|e| internal(format!("could not start the gateway: {e}")))
