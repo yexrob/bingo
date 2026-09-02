@@ -192,6 +192,25 @@ mod tests {
         );
     }
 
+    /// A turn a command opened goes back to the line that opened it. The
+    /// kernel leads such a prompt with `/name args`, so the row is the two
+    /// words a person would recognise rather than the page they expanded to.
+    #[test]
+    fn a_turn_a_command_opened_is_named_by_the_line_that_was_typed() {
+        let mut state = state();
+        state.items = vec![in_turn(
+            "itm_1",
+            "trn_1",
+            delivered(
+                "itm_1",
+                "command",
+                None,
+                "/guide the wire format\n\nRead this before answering about bingo itself.",
+            ),
+        )];
+        assert_eq!(turns(&state)[0].label(), "/guide the wire format");
+    }
+
     #[test]
     fn a_turn_nobody_opened_by_typing_is_named_by_its_own_id() {
         let mut state = state();

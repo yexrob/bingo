@@ -216,16 +216,23 @@ fn returns(body: Vec<Line<'static>>, rows: &Rows<'_>) -> Vec<Line<'static>> {
 
 /// The surfaces whose input is the machinery reporting in rather than
 /// somebody speaking: a background job that ended, a message from another
-/// session, a room's post, a scheduled turn. What they deliver reads as a
-/// tool row does, because that is what it is — something that happened, not
-/// something anyone said to you.
+/// session, a room's post, a scheduled turn, a command's own prompt. What they
+/// deliver reads as a tool row does, because that is what it is — something
+/// that happened, not something anyone said to you.
+///
+/// `command` is the one a person did set in motion, and it is here anyway: a
+/// `/guide` puts a page of skill body in the journal under a line nobody
+/// typed, and drawn as prose it is a wall of somebody else's words on the
+/// person's own bar. The line they *did* type leads the item, so the row says
+/// `⏺ /guide` and folds the page under it — which is what `Skill(guide)`, the
+/// model's way to the same body, already looks like.
 ///
 /// The set is closed, and this list is the only place it is written down: a
 /// surface nobody has put here is loud. A new subsystem chooses its side by
 /// being added or left out, deliberately, and the cost of each mistake says
 /// which way to lean — a person's own words drawn as machinery is a wrong
 /// nobody can undo by reading harder.
-const QUIET_SURFACES: &[&str] = &["agent", "bash", "room", "schedule"];
+const QUIET_SURFACES: &[&str] = &["agent", "bash", "command", "room", "schedule"];
 
 /// Whether a delivery is the machinery reporting in. The composer's pending
 /// area asks the same question of what is still queued (ADR-0028), so the set
@@ -259,6 +266,10 @@ fn notice(
         return Vec::new();
     }
     let (head, rest) = text.split_once('\n').unwrap_or((text, ""));
+    // A blank line between the headline and the rest is a separator in the
+    // text — a command's prompt puts one there — and under a `⎿` it would be
+    // a row spent on nothing.
+    let rest = rest.trim_start_matches('\n');
     let mut out = speaks(
         bullet_style(status, false),
         vec![headline(head, principal)],
@@ -819,6 +830,29 @@ mod tests {
             vec![
                 "⏺ Background job ab12cd34 exited with code 1 after 2m.".to_string(),
                 "  ⎿  `BashOutput` with id \"ab12cd34\" reads what it wrote.".to_string(),
+            ],
+        );
+    }
+
+    /// A skill typed as `/name args`: the row is the line the person typed —
+    /// the kernel puts it at the head of the prompt — and the page the command
+    /// produced hangs under it, folded, the way `Skill(guide)` already reads.
+    #[test]
+    fn a_commands_prompt_is_the_typed_line_with_its_expansion_under_it() {
+        assert_eq!(
+            drawn(vec![delivered(
+                "itm_1",
+                "command",
+                None,
+                "/guide the wire format\n\n\
+                 Base directory for this skill: /skills/guide\n\n\
+                 Read this before answering about bingo itself.",
+            )]),
+            vec![
+                "⏺ /guide the wire format".to_string(),
+                "  ⎿  Base directory for this skill: /skills/guide".to_string(),
+                String::new(),
+                "     Read this before answering about bingo itself.".to_string(),
             ],
         );
     }
