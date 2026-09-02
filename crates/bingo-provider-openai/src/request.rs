@@ -112,6 +112,7 @@ mod tests {
             messages,
             tools: Vec::new(),
             reasoning: None,
+            session: None,
             provider_options: ProviderMetadata::new(),
         }
     }

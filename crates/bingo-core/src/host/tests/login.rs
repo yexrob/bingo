@@ -278,3 +278,58 @@ async fn login_names_a_registered_provider_and_logout_answers_a_receipt() {
             if name == "logout" && receipt == "Signed out of signing."
     ));
 }
+
+/// ADR-0035 §5: the same door, now reachable through the sdk. A provider that
+/// must ask a person while it streams — an ACP adapter relaying
+/// `session/request_permission` — names the session its request was built for
+/// and asks on that session's own dialog.
+#[tokio::test]
+async fn the_sdk_reaches_the_same_prompter_a_login_is_handed() {
+    let host = host_with_signing().await;
+    let mut client = Client::open(&host).await;
+    let session = client.state.summary.id.clone();
+    let api: &dyn HostApi = host.as_ref();
+    let asking = api
+        .prompter(&session)
+        .expect("a live session has a way of asking");
+
+    let question = tokio::spawn(async move {
+        asking
+            .ask(
+                InteractionKind::Confirm {
+                    title: "claude asks".into(),
+                    detail: "Edit src/lib.rs".into(),
+                },
+                vec![AnswerSpec::Confirm, AnswerSpec::Cancel],
+            )
+            .await
+    });
+
+    while let Some(frame) = client.events.next().await {
+        client.state.apply(&frame);
+        if let Event::InteractionOpened { interaction } = &frame.event {
+            client.handle.answer(
+                IntentId::mint(),
+                interaction.id.clone(),
+                Answer::Confirm,
+                Activation::Programmatic,
+            );
+            break;
+        }
+    }
+    let answered = tokio::time::timeout(Duration::from_secs(10), question)
+        .await
+        .expect("the question is answered")
+        .expect("the task finishes")
+        .expect("an answer");
+    assert_eq!(answered, Answer::Confirm);
+}
+
+/// A session nobody is running cannot be asked anything, and says so rather
+/// than hanging whoever asked.
+#[tokio::test]
+async fn a_session_that_is_not_live_has_nobody_to_ask() {
+    let host = host_with_signing().await;
+    let api: &dyn HostApi = host.as_ref();
+    assert!(api.prompter(&SessionId::mint()).is_err());
+}

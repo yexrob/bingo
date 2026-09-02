@@ -700,6 +700,7 @@ mod side_tests {
             messages: vec![Message::text(Role::User, "what did we learn?")],
             tools: Vec::new(),
             reasoning: None,
+            session: None,
             provider_options: ProviderMetadata::new(),
         };
         let mut about = serde_json::Map::new();
@@ -751,6 +752,7 @@ mod addressed_tests {
             messages: vec![Message::text(Role::User, text)],
             tools: Vec::new(),
             reasoning: None,
+            session: None,
             provider_options: ProviderMetadata::new(),
         }
     }
@@ -951,6 +953,7 @@ mod tests {
             messages: vec![Message::text(Role::User, text)],
             tools: Vec::new(),
             reasoning: None,
+            session: None,
             provider_options: Default::default(),
         }
     }

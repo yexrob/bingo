@@ -53,6 +53,8 @@ pub fn request(model: &str, window: u64, instructions: Option<&str>, old: &[Item
         messages: vec![Message::text(Role::User, body(old, budget))],
         tools: Vec::new(),
         reasoning: None,
+        // A side question, not the session's turn (ADR-0035 §5).
+        session: None,
         provider_options: ProviderMetadata::new(),
     }
 }

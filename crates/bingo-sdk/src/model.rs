@@ -162,6 +162,12 @@ pub struct ModelRequest {
     pub tools: Vec<ToolSpec>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<Effort>,
+    /// Whose turn this is. A stateless provider ignores it; one that keeps a
+    /// conversation of its own per session, or must ask a person while it
+    /// streams (ADR-0035 §5), needs the kernel to say which session it is
+    /// answering for. `None` is a request built by hand, with nobody to ask.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<crate::ids::SessionId>,
     #[serde(default, skip_serializing_if = "is_empty_meta")]
     pub provider_options: ProviderMetadata,
 }

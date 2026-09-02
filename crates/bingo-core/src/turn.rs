@@ -393,6 +393,10 @@ impl Turn<'_> {
             messages,
             tools: self.tool_specs(),
             reasoning: self.model.reasoning,
+            // Whose turn this is: a provider that keeps a conversation of its
+            // own per session, or must ask a person mid-stream, has no other
+            // way to know (ADR-0035 §5).
+            session: Some(self.cfg.session.id.clone()),
             provider_options: ProviderMetadata::new(),
         };
         self.recount(&request).await;
