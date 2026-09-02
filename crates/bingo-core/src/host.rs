@@ -221,6 +221,12 @@ impl Host {
         refresh::now(self).await
     }
 
+    /// When this provider's endpoint last answered, for a person asking how
+    /// old the list is; `None` if it never has.
+    pub(crate) fn served_at(&self, provider: &str) -> Option<Timestamp> {
+        self.served.get(provider).map(|served| served.fetched)
+    }
+
     /// Start the enabled plugins in load order; each receives a host handle.
     async fn start_plugins(&self) -> Result<(), HostError> {
         for plugin in &self.plugins {
