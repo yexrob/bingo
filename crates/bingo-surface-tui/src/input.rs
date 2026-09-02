@@ -141,7 +141,7 @@ pub fn on_mouse(ui: &mut Ui, tree: &Tree, mouse: MouseEvent, now: Now) -> Vec<Ef
 }
 
 /// A press lands on whatever is under it: a card's option answers, a block
-/// takes the focus and starts a run.
+/// takes the focus, opens what is folded under it and starts a run.
 fn pressed(ui: &mut Ui, tree: &Tree, mouse: MouseEvent, now: Now) -> Vec<Effect> {
     if let Some(index) = card_option(ui, mouse) {
         return answer(ui, tree, index, now);
@@ -159,9 +159,24 @@ fn pressed(ui: &mut Ui, tree: &Tree, mouse: MouseEvent, now: Now) -> Vec<Effect>
     if let Some(session) = block.as_ref().and_then(|item| tree.spawned_by(item)) {
         return vec![Effect::View(session.clone())];
     }
+    if let Some(item) = &block {
+        toggle_fold(ui, item);
+    }
     ui.select.block = block;
     ui.select.start(cell);
     Vec::new()
+}
+
+/// A click on a block opens what is folded under it, and a second click folds
+/// it again — a result, a thought, a notice alike. A *key* never means two
+/// directions (§7, M11e); a click on the same row is one gesture, and the
+/// direction it takes is the one the row is not already in.
+///
+/// It fills the set `ctrl+o` fills, so a block is open in one way only.
+fn toggle_fold(ui: &mut Ui, item: &bingo_sdk::ItemId) {
+    if !ui.expanded.remove(item) {
+        ui.expanded.insert(item.clone());
+    }
 }
 
 /// A drag takes the far end of the run with it.
@@ -243,7 +258,7 @@ fn transcript_cell(ui: &Ui, mouse: MouseEvent) -> Option<Cell> {
 /// `ctrl+o to expand`).
 fn deepen(ui: &mut Ui, tree: &Tree, now: Now) {
     let focused = ui.select.block.clone();
-    let Some(id) = latest(tree.viewed(), focused.as_ref(), has_result) else {
+    let Some(id) = latest(tree.viewed(), focused.as_ref(), folds) else {
         return;
     };
     if ui.expanded.contains(&id) {
@@ -301,9 +316,16 @@ pub fn latest(
         .map(|item| item.id.clone())
 }
 
-fn has_result(item: &bingo_sdk::Item) -> bool {
+/// What `ctrl+o` opens further: a block whose row wears
+/// `… +N lines (ctrl+o to expand)` — a call that came back, a thought that was
+/// not redacted, an action's own result. A quiet notice is deliberately not
+/// one: its cut promises no key (M11's rule, 2026-09-01), and a click is what
+/// opens it.
+fn folds(item: &bingo_sdk::Item) -> bool {
     match &item.body {
         bingo_sdk::ItemBody::ToolCall { output, .. } => output.is_some(),
+        bingo_sdk::ItemBody::Reasoning { .. } => crate::transcript::thought(item).is_some(),
+        bingo_sdk::ItemBody::Action { result, .. } => result.is_some(),
         _ => false,
     }
 }
@@ -1916,6 +1938,141 @@ mod tests {
             "the last row is the last item"
         );
         assert!(ui.select.run.is_some(), "and a run starts there");
+    }
+
+    /// A block with more under it than a row can hold.
+    fn long_result() -> SessionState {
+        let output =
+            bingo_sdk::ToolOutput::text((1..=9).map(|i| format!("line {i}\n")).collect::<String>());
+        folded(vec![frame(
+            1,
+            bingo_sdk::Event::ItemCompleted {
+                item: tool(
+                    "itm_1",
+                    "Read",
+                    serde_json::json!({"file_path": "src/lib.rs"}),
+                    Some(output),
+                    bingo_sdk::ItemStatus::Completed,
+                ),
+            },
+        )])
+    }
+
+    /// The last row the transcript drew, which is the row a fold sits on.
+    fn last_row(ui: &Ui) -> u16 {
+        ui.painted.borrow().regions.transcript.bottom() - 1
+    }
+
+    /// A click on a fold is one gesture that opens it and folds it again — the
+    /// set `ctrl+o` fills, reached from the mouse (design §7).
+    #[test]
+    fn a_click_opens_a_fold_and_a_second_click_folds_it() {
+        let state = long_result();
+        let tree = solo(&state);
+        let (mut ui, now) = scene();
+        assert!(render(&state, &ui, now).contains("+4 lines (ctrl+o to expand)"));
+
+        let row = last_row(&ui);
+        on_mouse(&mut ui, &tree, click(6, row), now);
+        let opened = render(&state, &ui, now);
+        assert!(opened.contains("line 9"), "{opened}");
+        assert!(!opened.contains("+4 lines"), "{opened}");
+        assert_eq!(
+            ui.select.block,
+            Some(bingo_sdk::ItemId::from_raw("itm_1")),
+            "and the click still takes the focus"
+        );
+
+        let row = last_row(&ui);
+        on_mouse(&mut ui, &tree, click(6, row), now);
+        assert!(
+            render(&state, &ui, now).contains("+4 lines (ctrl+o to expand)"),
+            "the same gesture on the same row takes it back"
+        );
+    }
+
+    /// A notice folds without promising a key (2026-09-01), so the click is
+    /// the only way in — and it is the way in for every fold, not just this one.
+    #[test]
+    fn a_click_opens_a_folded_notice_too() {
+        let body: String = (1..=9).map(|i| format!("\nline {i}")).collect();
+        let state = folded(vec![frame(
+            1,
+            bingo_sdk::Event::ItemCompleted {
+                item: delivered(
+                    "itm_1",
+                    "schedule",
+                    None,
+                    &format!("the nightly run is in{body}"),
+                ),
+            },
+        )]);
+        let tree = solo(&state);
+        let (mut ui, now) = scene();
+        assert!(render(&state, &ui, now).contains("+4 lines"));
+        let row = last_row(&ui);
+        on_mouse(&mut ui, &tree, click(6, row), now);
+        let opened = render(&state, &ui, now);
+        assert!(opened.contains("line 9"), "{opened}");
+        assert!(!opened.contains("+4 lines"), "{opened}");
+    }
+
+    /// A thought, once it is one.
+    fn thought(text: &str) -> SessionState {
+        let mut item = crate::test_support::item(
+            "itm_1",
+            bingo_sdk::ItemStatus::Completed,
+            bingo_sdk::ItemBody::Reasoning {
+                text: text.into(),
+                provider_metadata: Default::default(),
+            },
+        );
+        item.completed_at = Some(ts() + jiff::SignedDuration::from_secs(2));
+        folded(vec![frame(1, bingo_sdk::Event::ItemCompleted { item })])
+    }
+
+    /// `ctrl+o` reaches a thought as it reaches a result: the fold lifts, then
+    /// the whole of it takes the sheet.
+    #[test]
+    fn ctrl_o_lifts_a_thoughts_fold_and_then_opens_it() {
+        let text: String = (1..=9).map(|i| format!("step {i}\n")).collect();
+        let state = thought(&text);
+        let (mut ui, now) = scene();
+        assert!(render(&state, &ui, now).contains("+4 lines (ctrl+o to expand)"));
+
+        press(&mut ui, &state, ctrl('o'), now);
+        let opened = render(&state, &ui, now);
+        assert!(opened.contains("step 9"), "{opened}");
+
+        press(&mut ui, &state, ctrl('o'), now);
+        assert!(
+            render(&state, &ui, later(now, 200)).contains("Thinking"),
+            "the sheet says what it is"
+        );
+    }
+
+    /// A redacted thought promises nothing: no fold, no key, no sheet.
+    #[test]
+    fn an_empty_thought_opens_nothing() {
+        let state = thought("");
+        let (mut ui, now) = scene();
+        render(&state, &ui, now);
+        press(&mut ui, &state, ctrl('o'), now);
+        assert!(ui.expanded.is_empty(), "there is nothing to lift");
+        ui.select.block = Some(bingo_sdk::ItemId::from_raw("itm_1"));
+        press(&mut ui, &state, key(KeyCode::Enter), now);
+        assert!(!ui.layer.showing(), "and nothing to open");
+    }
+
+    /// `⏎` on a focused block still opens the pager, thought or result alike.
+    #[test]
+    fn enter_on_a_focused_thought_opens_the_sheet() {
+        let state = thought("the manifest first");
+        let (mut ui, now) = scene();
+        render(&state, &ui, now);
+        ui.select.block = Some(bingo_sdk::ItemId::from_raw("itm_1"));
+        press(&mut ui, &state, key(KeyCode::Enter), now);
+        assert!(matches!(ui.layer.open, Open::Pager(_)));
     }
 
     #[test]
