@@ -135,24 +135,20 @@ fn an_agent_opens_a_shared_room_and_its_peer_reads_the_post() {
     let home = tempfile::tempdir().unwrap();
     with_a_scout(home.path());
     let script = script(CONVENE);
-    let out = run_within(
-        bingo()
-            .env("BINGO_FAKE_SCRIPT", script.path())
-            .env("HOME", home.path())
-            .args([
-                "--print",
-                "--output-format",
-                "json",
-                "--allowed-tools",
-                "OpenRoom",
-                "--cwd",
-            ])
-            .arg(home.path())
-            .arg("convene them"),
-        Duration::from_secs(60),
-    );
-    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
-    let root = root_of(&out);
+
+    // A host drives it, because what is asserted here lands in a turn the
+    // *peer* opens: a one-shot run ends with the root's turn and would race
+    // the scout to the exit. The reading is the gate, so the run outlives it.
+    let mut convening = hosting(home.path(), &script);
+    convening.args(["--allowed-tools", "OpenRoom"]);
+    let mut host = Host::start(&mut convening);
+    host.prompt("convene them");
+    until("the peer never read the room", || {
+        scout_dir(home.path()).is_some_and(|dir| !readings(&dir).is_empty())
+    });
+    let ended = host.finish();
+    assert_eq!(ended.code, Some(0), "stderr: {}", ended.err);
+    let root = root_id(home.path());
 
     // The room hangs under the root — the caller's parent — and not under the
     // agent that opened it. The key says which tree it is in.
@@ -294,6 +290,16 @@ fn hosting(home: &Path, script: &tempfile::NamedTempFile) -> Command {
         ])
         .arg(home);
     cmd
+}
+
+/// The run's root session, by the id its own summary carries: what every room
+/// under it is keyed by.
+fn root_id(home: &Path) -> String {
+    let root = root_dir(home).expect("a root session");
+    summary_of(&root).expect("the root's summary")["id"]
+        .as_str()
+        .expect("a session id")
+        .to_string()
 }
 
 /// The run's root session: the one on disk with nothing above it, which is
