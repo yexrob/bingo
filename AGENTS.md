@@ -18,7 +18,7 @@ A local coding-agent harness in Rust: a minimal kernel, everything else a plugin
 - **Contracts first** for anything consumed independently: a trait, a wire format, a persisted record gets its fixture or schema test before its implementation.
 - **Bricks first.** Pure function → primitive → component → feature. A feature without a pure brick underneath is suspect.
 - **Subtract by default.** Deleting needs no reason; adding does.
-- Tool properties fail closed: an unknown tool is not concurrency-safe, not read-only, and its interrupt behaviour is Block.
+- Tool properties fail closed: an unknown tool is not concurrency-safe, not read-only, and not trusted. It has no say in what an interrupt does: one `esc` ends the turn and every call in flight is dropped where it stands.
 - The kernel owns no feature nouns. `room`, `team`, `hire`, `task`, `experience`, `schedule` do not appear in `bingo-sdk` or `bingo-core`.
 - **Every platform the release ships.** Linux, macOS and Windows all build; the release matrix is the list. A platform-only API is `cfg`-gated together with its counterpart, written in the same change — a process group on unix is a job object on Windows, and a signal a program may answer has no Windows spelling at all, so there it is a kill. The constant, the helper and the test that belong to one platform carry the same gate.
 - **A machine is not the machine.** Assume nothing a developer's box happens to provide: not that a signal exists, not that a wait status is POSIX, not that `TMPDIR` is long, not that a core is free. A test that pins a wall clock, a path length or a scheduling order pins the machine it was written on, and CI is slower, has fewer cores and a shorter temporary path.

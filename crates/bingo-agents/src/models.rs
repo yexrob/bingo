@@ -9,8 +9,8 @@
 
 use async_trait::async_trait;
 use bingo_sdk::{
-    AuthStatus, CatalogEntry, CatalogKind, Interrupt, Tool, ToolContext, ToolError, ToolOutput,
-    ToolSpec, ToolTraits, input_schema,
+    AuthStatus, CatalogEntry, CatalogKind, Tool, ToolContext, ToolError, ToolOutput, ToolSpec,
+    ToolTraits, input_schema,
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -134,7 +134,7 @@ impl Tool for ListModelsTool {
     }
 
     fn traits(&self, _input: &Value) -> ToolTraits {
-        crate::traits(Interrupt::Cancel)
+        crate::traits()
     }
 
     /// The arguments are ignored: a listing has none, and a model that sends
@@ -270,6 +270,5 @@ mod tests {
         assert_eq!(spec.input_schema["type"], "object");
         let traits = tool.traits(&Value::Null);
         assert!(traits.read_only && traits.trusted && !traits.concurrency_safe);
-        assert_eq!(traits.interrupt, Interrupt::Cancel);
     }
 }

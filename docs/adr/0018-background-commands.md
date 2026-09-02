@@ -19,7 +19,7 @@ The old project backgrounded shell commands but shipped half the feature: no way
 
 - `bingo-tool-bash` grows a job table (one noun, its own module), two tools and the reader tasks; `bingo-surface-tui` grows one keybinding and nothing else it does not already render. No new crate, no new dependency, no sdk or kernel touch.
 - A background job lives exactly as long as the bingo process: no daemon, no persisted queue. The log file survives; the notification for a job whose session is gone goes nowhere, and says so in the log. Out-living the process is ADR-0019's schedule territory, not this one's.
-- `Interrupt` semantics are unchanged: interrupting a turn never kills a background job (that is what `KillShell` is for); a foreground call being interrupted keeps today's Block behaviour.
+- Interrupting a turn never kills a background job (that is what `KillShell` is for): a promoted command's process left the call's future for a task of its own, and only that task ends it. A foreground call is the other way about *(amended 2026-09-02, M34)*: one `esc` drops the call's future and the process group goes with it, output forfeit — the `Interrupt::{Block, Cancel}` trait this ADR wrote "unchanged" no longer exists.
 - The permission gate sees `Bash` as it always did; `BashOutput` is read-only and free; `KillShell` asks in default mode like any other untrusted-adjacent act — killing what you started is cheap to approve and `acceptEdits` does not auto-allow it.
 
 ## Supersedes

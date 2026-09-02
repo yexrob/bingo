@@ -383,7 +383,6 @@ async fn an_mcp_tool_never_earns_a_trait_the_gate_would_trust() {
                 prop_assert!(!traits.read_only, "{}", tool.spec().name);
                 prop_assert!(!traits.trusted, "{}", tool.spec().name);
                 prop_assert!(!traits.concurrency_safe, "{}", tool.spec().name);
-                prop_assert_eq!(traits.interrupt, bingo_sdk::Interrupt::Block);
                 prop_assert!(tool.subjects(&input, Path::new("/work")).is_empty());
             }
             Ok(())

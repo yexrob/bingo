@@ -39,8 +39,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use bingo_sdk::{
-    Command, ContextContributor, Contribution, ErrorCode, Interrupt, KernelError, Plugin,
-    PluginError, PluginManifest, Registrar, Tool, ToolError, ToolOutput, ToolTraits,
+    Command, ContextContributor, Contribution, ErrorCode, KernelError, Plugin, PluginError,
+    PluginManifest, Registrar, Tool, ToolError, ToolOutput, ToolTraits,
 };
 
 pub use command::TasksCommand;
@@ -81,7 +81,6 @@ pub(crate) fn traits() -> ToolTraits {
         read_only: true,
         trusted: true,
         concurrency_safe: false,
-        interrupt: Interrupt::Cancel,
         ..ToolTraits::default()
     }
 }
@@ -184,6 +183,5 @@ mod plugin_tests {
         let traits = traits();
         assert!(traits.read_only && traits.trusted);
         assert!(!traits.concurrency_safe && !traits.destructive && !traits.edit);
-        assert_eq!(traits.interrupt, Interrupt::Cancel);
     }
 }

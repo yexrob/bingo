@@ -361,7 +361,6 @@ mod tests {
         assert_eq!(traits, ToolTraits::default());
         assert!(!traits.read_only, "a room is opened, not read");
         assert!(!traits.concurrency_safe);
-        assert_eq!(traits.interrupt, bingo_sdk::Interrupt::Block);
     }
 
     /// The one thing a person sees before approving. It is also the rule an

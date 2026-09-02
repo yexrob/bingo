@@ -7,8 +7,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use bingo_sdk::{
-    ContentPart, Interrupt, KernelError, Tool, ToolContext, ToolError, ToolOutput, ToolSpec,
-    ToolTraits, View, input_schema,
+    ContentPart, KernelError, Tool, ToolContext, ToolError, ToolOutput, ToolSpec, ToolTraits, View,
+    input_schema,
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -55,7 +55,6 @@ impl Tool for DemoProgressTool {
             trusted: true,
             // One kind, one publisher: two calls at once would fight over it.
             concurrency_safe: false,
-            interrupt: Interrupt::Cancel,
             ..ToolTraits::default()
         }
     }
@@ -174,6 +173,5 @@ mod tests {
         let traits = DemoProgressTool.traits(&serde_json::Value::Null);
         assert!(traits.read_only && traits.trusted);
         assert!(!traits.concurrency_safe);
-        assert_eq!(traits.interrupt, Interrupt::Cancel);
     }
 }

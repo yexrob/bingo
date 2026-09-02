@@ -160,7 +160,6 @@ pub struct ToolTraits {                          // fail-closed defaults
     pub read_only: bool,                         // false
     pub destructive: bool,                       // false
     pub edit: bool,                              // false  (acceptEdits target)
-    pub interrupt: Interrupt,                    // Block: finish the in-flight call, skip the rest; Cancel: drop it
     pub result_limit: ResultLimit,               // Global | SelfBounded (P0 gap: per-tool result policy)
     pub trusted_traits: bool,                    // false for MCP: readOnlyHint is never trusted by the gate
 }
@@ -452,7 +451,7 @@ Deciding       : empty assistant & no tools → retry once, then Closing(Complet
                  tools → Gating
 Gating         : per call, serial: Hook::before_tool (rewrite/Deny/Ask) → policy.decide(traits, subjects, confirm) → Ask ⇒ InteractionOpened(preview, scope) → Verdict → policy.on_verdict ; Deny ⇒ Item Failed{permission_error + guidance} ; unknown tool ⇒ Item Failed
  └──────────────────────────► Executing
-Executing      : executor: consecutive concurrency_safe calls in parallel (≤10), others serial; child cancel tokens; Interrupt::Block tools finish, Cancel tools are dropped; completed results kept; every tool_use answered (placeholder for unanswered)
+Executing      : executor: consecutive concurrency_safe calls in parallel (≤10), others serial; child cancel tokens; an interrupt drops every call in flight (a tool has no say); completed results kept; every tool_use answered (placeholder for unanswered)
  ├─ cancel ─────────────────► Barrier(interrupted=true)
  └──────────────────────────► Barrier
 Barrier        : Hook::after_tool (Block ⇒ end after this round) ; if continuing: Contributors{Barrier} ; queue.absorb(steerable prefix) → User items ; commit tool-result user message ; TurnRound

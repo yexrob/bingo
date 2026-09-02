@@ -9,8 +9,8 @@ use std::path::Path;
 
 use async_trait::async_trait;
 use bingo_sdk::{
-    Interrupt, Preview, ResultLimit, Subject, Tool, ToolContext, ToolError, ToolOutput, ToolSpec,
-    ToolTraits, input_schema,
+    Preview, ResultLimit, Subject, Tool, ToolContext, ToolError, ToolOutput, ToolSpec, ToolTraits,
+    input_schema,
 };
 use futures::StreamExt;
 use reqwest::{Client, Response, header};
@@ -142,7 +142,6 @@ impl Tool for WebFetchTool {
             trusted: true,
             concurrency_safe: true,
             read_only: Self::target(input).is_some_and(|url| approved::is_documentation(&url)),
-            interrupt: Interrupt::Cancel,
             // The page is already capped at a hundred thousand characters; the
             // kernel's global clip would cut it again at half that.
             result_limit: ResultLimit::SelfBounded,
@@ -251,7 +250,6 @@ mod tests {
     fn a_fetch_is_trusted_cancellable_and_safe_beside_other_calls() {
         let traits = tool().traits(&args("https://example.com/"));
         assert!(traits.trusted && traits.concurrency_safe);
-        assert_eq!(traits.interrupt, Interrupt::Cancel);
         assert_eq!(traits.result_limit, ResultLimit::SelfBounded);
         assert!(!traits.destructive && !traits.edit);
     }
