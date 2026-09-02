@@ -1625,11 +1625,22 @@ mod tests {
         )
     }
 
+    /// The roster a room publishes, spelled as `bingo-rooms` publishes it: the
+    /// names a reader parses and the tree a surface draws, in one payload.
     fn members() -> Event {
         extended(
             "bingo.rooms",
             "members",
-            json!({"members": ["reviewer", "scout"]}),
+            json!({
+                "members": ["reviewer", "scout"],
+                "kind": "tree",
+                "nodes": [
+                    {"label": "reviewer", "tone": "neutral"},
+                    {"label": "listening", "tone": "neutral", "children": [
+                        {"label": "scout", "badge": "300s", "tone": "neutral"},
+                    ]},
+                ],
+            }),
         )
     }
 

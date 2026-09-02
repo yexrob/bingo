@@ -58,6 +58,76 @@ The surface owns the alternate screen for the whole run. Regions, top to bottom 
 - **Nothing jumps.** The input box never moves; the transcript grows upward from a fixed baseline; a card's reveal never shifts what is behind it. Resize re-lays the frame in one draw. The **activity band is reserved**: its two rows (air + the verb row) are held even while idle, so a turn starting or ending never reflows the transcript — the verb appears and leaves in place.
 - **Leaving** prints the last screenful of the transcript, plain, into the shell's normal screen so the conversation is still on the terminal after `exit` — the one thing the alternate screen would otherwise take.
 
+### Teams
+
+A room is not a region of the frame. It is a session, so it is already every part of §3 at once: a row in the transcript where it was opened, a view `⏎` steps into, a chip on the quick cycle, a card in the rail. What is on screen for one today, after M34:
+
+```text
+  ⏺ reviewer in #design: the plan is thin on tests     ← in a member's own transcript: who, where, what
+  ⏺ scout: Two nits, else fine.                        ← a direct message came from nobody but its sender
+
+  ⏺ OpenRoom(design)                                   ← the seats the call took, folded at five rows
+    ⎿  └─ #design
+          ├─ helper
+          ├─ scout
+          └─ listening
+             └─ watcher [ 120s ]
+
+  ⏺ SendMessage(#design)
+    ⎿  to    #design
+       from  parent
+       read  by every member, as it lands
+
+  ⏺ ListAgents
+    ⎿  ├─ helper [ busy ]
+       └─ scout [ idle ]
+```
+
+In the room's own view the name stands alone — `⏺ reviewer: the plan is thin on tests` — because there is only one conversation there to name; the composer reads `#design > post to the room` and the status line's right slot `in #design`. `ctrl+t` on the room draws the roster the room publishes, and `⏎` on that row pins it into the rail:
+
+```text
+  ❯ bingo.rooms · members                                  owed
+    ├─ reviewer                                          room     owed      as…
+    └─ listening                                         ──────────────────────
+       └─ scout [ 300s ]                                 #design  reviewer  14…
+```
+
+What is **not** on screen, and is the reason M35 exists: nowhere does a person see who is in a room without asking for it. The roster is a panel on the room's own session, so a member's transcript cannot show it at all; the `owed` card sits on the room's *parent*, where the roster is not; and the card's three columns are one wider than the rail, so the clock time folds. The ears drawn are the ones the roster declared — a seat that retuned its own with `Listen` says so under its own `bingo.rooms · ear:<name>` row, and reading the two together is left to a person.
+
+Three shapes a members pane could take. None is built; the choice is the user's.
+
+**A — a rail card.** The roster is already a `View::Tree`, so this is a pin and nothing else:
+
+```text
+  ⏺ reviewer in #design: the plan is thin        │ #design           │
+                                                 │ ├─ reviewer  busy │
+  ⏺ Two nits then.                               │ ├─ scout     idle │
+                                                 │ └─ listening      │
+                                                 │    └─ parent 300s │
+```
+
+It costs no furniture and no key: it is the panel lane doing its job, and below 120 columns it draws inline under the running rows like every other card. What it costs is a decision the surface cannot make alone — the roster lives on the room's session, so seeing it beside a *member's* transcript means either publishing it twice (two journals, one fact — refused) or teaching the rail to read a sibling's state, which no card does today. One plugin gets eight rows, so a room past seven seats folds to `… +N`.
+
+**B — a sheet.** `ctrl+r`, say, over the whole frame, for the room in view or the room a chip names:
+
+```text
+  ╭─ #design ──────────────────────────────────────────────────╮
+  │  reviewer   ⏺ busy       owes an answer · 14:02 · 22m       │
+  │  scout      ⏺ idle                                          │
+  │  parent     listening (300s)                                │
+  ╰─────────────────────────────────────────────────────────────╯
+```
+
+A sheet has room for what a card cannot hold — the ear, the debt and its age on one row, every seat unfolded — and it costs nothing at any width, because nothing is on screen until it is asked for: 80 columns is as good as 120, and the one-line-of-furniture rule is untouched. It costs one key on the `?` table and one more layer on the escape stack. Its real cost is that it must be remembered: a roster is exactly the thing a person does not think to open, and a debt nobody looks at is the failure ADR-0022 was written against.
+
+**C — chips, extending the quick cycle.** `↓` already turns the status line into a strip of sessions; `→` onto a room could open its seats as a second rank:
+
+```text
+  ❯ ⏺ project   ⏺ reviewer   #design ▸ ⏺ reviewer  ⏺ scout  ~parent
+```
+
+The cheapest of the three: no new key, no new layer, no new region, and it puts the roster where a person's hands already are. It is also the most cramped — one row, so a large room scrolls under the cursor as the strip already does, and there is no room for a debt beyond a dot. It reads a room as a *place to go*, which is what the strip is for, rather than as a thing to study.
+
 ## 4. Tokens
 
 Truecolor is the native look, chosen after the terminal's background is read (OSC 10/11) and derived for light and dark alike; the eight ANSI colours are the fallback and every rule below holds in both. The body background is never painted — the terminal's stays — but cards, sheets and the rail sit on a **raised tint** one step from it, which is what gives the frame depth.
@@ -215,3 +285,4 @@ What a change is checked against, in this order: `TestBackend` snapshots for eve
 - **2026-09-02** — **The rise is withdrawn; a notch adds to where the transcript is going; a terminal event waits for the frame** (M34 slice A; user-reported: the transcript "refreshes line by line"). The rise put its two blank rows at the *end* of the transcript, and the viewport hangs from the foot — so what a person saw was not a block falling into place but the whole screen jumping up two rows and walking back down over three frames, once per assistant message, tool row and tool result. §3's **nothing jumps** outranks §6's cue, and the cue reported the wrong thing anyway: it moved the world, not the block. Deleted whole — the constants, the rows, the segment and the arrival bookkeeping — so §6's "block arriving" row is withdrawn and a block now takes its own room and nothing more. Two more of the same feeling, traced the same day. A wheel notch used to restart the 100 ms ease from the *interpolated* position, so a trackpad burst — notches far faster than 30 Hz — paid off about a line an event and dropped the rest; a notch now adds to the ease's **target** and eases there from wherever the transcript has reached, so ten notches are thirty lines whether they take twenty milliseconds or twenty seconds (`Scroll::target`, and the ease is `clock::ease_out` now rather than a second spelling of it). And a terminal event used to force a full paint of its own while the kernel's frames were coalesced to one draw per 33 ms: both pass the same gate now, and the frame boundary is the one wake that always draws — an event arms a draw within one tick, never later and never a second one inside it, which is §6's "a keystroke echoes on the next frame" with the waste taken out.
 - **2026-09-02** — **A thought is readable where it happened, and a fold answers the pointer** (M34 worker B). `✻ Thought for 2s` used to be the whole of a thought on screen: the text was drawn nowhere, and the only way in was a click on the block followed by `⏎` — a path nothing on screen said. It now hangs under the row like any result (§4's thinking row), dim under a `⎿`, folded at five rows with the same `ctrl+o to expand`, and `ctrl+o`'s `latest()` reaches it. Choices made with it: the text lands **when the thinking is over**, not live — while it streams the row says the same thing whatever arrives, which is what lets `blocks::size` stop revising the block per delta; streaming it would put a second moving region under the one §6 already spends on the sparkle, for a summary most providers send in one piece. `Thought for 0s` becomes `<1s` (a thought that happened did not take no time) and the no-op `.max(0)` goes with it. An **empty thought** — Anthropic's `redacted_thinking`, an OpenAI turn the provider summarised nothing of — is the row alone: no fold, no key, no sheet, because a dead affordance is worse than a silent row. `ctrl+o` also reaches an **action's** result, whose `ctrl+o to expand` had been a promise nothing kept. **A click toggles a fold** (§7's new rule): one gesture on one row, opening what is folded and folding it again, for a result, a thought, an action and a quiet notice alike — the notice's cut still promises no key, because it has none, and the pointer is what opens it. It fills the same `expanded` set `ctrl+o` fills, so a block is open in one way only. Recorded with it: `/think <level>` on a session whose model resolved `reasoning: false` now names the model and `models."<provider>/<model>".reasoning = true`; the level is stored either way, so `/model` to a model that reasons is all it takes — and the config view (`thinking: null`) had been telling that truth all along while the ack said `thinking: high`.
 - **2026-09-02** — **Every list a cursor walks windows itself** (user-reported: "when a picker has many options it does not scroll; the selected row goes out of view and you cannot tell what is selected"). The `/` menu and the rewind card drew the first eight rows; the switcher, the resume picker, the panel sheet and a card's answers drew every row and let the layer clip. Past that many rows the selection was not on the screen at all — §7's "`❯` marks what the keyboard talks to" was quietly false. `window.rs` is the one brick: the run of a list that keeps its cursor in view in the room it has, and a `…` line at each end it cut. The marks are **inside** the row budget — the run plus its marks come to exactly the room asked for — so a window is invisible until it is needed, and every snapshot written before this is byte-identical, which is the proof. Where there is no room for both a mark and the cursor's own row, the mark goes. Two placements, each with its own name rather than a flag: `around` centres the run on the cursor for a list of rows, `onward` starts at it for the `ctrl+t` panel, whose rows carry their views under them. Sideways stays `cycle.rs`'s own: chips have widths, so that one grows a chip at a time, while rows are all one high and this is arithmetic. `MENU_ROWS` and rewind's `ROWS` are now the size of the window rather than a truncation, and the rewind card can be walked to every turn there is. A card is the same list — a question with a dozen options keeps the one the cursor is on — and `layers::fitted` is untouched above it: "the title and the newest rows" is what a permission wants, so the preview is still what gives way first.
+- **2026-09-02** — **A room looks like a room** (M34 worker E). Four things a person could not see: a room post read exactly like a direct message, because `headline()` drew the origin's principal and never its `conversation` — it now says `⏺ reviewer in #design: …` wherever the view is not the room itself, the name bold and the room dim, and the name alone in the room's own transcript. `SendMessage`, `OpenRoom` and `ListAgents` answered text and no `display`, so a person read the model's sentence under `⎿`; each now draws the block lane's own value — a `KeyValue` receipt, the seats as a tree, the roster with a state badge and the teammates under `Beside you`. The `members` extension is published as a payload that is *both* a membership and a `View::Tree`, so `ctrl+t` and a pinned card draw a roster instead of `members: ["reviewer","scout"]`: the vocabulary was not made the sole representation because a `TreeNode` has no slot for a patience (an ear would have to be parsed back out of a badge) and because `{"members":[…]}` is a shape already in people's journals — one writer mints both halves from one `&[Seat]`, which is what keeps it one fact. And the `owed` signal ADR-0022 has published since M19 was drawn for the first time, which showed that its three columns are one wider than the rail: the clock time folds to `14…`, recorded rather than cured, since every cure is a taste call this doc has not made. Carried: a **members pane** is still nobody's — §3 "Teams" sketches the three shapes it could take (rail card, sheet, quick-cycle chips) with what each costs, and the choice is M35's.

@@ -44,6 +44,9 @@ pub struct Rows<'a> {
     pub expanded: &'a BTreeSet<ItemId>,
     /// The frame being drawn: what every cue below is a function of.
     pub now: Now,
+    /// What the session in view is called. A post says which room it came
+    /// from, and the room's own transcript is the one place that says nothing.
+    pub title: Option<&'a str>,
 }
 
 /// Where one block is in its own motion (§6): the clock [`crate::blocks`]
@@ -92,13 +95,7 @@ pub fn item_lines(
     let opened = rows.expanded.contains(&item.id);
     match &item.body {
         ItemBody::User { parts, origin } => match quiet(origin) {
-            true => notice(
-                parts,
-                origin.principal.as_deref(),
-                item.status,
-                opened,
-                rows,
-            ),
+            true => notice(parts, origin, item.status, opened, rows),
             false => user(parts, origin.principal.as_deref(), rows),
         },
         ItemBody::Assistant { text } => assistant(text, item.status, rows, cue),
@@ -271,7 +268,7 @@ fn said(parts: &[ContentPart]) -> String {
 /// first line is the summary and nothing has to be invented for it.
 fn notice(
     parts: &[ContentPart],
-    principal: Option<&str>,
+    origin: &Origin,
     status: ItemStatus,
     expanded: bool,
     rows: &Rows<'_>,
@@ -288,7 +285,11 @@ fn notice(
     let rest = rest.trim_start_matches('\n');
     let mut out = speaks(
         bullet_style(status, false),
-        vec![headline(head, principal)],
+        vec![headline(
+            head,
+            origin.principal.as_deref(),
+            elsewhere(origin, rows),
+        )],
         rows,
     );
     if !rest.trim().is_empty() {
@@ -300,15 +301,29 @@ fn notice(
     out
 }
 
+/// The conversation a delivery says it came from, where saying it tells a
+/// person something: in a member's own transcript a room post is one of
+/// several conversations arriving, and in the room's own it is the only one.
+fn elsewhere<'a>(origin: &'a Origin, rows: &Rows<'_>) -> Option<&'a str> {
+    origin
+        .conversation
+        .as_deref()
+        .filter(|room| Some(*room) != rows.title)
+}
+
 /// The marked line itself: the sender's name where the origin carries one —
-/// an agent, a room's member — and what happened.
-fn headline(head: &str, principal: Option<&str>) -> Line<'static> {
+/// an agent, a room's member — where they said it, and what happened.
+fn headline(head: &str, principal: Option<&str>, conversation: Option<&str>) -> Line<'static> {
     let mut spans = Vec::new();
     if let Some(name) = principal {
-        spans.push(Span::styled(
-            format!("{name}: "),
-            theme::text().patch(theme::bold()),
-        ));
+        let bold = theme::text().patch(theme::bold());
+        spans.push(Span::styled(name.to_string(), bold));
+        match conversation {
+            // Who is bold, where is furniture: the room is dim so the name
+            // still wins the row (design §2).
+            Some(room) => spans.push(Span::styled(format!(" in {room}: "), theme::dim())),
+            None => spans.push(Span::styled(": ".to_string(), bold)),
+        }
     }
     spans.push(Span::styled(head.to_string(), theme::text()));
     Line::from(spans)
@@ -800,12 +815,20 @@ mod tests {
     use bingo_sdk::Event;
 
     fn drawn(items: Vec<Item>) -> Vec<String> {
+        drawn_in(None, items)
+    }
+
+    /// The same items in a session of that name: a room's own transcript when
+    /// the name is the room's.
+    fn drawn_in(title: Option<&str>, items: Vec<Item>) -> Vec<String> {
         let frames = items
             .into_iter()
             .enumerate()
             .map(|(i, item)| frame(i as u64 + 1, Event::ItemCompleted { item }))
             .collect();
-        rendered(&folded(frames))
+        let mut state = folded(frames);
+        state.summary.title = title.map(str::to_string);
+        rendered(&state)
     }
 
     /// The transcript without the welcome box, which `welcome.rs` pins on its
@@ -838,7 +861,7 @@ mod tests {
                 person("itm_2", "thanks"),
             ]),
             vec![
-                "⏺ reviewer: two nits, otherwise fine".to_string(),
+                "⏺ reviewer in #design: two nits, otherwise fine".to_string(),
                 String::new(),
                 "> thanks".to_string(),
             ],
@@ -846,10 +869,18 @@ mod tests {
         );
     }
 
+    /// Where a post is read decides whether it says where it came from: a
+    /// member's own transcript carries every conversation it is in, and a
+    /// room's carries one.
     #[test]
-    fn the_room_a_post_came_from_is_the_view_it_is_read_in() {
-        let drawn = drawn(vec![post("itm_1", "scout", "found it")]).join("\n");
-        assert!(!drawn.contains("#design"), "{drawn}");
+    fn a_post_names_its_room_everywhere_but_in_the_room() {
+        let post = || vec![post("itm_1", "scout", "found it")];
+        assert_eq!(drawn(post()), vec!["⏺ scout in #design: found it"]);
+        assert_eq!(
+            drawn_in(Some("#design"), post()),
+            vec!["⏺ scout: found it"],
+            "in the room's own transcript the name stands alone"
+        );
     }
 
     #[test]

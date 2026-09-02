@@ -1,20 +1,8 @@
 ---
-source: crates/bingo-surface-tui/src/view.rs
-assertion_line: 1576
-expression: screen
+source: crates/bingo-surface-tui/src/screens.rs
+assertion_line: 24
+expression: "draw_tree(80, 24, tree, ui, now)"
 ---
-"❯ bingo.rooms · members                                                         "
-"  ├─ reviewer                                                                   "
-"  └─ listening                                                                  "
-"     └─ scout [ 300s ]                                                          "
-"                                                                                "
-"  bingo.tasks · tasks                                                           "
-"  id  status       subject         owner                                        "
-"  ─────────────────────────────────────────                                     "
-"   1  pending      write the plan  –                                            "
-"   2  in_progress  ship it         reviewer                                     "
-"                                                                                "
-"                                                                                "
 "                                                                                "
 "                                                                                "
 "                                                                                "
@@ -24,6 +12,18 @@ expression: screen
 "                                                                                "
 "                                                                                "
 "╭──────────────────────────────────────────────────────────────────────────────╮"
-"│ #design > post to the room                                                   │"
+"│ ✻ Welcome to bingo!                                                          │"
+"│                                                                              │"
+"│   /help for help · /login codex to use a subscription                        │"
+"│   cwd: /tmp/project                                                          │"
 "╰──────────────────────────────────────────────────────────────────────────────╯"
-"? for shortcuts                                                       in #design"
+"                                                                                "
+"⏺ reviewer in #design: the plan is thin on tests                                "
+"                                                                                "
+"⏺ scout: Two nits, else fine.                                                   "
+"                                                                                "
+"                                                                                "
+"╭──────────────────────────────────────────────────────────────────────────────╮"
+"│ > ask anything · / for commands · ! for shell                                │"
+"╰──────────────────────────────────────────────────────────────────────────────╯"
+"? for shortcuts                                                           fake-1"

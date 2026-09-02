@@ -18,6 +18,8 @@ use crate::ui::{Open, Switcher, Ui};
 
 /// Where the colour lands on these same scenes (§4).
 mod colours;
+/// The screens a team is read through (§3 "Teams").
+mod teams;
 /// What a list a cursor walks draws when it outgrows its room (§3).
 mod windows;
 
@@ -460,22 +462,6 @@ fn a_skill_command() {
     ]);
     let (ui, now) = scene();
     both("skill_command", &solo(&state), &ui, now);
-}
-
-#[test]
-fn a_room_transcript() {
-    let tree = room_tree(vec![
-        posted(2, "itm_1", "reviewer", "the plan is thin on tests"),
-        posted(3, "itm_2", "scout", "M9's exit criteria cover them"),
-        log_frame(
-            4,
-            Event::ItemCompleted {
-                item: user("itm_3", "then let us ship it"),
-            },
-        ),
-    ]);
-    let (ui, now) = scene();
-    both("room_transcript", &tree, &ui, now);
 }
 
 #[test]

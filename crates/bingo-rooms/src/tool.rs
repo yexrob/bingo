@@ -8,8 +8,8 @@ use std::path::Path;
 
 use async_trait::async_trait;
 use bingo_sdk::{
-    ErrorCode, HostHandle, KernelError, SessionFilter, SessionId, SessionSummary, Subject, Tool,
-    ToolContext, ToolError, ToolOutput, ToolSpec, input_schema,
+    ErrorCode, HostHandle, KernelError, SessionFilter, SessionId, SessionSummary, Subject, Tone,
+    Tool, ToolContext, ToolError, ToolOutput, ToolSpec, TreeNode, View, input_schema,
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -83,6 +83,19 @@ fn card(name: &str, placement: Placement, seats: &[Seat]) -> String {
     )
 }
 
+/// The room the call left, as a person reads it (ADR-0013, the block lane):
+/// the room, and the seats it now has under it.
+fn seated(title: &str, seats: &[Seat]) -> View {
+    View::Tree {
+        nodes: vec![TreeNode {
+            label: title.to_string(),
+            badge: None,
+            tone: Tone::Neutral,
+            children: ear::nodes(seats),
+        }],
+    }
+}
+
 /// Opening a room in a tree: the session it hangs under is the audience, so
 /// this tool's traits are the fail-closed defaults and its card says where.
 #[derive(Debug, Default, Clone, Copy)]
@@ -117,7 +130,10 @@ impl Tool for OpenRoomTool {
         seat::seat(&cx.host, &parent, &cx.cwd, name, &seats)
             .await
             .map_err(refused)?;
-        Ok(ToolOutput::text(seat::receipt(&name::title(name), &seats)))
+        let title = name::title(name);
+        let mut out = ToolOutput::text(seat::receipt(&title, &seats));
+        out.display = Some(seated(&title, &seats));
+        Ok(out)
     }
 }
 
@@ -165,6 +181,15 @@ mod tests {
         input: Value,
     ) -> Result<ToolOutput, ToolError> {
         OpenRoomTool.call(input, &tool_context(caller, fleet)).await
+    }
+
+    fn node(label: &str, badge: Option<&str>, children: Vec<TreeNode>) -> TreeNode {
+        TreeNode {
+            label: label.into(),
+            badge: badge.map(str::to_string),
+            tone: Tone::Neutral,
+            children,
+        }
     }
 
     /// The room the call left, read back as any client reads one.
@@ -317,10 +342,57 @@ mod tests {
             .await
             .expect("a room a caller may fill later");
         assert_eq!(out.parts[0].as_text(), Some("#design: nobody yet"));
+        assert_eq!(
+            out.display,
+            Some(View::Tree {
+                nodes: vec![node(
+                    "#design",
+                    None,
+                    vec![node("nobody yet", None, vec![])]
+                )]
+            }),
+            "an empty roster says so in the block as it does in the words"
+        );
         assert!(
             fleet
                 .members(&fleet.titled("#design").expect("the room"))
                 .is_empty()
+        );
+    }
+
+    /// The block lane (ADR-0013 §2): the seats the call took, asserted as the
+    /// value a surface draws.
+    #[tokio::test]
+    async fn the_block_draws_the_room_and_the_seats_it_took() {
+        let (fleet, _, reviewer, _) = tree();
+        let out = opened(
+            &fleet,
+            &reviewer,
+            json!({
+                "name": "design",
+                "members": ["helper", "scout"],
+                "listeners": [{"name": "watcher", "patience_s": 120}],
+            }),
+        )
+        .await
+        .expect("a room with a listening seat in it");
+        assert_eq!(
+            out.display,
+            Some(View::Tree {
+                nodes: vec![node(
+                    "#design",
+                    None,
+                    vec![
+                        node("helper", None, vec![]),
+                        node("scout", None, vec![]),
+                        node(
+                            "listening",
+                            None,
+                            vec![node("watcher", Some("120s"), vec![])]
+                        ),
+                    ]
+                )]
+            })
         );
     }
 
