@@ -68,7 +68,7 @@ pub(crate) fn receipt(title: &str, seats: &[Seat]) -> String {
 /// on the ones that listen rather than answer.
 pub(crate) fn roster(seats: &[Seat]) -> String {
     match seats.is_empty() {
-        true => "nobody yet".to_string(),
+        true => ear::NOBODY.to_string(),
         false => seats
             .iter()
             .map(Seat::said)

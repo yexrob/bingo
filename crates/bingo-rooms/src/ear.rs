@@ -12,7 +12,7 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use bingo_sdk::{ErrorCode, KernelError, SessionState};
+use bingo_sdk::{ErrorCode, KernelError, SessionState, Tone, TreeNode};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -156,6 +156,57 @@ fn patience(seconds: &str) -> Result<u64, KernelError> {
             format!("{seconds:?} is not a patience: `~name` takes the default, `~name:120` waits that many seconds"),
         )
     })
+}
+
+/// What a room nobody is in reads as, wherever a roster is read back.
+pub const NOBODY: &str = "nobody yet";
+
+/// What the seats that listen rather than answer are gathered under.
+const LISTENING: &str = "listening";
+
+/// The roster as a person reads it (ADR-0013): a node per live seat, and the
+/// ones that listen under a node of their own, each badged with the patience
+/// it asked for. The ear is the whole of the difference between the two, so
+/// the tree is drawn here — and drawn once, for the block a door answers with
+/// and for the roster the room publishes alike.
+pub fn nodes(seats: &[Seat]) -> Vec<TreeNode> {
+    if seats.is_empty() {
+        return vec![leaf(NOBODY, None)];
+    }
+    let (listening, live): (Vec<&Seat>, Vec<&Seat>) =
+        seats.iter().partition(|seat| !seat.ear.is_live());
+    let mut nodes: Vec<TreeNode> = live.iter().map(|seat| leaf(&seat.name, None)).collect();
+    if !listening.is_empty() {
+        nodes.push(TreeNode {
+            label: LISTENING.into(),
+            badge: None,
+            tone: Tone::Neutral,
+            children: listening
+                .iter()
+                .map(|seat| leaf(&seat.name, waits(seat.ear)))
+                .collect(),
+        });
+    }
+    nodes
+}
+
+/// One seat as a node. A roster wants nobody, so no seat wears a tone that
+/// asks for anyone (ADR-0013 §1).
+fn leaf(label: &str, badge: Option<String>) -> TreeNode {
+    TreeNode {
+        label: label.to_string(),
+        badge,
+        tone: Tone::Neutral,
+        children: Vec::new(),
+    }
+}
+
+/// What a listening seat's badge says: how long a post waits for it.
+fn waits(ear: Ear) -> Option<String> {
+    match ear {
+        Ear::Live => None,
+        Ear::Patient(patience) => Some(format!("{}s", patience.as_secs())),
+    }
 }
 
 /// A listener as the structured doors declare one: a name, or a name and the
