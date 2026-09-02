@@ -121,8 +121,13 @@ async fn a_post_in_a_room_wakes_its_member_and_is_not_fanned_back() {
     assert_eq!(after.snapshot.summary.driver, Driver::Log);
     assert_eq!(
         after.snapshot.extensions["bingo.rooms"]["members"],
-        serde_json::json!({ "members": ["reviewer"] }),
-        "the membership lives in the room's own journal"
+        serde_json::json!({
+            "members": ["reviewer"],
+            "kind": "tree",
+            "nodes": [{"label": "reviewer", "tone": "neutral"}],
+        }),
+        "the membership lives in the room's own journal, wearing the tree a \
+         surface draws it as (ADR-0013 §2)"
     );
     let posts = after
         .snapshot

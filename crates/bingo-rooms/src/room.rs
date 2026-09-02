@@ -4,7 +4,7 @@
 //! nothing here keeps a copy of either beside them.
 
 use bingo_sdk::{
-    Driver, HostHandle, OpenOptions, SessionId, SessionSelector, SessionState, SessionSummary,
+    Driver, HostHandle, OpenOptions, SessionId, SessionSelector, SessionState, SessionSummary, View,
 };
 use serde_json::{Value, json};
 
@@ -115,14 +115,33 @@ pub fn roster_of(state: &SessionState) -> Vec<Seat> {
 }
 
 /// A membership as it is published: the whole of it, under one key. A roster
-/// of live seats is written exactly as it was before there were ears.
+/// of live seats keeps the names it was written with before there were ears,
+/// and wears the tree it is drawn as (ADR-0013 §2) in the same payload.
 pub fn payload(seats: &[Seat]) -> Value {
     let names: Vec<&str> = seats.iter().map(|seat| seat.name.as_str()).collect();
-    let mut payload = json!({ MEMBERS: names });
+    let mut payload = drawn(seats);
+    payload[MEMBERS] = json!(names);
     if let Some(listeners) = ear::listeners_of(seats) {
         payload[LISTENERS] = listeners;
     }
     payload
+}
+
+/// The roster in the vocabulary every surface already draws, so `ctrl+t` and
+/// a rail card get a tree rather than the raw object. It rides in the same
+/// payload as the names, minted here from the same seats: there is one way to
+/// write a roster and it cannot write half of one.
+///
+/// It is the roster *as declared*. A seat that has retuned its own ear since
+/// publishes that under its own `ear:` kind (ADR-0029 §4) — folding it back
+/// in would mean rewriting the roster on every retune, which is the race that
+/// register was split out to avoid — so what delivery hears is
+/// [`ear::ears_of`], and this tree is what the room was seated with.
+fn drawn(seats: &[Seat]) -> Value {
+    let view = View::Tree {
+        nodes: ear::nodes(seats),
+    };
+    serde_json::to_value(view).unwrap_or_default()
 }
 
 /// A session as this plugin reads one: its own journal, folded. A session it
@@ -211,13 +230,18 @@ mod tests {
         }
     }
 
-    /// A room of live seats is written the way it always was; a patient one
-    /// says so beside the names, and never instead of them.
+    /// The whole of what a room's journal is handed, asserted as one value:
+    /// the names a reader parses, the listeners' patience beside them and
+    /// never instead of them, and the tree a surface draws (ADR-0013 §2).
     #[test]
-    fn the_payload_names_the_listeners_only_when_a_seat_is_one() {
+    fn the_payload_carries_the_names_the_listeners_and_the_tree_it_draws_as() {
         assert_eq!(
             payload(&[Seat::live("scout")]),
-            json!({ "members": ["scout"] })
+            json!({
+                "members": ["scout"],
+                "kind": "tree",
+                "nodes": [{"label": "scout", "tone": "neutral"}],
+            })
         );
         let listening = [
             Seat::live("scout"),
@@ -231,7 +255,30 @@ mod tests {
             json!({
                 "members": ["scout", "parent"],
                 "listeners": [{"name": "parent", "patience_s": 120}],
+                "kind": "tree",
+                "nodes": [
+                    {"label": "scout", "tone": "neutral"},
+                    {"label": "listening", "tone": "neutral", "children": [
+                        {"label": "parent", "badge": "120s", "tone": "neutral"},
+                    ]},
+                ],
             })
         );
+        assert_eq!(
+            payload(&[])["nodes"],
+            json!([{"label": "nobody yet", "tone": "neutral"}]),
+            "a room nobody is in says so where a person looks"
+        );
+    }
+
+    /// The tree rides beside the names, so a client that reads either sees the
+    /// same roster and neither has to know about the other.
+    #[test]
+    fn the_payload_is_both_a_membership_and_a_view() {
+        let seats = [Seat::live("reviewer"), Seat::live("scout")];
+        let payload = payload(&seats);
+        assert_eq!(members_from(&payload), ["reviewer", "scout"]);
+        let view: View = serde_json::from_value(payload).expect("a view a surface can draw");
+        assert_eq!(view.fold(), "reviewer\nscout");
     }
 }

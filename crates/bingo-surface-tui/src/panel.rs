@@ -287,24 +287,28 @@ mod tests {
 
     #[test]
     fn every_plugin_and_kind_is_a_row_of_its_own() {
+        let roster = json!({
+            "members": ["scout"],
+            "kind": "tree",
+            "nodes": [{"label": "scout", "tone": "neutral"}],
+        });
         let state = folded(vec![
             frame(1, extended("bingo.tasks", "tasks", json!([{"id": 1}]))),
-            frame(
-                2,
-                extended("bingo.rooms", "members", json!({"members": ["scout"]})),
-            ),
+            frame(2, extended("bingo.rooms", "members", roster)),
         ]);
         assert_eq!(
             sheet(&state),
             vec![
                 "❯ bingo.rooms · members".to_string(),
-                r#"  members: ["scout"]"#.to_string(),
+                "  └─ scout".to_string(),
                 String::new(),
                 "  bingo.tasks · tasks".to_string(),
                 "  id".to_string(),
                 "  ──".to_string(),
                 "   1".to_string(),
-            ]
+            ],
+            "a payload that parses as a view is drawn as one, whatever else \
+             the plugin put in it"
         );
     }
 
