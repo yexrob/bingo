@@ -93,3 +93,93 @@ carries none worth trusting.
   rebase before the merge.
 - A provider whose `models()` blocks on a slow endpoint holds only
   its own background task; the timeout is the provider's client's.
+
+## Verified
+
+2026-09-02, worker F, worktree branch `worktree-agent-aa41b5e66954af54a`.
+
+- [x] With a provider declaring `["deepseek-v4-pro","glm-5"]`,
+  `catalog(Models)` lists both with `source: endpoint` after the first
+  refresh, and only the snapshot's shelf before it —
+  `host::tests::models::what_the_endpoint_answers_replaces_the_shelf_it_was_filed_under`,
+  and the background one lands on its own in
+  `…::the_list_arrives_on_its_own_after_the_host_is_up`.
+- [x] A cache file written by one process is what the next answers with
+  before any fetch —
+  `…::a_list_one_process_cached_is_what_the_next_one_answers_with`.
+- [x] A failing `models()` keeps the old cache and the failure is named —
+  `…::an_endpoint_that_cannot_be_asked_keeps_the_list_it_gave`
+  (`tracing::warn` at `host/refresh.rs`).
+- [x] The facts of a proxied or dated id are found under the family, then
+  the id — `models::catalog::tests::an_instance_reads_its_family_s_shelf_then_its_own_name_s`
+  and `host::tests::models::a_named_instance_reads_its_family_s_shelf_then_the_id_s_own`,
+  which pins `reasoning` true for `deepseek-v4-pro` behind an
+  `openai`-family instance. `/think`'s own wording is M34-B's.
+- [x] `/models refresh` answers with a count per provider and the
+  catalogue then says `from the endpoint` —
+  `cli::models::the_models_command_lists_the_catalogue_and_refreshes_on_demand`;
+  a `CatalogChanged` reaches a client
+  (`host::tests::models::a_changed_list_is_announced_and_an_unchanged_one_is_not`)
+  and the TUI's `/model` completions follow it
+  (`run::tests::the_completions_follow_a_catalogue_the_host_rebuilt`).
+- [x] Every gate. No new dependency.
+
+```
+$ cargo fmt --all -- --check
+fmt clean
+
+$ cargo clippy --workspace --all-targets --locked -- -D warnings
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.76s   (exit 0)
+
+$ cargo test -p bingo-core --locked
+test result: ok. 228 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+
+$ cargo test -p bingo-surface-tui --locked
+test result: ok. 489 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+
+$ cargo test -p bingo --locked
+tests/cli/main.rs   ok. 137 passed; 0 failed
+tests/rpc.rs        ok.  13 passed; 0 failed
+tests/pty.rs        ok.   2 passed; 0 failed
+(channels 7, instances 1, login 1, plugin_rpc 4, rooms 2, views 3, unit 57 — all ok)
+
+$ scripts/check_discipline.sh
+dependency direction ok · kernel names no tool · cohesion ok · discipline ok
+
+$ scripts/budget.sh
+dependencies (unique, normal): 302 (max 302)
+warm cargo check -p bingo-core: 0s (max 20s)
+relink isolation: touching the TUI recompiled 0 crates for core (must be 0)
+budget ok
+
+$ cargo check -p bingo-core --all-targets --locked --target x86_64-pc-windows-msvc
+$ cargo check -p bingo-surface-tui --all-targets --locked --target x86_64-pc-windows-msvc
+    Finished `dev` profile   (exit 0, both: the cache writes through std fs alone)
+```
+
+Where the plan did not survive contact:
+
+- **One file, not one per provider.** `data_dir/served-models.json` holds a
+  map keyed by provider id, as `learned-windows.json` does. A provider id is
+  a name out of a settings file, and `data_dir/models/<id>.json` is a path a
+  settings file could steer.
+- **The announcement is the gateway's, not a session's.**
+  `GatewayEvent::CatalogChanged{Models}`, which nothing published before and
+  which `docs/design/gateway-and-surfaces.md` already names, rather than
+  `Event::CatalogChanged` on every open session: a catalogue is the host's
+  fact, the session event is durable and would land in every transcript's
+  journal, and a refresh that finishes before the first session opens would
+  otherwise reach nobody. The TUI reads `gateway_events()` beside its frame
+  stream.
+- **`meta.source` has three values**, not two: `endpoint`, `catalogue`, and
+  `configured` for an id only the settings name. Two would have made the
+  third a lie.
+- **`ModelCatalog::lookup` already fell back across providers** (ADR-0004 §3,
+  exact id anywhere), so brick 2's miss was elsewhere: `resolve_model` looked
+  under the *instance name* rather than the family, so a named instance got
+  no facts for its own family's dated ids. The ladder now lives in
+  `ModelCatalog::facts_for`.
+- **A black-box run no longer inherits `ANTHROPIC_API_KEY`/`OPENAI_API_KEY`**
+  (`crates/bingo/tests/cli/main.rs`): every `Host::build` now asks the
+  endpoints it can sign in to, and a suite must not reach the network because
+  whoever ran it has a key exported.
