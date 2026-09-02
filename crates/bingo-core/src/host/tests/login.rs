@@ -90,6 +90,85 @@ async fn host_with_signing() -> Arc<Host> {
     Host::build(plugins, config).await.unwrap()
 }
 
+static ASKING: PluginManifest = PluginManifest {
+    id: "test.asking",
+    version: "0",
+    sdk: "^0.1",
+    provides: &["provider:asking"],
+    requires: &[],
+    config: None,
+};
+
+/// A provider that asks a person mid-turn, the way an ACP adapter relays
+/// `session/request_permission` (ADR-0035 §5): it reads the session off the
+/// request the host built for it and asks through the sdk's own door.
+struct Asking {
+    host: std::sync::OnceLock<HostHandle>,
+    stamped: Mutex<Option<SessionId>>,
+}
+
+impl Asking {
+    /// The session the host wrote on the request it streamed, if any.
+    fn stamped(&self) -> Option<SessionId> {
+        self.stamped.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl Provider for Asking {
+    fn id(&self) -> &str {
+        "asking"
+    }
+
+    fn endpoint(&self, _model: &str) -> EndpointCapabilities {
+        EndpointCapabilities::default()
+    }
+
+    async fn stream(
+        &self,
+        request: ModelRequest,
+        _cancel: CancellationToken,
+    ) -> Result<ModelStream, ProviderError> {
+        *self.stamped.lock().unwrap() = request.session.clone();
+        let failed = |message: String| ProviderError::Request { message };
+        let session = request
+            .session
+            .ok_or_else(|| failed("the request names no session".into()))?;
+        let host = self.host.get().expect("the host arrived before the turn");
+        let prompter = host.prompter(&session).map_err(|e| failed(e.message))?;
+        let answer = prompter
+            .ask(
+                InteractionKind::Confirm {
+                    title: "the agent asks".into(),
+                    detail: "Edit src/lib.rs".into(),
+                },
+                vec![AnswerSpec::Confirm, AnswerSpec::Cancel],
+            )
+            .await
+            .map_err(|e| failed(e.message))?;
+        let said = match answer {
+            Answer::Confirm => "Confirm",
+            _ => "Cancel",
+        };
+        Ok(Box::pin(futures::stream::iter(text(said))))
+    }
+}
+
+async fn host_that_asks() -> (Arc<Host>, Arc<Asking>) {
+    let provider = Arc::new(Asking {
+        host: std::sync::OnceLock::new(),
+        stamped: Mutex::new(None),
+    });
+    let plugins = vec![TestPlugin::boxed(
+        &ASKING,
+        vec![Contribution::Provider(provider.clone())],
+    )];
+    let config = HostConfig::new(env()).with_layer("cli", json!({ "model": "m" }));
+    let host = Host::build(plugins, config).await.unwrap();
+    let _ = provider.host.set(HostHandle(host.clone()));
+    (host, provider)
+}
+
 /// Submit a line and fold frames until its ack, answering the one
 /// interaction it opens with `answer`; returns the ack and what came before.
 async fn ack_answering(
@@ -281,48 +360,57 @@ async fn login_names_a_registered_provider_and_logout_answers_a_receipt() {
 
 /// ADR-0035 §5: the same door, now reachable through the sdk. A provider that
 /// must ask a person while it streams — an ACP adapter relaying
-/// `session/request_permission` — names the session its request was built for
-/// and asks on that session's own dialog.
+/// `session/request_permission` — reads the session off its own request and
+/// asks on that session's dialog, under the turn it is answering.
 #[tokio::test]
-async fn the_sdk_reaches_the_same_prompter_a_login_is_handed() {
-    let host = host_with_signing().await;
+async fn a_provider_asks_the_person_through_the_session_on_its_request() {
+    let (host, provider) = host_that_asks().await;
     let mut client = Client::open(&host).await;
-    let session = client.state.summary.id.clone();
-    let api: &dyn HostApi = host.as_ref();
-    let asking = api
-        .prompter(&session)
-        .expect("a live session has a way of asking");
+    client
+        .handle
+        .submit(IntentId::mint(), Input::text("go", Origin::surface("test")));
 
-    let question = tokio::spawn(async move {
-        asking
-            .ask(
-                InteractionKind::Confirm {
-                    title: "claude asks".into(),
-                    detail: "Edit src/lib.rs".into(),
-                },
-                vec![AnswerSpec::Confirm, AnswerSpec::Cancel],
-            )
-            .await
-    });
-
+    let mut asked = None;
     while let Some(frame) = client.events.next().await {
         client.state.apply(&frame);
-        if let Event::InteractionOpened { interaction } = &frame.event {
-            client.handle.answer(
-                IntentId::mint(),
-                interaction.id.clone(),
-                Answer::Confirm,
-                Activation::Programmatic,
-            );
-            break;
+        match &frame.event {
+            Event::InteractionOpened { interaction } => {
+                asked = Some(interaction.clone());
+                client.handle.answer(
+                    IntentId::mint(),
+                    interaction.id.clone(),
+                    Answer::Confirm,
+                    Activation::Programmatic,
+                );
+            }
+            Event::TurnCompleted { .. } => break,
+            _ => {}
         }
     }
-    let answered = tokio::time::timeout(Duration::from_secs(10), question)
-        .await
-        .expect("the question is answered")
-        .expect("the task finishes")
-        .expect("an answer");
-    assert_eq!(answered, Answer::Confirm);
+
+    let asked = asked.expect("the provider asked the person");
+    assert!(
+        matches!(&asked.kind, InteractionKind::Confirm { title, .. } if title == "the agent asks"),
+        "{asked:?}"
+    );
+    assert!(
+        asked.turn.is_some(),
+        "a provider's question is asked under the turn it is answering"
+    );
+    assert_eq!(
+        provider.stamped(),
+        Some(client.state.summary.id.clone()),
+        "the request names the session the host built it for"
+    );
+    assert!(
+        client
+            .state
+            .items
+            .iter()
+            .any(|item| matches!(&item.body, ItemBody::Assistant { text } if text == "Confirm")),
+        "the answer reached the provider: {:?}",
+        client.state.items
+    );
 }
 
 /// A session nobody is running cannot be asked anything, and says so rather
