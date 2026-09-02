@@ -29,6 +29,7 @@ pub(super) fn in_background(host: &Arc<Host>) {
         let Some(host) = weak.upgrade() else { return };
         let now = Timestamp::now();
         let stale: Vec<Arc<dyn Provider>> = usable(&host.providers().await)
+            .into_iter()
             .filter(|p| host.served.stale(p.id(), now))
             .collect();
         let weak = Arc::downgrade(&host);
@@ -43,7 +44,7 @@ pub(super) fn in_background(host: &Arc<Host>) {
 /// Ask every usable provider now, however fresh its list is, and say what each
 /// answered: `/models refresh`, which waits because a person asked it to.
 pub(super) async fn now(host: &Arc<Host>) -> Vec<Refreshed> {
-    let providers: Vec<Arc<dyn Provider>> = usable(&host.providers().await).collect();
+    let providers = usable(&host.providers().await);
     let weak = Arc::downgrade(host);
     futures::future::join_all(
         providers
@@ -55,13 +56,12 @@ pub(super) async fn now(host: &Arc<Host>) -> Vec<Refreshed> {
 
 /// A provider with no usable credentials is not asked: an endpoint answers a
 /// listing with the same 401 it answers a turn with.
-fn usable(providers: &[Arc<dyn Provider>]) -> impl Iterator<Item = Arc<dyn Provider>> {
+fn usable(providers: &[Arc<dyn Provider>]) -> Vec<Arc<dyn Provider>> {
     providers
         .iter()
         .filter(|p| super::check_auth(p.as_ref()).is_ok())
         .cloned()
-        .collect::<Vec<_>>()
-        .into_iter()
+        .collect()
 }
 
 /// One provider's list, kept if it came and announced if it changed. A failure
