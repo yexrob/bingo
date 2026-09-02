@@ -296,3 +296,26 @@ fn the_roster_with_the_cursor_in_the_rooms_column() {
     assert!(screen.contains("❯ #design"), "{screen}");
     insta::assert_snapshot!("roster_in_the_rooms", screen);
 }
+
+/// One list, two doors (§3): `↓` on an empty composer and `ctrl+g` open the
+/// same thing, so the two screens are the same screen — not two renderers that
+/// happen to agree today.
+#[test]
+fn the_two_doors_open_byte_identical_lists() {
+    let tree = a_team();
+    let (mut down, now) = scene();
+    let (mut chord, _) = scene();
+    crate::input::on_key(&mut down, &tree, key(crossterm::event::KeyCode::Down), now);
+    crate::input::on_key(&mut chord, &tree, ctrl('g'), now);
+    for (width, height) in [(80u16, 24u16), (120, 40)] {
+        assert_eq!(
+            draw_tree(width, height, &tree, &down, now),
+            draw_tree(width, height, &tree, &chord, now),
+            "at {width}x{height}"
+        );
+    }
+    assert!(
+        draw_tree(80, 24, &tree, &down, now).contains("❯ ⏺ project"),
+        "and it is the list that both of them opened"
+    );
+}
