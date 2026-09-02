@@ -11,7 +11,9 @@ pub mod error;
 pub mod events;
 #[cfg(test)]
 pub(crate) mod fixtures;
+pub mod ladder;
 pub mod method;
+pub mod prompter;
 pub mod render;
 pub mod transcript;
 pub mod wire;
