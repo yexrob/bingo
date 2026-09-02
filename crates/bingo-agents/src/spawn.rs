@@ -65,10 +65,9 @@ pub struct SpawnArgs {
     /// to wait for its reply as the result of this call.
     pub background: Option<bool>,
     /// Seat it silent: the prompt is its standing brief, kept unread, and it
-    /// runs no turn until something wakes it — a post that names it in a room
-    /// it is in, or
-    /// a message. Nothing here is told when it finishes. Use it for the
-    /// members of a room, so one kickoff post starts all of them at once.
+    /// runs no turn until something wakes it — a post naming it in a room it
+    /// is in, or a message. Nothing here is told when it finishes. Use it for
+    /// the members of a room, so one kickoff post starts everyone it names.
     pub standby: Option<bool>,
     /// The model the sub-agent runs on; this session's by default. Call
     /// `ListModels` to see what is available instead of guessing an id.

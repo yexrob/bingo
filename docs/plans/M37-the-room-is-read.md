@@ -65,17 +65,18 @@ input,pointer,keys}.rs` + snapshots; `docs/adr/{0025,0028,0029}.md`;
 
 ## Exit criteria
 
-- [ ] A member's journal after ten room posts holds no `User { origin:
+- [x] A member's journal after ten room posts holds no `User { origin:
   room }` item; the same member's next request carries the ten posts
   under one `[#design, since you last read]` label.
-- [ ] Four patient members and one poster: one turn each per patience,
+- [x] Four patient members and one poster: one turn each per patience,
   none before; an `@` wakes at once.
-- [ ] The relay black-box (`peers.rs`) passes with its assertions
-  unchanged; the bounce still says what was missed.
-- [ ] A resumed member (`--continue`) reads only what its cursor left.
+- [x] The relay black-box (`peers.rs`) passes with its assertions
+  unchanged; the bounce still says what was missed. †
+- [x] A resumed member (`--continue`) reads only what its cursor left.
 - [ ] `roster_80x24`: `Agents` / `Rooms` labels, one column, cursor
   visible past the room's end; `unread` on a lagging member's row.
-- [ ] Every gate in AGENTS.md; no new dependency.
+- [x] Every gate in AGENTS.md; no new dependency. (Bricks 1–6; brick 7
+  and its `roster_80x24` criterion belong to the surface worker.)
 
 ## Non-goals
 
@@ -90,3 +91,59 @@ posts in a surface — there is nothing to hide.
 - `bingo-experience` recall no longer sees copied posts; recorded.
 - Old journals with copied posts: replay is untouched; the cursor line
   at seating keeps a resumed member from re-reading history.
+
+## Verified — bricks 1–6 (rooms), 2026-09-03
+
+Gates, in the worktree: `cargo fmt --all -- --check` clean; `cargo
+clippy --workspace --all-targets --locked -- -D warnings` finished with
+no diagnostic; `cargo test --workspace --locked` every target `ok`, `0
+failed` (`bingo-rooms` 156, `bingo-agents` 136, `bingo --test cli` 138,
+`bingo --test rooms` 2); `scripts/check_discipline.sh` → `dependency
+direction ok` / `cohesion ok` / `discipline ok`; `scripts/budget.sh` →
+`budget ok`, `dependencies (unique, normal): 302 (max 302)` — nothing
+added.
+
+Criteria: no copy and one label —
+`reader::ten_posts_are_read_as_one_piece_under_one_label`, plus
+`peers::a_post_reaches_each_member_exactly_once` and
+`tests/rooms.rs::a_post_in_a_room_wakes_its_member_and_is_not_fanned_back`,
+which each assert the member's journal holds the reading and no copy.
+Storm bound —
+`deadline::four_patient_members_and_one_poster_cost_one_wake_each_per_patience`
+(nothing at 119 s, four wakes at 120 s, none in the next 600 s, `@alpha`
+at once). Resumed —
+`rooms::a_resumed_member_reads_only_what_its_cursor_left`.
+
+† The relay's own assertions are unchanged — one post per round to
+`count 3`, the parent dispatching none — and the bounce test is
+untouched. But two assertions that read a member's journal for a *copy*
+of a post had to change, because §1 is that there is no copy:
+`fanned_out` became `readings` (filtering `contributor:rooms`), and the
+per-member check finds `parent: start the count` inside the reading.
+`ONE_POST` and `RELAY` also declare `patience_s: 0` seats, since a relay
+on unnamed posts cannot run on patient ears.
+
+Decided beyond the plan:
+
+- **The cursor lives in the room's journal, keyed by member**
+  (`cursor:<member>`), not on the member's session keyed by room. The
+  latter is wrong: reading a member's session is `host.open` plus a
+  dropped attachment, which makes the reader its last client and closes
+  an idle seat, losing the wake just sent — it regressed
+  `mentions::a_question_left_unanswered_is_chased_...`. ADR-0034 §2
+  amended in place. `cursors_of` was not built; `Unread::of(room,
+  member)` is the brick.
+- **A reseat moves no cursor** — only names the room was not already
+  seating start at its head — or every restart would sweep away every
+  backlog. Cost: the first run after this change reads each room's
+  history once. In ADR-0034's consequences.
+- **The `~` sigil is gone**, not re-defaulted: it meant "patient",
+  which is what a bare name means now. ADR-0029 §2 amended.
+- `tests/rooms.rs` was outside the plan's file list but had to be
+  re-aimed: it seated `reviewer` bare and asserted the copied post.
+
+Not done here: brick 7 (`bingo-surface-tui`), untouched — and its
+`seats.rs::declared()` still falls back to `Ear::Live` for a seat with
+no `listeners` entry, which is the reversed default and now wrong.
+Flagged for the surface worker. No Windows cross-check: nothing here
+touches a process, path, signal or clock.

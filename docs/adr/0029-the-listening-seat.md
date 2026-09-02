@@ -35,6 +35,14 @@ turn boundary already coalesces and a queue already holds.
    a flat array read from an old journal is all-live. `patience_s`
    stores what was asked — absent means default, applied by one reader,
    so the constant lives in one place: the chaser's own 300 s.
+   (Amended 2026-09-03, ADR-0034 §6: the `~` sigil is gone. It meant
+   "patient", which is what a bare name means now, so it had nothing
+   left to say; patience is one number, and `name:120` / `name:0` is the
+   whole of the syntax. A `~name` left in an old roster is not a
+   patience — it is a member name nobody holds, kept and skipped, as any
+   unheld name is. And a roster read from an old journal is now
+   all-*patient* where this said all-live: the absence of `listeners`
+   means the default, and the default is the thing that changed.)
 3. **The patience deadline.** Held mail whose origin surface is
    `room` — only that; a standby brief (surface `agent`) must never
    trip this, or ADR-0027's zero-cost seat dies — older than the
