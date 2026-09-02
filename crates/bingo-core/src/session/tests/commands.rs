@@ -182,9 +182,40 @@ async fn a_prompt_outcome_opens_a_turn_with_the_commands_own_intent() {
     ));
     let user = &state.items[0];
     assert_eq!(user.intent.as_ref(), Some(&intent));
-    assert!(
-        matches!(&user.body, ItemBody::User { parts, origin } if parts[0].as_text() == Some("say hi") && origin.surface == "test")
+    let ItemBody::User { parts, origin } = &user.body else {
+        panic!("a prompt is journaled as a user item");
+    };
+    assert_eq!(
+        parts[0].as_text(),
+        Some("/greet\n\nsay hi"),
+        "the line that asked for the prompt leads it"
     );
+    assert_eq!(
+        origin.surface, "command",
+        "the command spoke, not the surface it was typed on"
+    );
+}
+
+/// The prompt is the command's, so it names nothing: a session that opened
+/// with `/greet` waits for a person to say something before it has a name.
+#[tokio::test]
+async fn a_prompt_outcome_does_not_name_the_session() {
+    let provider = ScriptedProvider::new(vec![Script::Events(text("hi back"))]);
+    let greet = ScriptedCommand::new(
+        "greet",
+        true,
+        Ok(CommandOutcome::Prompt {
+            text: "say hi to everyone here".into(),
+        }),
+    );
+    let mailbox = with_commands(provider, vec![greet]);
+    let (mut state, mut events) = mailbox.attach().await.unwrap();
+    mailbox.submit(
+        IntentId::mint(),
+        Input::text("/greet", Origin::surface("test")),
+    );
+    collect(&mut events, &mut state, turn_completed).await;
+    assert_eq!(state.summary.title, None);
 }
 
 #[tokio::test]

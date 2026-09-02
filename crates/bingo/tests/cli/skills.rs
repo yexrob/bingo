@@ -26,17 +26,34 @@ fn a_project_skill_is_a_command_whose_body_becomes_the_prompt() {
         .lines()
         .map(|line| serde_json::from_str(line).unwrap())
         .collect();
-    let prompt = frames.iter().find_map(|f| match &f.event {
+    let asked = frames.iter().find_map(|f| match &f.event {
         Event::ItemCompleted { item } => match &item.body {
-            bingo_sdk::ItemBody::User { parts, .. } => parts[0].as_text().map(str::to_owned),
+            bingo_sdk::ItemBody::User { parts, origin } => {
+                Some((parts[0].as_text()?.to_owned(), origin.clone()))
+            }
             _ => None,
         },
         _ => None,
     });
+    let (prompt, origin) = asked.expect("the command's prompt is journaled");
     assert_eq!(
-        prompt.as_deref(),
-        Some("Say hello to world, warmly.\n"),
-        "the skill's body, expanded, is what the model was asked"
+        origin.surface, "command",
+        "the command spoke, not the surface it was typed on"
+    );
+    let lines: Vec<&str> = prompt.lines().collect();
+    assert_eq!(
+        lines.first().copied(),
+        Some("/hello world"),
+        "the line that was typed leads the prompt: {lines:?}"
+    );
+    assert!(
+        lines[2].starts_with("Base directory for this skill: ") && lines[2].contains("hello"),
+        "the expansion says where the skill lives: {lines:?}"
+    );
+    assert_eq!(
+        lines.last().copied(),
+        Some("Say hello to world, warmly."),
+        "the skill's body, expanded, is what the model was asked: {lines:?}"
     );
     assert!(matches!(
         frames.last().map(|f| &f.event),

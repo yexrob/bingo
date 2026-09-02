@@ -197,9 +197,9 @@ pub fn user(id: &str, text: &str) -> Item {
     )
 }
 
-/// What a subsystem delivered into a session: a user item stamped with the
-/// surface that sent it, the way `bash`, `agent`, `room` and `schedule` do —
-/// and the way a surface nobody has called quiet does too.
+/// What a subsystem put into a session: a user item stamped with the surface
+/// that sent it, the way `bash`, `agent`, `room`, `schedule` and `command` do
+/// — and the way a surface nobody has called quiet does too.
 pub fn delivered(id: &str, surface: &str, principal: Option<&str>, text: &str) -> Item {
     item(
         id,

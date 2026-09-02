@@ -5,7 +5,9 @@
 //! session with — outlives it. Both halves are pure, so what a name comes out
 //! as is decided here and asserted here.
 
-use bingo_sdk::{ContentPart, Item, ItemBody};
+use bingo_sdk::{ContentPart, Item, ItemBody, Origin};
+
+use super::commands;
 
 /// How many characters of the ask a name keeps. Characters, not bytes: a cut
 /// that is not at a boundary is not a cut.
@@ -15,9 +17,16 @@ const LIMIT: usize = 48;
 /// only — an ask that carried nothing but an image names nothing.
 pub fn first_ask(items: &[Item]) -> Option<&str> {
     items.iter().find_map(|item| match &item.body {
-        ItemBody::User { parts, .. } => parts.iter().find_map(prose),
+        ItemBody::User { parts, origin } if !from_a_command(origin) => parts.iter().find_map(prose),
         _ => None,
     })
+}
+
+/// Whether a user item is a command's own prompt rather than something asked.
+/// `/guide` puts a whole skill body in the journal, and a session named after
+/// that page is named after nothing anyone said (ADR-0008 §3).
+fn from_a_command(origin: &Origin) -> bool {
+    origin.surface == commands::SURFACE
 }
 
 fn prose(part: &ContentPart) -> Option<&str> {
@@ -138,6 +147,23 @@ mod tests {
         assert_eq!(
             mint("把解析器修好。再看看测试"),
             Some("把解析器修好".into())
+        );
+    }
+
+    /// A skill's body is the command talking. It is a page long, it says
+    /// nothing about why the session exists, and the ask after it does.
+    #[test]
+    fn a_commands_own_prompt_names_nothing() {
+        let mut expansion = asked(vec![ContentPart::text(
+            "/guide\n\nRead this before answering questions about bingo.",
+        )]);
+        if let ItemBody::User { origin, .. } = &mut expansion.body {
+            origin.surface = "command".into();
+        }
+        assert_eq!(first_ask(&[expansion.clone()]), None);
+        assert_eq!(
+            first_ask(&[expansion, asked(vec![ContentPart::text("fix the parser")])]),
+            Some("fix the parser")
         );
     }
 

@@ -42,6 +42,13 @@
 //! left as written; a substituted value is never rescanned; and arguments no
 //! placeholder asked for are appended as `ARGUMENTS: <text>` rather than
 //! dropped.
+//!
+//! *The base directory.* The reference puts `Base directory for this skill:
+//! <path>` before every body it loads, which is why a skill written for it
+//! says `scripts/check.sh` and means the file beside its own `SKILL.md`.
+//! [`expand`] writes the same line, so such a skill works here unchanged and
+//! `${BINGO_SKILL_DIR}` stays for a body that wants the path in its own
+//! sentence. A bundled skill has no directory and gets no line.
 
 mod bundled;
 mod command;

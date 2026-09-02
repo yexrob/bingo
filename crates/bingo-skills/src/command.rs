@@ -117,8 +117,10 @@ mod tests {
         assert_eq!(
             run(&command, "staging").await,
             CommandOutcome::Prompt {
-                text: "Deploy staging now.\n".into()
-            }
+                text: "Base directory for this skill: /skills/deploy\n\nDeploy staging now.\n"
+                    .into()
+            },
+            "the command path expands like the tool path, base line and all"
         );
     }
 

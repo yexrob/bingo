@@ -111,13 +111,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_named_skill_comes_back_expanded() {
+    async fn a_named_skill_comes_back_expanded_under_its_own_directory() {
         let tree = Tree::new();
-        tree.user_skill("deploy", "---\ndescription: Ship\n---\nDeploy $1 now.\n");
+        let dir = tree.user_skill("deploy", "---\ndescription: Ship\n---\nDeploy $1 now.\n");
 
         let output = call(&tree, json!({"name": "deploy", "arguments": "staging"})).await;
         assert!(!output.is_error);
-        assert_eq!(text(&output), "Deploy staging now.\n");
+        assert_eq!(
+            text(&output),
+            format!(
+                "Base directory for this skill: {}\n\nDeploy staging now.\n",
+                dir.display()
+            ),
+            "a relative path in the body has something to be relative to"
+        );
     }
 
     #[tokio::test]
@@ -126,7 +133,11 @@ mod tests {
         tree.user_skill("deploy", "Deploy the build.\n");
 
         let output = call(&tree, json!({"name": "deploy"})).await;
-        assert_eq!(text(&output), "Deploy the build.\n");
+        assert!(
+            text(&output).ends_with("Deploy the build.\n"),
+            "{}",
+            text(&output)
+        );
     }
 
     #[tokio::test]
