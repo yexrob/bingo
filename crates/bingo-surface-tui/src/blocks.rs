@@ -51,14 +51,16 @@ fn revision(item: &Item, agent: Option<&SessionState>, expanded: bool) -> Revisi
     }
 }
 
-/// How much of the body is on the screen. A thought is not here: its row says
-/// `✻ Thinking…` for as long as it streams, whatever the deltas carry, and the
-/// text lands under it when the status turns — which [`Revision::status`]
-/// already answers for. Sizing it by the text would draw the block again for
-/// every delta and show nothing new.
+/// How much of the body is on the screen. Anything that grows a block grows
+/// this: the text of an answer, a tail, an output — and a thought's text, which
+/// M34-B left out because the row said `✻ Thinking…` whatever the deltas
+/// carried and nothing under it was drawn from them. A thought now streams its
+/// tail under that row (§6), so a delta does change the rows and the block has
+/// to be drawn again for it.
 fn size(body: &ItemBody) -> usize {
     match body {
         ItemBody::Assistant { text } => text.len(),
+        ItemBody::Reasoning { text, .. } => text.len(),
         ItemBody::ToolCall {
             output, progress, ..
         } => {

@@ -324,7 +324,12 @@ pub fn latest(
 fn folds(item: &bingo_sdk::Item) -> bool {
     match &item.body {
         bingo_sdk::ItemBody::ToolCall { output, .. } => output.is_some(),
-        bingo_sdk::ItemBody::Reasoning { .. } => crate::transcript::thought(item).is_some(),
+        // Only once the thinking is over, as a call folds only once it has
+        // come back: while it is being had the row wears the same three tail
+        // rows a running tool does, which cut nothing and promise no key.
+        bingo_sdk::ItemBody::Reasoning { .. } => {
+            item.completed_at.is_some() && crate::transcript::thought(item).is_some()
+        }
         bingo_sdk::ItemBody::Action { result, .. } => result.is_some(),
         _ => false,
     }
@@ -2097,6 +2102,34 @@ mod tests {
         ui.select.block = Some(bingo_sdk::ItemId::from_raw("itm_1"));
         press(&mut ui, &state, key(KeyCode::Enter), now);
         assert!(!ui.layer.showing(), "and nothing to open");
+    }
+
+    /// A thought being had is not a fold: its tail is the last three rows and
+    /// cuts nothing, so `ctrl+o` walks past it to the result that does fold —
+    /// the same rule a running call keeps.
+    #[test]
+    fn ctrl_o_walks_past_a_thought_that_is_still_being_had() {
+        let mut state = thought(&(1..=9).map(|i| format!("step {i}\n")).collect::<String>());
+        let being_had = crate::test_support::item(
+            "itm_2",
+            bingo_sdk::ItemStatus::Running,
+            bingo_sdk::ItemBody::Reasoning {
+                text: "and now the lockfile".into(),
+                provider_metadata: Default::default(),
+            },
+        );
+        state.apply(&frame(2, bingo_sdk::Event::ItemStarted { item: being_had }));
+        let (mut ui, now) = scene();
+        render(&state, &ui, now);
+        press(&mut ui, &state, ctrl('o'), now);
+        assert_eq!(
+            ui.expanded
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>(),
+            vec!["itm_1".to_string()],
+            "the thought that is over is the one with a fold to lift"
+        );
     }
 
     /// `⏎` on a focused block still opens the pager, thought or result alike.

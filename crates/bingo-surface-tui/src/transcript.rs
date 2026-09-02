@@ -435,20 +435,47 @@ fn cooling(back: usize, age: f32) -> Style {
     theme::comet((age + behind).min(1.0))
 }
 
-/// `✻ Thinking…` while it lasts; `✻ Thought for 2s` once it is over, with what
-/// was thought under it — dim, folded at [`OUTPUT_ROWS`] like any other result,
-/// and opened by the same `ctrl+o`.
+/// A thought is readable where it happened, and while it is being had: the
+/// row says `✻ Thinking…` over the tail of what has arrived, then decays to
+/// `✻ Thought for 2s` over the whole of it.
 ///
-/// A thought is only readable where it happened. While it streams the row says
-/// the same thing whatever arrives, which is why [`crate::blocks`] does not
-/// revise the block per delta: the text lands whole when the thinking is over.
+/// One match on one fact — whether the thinking is over — because that is the
+/// only thing the two halves differ by.
 fn thinking(item: &Item, expanded: bool, rows: &Rows<'_>) -> Vec<Line<'static>> {
-    let Some(end) = item.completed_at else {
-        return vec![sparkled(
-            format!("Thinking{}", theme::ellipsis()),
-            theme::dim().patch(theme::italic()),
-        )];
-    };
+    match item.completed_at {
+        None => still_thinking(item, rows),
+        Some(end) => thought_for(item, end, expanded, rows),
+    }
+}
+
+/// A thought as it is being had: the row, and under it the last rows of what
+/// has been thought so far — the same three dim `⎿` rows a running tool's tail
+/// shows (§6), scrolling up as the deltas arrive.
+///
+/// They wear no comet tail. The comet is `presence`'s glow on words being said
+/// (§6 "streaming"), and thinking is where `dim` lives (§4): a second warm
+/// light beside the sparkle would put motion on the one thing a person is
+/// meant to read past.
+fn still_thinking(item: &Item, rows: &Rows<'_>) -> Vec<Line<'static>> {
+    let mut out = vec![sparkled(
+        format!("Thinking{}", theme::ellipsis()),
+        theme::dim().patch(theme::italic()),
+    )];
+    if let Some(text) = thought(item) {
+        out.extend(returns(tail(text), rows));
+    }
+    out
+}
+
+/// A thought that is over: how long it took, and what was thought under it —
+/// dim, folded at [`OUTPUT_ROWS`] like any other result, and opened by the
+/// same `ctrl+o`.
+fn thought_for(
+    item: &Item,
+    end: jiff::Timestamp,
+    expanded: bool,
+    rows: &Rows<'_>,
+) -> Vec<Line<'static>> {
     let mut out = vec![sparkled(
         format!("Thought for {}", took(end.duration_since(item.started_at))),
         theme::dim(),
@@ -567,9 +594,11 @@ fn result(call: &Call<'_>, rows: &Rows<'_>) -> Vec<Line<'static>> {
     returns(folded(output, call.expanded, rows.result_width()), rows)
 }
 
-/// The last rows of what a running tool has printed so far.
-fn tail(progress: &str) -> Vec<Line<'static>> {
-    let all: Vec<&str> = progress.trim_end().lines().collect();
+/// The last rows of something still arriving: what a running tool has printed
+/// so far, or what a thought has been thinking. One tail, so the two read the
+/// same and move the same (§6).
+fn tail(arriving: &str) -> Vec<Line<'static>> {
+    let all: Vec<&str> = arriving.trim_end().lines().collect();
     plain(&all[all.len().saturating_sub(TAIL_ROWS)..].join("\n"))
 }
 
@@ -1066,20 +1095,25 @@ mod tests {
         item
     }
 
-    #[test]
-    fn thinking_decays_into_what_it_took_and_what_was_thought() {
-        let running = item(
+    /// A thought as it is being had: no `completed_at`, and as much text as
+    /// the deltas have carried so far.
+    fn thinking_item(text: &str) -> Item {
+        item(
             "itm_1",
             ItemStatus::Running,
             ItemBody::Reasoning {
-                text: "the manifest".into(),
+                text: text.into(),
                 provider_metadata: Default::default(),
             },
-        );
+        )
+    }
+
+    #[test]
+    fn thinking_decays_into_what_it_took_and_what_was_thought() {
         assert_eq!(
-            drawn(vec![running]),
-            vec!["✻ Thinking…".to_string()],
-            "a thought still being had says only that it is being had"
+            drawn(vec![thinking_item("the manifest")]),
+            vec!["✻ Thinking…".to_string(), "  ⎿  the manifest".to_string()],
+            "a thought being had is read as it is thought"
         );
         assert_eq!(
             drawn(vec![thought_item("The manifest first.", 2)]),
@@ -1088,6 +1122,31 @@ mod tests {
                 "  ⎿  The manifest first.".to_string(),
             ],
             "and once it is over it is readable where it happened"
+        );
+    }
+
+    /// The same three rows a running tool's tail shows (§6), the last of what
+    /// has arrived — one helper, so the two move alike.
+    #[test]
+    fn a_thought_being_had_streams_the_tail_of_what_it_has_so_far() {
+        assert_eq!(
+            drawn(vec![thinking_item("first\nsecond\nthird\nfourth")]),
+            vec![
+                "✻ Thinking…".to_string(),
+                "  ⎿  second".to_string(),
+                "     third".to_string(),
+                "     fourth".to_string(),
+            ],
+        );
+    }
+
+    /// Nothing thought yet, and nothing to fold: the row alone, as an empty
+    /// thought stays once it is over.
+    #[test]
+    fn a_thought_with_nothing_in_it_yet_is_the_row_alone() {
+        assert_eq!(
+            drawn(vec![thinking_item("")]),
+            vec!["✻ Thinking…".to_string()],
         );
     }
 
