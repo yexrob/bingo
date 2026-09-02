@@ -687,6 +687,18 @@ impl Host {
         self.live(id).map(|l| l.thinking)
     }
 
+    /// What the session's next turn would run on, chosen from the spec as it
+    /// now stands: the same resolution [`Host::reconfigure`] hands the actor,
+    /// so `ModelChoice::reasoning` here *is* what the turn will ask for.
+    /// `None` for a log session, which resolves no provider (ADR-0011 §1).
+    ///
+    /// A command that reports a setting the model may ignore reads it here
+    /// rather than assuming the setting reached the wire.
+    pub async fn session_model(&self, id: &SessionId) -> Result<Option<ModelChoice>, KernelError> {
+        let live = self.live(id)?;
+        self.model_for(&live.spec, live.thinking).await
+    }
+
     pub async fn session_summary(&self, id: &SessionId) -> Result<SessionSummary, KernelError> {
         self.live(id)?.mailbox.summary().await
     }
