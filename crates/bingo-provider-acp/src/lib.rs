@@ -5,6 +5,7 @@
 //! newline-framed JSON-RPC client loop is written here, in tokio, `Send`.
 
 pub mod child;
+pub mod config;
 pub mod connection;
 pub mod error;
 pub mod events;
@@ -12,4 +13,5 @@ pub mod events;
 pub(crate) mod fixtures;
 pub mod method;
 pub mod render;
+pub mod transcript;
 pub mod wire;
