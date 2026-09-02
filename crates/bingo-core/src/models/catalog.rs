@@ -88,6 +88,15 @@ impl ModelCatalog {
             .or_else(|| self.anywhere(model))
     }
 
+    /// The facts for a model one provider serves: the shelf its wire shape is
+    /// filed under first — a named instance (ADR-0017) has none of its own —
+    /// then the provider's own name, which is where a built-in's models are
+    /// and where a proxy named after a vendor finds that vendor's dated ids.
+    pub fn facts_for(&self, family: &str, provider: &str, model: &str) -> Option<ModelFacts> {
+        self.lookup(family, model)
+            .or_else(|| self.lookup(provider, model))
+    }
+
     /// Every model the catalogue lists under a provider, in id order.
     pub fn models_of(&self, provider: &str) -> impl Iterator<Item = &str> {
         self.providers
@@ -198,6 +207,27 @@ mod tests {
             .expect("anthropic entries");
         assert!(claude.reasoning && claude.images);
         assert!(catalog.lookup("openai", "gpt-5").is_some());
+    }
+
+    /// An instance called `work` has no shelf; its family's is where its
+    /// models are, including the dated ones a proxy list carries.
+    #[test]
+    fn an_instance_reads_its_family_s_shelf_then_its_own_name_s() {
+        let catalog = fixture();
+        assert_eq!(
+            catalog
+                .facts_for("openai", "work", "gpt-5.4-2026-03-05")
+                .map(|f| f.context_window),
+            Some(1_050_000)
+        );
+        assert_eq!(
+            catalog
+                .facts_for("openai", "deepseek", "deepseek-v4-pro")
+                .map(|f| f.max_output),
+            Some(384_000),
+            "and a vendor's own id is found wherever it is filed"
+        );
+        assert!(catalog.facts_for("openai", "work", "house-1").is_none());
     }
 
     #[test]

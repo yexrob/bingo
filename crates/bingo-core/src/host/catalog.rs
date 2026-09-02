@@ -56,13 +56,10 @@ fn models(
 }
 
 fn entry(provider: &dyn Provider, offer: Offer) -> CatalogEntry {
+    let facts = ModelCatalog::embedded().facts_for(provider.family(), provider.id(), &offer.id);
     CatalogEntry {
         id: format!("{}/{}", provider.id(), offer.id),
-        meta: model_meta(
-            provider.id(),
-            offer.source,
-            super::catalogued(provider, &offer.id),
-        ),
+        meta: model_meta(provider.id(), offer.source, facts),
         label: offer.id,
     }
 }

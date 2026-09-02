@@ -27,7 +27,7 @@ use tool_host::SessionToolHost;
 use unavailable::Unavailable;
 
 use crate::gate::DefaultPolicy;
-use crate::models::{self, Learned, ModelCatalog, ModelFacts, ServedModels};
+use crate::models::{self, Learned, ModelCatalog, ServedModels};
 use crate::prompt::{self, PromptInput};
 use crate::session::{self, Mailbox};
 use crate::settings::{self, Claim, Layer, Merged, SettingsError};
@@ -537,7 +537,7 @@ impl Host {
         models::resolve(
             self.settings.kernel.models.get(&key),
             self.learned.window(provider.id(), model),
-            catalogued(provider, model),
+            ModelCatalog::embedded().facts_for(provider.family(), provider.id(), model),
             provider.endpoint(model),
         )
     }
@@ -746,18 +746,6 @@ impl Host {
             }
         }
     }
-}
-
-/// What the snapshot knows about a model this provider serves: the shelf its
-/// wire shape is filed under first (a named instance serves its family's
-/// models, ADR-0017), then its own name — which is where a built-in's models
-/// are, and where a proxy named after a vendor finds that vendor's dated ids.
-/// A model id belongs to its maker, whoever fronts it.
-fn catalogued(provider: &dyn Provider, model: &str) -> Option<ModelFacts> {
-    let catalogue = ModelCatalog::embedded();
-    catalogue
-        .lookup(provider.family(), model)
-        .or_else(|| catalogue.lookup(provider.id(), model))
 }
 
 /// A provider that cannot authenticate is refused before any turn is spent on it.
