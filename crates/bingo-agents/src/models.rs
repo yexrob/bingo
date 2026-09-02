@@ -4,8 +4,9 @@
 //! staffs an agent by looking instead of guessing an id (ADR-0026).
 //!
 //! Nothing here asks a provider anything: a live model list would be a
-//! network call inside a read-only tool, and a second answer beside the
-//! snapshot (ADR-0026 §4).
+//! network call inside a read-only tool (ADR-0026 §4). The ids it reads may
+//! still be an endpoint's own — the kernel fetches those in the background
+//! and caches them — so each provider's line says when they are.
 
 use async_trait::async_trait;
 use bingo_sdk::{
@@ -24,11 +25,16 @@ model you are unsure of, and pass what you pick as `SpawnAgent`'s `provider` \
 and `model`.";
 
 /// The closing line: what these facts are, so a model reads an unknown id as
-/// unknown rather than as unavailable.
+/// unknown rather than as unavailable, and where the ids themselves come from.
 const SNAPSHOT: &str = "\
 The facts above come from the models.dev snapshot embedded in this build, not \
 from a live call to any provider; a model listed without them is one the \
-snapshot does not carry, which says nothing about whether it works.";
+snapshot does not carry, which says nothing about whether it works. The ids \
+come from the same snapshot unless the provider's line says its endpoint was \
+asked what it serves.";
+
+/// What a provider's line says when its ids are its endpoint's own answer.
+const FROM_ENDPOINT: &str = "ids from the endpoint";
 
 /// What a provider serves when the catalogue files nothing under it.
 const NOTHING: &str = "none listed";
@@ -49,17 +55,28 @@ fn listing(providers: &[CatalogEntry], models: &[CatalogEntry]) -> String {
     }
     let mut lines = Vec::new();
     for provider in providers {
-        lines.push(header(provider));
-        lines.extend(served(&provider.id, models));
+        let its_own: Vec<&CatalogEntry> = of(&provider.id, models).collect();
+        lines.push(header(provider, &its_own));
+        lines.extend(rows(&its_own));
     }
     lines.push(String::new());
     lines.push(SNAPSHOT.to_string());
     lines.join("\n")
 }
 
-/// A provider and what a person would have to do before it answers.
-fn header(provider: &CatalogEntry) -> String {
-    format!("{}  {}", provider.id, auth(&provider.meta))
+/// A provider, what a person would have to do before it answers, and — when
+/// the kernel's cached list is the endpoint's own — that these are the ids it
+/// really serves (ADR-0026 §4).
+fn header(provider: &CatalogEntry, models: &[&CatalogEntry]) -> String {
+    let line = format!("{}  {}", provider.id, auth(&provider.meta));
+    match models.iter().any(from_endpoint) {
+        true => format!("{line}  {FROM_ENDPOINT}"),
+        false => line,
+    }
+}
+
+fn from_endpoint(model: &&CatalogEntry) -> bool {
+    model.meta.get("source").and_then(Value::as_str) == Some("endpoint")
 }
 
 /// The sign-in state in the words the kernel filed it under; a state this
@@ -75,18 +92,20 @@ fn auth(meta: &Value) -> String {
     }
 }
 
+/// The catalogue's entries for one provider.
+fn of<'a>(provider: &'a str, models: &'a [CatalogEntry]) -> impl Iterator<Item = &'a CatalogEntry> {
+    models
+        .iter()
+        .filter(move |model| model.meta.get("provider").and_then(Value::as_str) == Some(provider))
+}
+
 /// The models filed under one provider, indented under it. A provider the
 /// catalogue lists nothing for says so, which is not an error: an id it does
 /// not carry can still be spawned on.
-fn served(provider: &str, models: &[CatalogEntry]) -> Vec<String> {
-    let rows: Vec<String> = models
-        .iter()
-        .filter(|model| model.meta.get("provider").and_then(Value::as_str) == Some(provider))
-        .map(|model| format!("  {}", row(model)))
-        .collect();
-    match rows.is_empty() {
+fn rows(models: &[&CatalogEntry]) -> Vec<String> {
+    match models.is_empty() {
         true => vec![format!("  {NOTHING}")],
-        false => rows,
+        false => models.iter().map(|model| format!("  {}", row(model))).collect(),
     }
 }
 
@@ -196,16 +215,20 @@ mod tests {
             model(
                 "anthropic",
                 "claude-sonnet-4-5",
-                json!({ "provider": "anthropic", "context": 1_000_000, "output": 64_000,
-                        "reasoning": true, "images": true }),
+                json!({ "provider": "anthropic", "source": "catalogue", "context": 1_000_000,
+                        "output": 64_000, "reasoning": true, "images": true }),
             ),
             model(
                 "openai",
                 "text-only-1",
-                json!({ "provider": "openai", "context": 400_000, "output": 128_000,
-                        "reasoning": false, "images": false }),
+                json!({ "provider": "openai", "source": "catalogue", "context": 400_000,
+                        "output": 128_000, "reasoning": false, "images": false }),
             ),
-            model("fake", "fake-1", json!({ "provider": "fake" })),
+            model(
+                "fake",
+                "fake-1",
+                json!({ "provider": "fake", "source": "endpoint" }),
+            ),
         ];
         (providers, models)
     }
@@ -231,12 +254,22 @@ mod tests {
         assert!(text.ends_with(SNAPSHOT), "{text}");
     }
 
+    /// The kernel's list for this one is the endpoint's own answer, and the
+    /// line says so — while the facts are still the snapshot's, or nobody's.
     #[test]
     fn a_model_the_snapshot_does_not_carry_is_listed_without_facts() {
         let (providers, models) = catalogues();
         let text = listing(&providers, &models);
-        assert_eq!(line(&text, "fake  "), "fake  no sign-in needed");
+        assert_eq!(
+            line(&text, "fake  "),
+            format!("fake  no sign-in needed  {FROM_ENDPOINT}")
+        );
         assert_eq!(line(&text, "fake-1"), format!("fake-1  {UNKNOWN}"));
+        assert_eq!(
+            line(&text, "anthropic"),
+            "anthropic  signed in",
+            "a provider still on the snapshot's list says nothing extra"
+        );
     }
 
     #[test]
@@ -250,13 +283,16 @@ mod tests {
     #[test]
     fn a_sign_in_state_this_build_cannot_read_is_not_read_as_ready() {
         let unread = provider("odd", json!({ "kind": "somethingElse" }));
-        assert_eq!(header(&unread), "odd  sign-in state unknown");
+        assert_eq!(header(&unread, &[]), "odd  sign-in state unknown");
         assert_eq!(
-            header(&CatalogEntry {
-                id: "bare".into(),
-                label: "bare".into(),
-                meta: Value::Null,
-            }),
+            header(
+                &CatalogEntry {
+                    id: "bare".into(),
+                    label: "bare".into(),
+                    meta: Value::Null,
+                },
+                &[]
+            ),
             "bare  sign-in state unknown"
         );
     }
